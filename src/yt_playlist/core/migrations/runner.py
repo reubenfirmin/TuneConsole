@@ -139,6 +139,13 @@ def _predecessor_contract(version):
     return current._schema_contract(statements())
 
 
+@lru_cache(maxsize=16)
+def _installed_contract(version):
+    """Reuse shipped DDL fingerprints; installed structure and data stay live."""
+    from . import current
+    return current._schema_contract(current.statements(version=version))
+
+
 def validate_version(conn, version, *, foreign_keys=True, data=True):
     """Use the current contract at its floor; frozen validators serve older upgrades."""
     from . import current
@@ -148,7 +155,7 @@ def validate_version(conn, version, *, foreign_keys=True, data=True):
         current.validate(conn, foreign_keys=foreign_keys, data=data)
         return
     if version >= 92:
-        current._validate(conn, current._schema_contract(current.statements(version=version)), version,
+        current._validate(conn, _installed_contract(version), version,
                           foreign_keys=foreign_keys, data=data)
         return
     if 86 <= version < 92:
@@ -169,7 +176,7 @@ def validate_version(conn, version, *, foreign_keys=True, data=True):
             added |= v082_recommendation_work.OBJECTS
         if version == 80:
             added |= {'playback_feedback_receipts'}
-        expected = current._schema_contract(current.statements(version=85))
+        expected = _installed_contract(85)
         current._validate(conn, expected, version, replaced=added,
                           foreign_keys=foreign_keys, data=data)
         return
@@ -294,7 +301,12 @@ def validate_version(conn, version, *, foreign_keys=True, data=True):
             v072_compact_groups.validate(conn)
         if version >= 73:
             from . import v073_recommendation_publications
-            v073_recommendation_publications.validate(conn)
+            from .. import recommendation_revalidations
+            replacements = frozenset()
+            if recommendation_revalidations.available(conn):
+                recommendation_revalidations.validate(conn)
+                replacements = {name for name, _sql in recommendation_revalidations.guards()}
+            v073_recommendation_publications.validate(conn, replaced=replacements)
         if version == 74:
             from . import v074_artist_credits
             v074_artist_credits.validate(conn)
@@ -348,6 +360,13 @@ def migrate(conn, *, registry=None, clock=time.time, defer_validation=False):
     True means the installed layout still needs compatibility adapters. It does
     not request an automatic conversion or pause ordinary application writes.
     """
+    from ..schema_inspection import reuse_tables
+
+    with reuse_tables(conn) as inspections:
+        return _migrate(conn, registry, clock, defer_validation, inspections)
+
+
+def _migrate(conn, registry, clock, defer_validation, inspections):
     production = registry is None
     if production:
         from .registry import MIGRATIONS
@@ -367,6 +386,7 @@ def migrate(conn, *, registry=None, clock=time.time, defer_validation=False):
         restore_foreign_keys = None
         try:
             conn.execute('BEGIN' if production else 'BEGIN IMMEDIATE')
+            inspections.refresh()
             current = history(conn, registry)
             if fresh is None:
                 fresh = not bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").fetchone())
@@ -383,21 +403,27 @@ def migrate(conn, *, registry=None, clock=time.time, defer_validation=False):
                     # before HTTP admission, even when no migration is pending.
                     validate_version(conn, current, foreign_keys=False, data=False)
                     from . import regular
-                    regular.validate(conn)
+                    applied = regular.validate(conn)
                     conn.rollback()
-                    if not defer_validation:
+                    # Both histories and their installed owners were checked
+                    # on the same read snapshot. Only pending changes need the
+                    # regular runner's new snapshot and write reservation.
+                    if not defer_validation and applied < len(regular.CHANGES):
                         regular.migrate(conn, clock=clock)
                     return current < len(registry)
                 if not fresh:
                     raise MigrationError('Installed layouts before 79 require the explicit historical upgrade route')
                 conn.rollback()
                 conn.execute('BEGIN IMMEDIATE')
+                inspections.refresh()
                 if history(conn, registry) != current:
                     conn.rollback()
                     continue
             if production and fresh and current == 0:
                 from . import current as current_schema
-                current_schema.bootstrap(conn, registry, clock())
+                from .. import schema_bootstrap
+                from . import regular
+                schema_bootstrap.bootstrap(conn, registry, regular.CHANGES, clock(), validation=current_schema.validate)
                 conn.commit()
                 fresh = False
                 log.info('Initialized current schema at version %s', current_schema.VERSION)
@@ -420,8 +446,10 @@ def migrate(conn, *, registry=None, clock=time.time, defer_validation=False):
                 restore_foreign_keys = 1
                 conn.execute('PRAGMA foreign_keys=OFF')
                 conn.execute('BEGIN IMMEDIATE')
+                inspections.refresh()
                 if history(conn, registry) != current:
                     conn.rollback()
+                    checked_entry = False
                     continue
                 if frozen:
                     _validate_migration_structure(conn, current)
@@ -437,12 +465,12 @@ def migrate(conn, *, registry=None, clock=time.time, defer_validation=False):
                 raise MigrationError('Migration committed outside the runner')
             if migration.rebuild_tables and conn.execute('PRAGMA foreign_key_check').fetchone():
                 raise MigrationError('Table replacement broke a foreign-key reference')
-            if frozen and migration.version == len(registry):
-                _validate_migration_structure(conn, migration.version)
             conn.execute('INSERT INTO schema_migrations VALUES (?,?,?)', (migration.version, migration.name, clock()))
             if registered_prefix:
                 from . import regular
                 regular.after_owner_upgrade(conn)
+            if frozen and migration.version == len(registry):
+                _validate_migration_structure(conn, migration.version)
             conn.commit()
             log.info('Applied migration %s: %s', migration.version, migration.name)
         except BaseException as exc:

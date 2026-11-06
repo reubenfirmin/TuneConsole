@@ -80,6 +80,18 @@ def configurations(conn):
                 yield version,_configuration(saved)
 
 
+def candidates(conn, now, limit=128):
+    """Find impression-only owners without reserving the serving writer."""
+    from ..repos import policy_storage
+    if type(limit) is not int or not 1 <= limit <= 128:
+        raise ValueError('Policy history batch must be 1 to 128')
+    return [row[0] for row in conn.execute(
+        'SELECT p.version FROM recommendation_policies p WHERE created_at<? AND '
+        'p.version IN (SELECT policy_version FROM recommendation_impression_policies) AND '
+        + policy_storage.operational_protection(conn) + ' ORDER BY created_at,version LIMIT ?',
+        (now-policy_storage.GRACE_SECONDS, limit))]
+
+
 def prepare_batch(conn, now, limit=128, *, versions=None):
     """Recheck operational closure under the caller's writer reservation."""
     from ..repos import policy_storage

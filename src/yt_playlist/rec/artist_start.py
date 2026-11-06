@@ -10,7 +10,6 @@ import re
 import time
 
 from yt_playlist.core.accounts import catalog_client
-from yt_playlist.core import sync_state
 from yt_playlist.util.matching import identity_key
 from yt_playlist.util.duration import parse_duration
 
@@ -51,14 +50,7 @@ def required(store):
             return required(reader)
     # Creating the first set also mirrors its tracks locally. Those tracks
     # remain generated output until adopted; saving them isn't a first listen.
-    if store.conn.execute(
-            'SELECT 1 FROM playable_library_tracks t WHERE '
-            + store.rec_eligibility.track_length_clause('t.duration_s') + ' AND ('
-            'NOT EXISTS(SELECT 1 FROM playlist_tracks pt JOIN playlists p ON p.id=pt.playlist_id '
-            'JOIN quarantined_playlists q ON q.playlist_scope_id=p.playlist_scope_id WHERE pt.track_id=t.id) '
-            'OR EXISTS(SELECT 1 FROM playlist_tracks pt JOIN playlists p ON p.id=pt.playlist_id '
-            'LEFT JOIN quarantined_playlists q ON q.playlist_scope_id=p.playlist_scope_id '
-            'WHERE pt.track_id=t.id AND q.playlist_scope_id IS NULL)) LIMIT 1').fetchone():
+    if store.readiness.playable_owned(exclude_generated=True):
         return False
     if store.collection.get_saved_albums():
         return False
@@ -67,10 +59,7 @@ def required(store):
     # A generated mirror, an imported play or an unrelated song cannot do this.
     if len(store.discovery.starter_artists()) >= MIN_ARTISTS:
         videos = [track['video_id'] for track in store.discovery.starter_tracks()]
-        if videos and store.conn.execute(
-                'SELECT 1 FROM play_events e JOIN play_event_sources s ON s.event_id=e.id '
-                "WHERE s.source='live' AND e.is_generated=1 "
-                f"AND e.video_id IN ({','.join('?' for _ in videos)}) LIMIT 1", videos).fetchone():
+        if store.readiness.live_starter_played(videos):
             return False
     if store.settings.get_setting('last_sync_at') is not None:
         return True
@@ -78,7 +67,7 @@ def required(store):
     # Empty saved-album pages can fail parsing just like empty Liked Music.
     # Neither failure should strand an account with no playable collection on
     # First sounds. Offer explicit picks while the ordinary imports retry.
-    state = sync_state.read(store.conn)
+    state = store.sync.state()
     accounts = {str(account.id) for account in store.accounts.get_accounts()}
     return bool(accounts) and all(
         state.get('accounts', {}).get(account, {}).get('resources', {})

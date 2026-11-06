@@ -16,7 +16,7 @@ def test_rename_family_filter_and_provider_aliases_follow_identity(store):
     assert store.rec_query.track_genres([key]) == {key:'New electronic label'}
     assert store.rec_query.keys_in_genre_selection(['Synth Pop']) == {key}
     family = store.conn.execute("SELECT family_key FROM genre_catalog WHERE key='synth pop'").fetchone()[0]
-    assert store.rec_query.keys_in_families([family]) == {key}
+    assert store.rec_query.keys_in_genre_selection([family]) == {key}
     assert store.rec_model.get_leans() == {'genre:synth pop':1.4}
     assert audio_vibe_metadata.subgenre({'genre':'New electronic label'},conn=store.conn) == 'synth pop'
     genres.configure(store,read_only=True)
@@ -73,23 +73,24 @@ def test_family_edit_rebuilds_model_inputs_and_live_filters(store):
     store.tracks.set_track_genre(entry,'Synth Pop')
     key = store.rec_query.key_for_video('v')
     inputs = content_model.ContentInputs([key],{key:('Synth-Pop',None)},{})
-    original = content_model.input_fingerprint(inputs,conn=store.conn)
+    original = content_model.input_fingerprint(inputs,genre_axes=store.genres.feature_axes(['Synth-Pop']))
     store.genres.rename_genre('synth pop','New label')
-    pin = radio_genres.GenrePolicy(1,[],current={'genre':'New label'},conn=store.conn)
+    pin = radio_genres.GenrePolicy(1,[],current={'genre':'New label'},store=store)
     assert pin.allows({'genre':'Synth Pop'})
     assert pin.bonus({'genre':'Synth Pop'}) == 1
     store.genres.set_genre_family('synth pop','jazz')
-    assert content_model.input_fingerprint(inputs,conn=store.conn) != original
-    model = content_model.build_content_model(inputs.content,{},conn=store.conn)
+    axes = store.genres.feature_axes(['Synth-Pop', 'New label'])
+    assert content_model.input_fingerprint(inputs,genre_axes=axes) != original
+    model = content_model.build_content_model(inputs.content,{},genre_axes=axes)
     assert set(model['cat']) == {'fam:jazz','sub:synth pop'}
-    assert content_model.encode_content(model,'New label',None,{},conn=store.conn) is not None
+    assert content_model.encode_content(model,'New label',None,{},genre_axes=axes) is not None
     facets = transient.facets_for(store,[key])
     assert facets['genre:jazz'] == [key]
     assert facets['genre:synth pop'] == [key]
-    assert store.rec_query.keys_in_families(['jazz']) == {key}
-    assert group_similarity.recording(key,{'genre':'New label'},conn=store.conn).family == 'jazz'
+    assert store.rec_query.keys_in_genre_selection(['jazz']) == {key}
+    assert group_similarity.recording(key,{'genre':'New label'},genre_axes=axes).family == 'jazz'
     choices,_ = album_choices.menu([{'browse_id':'release','artist':'Artist','genre':'New label',
-                                     'classification':'discovery'}],{'novelty':.5},genres=['jazz'],conn=store.conn)
+                                     'classification':'discovery'}],{'novelty':.5},genres=['jazz'],genre_axes=axes)
     assert [row['browse_id'] for row in choices] == ['release']
     assert store.conn.execute("SELECT revision FROM rec_change_queue WHERE kind='refresh'").fetchone()[0] > 1
 

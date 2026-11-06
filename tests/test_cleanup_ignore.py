@@ -7,14 +7,23 @@ import pytest
 from fastapi.testclient import TestClient
 
 from yt_playlist.rec import actions
-from yt_playlist.web.app import create_app
+from yt_playlist.web import app as webapp
+from yt_playlist.web.routes import app_update, audio_preview, cleanup
 from tests.conftest import FakeClient
 
 
-def _app(store):
+@pytest.fixture
+def cleanup_client(store, monkeypatch):
+    # Keep cleanup's real app, including the shared template and shutdown owners.
+    # Other feature routers do not participate in these dismissal workflows.
+    monkeypatch.setattr(webapp, "build_all", lambda ctx: [module.build(ctx) for module in
+                                                        (cleanup, app_update, audio_preview)])
     iid = store.accounts.upsert_account("main", "cred", None, True)
-    return iid, TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0),
-                           base_url="http://127.0.0.1")
+    app = webapp.create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0,
+                           background_work=False)
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        yield iid, client
+    assert not app.state.ctx.work.active
 
 
 def _count_after_reload(c, store):
@@ -23,8 +32,8 @@ def _count_after_reload(c, store):
     return (store.rec_proposals.get_proposals("cleanup") or {}).get("count", 0)
 
 
-def test_ignore_empty_playlist_round_trip(store):
-    iid, c = _app(store)
+def test_ignore_empty_playlist_round_trip(store, cleanup_client):
+    iid, c = cleanup_client
     store.playlists.upsert_playlist(iid, "PE", "Strays", 0, "h", 0.0)        # one empty playlist
     assert _count_after_reload(c, store) == 1
     assert "Strays" in c.get("/cleanup").text
@@ -38,8 +47,8 @@ def test_ignore_empty_playlist_round_trip(store):
     assert _count_after_reload(c, store) == 1                      # restored
 
 
-def test_ignore_merge_round_trip(store):
-    iid, c = _app(store)
+def test_ignore_merge_round_trip(store, cleanup_client):
+    iid, c = cleanup_client
     a = store.playlists.upsert_playlist(iid, "PLA", "Mix", 4, "h", 0.0)
     b = store.playlists.upsert_playlist(iid, "PLB", "Mix copy", 4, "h", 0.0)
     ts = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, 1) for i in range(4)]   # 4 tracks -> not 'tiny'
@@ -55,16 +64,17 @@ def test_ignore_merge_round_trip(store):
 
 
 @pytest.mark.parametrize("near", [False, True])
-def test_dismissed_duplicate_members_still_show_unrelated_overlaps(store, near):
+def test_dismissed_duplicate_members_still_show_unrelated_overlaps(store, cleanup_client, near):
     from yt_playlist.library.analysis import analyze_cleanup
-    iid, c = _app(store)
+    iid, c = cleanup_client
     tracks = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, 1) for i in range(10)]
     members = [tracks[:6], tracks[:5] + [tracks[6]], tracks[:2] + tracks[7:9]] if near else [
         tracks[:4], tracks[:4], tracks[:2] + tracks[7:9]]
     for remote, rows in zip(("PLA", "PLB", "PLC"), members):
         pid = store.playlists.upsert_playlist(iid, remote, remote, len(rows), "h", 0)
         store.playlists.set_playlist_tracks(pid, rows)
-    c.post("/cleanup/ignore-merge", data={"members": "PLA,PLB"})
+    response = c.post("/cleanup/ignore-merge", data={"members": "PLA,PLB"})
+    assert response.status_code == 200 and response.headers["hx-refresh"] == "true"
     result = analyze_cleanup(store)
     assert not result.groups and not result.near_pairs
     assert {frozenset((o.playlist_a.provider_playlist_id, o.playlist_b.provider_playlist_id))
@@ -87,8 +97,8 @@ def _near_playlists(store, iid):
     ("suppress-many", {"pairs": json.dumps([["PLA", "PLB"], ["PLA", "PLC"], ["PLB", "PLC"]])}, 0, 0),
 ])
 def test_near_duplicate_menu_actions_update_page_and_home_count(
-        store, action, data, remaining_pairs, remaining_playlists):
-    iid, c = _app(store)
+        store, cleanup_client, action, data, remaining_pairs, remaining_playlists):
+    iid, c = cleanup_client
     _near_playlists(store, iid)
     assert c.get("/cleanup").text.count('class="ov-row"') == 3
     assert _count_after_reload(c, store) == 3
@@ -105,8 +115,8 @@ def test_near_duplicate_menu_actions_update_page_and_home_count(
     ("suppress", "unsuppress", {"a": "PLA", "b": "PLB"}),
     ("ignore", "unignore", {"ytm": "PLA"}),
 ])
-def test_near_duplicate_preferences_restore_pairs(store, hide, restore, data):
-    iid, c = _app(store)
+def test_near_duplicate_preferences_restore_pairs(store, cleanup_client, hide, restore, data):
+    iid, c = cleanup_client
     _near_playlists(store, iid)
     c.post(f"/overlaps/{hide}", data=data)
     c.post(f"/overlaps/{restore}", data=data)
@@ -114,8 +124,8 @@ def test_near_duplicate_preferences_restore_pairs(store, hide, restore, data):
     assert _count_after_reload(c, store) == 3
 
 
-def test_previously_ignored_near_merge_stays_hidden(store):
-    iid, c = _app(store)
+def test_previously_ignored_near_merge_stays_hidden(store, cleanup_client):
+    iid, c = cleanup_client
     _near_playlists(store, iid)
     c.post("/cleanup/ignore-merge", data={"members": "PLA,PLB,PLC"})
     assert c.get("/cleanup").text.count('class="ov-row"') == 0

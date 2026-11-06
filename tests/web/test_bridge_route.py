@@ -137,11 +137,10 @@ def test_missing_origin_rejected():
             ws.receive_json()
 
 
-def test_play_frame_persists_event():
+def test_play_frame_persists_event(store):
     # #75 a play frame updates now_playing AND lands in play_events with identity attribution
     import time
-    from yt_playlist.core.store import Store
-    s = Store(":memory:"); s.init_schema()
+    s = store
     s.accounts.upsert_account("main", "bridge", None, True)
     bridge = Bridge()
     app = FastAPI()
@@ -245,12 +244,10 @@ def test_now_playing_heartbeat_refreshes_presence_without_replacing_track():
         assert bridge.now_playing_seen_at > 1.0
 
 
-def test_rich_now_playing_heartbeat_restores_expired_ui_without_recording_play():
+def test_rich_now_playing_heartbeat_restores_expired_ui_without_recording_play(store):
     """A throttled YTM page may miss the eight-second presence window during an audio-device
     switch. Its next deduplicated heartbeat must rebuild Now Playing without entering the play
     persistence path."""
-    from yt_playlist.core.store import Store
-    store = Store(":memory:"); store.init_schema()
     store.accounts.upsert_account("main", "bridge", None, True)
     bridge = Bridge()
     app = FastAPI()
@@ -466,7 +463,7 @@ def test_active_radio_links_to_specialist_view(store, active, playing, kind, url
     store.playlists.upsert_playlist(iid, "PL_other", "Another mix", 1, "", 1)
     bridge = Bridge()
     bridge.now_playing = {"title": "Song", "video_id": "v1", "playlist_ytm_id": playing}
-    radio = SimpleNamespace(active=active, state=lambda: {
+    radio = SimpleNamespace(active=active, state=lambda *, reader=None: {
         "active": active, "playlist_id": "PL_radio", "title": "Radio Session"})
     app = FastAPI()
     app.include_router(build_bridge_route(SimpleNamespace(bridge=bridge, store=store, radio=radio)))
@@ -585,10 +582,7 @@ def test_play_frame_carries_true_paused_state():
         assert bridge.now_playing["paused"] is True
 
 
-def test_repeated_paused_play_frames_only_refresh_presence(caplog):
-    from yt_playlist.core.store import Store
-
-    store = Store(":memory:"); store.init_schema()
+def test_repeated_paused_play_frames_only_refresh_presence(store, caplog):
     store.accounts.upsert_account("main", "bridge", None, True)
     bridge = Bridge()
     app = FastAPI()
@@ -736,7 +730,8 @@ def test_confirmed_rating_updates_native_player_and_skips_only_dislikes(store, l
         worker.join(timeout=5)
         assert not worker.is_alive()
         assert result[0]["ok"] is True  # A failed player command cannot undo a confirmed rating.
-        assert result[0].get("player_error") == (None if player_ok else "No next song")
+        assert result[0].get("player_error") == (None if player_ok else
+            "Rating saved. Some updates are not confirmed; check it in YouTube Music.")
         assert store.tracks.item_rating(main, "radio-song")["status"] == like_status
 
 
@@ -797,11 +792,10 @@ def test_rate_requires_displayed_target():
     assert client.post("/now-playing/rate", json={"action": "like"}).json()["ok"] is False
 
 
-def test_pevent_frame_persists_raw_event():
+def test_pevent_frame_persists_raw_event(store):
     # #91 a pevent frame lands in player_events; a stub store still cannot kill the socket
     import time
-    from yt_playlist.core.store import Store
-    s = Store(":memory:"); s.init_schema()
+    s = store
     s.accounts.upsert_account("main", "bridge", None, True)
     bridge = Bridge()
     app = FastAPI()
@@ -819,11 +813,10 @@ def test_pevent_frame_persists_raw_event():
     assert len(evs) == 1 and evs[0]["kind"] == "track_exit" and evs[0]["at"] == 1234.0
 
 
-def test_live_play_frame_is_processed():
+def test_live_play_frame_is_processed(store):
     # Regression: the same frame tagged deck:"live" must still set now_playing and persist, exactly
     # as an untagged frame did before deck attribution existed (see test_play_frame_persists_event).
-    from yt_playlist.core.store import Store
-    s = Store(":memory:"); s.init_schema()
+    s = store
     s.accounts.upsert_account("main", "bridge", None, True)
     bridge = Bridge()
     app = FastAPI()

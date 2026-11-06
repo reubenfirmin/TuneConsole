@@ -161,10 +161,9 @@ def test_failures_are_safe_durable_and_shared_without_billed_retry(boundary, sto
     assert_credential_not_stored(store)
 
 
-def test_rejected_credential_remains_rejected_after_replacement_and_restart(boundary, tmp_path):
+def test_rejected_credential_remains_rejected_after_replacement_and_restart(boundary, tmp_path, consumer_store, request):
     path = tmp_path / 'deepseek.db'
-    db = Store(path)
-    db.init_schema()
+    db = consumer_store(path)
     own_album(db, ALBUM)
     db.settings.set_setting('deepseek_api_key', KEY)
 
@@ -183,6 +182,7 @@ def test_rejected_credential_remains_rejected_after_replacement_and_restart(boun
     finally:
         db.conn.close()
     db = Store(path)
+    request.addfinalizer(db.conn.close)
     db.init_schema()
     try:
         db.settings.set_setting('deepseek_api_key', KEY)
@@ -195,10 +195,10 @@ def test_rejected_credential_remains_rejected_after_replacement_and_restart(boun
         db.conn.close()
 
 
-def test_two_connections_share_daily_cap_even_after_key_change(boundary, tmp_path):
+def test_two_connections_share_daily_cap_even_after_key_change(boundary, tmp_path, consumer_store, request):
     path = tmp_path / 'budget.db'
-    first, second = Store(path), Store(path)
-    first.init_schema()
+    first, second = consumer_store(path), Store(path)
+    request.addfinalizer(second.conn.close)
     second.init_schema()
     own_album(first, ALBUM)
     other = other_album(first, 'Other record')
@@ -251,10 +251,10 @@ def test_expired_lease_during_pacing_cannot_authorize_a_post(boundary, store):
     assert usage['claim_token'] is None and usage['lease_until'] == 0
 
 
-def test_lease_takeover_during_pacing_keeps_new_owner_and_authorizes_only_once(boundary, tmp_path):
+def test_lease_takeover_during_pacing_keeps_new_owner_and_authorizes_only_once(boundary, tmp_path, consumer_store, request):
     path = tmp_path / 'lease-takeover.db'
-    first, second = Store(path), Store(path)
-    first.init_schema()
+    first, second = consumer_store(path), Store(path)
+    request.addfinalizer(second.conn.close)
     second.init_schema()
     own_album(first, ALBUM)
     other = other_album(first, 'Another reservation')

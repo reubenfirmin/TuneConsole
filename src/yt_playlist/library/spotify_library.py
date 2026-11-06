@@ -374,7 +374,7 @@ def _transfer_playlist(store, client, account_id, playlist, fingerprint, now):
 def _transfer_claimed_playlist(store, client, account_id, playlist, fingerprint, now):
     from yt_playlist.core import workflow_settings
     state_key, transfers = _playlist_transfers(store, account_id)
-    owned = workflow_settings.available(store.conn)
+    owned = store.settings.has_transfer_receipts()
     if owned:
         transfers = store.settings.spotify_transfer_receipts(account_id)
     transfer = transfers.get(fingerprint)

@@ -13,9 +13,9 @@ import sqlite3
 from tempfile import TemporaryDirectory
 import time
 
-from yt_playlist.core import retained_copy
+from yt_playlist.core.db_rebuild import build
 
-Q = retained_copy.quote
+Q = build.quote
 
 
 def main():
@@ -75,7 +75,7 @@ def main():
                         # The source alias is changed without changing correlated main
                         # lookups above: these subqueries intentionally use the cohort's
                         # already copied attempt rows and state fields.
-                        fields, _ = retained_copy._fields(original, name)
+                        fields, _ = build._fields(original, name)
                         fields = ','.join(map(Q, fields))
                         target.execute('INSERT INTO main.' + Q(name) + '(' + fields + ') SELECT '
                             + fields + ' FROM original.' + Q(name) + ' s WHERE ' + predicate, {'owner': owner})

@@ -4,9 +4,11 @@ SQLite's writer lock protects copying; this separate lifetime lock protects
 replacement after every participating connection is closed. Lock files remain.
 """
 from contextlib import contextmanager, ExitStack
+from functools import wraps
 import json
 from pathlib import Path
 import sqlite3
+import threading
 import time
 import weakref
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -71,12 +73,39 @@ def lease(path, *, exclusive=False, timeout=1):
             unlock()
 
 
+def _serialized(operation):
+    @wraps(operation)
+    def call(self, *args, **kwargs):
+        connection = self.connection if isinstance(self, sqlite3.Cursor) else self
+        # SQLite's own mutex is insufficient: parameter binding can retain the
+        # GIL while a stepping thread holds that mutex and calls Python. Wait
+        # outside SQLite, releasing the GIL, including during fetch and close.
+        with connection._sqlite_lock:
+            return operation(self, *args, **kwargs)
+    return call
+
+
 class Cursor(sqlite3.Cursor):
-    def _run(self, target, *args):
-        self.connection._admit()
+    @_serialized
+    def _run(self, target, *args, admit=True):
         try:
+            if admit:
+                self.connection._admit()
             return target(*args)
-        except sqlite3.OperationalError as error:
+        except StopIteration:
+            raise
+        except BaseException as error:
+            # Connection.execute() owns its implicit cursor. Retire its SQLite
+            # statement here, before an exception traceback can retain it for
+            # collection on another thread using this shared connection.
+            # Explicit cursors remain reusable after an unsuccessful operation.
+            if getattr(self, '_implicit', False):
+                try:
+                    self.close()
+                except sqlite3.Error:
+                    # A closed connection has already retired its statements.
+                    # Preserve the original operation's failure.
+                    pass
             if (getattr(error, 'sqlite_errorcode', 0) & 255 == sqlite3.SQLITE_READONLY
                     and getattr(self.connection, '_storage_compacting', False)):
                 self.connection.rollback()
@@ -92,11 +121,30 @@ class Cursor(sqlite3.Cursor):
     def executescript(self, sql):
         return self._run(super().executescript, sql)
 
+    def fetchone(self):
+        return self._run(super().fetchone, admit=False)
+
+    def fetchmany(self, size=None):
+        return self._run(super().fetchmany, *(() if size is None else (size,)), admit=False)
+
+    def fetchall(self):
+        return self._run(super().fetchall, admit=False)
+
+    def __next__(self):
+        return self._run(super().__next__, admit=False)
+
+    close = _serialized(sqlite3.Cursor.close)
+
 
 class Connection(sqlite3.Connection):
     def __init__(self, database, *args, **kwargs):
+        # Reentrant for SQLite callbacks and close callbacks using this handle.
+        # This guards individual native calls; repository transaction ownership
+        # still belongs to the Store lock and is not changed by this guard.
+        self._sqlite_lock = threading.RLock()
         self._handle_internal = kwargs.pop('_compaction_internal',False)
         self._handle_path = path_for(database)
+        self._compaction_state_path = state_path(self._handle_path) if self._handle_path is not None else None
         self._handle_readonly = (kwargs.get('uri',False)
             and parse_qs(urlsplit(str(database)).query).get('mode')==['ro'])
         self._handle_lease = None
@@ -153,7 +201,7 @@ class Connection(sqlite3.Connection):
         # file identity for every statement, but do not parse the complete
         # retained-row report for every ordinary browse query after completion.
         try:
-            stat = state_path(self._handle_path).stat()
+            stat = self._compaction_state_path.stat()
             key = (stat.st_ino,stat.st_mtime_ns,stat.st_ctime_ns,stat.st_size)
         except FileNotFoundError:
             key = None
@@ -187,20 +235,50 @@ class Connection(sqlite3.Connection):
             self._handle_lease.__enter__()
             self._handle_internal = False
 
+    @_serialized
     def cursor(self, factory=Cursor):
         cursor = super().cursor(factory)
         self._handle_cursors.add(cursor)
         return cursor
 
     def execute(self, sql, parameters=()):
-        return self.cursor().execute(sql, parameters)
+        cursor = self.cursor()
+        cursor._implicit = True
+        return cursor.execute(sql, parameters)
 
     def executemany(self, sql, parameters):
-        return self.cursor().executemany(sql, parameters)
+        cursor = self.cursor()
+        cursor._implicit = True
+        return cursor.executemany(sql, parameters)
 
     def executescript(self, sql):
-        return self.cursor().executescript(sql)
+        cursor = self.cursor()
+        cursor._implicit = True
+        return cursor.executescript(sql)
 
+    commit = _serialized(sqlite3.Connection.commit)
+    rollback = _serialized(sqlite3.Connection.rollback)
+    __enter__ = _serialized(sqlite3.Connection.__enter__)
+    __exit__ = _serialized(sqlite3.Connection.__exit__)
+    create_function = _serialized(sqlite3.Connection.create_function)
+    create_aggregate = _serialized(sqlite3.Connection.create_aggregate)
+    create_window_function = _serialized(sqlite3.Connection.create_window_function)
+    create_collation = _serialized(sqlite3.Connection.create_collation)
+    set_progress_handler = _serialized(sqlite3.Connection.set_progress_handler)
+    set_authorizer = _serialized(sqlite3.Connection.set_authorizer)
+    set_trace_callback = _serialized(sqlite3.Connection.set_trace_callback)
+    # interrupt() deliberately remains lock-free: cancellation must interrupt
+    # an executing statement rather than wait for it to finish.
+
+    def backup(self, target, **kwargs):
+        connections = sorted({self, target}, key=id)
+        with ExitStack() as locks:
+            for connection in connections:
+                if isinstance(connection, Connection):
+                    locks.enter_context(connection._sqlite_lock)
+            return super().backup(target, **kwargs)
+
+    @_serialized
     def close(self):
         if self._handle_closed:
             return

@@ -146,22 +146,7 @@ def _retire_product_trial(store, now):
     if current.get('phase') not in ('preparing', 'observing'):
         return
     reason = 'Replaced by daily prediction comparisons with a 30-day holdout.'
-    with store._lock, store.conn:
-        current = product_comparison.state(store)
-        if current.get('phase') not in ('preparing', 'observing'):
-            return
-        run = store.model_selection.selection_run(current['run_id'])
-        if run:
-            run.update(status='retained', phase='complete', reason=reason, ended_at=now)
-            store.conn.execute('UPDATE rec_model_selection_runs SET result_json=result_json WHERE id=?', (run['id'],))
-            store.model_selection.publish_selection(run['id'], json.dumps(run), None, run['previous'])
-        current.update(phase='retained', reason=reason, ended_at=now)
-        store.rec_proposals.publish_prepared_home(json.dumps(current), now, surface=product_comparison.SURFACE)
-        store.settings.publish_values({'rec_selection_live_run': ''})
-        monitor = store.rec_proposals.get_proposals(product_comparison.MONITOR)
-        if monitor:
-            store.rec_proposals.publish_prepared_home(json.dumps({**monitor, 'complete': True}),
-                                                     now, surface=product_comparison.MONITOR)
+    store.model_selection.retire_product_trial(now, reason)
 
 
 def _finish(store, run, now, *, status, reason):
@@ -181,7 +166,7 @@ def _publish_fit(store, snapshot, run, now):
     weights = (training.cooc_weights(reader.rec_query.play_counts())
                if reader.settings.get_setting('rec_cooc_weighting') == '1' else None)
     previous_rows = dict(reader.rec_model.get_rec_vectors())
-    previous_basis = embeddings.head(reader.conn, 'rec_vectors')
+    previous_basis = reader.rec_model.collaborative_basis()
     snapshot.release_reader()
     model_refresh._check_fit_memory(baskets, selected['dim'], progressive.Budget().full_memory_bytes)
     keys, vectors = training.build_vectors_from_baskets(baskets, dim=selected['dim'],
@@ -209,10 +194,7 @@ def _publish_fit(store, snapshot, run, now):
         if not applied:
             store.rec_model.publish_training_generation(changes)
         store.settings.publish_values({'rec_fit_inputs': fit_inputs})
-        store.conn.execute("DELETE FROM rec_proposals WHERE surface IN "
-            "('home_choice','mode_bundles','fresh_pool')")
-        from yt_playlist.rec.invalidation import clear_model_display
-        clear_model_display(store.conn)
+        store.model_selection.retire_model_display()
         store.model_selection.schedule_daily(run['ran_at'] + DAY, now)
     if not snapshot.publish(publish):
         raise ValueError('Model inputs changed before publication; the serving model was kept')

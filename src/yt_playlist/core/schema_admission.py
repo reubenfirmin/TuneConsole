@@ -66,6 +66,9 @@ def earlier_genres(version):
 def validate_version(conn, version, *, foreign_keys=True, data=True):
     if not 79<=version<=schema.VERSION:
         raise MigrationError('Preparation requires a supported installed schema')
+    if version == schema.VERSION:
+        schema.validate(conn, foreign_keys=foreign_keys, data=data)
+        return
     expected = contract(version if version==79 or version>=86 else 85)
     replaced = frozenset()
     if 80<=version<86:

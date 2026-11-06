@@ -25,10 +25,9 @@ def _song(video_id):
 
 
 @pytest.mark.parametrize("action", ["like", "dislike"])
-def test_unseen_confirmed_rating_survives_restart_and_teaches_without_playlist(tmp_path, action):
+def test_unseen_confirmed_rating_survives_restart_and_teaches_without_playlist(tmp_path, action, consumer_store, request):
     path = tmp_path / "ratings.db"
-    store = Store(path)
-    store.init_schema()
+    store = consumer_store(path)
     iid = store.accounts.upsert_account("main", "cred", None, True)
     calls = []
     ctx = SimpleNamespace(store=store, rec_worker=SimpleNamespace(
@@ -39,6 +38,7 @@ def test_unseen_confirmed_rating_survives_restart_and_teaches_without_playlist(t
     store.conn.close()
 
     store = Store(path)
+    request.addfinalizer(store.conn.close)
     store.init_schema()
     keys = ratings.reconcile_pending(store, iid, SimpleNamespace(get_song=_song))
     assert keys == {"unseen song|artist"}

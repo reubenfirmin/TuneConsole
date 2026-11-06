@@ -13,6 +13,8 @@ from yt_playlist.core.recommendation_custody import retain, release
 from . import policy_storage, proposal_cache
 
 BATCH_ROWS = 128
+SLOT_BATCH_ROWS = 16
+OUTPUT_BATCH_ROWS = 16
 CLEANUP_ROWS = 1024
 CLEANUP_POOLS = 32
 LEASE_SECONDS = 60
@@ -26,6 +28,11 @@ class Slot:
     mode_key: str
     purpose: str
     pool: pools.Pool
+    revalidated_policy: str | None = None
+
+    @property
+    def revalidated(self):
+        return self.revalidated_policy is not None
 
 
 @dataclass(frozen=True)
@@ -111,7 +118,8 @@ def validate(plan, *, allow_unobserved=False):
     used, slots, files, distinct, surfaces, selections, ranges = 0, set(), set(), {}, set(), set(), {}
     for slot in plan.slots:
         if (not isinstance(slot, Slot) or not _identity(slot.surface) or not _identity(slot.mode_key, empty=True)
-                or not _identity(slot.purpose) or not isinstance(slot.pool, pools.Pool)):
+                or not _identity(slot.purpose) or not isinstance(slot.pool, pools.Pool)
+                or slot.revalidated and not _identity(slot.revalidated_policy)):
             raise ValueError('Invalid recommendation pool slot')
         key = slot.surface, slot.mode_key, slot.purpose
         if key in slots:
@@ -129,7 +137,7 @@ def validate(plan, *, allow_unobserved=False):
             distinct[pool.content_digest] = pool
         elif distinct[pool.content_digest] != pool:
             raise ValueError('Conflicting recommendation pool content identity')
-        digest.update(canonical([*key, pool.content_digest]))
+        digest.update(canonical([*key, pool.content_digest, *([slot.revalidated_policy] if slot.revalidated else [])]))
         if used > MAX_PLAN_BYTES:
             raise ValueError('Recommendation publication exceeds its admitted memory')
     for output in plan.outputs:
@@ -237,7 +245,7 @@ def _create_pool(conn, prepared):
          prepared.content_digest, prepared.purpose, len(prepared.candidates))).fetchone()[0]
 
 
-def _pool(repo, build, prepared):
+def _pool(repo, build, prepared, *, still_current=None):
     with proposal_cache._write(repo) as conn:
         _touch(conn, build)
         row = conn.execute('SELECT id,complete FROM recommendation_pools WHERE content_digest=?',
@@ -245,9 +253,12 @@ def _pool(repo, build, prepared):
         if row is None:
             identity = _create_pool(conn, prepared)
             conn.execute('INSERT INTO recommendation_build_pools VALUES (?,?)', (build.generation_id, identity))
+            pools.append(conn, identity, prepared.candidates[:BATCH_ROWS], 0)
+            count = min(BATCH_ROWS, len(prepared.candidates))
             sealed = False
         else:
             identity, sealed = row
+            count = None
             if conn.execute('SELECT 1 FROM recommendation_pool_retirements WHERE pool_id=?', (identity,)).fetchone():
                 raise WorkBudgetExceeded('Recommendation pool is awaiting bounded cleanup')
             owner = conn.execute('SELECT generation_id FROM recommendation_build_pools WHERE pool_id=?', (identity,)).fetchone()
@@ -257,21 +268,20 @@ def _pool(repo, build, prepared):
                 conn.execute('INSERT INTO recommendation_build_pools VALUES (?,?) ON CONFLICT DO NOTHING',
                              (build.generation_id, identity))
     if not sealed:
-        with repo._store.read_view() as reader:
-            count = reader.conn.execute('SELECT (SELECT count(*) FROM recommendation_candidates WHERE pool_id=?)'
-                '+(SELECT count(*) FROM unresolved_recommendation_candidates WHERE pool_id=?)', (identity, identity)).fetchone()[0]
+        if count is None:
+            with repo._store.read_view() as reader:
+                count = reader.conn.execute('SELECT (SELECT count(*) FROM recommendation_candidates WHERE pool_id=?)'
+                    '+(SELECT count(*) FROM unresolved_recommendation_candidates WHERE pool_id=?)', (identity, identity)).fetchone()[0]
         if count > len(prepared.candidates):
             raise ValueError('Recommendation candidate prefix exceeds its plan')
         for start in range(count, len(prepared.candidates), BATCH_ROWS):
+            if still_current is not None and not still_current():
+                return None
             with proposal_cache._write(repo) as conn:
                 _touch(conn, build)
                 pools.append(conn, identity, prepared.candidates[start:start + BATCH_ROWS], start)
     with repo._store.read_view() as reader:
         pools.verify(reader.conn, identity, prepared)
-    if not sealed:
-        with proposal_cache._write(repo) as conn:
-            _touch(conn, build)
-            conn.execute('UPDATE recommendation_pools SET complete=1 WHERE id=?', (identity,))
     return identity
 
 
@@ -301,47 +311,84 @@ def _ready(conn, plan, generation):
         conn.execute("UPDATE recommendation_generations SET status='ready' WHERE id=?", (generation,))
 
 
-def stage(repo, plan, build):
+def stage(repo, plan, build, *, still_current=None):
     if validate(plan) != build.plan_digest:
         raise ValueError('Recommendation staged plan changed')
-    for slot in plan.slots:
-        check_cancellable_work()
+    for start in range(0, len(plan.slots), SLOT_BATCH_ROWS):
+        if still_current is not None and not still_current():
+            return False
+        pending = []
         with repo._store.read_view() as reader:
-            existing = reader.conn.execute('SELECT p.content_digest FROM recommendation_surface_pools m '
-                'JOIN recommendation_pools p ON p.id=m.pool_id WHERE m.generation_id=? AND m.surface=? '
-                'AND m.mode_key=? AND m.purpose=?',
-                (build.generation_id, slot.surface, slot.mode_key, slot.purpose)).fetchone()
-        if existing:
-            if existing[0] != slot.pool.content_digest:
-                raise ValueError('Recommendation staged pool selection changed')
-            continue
-        identity = _pool(repo, build, slot.pool)
-        with proposal_cache._write(repo) as conn:
-            _touch(conn, build)
-            conn.execute('INSERT INTO recommendation_surface_pools VALUES (?,?,?,?,?)',
-                         (build.generation_id, slot.surface, slot.mode_key, slot.purpose, identity))
-            conn.execute('DELETE FROM recommendation_build_pools WHERE generation_id=? AND pool_id=?',
-                         (build.generation_id, identity))
-    root = outputs.root_for_database(repo._store._db_path, repo._store._evidence_key)
-    for output in plan.outputs:
-        check_cancellable_work()
-        with repo._store.read_view() as reader:
-            existing = reader.conn.execute('SELECT content_digest FROM prepared_outputs WHERE generation_id=? '
-                'AND surface=? AND chunk_key=?', (build.generation_id, output.surface, output.chunk_key)).fetchone()
-        if existing:
-            if existing[0] != hashlib.sha256(output.encoded).hexdigest():
-                raise ValueError('Recommendation staged output changed')
-            continue
-        # The shared lifetime lock fences file GC while bytes are durable but
-        # their owner row is not committed. File I/O stays outside serving locks.
-        with policy_documents.retained_reader(root):
-            file = outputs.publish(root, output.encoded)
+            # Share only the bounded selection lookup. Each pool still gets its
+            # own complete off-lock verification and bounded write transactions.
+            for slot in plan.slots[start:start + SLOT_BATCH_ROWS]:
+                check_cancellable_work()
+                existing = reader.conn.execute('SELECT p.content_digest FROM recommendation_surface_pools m '
+                    'JOIN recommendation_pools p ON p.id=m.pool_id WHERE m.generation_id=? AND m.surface=? '
+                    'AND m.mode_key=? AND m.purpose=?',
+                    (build.generation_id, slot.surface, slot.mode_key, slot.purpose)).fetchone()
+                if existing:
+                    if existing[0] != slot.pool.content_digest:
+                        raise ValueError('Recommendation staged pool selection changed')
+                else:
+                    pending.append(slot)
+        for slot in pending:
+            check_cancellable_work()
+            identity = (_pool(repo, build, slot.pool, still_current=still_current)
+                        if still_current is not None else _pool(repo, build, slot.pool))
+            if identity is None:
+                return False
             with proposal_cache._write(repo) as conn:
                 _touch(conn, build)
-                _output(conn, plan, build.generation_id, output, file)
+                # Verification stays off-lock; sealing and attachment share a commit.
+                conn.execute('UPDATE recommendation_pools SET complete=1 WHERE id=? AND complete=0', (identity,))
+                if slot.revalidated:
+                    # _pool verified every canonical fact outside this lock.
+                    # This immutable owner explicitly records rechecking those
+                    # facts under the new generation's captured input policy.
+                    conn.execute('INSERT INTO recommendation_pool_revalidations VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING',
+                                 (build.generation_id, slot.surface, slot.mode_key, slot.purpose,
+                                  identity, slot.revalidated_policy))
+                conn.execute('INSERT INTO recommendation_surface_pools VALUES (?,?,?,?,?)',
+                             (build.generation_id, slot.surface, slot.mode_key, slot.purpose, identity))
+                conn.execute('DELETE FROM recommendation_build_pools WHERE generation_id=? AND pool_id=?',
+                             (build.generation_id, identity))
+    root = outputs.root_for_database(repo._store._db_path, repo._store._evidence_key)
+    for start in range(0, len(plan.outputs), OUTPUT_BATCH_ROWS):
+        if still_current is not None and not still_current():
+            return False
+        pending = []
+        with repo._store.read_view() as reader:
+            for output in plan.outputs[start:start + OUTPUT_BATCH_ROWS]:
+                check_cancellable_work()
+                existing = reader.conn.execute('SELECT content_digest FROM prepared_outputs WHERE generation_id=? '
+                    'AND surface=? AND chunk_key=?', (build.generation_id, output.surface, output.chunk_key)).fetchone()
+                if existing:
+                    if existing[0] != hashlib.sha256(output.encoded).hexdigest():
+                        raise ValueError('Recommendation staged output changed')
+                else:
+                    pending.append(output)
+        if not pending:
+            continue
+        # The shared lifetime lock fences file GC while bytes are durable but
+        # their owner rows are not committed. Only the bounded manifest batch
+        # takes the serving lock; every file is synced before its SQL owner.
+        with policy_documents.retained_reader(root):
+            files = []
+            for output in pending:
+                check_cancellable_work()
+                files.append((output, outputs.publish(root, output.encoded)))
+            with proposal_cache._write(repo) as conn:
+                _touch(conn, build)
+                for output, file in files:
+                    check_cancellable_work()
+                    _output(conn, plan, build.generation_id, output, file)
+    if still_current is not None and not still_current():
+        return False
     with proposal_cache._write(repo) as conn:
         _touch(conn, build)
         _ready(conn, plan, build.generation_id)
+    return True
 
 
 def finish(conn, build, at):
@@ -479,9 +526,13 @@ def cleanup_generations(repo, *, checkpoint=True):
             if status != 'retiring':
                 conn.execute("UPDATE recommendation_generations SET status='retiring' WHERE id=?", (identity,))
             conn.execute("UPDATE recommendation_builds SET owner='cleanup',expires_at=0 WHERE generation_id=?", (identity,))
+            revalidations = (('recommendation_pool_revalidations', ('generation_id', 'surface', 'mode_key', 'purpose')),)
+            if not conn.execute("SELECT 1 FROM sqlite_schema WHERE name='recommendation_pool_revalidations'").fetchone():
+                revalidations = ()
             for table, columns in (('prepared_outputs', ('id',)),
                                    ('recommendation_bundle_framing', ('generation_id',)),
                                    ('recommendation_surface_pools', ('generation_id', 'surface', 'mode_key', 'purpose')),
+                                   *revalidations,
                                    ('recommendation_build_pools', ('generation_id', 'pool_id')),
                                    ('recommendation_generation_surfaces', ('generation_id', 'surface'))):
                 removed += _delete(conn, table, columns, 'generation_id=?', (identity,), CLEANUP_ROWS - removed)
@@ -500,10 +551,12 @@ def cleanup_pools(repo, *, checkpoint=True):
         # The writer reservation keeps this bounded selection valid throughout
         # the transaction. Repeating the same anti-joins for each small pool
         # can consume the whole turn once retained pools lead the ID order.
+        revalidations = ('AND NOT EXISTS(SELECT 1 FROM recommendation_pool_revalidations v WHERE v.pool_id=p.id) '
+            if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='recommendation_pool_revalidations'").fetchone() else '')
         selected = conn.execute('SELECT p.id FROM recommendation_pools p WHERE NOT EXISTS('
             'SELECT 1 FROM recommendation_surface_pools m WHERE m.pool_id=p.id) AND NOT EXISTS('
             'SELECT 1 FROM recommendation_build_pools b WHERE b.pool_id=p.id) AND NOT EXISTS('
-            'SELECT 1 FROM prepared_outputs o WHERE o.pool_id=p.id) ORDER BY p.id LIMIT ?',
+            'SELECT 1 FROM prepared_outputs o WHERE o.pool_id=p.id) ' + revalidations + 'ORDER BY p.id LIMIT ?',
             (CLEANUP_POOLS,)).fetchall()
         for pool in selected:
             check_cancellable_work()

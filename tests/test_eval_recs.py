@@ -1,29 +1,36 @@
 import numpy as np
 import pytest
+from types import SimpleNamespace
 
+from tests.repository_mock_support import no_database, repository_store
 from yt_playlist.rec import embed, eval_recs
 from tests import model_support
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
 
 
-def test_recall_recovers_held_out_cluster_track(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+def test_recall_recovers_held_out_cluster_track(no_database):
     # one tight 8-track cluster (one playlist) + a distractor cluster, so the held-out
     # track should rank near the rest of its own playlist.
-    A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None, created_at=0) for i in range(8)]
-    B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None, created_at=0) for i in range(8)]
-    store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", 8, "h", 0.0), A)
-    store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "PB", 8, "h2", 0.0), B)
-    model_support.build_track_model(store, dim=4)
+    groups = {1: [f'a{i}|ab' for i in range(8)], 2: [f'b{i}|bb' for i in range(8)]}
+    rows = [(key, np.array(direction, dtype=np.float32).tobytes())
+            for group, direction in ((1, [1., 0.]), (2, [0., 1.]))
+            for key in groups[group]]
+    store = repository_store(
+        rec_model={'get_rec_vectors': rows},
+        playlists={'get_playlists': [SimpleNamespace(id=1), SimpleNamespace(id=2)],
+                   'get_playlist_track_keys': []})
+    store.playlists.get_playlist_track_keys.side_effect = groups.__getitem__
 
     res = eval_recs.recall_at_k(store, k=5, min_size=5)
     assert res["trials"] == 2
     assert res["recall_at_k"] == 1.0          # both held-out tracks recovered in top-5
+    assert res['baseline'] == pytest.approx(5 / 16)
+    assert res['lift'] == pytest.approx(16 / 5)
 
 
-def test_recall_none_without_vectors(store):
-    store.accounts.upsert_account("main", "cred", None, True)
+def test_recall_none_without_vectors(no_database):
+    store = repository_store(rec_model={'get_rec_vectors': []})
     assert eval_recs.recall_at_k(store)["recall_at_k"] is None
 
 
@@ -36,31 +43,27 @@ def _two_cluster_playlists(store, *, fit=True):
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "PB", 8, "h2", 0.0), B)
     if fit:
         model_support.build_track_model(store, dim=4)
-    else:
-        store.rec_model.replace_rec_vectors([
-            (identity_key(f'{cluster}{i}', artist), np.eye(4, dtype=np.float32)[column].tobytes())
-            for column, (cluster, artist) in enumerate((('A', 'AB'), ('B', 'BB'))) for i in range(8)])
     return iid
 
 
-def test_temporal_recall_recovers_recent_plays_from_history(store):
+def test_rolling_temporal_recall_recovers_recent_plays_without_live_vectors(store):
     # The model's real job: predict what you played next. Context = cluster-A tracks played before the
     # holdout window; held-out = the rest of cluster A played inside it. A tight cluster should rank its
     # own held-out members near the context centroid, so recall is high.
-    iid = _two_cluster_playlists(store)
+    iid = _two_cluster_playlists(store, fit=False)
     day, t_recent = 86400, 1_000_000.0
     store.history.record_history_plays(iid, t_recent - 10 * day,
         [identity_key(f"A{i}", "AB") for i in range(4)], source_timezone="UTC")
     store.history.record_history_plays(iid, t_recent,
         [identity_key(f"A{i}", "AB") for i in range(4, 8)], source_timezone="UTC")
 
-    res = eval_recs.temporal_recall(store, holdout_days=5, k=8)
+    res = eval_recs.rolling_temporal_recall(store, holdout_days=5, k=8, windows=1, dim=4)
     assert res["trials"] == 4                 # the four held-out recent plays, none seen before the cutoff
     assert res["recall"] == 1.0               # all recovered in the top-8 by the context centroid
 
 
 @pytest.mark.parametrize("source", ["ytm_history", "independent"])
-def test_temporal_recall_excludes_generated_only_held_plays(store, source):
+def test_rolling_temporal_recall_excludes_generated_only_held_plays(store, source):
     # #83 closing the last circular path: a held-out play the app CAUSED (played only from a
     # quarantined generated playlist, per play_events provenance) must not count as a successful
     # prediction. Keys with organic evidence in the window (mixed, or no play_events rows at all)
@@ -84,7 +87,7 @@ def test_temporal_recall_excludes_generated_only_held_plays(store, source):
     store.history.record_play_event(iid, identity_key("A5", "AB"), "a5", 997_000.0, playlist_ytm_id="PLGEN")
     store.history.record_play_event(iid, identity_key("A5", "AB"), "a5", 990_000.0, playlist_ytm_id=None)
 
-    res = eval_recs.temporal_recall(store, holdout_days=5, k=8)
+    res = eval_recs.rolling_temporal_recall(store, holdout_days=5, k=8, windows=1, dim=4)
 
     assert res["generated_excluded"] == (2 if source == "ytm_history" else 0)
     assert res["trials"] == (2 if source == "ytm_history" else 4)
@@ -92,7 +95,7 @@ def test_temporal_recall_excludes_generated_only_held_plays(store, source):
 
 
 @pytest.mark.parametrize("source", ["ytm_history", "independent"])
-def test_temporal_recall_all_held_generated_is_insufficient_not_perfect(store, source):
+def test_rolling_temporal_recall_all_held_generated_is_insufficient_not_perfect(store, source):
     # When EVERY held-out play is app-caused, the honest answer is "no usable split", never a
     # recall score computed over zero real plays.
     from yt_playlist.repos.base import GENERATED_GROUP
@@ -110,29 +113,42 @@ def test_temporal_recall_all_held_generated_is_insufficient_not_perfect(store, s
         store.history.record_play_event(iid, identity_key(f"A{i}", "AB"), f"a{i}", 990_000.0 + i * 3600,
                                 playlist_ytm_id="PLGEN")
 
-    res = eval_recs.temporal_recall(store, holdout_days=5, k=8)
+    res = eval_recs.rolling_temporal_recall(store, holdout_days=5, k=8, windows=1, dim=4)
 
     if source == "ytm_history":
         assert res["recall"] is None
         assert res["trials"] == 0 and res["generated_excluded"] == 4
-        assert res["reason"] == "insufficient temporal split"
+        assert res["reason"] == "no viable reconstructable windows"
+        assert res["windows"][0]["reason"] == "insufficient causal split"
     else:
         assert res["recall"] == 1.0
         assert res["trials"] == 4 and res["generated_excluded"] == 0
 
 
-def test_temporal_recall_none_without_vectors(store):
-    store.accounts.upsert_account("main", "cred", None, True)
-    assert eval_recs.temporal_recall(store)["recall"] is None
+def test_rolling_temporal_recall_none_without_reconstructable_vectors(store):
+    iid = store.accounts.upsert_account("main", "cred", None, True)
+    for i, timestamp in enumerate((100_000.0, 1_000_000.0)):
+        store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None, created_at=0)
+        store.history.record_history_plays(iid, timestamp, [identity_key(f"A{i}", "AB")],
+                                          source_timezone="UTC")
+    result = eval_recs.rolling_temporal_recall(store, holdout_days=5, windows=1, dim=4)
+    assert result["recall"] is None and result["trials"] == 0
+    assert result["windows"][0]["reason"] == "no reconstructable as-of vectors"
 
 
-def test_temporal_recall_none_without_history(store):
-    _two_cluster_playlists(store, fit=False)   # vectors exist, but no history snapshots were taken
-    assert eval_recs.temporal_recall(store)["recall"] is None
+def test_rolling_temporal_recall_none_without_history(no_database):
+    store = repository_store(rec_evidence={'evaluation_history_bounds': (None, None)})
+    result = eval_recs.rolling_temporal_recall(store)
+    assert result["recall"] is None and result["trials"] == 0
+    assert result["reason"] == "no history"
 
 
 def test_rolling_temporal_recall_rebuilds_as_of_cutoff(store):
     iid = _two_cluster_playlists(store)
+    # This existing genuine fit owns producer-to-leave-one-out integration.
+    # The separate recall arithmetic case consumes explicit repository vectors.
+    current = eval_recs.recall_at_k(store, k=5, min_size=5)
+    assert current['trials'] == 2 and current['recall_at_k'] == 1.
     day, t = 86400, 5_000_000.0
     store.history.record_history_plays(iid, t - 20 * day,
         [identity_key(f"A{i}", "AB") for i in range(4)], source_timezone="UTC")
@@ -220,9 +236,10 @@ def test_projection_recall_pins_reference_during_model_publication(store, monkey
     assert len(calls) == 5
 
 
-def test_historical_fit_checks_memory_before_training(store, monkeypatch):
+def test_historical_fit_checks_memory_before_training(no_database, monkeypatch):
     from yt_playlist.rec import embedding_training, model_refresh
-    _two_cluster_playlists(store)
+    store = repository_store(rec_evidence={'rec_baskets_as_of': (
+        [[f'a{i}|ab' for i in range(8)], [f'b{i}|bb' for i in range(8)]], {})})
     monkeypatch.setattr(embedding_training, 'build_vectors_from_baskets',
                         lambda *a, **kw: pytest.fail('fit exceeded memory admission'))
     with pytest.raises(model_refresh.MemoryBudgetExceeded):

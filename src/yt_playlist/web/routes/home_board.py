@@ -36,7 +36,6 @@ def build(ctx, views):
         if proto is None:
             return Response(status_code=204)
         recommendations.record_modes([proto], result.epoch, now)
-        recommendations.record_offer([proto], now, epoch=result.epoch)
         response = templates.TemplateResponse(request, "_partials/generated_playlist.html",
                                                {"p": proto, "regenerating": True})
         recommendations.audit([proto], now, request.url.path)

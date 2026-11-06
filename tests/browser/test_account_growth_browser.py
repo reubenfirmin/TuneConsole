@@ -1,6 +1,6 @@
-"""Rendered growth states, notification actions and live health counts."""
+"""Rendered growth states and notification actions."""
 import hashlib
-import inspect
+from tests.enrichment_support import complete_entries, complete_discovered
 import io
 import json
 import re
@@ -16,13 +16,25 @@ from tests.onboarding_support import publish_personal_album, publish_personal_mi
 from tests.test_growth_journey import early_journey
 from tests.home_fixture_support import returning_listener
 from yt_playlist.rec import account_growth
+from tests.browser.quiet_action_support import (  # noqa: F401 - shared evidence fixture
+    action_evidence, assert_quiet_action, fail_action,
+)
 
 
 def growth_catalog(store):
     early_journey(store)
     catalog(store)
-    store.discovery.mark_discovered_enriched([row[0] for row in store.conn.execute(
+    complete_discovered(store, [row[0] for row in store.conn.execute(
         'SELECT identity_key FROM discovered_tracks')], 1)
+
+
+@pytest.fixture
+def store(store, request):
+    if request.node.originalname == 'test_festival_states_notices_home_choice_and_bonus_details':
+        # This interaction-only journey repeatedly serves the same prepared
+        # state. Keep ordinary private WAL reads instead of memory snapshots.
+        return request.getfixturevalue('file_backed_store')
+    return store
 
 
 def test_trail_light_preserves_foreground_scenery(live_app, store, page, monkeypatch):
@@ -36,7 +48,7 @@ def test_trail_light_preserves_foreground_scenery(live_app, store, page, monkeyp
     def explored_view(source, now, **kwargs):
         state = actual_view(source, now, **kwargs)
         for node in state['nodes']:
-            node.update(state='explored', ready=True)
+            node.update(state='explored', ready=True, upcoming=False)
         return state
 
     monkeypatch.setattr(account_growth, 'view', explored_view)
@@ -55,7 +67,7 @@ def test_trail_light_preserves_foreground_scenery(live_app, store, page, monkeyp
         document.querySelectorAll('.growth-unlock-notice,.growth-home-choice').forEach(el => el.style.setProperty('display','none','important'));
     }''')
     svg = page.locator('.festival-map')
-    svg.screenshot(path='/tmp/tuneconsole-611-trails-explored.png', animations='disabled')
+    svg.screenshot(path='/tmp/tuneconsole-861-trails-open.png', animations='disabled')
     # Lit venue cutouts also sit above the paths. Hide that layer during pixel
     # comparison to exercise the path mask even when those venues are unlit.
     page.locator('.landmark-art').evaluate_all("els => els.forEach(el => el.style.visibility = 'hidden')")
@@ -71,9 +83,11 @@ def test_trail_light_preserves_foreground_scenery(live_app, store, page, monkeyp
     lit = snapshot()
     routes.evaluate("el => el.removeAttribute('mask')")
     unmasked = snapshot()
+    for name, shot in [('dark', dark), ('open', explored), ('preparing', lit), ('unmasked', unmasked)]:
+        shot.save(f'/tmp/tuneconsole-861-trail-pixels-{name}.png')
     routes.evaluate("el => el.setAttribute('mask','url(#festival-path-surface)')")
     page.locator('.landmark-art').evaluate_all("els => els.forEach(el => el.style.visibility = 'visible')")
-    svg.screenshot(path='/tmp/tuneconsole-611-trails-preparing.png', animations='disabled')
+    svg.screenshot(path='/tmp/tuneconsole-861-trails-preparing.png', animations='disabled')
 
     def difference(first, second, point, *, radius=0):
         px = round(point[0] * first.width / 1536)
@@ -99,12 +113,18 @@ def test_trail_light_preserves_foreground_scenery(live_app, store, page, monkeyp
         'cinema screen': (1100, 780),
         'waterfall handrail': (1335, 374),
         'upper switchback lamp post': (789, 321),
-        'outer switchback lamp post': (829, 327),
         'first bridge lamp post': (1329, 348),
         'middle bridge lamp post': (1370, 372),
         'last bridge lamp post': (1422, 405),
         'stage approach visitor': (1246, 623),
         'stage forecourt lamp': (1297, 670),
+        'island bridge near post': (1002, 645),
+        'island bridge curved rail': (1049, 663),
+        'island bridge lower post': (1074, 682),
+        'western bridge rail': (701, 681),
+        'vibes urn': (798, 666),
+        'vibes bank shrub': (924, 673),
+        'cinema front-row chair': (1180, 883),
     }
     evidence = {name: {'unmasked': difference(dark, unmasked, point),
                        'masked': difference(dark, lit, point),
@@ -113,18 +133,32 @@ def test_trail_light_preserves_foreground_scenery(live_app, store, page, monkeyp
     assert all(item['unmasked'] > 4 for item in evidence.values()), json.dumps(evidence)
     assert all(item['masked'] <= 2 for item in evidence.values()), json.dumps(evidence)
     assert all(item['explored'] <= 4 for item in evidence.values()), json.dumps(evidence)
+    # Retracing also avoids the outer switchback lamp entirely. Unlike the
+    # foreground above, this object no longer depends on the mask for protection.
+    assert difference(dark, unmasked, (829, 327)) <= 4
     # These independent points follow the artwork's actual stair treads, not
     # coordinates sampled from the route definition. They catch the old shortcut
     # through the planting bed and the displaced upper stair bend.
-    for point in [(734, 402), (761, 446), (823, 350)]:
-        assert difference(dark, explored, point, radius=2) > 4, f'Explored trail misses stair tread at {point}'
+    for point, radius in [((734, 402), 2), ((761, 446), 2), ((823, 350), 8)]:
+        assert difference(dark, explored, point, radius=radius) > 4, f'Open trail misses stair tread at {point}'
         assert difference(dark, lit, point, radius=2) > 4, f'Preparing trail misses stair tread at {point}'
     for point in [(155, 503), (174, 514), (200, 517), (250, 530), (1058, 260), (1128, 361), (686, 800), (785, 925)]:
         assert difference(dark, lit, point) > 4, f'Adjacent walking surface lost its light at {point}'
+    # Native artwork samples along previously missing or displaced sections:
+    # forecourts, the uphill loop, both island approaches and the cinema apron.
+    for point in [(550, 517), (1008, 420), (1068, 253), (1190, 277), (1100, 702),
+                  (861, 670), (690, 684), (640, 700), (645, 750), (690, 788),
+                  (650, 834), (497, 892), (330, 865), (285, 876), (198, 655),
+                  (1218, 887), (1150, 868)]:
+        assert difference(dark, explored, point, radius=4) > 4, f'Open trail misses walking surface at {point}'
+        assert difference(dark, lit, point) > 4, f'Preparing trail misses walking surface at {point}'
+    for point in [(875, 689), (920, 688), (500, 910), (310, 850)]:
+        assert difference(dark, explored, point) <= 4, f'Open trail crosses planted bank at {point}'
+        assert difference(dark, lit, point) <= 2, f'Preparing trail crosses planted bank at {point}'
 
 
 @pytest.mark.parametrize('width', [1536])
-def test_festival_states_notices_home_choice_and_bonus_details(live_app, store, page, monkeypatch, width):
+def test_festival_states_notices_home_choice_and_bonus_details(live_app, store, page, monkeypatch, width, action_evidence):
     growth_catalog(store)
     publish_personal_album(store)
     publish_personal_mix(store)
@@ -146,7 +180,7 @@ def test_festival_states_notices_home_choice_and_bonus_details(live_app, store, 
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.set_viewport_size({'width': width, 'height': 1100})
-    page.goto(live_app + '/#unlocks')
+    page.goto(live_app + '/#unlocks', wait_until='domcontentloaded')
     page.screenshot(path=f'/tmp/tuneconsole-festival-initial-{width}.png', full_page=True)
     expect(page.get_by_role('heading', name='Your unlocks', exact=True)).to_be_visible()
     expect(page.get_by_role('tab', name='Your unlocks')).to_be_visible()
@@ -155,14 +189,14 @@ def test_festival_states_notices_home_choice_and_bonus_details(live_app, store, 
     expect(page.locator('.festival-destination.is-preparing')).to_have_count(1)
     expect(page.locator('.festival-destination.is-untouched')).to_have_count(7)
     assert page.locator('.festival-routes .growth-route').count() == 14
-    expect(page.locator('.festival-routes .growth-route:visible')).to_have_count(4)
+    expect(page.locator('.festival-routes .growth-route:visible')).to_have_count(7)
     expect(page.locator('.festival-routes .growth-route.is-preparing:visible')).to_have_count(1)
-    assert page.locator('.festival-routes .growth-route:not(.is-explored):not(.is-preparing)').evaluate_all(
+    assert page.locator('.festival-routes .growth-route:not(.is-explored):not(.is-ready):not(.is-connected):not(.is-preparing)').evaluate_all(
         'routes => routes.every(route => getComputedStyle(route).display === "none")')
     assert page.locator('.festival-routes path').evaluate_all(
         'paths => paths.every(path => getComputedStyle(path).strokeDasharray === "none")')
     assert page.locator('.festival-grounds').get_attribute('href') == '/static/festival-grounds-v4.png'
-    expect(page.locator('.landmark-hint:visible').filter(has_text='New')).to_have_count(5)
+    expect(page.locator('.landmark-hint:visible')).to_have_count(1)
     # Prior successful use does not acknowledge either unlock notification.
     for _ in range(5):
         page.locator('.growth-unlock-notice').get_by_role('button', name='Mark as seen').click()
@@ -170,16 +204,59 @@ def test_festival_states_notices_home_choice_and_bonus_details(live_app, store, 
     expect(page.locator('.landmark-hint:visible').filter(has_text='New')).to_have_count(0)
     page.get_by_role('button', name='Later', exact=True).click()
     expect(page.locator('.growth-unlock-notice')).to_be_hidden()
-    page.reload()
+    page.reload(wait_until='domcontentloaded')
     expect(page.locator('.growth-unlock-notice')).to_be_hidden()
     assert store.settings.get_setting('home_format') is None
     page.get_by_role('button', name='Choose my Home', exact=True).click()
     page.get_by_role('radio', name='Long play').check()
     expect(page.get_by_role('dialog', name='Choose what opens on Home')).to_be_visible()
     expect(page.get_by_role('radio', name='Long play')).to_be_checked()
-    page.get_by_role('button', name='Save Home choice', exact=True).click()
+    writes = []
+    def not_saved(route):
+        writes.append(route.request.post_data)
+        fail_action(route, 'plaintext')
+    page.route('**/home/growth/format', not_saved)
+    save = page.get_by_role('button', name='Save Home choice', exact=True)
+    save.click()
+    expect(page.locator('.growth-home-choice').get_by_role('status')).to_have_text(
+        'Choice not confirmed. Your selection is kept here.')
+    expect(save).to_be_enabled()
+    expect(page.get_by_role('radio', name='Long play')).to_be_checked()
+    assert store.settings.get_setting('home_format') is None and len(writes) == 1
+    assert_quiet_action(page)
+    page.screenshot(path=action_evidence + '.png', full_page=True)
+    page.unroute('**/home/growth/format', not_saved)
+    old_growth = []
+    def hold_old_growth(route):
+        if not old_growth:
+            response = route.fetch()
+            assert response.ok
+            old_growth.append((route, response.json()))
+            page.evaluate('window.oldGrowthCaptured = true')
+        else:
+            route.continue_()
+    page.route('**/home/growth', hold_old_growth)
+    growth_model = 'Alpine.$data(document.querySelector(".home-growth"))'
+    with page.expect_request('**/home/growth'):
+        page.evaluate(f'void {growth_model}.refresh()')
+    page.wait_for_function('window.oldGrowthCaptured === true')
+    assert old_growth and old_growth[0][1]['home_choice'] is None
+    def saved_but_lost(route):
+        writes.append(route.request.post_data)
+        assert route.fetch().status == 204
+        route.abort()
+    page.route('**/home/growth/format', saved_but_lost)
+    save.click()
     expect(page.locator('.growth-home-choice')).to_be_hidden()
     assert store.settings.get_setting('home_format') == 'albums'
+    assert writes == ['format=albums', 'format=albums']
+    old_route, old_state = old_growth[0]
+    old_route.fulfill(json=old_state)
+    page.wait_for_function(f'!{growth_model}.refreshing')
+    assert page.evaluate(f'{growth_model}.growth.home_choice') == 'albums'
+    assert not page.evaluate(f'{growth_model}.growth.home_choice_available')
+    page.unroute('**/home/growth', hold_old_growth)
+    assert_quiet_action(page)
     bonus = page.get_by_role('button', name=re.compile('^Richer music details,'))
     bonus.scroll_into_view_if_needed()
     hit = bonus.evaluate('''button => {
@@ -218,7 +295,7 @@ def test_successful_use_keeps_unlock_new_until_explicitly_seen(live_app, store, 
     growth_catalog(store)
     publish_personal_mix(store, now=1)
     publish_personal_album(store, now=1)
-    store.enrichment_queue.mark_enriched([row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1)
+    complete_entries(store, [row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1)
     actual_view = account_growth.view
     monkeypatch.setattr(account_growth, 'view', lambda source, now, **_kwargs:
                         actual_view(source, now, mixes_ready=True, albums_ready=True, radio=ready_radio()))
@@ -228,7 +305,7 @@ def test_successful_use_keeps_unlock_new_until_explicitly_seen(live_app, store, 
     page.goto(live_app + '/#unlocks')
     radio = page.locator('.festival-destination').filter(has_text='On air')
     expect(radio).to_have_class(re.compile(r'\bis-ready\b'))
-    expect(radio.locator('.landmark-hint')).to_contain_text('New')
+    expect(radio.locator('.landmark-hint')).to_be_hidden()
     # Earlier main-path unlocks are announced first, including ones already
     # explored. Reading them is separate from recording successful Radio use.
     while page.locator('.growth-unlock-copy strong').inner_text() != 'On air':
@@ -240,12 +317,14 @@ def test_successful_use_keeps_unlock_new_until_explicitly_seen(live_app, store, 
     choice_evidence.compile_report(store, 1)
     page.evaluate('() => Alpine.$data(document.querySelector(".home-growth")).refresh()')
     expect(radio).to_have_class(re.compile(r'\bis-explored\b'))
-    expect(radio.locator('.landmark-hint')).to_contain_text('New')
+    expect(radio.locator('.landmark-hint')).to_be_hidden()
+    expect(page.locator('.growth-unlock-copy strong')).to_have_text('On air')
     page.reload()
     expect(radio).to_have_class(re.compile(r'\bis-explored\b'))
-    expect(radio.locator('.landmark-hint')).to_contain_text('New')
+    expect(radio.locator('.landmark-hint')).to_be_hidden()
+    expect(page.locator('.growth-unlock-copy strong')).to_have_text('On air')
     page.locator('.growth-unlock-notice').get_by_role('button', name='Mark as seen').click()
-    expect(radio.locator('.landmark-hint')).not_to_contain_text('New')
+    expect(radio.locator('.landmark-hint')).to_be_hidden()
     expect(radio).to_have_class(re.compile(r'\bis-explored\b'))
     listening = page.get_by_role('button', name='Mix tapes, Ready to try', exact=True)
     expect(listening).to_have_class(re.compile(r'\bis-ready\b'))
@@ -258,7 +337,7 @@ def test_successful_use_keeps_unlock_new_until_explicitly_seen(live_app, store, 
 
 
 @pytest.mark.parametrize('width', [1536])
-def test_unlock_notice_is_a_corner_popup_and_maintenance_keeps_health_in_place(live_app, store, page, monkeypatch, width):
+def test_unlock_notice_stays_inline_without_a_sidebar_health_widget(live_app, store, page, monkeypatch, width):
     growth_catalog(store)
     publish_personal_mix(store, now=1)
     publish_personal_album(store, now=1)
@@ -278,35 +357,43 @@ def test_unlock_notice_is_a_corner_popup_and_maintenance_keeps_health_in_place(l
     expect(page.locator('.growth-tab-dot')).to_have_count(0)
     notice = page.locator('.growth-unlock-notice')
     expect(notice).to_be_visible()
-    assert notice.evaluate('el => getComputedStyle(el).position') == 'fixed'
-    page.wait_for_function('''() => {
-        const box = document.querySelector('.growth-unlock-notice').getBoundingClientRect();
-        return Math.abs(innerWidth - box.right - 24) < 1
-            && Math.abs(innerHeight - box.bottom - 24) < 1;
-    }''')
+    assert notice.evaluate('el => getComputedStyle(el).position') not in ('fixed', 'absolute')
+    # Let the entrance and twinkle finish naturally before measuring normal flow.
+    page.locator('main').evaluate('''el => Promise.all(el.getAnimations({subtree:true})
+        .filter(a => a.effect.getComputedTiming().iterations !== Infinity)
+        .map(a => a.finished.catch(() => {})))''')
     box = notice.bounding_box()
     assert box['x'] + box['width'] <= width and box['x'] >= 0
-    assert box['y'] > 250
-    assert page.locator('.account-health').evaluate('el => !!el.closest("#account-health-slot") && !!el.closest(".topbar")')
-    assert page.locator('.account-health').bounding_box()['x'] < 50
-    health_before = page.locator('.account-health').bounding_box()
-    health_position = page.locator('.account-health').evaluate('el => getComputedStyle(el).position')
+    assert box['y'] >= 0 and box['y'] + box['height'] <= 1000
+    dashboard = page.locator('.home-dashboard').bounding_box()
+    assert box['y'] + box['height'] <= dashboard['y']
+    for action in ('See what’s new', 'Mark as seen'):
+        button = notice.get_by_role('button', name=action, exact=True)
+        expect(button).to_be_visible()
+        expect(button).to_be_enabled()
+        assert button.evaluate('''el => {
+            const r = el.getBoundingClientRect();
+            return el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+        }''')
+    unseen = page.evaluate('Alpine.$data(document.querySelector(".home-growth")).newNodes.map(node => node.id)')
+    assert unseen
+    seen = page.evaluate('Alpine.$data(document.querySelector(".home-growth")).seen')
+    page.screenshot(path=f'/tmp/tuneconsole-996-inline-notice-{width}.png', full_page=True)
+    expect(page.locator('.account-health, #account-health-slot')).to_have_count(0)
     maintenance['active'] = True
-    maintenance['banner_message'] = 'Updating library storage; browsing and playback remain available.'
+    maintenance['banner_message'] = 'Optimizing app storage; some recommendations are temporarily unavailable.'
     banner = page.locator('#storage-maintenance')
     page.wait_for_function('document.documentElement.dataset.storageCompacting === "true"')
-    expect(banner).to_have_text('Updating library storage; browsing and playback remain available.')
+    expect(banner).to_have_text('Optimizing app storage; some recommendations are temporarily unavailable.')
     expect(banner).to_be_visible()
-    dock = page.locator('.account-health')
-    expect(dock).to_be_visible()
-    assert dock.evaluate('el => getComputedStyle(el).position') == health_position
-    health_after = dock.bounding_box()
-    assert all(abs(health_after[key] - health_before[key]) < 1 for key in ('x', 'width', 'height'))
-    # The fixed desktop rail stays put while the notice appears.
-    assert abs(health_after['y'] - health_before['y']) < 1
+    expect(page.locator('.account-health, #account-health-slot')).to_have_count(0)
     assert page.locator('.global-now-playing-slot').count() == 1
-    page.screenshot(path=f'/tmp/tuneconsole-561-corner-popup-{width}.png', full_page=True)
+    page.screenshot(path=f'/tmp/tuneconsole-996-inline-maintenance-{width}.png', full_page=True)
     expect(star).not_to_have_class(re.compile(r'\bis-twinkling\b'))
+    expect(star).to_have_class(re.compile(r'\bhas-new\b'))
+    expect(notice).to_be_visible()
+    assert page.evaluate('Alpine.$data(document.querySelector(".home-growth")).newNodes.map(node => node.id)') == unseen
+    assert page.evaluate('Alpine.$data(document.querySelector(".home-growth")).seen') == seen
     assert store.settings.get_setting('home_format') is None
 
 
@@ -315,7 +402,7 @@ def test_corner_unlock_opens_a_destination_without_leaving_mix_tapes(live_app, s
     growth_catalog(store)
     publish_personal_mix(store, now=1)
     publish_personal_album(store, now=1)
-    store.enrichment_queue.mark_enriched([row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1)
+    complete_entries(store, [row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1)
     store.settings.set_setting('home_format', 'albums')
     actual_view = account_growth.view
     monkeypatch.setattr(account_growth, 'view', lambda source, now, **_kwargs:
@@ -406,7 +493,7 @@ def test_festival_landmarks_open_popups_and_only_rendered_paths_have_a_legend(li
     # skip the serial TV predecessor (#608/#649); an earlier Vibes listen keeps
     # access independently of today's preparation.
     returning_listener(store, 'vibes', now=1)
-    store.enrichment_queue.mark_enriched([row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1)
+    complete_entries(store, [row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1)
     actual_view = account_growth.view
     explored = [False]
 
@@ -440,7 +527,7 @@ def test_festival_landmarks_open_popups_and_only_rendered_paths_have_a_legend(li
     assert abs(map_box['y'] - panel_box['y']) < 2
     tabs = page.locator('.dash-navigation').bounding_box()
     assert abs(map_box['y'] - tabs['y'] - tabs['height']) < 2
-    assert page.locator('.festival-routes .growth-route:not(.is-explored):not(.is-preparing)').evaluate_all(
+    assert page.locator('.festival-routes .growth-route:not(.is-explored):not(.is-ready):not(.is-connected):not(.is-preparing)').evaluate_all(
         'routes => routes.every(route => getComputedStyle(route).display === "none")')
     for label in ('Mix tapes', 'Long play', 'On air'):
         stop = page.get_by_role('button', name=label + ', Ready to try', exact=True)
@@ -475,105 +562,3 @@ def test_festival_landmarks_open_popups_and_only_rendered_paths_have_a_legend(li
     page.locator('main').evaluate('el => Promise.allSettled(el.getAnimations({subtree: true}).filter(a => a.effect.getComputedTiming().iterations !== Infinity).map(a => a.finished))')
     page.screenshot(path=f'/tmp/tuneconsole-562-festival-map-{width}.png', full_page=True)
     assert page.locator('body').evaluate('body => body.scrollWidth <= innerWidth')
-
-
-def test_health_refresh_and_poll_preserve_the_selected_listening_tab(live_app, store, page, tmp_path):
-    """Controlled owned songs and a real prepared mix; no readiness overrides."""
-    root = Path(__file__).resolve().parents[2]
-    source_paths = [root / name for name in (
-        'src/yt_playlist/rec/account_growth.py',
-        'src/yt_playlist/web/routes/home_growth.py',
-        'src/yt_playlist/web/templates/home.html',
-        'src/yt_playlist/web/templates/_partials/account_health.html',
-        'src/yt_playlist/web/static/account-growth.js',
-        'src/yt_playlist/web/static/account-growth.css',
-    )]
-    sources = {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
-               for path in source_paths}
-    assert Path(inspect.getsourcefile(account_growth.view)).resolve() == source_paths[0]
-    publish_personal_mix(store, now=1)
-    store.settings.set_setting('last_sync_at', '1')
-    store.settings.set_setting('onboard_setup_complete', '1')
-    store.rec_proposals.put_proposals('listening_choices', {'home_format': {
-        'episodes': {'mixes': 1}}}, 1)
-    initial_entries = [row[0] for row in store.conn.execute(
-        "SELECT id FROM catalog_entries WHERE video_id IN ('prepared-0','prepared-1')")]
-    assert len(initial_entries) == 2
-    store.enrichment_queue.mark_enriched(initial_entries, 1)
-    initial = account_growth.view(store, 1)
-    assert initial['ready_formats']['mixes'], 'Controlled published mix must be genuinely usable'
-    assert tuple(initial['health'][key] for key in ('processed', 'total', 'percent')) == (2, 16, 12)
-    errors, requests, snapshots = [], [], []
-    page.on('pageerror', lambda error: errors.append(str(error)))
-    page.on('request', lambda request: requests.append((request.method, urlsplit(request.url).path)))
-    page.route('**/bridge/status', lambda route: route.fulfill(json={'connected': True}))
-    page.route('https://i.ytimg.com/**', lambda route: route.fulfill(status=404))
-    page.set_viewport_size({'width': 1536, 'height': 900})
-    report = {'status': 'incomplete', 'source_before': sources,
-              'qualification': 'Controlled four prepared mixes with 16 owned songs and additions; '
-                               'real projection, GET refresh and natural 15-second poll.'}
-    try:
-        with page.expect_response(lambda response: urlsplit(response.url).path == '/static/account-growth.js') as js_response:
-            with page.expect_response(lambda response: urlsplit(response.url).path == '/static/account-growth.css') as css_response:
-                page.goto(live_app + '/#directions')
-        for response, name in ((js_response.value, 'account-growth.js'),
-                               (css_response.value, 'account-growth.css')):
-            expected = (root / 'src/yt_playlist/web/static' / name).read_bytes()
-            assert response.status == 200 and response.body() == expected
-        report['served_assets_match'] = True
-        strip = page.locator('.account-health')
-        tab = page.get_by_role('tab', name='Mix tapes', exact=True)
-
-        def visible_health(processed, total, percent):
-            expect(strip).to_be_visible()
-            expect(strip.get_by_text(f'{processed} of {total} songs', exact=True)).to_be_visible()
-            expect(strip.get_by_text(f'{percent}%', exact=True)).to_be_visible()
-            expect(strip.get_by_role('progressbar', name='Catalog preparation')).to_have_attribute('value', str(percent))
-            expect(tab).to_have_attribute('aria-selected', 'true')
-            expect(page.locator('[data-dash="directions"]')).to_be_visible()
-            assert urlsplit(page.url).fragment == 'directions'
-            assert strip.evaluate("el => !el.closest('[role=tabpanel]') && !el.closest('.home-dashboard')")
-            assert strip.evaluate('''el => {
-                const box = el.getBoundingClientRect();
-                return !!el.closest('.topbar') && box.width > 0
-                    && box.left >= 0 && box.right <= innerWidth;
-            }''')
-
-        visible_health(2, 16, 12)
-        page.screenshot(path=str(tmp_path / 'health-initial-1536.png'), full_page=True)
-        with store._lock:
-            entry = store.tracks.upsert_track('health-added', 'Health addition', 'Artist', None, 200)
-        with page.expect_response(lambda response: urlsplit(response.url).path == '/home/growth') as refreshed:
-            page.evaluate("() => Alpine.$data(document.querySelector('.home-growth')).refresh()")
-        assert refreshed.value.status == 200
-        snapshots.append(refreshed.value.json()['health'])
-        visible_health(2, 17, 11)
-        with store._lock:
-            store.enrichment_queue.mark_enriched([entry], 2)
-        # Observe the existing production timer without clock changes, sleeps,
-        # alternate response payloads, or direct DOM/data mutation.
-        with page.expect_response(lambda response: urlsplit(response.url).path == '/home/growth', timeout=20000) as polled:
-            pass
-        assert polled.value.status == 200
-        snapshots.append(polled.value.json()['health'])
-        visible_health(3, 17, 17)
-        page.screenshot(path=str(tmp_path / 'health-updated-1536.png'), full_page=True)
-        # Home reads its normal menu even when health is below Radio's unlock
-        # threshold. Permit those GETs while retaining the no-action boundary.
-        report['unexpected_action_requests'] = [
-            (method, path) for method, path in requests
-            if method not in ('GET', 'HEAD', 'OPTIONS')
-            and path in ('/radio/seeds', '/home/generate', '/home/tv/play')]
-        assert not report['unexpected_action_requests']
-        assert not errors
-        assert {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
-                for path in source_paths} == sources
-        report['status'] = 'passed'
-    finally:
-        report.update(page_errors=errors, health_snapshots=snapshots, requests=requests,
-                      source_after={str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
-                                    for path in source_paths})
-        if report['source_after'] != sources:
-            report['status'] = 'failed_source_custody'
-        (tmp_path / 'health-live-update.json').write_text(json.dumps(report, indent=2))
-        assert report['source_after'] == sources

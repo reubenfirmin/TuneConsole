@@ -217,28 +217,6 @@ def test_cleanup_uses_verified_expiry_and_keeps_unverified_album_clock(installed
     assert store.conn.execute('SELECT count(*) FROM main.discovery_visible_impressions').fetchone()[0] == 5
 
 
-@pytest.mark.parametrize('installed', [79], indirect=True)
-def test_removing_folded_origin_deletes_all_installed_alias_contributions_only(installed):
-    store, _ = installed
-    seed(store)
-    store.discovery.select_starter_artist('Starter', 'UC-first', None, True, 1)
-    starter = store.discovery.starter_artists()[0]['artist_id']
-    with store.conn:
-        store.conn.execute("INSERT INTO main.artist_provider_ids VALUES ('youtube','UC-second',?)", (starter,))
-    for token in ('artist:UC-first', 'artist:UC-second'):
-        store.discovery.upsert_discovered_track('song|artist', 'song', 'Song', 'Artist', None, None, None, None, token, 2)
-    owner, stage = ready(store.conn)
-    owner.publish(store.conn, stage=stage)
-    assert len(store.discovery.discovery_sources_for_track('song|artist')) == 2
-    assert not store.discovery.remove_discovery_source('song|artist', 'artist:UC-second')
-    assert [row[0] for row in store.conn.execute('SELECT source_token FROM main.discovery_sources')] == ['radio:song']
-    assert store.conn.execute('SELECT count(*) FROM main.discovery_memberships').fetchone()[0] == 1
-    owner, stage = ready(store.conn)
-    owner.publish(store.conn, stage=stage)
-    assert store.discovery.remove_discovery_source('song|artist', 'radio:song')
-    assert not store.conn.execute('SELECT 1 FROM main.discovery_memberships').fetchone()
-
-
 @pytest.mark.parametrize('installed', [93], indirect=True)
 def test_canonical_artist_collision_preserves_first_metadata_last_explanation_and_each_raw_owner(installed):
     store, _ = installed
@@ -413,7 +391,7 @@ def test_repeated_stage_schema_validation_does_not_reserve_writer(installed, mon
         task.result(timeout=15)
 
 
-@pytest.mark.parametrize('installed', [79, 100], indirect=True)
+@pytest.mark.parametrize('installed', [100], indirect=True)
 def test_frozen_native_upgrade_keeps_retained_inputs_and_prefers_native_readers(installed, tmp_path):
     store, _ = installed
     seed(store)

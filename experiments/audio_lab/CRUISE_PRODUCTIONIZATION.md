@@ -134,7 +134,7 @@ check. All three shared classifiers choose an acceptable label on six of eight.
 ## Product integration
 
 1. Implemented: preserve the separate suitability and classification fields through
-   `audio_vibe_model` / `audio_vibe_preview`. Current banners and annotation
+   `audio_vibe_model` / `audio_vibe_prediction`. Current banners and annotation
    feedback can continue using comparable shared scores. Prepared listening
    modes can consume Cruise suitability through their existing per-vibe fits.
 2. Implemented: include the shared artifact hash, Cruise artifact hash, routing mode and

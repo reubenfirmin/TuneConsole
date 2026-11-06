@@ -38,6 +38,51 @@ def test_custom_addition_is_explicit_and_reuses_registered_alias(store):
     assert conn.execute('SELECT source FROM genre_catalog WHERE key=?', (key,)).fetchone()[0] == 'custom'
 
 
+def test_batched_axes_preserve_alias_collisions_redirects_and_unknowns(store):
+    conn = store.conn
+    conn.executemany("INSERT INTO genre_catalog(key,name,source) VALUES (?,?,'custom')",
+                     [('one', 'First'), ('two', 'Second'), ('old', 'Retired')])
+    conn.execute("INSERT INTO genre_alias VALUES ('first','First','two','custom')")
+    conn.execute("INSERT INTO genre_redirects VALUES ('old','two')")
+    labels = ['First', 'Second', 'Retired', 'old', 'one', 'Techno', 'Novel unknown style']
+    expected = {label: (genre_identity.family(conn, label), genre_identity.resolve(conn, label)[0])
+                for label in labels}
+    queries = []
+    conn.set_trace_callback(queries.append)
+    try:
+        assert store.genres.feature_axes(labels + labels + ['', None]) == expected
+    finally:
+        conn.set_trace_callback(None)
+    assert len(queries) <= 2
+
+
+def test_large_label_batch_does_not_rescan_all_aliases_for_each_label(store):
+    conn = store.conn
+    with conn:
+        conn.executemany("INSERT INTO genre_catalog(key,name,source) VALUES (?,?,'custom')",
+                         [(f'local-{i}', f'Local style {i}') for i in range(2000)])
+        conn.executemany("INSERT INTO genre_alias VALUES (?,?,?,'custom')",
+                         [(f'local-alias-{i}', f'Local alias {i}', f'local-{i % 2000}')
+                          for i in range(8000)])
+        conn.execute("INSERT INTO genre_alias VALUES ('local style 3','Local style 3','local-7','custom')")
+        conn.execute("INSERT INTO genre_redirects VALUES ('local-8','local-9')")
+    labels = [label for i in range(40) for label in (f'Local style {i}', f'LOCAL ALIAS {i}')]
+    expected = {label: (genre_identity.family(conn, label), genre_identity.resolve(conn, label)[0])
+                for label in labels}
+    steps = 0
+
+    def bound_work():
+        nonlocal steps
+        steps += 1000
+        return steps >= 1000000
+
+    conn.set_progress_handler(bound_work, 1000)
+    try:
+        assert store.genres.feature_axes(labels) == expected
+    finally:
+        conn.set_progress_handler(None, 0)
+
+
 @pytest.mark.parametrize('label', ['', ' ', '!!!', None, 17, 'x' * 1025])
 def test_invalid_custom_addition_has_no_dml(store, label):
     before = store.conn.total_changes

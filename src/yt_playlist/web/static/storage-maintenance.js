@@ -11,14 +11,10 @@
         document.documentElement.dataset.storageCompacting = state.active ? 'true' : 'false';
         const banner = document.getElementById('storage-maintenance');
         if (banner) {
-          const message = state.banner_message || '';
-          const warning = !!state.warning;
-          const role = warning ? 'alert' : 'status';
-          if (banner.getAttribute('role') !== role) {
-            banner.setAttribute('role', role);
-            banner.setAttribute('aria-live', warning ? 'assertive' : 'polite');
-          }
-          banner.dataset.warning = String(warning);
+          const message = state.warning || state.phase === 'recovery_required' ? '' : state.banner_message || '';
+          if (banner.getAttribute('role') !== 'status') banner.setAttribute('role', 'status');
+          if (banner.getAttribute('aria-live') !== 'polite') banner.setAttribute('aria-live', 'polite');
+          banner.dataset.warning = 'false';
           if (banner.textContent !== message) banner.textContent = message;
           banner.hidden = !message;
         }

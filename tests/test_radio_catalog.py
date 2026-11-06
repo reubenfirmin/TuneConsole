@@ -1,5 +1,8 @@
 """Temporary fully Themed backfill must outlive finite prepared Home lists (#286)."""
 import json
+import time
+from tests.enrichment_support import seed_enrichment
+from tests.derived_rating_support import seed_dislike
 
 import numpy as np
 import pytest
@@ -9,18 +12,18 @@ from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, RadioCandidates
 from yt_playlist.rec.radio_directions import DEPTH, RadioDirections
 from yt_playlist.rec.radio_genres import genre
 from yt_playlist.core import catalog
+from yt_playlist.core.db_writes import atomic_write
 
 
 def catalog_track(store, video, label="Downtempo", *, artist=None, duration=200, available=None):
     artist = artist or f"Artist {video}"
     tid = store.tracks.upsert_track(video, video, artist, "", duration, available=available)
-    store.tracks.set_track_enrichment(tid, label, "2001")
+    seed_enrichment(store, tid, label, "2001")
     key = store.tracks.catalog_subject(tid)["identity_key"]
     return dict(key=key, video_id=video, title=video, artist=artist, genre=label), tid
 
 
-@pytest.fixture
-def seed(store):
+def seed_catalog(store):
     from tests.recommendation_support import publish_bundles
     track, entry = catalog_track(store, "seed")
     account = store.accounts.upsert_account('Main','credential',None,True)
@@ -30,6 +33,11 @@ def seed(store):
         centroid=np.array([1., 0.], dtype=np.float32), size=1, rep_keys=[track["key"]])], [], 1)
     publish_bundles(store,{"1": {"wheelhouse": [track]}},now=1)
     return track
+
+
+@pytest.fixture
+def seed(store):
+    return seed_catalog(store)
 
 
 def candidates(store, **tuning):
@@ -86,32 +94,65 @@ def test_themed_fills_all_four_streams_with_unprepared_catalog_tracks(store, see
     assert not plans.update([seed], [], 0)
 
 
-def test_themed_keeps_refilling_beyond_one_catalog_batch(store, seed, monkeypatch):
+def test_themed_keeps_refilling_beyond_one_catalog_batch(store, seed, monkeypatch, record_property):
     # An entire rejected page must not hide the matching catalog entries after it.
-    for i in range(CLUSTER_POOL_LIMIT):
-        catalog_track(store, f"muted-{i}", artist="Muted Artist")
-    expected = {catalog_track(store, f"eligible-{i}")[0]["video_id"]
-                for i in range(CLUSTER_POOL_LIMIT + 7)}
+    phases = {}
+    started = time.perf_counter()
+    with atomic_write(store):
+        for i in range(CLUSTER_POOL_LIMIT):
+            catalog_track(store, f"muted-{i}", artist="Muted Artist")
+        expected = {catalog_track(store, f"eligible-{i}")[0]["video_id"]
+                    for i in range(CLUSTER_POOL_LIMIT + 7)}
+    phases['catalog_population_seconds'] = time.perf_counter() - started
     monkeypatch.setattr(store.rec_model, "muted_artists", lambda: {"Muted Artist"})
+    started = time.perf_counter()
     c = candidates(store)
+    phases['candidate_construction_seconds'] = time.perf_counter() - started
     batches, read = [], c._read_vectors
+    vector_reads, refills = [], []
+    themed_pool = radio_catalog.themed_pool
+
+    def refill(*args, **kwargs):
+        observed = {'limit': kwargs['limit']}
+        started = time.perf_counter()
+        try:
+            tracks = themed_pool(*args, **kwargs)
+            observed['returned'] = len(tracks)
+            return tracks
+        finally:
+            observed['seconds'] = time.perf_counter() - started
+            refills.append(observed)
 
     def bounded(keys):
         batches.append(len(keys))
         assert len(keys) <= CLUSTER_POOL_LIMIT
-        return read(keys)
+        started = time.perf_counter()
+        try:
+            return read(keys)
+        finally:
+            vector_reads.append({'keys': len(keys), 'seconds': time.perf_counter() - started})
 
+    monkeypatch.setattr(radio_catalog, "themed_pool", refill)
     monkeypatch.setattr(c, "_read_vectors", bounded)
     history = [seed]
+    started = time.perf_counter()
     for _ in range(len(expected)):
         pick = c.next_track(history)
         assert pick is not None
         assert pick["video_id"] in expected
         assert pick["key"] not in {t["key"] for t in history}
         history.append(pick)
+    phases['eligible_draws_seconds'] = time.perf_counter() - started
     assert {t["video_id"] for t in history[1:]} == expected
+    started = time.perf_counter()
     assert c.next_track(history) is None
+    phases['exhaustion_seconds'] = time.perf_counter() - started
     assert max(batches) == CLUSTER_POOL_LIMIT
+    record_property('catalog_refill', json.dumps({
+        'page_size': CLUSTER_POOL_LIMIT, 'muted_tracks': CLUSTER_POOL_LIMIT,
+        'eligible_tracks': len(expected), 'phases': phases,
+        'refills': refills, 'vector_reads': vector_reads,
+    }))
 
 
 def test_themed_catalog_respects_exclusions_and_current_metadata(store, seed):
@@ -137,7 +178,7 @@ def test_themed_catalog_respects_exclusions_and_current_metadata(store, seed):
         catalog.choose_field(store.conn, good_id, 'genre', 'Downtempo', 'test', now=1)
     c = candidates(store)
     # Feedback can arrive after construction, before these tracks enter a menu.
-    store.rec_model.record_dislike(rejected["disliked"][0]["key"], 200_000, 1)
+    seed_dislike(store, rejected["disliked"][0]["key"], 200_000, 1)
     store.rec_model.record_feedback("for_you", rejected["dismissed"][0]["key"], "dismiss", now=1)
     store.rec_model.record_feedback("for_you", "artist:Artist muted", "mute", now=1)
     history = [heard, rejected["heard"][0], seed]

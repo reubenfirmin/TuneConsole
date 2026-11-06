@@ -1,10 +1,12 @@
 """Slow SQLite calls and serving-lock waits retain separate, sanitized timings."""
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime
+import json
 import logging
 import sqlite3
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -140,6 +142,42 @@ def test_fast_operations_and_nested_phases_are_quiet(store, clock, caplog):
     assert not caplog.records
 
 
+@pytest.mark.parametrize('memory', [False, True])
+def test_sqlite_full_keeps_error_and_reports_capacity_separately_from_page_limits(tmp_path, caplog, monkeypatch, memory):
+    target = ':memory:' if memory else str(tmp_path / 'limited.db')
+    with closing(sqlite3.connect(target, factory=diagnostics.DiagnosticConnection)) as conn:
+        conn.execute('CREATE TABLE probe(value BLOB)')
+        pages = conn.execute('PRAGMA page_count').fetchone()[0]
+        conn.execute(f'PRAGMA max_page_count={pages}')
+        with pytest.raises(sqlite3.OperationalError) as caught, work_span('limited publication'):
+            conn.execute('INSERT INTO probe VALUES (?)', (b'private-value' * 8192,))
+        assert caught.value.sqlite_errorcode == sqlite3.SQLITE_FULL
+        records = [row.getMessage() for row in caplog.records if 'SQLite storage failure:' in row.getMessage()]
+        assert len(records) == 1
+        detail = json.loads(records[0].split('SQLite storage failure: ', 1)[1])
+        assert detail['code'] == sqlite3.SQLITE_FULL and detail['name'] == 'SQLITE_FULL'
+        assert detail['phase'] == 'limited publication' and detail['stage'] == 'execute'
+        assert detail['limits']['page_count'] == detail['limits']['max_page_count'] == pages
+        assert detail['databases'][0][2] == ('' if memory else target)
+        assert detail['filesystems']['SQLITE_TMPDIR']['available_bytes'] > 0
+        assert detail['pid'] > 0 and 'private-value' not in records[0]
+        assert conn.execute('SELECT COUNT(*) FROM probe').fetchone()[0] == 0
+        conn.execute('PRAGMA max_page_count=1024')
+        conn.execute('INSERT INTO probe VALUES (1)')
+        assert conn.execute('SELECT value FROM probe').fetchone()[0] == 1
+        if memory:
+            def unavailable():
+                raise OSError('private-capacity-probe-error')
+
+            monkeypatch.setattr(diagnostics.tempfile, 'gettempdir', unavailable)
+            conn.execute(f'PRAGMA max_page_count={pages}')
+            with pytest.raises(sqlite3.OperationalError) as again:
+                conn.execute('INSERT INTO probe VALUES (zeroblob(1048576))')
+            assert again.value.sqlite_errorcode == sqlite3.SQLITE_FULL
+            assert 'diagnostic_error' in caplog.text
+            assert 'private-capacity-probe-error' not in caplog.text
+
+
 def test_reusing_a_cursor_does_not_combine_separate_fast_queries(store, clock, caplog):
     def short():
         clock[0] += diagnostics.SLOW_SQL_SECONDS - .01
@@ -191,7 +229,8 @@ def test_unsuccessful_timed_lock_acquisition_is_identified(store, clock, caplog,
 
 def test_deliberate_yields_are_separate_from_lock_contention(store, clock, caplog, monkeypatch):
     caplog.set_level(logging.DEBUG, logger="yt_playlist.database")
-    monkeypatch.setattr(priority, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(priority, 'time', SimpleNamespace(
+        monotonic=lambda: clock[0], thread_time=lambda: clock[0]))
     def wait(_):
         # A scheduler timeslice may slightly overshoot its 0.1s deadline.
         clock[0] += .125
@@ -201,6 +240,9 @@ def test_deliberate_yields_are_separate_from_lock_contention(store, clock, caplo
     try:
         with store.priority.background(checkpoint), work_span('enrichment'):
             for _ in range(12):
+                # Each measured acquisition follows a calculation interval;
+                # immediate consecutive calls share the scheduler's grace.
+                clock[0] += .051
                 assert ProbeRepo(store).query('SELECT 1')[0][0] == 1
     finally:
         release()
@@ -304,7 +346,8 @@ def test_checkpoint_failure_retains_outcome_and_restores_timing_context(store, c
 
 
 def test_nested_background_acquisition_does_not_yield_while_lock_is_held(store, clock, caplog, monkeypatch):
-    monkeypatch.setattr(priority, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(priority, 'time', SimpleNamespace(
+        monotonic=lambda: clock[0], thread_time=lambda: clock[0]))
     def wait(_):
         clock[0] += .125
     monkeypatch.setattr(store.priority._condition, 'wait', wait)
@@ -337,6 +380,11 @@ def test_live_log_window_separates_scheduler_yields_and_real_contention(store, t
         try:
             with store.priority.background(check_stopping), work_span('live probe: scheduler'):
                 for _ in range(5):
+                    # Spend the short CPU allowance before asking for another
+                    # slice; sleeping must not consume useful-work allowance.
+                    calculation_until = time.thread_time() + .006
+                    while time.thread_time() < calculation_until:
+                        sum(value * value for value in range(1000))
                     assert ProbeRepo(store).query('SELECT 1')[0][0] == 1
         finally:
             release_request()

@@ -1,5 +1,6 @@
 """Reject whole stale results, including fields, retries, reuse and artwork."""
 from types import SimpleNamespace
+from tests.enrichment_support import complete_entries
 
 import pytest
 
@@ -34,7 +35,7 @@ def test_in_flight_answer_cannot_enter_corrected_recording_or_completed_reuse(st
     else:
         original = store.tracks.upsert_track('original', 'Wrong', 'Artist', '', 200)
     target = store.tracks.upsert_track('target', 'Correct', 'Artist', '', 200)
-    store.enrichment_queue.mark_enriched([target], 100)
+    complete_entries(store, [target], 100)
     recording = store.tracks.catalog_subject(target)['recording_id']
     def probe(track, _store):
         move(store, target)

@@ -1,17 +1,9 @@
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
-from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 from yt_playlist.rec.mode_eval import choice_evidence, mode_bandit_stats
 from tests.conftest import FakeClient
-
-
-@pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    return s
 
 
 def _client(store, now=1000.0):

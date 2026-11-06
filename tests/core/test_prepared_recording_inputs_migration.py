@@ -17,11 +17,11 @@ UPGRADE = Migration(69, 'typed_prepared_recording_inputs', migration.apply)
 
 
 @pytest.fixture
-def predecessor(tmp_path):
+def predecessor(tmp_path, _pristine_installed_schema):
     conn = sqlite3.connect(tmp_path / 'inputs.db')
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys=ON')
-    migrate(conn, registry=registry.MIGRATIONS[:68])
+    _pristine_installed_schema(68).backup(conn)
     with conn:
         conn.executemany('INSERT INTO recordings(id,identity_key) VALUES (?,?)', [(1, 'one'), (2, 'two')])
         conn.execute('UPDATE rec_preparation SET content_changes=25 WHERE id=1')

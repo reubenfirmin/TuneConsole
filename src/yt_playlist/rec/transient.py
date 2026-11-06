@@ -15,7 +15,6 @@ import json
 
 import numpy as np
 
-from yt_playlist.util import genre_map
 from yt_playlist.rec import embedding_vectors as vectors, rec_params
 
 # Historical generated radio playlist IDs remain provenance after the deck controller's removal.
@@ -87,8 +86,9 @@ def facets_for(store, keys) -> dict:
             return facets_for(reader, keys)
     dao = store.rec_query
     genres, decades, artists = dao.track_genres(keys), dao.track_decades(keys), dao.track_artists(keys)
-    families = {genre: genre_map.family(genre, conn=store.conn) for genre in set(genres.values())}
-    subgenres = {genre: genre_map.subgenre(genre, conn=store.conn) for genre in families}
+    axes = store.genres.feature_axes(genres.values())
+    families = {genre: axes.get(genre, ('', None))[0] for genre in set(genres.values())}
+    subgenres = {genre: axes.get(genre, ('', None))[1] for genre in families}
     out: dict = {}
     for k in keys:
         if k in genres:
@@ -172,14 +172,13 @@ def facet_leans(store, now) -> dict:
             leans[facet] = leans.get(facet, 0.0) + signed * (count / len(keys))
     # Mix choices are broad raw-genre preferences, never synthetic plays or
     # centroids over whichever recordings happen to match today's catalog.
-    from yt_playlist.core import mix_choices
     from yt_playlist.rec import choice_learning
     choice_genres = {}
     for interest in choice_learning.contexts(store, now):
         if interest['format'] != 'mixes' or interest.get('descriptor_id') is None:
             continue
-        descriptor = mix_choices.read_descriptor(store.conn, interest['descriptor_id'])
-        families = {genre_map.family(label, conn=store.conn) for label in descriptor['genres']}
+        descriptor = store.rec_ledger.mix_descriptor(interest['descriptor_id'])
+        families = {value[0] for value in store.genres.feature_axes(descriptor['genres']).values()}
         for family in families - {None, ''}:
             axis = 'genre:' + family
             choice_genres[axis] = max(choice_genres.get(axis, 0.), min(1., interest['weight']) / max(1, len(families)))

@@ -4,7 +4,6 @@ import threading
 
 import pytest
 
-from yt_playlist.core.store import Store
 from yt_playlist.rec import experiments, scorecard
 from yt_playlist.repos import scorecard_attribution
 
@@ -22,9 +21,8 @@ def seed(store):
 
 
 @pytest.mark.parametrize('method', ['scorecard', 'trace', 'experiment'])
-def test_report_wrappers_leave_foreground_free_and_keep_a_pinned_view(tmp_path, monkeypatch, method):
-    store = Store(tmp_path / 'state.db')
-    store.init_schema()
+def test_report_wrappers_leave_foreground_free_and_keep_a_pinned_view(tmp_path, monkeypatch, method, consumer_store):
+    store = consumer_store(tmp_path / 'state.db')
     iid = seed(store)
     started, release = threading.Event(), threading.Event()
     original = scorecard_attribution.Attribution.__init__
@@ -57,9 +55,8 @@ def test_report_wrappers_leave_foreground_free_and_keep_a_pinned_view(tmp_path, 
 
 
 @pytest.mark.parametrize('change', ['play', 'allocation'])
-def test_experiment_decision_checks_evidence_without_holding_report_lock(tmp_path, monkeypatch, change):
-    store = Store(tmp_path / 'state.db')
-    store.init_schema()
+def test_experiment_decision_checks_evidence_without_holding_report_lock(tmp_path, monkeypatch, change, consumer_store):
+    store = consumer_store(tmp_path / 'state.db')
     iid = seed(store)
     started, release = threading.Event(), threading.Event()
     prepare = experiments._prepare_decision

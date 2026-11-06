@@ -7,6 +7,7 @@ input perturbations and the identical-vector comparison arms are controlled.
 This verifies storage and learning continuity, not recommendation superiority,
 cold startup, real fitting cost or future user behavior.
 """
+import base64
 from copy import deepcopy
 import hashlib
 import json
@@ -24,10 +25,11 @@ import pytest
 
 from tests.bench_choice_retention import inventory
 from tests.bench_svd_background import _backup_library
+from tests.comparison_support import legacy_projection
 from yt_playlist.core.activity import Activity, work_budget
 from yt_playlist.core.evidence_ledger import EvidenceBudgetExceeded, EvidenceLedger, _components, canonical
 from yt_playlist.core.store import Store
-from yt_playlist.rec import (choice_evidence as choices, choice_retention, comparison_preparation,
+from yt_playlist.rec import (choice_evidence as choices, choice_retention,
                             comparison_storage, group_serving, home_prepared, model_setup,
                             product_comparison as product)
 from yt_playlist.rec.choice_context import checkpoint, learning_context
@@ -54,13 +56,11 @@ def _graph(ledger, roots):
     return found
 
 
-def _prepared(store):
+def _prepared(store, run_id):
     surfaces = ('mode_bundles', 'fresh_pool', group_serving.SURFACE, home_prepared.SURFACE)
-    with store._lock:
-        rows = store.conn.execute(
-            "SELECT surface,payload FROM rec_proposals WHERE surface IN (?,?,?,?) "
-            "OR surface LIKE 'model_pair:%' ORDER BY surface", surfaces).fetchall()
-    return {name: _hash(raw.encode()) for name, raw in rows}
+    surfaces += tuple(product.pair_surface(run_id, arm, format)
+                      for arm in ('incumbent', 'challenger') for format in product.FORMATS)
+    return {name: _hash(canonical(store.rec_proposals.get_proposals(name))) for name in surfaces}
 
 
 def _accounting(store, protected_roots, run_id):
@@ -152,7 +152,7 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
                               'pressure_min_captures': 200,
                               'pressure_stop': 'at least two real capacity-retirement cycles',
                               'pressure_inputs': 'new real-sized matrix and unavailable definition per capture',
-                              'comparison': 'controlled identical real vectors; production paired preparation',
+                              'comparison': 'controlled identical real vectors; retained pairs seeded from existing outputs',
                               'audit_wall_budget_seconds': AUDIT_BUDGET_SECONDS,
                               'limits': 'unchanged production quota, retention, acknowledgement batch and menu limits'}}
     store = worker = None
@@ -214,7 +214,8 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
         report.update(start=start, runtime_schema=store.conn.execute(
             'SELECT MAX(version) FROM schema_migrations').fetchone()[0], before=inventory(ledger))
         report['source_hashes'] = {module.__name__: _hash(Path(module.__file__).read_bytes())
-                                  for module in (choices, choice_retention, comparison_preparation,
+                                  for module in (choices, choice_retention, comparison_storage,
+                                                 sys.modules[legacy_projection.__module__],
                                                  sys.modules[EvidenceLedger.__module__])}
         templates = {format: max((row for row in offers if row['format'] == format
                                   and len(row['options'][0]) > 2),
@@ -227,7 +228,7 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
                             for row in rows if kind == 'response' or row['id'] in durable}
         historical = choices.replay(store, start - 1)
 
-        report['phase'] = 'prepare-full-menus-and-comparison'
+        report['phase'] = 'prepare-full-menus-and-retain-comparison'
         choices.compile_report(store, start)
         for _ in range(home_prepared.MAX_MENUS + 2):
             with work_budget(30):
@@ -250,11 +251,11 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
         store.model_selection.save_selection(restore_id, restore, rows=changed)
         # The copied export's old monitoring assignment is unrelated to this run.
         store.rec_proposals.put_proposals(product.MONITOR, {}, start)
-        vectors = ledger.artifact({'incumbent': comparison_preparation._encode(changed),
-                                   'challenger': comparison_preparation._encode(changed)})
+        encoded_vectors = [(key, base64.b64encode(vector).decode('ascii')) for key, vector in changed]
+        vectors = ledger.artifact({'incumbent': encoded_vectors, 'challenger': encoded_vectors})
         policy = dict(product.POLICY)
-        # Follow the normal programme's error spending, including retained runs
-        # from the export. Only the identical arm vectors and seed are controlled.
+        # Reconstruct a historical assignment, including retained attempt counts.
+        # The current daily selector no longer creates or prepares these trials.
         with store._lock:
             attempts = max(product.state(store).get('attempt', 0), store.conn.execute(
                 "SELECT COUNT(*) FROM rec_model_selection_runs "
@@ -270,8 +271,8 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
         current['run_id'] = store.model_selection.start_selection(start, run)
         store.settings.set_setting('rec_selection_live_run', str(current['run_id']))
         store.rec_proposals.put_proposals(product.SURFACE, current, start)
-        # Exercise all measurement/decision fields before expensive preparation
-        # or simulated days, so an incomplete controlled state fails immediately.
+        # Exercise all measurement/decision fields before simulated days, so an
+        # incomplete controlled historical state fails immediately.
         preflight = product.measure(store, current, start)
         assert preflight['alpha'] == current['alpha']
         assert preflight['source_ids'] == []
@@ -283,10 +284,26 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
         report['comparison_preflight'] = {'attempt': attempts, 'alpha': current['alpha'],
                                           'generation': current['generation'], 'formats': list(product.FORMATS)}
         save()
-        assert comparison_preparation.prepare(store, current, start)
-        current = product.state(store)
+        # Seed retained historical pairs from real saved outputs. This audit
+        # checks their custody under pressure; it does not fit alternative models
+        # or claim that these controlled pairs measure recommendation quality.
+        context = choices.freeze_context(store, choices.model_context(store, start))
+        albums = store.rec_proposals.get_proposals('album_prepared') or {}
+        formats = {
+            'mixes': {**home, 'choice_context': context},
+            'albums': {**albums, 'items': albums.get('items') or templates['albums'], 'context': context},
+            'radio': {'bundles': store.rec_proposals.get_proposals('mode_bundles') or {},
+                      'context': context,
+                      'modes': [{**mode, 'centroid': mode['centroid'].tolist()}
+                                for mode in store.modes.list_modes()],
+                      'encoding_model': store.settings.get_setting('rec_content_model')},
+        }
+        for arm in ('incumbent', 'challenger'):
+            for format, data in formats.items():
+                store.rec_proposals.put_proposals(product.pair_surface(current['run_id'], arm, format),
+                    legacy_projection(current['run_id'], data), start)
         assert current['attempt'] == attempts and current['alpha'] == preflight['alpha']
-        prepared = _prepared(store)
+        prepared = _prepared(store, current['run_id'])
         assert sum(name.startswith(f"model_pair:{current['run_id']}:") for name in prepared) == 6
         protected_roots = {current['vectors']}
         for arm in ('incumbent', 'challenger'):
@@ -355,7 +372,7 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
                 for format in choices.FORMATS:
                     assert summary['formats'][format]['choices'] == (
                         initial_counts[format]['choices'] + expected_choices[format])
-                assert _prepared(store) == prepared
+                assert _prepared(store, current['run_id']) == prepared
                 measured = product.measure(store, current, clock[0])
                 report['days'].append({'day': day + 1, 'captures': capture_count,
                                        'wall_s': time.monotonic() - day_started,
@@ -370,7 +387,7 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
                     store, worker = open_store()
                     ledger = store.rec_ledger.evidence()
                     assert choices.replay(store, clock[0]) == before_restart
-                    assert _prepared(store) == prepared
+                    assert _prepared(store, current['run_id']) == prepared
                     assert product.state(store) == current
                     report['restart_verified'] = True
                 save()
@@ -412,7 +429,7 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
 
         report['phase'] = 'correction-and-restore'
         assert capture_count == 14 * 160
-        assert _prepared(store) == prepared
+        assert _prepared(store, current['run_id']) == prepared
         assert _graph(ledger, protected_graph) == protected_graph
         assert choices.replay(store, start - 1) == historical
         for (kind, identity), raw in original_records.items():

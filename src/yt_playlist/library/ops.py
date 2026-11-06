@@ -5,11 +5,12 @@ through every executor call. PlaylistOps binds those three once and exposes the 
 playlist operations (merge, dupe-delete, keep-one, delete, move, undo) so the routes stay thin
 and the orchestration lives in one place.
 
-Methods raise ValueError for expected/user-facing problems (missing playlist, no client, etc.);
-callers turn those into messages and let unexpected exceptions bubble to their own handlers.
+Shared song actions use ActionInputError for explicit validation. Provider, parser and
+storage exceptions, including ValueError, must go through the caller's diagnostic handler.
 """
 import logging
 from yt_playlist.core.accounts import client_for
+from yt_playlist.core.action_errors import ActionInputError
 
 from yt_playlist.library import analysis
 from yt_playlist.library import ratings
@@ -24,7 +25,8 @@ from yt_playlist.library.playlist_catalog import search_versions
 from yt_playlist.library.playlist_undo import undo_action
 from yt_playlist.library.liked_music import LikedMusic
 from yt_playlist.library.playlist_positions import retry_insertions
-from yt_playlist.library.playlist_deletion import reconcile_deletion
+from yt_playlist.library.playlist_deletion import pending_deletion, reconcile_deletion
+from yt_playlist.library.playlist_snapshot import http_status
 
 logger = logging.getLogger("yt_playlist.ops")
 
@@ -42,7 +44,7 @@ class PlaylistOps:
     def _client_for(self, playlist):
         try:
             return client_for(self.store,self._clients(),playlist_id=playlist.id)[1]
-        except ValueError:
+        except ActionInputError:
             return None
 
     # --- merge / duplicate resolution ---------------------------------------
@@ -53,10 +55,10 @@ class PlaylistOps:
     def delete_dupe(self, source, target) -> str:
         """Plan + remote-verified delete of `source` (keeping `target`). Returns the deleted title."""
         if source == target:
-            raise ValueError("source and target must differ")
+            raise ActionInputError('playlist_same')
         src, tgt = self.store.playlists.get_playlist(source), self.store.playlists.get_playlist(target)
         if src is None or tgt is None:
-            raise ValueError("playlist no longer exists (already deleted?)")
+            raise ActionInputError('playlist_missing')
         aid = store_plan(self.store, MergePlan(source, target, [], []), "delete",
                          src.provider_playlist_id, self.now_fn())
         execute_planned(self.store, aid, self._clients(), self.now_fn())
@@ -66,23 +68,52 @@ class PlaylistOps:
         """Delete every non-system sibling with the same track set as `keep`. Returns (deleted, errors)."""
         kept = self.store.playlists.get_playlist(keep)
         if kept is None:
-            raise ValueError("kept playlist no longer exists")
+            raise ActionInputError('playlist_missing')
         keep_keys = self.store.playlists.get_playlist_track_keys(keep)
-        siblings = [p for p in self.store.playlists.get_playlists()
-                    if p.id != keep and p.provider_playlist_id not in analysis.SYSTEM_PLAYLIST_IDS
-                    and self.store.playlists.get_playlist_track_keys(p.id) == keep_keys]
+        siblings = {}
+        for playlist in self.store.playlists.get_playlists():
+            if (playlist.playlist_scope_id != kept.playlist_scope_id
+                    and playlist.provider_playlist_id not in analysis.SYSTEM_PLAYLIST_IDS
+                    and self.store.playlists.get_playlist_track_keys(playlist.id) == keep_keys):
+                siblings.setdefault(playlist.playlist_scope_id, []).append(playlist)
         deleted, errors = 0, []
-        for sib in siblings:
-            try:
-                aid = store_plan(self.store, MergePlan(sib.id, keep, [], []), "delete",
-                                 sib.provider_playlist_id, self.now_fn())
-                execute_planned(self.store, aid, self._clients(), self.now_fn())
-                deleted += 1
-            except ValueError as e:
-                errors.append(str(e))
-            except Exception:  # noqa: BLE001
-                logger.exception("keep-one delete of %s failed", sib.provider_playlist_id)
-                errors.append(f"{sib.provider_playlist_id}: unexpected error")
+        clients = self._clients()
+        for memberships in siblings.values():
+            # A lost receipt through any membership owns the remote object.
+            # Never evade that uncertainty by trying another account.
+            if any(pending_deletion(self.store, sib) is not None for sib in memberships):
+                errors.append(f"{memberships[0].provider_playlist_id}: a deletion is unconfirmed. "
+                              "Recheck its saved action before requesting another deletion.")
+                continue
+            candidates = [sib for sib in memberships if sib.account_id in clients]
+            if not candidates:
+                errors.append(f"{memberships[0].provider_playlist_id}: reconnect a playlist account.")
+                continue
+            for index, sib in enumerate(candidates):
+                aid = None
+                try:
+                    aid = store_plan(self.store, MergePlan(sib.id, keep, [], []), "delete",
+                                     sib.provider_playlist_id, self.now_fn())
+                    execute_planned(self.store, aid, clients, self.now_fn())
+                    deleted += 1
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    action = self.store.actions.get_action(aid) if aid is not None else None
+                    # Only a definitive permission refusal, durably recorded by
+                    # the deletion gate, permits another membership attempt. The
+                    # next account repeats the complete verification and backup.
+                    if http_status(exc) == 403 and action is not None and action.status == 'delete_failed':
+                        if index + 1 < len(candidates):
+                            continue
+                        errors.append(f"{sib.provider_playlist_id}: no connected account has permission to delete it.")
+                    elif isinstance(exc, ActionInputError):
+                        errors.append(exc)
+                    elif isinstance(exc, ValueError):
+                        errors.append(str(exc))
+                    else:
+                        logger.exception("keep-one delete of %s failed", sib.provider_playlist_id)
+                        errors.append(f"{sib.provider_playlist_id}: unexpected error")
+                    break
         return deleted, errors
 
     # --- deletes ------------------------------------------------------------
@@ -105,14 +136,14 @@ class PlaylistOps:
     def copy_into(self, source_ids, target_id) -> dict:
         """Copy the selected playlists' songs into an existing target playlist (the target's client)."""
         if not source_ids:
-            raise ValueError("no playlists to copy")
+            raise ActionInputError('playlist_sources_required')
         client = self._require_client(target_id)
         return copy_into_playlist(self.store, source_ids, target_id, client, self.now_fn())
 
     def create_playlist_from_album(self, browse_id, name="") -> dict:
         """Create a new playlist from an album's tracks, under the master account."""
         if not browse_id:
-            raise ValueError("no album given")
+            raise ActionInputError('album_required')
         account_id,client = client_for(self.store,self._clients())
         return create_playlist_from_album(self.store, browse_id, name, client, self.now_fn(), account_id)
 
@@ -124,13 +155,13 @@ class PlaylistOps:
     def add_song_to_playlist(self, playlist_id, track) -> dict:
         pl = self.store.playlists.get_playlist(playlist_id)
         if pl is None:
-            raise ValueError("That playlist no longer exists.")
+            raise ActionInputError('playlist_missing')
         if pl.provider_playlist_id in analysis.SYSTEM_PLAYLIST_IDS:
-            raise ValueError("Choose a regular playlist.")
+            raise ActionInputError('playlist_regular_required')
         if playlist_id in self.store.playlists.playlist_ids_for_video(track["videoId"]):
             return {"added": 0, "already_present": True}
         if self._client_for(pl) is None:
-            raise ValueError("That playlist's account isn't connected.")
+            raise ActionInputError('playlist_account_disconnected')
         return self.add_tracks(playlist_id, [track])
 
     # --- alternate versions -------------------------------------------------
@@ -139,17 +170,17 @@ class PlaylistOps:
         track = next((t for t in self.store.charts.playlist_tracks_detail(playlist_id)
                       if t["video_id"] == video_id), None)
         if track is None:
-            raise ValueError("track is not in this playlist")
+            raise ActionInputError('playlist_song_missing')
         client = self._require_client(playlist_id)
         return search_versions(client, track["title"], track["artist"], exclude=video_id)
 
     def add_tracks(self, playlist_id, tracks, after_video_id=None) -> dict:
         pl = self.store.playlists.get_playlist(playlist_id)
         if pl is None:
-            raise ValueError("playlist no longer exists")
+            raise ActionInputError('playlist_missing')
         client = self._client_for(pl)
         if client is None:
-            raise ValueError("no client for that identity")
+            raise ActionInputError('playlist_account_disconnected')
         # Liked Music is YouTube-managed and won't accept directly-added tracks, so "Add" (from an
         # alternate version or a 'complete this playlist' suggestion) becomes a *like*, the only thing
         # that actually lands a song in Liked Music. Every other playlist adds normally. (Ordering is
@@ -162,10 +193,10 @@ class PlaylistOps:
     def remove_track(self, playlist_id, video_id) -> dict:
         pl = self.store.playlists.get_playlist(playlist_id)
         if pl is None:
-            raise ValueError("playlist no longer exists")
+            raise ActionInputError('playlist_missing')
         client = self._client_for(pl)
         if client is None:
-            raise ValueError("no client for that identity")
+            raise ActionInputError('playlist_account_disconnected')
         # Liked Music has no removable playlist item: "remove" unlikes the song instead.
         if LikedMusic.is_lm(pl):
             return LikedMusic(self.store).remove(playlist_id, video_id, client, self.now_fn())
@@ -199,10 +230,10 @@ class PlaylistOps:
     def _require_client(self, playlist_id):
         pl = self.store.playlists.get_playlist(playlist_id)
         if pl is None:
-            raise ValueError("playlist no longer exists")
+            raise ActionInputError('playlist_missing')
         client = self._client_for(pl)
         if client is None:
-            raise ValueError("no client for that identity")
+            raise ActionInputError('playlist_account_disconnected')
         return client
 
     # --- move between identities --------------------------------------------

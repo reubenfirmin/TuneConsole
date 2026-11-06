@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 from yt_playlist.core import radio_provenance
-from yt_playlist.core.store import Store
+from tests.repository_mock_support import no_database, repository_store, transient_store
 from yt_playlist.rec import rec_params, transient
 from yt_playlist.util.matching import identity_key
 
@@ -13,26 +13,29 @@ def _jazz_track(store, vid, title, artist="A", year="1960"):
     return identity_key(title, artist)
 
 
-def test_mood_event_moves_facet_lean(store):
-    k = _jazz_track(store, "v1", "S")
-    store.rec_signals.record_mood([k], -1, now=10.0)                       # "less" this jazz vibe
+def test_mood_event_moves_facet_lean(transient_store):
+    store, k = transient_store, 's|a'
+    store.rec_query.track_genres.return_value = {k: 'jazz'}
+    store.rec_query.track_artists.return_value = {k: 'A'}
+    store.rec_signals.recent_mood_events.return_value = [(10., -1, [k])]
     leans = transient.facet_leans(store, now=10.0)
     assert any(f.startswith("genre:") and v < 0 for f, v in leans.items())
     assert leans.get("artist:A", 0.0) < 0
 
 
-def test_recent_play_moves_lean_positive(store):
-    k = _jazz_track(store, "v1", "S")
-    # This assertion concerns a recent timestamped play, rather than a capture date.
-    iid = store.accounts.upsert_account("main", "c", None, True)
-    store.history.record_play_event(iid, k, "v1", 5.0, source_timezone="UTC")
+def test_recent_play_moves_lean_positive(transient_store):
+    store, k = transient_store, 's|a'
+    store.rec_query.track_artists.return_value = {k: 'A'}
+    store.history.recent_plays_with_ts.return_value = [(k, 5.)]
     leans = transient.facet_leans(store, now=10.0)
     assert leans.get("artist:A", 0.0) > 0                      # a recent play pushes its facets up
 
 
-def test_dislike_moves_lean_negative(store):
-    k = _jazz_track(store, "v1", "S")
-    store.rec_model.record_dislike(k, until=9e9, now=5.0)
+def test_dislike_moves_lean_negative(transient_store):
+    store, k = transient_store, 's|a'
+    store.rec_query.track_genres.return_value = {k: 'jazz'}
+    store.rec_query.track_artists.return_value = {k: 'A'}
+    store.rec_model.disliked_with_ts.return_value = [(k, 5.)]
     leans = transient.facet_leans(store, now=10.0)
     # #54: a dislike must NOT push the artist negative (one stinker can't mute the whole artist),
     assert leans.get("artist:A", 0.0) >= 0
@@ -40,18 +43,18 @@ def test_dislike_moves_lean_negative(store):
     assert any(v < 0 for f, v in leans.items() if not f.startswith("artist:"))
 
 
-def test_blended_leans_batch_metadata_and_keep_event_denominators_and_artist_rules(store, monkeypatch):
-    first = _jazz_track(store, 'first', 'First', artist='A', year='1960')
-    second = _jazz_track(store, 'second', 'Second', artist='B', year='1970')
+def test_blended_leans_batch_metadata_and_keep_event_denominators_and_artist_rules(transient_store):
+    store = transient_store
+    first, second = 'first|a', 'second|b'
     missing = 'missing|unknown'
-    monkeypatch.setattr(type(store.rec_signals), 'recent_mood_events',
-                        lambda _: [(1, 1, [first, first, second, missing])])
-    monkeypatch.setattr(transient, 'evidence_plays', lambda *_: [(first, 5), (second, 6)])
-    monkeypatch.setattr(type(store.rec_model), 'recent_liked_with_ts', lambda _, **kw: [(second, 7)])
-    monkeypatch.setattr(type(store.rec_model), 'disliked_with_ts', lambda _: [(first, 8)])
-    monkeypatch.setattr(type(store.player_events), 'recent_skips_with_ts', lambda *_: [(second, 9)])
-    from yt_playlist.rec import choice_learning
-    monkeypatch.setattr(choice_learning, 'contexts', lambda *_: [])
+    store.rec_signals.recent_mood_events.return_value = [(1, 1, [first, first, second, missing])]
+    store.history.recent_plays_with_ts.return_value = [(first, 5), (second, 6)]
+    store.rec_model.recent_liked_with_ts.return_value = [(second, 7)]
+    store.rec_model.disliked_with_ts.return_value = [(first, 8)]
+    store.player_events.recent_skips_with_ts.return_value = [(second, 9)]
+    store.rec_query.track_genres.return_value = {first: 'jazz', second: 'jazz'}
+    store.rec_query.track_decades.return_value = {first: '1960', second: '1970'}
+    store.rec_query.track_artists.return_value = {first: 'A', second: 'B'}
     now = 86410
     def strength(at, weight, half_life):
         return rec_params.get_param(store, weight) * 2 ** (
@@ -65,20 +68,15 @@ def test_blended_leans_batch_metadata_and_keep_event_denominators_and_artist_rul
     expected = {'genre:jazz': 2*mood+play_a+play_b+like-dislike-skip,
                 'era:1960': mood+play_a-dislike, 'era:1970': mood+play_b+like-skip,
                 'artist:A': mood+play_a, 'artist:B': mood+play_b+like}
-    calls = {}
-    for name in ('track_genres', 'track_decades', 'track_artists'):
-        original = getattr(type(store.rec_query), name)
-        def capture(repo, keys, _name=name, _original=original):
-            calls.setdefault(_name, []).append(list(keys))
-            return _original(repo, keys)
-        monkeypatch.setattr(type(store.rec_query), name, capture)
     assert transient.facet_leans(store, now) == pytest.approx(expected)
-    assert set(calls) == {'track_genres', 'track_decades', 'track_artists'}
-    assert all(len(batches) == 1 and set(batches[0]) == {first, second, missing}
-               for batches in calls.values())
+    for name in ('track_genres', 'track_decades', 'track_artists'):
+        query = getattr(store.rec_query, name)
+        query.assert_called_once()
+        assert set(query.call_args.args[0]) == {first, second, missing}
 
 
-def test_facet_multiplier_clamps_and_neutral_at_zero(store):
+def test_facet_multiplier_clamps_and_uses_params(no_database):
+    store = repository_store(settings={'get_setting': None})
     g = rec_params.get_param(store, "facet_gain")
     lo = rec_params.get_param(store, "facet_mult_min")
     hi = rec_params.get_param(store, "facet_mult_max")
@@ -86,22 +84,15 @@ def test_facet_multiplier_clamps_and_neutral_at_zero(store):
     assert transient.facet_multiplier(-100.0, g, lo, hi) == lo
     assert transient.facet_multiplier(100.0, g, lo, hi) == hi
     assert transient.facet_multiplier(-1.0, g, lo, hi) < 1.0
-
-
-def test_facet_multiplier_uses_params(store):
-    g = rec_params.get_param(store, "facet_gain")
-    lo = rec_params.get_param(store, "facet_mult_min")
-    hi = rec_params.get_param(store, "facet_mult_max")
-    # default behavior preserved: 1 + gain*lean, clamped
-    assert transient.facet_multiplier(0.0, g, lo, hi) == 1.0
     assert transient.facet_multiplier(1.0, g, lo, hi) == max(lo, min(hi, 1.0 + g))
     assert transient.facet_multiplier(-1.0, g, lo, hi) >= lo
 
 
-def test_centroid_tilt_newest_dominates_and_persists(store):
+def test_centroid_tilt_newest_dominates_and_persists(transient_store):
+    store = transient_store
     V, idx = np.array([[1.0, 0.0]]), {"a|x": 0}
-    store.rec_signals.record_mood(["a|x"], 1, now=1000.0)
-    store.rec_signals.record_mood(["a|x"], -1, now=1001.0)                 # newest: away
+    store.rec_signals.recent_mood_events.return_value = [
+        (1000., 1, ['a|x']), (1001., -1, ['a|x'])]
     assert transient.centroid_tilt(store, 1001.0, V, idx)[0] < 0
     # #85: this used to assert no wall-clock decay; now a single event fades on the clock (mood_halflife_d)
     # Its fading magnitude stays defined 30d out, rather than being normalized back to full strength.
@@ -109,12 +100,9 @@ def test_centroid_tilt_newest_dominates_and_persists(store):
     assert store2_tilt is not None
 
 
-def test_centroid_tilt_includes_recent_plays():
-    s = Store(":memory:")
-    s.init_schema()
-    iid = s.accounts.upsert_account("m", "c", None, True)
-    s.tracks.upsert_track("v1", "s", "band", None, None)
-    s.history.record_play_event(iid, "s|band", "v1", 1.0, source_timezone="UTC")
+def test_centroid_tilt_includes_recent_plays(transient_store):
+    s = transient_store
+    s.history.recent_plays_with_ts.return_value = [('s|band', 1.)]
     V = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
     idx = {"s|band": 0, "other|x": 1}
     tilt = transient.centroid_tilt(s, 1000.0, V, idx)

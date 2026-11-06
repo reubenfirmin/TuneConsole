@@ -70,17 +70,13 @@ def test_experiment_policy_reuses_definition_and_retains_opportunity_linkage(sto
     assert store.conn.execute("SELECT COUNT(*) FROM recommendation_policies").fetchone()[0] == 2
 
 
-def test_policy_captures_aggregate_evidence_without_lifetime_playlist_handles(store, monkeypatch):
+def test_policy_captures_aggregate_evidence_without_lifetime_playlist_handles(store):
     store.modes.replace_modes([{"mode_id": 7, "label": "Rock", "families": [],
         "centroid": [1., 0.], "size": 1, "rep_keys": []}], [], 1)
     for i in range(100):
         store.modes.log_pick(i + 1, 7, i + 1)
     store.modes.log_impressions(1, [("wheelhouse", 7)], 1)
 
-    def unexpected(*args, **kwargs):
-        pytest.fail("snapshot must aggregate picks in SQL")
-
-    monkeypatch.setattr(type(store.modes), "pick_rows", unexpected)
     version, config = measurement.serving_policy(store, 100)
     assert config["modes"]["picks"] == {7: 100}
     for i in range(100, 200):

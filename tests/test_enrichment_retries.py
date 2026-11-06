@@ -1,4 +1,5 @@
 """Retry deadlines survive batches/restarts without starving other work or repeating successes."""
+import io
 import logging
 import urllib.error
 from functools import partial
@@ -8,6 +9,8 @@ import pytest
 
 from yt_playlist.core.store import Store
 from yt_playlist.enrich.enrich_worker import EnrichWorker
+from yt_playlist.integrations.musicbrainz import MusicBrainzIAO
+from yt_playlist.providers import musicbrainz
 from yt_playlist.providers.base import EnrichmentResult
 from yt_playlist.providers.waterfall import run_waterfall
 from yt_playlist.util import net
@@ -18,7 +21,6 @@ class Provider:
         self.name, self.fail, self.calls = name, fail, []
 
     def available(self, store): return True
-    def reset(self): pass
     def tripped(self): return False
 
     def probe(self, track, store):
@@ -30,7 +32,7 @@ class Provider:
 
 def worker(store, clock, providers):
     ctx = SimpleNamespace(store=store, now_fn=lambda: clock[0], logger=logging.getLogger(__name__),
-                          rec_worker=SimpleNamespace(trigger_mode_refresh=lambda **kw: None))
+                          rec_worker=SimpleNamespace(trigger_content_update=lambda keys: None))
     return EnrichWorker(ctx, waterfall_fn=partial(run_waterfall,
                         registry={p.name: p for p in providers}))
 
@@ -75,25 +77,41 @@ def test_more_failures_than_one_batch_do_not_starve_healthy_tracks_and_recovery_
 
 
 @pytest.mark.parametrize("retry_after", ["120", "Thu, 01 Jan 1970 00:18:40 GMT"])
-def test_throttle_cooldown_honors_retry_after_across_batches(store, retry_after):
-    tracks(store, 4)
+def test_throttle_cooldown_honors_retry_after_across_batches(store, monkeypatch, retry_after):
+    ids = tracks(store, 4)
     clock = [1000.0]
-    def throttle(track):
-        raise urllib.error.HTTPError("https://provider.test", 429, "slow down",
-                                     {"Retry-After": retry_after}, None)
-    throttled, healthy = Provider("musicbrainz", throttle), Provider("deezer")
-    w = worker(store, clock, [throttled, healthy])
+    requests = []
+
+    def request(req, **kwargs):
+        requests.append(req.full_url)
+        if clock[0] < 1120:
+            raise urllib.error.HTTPError(req.full_url, 429, "slow down",
+                                         {"Retry-After": retry_after}, None)
+        return io.StringIO('{"recordings": []}')
+
+    monkeypatch.setattr(musicbrainz, '_iao', MusicBrainzIAO(open_fn=request,
+        now_fn=lambda: clock[0], monotonic_fn=lambda: clock[0],
+        pacer=SimpleNamespace(wait=lambda: None)))
+    healthy = Provider("deezer")
+    w = worker(store, clock, [musicbrainz, healthy])
     assert w.drain_once(limit=4) == 0
-    assert len(throttled.calls) == 1 and len(healthy.calls) == 4
-    assert store.enrichment_state.enrichment_cooldowns()["musicbrainz"]["retry_at"] == 1120
+    assert len(requests) == 1 and len(healthy.calls) == 4
+    cooldown = store.enrichment_state.integration_cooldown('musicbrainz')
+    assert cooldown["retry_at"] == 1120 and cooldown['failures'] == 1
     clock[0] = 1119
+    # Enter the real waterfall again, even though the worker queue would suppress
+    # this batch. Batch startup and deferred attempts cannot erase the outage.
+    assert run_waterfall(store, [store.tracks.track_for_waterfall(tid) for tid in ids],
+        [{'name': 'musicbrainz', 'enabled': True}], lambda event: None,
+        registry={'musicbrainz': musicbrainz}, now_fn=lambda: clock[0]) == []
+    assert store.enrichment_state.integration_cooldown('musicbrainz') == cooldown
     assert w.drain_once(limit=4) == 0
-    assert len(throttled.calls) == 1
+    assert len(requests) == 1
     assert store.enrichment_queue.next_enrich_batch(4, providers=["musicbrainz", "deezer"], now=1119) == []
     assert store.enrichment_reports.queue_remaining() == 4
     clock[0] = 1120
-    throttled.fail = None
     assert w.drain_once(limit=4) == 4
+    assert len(requests) == 5
     assert len(healthy.calls) == 4
     assert store.enrichment_state.enrichment_cooldowns() == {}
 
@@ -115,5 +133,5 @@ def test_backoff_is_bounded_and_partial_provider_evidence_is_retained(store):
 
 
 def test_retry_after_invalid_header_uses_default_backoff():
-    error = urllib.error.HTTPError("u", 503, "busy", {"Retry-After": "nonsense"}, None)
-    assert net.retry_after(error, 1000) == 0
+    with urllib.error.HTTPError("u", 503, "busy", {"Retry-After": "nonsense"}, None) as error:
+        assert net.retry_after(error, 1000) == 0

@@ -13,6 +13,7 @@ from playwright.sync_api import expect
 
 
 EXT = Path(__file__).resolve().parents[2] / "extension"
+PROBE = EXT.parent / 'experiments/audio_lab/audio_probe.js'
 
 
 def _wav(*, silent=False):
@@ -30,6 +31,7 @@ def _wav(*, silent=False):
 def probe_browser(playwright, browser_type_launch_args, tmp_path, request):
     extension = tmp_path / "extension"
     shutil.copytree(EXT, extension)
+    shutil.copyfile(PROBE, extension / 'audio_probe.js')
     # The access-only diagnostic is explicitly installed in this test profile;
     # ordinary extension startup must not capture audio outside the app's flag.
     manifest_path = extension / 'manifest.json'
@@ -345,7 +347,7 @@ def test_capture_and_pcm_decode_need_no_page_activation_or_audio_unlock(probe_br
         })
         assert playback["result"]["value"] == {"playing": True, "active": False, "ever": False}
         if entry == "already_playing":
-            session.send("Runtime.evaluate", {"expression": (EXT / "audio_probe.js").read_text(),
+            session.send("Runtime.evaluate", {"expression": PROBE.read_text(),
                 "contextId": probe_world, "userGesture": False})
         completed = session.send("Runtime.evaluate", {
             "expression": "new Promise(resolve => {const timer=setInterval(() => {"

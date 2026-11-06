@@ -1,12 +1,14 @@
 """Exact regular-admission oracle for the installed v103/v107 fixtures."""
 from yt_playlist.core import (
-    credit_retention, embedding_files, group_progress, group_retention_progress,
+    album_feedback_outbox,
+    collection_recovery_epoch, credit_retention, embedding_files, group_checkpoint_retention, group_progress, group_retention_progress,
     legacy_journals, metadata_native, metadata_runtime, mix_choices,
-    mode_retention, policy_history, profile_files, served_facts, vibe_provenance,
+    mode_retention, policy_history, profile_files, recommendation_revalidations, served_facts, vibe_provenance,
     vibe_versions,
 )
 from yt_playlist.core.migrations import current, migrate, regular
 from yt_playlist.core.preparation import installed_genre_contract
+from yt_playlist.repos import vibe_models
 
 
 CHANGE_NAMES = (
@@ -23,6 +25,13 @@ CHANGE_NAMES = (
     'protected_file_provenance_inputs', 'compact_historical_policy_identities',
     'vibe_version_identities', 'continuing_historical_policy_attribution',
     'continuing_installed_embedding_order',
+    'grouping_checkpoint_retention',
+    'collection_recovery_ownership_epoch',
+    'collection_recovery_scan_keys',
+    'revalidated_recommendation_pools',
+    'durable_album_feedback_responses',
+    'shared_vibe_model_generations',
+    'bounded_embedding_basis_guards',
 )
 
 
@@ -42,12 +51,14 @@ def admit_regular_schema(store, *, clock=1234):
     before = captured(conn)
     assert 'schema_changes' not in before
     assert tuple(change.name for change in regular.CHANGES) == CHANGE_NAMES
-    assert tuple(change.version for change in regular.CHANGES) == tuple(range(1, 26))
+    assert tuple(change.version for change in regular.CHANGES) == tuple(range(1, 33))
     assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] in (103, 107)
     definitions = dict(conn.execute('SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL'))
     allowed = {'schema_changes': regular.HISTORY_SQL,
                'metadata_native_delivery_heads': metadata_native.RUNTIME_HEAD_SQL,
-               'prediction_provenance': vibe_provenance.SQL}
+               'prediction_provenance': vibe_provenance.SQL,
+               'album_feedback_response_outbox': album_feedback_outbox.SQL,
+               'ix_album_feedback_response_pending': album_feedback_outbox.INDEX}
     for declarations in (
         group_progress.definitions(conn), group_retention_progress.definitions(conn),
         installed_genre_contract.definitions(conn), metadata_runtime.definitions(),
@@ -56,12 +67,20 @@ def admit_regular_schema(store, *, clock=1234):
         vibe_provenance.lifecycle_sql(), policy_history.definitions(),
         vibe_versions.definitions(), policy_history.capture_guards(),
         embedding_files.legacy_order_definitions(),
+        group_checkpoint_retention.definitions(conn),
+        collection_recovery_epoch.definitions(conn),
+        collection_recovery_epoch.key_definitions(conn),
+        recommendation_revalidations.definitions(),
+        vibe_models.schema(conn),
+        embedding_files.bounded_basis_guards(),
     ):
         allowed.update(declarations)
     for sql in (*credit_retention.statements(), *mode_retention.statements(),
                 *vibe_provenance.allocation_sql(), legacy_journals.SQL, legacy_journals.CUTOVER_SQL):
         allowed[sql.split()[2]] = sql
 
+    # New owners, including changes 29-31, start empty. Existing owners retain
+    # their complete captured contents; joint-vibe guards do not seed settings.
     additions = {name: [] for name, sql in allowed.items()
                  if sql.startswith('CREATE TABLE') and name not in before}
     additions.update({
@@ -69,7 +88,10 @@ def admit_regular_schema(store, *, clock=1234):
                                   for version, name in enumerate(CHANGE_NAMES, 1)), key=repr),
         'group_preparation_progress': [tuple(row) for row in conn.execute(
             'SELECT singleton,phase,reported_at,reason FROM group_preparation_state')],
-        'group_retention_epoch': [(1, 0)],
+        # Change 26 adds checkpoint custody guards and invalidates the old
+        # retirement closure once, without scanning or rewriting its members.
+        'group_retention_epoch': [(1, 1)],
+        'collection_recovery_epoch': [(1, 0)],
         'metadata_runtime_state': [(1, 0, 0, 0, 0)],
         'served_fact_state': [(1, 0, 1)],
         'artist_credit_retention': [(1, 0, 0, 0, 0)],

@@ -1,6 +1,8 @@
 import pytest
+from tests.derived_rating_support import seed_dislike
 from tests.test_mode_cards_route import prepare_home as prepare_current_home
 from tests.home_fixture_support import browser_store as store, returning_listener
+from tests.prepared_fixture_support import prepared_template, roots
 from tests.visual_support import capture
 
 
@@ -9,6 +11,67 @@ def prepare_home(store, now=1):
     # current offers. Prior use keeps access; current output still drives slots.
     returning_listener(store, 'mixes', now=now)
     prepare_current_home(store, now)
+
+
+@pytest.fixture(scope='module')
+def genre_home_template(_pristine_current_schema):
+    from tests.test_home_other_genres import seed_genres
+
+    def seed(source):
+        seed_genres(source)
+        prepare_home(source, 1)
+        return source.rec_proposals.get_proposals('home_prepared')
+
+    with prepared_template(_pristine_current_schema, seed) as template:
+        yield template
+
+
+@pytest.fixture
+def prepared_genre_app(request, store, genre_home_template):
+    # Restore before the live app creates its own account, playlist and jobs.
+    genre_home_template.restore(store)
+    return request.getfixturevalue('live_app')
+
+
+@pytest.fixture(scope='module')
+def mixtape_home_template(_pristine_current_schema):
+    from tests.home_prepared_support import seed
+
+    def build(source):
+        # Preserve this pair's full eight-track input; the genre consumers and
+        # the smaller session Home template exercise different baselines.
+        seed(source)
+        prepare_home(source, 1)
+        payload = source.rec_proposals.get_proposals('home_prepared')
+        assert payload and len(payload['menus'][0]['protos']) == 4
+        return payload
+
+    with prepared_template(_pristine_current_schema, build) as template:
+        yield template
+
+
+@pytest.fixture
+def prepared_mixtape_app(request, store, mixtape_home_template):
+    mixtape_home_template.restore(store)
+    assert not store.accounts.get_accounts()
+    # The live app owns its account, playlist and jobs after the private restore.
+    return request.getfixturevalue('live_app')
+
+
+@pytest.fixture
+def home_sibling_store(tmp_path, _pristine_current_schema):
+    from tests.store_fixture_support import initialize_consumer
+    from yt_playlist.core.store import Store
+
+    # File owners use the database directory, so siblings need separate parents.
+    directory = tmp_path / 'sibling'
+    directory.mkdir()
+    sibling = Store(directory / 'home.db')
+    try:
+        initialize_consumer(sibling, _pristine_current_schema)
+        yield sibling
+    finally:
+        sibling.conn.close()
 
 
 @pytest.mark.parametrize("width", [1440])
@@ -76,12 +139,52 @@ def expiring_pool_jobs(monkeypatch):
 
 
 @pytest.mark.parametrize("kind,lane", [("fresh_pool", "fresh"), ("library_pool", "wheelhouse")])
-def test_expired_pool_stops_polling_and_refreshes_mixes(expiring_pool_jobs, live_app, store, page, kind, lane):
+def test_expired_pool_stops_polling_and_refreshes_mixes(
+        expiring_pool_jobs, prepared_genre_app, store, page, kind, lane,
+        genre_home_template, home_sibling_store):
+    import sqlite3
     from playwright.sync_api import expect
-    from tests.test_home_other_genres import seed_genres
 
-    seed_genres(store)
-    prepare_home(store, 1)
+    live_app = prepared_genre_app
+    if kind == 'fresh_pool':
+        template = genre_home_template
+        sibling = template.restore(home_sibling_store)
+        assert sibling == template.result == store.rec_proposals.get_proposals('home_prepared')
+        assert template.source.accounts.get_accounts() == []
+        assert len(store.accounts.get_accounts()) == 1
+        assert len({template.source._evidence_key, store._evidence_key, home_sibling_store._evidence_key}) == 3
+        for current in (template.source, store, home_sibling_store):
+            assert current.recommendations.heads() == template.source.recommendations.heads()
+            assert list(map(tuple, current.conn.execute('SELECT * FROM taste_modes ORDER BY mode_id'))) == list(map(
+                tuple, template.source.conn.execute('SELECT * FROM taste_modes ORDER BY mode_id')))
+            assert len(current.modes.list_modes(active_only=True)) == 6
+            assert current.conn.execute('PRAGMA foreign_key_check').fetchall() == []
+        assert set(template.bundles) == {'all', '_meta', '0', '1', '2', '3', '4', '5'}
+        for mode in map(str, range(6)):
+            assert all(len(items) == 20 for items in template.bundles[mode].values())
+        destinations = [roots(target.conn) for target in (store, home_sibling_store)]
+        copied = 0
+        for name, directory in template.files.items():
+            assert len({directory, *(owned[name] for owned in destinations)}) == 3
+            for source in directory.rglob('*'):
+                if source.is_file():
+                    paths = [source, *(owned[name] / source.relative_to(directory) for owned in destinations)]
+                    assert all(path.read_bytes() == source.read_bytes() for path in paths)
+                    assert len({(path.stat().st_dev, path.stat().st_ino) for path in paths}) == 3
+                    copied += 1
+        assert copied
+        assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+        with pytest.raises(sqlite3.OperationalError, match='readonly'):
+            with template.source.conn:
+                template.source.conn.execute("INSERT INTO settings VALUES ('private','forbidden')")
+        sibling['menus'].clear()
+        home_sibling_store._fixture_bundle_payload['all']['wheelhouse'].clear()
+        home_sibling_store.settings.set_setting('private_home', 'sibling')
+        assert template.result['menus'] and store.rec_proposals.get_proposals('home_prepared')['menus']
+        assert len(store._fixture_bundle_payload['all']['wheelhouse']) == 120
+        assert len(template.bundles['all']['wheelhouse']) == 120
+        assert template.source.settings.get_setting('private_home') is None
+        assert store.settings.get_setting('private_home') is None
 
     job = expiring_pool_jobs.create(kind)
     job.parameters = {"include_genres": [], "avoid_genres": [], "lane": lane, "epoch": 0}
@@ -115,16 +218,12 @@ def test_expired_pool_stops_polling_and_refreshes_mixes(expiring_pool_jobs, live
     assert polls == []
 
 
-@pytest.mark.parametrize("reduced_motion", ["no-preference", "reduce"])
-def test_mix_hover_crossfades_even_with_reduced_motion(live_app, store, page, reduced_motion):
+def test_mix_hover_crossfades_even_with_reduced_motion(prepared_genre_app, store, page):
     from playwright.sync_api import expect
-    from tests.test_home_other_genres import seed_genres
 
-    seed_genres(store)
+    live_app = prepared_genre_app
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
-    prepare_home(store, 1)
-    page.emulate_media(reduced_motion=reduced_motion)
     page.set_viewport_size({"width": 1440, "height": 1000})
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.mouse.move(1, 1)
@@ -134,7 +233,16 @@ def test_mix_hover_crossfades_even_with_reduced_motion(live_app, store, page, re
     cards.first.evaluate("""el => Promise.all(
         [...el.parentElement.querySelectorAll(':scope > .gen-card')]
             .flatMap(card => card.getAnimations()).map(animation => animation.finished))""")
-    bounds = [card.bounding_box() for card in cards.all()]
+    def document_bounds():
+        # Hover can scroll an off-screen card into view. Compare document
+        # coordinates so scrolling cannot masquerade as a card layout change.
+        return cards.evaluate_all("""cards => cards.map(card => {
+            const box = card.getBoundingClientRect();
+            return {x: box.x + scrollX, y: box.y + scrollY,
+                    width: box.width, height: box.height};
+        })""")
+
+    bounds = document_bounds()
 
     def mid_fade_opacities():
         return cards.evaluate_all("""async cards => {
@@ -142,31 +250,33 @@ def test_mix_hover_crossfades_even_with_reduced_motion(live_app, store, page, re
             return cards.map(card => Number(getComputedStyle(card).opacity));
         }""")
 
-    cards.first.hover()
-    assert .42 < mid_fade_opacities()[1] < 1
-    for card in cards.all()[1:]:
-        expect(card).to_have_css("opacity", "0.42")
+    for reduced_motion in ("no-preference", "reduce"):
+        page.emulate_media(reduced_motion=reduced_motion)
+        cards.first.hover()
+        assert .42 < mid_fade_opacities()[1] < 1
+        for card in cards.all()[1:]:
+            expect(card).to_have_css("opacity", "0.42")
 
-    cards.nth(1).hover()
-    fading = mid_fade_opacities()
-    assert .42 < fading[0] < 1  # the previous card dims gradually
-    assert .42 < fading[1] < 1  # the new card brightens gradually
-    expect(cards.first).to_have_css("opacity", "0.42")
-    expect(cards.nth(1)).to_have_css("opacity", "1")
-    assert [card.bounding_box() for card in cards.all()] == bounds
+        cards.nth(1).hover()
+        fading = mid_fade_opacities()
+        assert .42 < fading[0] < 1  # the previous card dims gradually
+        assert .42 < fading[1] < 1  # the new card brightens gradually
+        expect(cards.first).to_have_css("opacity", "0.42")
+        expect(cards.nth(1)).to_have_css("opacity", "1")
+        assert document_bounds() == bounds
 
-    page.mouse.move(1, 1)
-    assert .42 < mid_fade_opacities()[0] < 1
-    for card in cards.all():
-        expect(card).to_have_css("opacity", "1")
+        page.mouse.move(1, 1)
+        assert .42 < mid_fade_opacities()[0] < 1
+        for card in cards.all():
+            expect(card).to_have_css("opacity", "1")
+        page.locator('#home-mode-cards').screenshot(path=f'/tmp/tuneconsole-914-hover-{reduced_motion}.png')
 
 
 def test_fresh_skeleton_click_builds_selected_pool_then_shows_mix(live_app, store, page, monkeypatch, tmp_path):
     import threading
     from playwright.sync_api import expect
     from tests.test_fresh_pool import _without_fresh
-    from tests.recommendation_support import publish_bundles
-    from yt_playlist.rec import fresh_pool, surfaces
+    from yt_playlist.rec import fresh_pool, mode_surfaces, surfaces
     from yt_playlist.util.matching import identity_key
 
     _without_fresh(store)
@@ -186,12 +296,12 @@ def test_fresh_skeleton_click_builds_selected_pool_then_shows_mix(live_app, stor
             store.discovery.upsert_discovered_track(track.key, track.video_id,
                 track.title, track.artist, '', None, track.genre, None, 'genre:fixture', 1)
     monkeypatch.setattr(fresh_pool, "populate", populate)
-    def prepare(store, now):
-        # This exercises the discovery job and its real typed publication, while
-        # ranking is controlled independently of the browser's polling deadline.
-        fresh = [surfaces._item_to_fresh_dict(track) for track in tracks]
-        return publish_bundles(store, {'all': {'fresh': fresh}}, now, fresh=fresh)
-    monkeypatch.setattr(fresh_pool, "prepare", prepare)
+    def rank(store, now, policies):
+        # Control ranking, while the real preparation owner handles snapshot
+        # conflicts, policy capture and typed publication in the discovery job.
+        fresh = policies.stamp([surfaces._item_to_fresh_dict(track) for track in tracks], 'fresh')
+        return {'all': {'fresh': fresh}}, fresh
+    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', rank)
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.goto(f"{live_app}/")
     expect(page.locator("#home-mode-cards")).to_be_visible()
@@ -303,24 +413,26 @@ def test_two_ready_mixes_show_clickable_skeletons_for_the_missing_slots(live_app
 
 
 @pytest.mark.parametrize('width', [1440])
-def test_saving_wheelhouse_keeps_all_four_mixtapes(live_app, store, page, monkeypatch, width):
+def test_saving_wheelhouse_keeps_all_four_mixtapes(prepared_mixtape_app, store, page, monkeypatch, width):
     import json
     from playwright.sync_api import expect
-    from tests.rec.test_home_prepared import seed, service
+    from tests.rec.test_home_prepared import service
     from tests.conftest import FakeClient
     from yt_playlist.rec import home_prepared
 
-    seed(store)
-    returning_listener(store, 'mixes')
-    payload = home_prepared.prepare(store, 1)
+    live_app = prepared_mixtape_app
+    payload = store.rec_proposals.get_proposals(home_prepared.SURFACE)
     initial = home_prepared.cards(store, payload, 1, service(store))
     wheelhouse = next(p for p in initial.protos if p['lane'] == 'wheelhouse')
     add = FakeClient.add_playlist_items
+    writes = []
 
     def add_known_videos(client, pid, videos, **kwargs):
         client._catalog.update({t['video_id']: {'videoId': t['video_id'], 'title': t['title'],
             'artists': [{'name': t['artist']}]} for t in wheelhouse['tracks']})
-        return add(client, pid, videos, **kwargs)
+        result = add(client, pid, videos, **kwargs)
+        writes.append((client, pid, list(videos), result))
+        return result
 
     monkeypatch.setattr(FakeClient, 'add_playlist_items', add_known_videos)
     store.settings.set_setting('last_sync_at', '1')
@@ -334,13 +446,26 @@ def test_saving_wheelhouse_keeps_all_four_mixtapes(live_app, store, page, monkey
     response = page.request.post(live_app + '/home/generate', form={
         'name': wheelhouse['name'], 'tracks': json.dumps(wheelhouse['tracks']),
         'recipe': json.dumps(wheelhouse['recipe'])})
-    assert response.ok and 'Saved' in response.text()
+    assert response.ok
+    assert len(writes) == 1
+    provider, generated_id, videos, result = writes[0]
+    expected_videos = [track['video_id'] for track in wheelhouse['tracks']]
+    assert videos == expected_videos
+    assert result['status'] == 'STATUS_SUCCEEDED'
+    assert [track['videoId'] for track in provider.get_playlist(generated_id)['tracks']] == expected_videos
+    saved = store.playlists.get_playlist_for_account(1, generated_id)
+    assert saved is not None
+    assert [track[1] for track in store.playlists.get_playlist_tracks_with_meta(saved.id)] == expected_videos
+    assert store.playlists.get_playlist_groups()[generated_id] == 'Generated'
+    assert f'data-generated-playlist="{generated_id}"' in response.text()
+    assert f'window.location.assign("/playlist/{saved.id}")' in response.text()
+    assert 'genComplete(' in response.text()
     page.reload()
     expect(board.locator(':scope > .gen-card')).to_have_count(4)
     expect(board.locator('#gen-wheelhouse .gen-row')).to_have_count(len(wheelhouse['tracks']))
     assert board.locator('.gen-row').all_text_contents() == before
     expect(board.locator('#gen-wheelhouse .gen-poster')).to_be_visible()
-    capture(board, path=f'/tmp/tuneconsole-428-saved-wheelhouse-{width}.png')
+    board.screenshot(path=f'/tmp/tuneconsole-714-saved-wheelhouse-{width}.png')
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), page.evaluate('''
         [...document.querySelectorAll('body *')].filter(el => {
           const r=el.getBoundingClientRect(); return r.width && r.right>innerWidth+1 && getComputedStyle(el).display!=='none';
@@ -348,22 +473,22 @@ def test_saving_wheelhouse_keeps_all_four_mixtapes(live_app, store, page, monkey
 
 
 @pytest.mark.parametrize('width', [1440])
-def test_lost_held_mix_keeps_its_slot_then_recovers_after_preparation(live_app, store, page, width):
+def test_lost_held_mix_keeps_its_slot_then_recovers_after_preparation(prepared_mixtape_app, store, page, width):
     from copy import deepcopy
     from playwright.sync_api import expect
-    from tests.rec.test_home_prepared import seed, service
+    from tests.rec.test_home_prepared import service
     from yt_playlist.rec import home_prepared
 
-    bundles = seed(store)
-    returning_listener(store, 'mixes')
-    payload = home_prepared.prepare(store, 1)
+    live_app = prepared_mixtape_app
+    bundles = store._fixture_bundle_payload
+    payload = store.rec_proposals.get_proposals(home_prepared.SURFACE)
     payload['menus'] = [payload['menus'][0]]
     store.rec_proposals.put_proposals(home_prepared.SURFACE, payload, 1)
     first = home_prepared.cards(store, payload, 1, service(store))
     wheelhouse = next(p for p in first.protos if p['lane'] == 'wheelhouse')
     old_keys = {t['key'] for t in wheelhouse['tracks']}
     for key in old_keys:
-        store.rec_model.record_dislike(key, until=None, now=1)
+        seed_dislike(store, key, until=None, now=1)
     store.settings.set_setting('last_sync_at', '1')
     store.settings.set_setting('onboard_dismissed', '1')
     page.set_viewport_size({'width': width, 'height': 1000})
@@ -387,6 +512,64 @@ def test_lost_held_mix_keeps_its_slot_then_recovers_after_preparation(live_app, 
     assert not old_keys.intersection(board.locator('#gen-wheelhouse .gen-row').evaluate_all(
         'rows => rows.map(row => row.dataset.key)'))
     capture(board, path=f'/tmp/tuneconsole-428-recovered-{width}.png')
+
+
+def test_mixtape_home_template_keeps_private_inputs(mixtape_home_template, store, home_sibling_store):
+    import sqlite3
+    from yt_playlist.core import profile_files
+    from yt_playlist.rec import home_prepared
+
+    template = mixtape_home_template
+    first, second = template.restore(store), template.restore(home_sibling_store)
+    assert first == second == template.result
+    assert set(template.bundles) >= {'all', '_meta', *map(str, range(6))}
+    for mid in map(str, range(6)):
+        assert set(template.bundles[mid]) == {'wheelhouse', 'explore', 'comfort', 'fresh'}
+        assert all(len(items) == 8 for items in template.bundles[mid].values())
+    keys = {item['key'] for items in template.bundles['all'].values() for item in items}
+    assert len(keys) == 192
+    profiles = template.source.musical_profiles.by_keys(keys)
+    assert len(profiles) == len(keys)
+    assert len({template.source._evidence_key, store._evidence_key, home_sibling_store._evidence_key}) == 3
+    for target in (template.source, store, home_sibling_store):
+        assert not target.accounts.get_accounts()
+        assert target.recommendations.heads() == template.source.recommendations.heads()
+        assert target.musical_profiles.by_keys(keys) == profiles
+        assert target.rec_proposals.get_proposals(home_prepared.SURFACE) == template.result
+        assert target.conn.execute('PRAGMA foreign_key_check').fetchall() == []
+    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    with pytest.raises(sqlite3.OperationalError, match='readonly'):
+        with template.source.conn:
+            template.source.settings.set_setting('private_mixtape', 'forbidden')
+
+    destinations = [roots(target.conn) for target in (store, home_sibling_store)]
+    copied = 0
+    for name, directory in template.files.items():
+        assert len({directory, *(owned[name] for owned in destinations)}) == 3
+        for source in directory.rglob('*'):
+            if source.is_file():
+                paths = [source, *(owned[name] / source.relative_to(directory) for owned in destinations)]
+                assert all(path.read_bytes() == source.read_bytes() for path in paths)
+                assert len({(path.stat().st_dev, path.stat().st_ino) for path in paths}) == 3
+                copied += 1
+    assert copied
+
+    # Challenge SQL, detached nested payloads and physical profile ownership.
+    second['menus'].clear()
+    home_sibling_store._fixture_bundle_payload['all']['wheelhouse'].clear()
+    home_sibling_store.settings.set_setting('private_mixtape', 'sibling')
+    home_sibling_store.rec_proposals.put_proposals(home_prepared.SURFACE, {}, 2)
+    publication = home_sibling_store.conn.execute(
+        'SELECT publication FROM recording_profile_files LIMIT 1').fetchone()[0]
+    relative = profile_files.relative('recording', publication)
+    expected = (profile_files.directory(template.source.conn) / relative).read_bytes()
+    (profile_files.directory(home_sibling_store.conn) / relative).write_bytes(b'Private damaged profile')
+    assert first == template.result
+    for target in (template.source, store):
+        assert target.settings.get_setting('private_mixtape') is None
+        assert target.rec_proposals.get_proposals(home_prepared.SURFACE) == template.result
+        assert len(target._fixture_bundle_payload['all']['wheelhouse']) == 48
+        assert (profile_files.directory(target.conn) / relative).read_bytes() == expected
 
 
 def test_home_is_landing_with_status_and_sections(live_app, page):
@@ -416,12 +599,6 @@ def test_cold_preparation_status_is_visible(live_app, store, page):
         has_text='Your next mixes will appear as your library is prepared.')).to_be_visible()
 
 
-def test_sync_button_absent_from_playlists_tab(live_app, page):
-    page.goto(f"{live_app}/playlists")
-    assert page.get_by_role("button", name="Sync plays").count() == 0
-    assert page.get_by_role("button", name="Full sync").count() == 0
-
-
 def test_now_playing_widget_is_global(live_app, page):
     from playwright.sync_api import expect
     page.route("**/bridge/status", lambda route: route.fulfill(json={
@@ -435,18 +612,18 @@ def test_now_playing_widget_is_global(live_app, page):
         "radio_fallback_reason": None, "radio_upcoming": [],
     }))
     page.goto(f"{live_app}/playlists")
+    assert page.get_by_role("button", name="Sync plays").count() == 0
+    assert page.get_by_role("button", name="Full sync").count() == 0
     expect(page.locator(".global-now-playing")).to_be_visible()
     expect(page.get_by_text("Global Song", exact=True)).to_be_visible()
     expect(page.get_by_text("Global Artist", exact=True)).to_be_visible()
 
 
-def test_genre_controls_make_mixes_in_the_tabbed_configurator(live_app, store, page, tmp_path):
-    from tests.test_home_other_genres import seed_genres
+def test_genre_controls_make_mixes_in_the_tabbed_configurator(prepared_genre_app, store, page, tmp_path):
     from playwright.sync_api import expect
-    seed_genres(store)
+    live_app = prepared_genre_app
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
-    prepare_home(store, 1)
     # Keep the browser check local: album art is incidental to this control.
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.goto(f"{live_app}/")
@@ -465,6 +642,41 @@ def test_genre_controls_make_mixes_in_the_tabbed_configurator(live_app, store, p
     before = set(page.evaluate("homeOfferedGenres()"))
     assert len(before) == 4
     search = panel.get_by_role("searchbox", name="Find a genre for these mixes")
+    launcher = page.get_by_role("button", name="Tune these mixes", exact=True)
+    dialog = page.get_by_role("dialog", name="Tune these mixes", exact=True)
+    expect(dialog).to_be_visible()
+    assert dialog.evaluate("el => el.matches(':modal')")
+    for _ in range(24):
+        page.keyboard.press("Tab")
+        assert dialog.evaluate("el => el.contains(document.activeElement)")
+    for _ in range(24):
+        page.keyboard.press("Shift+Tab")
+        assert dialog.evaluate("el => el.contains(document.activeElement)")
+    page.locator("header nav").get_by_role("link", name="Playlists", exact=True).evaluate("el => el.focus()")
+    assert dialog.evaluate("el => el.contains(document.activeElement)")
+    page.set_viewport_size({"width": 1280, "height": 850})
+    search.fill("jazz")
+    search.focus()
+    expect(search).to_have_value("jazz")
+    assert search.evaluate("""el => {
+        const css = getComputedStyle(el);
+        return css.color === getComputedStyle(el.closest('dialog')).color
+            && css.outlineStyle === 'none' && css.boxShadow === 'none';
+    }""")
+    expect(button).to_be_in_viewport()
+    capture(page, path=tmp_path / "mix-modal-1280.png")
+    page.keyboard.press("Escape")
+    expect(dialog).not_to_be_visible()
+    expect(launcher).to_be_focused()
+    launcher.click()
+    expect(dialog).to_be_visible()
+    # The real backdrop must not activate an underlying card or navigation.
+    page.mouse.click(2, 2)
+    expect(dialog).not_to_be_visible()
+    expect(launcher).to_be_focused()
+    assert page.url == f"{live_app}/"
+    expect(page.locator(".gen-card.is-focused")).to_have_count(0)
+    launcher.click()
     search.fill("nothing-matches")
     expect(panel.get_by_text("No matching genres.", exact=True)).to_be_visible()
     search.fill("jazz")
@@ -477,12 +689,28 @@ def test_genre_controls_make_mixes_in_the_tabbed_configurator(live_app, store, p
     panel.get_by_role("checkbox", name="techno", exact=True).check()
     expect(button).to_have_accessible_name("Make mixes")
     assert set(page.evaluate("homeOfferedGenres()")) == before  # selections are a draft until applied
+    jazz.focus()
+    page.evaluate("document.dispatchEvent(new CustomEvent('htmx:afterSettle'))")
+    expect(jazz).to_be_checked()
+    expect(jazz).to_be_focused()
+    expect(panel.get_by_role("checkbox", name="techno", exact=True)).to_be_checked()
     for width in (1280,):
         page.set_viewport_size({"width": width, "height": 850})
         panel.scroll_into_view_if_needed()
         expect(button).to_be_in_viewport()
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         capture(page, path=tmp_path / f"mix-genres-{width}.png")
+    page.route("**/home/mix-genres", lambda route: route.fulfill(status=500, body="Unavailable"))
+    button.click()
+    expect(page.locator("#home-theme-summary")).to_have_text("Couldn’t make your mixes. Try again.")
+    expect(button).to_be_enabled()
+    expect(jazz).to_be_enabled()
+    expect(jazz).to_be_checked()
+    expect(panel.get_by_role("checkbox", name="techno", exact=True)).to_be_checked()
+    assert set(page.evaluate("homeOfferedGenres()")) == before
+    page.evaluate("document.dispatchEvent(new CustomEvent('htmx:afterSettle'))")
+    expect(page.locator("#home-theme-summary")).to_have_text("Couldn’t make your mixes. Try again.")
+    page.unroute("**/home/mix-genres")
     button.click()
     expect(panel.locator("dialog")).not_to_be_visible()
     assert set(page.evaluate("homeOfferedGenres()")) == {"jazz", "techno"}
@@ -519,6 +747,15 @@ def test_genre_controls_make_mixes_in_the_tabbed_configurator(live_app, store, p
     page.get_by_role("tab", name="Nerd out", exact=True).click()
     expect(button).to_be_hidden()
     expect(panel.locator(".fp-breadth-slider")).to_be_visible()
+    preference_search = dialog.get_by_role("textbox", name="Find a genre to adjust")
+    preference_search.fill("jazz")
+    assert preference_search.evaluate("""el => {
+        const css = getComputedStyle(el);
+        return css.color === getComputedStyle(el.closest('dialog')).color
+            && css.outlineStyle === 'none' && css.boxShadow === 'none'
+            && css.borderTopWidth === '0px';
+    }""")
+    capture(page, path=tmp_path / "preferences-search.png")
     page.get_by_role("tab", name="Nerd out", exact=True).press("ArrowLeft")
     expect(page.get_by_role("tab", name="Genre focus", exact=True)).to_be_focused()
     for width in (1280,):
@@ -537,15 +774,13 @@ def test_genre_controls_make_mixes_in_the_tabbed_configurator(live_app, store, p
     assert set(page.evaluate("homeOfferedGenres()")) == after
 
 
-def test_clear_mix_controls_resets_applied_and_draft_choices_from_either_tab(live_app, store, page, tmp_path):
+def test_clear_mix_controls_resets_applied_and_draft_choices_from_either_tab(prepared_genre_app, store, page, tmp_path):
     from playwright.sync_api import expect
-    from tests.test_home_other_genres import seed_genres
     from yt_playlist.rec import rec_params
 
-    seed_genres(store)
+    live_app = prepared_genre_app
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
-    prepare_home(store, 1)
     store.rec_model.set_weight("genre:jazz", 1.4, now=1)
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.request.post(f"{live_app}/home/mix-genres", form={"genres": "jazz"})
@@ -592,15 +827,13 @@ def test_clear_mix_controls_resets_applied_and_draft_choices_from_either_tab(liv
     expect(panel.locator("dialog")).to_be_visible()
 
 
-def test_mix_controls_automatically_reset_an_open_page_after_four_hours(live_app, store, page):
+def test_mix_controls_automatically_reset_an_open_page_after_four_hours(prepared_genre_app, store, page):
     from playwright.sync_api import expect
-    from tests.test_home_other_genres import seed_genres
     from yt_playlist.rec import mix_tuning, rec_params
 
-    seed_genres(store)
+    live_app = prepared_genre_app
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
-    prepare_home(store, 1)
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.clock.install()
     page.goto(f"{live_app}/")
@@ -631,21 +864,19 @@ def test_mix_controls_automatically_reset_an_open_page_after_four_hours(live_app
     expect(panel.locator('input[name="genres"]:checked')).to_have_count(0)
 
 
-def test_regenerating_one_mix_updates_shuffle_request(live_app, store, page):
+def test_regenerating_one_mix_updates_shuffle_request(prepared_genre_app, store, page):
     from dataclasses import asdict
     import json
     import logging
     from urllib.parse import parse_qs
 
     from playwright.sync_api import expect
-    from tests.test_home_other_genres import seed_genres
     from yt_playlist.rec import home_cards, home_prepared
     from yt_playlist.web.jobs import SyncJobs
 
-    seed_genres(store)
+    live_app = prepared_genre_app
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
-    prepare_home(store, 1)
     # Publish real menus with one distinct theme per epoch band. Randomly drawing
     # from the usual menu batch can legitimately repeat the wheelhouse genre.
     payload = store.rec_proposals.get_proposals(home_prepared.SURFACE)
@@ -694,99 +925,6 @@ def test_regenerating_one_mix_updates_shuffle_request(live_app, store, page):
     assert set(json.loads(submitted)) == expected_genres
 
 
-def test_genre_draft_survives_unrelated_updates_and_failed_submission(live_app, store, page):
-    from playwright.sync_api import expect
-    from tests.test_home_other_genres import seed_genres
-
-    seed_genres(store)
-    store.settings.set_setting("last_sync_at", "1")
-    store.settings.set_setting("onboard_dismissed", "1")
-    prepare_home(store, 1)
-    page.route("https://i.ytimg.com/**", lambda route: route.abort())
-    page.goto(f"{live_app}/")
-    page.locator("#fingerprint .fp-collapse").click()
-    page.get_by_role("tab", name="Genre focus", exact=True).click()
-    jazz = page.get_by_role("checkbox", name="jazz", exact=True)
-    jazz.check()
-    jazz.focus()
-    page.evaluate("document.dispatchEvent(new CustomEvent('htmx:afterSettle'))")
-    expect(jazz).to_be_checked()
-    expect(jazz).to_be_focused()
-    before = set(page.evaluate("homeOfferedGenres()"))
-    page.route("**/home/mix-genres", lambda route: route.fulfill(status=500, body="Unavailable"))
-    make = page.get_by_role("button", name="Make mixes", exact=True)
-    make.click()
-    expect(page.locator("#home-theme-summary")).to_have_text("Couldn’t make your mixes. Try again.")
-    expect(make).to_be_enabled()
-    expect(jazz).to_be_enabled()
-    expect(jazz).to_be_checked()
-    assert set(page.evaluate("homeOfferedGenres()")) == before
-    page.evaluate("document.dispatchEvent(new CustomEvent('htmx:afterSettle'))")
-    expect(page.locator("#home-theme-summary")).to_have_text("Couldn’t make your mixes. Try again.")
-
-
-def test_configurator_modal_blocks_background_and_keeps_focus(live_app, store, page, tmp_path):
-    from playwright.sync_api import expect
-    from tests.test_home_other_genres import seed_genres
-
-    seed_genres(store)
-    store.settings.set_setting("last_sync_at", "1")
-    store.settings.set_setting("onboard_dismissed", "1")
-    prepare_home(store, 1)
-    page.route("https://i.ytimg.com/**", lambda route: route.abort())
-    page.goto(f"{live_app}/")
-    launcher = page.get_by_role("button", name="Tune these mixes", exact=True)
-    launcher.click()
-    dialog = page.get_by_role("dialog", name="Tune these mixes", exact=True)
-    expect(dialog).to_be_visible()
-    assert dialog.evaluate("el => el.matches(':modal')")
-    for _ in range(24):
-        page.keyboard.press("Tab")
-        assert dialog.evaluate("el => el.contains(document.activeElement)")
-    for _ in range(24):
-        page.keyboard.press("Shift+Tab")
-        assert dialog.evaluate("el => el.contains(document.activeElement)")
-    # Even a script cannot focus the navigation behind a modal dialog.
-    page.locator("header nav").get_by_role("link", name="Playlists", exact=True).evaluate("el => el.focus()")
-    assert dialog.evaluate("el => el.contains(document.activeElement)")
-    dialog.get_by_role("tab", name="Genre focus", exact=True).click()
-    search = dialog.get_by_role("searchbox")
-    search.fill("jazz")
-    for width in (1280,):
-        page.set_viewport_size({"width": width, "height": 850})
-        search.focus()
-        expect(search).to_have_value("jazz")
-        assert search.evaluate("""el => {
-            const css = getComputedStyle(el);
-            return css.color === getComputedStyle(el.closest('dialog')).color
-                && css.outlineStyle === 'none' && css.boxShadow === 'none';
-        }""")
-        expect(dialog.get_by_role("button", name="Shuffle genres", exact=True)).to_be_in_viewport()
-        capture(page, path=tmp_path / f"mix-modal-{width}.png")
-    page.keyboard.press("Escape")
-    expect(dialog).not_to_be_visible()
-    expect(launcher).to_be_focused()
-    launcher.click()
-    expect(dialog).to_be_visible()
-    # Backdrop catches the click; it must not open a mix or follow a link underneath.
-    page.mouse.click(2, 2)
-    expect(dialog).not_to_be_visible()
-    expect(launcher).to_be_focused()
-    assert page.url == f"{live_app}/"
-    expect(page.locator(".gen-card.is-focused")).to_have_count(0)
-    launcher.click()
-    dialog.get_by_role("tab", name="Nerd out", exact=True).click()
-    preference_search = dialog.get_by_role("textbox", name="Find a genre to adjust")
-    preference_search.fill("jazz")
-    assert preference_search.evaluate("""el => {
-        const css = getComputedStyle(el);
-        return css.color === getComputedStyle(el.closest('dialog')).color
-            && css.outlineStyle === 'none' && css.boxShadow === 'none'
-            && css.borderTopWidth === '0px';
-    }""")
-    capture(page, path=tmp_path / "preferences-search.png")
-
-
 def test_quick_genres_show_favorites_and_search_reaches_the_rest(live_app, store, page):
     from playwright.sync_api import expect
     from tests.test_home_other_genres import seed_genres
@@ -823,39 +961,119 @@ def test_quick_genres_show_favorites_and_search_reaches_the_rest(live_app, store
     expect(page.get_by_role("checkbox", name="archive 17", exact=True)).to_be_checked()
 
 
-def test_nav_has_home_and_playlists(live_app, page):
+@pytest.mark.parametrize('connected', [False, True])
+def test_nav_has_home_and_playlists(live_app, store, page, connected):
+    from playwright.sync_api import expect
+    from tests.test_growth_destinations import publish_full_journey
+
+    with store._lock:
+        publish_full_journey(store, now=1000)
+        store.settings.set_setting('last_sync_at', '1')
+        store.settings.set_setting('home_format', 'mixes')
+    page.route('**/bridge/status', lambda route: route.fulfill(json={
+        'connected': connected, 'now_playing': None}))
+    page.route('https://**', lambda route: route.fulfill(status=404))
+    page.set_viewport_size({'width': 1280, 'height': 900})
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(f"{live_app}/")
     nav = page.locator("header nav")
     assert nav.get_by_role("link", name="Home").is_visible()
     assert nav.get_by_role("link", name="Playlists").is_visible()
+    page.wait_for_function("connected => Alpine.$data(document.querySelector('#home')).connected === connected", arg=connected)
+    tabs = page.get_by_role('tablist', name='Home areas')
+    attention = tabs.get_by_role('tab', name='Needs attention', exact=True)
+    tv = tabs.get_by_role('tab', name='TV', exact=True)
+    parameters = page.get_by_role('button', name='Adjust TV parameters', exact=True)
+    for width, height in ((1280, 900), (1600, 1100), (1920, 1080)):
+        page.set_viewport_size({'width': width, 'height': height})
+        tabs.get_by_role('tab', name='Your unlocks', exact=True).click()
+        tabs.evaluate('''el => {
+            el.scrollLeft = 0;
+            document.activeElement.blur();
+            window.scrollTo(0, 0);
+        }''')
+        tv.click()
+        expect(parameters).to_be_visible()
+        # Exercise pointer scrolling before keyboard traversal. Playwright's click
+        # would otherwise reveal a clipped tab automatically and conceal the bug.
+        tabs.hover()
+        page.mouse.wheel(1000, 0)
+        page.wait_for_function('''() => {
+            const el = document.querySelector('.dash-nav [role=tab]:last-child');
+            const r = el.getBoundingClientRect(), n = el.parentElement.getBoundingClientRect();
+            return r.left >= n.left && r.right <= n.right + 1;
+        }''')
+        attention.click()
+        expect(page.locator('[data-dash="notices"]')).to_be_visible()
+        tv.click()
+        scroll_before = page.evaluate('scrollY')
+        for _ in range(4):
+            page.keyboard.press('ArrowRight')
+        expect(attention).to_be_focused()
+        assert page.evaluate('scrollY') == pytest.approx(scroll_before, abs=1)
+        expect(tv).to_have_attribute('aria-selected', 'true')
+        focused = attention.evaluate('''el => {
+            const nav = el.closest('[role=tablist]'), n = nav.getBoundingClientRect();
+            const r = el.getBoundingClientRect(), style = getComputedStyle(el);
+            const ring = parseFloat(style.outlineWidth) + parseFloat(style.outlineOffset);
+            const range = document.createRange(); range.selectNodeContents(el.firstChild);
+            const text = range.getBoundingClientRect(), y = (text.top + text.bottom) / 2;
+            return {scrollLeft: nav.scrollLeft, scrollWidth: nav.scrollWidth,
+                clientWidth: nav.clientWidth, focusVisible: el.matches(':focus-visible'),
+                labelPainted: [text.left + 1, (text.left + text.right) / 2, text.right - 1]
+                    .every(x => { const top = document.elementFromPoint(x, y); return top && el.contains(top); }),
+                ringVisible: r.left - ring >= n.left && r.right + ring <= n.right
+                    && r.top - ring >= n.top && r.bottom + ring <= n.top + nav.clientHeight};
+        }''')
+        page.screenshot(path=f'/tmp/tuneconsole-991-focus-{connected}-{width}.png', full_page=True)
+        assert focused['focusVisible'] and focused['labelPainted'] and focused['ringVisible'], focused
+        expect(parameters).to_be_visible()
+        page.keyboard.press('Enter')
+        expect(attention).to_have_attribute('aria-selected', 'true')
+        expect(page.locator('[data-dash="notices"]')).to_be_visible()
+        # Wrap in both directions, preserving explicit activation of the panel.
+        page.keyboard.press('ArrowRight')
+        expect(tabs.get_by_role('tab', name='Your unlocks', exact=True)).to_be_focused()
+        page.keyboard.press('ArrowLeft')
+        expect(attention).to_be_focused()
+        tv.click()
+        parameters.click()
+        expect(page.get_by_role('dialog', name='TV parameters', exact=True)).to_be_visible()
+        page.keyboard.press('Escape')
+        expect(page.get_by_role('dialog', name='TV parameters', exact=True)).to_be_hidden()
+    assert not errors
 
 
-@pytest.mark.parametrize("width", [1280, 1920])
-def test_desktop_uses_side_rail_but_clusters_has_only_exit_control(live_app, store, page, width):
+def test_desktop_uses_side_rail_but_clusters_has_only_exit_control(live_app, store, page):
     from tests.onboarding_support import publish_personal_mix
 
     # Check the normal Home layout after setup; the arrival screen uses a wider canvas.
     store.settings.set_setting('last_sync_at', '1')
     returning_listener(store, 'mixes', now=1)
     publish_personal_mix(store, now=1)
-    page.set_viewport_size({"width": width, "height": 800})
+    page.set_viewport_size({"width": 1280, "height": 800})
     page.goto(f"{live_app}/")
     tools = page.get_by_role("button", name="Tools")
     # The button is server-rendered before Alpine owns its state; wait for hydration so this tests
     # the menu rather than racing a click against the framework startup.
     page.wait_for_function("el => el.getAttribute('aria-expanded') === 'false'", arg=tools.element_handle())
-    tools.click()
-    page.wait_for_function("el => getComputedStyle(el).opacity === '1'", arg=page.locator(".tools-pop").element_handle())
-    assert page.get_by_role("link", name="Setup").is_visible()
-    tools.click()
-    assert page.locator("header.topbar").evaluate("el => getComputedStyle(el).position") == "fixed"
-    main_box = page.locator("main").bounding_box()
-    rail_box = page.locator("header.topbar").bounding_box()
-    assert main_box and rail_box
-    assert abs(main_box["x"] * 2 + main_box["width"] - width) < 1
-    assert main_box["width"] <= 1088
-    assert main_box["x"] >= rail_box["x"] + rail_box["width"]
+    for width in (1280, 1920):
+        page.set_viewport_size({"width": width, "height": 800})
+        tools.click()
+        page.wait_for_function("el => getComputedStyle(el).opacity === '1'", arg=page.locator(".tools-pop").element_handle())
+        assert page.get_by_role("link", name="Setup").is_visible()
+        tools.click()
+        assert page.locator("header.topbar").evaluate("el => getComputedStyle(el).position") == "fixed"
+        main_box = page.locator("main").bounding_box()
+        rail_box = page.locator("header.topbar").bounding_box()
+        assert main_box and rail_box
+        assert abs(main_box["x"] * 2 + main_box["width"] - width) < 1
+        assert main_box["width"] <= 1088
+        assert main_box["x"] >= rail_box["x"] + rail_box["width"]
 
     page.goto(f"{live_app}/clusters")
-    assert page.locator("header.topbar").evaluate("el => getComputedStyle(el).display") == "none"
-    assert page.get_by_role("link", name="Back to TuneConsole").is_visible()
+    for width in (1280, 1920):
+        page.set_viewport_size({"width": width, "height": 800})
+        assert page.locator("header.topbar").evaluate("el => getComputedStyle(el).display") == "none"
+        assert page.get_by_role("link", name="Back to TuneConsole").is_visible()

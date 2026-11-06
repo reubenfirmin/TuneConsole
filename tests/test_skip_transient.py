@@ -6,15 +6,13 @@ and a skip must never graduate as a play.
 """
 import numpy as np
 
-from yt_playlist.core.store import Store
 from yt_playlist.rec import transient
 
 DAY = 86400.0
 
 
-def _store():
-    s = Store(":memory:")
-    s.init_schema()
+def _store(consumer_store):
+    s = consumer_store()
     s.accounts.upsert_account("main", "bridge", None, True)
     return s
 
@@ -36,8 +34,8 @@ def _skip(s, key, ts, position=20.0, duration=200.0):
     s.player_events.record_player_event(1, "track_exit", f"v_{key}", position, duration, None, None, ts)
 
 
-def test_fresh_skip_pushes_genre_lean_negative_artist_untouched():
-    s = _store()
+def test_fresh_skip_pushes_genre_lean_negative_artist_untouched(consumer_store):
+    s = _store(consumer_store)
     _track(s, "song|artist", genre="techno")
     now = 1000 * DAY
     _skip(s, "song|artist", now)                       # fresh: full weight
@@ -48,8 +46,8 @@ def test_fresh_skip_pushes_genre_lean_negative_artist_untouched():
     assert leans.get("artist:artist", 0.0) == 0.0
 
 
-def test_old_skip_beyond_lookback_contributes_nothing():
-    s = _store()
+def test_old_skip_beyond_lookback_contributes_nothing(consumer_store):
+    s = _store(consumer_store)
     _track(s, "song|artist", genre="techno")
     now = 1000 * DAY
     # default skip_halflife_d=14 -> lookback = 4*14 = 56 days. 90 days is well past the lookback
@@ -59,15 +57,15 @@ def test_old_skip_beyond_lookback_contributes_nothing():
     assert leans.get("genre:techno", 0.0) == 0.0
 
 
-def test_recent_skip_decays_toward_zero_with_age():
-    s = _store()
+def test_recent_skip_decays_toward_zero_with_age(consumer_store):
+    s = _store(consumer_store)
     _track(s, "fresh|artist", genre="jazz")
     _track(s, "aging|artist", genre="jazz")
     now = 1000 * DAY
     _skip(s, "fresh|artist", now)
     _skip(s, "aging|artist", now - 13 * DAY)            # within lookback, near the half-life
     leans_fresh_only = {}
-    s2 = _store()
+    s2 = _store(consumer_store)
     _track(s2, "fresh|artist", genre="jazz")
     _skip(s2, "fresh|artist", now)
     leans_fresh_only = transient.facet_leans(s2, now)
@@ -81,14 +79,14 @@ def test_recent_skip_decays_toward_zero_with_age():
     assert both_val > 2 * fresh_val                     # but nowhere near doubling it
 
 
-def test_centroid_tilt_cosine_to_skipped_track_decreases():
+def test_centroid_tilt_cosine_to_skipped_track_decreases(consumer_store):
     # Base positive signal (a play) toward [0, 1] so centroid_tilt is defined either way; the
     # skipped track's own direction is [1, 0].
     V = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
     idx = {"skip|artist": 0, "base|artist": 1}
     skip_dir = V[0] / np.linalg.norm(V[0])
 
-    s_no_skip = _store()
+    s_no_skip = _store(consumer_store)
     _track(s_no_skip, "base|artist", genre="jazz")
     iid = s_no_skip.accounts.get_master_account().id
     now = 1000 * DAY
@@ -97,7 +95,7 @@ def test_centroid_tilt_cosine_to_skipped_track_decreases():
     assert tilt_no_skip is not None
     cos_no_skip = float(np.dot(tilt_no_skip, skip_dir))
 
-    s_skip = _store()
+    s_skip = _store(consumer_store)
     _track(s_skip, "base|artist", genre="jazz")
     _track(s_skip, "skip|artist", genre="techno")
     iid2 = s_skip.accounts.get_master_account().id
@@ -110,10 +108,10 @@ def test_centroid_tilt_cosine_to_skipped_track_decreases():
     assert cos_with_skip < cos_no_skip                  # the skip pulls the tilt away from its own direction
 
 
-def test_centroid_tilt_skip_only_is_not_quiet():
+def test_centroid_tilt_skip_only_is_not_quiet(consumer_store):
     # A skip alone (no mood/play/like) must still produce a defined (non-None) tilt: the quiet
     # gate has to know about skips too, or a skip-only session would silently vanish.
-    s = _store()
+    s = _store(consumer_store)
     _track(s, "skip|artist", genre="techno")
     now = 1000 * DAY
     _skip(s, "skip|artist", now)
@@ -124,7 +122,7 @@ def test_centroid_tilt_skip_only_is_not_quiet():
     assert tilt[0] < 0                                   # pushed away from the skipped track's own direction
 
 
-def test_audio_centroid_tilt_cosine_to_skipped_track_decreases(monkeypatch):
+def test_audio_centroid_tilt_cosine_to_skipped_track_decreases(monkeypatch, consumer_store):
     from yt_playlist.rec import embedding_vectors as embed
 
     CV = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
@@ -135,7 +133,7 @@ def test_audio_centroid_tilt_cosine_to_skipped_track_decreases(monkeypatch):
 
     now = 1000 * DAY
 
-    s_no_skip = _store()
+    s_no_skip = _store(consumer_store)
     _track(s_no_skip, "base|artist", genre="jazz")
     iid = s_no_skip.accounts.get_master_account().id
     s_no_skip.history.record_play_event(iid, "base|artist", "v_base|artist", now, source_timezone="UTC")
@@ -143,7 +141,7 @@ def test_audio_centroid_tilt_cosine_to_skipped_track_decreases(monkeypatch):
     assert tilt_no_skip is not None
     cos_no_skip = float(np.dot(tilt_no_skip, skip_dir))
 
-    s_skip = _store()
+    s_skip = _store(consumer_store)
     _track(s_skip, "base|artist", genre="jazz")
     _track(s_skip, "skip|artist", genre="techno")
     iid2 = s_skip.accounts.get_master_account().id
@@ -156,15 +154,15 @@ def test_audio_centroid_tilt_cosine_to_skipped_track_decreases(monkeypatch):
     assert cos_with_skip < cos_no_skip
 
 
-def test_play_facet_leans_unaffected_by_skips():
-    s_no_skip = _store()
+def test_play_facet_leans_unaffected_by_skips(consumer_store):
+    s_no_skip = _store(consumer_store)
     _track(s_no_skip, "played|artist", genre="jazz")
     iid = s_no_skip.accounts.get_master_account().id
     now = 1000 * DAY
     s_no_skip.history.record_play_event(iid, "played|artist", "v_played|artist", now, source_timezone="UTC")
     leans_no_skip = transient.play_facet_leans(s_no_skip, now)
 
-    s_skip = _store()
+    s_skip = _store(consumer_store)
     _track(s_skip, "played|artist", genre="jazz")
     _track(s_skip, "skipped|artist", genre="techno")
     iid2 = s_skip.accounts.get_master_account().id

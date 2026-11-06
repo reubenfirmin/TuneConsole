@@ -1,4 +1,5 @@
 """Ordered content reuse preserves distinct captures and selected-credit lineage."""
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import json
@@ -8,19 +9,18 @@ from threading import Barrier
 import pytest
 
 from yt_playlist.core import artist_credits as credits, artists
-from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations import v074_artist_credits as migration
 from yt_playlist.core.migrations.runner import Context, MigrationError
 from yt_playlist.core.store import Store
 
 
 @pytest.fixture
-def predecessor(tmp_path):
+def predecessor(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path / 'credits.db')
-    migrate(store.conn, registry=registry.MIGRATIONS[:69])
-    store._bind_repositories()
-    yield store
-    store.conn.close()
+    with closing(store.conn):
+        _pristine_installed_schema(69).backup(store.conn)
+        store._bind_repositories()
+        yield store
 
 
 def apply(store):

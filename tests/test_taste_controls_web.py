@@ -168,23 +168,29 @@ def test_retired_genre_familiarity_control_cannot_be_saved_or_restored(store):
     assert rec_params.get_param(store, 'breadth_bias') == 0.0
 
 
-@pytest.mark.parametrize("name", ["onboard_coverage_min", "onboard_library_min"])
-def test_retired_onboarding_control_cannot_be_saved_or_restored(store, name):
+def test_retired_onboarding_control_cannot_be_saved_or_restored(store):
     c = _client(store)
-    key = rec_params.SETTING_PREFIX + name
+    retired = ('onboard_coverage_min', 'onboard_library_min', 'onboard_feedback_min')
+    old_key = 'rec_param:onboard_feedback_min'
+    store.settings.set_setting(old_key, '3')
     store.settings.set_setting("taste_settings_checkpoint_v1", json.dumps({
-        "saved_at": 1.0, "params": {key: "100", "rec_param:onboard_feedback_min": "15"},
+        "saved_at": 1.0, "params": {**{rec_params.SETTING_PREFIX + name: '100' for name in retired},
+                                  'rec_param:erosion_view_cap': '5'},
         "weights": [],
     }))
     html = c.get("/taste/panels/recommendations").text
-    assert name not in html
-    assert 'id="param-onboard_feedback_min"' in html
-    assert c.post("/taste/param", data={"name": name, "value": "100"}).status_code == 200
+    assert 'Getting started' not in html
+    for name in retired:
+        assert name not in html
+        assert c.post("/taste/param", data={"name": name, "value": "100"}).status_code == 200
     assert c.post("/taste/checkpoint/restore").status_code == 200
-    assert store.settings.get_setting(key) is None
-    assert rec_params.get_param(store, "onboard_feedback_min") == 15
-    assert c.post("/taste/reset-param", data={"name": name}).status_code == 200
-    assert store.settings.get_setting(key) is None
+    assert rec_params.get_param(store, 'erosion_view_cap') == 5
+    for name in retired:
+        assert c.post("/taste/reset-param", data={"name": name}).status_code == 200
+        assert store.settings.get_setting(rec_params.SETTING_PREFIX + name) == ('3' if name == 'onboard_feedback_min' else None)
+    assert c.post('/taste/reset-all').status_code == 200
+    assert rec_params.get_param(store, 'erosion_view_cap') == 3
+    assert store.settings.get_setting(old_key) == '3'
 
 
 def test_taste_genre_weight_uses_genre_band(store):

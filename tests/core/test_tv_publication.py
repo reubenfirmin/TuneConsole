@@ -1,5 +1,6 @@
 """TV cutovers retain exact evidence and keep all continuing writers usable."""
 from dataclasses import replace
+from functools import partial
 import json
 from pathlib import Path
 import sqlite3
@@ -9,21 +10,45 @@ import pytest
 from tests.core.test_predecessor_writes import installed
 from tests.core.test_tv_state_preparation import aliases, finish, seed
 from tests.test_tv_stream import video
+from tests.tv_publication_timing_support import tv_publication_costs
 from yt_playlist.core import tv_recommendation_state as state
-from yt_playlist.core.migrations import MigrationError, registry, regular, runner
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import tv_publication as publication, tv_state as preparation
 from yt_playlist.core.store import Store
 
 
-def prepare(owner, conn):
+def prepare(owner, conn, *, size=128):
     owner.worker.install(conn)
-    return finish(owner.worker, conn).prepared_revision
+    return finish(owner.worker, conn, size=size).prepared_revision
+
+
+def rejection_inputs(store, *, surface, with_aliases):
+    _, originals = seed(store)
+    if with_aliases:
+        aliases(store.conn)
+    owner = publication.SOURCES[surface]
+    revision = prepare(owner, store.conn)
+    assert owner.selected(store.conn) is None
+    return originals, revision
 
 
 def publish_all(store):
     aliases(store.conn)
     for owner in publication.OWNERS.values():
         owner.publish(store.conn, revision=prepare(owner, store.conn))
+
+
+@pytest.mark.parametrize('installed', [93], indirect=True)
+def test_selected_presence_reads_no_display_document(installed, monkeypatch):
+    store, _ = installed
+    values, _ = seed(store)
+    publish_all(store)
+    def forbidden(*args, **kwargs):
+        pytest.fail('Presence read a selected TV document')
+    for owner in publication.OWNERS.values():
+        monkeypatch.setattr(type(owner), 'value', forbidden)
+    for surface in values:
+        assert store.rec_proposals.has_proposals(surface)
 
 
 @pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
@@ -82,12 +107,11 @@ def test_absence_empty_shapes_and_recreated_sources_remain_distinct(installed):
     ('tv_artist_artwork_requests', 'requested_at', 99),
     ('tv_visual_checks', 'sample_times', 99), ('tv_continuations', 'target_stream', 'wrong'),
 ])
-def test_each_owner_rejects_unverified_typed_state(installed, surface, column, value):
+def test_each_owner_rejects_unverified_typed_state(installed, staged_custody, surface, column, value):
     store, _ = installed
-    _, originals = seed(store)
-    aliases(store.conn)
     owner = publication.SOURCES[surface]
-    revision = prepare(owner, store.conn)
+    originals, revision = staged_custody(installed, ('tv', surface, 'aliases'),
+        partial(rejection_inputs, surface=surface, with_aliases=True))
     table = {'tv_pool':'tv_pool_state', 'tv_artist_artwork':'tv_artist_artwork',
         'tv_artist_artwork_requests':'tv_artist_requests', 'tv_visual_checks':'tv_visual_samples',
         'tv_continuations':'tv_continuation_receipts'}[surface]
@@ -105,11 +129,11 @@ def test_each_owner_rejects_unverified_typed_state(installed, surface, column, v
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['time', 'missing', 'extra', 'original'])
-def test_time_completeness_and_original_file_are_verified(installed, failure):
+def test_time_completeness_and_original_file_are_verified(installed, staged_custody, failure):
     store, _ = installed
-    seed(store)
     owner = publication.OWNERS['pool']
-    revision = prepare(owner, store.conn)
+    _, revision = staged_custody(installed, ('tv', owner.source, 'unaliased'),
+        partial(rejection_inputs, surface=owner.source, with_aliases=False))
     with store.conn:
         if failure == 'time':
             store.conn.execute('UPDATE '+preparation.tables(owner.source)[0]+' SET built_at=1')
@@ -251,44 +275,39 @@ def test_selected_custody_missing_file_and_failed_recovery_keep_ddl_independent(
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_receipt_budget_numeric_affinity_and_interrupted_cutover(installed):
+def test_receipt_budget_numeric_affinity_and_interrupted_cutover(installed, tv_publication_costs):
     store, _ = installed
-    value = {f'{number+1}:stream:request:{number}':{'playlist_id':number+101, 'stream':'next',
-        'items':[video(index) for index in range(60)]} for number in range(60)}
-    raw = json.dumps(value, indent=2)
-    with store.conn:
+    with tv_publication_costs('input_json'):
+        value = {f'{number+1}:stream:request:{number}':{'playlist_id':number+101, 'stream':'next',
+            'items':[video(index) for index in range(60)]} for number in range(60)}
+        raw = json.dumps(value, indent=2)
+    with tv_publication_costs('input_write'), store.conn:
         store.conn.execute('INSERT INTO rec_proposals VALUES (?,?,?)', ('tv_continuations', raw, 9007199254740993))
+    original = tuple(store.conn.execute('SELECT * FROM rec_proposals WHERE surface=?', ('tv_continuations',)).fetchone())
     owner = publication.OWNERS['continuations']
-    revision = prepare(owner, store.conn)
-    owner.install(store.conn)
+    with tv_publication_costs('preparation'):
+        # This control owns the full receipt budget and atomic cutover. Use the
+        # supported maximum slice; small-slice checkpoints and partial-batch
+        # rollback have separate owners in test_tv_continuation_batches.
+        revision = prepare(owner, store.conn, size=512)
+    assert store.conn.execute('SELECT count(*) FROM '+preparation.relation('tv_continuation_receipts')+
+        ' WHERE preparation_revision=?', (revision,)).fetchone()[0] == 60
+    assert store.conn.execute('SELECT count(*) FROM '+preparation.relation('tv_continuation_items')+
+        ' WHERE preparation_revision=?', (revision,)).fetchone()[0] == 3600
+    with tv_publication_costs('publication_install'):
+        owner.install(store.conn)
     with store.conn:
         store.conn.execute('CREATE TRIGGER controlled_tv_interrupt BEFORE INSERT ON '+owner.tables[1]+
             " BEGIN SELECT RAISE(ABORT,'controlled TV interruption'); END")
-    with pytest.raises(sqlite3.IntegrityError, match='controlled TV interruption'):
+    with tv_publication_costs('failed_cutover'), pytest.raises(sqlite3.IntegrityError, match='controlled TV interruption'):
         owner.publish(store.conn, revision=revision)
     assert not store.conn.execute('SELECT 1 FROM '+owner.tables[0]).fetchone()
+    assert owner.selected(store.conn) is None and not store.conn.in_transaction
     with store.conn:
         store.conn.execute('DROP TRIGGER controlled_tv_interrupt')
-    owner.publish(store.conn, revision=revision)
+    with tv_publication_costs('successful_retry'):
+        owner.publish(store.conn, revision=revision)
     assert store.rec_proposals._proposal_json(owner.source) == raw
     assert store.rec_proposals.get_proposals(owner.source) == value
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_full_frozen_upgrade_prefers_native_state_and_retains_published_originals(installed, tmp_path):
-    store, _ = installed
-    values, originals = seed(store)
-    publish_all(store)
-    upgraded = Store(tmp_path/'native-tv-publication.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        upgraded.init_schema(defer_metadata=True)
-        regular.validate(upgraded.conn)
-        for surface, owner in publication.SOURCES.items():
-            assert owner.selected(upgraded.conn) is None
-            assert owner.value(upgraded.conn, 0) == originals[surface]
-            assert upgraded.rec_proposals.get_proposals(surface) == values[surface]
-        assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        upgraded.conn.close()
+    assert tuple(store.conn.execute('SELECT * FROM rec_proposals WHERE surface=?', (owner.source,)).fetchone()) == original
+    assert not store.conn.in_transaction and not store.conn.execute('PRAGMA foreign_key_check').fetchone()

@@ -1,5 +1,7 @@
 import logging
+from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -8,6 +10,7 @@ from yt_playlist.rec import embedding_training as embed, model_selection as ms, 
 from tests import model_support
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.util.matching import identity_key
+from tests.repository_mock_support import no_database, repository_store
 
 
 def _result(now=1000, status="applied"):
@@ -42,23 +45,31 @@ def test_forecast_expiry_preserves_summary_and_active_exact_restore(store, monke
     assert store.rec_model.get_rec_vectors() == [incumbent]
 
 
-def test_readiness_explains_initial_wait_pause_cooldown_and_fresh_data(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+def test_readiness_explains_initial_wait_pause_cooldown_and_fresh_data(no_database):
+    store = repository_store(
+        values={'read_view': Mock()},
+        settings={'get_setting': None},
+        rec_evidence={'evaluation_history_bounds': (None, None)},
+        rec_model={'rec_vectors_count': 0},
+        model_selection={'latest_daily_selection': None, 'comparison_activity': {}},
+    )
+    store.read_view.return_value = nullcontext(store)
     assert ms.readiness(store, 1000)["state"] == "waiting"
-    store.rec_model.replace_rec_vectors([_owned_vector(store, str(i), 2) for i in range(100)])
-    store.history.record_history_plays(iid, 0, ["context"], source_timezone="UTC")
-    store.history.record_history_plays(iid, 46 * ms.DAY, ["later"], source_timezone="UTC")
+    store.rec_model.rec_vectors_count.return_value = 100
+    store.rec_evidence.evaluation_history_bounds.return_value = (0, 46 * ms.DAY)
     now = 47 * ms.DAY
     assert ms.readiness(store, now)["state"] == "ready"
     result = _result(now, "retained")
     result.update(kind='daily', evidence_end=now)
-    store.model_selection.start_selection(now, result)
+    store.model_selection.latest_daily_selection.return_value = result
     assert "next_at" in ms.readiness(store, now)
     later = now + 2 * ms.DAY
     assert "freshly played" in ms.readiness(store, later)["reason"]
-    store.history.record_history_plays(iid, later - 1, [f"fresh{i}" for i in range(30)], source_timezone="UTC")
+    store.model_selection.comparison_activity.return_value = {
+        f'fresh{i}': later - 1 for i in range(30)}
     assert ms.readiness(store, later)["state"] == "ready"
-    store.settings.set_setting("rec_selection_paused", "1")
+    store.model_selection.comparison_activity.assert_called_with(now, later)
+    store.settings.get_setting.side_effect = lambda key: '1' if key == 'rec_selection_paused' else None
     assert ms.readiness(store, later)["state"] == "paused"
 
 

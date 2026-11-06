@@ -15,12 +15,12 @@ def records():
             for i in range(12)]
 
 
-def test_default_menu_reserves_discovery_and_excludes_duplicate_artists(store):
+def test_default_menu_reserves_discovery_and_excludes_duplicate_artists():
     pool = records()
     pool[7]['artist'] = pool[6]['artist']
     pool[8]['artist'] = pool[0]['artist']
     for epoch in range(8):
-        items, policy = album_choices.menu(pool, album_tuning.defaults(store), epoch)
+        items, policy = album_choices.menu(pool, {'novelty': .5}, epoch)
         assert len(items) == len({item['artist'] for item in items}) == 4
         assert policy['discovery_offered'] == policy['discovery_requested'] == 2
         assert policy['coverage_gap'] == 0
@@ -29,29 +29,30 @@ def test_default_menu_reserves_discovery_and_excludes_duplicate_artists(store):
         assert len(policy['eligible_options']) == len(pool)
 
 
-def test_explicit_refresh_gets_four_different_records_and_reports_constraint_shortages(store):
+def test_explicit_refresh_gets_four_different_records_and_reports_constraint_shortages():
     pool = records()
-    first, _ = album_choices.menu(pool, album_tuning.defaults(store))
+    first, _ = album_choices.menu(pool, {'novelty': .5})
     excluded = [item['browse_id'] for item in first]
-    second, policy = album_choices.menu(pool, album_tuning.defaults(store), 1, exclude=excluded)
+    second, policy = album_choices.menu(pool, {'novelty': .5}, 1, exclude=excluded)
     assert len(second) == 4 and not set(excluded) & {item['browse_id'] for item in second}
     assert policy['previous_selection'] == sorted(excluded)
     # A sparse genre/artist pool still supplies a complete set where possible.
-    sparse, _ = album_choices.menu(pool[:4], album_tuning.defaults(store), exclude=excluded)
+    sparse, _ = album_choices.menu(pool[:4], {'novelty': .5}, exclude=excluded)
     assert len(sparse) == 4
 
 
-def test_discovery_shortage_and_genre_restriction_remain_explicit(store):
+def test_discovery_shortage_and_genre_restriction_remain_explicit():
     pool = records()[:7]
-    items, policy = album_choices.menu(pool, album_tuning.defaults(store), genres=['techno'])
+    axes = {'Techno': ('techno', 'techno'), 'Jazz': ('jazz', 'jazz')}
+    items, policy = album_choices.menu(pool, {'novelty': .5}, genres=['techno'], genre_axes=axes)
     assert all(item['genre'] == 'Techno' for item in items)
     assert policy['discovery_requested'] == 2 and policy['discovery_offered'] == 1
     assert policy['coverage_gap'] == 1
     assert len(items) == 4
-    assert album_choices.menu(pool, album_tuning.defaults(store), genres=['not-present'])[0] == []
+    assert album_choices.menu(pool, {'novelty': .5}, genres=['not-present'], genre_axes=axes)[0] == []
 
 
-def test_comfort_and_novelty_change_familiarity_and_reach_without_an_era_bias(store):
+def test_comfort_and_novelty_change_familiarity_and_reach_without_an_era_bias():
     pool = records()[:6]
     near, familiar = album_choices.menu(pool, {'novelty': 0})
     far, novel = album_choices.menu(pool, {'novelty': 1})

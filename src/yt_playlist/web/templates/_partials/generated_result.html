@@ -32,9 +32,13 @@
 {# Fetch consumers read this receipt without inserting a success screen. #}
 <span hidden data-generated-playlist="{{ ytm }}"></span>
 <script>(function () {
-  window.addEventListener('pagehide', function () {
+  function complete() {
+    window.removeEventListener('pagehide', complete);
+    window.removeEventListener('app-page-changed', complete);
     genComplete({{ launch_id|default('')|tojson }}, {{ ytm|tojson }}, false, false, true);
-  }, {once: true});
+  }
+  window.addEventListener('pagehide', complete, {once: true});
+  window.addEventListener('app-page-changed', complete, {once: true});
   window.location.assign({{ (playlist_url|default('/playlist/' ~ pid))|tojson }});
 })();</script>
 {% endif %}

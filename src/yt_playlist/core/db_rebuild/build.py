@@ -15,7 +15,7 @@ import time
 from typing import Callable
 
 from .. import db_handles, db_space
-from ..policy_recovery import _verify
+from .sqlite_checks import verify as _verify
 from .installed_format import validate as _format
 
 
@@ -384,7 +384,8 @@ def plan(conn, *, now, references='1'):
     if not generations <= tables:
         return predicates
     owned = ('prepared_outputs', 'recommendation_bundle_framing', 'recommendation_surface_pools',
-             'recommendation_build_pools', 'recommendation_generation_surfaces', 'recommendation_builds')
+             'recommendation_build_pools', 'recommendation_generation_surfaces', 'recommendation_builds',
+             'recommendation_pool_revalidations')
     conn.execute('CREATE TEMP TABLE compact_drop_generations(id INTEGER PRIMARY KEY)')
     conn.execute('INSERT INTO compact_drop_generations SELECT g.id FROM main.recommendation_generations g '
         'WHERE NOT EXISTS(SELECT 1 FROM main.recommendation_heads h WHERE h.generation_id=g.id) '
@@ -410,7 +411,8 @@ def plan(conn, *, now, references='1'):
             predicates[table] = 's.generation_id NOT IN (SELECT id FROM compact_drop_generations)'
     if 'recommendation_pools' not in tables:
         return predicates
-    owners = ('recommendation_surface_pools', 'recommendation_build_pools', 'prepared_outputs')
+    owners = ('recommendation_surface_pools', 'recommendation_build_pools', 'prepared_outputs',
+              *(('recommendation_pool_revalidations',) if 'recommendation_pool_revalidations' in tables else ()))
     if not set(owners) <= tables:
         return predicates
     conn.execute('CREATE TEMP TABLE compact_drop_pools(id INTEGER PRIMARY KEY)')

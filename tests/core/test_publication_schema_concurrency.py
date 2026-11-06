@@ -1,5 +1,6 @@
 """Repeated definition checks must leave the writer available to ordinary work."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import sqlite3
 import threading
 
@@ -55,7 +56,7 @@ def test_existing_schema_validation_allows_serving_writes_and_regular_ddl(instal
     def inspect():
         nonlocal worker_thread
         worker_thread = threading.get_ident()
-        with sqlite3.connect(store._db_path, timeout=.1) as reader:
+        with closing(sqlite3.connect(store._db_path, timeout=.1)) as reader, reader:
             reader.row_factory = sqlite3.Row
             install(reader)
     with ThreadPoolExecutor() as pool:

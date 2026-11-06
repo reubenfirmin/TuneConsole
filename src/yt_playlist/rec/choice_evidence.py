@@ -21,18 +21,23 @@ logger = logging.getLogger(__name__)
 FORMATS = {"albums", "mixes", "radio"}
 ACTIONS = {"visible", "open", "choice", "start", "save", "promote", "return", "experience", "feedback", "withdraw", "close"}
 STORAGE_PENDING = 'listening_evidence_storage_pending'
+STORAGE_PHASE = 'listening_evidence_storage_phase'
+STORAGE_SECONDS = 5
 
 
-def present(store, format, options, now, *, context, window, episode_id=None):
+def present(store, format, options, now, *, context, window, episode_id=None, vibe=None):
     """Rerenders reuse one complete menu; edits or new model inputs create another opportunity."""
     if getattr(store, 'activity_paused', False) or getattr(store, '_read_only', False):
         return None
     if format == 'mixes':
         options = [mix_choices.visible_option(option) for option in options]
         context = mix_choices.context(_context_manifest(store.rec_ledger.evidence(), context), mixes=True)
-    identity = hashlib.sha256(canonical([format, window, options, context])).hexdigest()[:32]
+    menu = [format, window, options, context]
+    if vibe is not None:
+        menu.append(vibe)
+    identity = hashlib.sha256(canonical(menu)).hexdigest()[:32]
     if issue(store, format, options, now, context=context, episode_id=episode_id,
-             opportunity_id=identity, reuse=True) is None:
+             opportunity_id=identity, reuse=True, vibe=vibe) is None:
         return None
     held = store.rec_proposals.get_proposals('choice_window:' + format) or {}
     if held.get('opportunity_id') != identity:
@@ -143,12 +148,17 @@ def _model_context(store, now, *, facet_leans=None):
                              "content": taste(scoring.content_taste(store, now=now)) if has_content else None}}}
 
 
-def issue(store, format, options, now, *, context, episode_id=None, opportunity_id=None, reuse=False):
+def issue(store, format, options, now, *, context, episode_id=None, opportunity_id=None, reuse=False,
+          vibe=None):
     """Freeze the complete actual menu and its pre-response state, with optional scored forecast."""
     if getattr(store, 'activity_paused', False):
         return None
     if format not in FORMATS or not math.isfinite(now):
         raise ValueError("Unknown listening format")
+    if vibe is not None:
+        from yt_playlist.rec.home_vibe import PRESETS
+        if format != 'mixes' or vibe not in PRESETS:
+            raise ValueError('Unknown displayed Vibe')
     options, context = deepcopy(list(options)), deepcopy(context)
     if format == 'mixes':
         options = [mix_choices.visible_option(option) for option in options]
@@ -166,6 +176,10 @@ def issue(store, format, options, now, *, context, episode_id=None, opportunity_
     record = {"schema": 1, "id": identity, "format": format, "at": now, "observed_at": now,
               "episode_id": episode_id or identity,
               "options": options}
+    if vibe is not None:
+        # The visible tuning choice belongs to the small decision envelope.
+        # It carries no playback recipe, recording membership or model history.
+        record['vibe'] = vibe
     if format == 'mixes':
         record['context_at'] = context.get('at', now)
     if comparison:
@@ -218,18 +232,16 @@ def _issue_record(store, record, context, *, reuse=False):
     record = {**record, 'context': hashlib.sha256(canonical(context)).hexdigest(),
               'prediction': prediction, 'prediction_status': 'issued' if scored else 'unscored'}
     if record['format'] == 'mixes':
-        with store._lock:
-            if mix_choices.available(store.conn):
-                # Publication acknowledges SQL descriptor custody before the event file.
-                # A failed event write leaves a conservative projection for this ID.
-                with store.conn:
-                    record = mix_choices.publish_menu(store.conn, record, record['context'])
+        # Publication acknowledges SQL descriptor custody before the event file.
+        # A failed event write leaves a conservative projection for this ID.
+        record = store.rec_ledger.publish_mix_menu(record, record['context'])
     ledger.put("opportunity", identity, record, artifact=context)
     return identity
 
 
-def respond(store, opportunity_id, kind, now, *, option_id=None, action_id=None, visible=(), details=None):
-    """Queue a frozen observation; the worker validates it against the actual issued menu."""
+def respond(store, opportunity_id, kind, now, *, option_id=None, action_id=None, visible=(), details=None,
+            synchronous=False):
+    """Queue an observation, or persist a durable intent under nonblocking admission."""
     if getattr(store, 'activity_paused', False):
         return None
     if kind not in ACTIONS or not math.isfinite(now):
@@ -238,7 +250,7 @@ def respond(store, opportunity_id, kind, now, *, option_id=None, action_id=None,
         raise ValueError("A listening response must name its option")
     options = {'option_id': str(option_id) if option_id is not None else None,
                'action_id': action_id, 'visible': tuple(map(str, visible)), 'details': deepcopy(details)}
-    capture = getattr(store, 'choice_capture', None)
+    capture = None if synchronous else getattr(store, 'choice_capture', None)
     if capture is not None:
         ledger = store.rec_ledger.evidence()
         close = None
@@ -327,11 +339,10 @@ def album_playback_context(store, msg, now, *, account_id=None):
     """Resolve a recent deliberate album queue without treating navigation as playback."""
     from yt_playlist.rec import rec_params
     try:
-        from yt_playlist.core import album_playback_context as playback_context
         # Playback events overlap TV refills and other serving writes. Pin this
         # read on its own connection; the context loader owns a read transaction.
         with store.read_view() as reader:
-            pending = playback_context.load(reader.conn)
+            pending = reader.rec_ledger.album_playback_context()
             attribution_hours = rec_params.get_param(reader, 'choice_attribution_h')
         if (not pending or not 0 <= now - pending['at'] <=
                 attribution_hours * 3600):
@@ -360,9 +371,7 @@ def record_playback(store, msg, now, *, account_id=None):
         pending = album_playback_context(store, msg, now, account_id=account_id)
         if pending:
             if account_id is not None and pending.get('account_id') is None:
-                from yt_playlist.core import album_playback_context as playback_context
-                with store._lock,store.conn:
-                    playback_context.bind(store.conn,pending,account_id)
+                store.rec_ledger.bind_album_playback_context(pending, account_id)
             for kind in ("start", "experience"):
                 safe_respond(store, pending["opportunity_id"], kind, now, option_id=pending["browse"],
                     action_id=f"album:{pending.get('action_id', pending['opportunity_id'])}:{kind}:{msg.get('videoId')}",
@@ -597,7 +606,7 @@ def replay(store, now, predictor=None):
             except ValueError:
                 context = None
             valid = context is not None and context.get("at", offer["at"]) <= offer["at"]
-            options = ([mix_choices.expand(store.conn, option) for option in offer['options']]
+            options = (store.rec_ledger.expand_mix_options(offer['options'])
                        if offer['format'] == 'mixes' else offer['options'])
             forecasts[oid] = ((predictor.predict(context, options) if predictor else offer["prediction"])
                               if valid else None)
@@ -658,24 +667,23 @@ def replay(store, now, predictor=None):
 def maintain_storage(store, now, *, required_bytes=0, protected_artifacts=()):
     from yt_playlist.core.activity import WorkBudgetExceeded, work_budget
     store = group_roots.source(store)
-    # Foreground rendering can read published state while this owner recovers
-    # evidence. It must not synchronously join the publication admission lock.
+    # Pending work is scheduling intent, not an unsafe installed format. The
+    # domain admission/read leases fence publication and collection per turn.
     with store._evidence_state_lock:
         if getattr(store, '_evidence_maintenance', 0):
             return {'deferred': True}
         store._evidence_maintenance = getattr(store, '_evidence_maintenance', 0) + 1
         store._evidence_recovery_pending = True
     try:
-        with group_roots.writer(store) as conn:
-            conn.execute('INSERT INTO settings(key,value) VALUES (?,\'1\') ON CONFLICT(key) '
-                         "DO UPDATE SET value='1' WHERE value<>'1'", (STORAGE_PENDING,))
-        with work_budget(5), group_roots.admission(store):
+        with group_roots.writer(store):
+            store.settings.publish_values({STORAGE_PENDING: '1'})
+        with work_budget(STORAGE_SECONDS), group_roots.admission(store):
             result = _maintain_storage(store, now, required_bytes=required_bytes,
                                       protected_artifacts=protected_artifacts)
         store._evidence_recovery_failed = False
         if not result.get('deferred'):
-            with group_roots.writer(store) as conn:
-                conn.execute('UPDATE settings SET value=\'0\' WHERE key=?', (STORAGE_PENDING,))
+            with group_roots.writer(store):
+                store.settings.publish_values({STORAGE_PENDING: '0', STORAGE_PHASE: 'inventory'})
             store._evidence_recovery_pending = False
         return result
     except WorkBudgetExceeded:
@@ -701,12 +709,25 @@ def _maintain_storage(store, now, *, required_bytes=0, protected_artifacts=()):
     # Each inventory step commits its own progress and checks the same outer
     # deadline. A large historical checkpoint should not buy another full scan
     # merely because it fills the inventory's small byte batch.
-    store._evidence_phase = 'inventory'
-    while group_root_backfill.maintain(store):
-        check_cancellable_work()
+    phase = store.settings.get_setting(STORAGE_PHASE) or 'inventory'
+    if phase not in {'inventory', 'checkpoint', 'retention'}:
+        raise ValueError('Unknown listening evidence maintenance phase: ' + phase)
+    store._evidence_phase = phase
+    if phase == 'inventory':
+        while group_root_backfill.maintain(store):
+            check_cancellable_work()
+        store.settings.set_setting(STORAGE_PHASE, 'checkpoint')
+        phase = store._evidence_phase = 'checkpoint'
     ledger = store.rec_ledger.evidence()
-    store._evidence_phase = 'checkpoint'
-    compacted = choice_retention.acknowledge(store, now, compile_report)
+    if phase == 'checkpoint':
+        # Small durable prefixes bound individual transactions. Keep using the
+        # allotted slice instead of paying a whole-ledger scan after each prefix.
+        while True:
+            choice_retention.acknowledge(store, now, compile_report)
+            if not store._choice_retention_more:
+                break
+            check_cancellable_work()
+        store.settings.set_setting(STORAGE_PHASE, 'retention')
     protected = set(protected_artifacts)
     opportunities = set()
     capture = getattr(store, 'choice_capture', None)
@@ -722,20 +743,16 @@ def _maintain_storage(store, now, *, required_bytes=0, protected_artifacts=()):
     if live.get('phase') in ('preparing', 'observing') and live.get('vectors'):
         protected.add(live['vectors'])
     try:
-        from yt_playlist.core import radio_storage
         with store.read_view() as reader:
-            radio = radio_storage.load(reader.conn)[0] or {}
+            radio = reader.radio_checkpoints.load()[0] or {}
         if not radio.get('stopped'):
             direction = radio.get('directions') or {}
             if direction.get('menu_id'):
                 opportunities.add(direction['menu_id'])
     except (TypeError, ValueError):
         pass
-    with store._lock:
-        if store._model_projections:
-            protected.update(row[0] for row in store.conn.execute('SELECT artifact FROM model_pair_contexts'))
-        surfaces = [row[0] for row in store.conn.execute(
-            "SELECT surface FROM rec_proposals WHERE surface LIKE 'model_pair:%'")]
+    pair_artifacts, surfaces = store.model_selection.retained_pair_artifacts()
+    protected.update(pair_artifacts)
     for surface in surfaces:
         pair = store.rec_proposals.get_proposals(surface) or {}
         data = pair.get('data') if isinstance(pair.get('data'), dict) else pair
@@ -762,21 +779,24 @@ def _maintain_storage(store, now, *, required_bytes=0, protected_artifacts=()):
                 protected.add(context['artifact'])
     monitor = store.rec_proposals.get_proposals(product_comparison.MONITOR) or {}
     store._evidence_phase = 'retention'
+    progress = store._evidence_progress = {}
     result = ledger.maintain(
         now - rec_params.get_param(store, "choice_retention_d") * 86400,
         protected_artifacts=protected, protected_runs={live.get('run_id') if live.get('phase') == 'observing' else None,
             monitor.get('run_id') if not monitor.get('complete') else None} - {None},
         protected_opportunities=opportunities, orphan_before=now - 600, pressure_before=now - 3600,
-        compacted_contexts=compacted, context_before=now - choice_retention.DIAGNOSTIC_DAYS * 86400,
+        # Validated durable checkpoints include completed prefixes from before
+        # a restart; this process's iterator is not the acknowledgement record.
+        compacted_contexts=None, context_before=now - choice_retention.DIAGNOSTIC_DAYS * 86400,
         context_byte_budget=int(ledger.byte_budget * choice_retention.DIAGNOSTIC_FRACTION),
         required_bytes=required_bytes,
-        pending_protection=capture.protection if capture is not None else None,
+        progress=progress,
+        pending_protection=lambda: store.album_feedback.protection(capture),
         retire_references=(lambda offers, checkpoints: group_roots.retired(store, offers, checkpoints))
             if group_roots.enabled(store) else None)
-    group_roots.maintain_retention(store)
-    with store._lock:
-        roots_pending = (group_roots.enabled(store) and not store.conn.execute(
-            'SELECT roots_complete FROM group_retention_state WHERE id=1').fetchone()[0])
+    # Derived-history collection has its own RETENTION job and time slices.
+    # It must not consume this owner's deadline after ledger work completed.
+    roots_pending = group_roots.enabled(store) and not store.group_evidence.roots_complete()
     if getattr(store, '_choice_retention_more', False) or roots_pending:
         result['deferred'] = True
     return result

@@ -23,7 +23,6 @@ from tests.onboarding_support import publish_personal_mix
 from yt_playlist.core import fao
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.evidence_ledger import canonical, EvidenceBudgetExceeded, EvidenceLedger
-from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.storage_maintenance import EVIDENCE_MESSAGE, EVIDENCE_RETRY_MESSAGE
 from yt_playlist.core.store import Store
 from yt_playlist.rec import choice_evidence, choice_retention, group_root_backfill, group_roots, home_cards, mode_surfaces, stored_home
@@ -63,7 +62,7 @@ def assert_maintenance_banner(response, *, visible=False):
     assert len(banners) == 1 and ('hidden' not in banners[0]) is visible
     if visible:
         assert ''.join(banner_text).strip() == (
-            'Performing database maintenance - this should take just a few minutes.')
+            'Optimizing app storage; some recommendations are temporarily unavailable.')
 
 
 def historical_inventory(store, identity):
@@ -91,13 +90,21 @@ def historical_inventory(store, identity):
 
 
 @pytest.fixture
-def library(tmp_path, request):
+def installed_v94_store(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path / 'library.db')
-    if getattr(request, 'param', None) == 94:
-        # This inventory exists on installed predecessors. Current installations
-        # reject generic proposal writes after the domain-owner cutover (#486).
-        migrate(store.conn, registry=registry.MIGRATIONS[:94])
-    store.init_schema()
+    try:
+        _pristine_installed_schema(94).backup(store.conn)
+        store.init_schema()
+        yield store
+    finally:
+        store.conn.close()
+
+
+@pytest.fixture
+def library(request):
+    # Historical inventory retains genuine predecessor proposal writes (#486).
+    fixture = 'installed_v94_store' if getattr(request, 'param', None) == 94 else 'file_backed_store'
+    store = request.getfixturevalue(fixture)
     for key in ('one', 'two'):
         seed_catalog_track(store, key, key, 'Artist', video_id=key, genre='house')
     value = prepared('first', 1)
@@ -111,10 +118,7 @@ def library(tmp_path, request):
     choice_evidence.issue(store, 'mixes', [{'id': 'one'}, {'id': 'two'}], 10,
         context={'at': 10, 'group_generation': 'first', 'musical_groups': [
             {'group_id': 'stable-leaf', 'version': 'first-leaf', 'parent_version': 'first-parent'}]})
-    try:
-        yield store
-    finally:
-        store.conn.close()
+    return store
 
 
 def test_correction_identity_and_current_learning_descriptors_match_the_published_head(library, monkeypatch):
@@ -196,7 +200,7 @@ def test_small_inventory_batches_advance_before_repeating_the_whole_ledger_scan(
 
 
 @pytest.mark.parametrize('failure', [WorkBudgetExceeded, WorkClosing, OSError])
-def test_pending_recovery_survives_interruption_and_clears_only_after_success(library, monkeypatch, failure):
+def test_pending_cleanup_survives_interruption_without_pausing_activity(library, monkeypatch, failure):
     path = library._db_path
     original = choice_evidence._maintain_storage
     monkeypatch.setattr(choice_evidence, '_maintain_storage', lambda *a, **kw: (_ for _ in ()).throw(failure('stop')))
@@ -205,11 +209,12 @@ def test_pending_recovery_survives_interruption_and_clears_only_after_success(li
     else:
         with pytest.raises(failure):
             choice_evidence.maintain_storage(library, 11)
-    assert library.activity_paused and library._evidence_maintenance == 0
+    assert not library.activity_paused and library._evidence_maintenance == 0
     assert library.settings.get_setting(choice_evidence.STORAGE_PENDING) == '1'
     app = create_app(library, lambda: {}, background_work=False)
     status = app.state.ctx.storage_maintenance.status()
-    assert status['active'] and not status['recording']
+    assert not status['active'] and status['recording']
+    assert status['evidence_maintenance']['pending']
     assert status['message'] == (EVIDENCE_MESSAGE if failure is WorkBudgetExceeded else EVIDENCE_RETRY_MESSAGE)
     monkeypatch.setattr(choice_evidence, '_maintain_storage', original)
     # A new Store and worker reconstruct intent from committed state, without
@@ -218,7 +223,7 @@ def test_pending_recovery_survives_interruption_and_clears_only_after_success(li
     reopened.init_schema()
     restarted = create_app(reopened, lambda: {}, background_work=True)
     worker = restarted.state.ctx.rec_worker
-    assert reopened.activity_paused
+    assert not reopened.activity_paused
     scheduled = []
     monkeypatch.setattr(worker, '_start_loop', lambda: scheduled.append(True))
     worker._poll_evidence_storage()
@@ -269,25 +274,25 @@ def test_home_and_navigation_remain_available_while_processing_historical_prepar
             started = time.monotonic()
             home = client.get('/')
             assert home.status_code == 200
-            assert_maintenance_banner(home, visible=True)
+            assert_maintenance_banner(home)
             for lane in ('comfort', 'wheelhouse', 'explore', 'temporal'):
                 assert f'A {lane} mix for you' in home.text
             assert choice_evidence.maintain_storage(library, 1000) == {'deferred': True}
             assert client.get('/playlists').status_code == 200
-            assert client.post('/sync').status_code == 503
+            assert client.post('/settings/lastfm-key', data={'key': 'during-inventory'}).status_code == 204
             # This path used to acquire a durable pending root before opening
             # its private reader, and therefore waited for all storage work.
             stored_home.unmodeled_cards(library, 1000, card_builder=home_cards._carded)
             stored_home.assemble(library, 1000, 0)
-            # Maintenance freezes publications. Radio can select that snapshot
-            # without a SQL lease, then retain it before workers resume (#649).
+            # SQL publication leases do not wait for evidence file preparation.
+            # Radio retains the selected generation while writers continue.
             radio = PreparedRadio(library, 1000)
             try:
                 with library.read_view() as reader:
                     head = next((value for surface in ('radio', 'home', 'fresh')
                                  if (value := reader.recommendations.head(surface)) is not None), None)
                 assert radio.generation == (head['id'] if head else None)
-                assert radio._lifetime is None
+                assert (radio._lifetime is not None) == bool(head)
             finally:
                 radio.close()
             assert time.monotonic() - started < 2
@@ -354,10 +359,11 @@ def test_inventory_preparation_does_not_hold_the_home_serving_lock(library, monk
             started = time.monotonic()
             response = client.get('/')
             assert response.status_code == 200
-            assert_maintenance_banner(response, visible=True)
+            assert_maintenance_banner(response)
             assert 'A comfort mix for you' in response.text
             assert client.get('/playlists').status_code == 200
-            assert client.get('/storage-maintenance/status').json()['active']
+            status = client.get('/storage-maintenance/status').json()
+            assert not status['active'] and status['evidence_maintenance']['running']
             assert time.monotonic() - started < 2
             assert not future.done()
             assert library.conn.execute('SELECT roots_complete FROM group_retention_state').fetchone()[0] == 0
@@ -582,7 +588,7 @@ def test_cached_home_does_not_wait_for_inventory_file_preparation(library, monke
                     observed['home_timed_out'] = True
                 else:
                     assert home.status_code == 200 and 'A comfort mix for you' in home.text
-                    assert_maintenance_banner(home, visible=True)
+                    assert_maintenance_banner(home)
                     assert not maintenance.done() and not release.is_set()
                 observed['home_elapsed_before_release'] = time.monotonic() - started
                 observed['maintenance_held_before_release'] = not maintenance.done()
@@ -629,29 +635,123 @@ def test_cached_home_does_not_wait_for_inventory_file_preparation(library, monke
 
 
 def test_admission_race_refuses_capture_and_cleans_its_lifetime_file(library, monkeypatch):
+    from yt_playlist.core import policy_documents
+
     jobs = []
     library.choice_capture = CaptureQueue(lambda job: jobs.append(job) or True)
     entered, release = threading.Event(), threading.Event()
     pending = group_roots.pending
+    admission = group_roots.admission
+    directory = group_roots.group_documents.directory(library.conn) / '.pending'
 
-    def late(*args, **kwargs):
+    def late(store, captured, at):
+        assert captured == {}, 'Listening choices must not restore group-history pins'
         entered.set()
         assert release.wait(5)
-        return pending(*args, **kwargs)
+        return pending(store, captured, at)
 
+    # #688 removed historical-group custody from queued listening choices. An
+    # empty capture must stay usable while the independent group owner is busy.
     monkeypatch.setattr(group_roots, 'pending', late)
+    try:
+        with ThreadPoolExecutor(1) as executor:
+            future = executor.submit(choice_evidence.issue, library, 'mixes', [{'id': 'one'}], 12,
+                context={'group_generation': 'first'}, opportunity_id='no-group-menu')
+            try:
+                assert entered.wait(2)
+                with admission(library):
+                    release.set()
+                    assert future.result(1) == 'no-group-menu'
+                    capture, = jobs
+                    assert capture.opportunity['id'] == 'no-group-menu'
+                    assert 'group_generation' not in capture.group_context
+                    assert library.choice_capture.get('no-group-menu')['id'] == 'no-group-menu'
+                    assert not library.rec_ledger.evidence().get('opportunity', 'no-group-menu')
+                    assert not list(directory.glob('*.lock'))
+                    assert not library.conn.execute(
+                        "SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
+            finally:
+                release.set()
+        assert capture.run() == 'no-group-menu'
+        assert library.rec_ledger.evidence().get('opportunity', 'no-group-menu')['id'] == 'no-group-menu'
+    finally:
+        release.set()
+        for job in jobs:
+            job.close()
+            job.close()
+    assert library.choice_capture.get('no-group-menu') is None
+    assert not library.choice_capture.opportunities()
+    jobs.clear()
+    monkeypatch.setattr(group_roots, 'pending', pending)
+
+    # A genuine group reader still needs admission. Pause after _pending has
+    # reserved its OS lifetime file, before it tries the real admission lock.
+    entered.clear()
+    release.clear()
+
+    def late_admission(*args, **kwargs):
+        assert kwargs.get('blocking') is False
+        entered.set()
+        assert release.wait(5)
+        return admission(*args, **kwargs)
+
+    monkeypatch.setattr(group_roots, 'admission', late_admission)
     with ThreadPoolExecutor(1) as executor:
-        future = executor.submit(choice_evidence.issue, library, 'mixes', [{'id': 'one'}], 12,
-                                 context={'group_generation': 'first'})
+        future = executor.submit(pending, library, {'group_generation': 'first'}, 12)
         try:
             assert entered.wait(2)
-            with group_roots.admission(library):
+            path, = directory.glob('*.lock')
+            with path.open('r+b') as stream:
+                unlock = policy_documents._try_file_lock(stream, exclusive=True)
+                try:
+                    assert unlock is None, 'The paused capture must already own its lifetime file'
+                finally:
+                    if unlock is not None:
+                        unlock()
+            with admission(library):
                 release.set()
-                assert future.result(1) is None
-                assert not jobs
+                with pytest.raises(WorkBudgetExceeded, match='publication'):
+                    future.result(1)
+                assert not jobs and not library.choice_capture.opportunities()
+                assert not list(directory.glob('*.lock'))
+                assert not library.conn.execute(
+                    "SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
         finally:
             release.set()
-    directory = group_roots.group_documents.directory(library.conn) / '.pending'
+            # If an earlier assertion failed before acquiring admission, the
+            # reader may have succeeded. Retire its real callback before exit.
+            try:
+                close = future.result(2)
+            except WorkBudgetExceeded:
+                pass
+            else:
+                if close is not None:
+                    close()
+    monkeypatch.setattr(group_roots, 'admission', admission)
+
+    # The same nonempty reader succeeds once the contended owner releases,
+    # proving the negative did not merely exercise an absent generation.
+    close = pending(library, {'group_generation': 'first'}, 12)
+    try:
+        assert callable(close)
+        path, = directory.glob('*.lock')
+        assert library.conn.execute("SELECT 1 FROM group_evidence_owners "
+            "WHERE kind='pending' AND external_key=?", (path.stem,)).fetchone()
+    finally:
+        if close is not None:
+            close()
+            close()
+
+    # Synchronous publication still needs admission and must not persist an
+    # offer while another owner holds it. There is no queued fallback here.
+    with monkeypatch.context() as synchronous:
+        synchronous.delattr(library, 'choice_capture')
+        with ThreadPoolExecutor(1) as executor, admission(library):
+            future = executor.submit(choice_evidence.issue, library, 'mixes', [{'id': 'one'}], 12,
+                context={'group_generation': 'first'}, opportunity_id='refused-menu')
+            assert future.result(1) is None
+            assert not library.rec_ledger.evidence().get('opportunity', 'refused-menu')
+    assert not jobs and not library.choice_capture.opportunities()
     assert not list(directory.glob('*.lock'))
     assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
 
@@ -734,7 +834,7 @@ def test_accepted_fifo_tail_keeps_roots_and_retries_while_recovery_is_pending(li
     monkeypatch.setattr(EvidenceLedger, 'put', full)
     monkeypatch.setattr(choice_evidence, '_maintain_storage', deferred)
     worker._flush_measurements()
-    assert library.activity_paused
+    assert not library.activity_paused
     assert list(worker.jobs.measurements) == captures
     assert library.choice_capture.get(oid)
     # The accepted FIFO owns its immutable menu/response custody. Compact mix
@@ -798,8 +898,9 @@ def test_process_interruption_releases_publication_and_restart_finishes_recovery
         try:
             reopened.init_schema()
             app = create_app(reopened, lambda: {}, background_work=True)
-            assert reopened.activity_paused
-            assert app.state.ctx.storage_maintenance.status()['active']
+            assert not reopened.activity_paused
+            status = app.state.ctx.storage_maintenance.status()
+            assert not status['active'] and status['evidence_maintenance']['pending']
             for _ in range(10):
                 if not choice_evidence.maintain_storage(reopened, 100).get('deferred'):
                     break

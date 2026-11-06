@@ -1,35 +1,11 @@
-import sqlite3
-
 import pytest
-from yt_playlist.core.store import Store
 from tests.mode_fixtures import seed_modes
-from tests.historical_support import upgrade_fixture
 
 
 @pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    seed_modes(s,1,2)
-    return s
-
-
-def test_migration_adds_ranker_columns_to_old_db(tmp_path):
-    # simulate a pre-#57 DB without the ranker columns
-    db = tmp_path / "old.db"
-    raw = sqlite3.connect(db)
-    raw.execute("CREATE TABLE rec_mode_impressions (epoch INTEGER NOT NULL, lane TEXT NOT NULL, "
-                "mode_id INTEGER NOT NULL, created_at REAL NOT NULL, PRIMARY KEY (epoch, lane))")
-    raw.execute("CREATE TABLE rec_mode_picks (playlist_id INTEGER PRIMARY KEY, "
-                "mode_id INTEGER NOT NULL, created_at REAL NOT NULL)")
-    raw.commit()
-    raw.close()
-    s = Store(str(db))
-    upgrade_fixture(s)
-    icols = {r["name"] for r in s.conn.execute("PRAGMA table_info(rec_mode_impressions)")}
-    pcols = {r["name"] for r in s.conn.execute("PRAGMA table_info(rec_mode_picks)")}
-    assert "ranker" in icols
-    assert "ranker" in pcols
+def store(store):
+    seed_modes(store,1,2)
+    return store
 
 
 def test_impressions_persist_ranker_and_accept_legacy_two_tuple(store):
@@ -44,9 +20,3 @@ def test_picks_persist_ranker_and_accept_legacy_pick(store):
     store.modes.log_pick(11, 2, 200.0)
     rows = store.conn.execute('SELECT membership_ref_id, ranker FROM rec_mode_picks ORDER BY membership_ref_id').fetchall()
     assert [(row['membership_ref_id'], row['ranker']) for row in rows] == [(10, 'ppr'), (11, None)]
-
-
-def test_legacy_pick_rows_unchanged(store):
-    # #57 must not disturb the 2-tuple pick_rows the Thompson sampler / scoreboard rely on.
-    store.modes.log_pick(10, 1, 100.0, ranker="ppr")
-    assert store.modes.pick_rows() == [(10, 1)]

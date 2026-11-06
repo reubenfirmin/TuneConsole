@@ -13,15 +13,13 @@ import pytest
 
 from yt_playlist.core.activity import Activity, WorkClosing
 from yt_playlist.core.bridge import Bridge
-from yt_playlist.core.store import Store
 from yt_playlist.repos.rec_model import RecModelRepo
 from yt_playlist.web.routes import bridge, clusters
 
 
 @pytest.fixture(params=['memory', 'file'])
-def database(request, tmp_path):
-    store = Store(':memory:' if request.param == 'memory' else tmp_path / 'clusters.db')
-    store.init_schema()
+def database(request, tmp_path, consumer_store):
+    store = consumer_store(':memory:' if request.param == 'memory' else tmp_path / 'clusters.db')
     store.accounts.upsert_account('Listener', 'fixture', None, True)
     keys = []
     for i in range(3):

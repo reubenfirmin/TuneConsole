@@ -8,7 +8,7 @@ import time
 
 from .catalog_identity import RECORDING_FIELDS, ITEM_FIELDS
 from . import genre_classifications, metadata_attempts, metadata_deliveries, metadata_evidence, metadata_values
-from . import metadata_runtime
+from . import metadata_runtime, provider_queries
 from yt_playlist.util import genre_catalog
 
 
@@ -41,6 +41,13 @@ def selected_source(conn, entry_id, field):
 
 
 def select(conn, entry_id, field, value, source, *, now=None, observation_id=None):
+    previous = provider_queries.identity(conn, entry_id, field)
+    result = _select(conn, entry_id, field, value, source, now=now, observation_id=observation_id)
+    provider_queries.resume_changed(conn, entry_id, field, previous)
+    return result
+
+
+def _select(conn, entry_id, field, value, source, *, now=None, observation_id=None):
     if field not in (*ITEM_FIELDS,*RECORDING_FIELDS):
         raise ValueError(f'Unknown metadata field: {field}')
     if metadata_runtime.active(conn):

@@ -4,11 +4,13 @@ from copy import deepcopy
 from html.parser import HTMLParser
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient, seed_catalog_track
 from tests.group_support import publish, recordings
 from tests.home_fixture_support import returning_listener
+from tests.playlist_fixture_support import library_catalog
 from tests.recommendation_support import publish_bundles
 from yt_playlist.core import mix_choices
 from yt_playlist.rec import (choice_evidence, group_home, group_serving, group_viz,
@@ -31,12 +33,17 @@ def library(store):
     return tracks, head
 
 
+@pytest.fixture
+def adaptive_library(store, adaptive_library_template):
+    return adaptive_library_template.restore(store)
+
+
 def service(store):
     return home_cards.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__))
 
 
-def test_default_home_offers_use_exact_graph_definitions_without_legacy_ids(store):
-    _tracks, head = library(store)
+def test_default_home_offers_use_exact_graph_definitions_without_legacy_ids(store, adaptive_library):
+    _tracks, head = adaptive_library
     result = service(store).cards(home_cards.CardsRequest(1200, record=False))
     assert len(result.protos) >= 2
     by_version = {g['version']: g for g in head['groups']}
@@ -60,8 +67,8 @@ def test_default_home_offers_use_exact_graph_definitions_without_legacy_ids(stor
     assert not list(store.rec_ledger.evidence().records('opportunity'))
 
 
-def test_cached_group_headings_are_corrected_without_rewriting_the_prepared_set(store):
-    _tracks, head = library(store)
+def test_cached_group_headings_are_corrected_without_rewriting_the_prepared_set(store, adaptive_library):
+    _tracks, head = adaptive_library
     payload = home_prepared.prepare(store, 1200)
     names = {group['version']: group['name'] for group in head['groups']}
     for menu in payload['menus']:
@@ -79,8 +86,7 @@ def test_cached_group_headings_are_corrected_without_rewriting_the_prepared_set(
     assert payload == original
 
 
-def test_filters_do_not_turn_small_interests_into_unrelated_mixes(store):
-    library(store)
+def test_filters_do_not_turn_small_interests_into_unrelated_mixes(store, adaptive_library):
     data = group_home.inputs(store, 1200)
     cards = group_home.assemble(store, 1200, 0, data, include={'jazz'})
     assert cards and all(p['group_name'] == 'Jazz' for p in cards)
@@ -88,8 +94,7 @@ def test_filters_do_not_turn_small_interests_into_unrelated_mixes(store):
     assert not group_home.assemble(store, 1200, 0, data, include={'metal'})
 
 
-def test_rollback_and_old_preview_schema_do_not_activate_graph_serving(store):
-    library(store)
+def test_rollback_and_old_preview_schema_do_not_activate_graph_serving(store, adaptive_library):
     assert group_serving.policy(store) == 'adaptive'
     store.settings.set_setting('rec_group_serving', 'legacy')
     assert group_serving.policy(store) == 'legacy'
@@ -120,15 +125,15 @@ def test_small_initial_groups_remain_visible_without_replacing_usable_startup_mi
     assert prepared and any(m['protos'] for m in prepared['menus'])
 
 
-def test_prepared_home_and_real_menu_capture_preserve_group_context(store):
-    _tracks, head = library(store)
+def test_prepared_home_and_real_menu_capture_preserve_group_context(store, adaptive_library):
+    _tracks, head = adaptive_library
     payload = home_prepared.prepare(store, 1200)
     assert payload and payload['group_policy'] == 'adaptive'
     assert home_prepared._valid(payload)
     assert payload['choice_context']['group_generation'] == head['generation']
     identity = store.accounts.upsert_account('main', 'cred', None, True)
     returning_listener(store, 'mixes', now=1200)
-    fake = FakeClient()
+    fake = FakeClient(catalog=library_catalog(store))
     clock = [1300]
     app = create_app(store, lambda: {identity: fake}, now_fn=lambda: clock[0])
     with TestClient(app, base_url='http://127.0.0.1') as client:
@@ -169,8 +174,26 @@ def test_prepared_home_and_real_menu_capture_preserve_group_context(store):
         assert recipe['opportunity_id'] == menu['id'] and card['tracks']
         generated = client.post('/home/generate', data={'name': 'Group soak mix',
             'tracks': json.dumps(card['tracks']), 'recipe': json.dumps(recipe)})
-        assert generated.status_code == 200 and 'Saved' in generated.text
-        assert fake.created and fake.added
+        assert generated.status_code == 200
+        created, = fake.created
+        remote_id, title, _description = created
+        expected = [track['video_id'] for track in card['tracks']]
+        assert len(expected) == len(set(expected))
+        assert fake.added == [(remote_id, expected)]
+        assert [track['videoId'] for track in fake.get_playlist(remote_id, limit=None)['tracks']] == expected
+        saved = store.playlists.get_playlist_for_account(identity, remote_id)
+        assert saved.title == title and saved.track_count == len(expected)
+        assert [track['video_id'] for track in store.charts.playlist_tracks_detail(saved.id)] == expected
+        assert store.playlists.get_playlist_groups()[remote_id] == 'Generated'
+        assert f'data-generated-playlist="{remote_id}"' in generated.text
+        assert f'window.location.assign("/playlist/{saved.id}")' in generated.text
+        from yt_playlist.util.action_kinds import COPY_PLAYLIST
+        action, = [action for action in store.actions.get_actions() if action.kind == COPY_PLAYLIST]
+        assert action.status == 'executed'
+        undo, params = json.loads(action.undo_json), json.loads(action.params_json)
+        assert undo['new_ytm'] == remote_id and undo['target_identity'] == identity
+        assert undo['post']['videos'] == expected
+        assert params['added'] == len(expected) and params['skipped'] == 0 and not params['partial']
         choice_evidence.daily(store, 1303)
         state = store.rec_proposals.get_proposals('group_choice_bandit')
         genres = {g.casefold() for g in mix_choices.expand(store.conn, options[0])['genres']}
@@ -188,9 +211,9 @@ def test_prepared_home_and_real_menu_capture_preserve_group_context(store):
         assert 'Server-rendered Home offers' not in choices.text
 
 
-def test_history_only_refresh_and_retirement_accumulate_all_adaptive_menus(store, monkeypatch):
+def test_history_only_refresh_and_retirement_accumulate_all_adaptive_menus(store, monkeypatch, adaptive_library):
     from yt_playlist.rec import candidate_refresh, rec_params
-    library(store)
+    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) is None
     choice_evidence.refresh_report(store, 1200)
     pools = ('mode_bundles', 'fresh_pool', group_serving.SURFACE)
     original_pools = {name: store.rec_proposals._proposal_json(name) for name in pools}
@@ -232,9 +255,8 @@ def test_history_only_refresh_and_retirement_accumulate_all_adaptive_menus(store
     assert {menu['epoch'] for menu in payload['menus']} == set(range(home_prepared.MAX_MENUS))
 
 
-def test_home_worker_retries_partial_adaptive_menus_until_full(store):
+def test_home_worker_retries_partial_adaptive_menus_until_full(store, adaptive_library):
     from yt_playlist.rec.worker_tasks import ServingTasks
-    library(store)
     calls = []
     payload = {'group_policy': 'adaptive', 'modes': [], 'menus': [{}], 'play_exposure': {}}
 
@@ -254,8 +276,8 @@ def test_home_worker_retries_partial_adaptive_menus_until_full(store):
     assert calls.count('Home collections') == 2
 
 
-def test_muting_and_suppression_are_checked_again_after_group_preparation(store):
-    tracks, _head = library(store)
+def test_muting_and_suppression_are_checked_again_after_group_preparation(store, adaptive_library):
+    tracks, _head = adaptive_library
     store.rec_model.set_weight('genre:jazz', 0, lo=0, now=1200)
     store.rec_model.record_feedback('for_you', tracks[0].key, 'dislike', now=1200)
     with store.conn:
@@ -266,8 +288,8 @@ def test_muting_and_suppression_are_checked_again_after_group_preparation(store)
     assert all(t['key'] not in {tracks[0].key, tracks[1].key} for p in cards for t in p['tracks'])
 
 
-def test_active_preparation_freezes_graph_inputs_and_does_not_capture_legacy_models(store, monkeypatch):
-    _tracks, head = library(store)
+def test_active_preparation_freezes_graph_inputs_and_does_not_capture_legacy_models(store, monkeypatch, adaptive_library):
+    _tracks, head = adaptive_library
     from yt_playlist.repos.rec_proposals import RecProposalsRepo
     original = RecProposalsRepo.get_proposals
     preview_reads = []
@@ -290,8 +312,8 @@ def test_active_preparation_freezes_graph_inputs_and_does_not_capture_legacy_mod
     assert context['musical_groups'] and all('choice_context' not in m for m in prepared['menus'])
 
 
-def test_rollback_rejects_cached_adaptive_menus_but_keeps_definitions(store):
-    _tracks, head = library(store)
+def test_rollback_rejects_cached_adaptive_menus_but_keeps_definitions(store, adaptive_library):
+    _tracks, head = adaptive_library
     assert home_prepared.prepare(store, 1200)
     store.settings.set_setting('rec_group_serving', 'legacy')
     scheduled = []
@@ -299,8 +321,8 @@ def test_rollback_rejects_cached_adaptive_menus_but_keeps_definitions(store):
     assert scheduled and store.taste_groups.head_generation() == head['generation']
 
 
-def test_recent_listening_is_mapped_to_exact_graph_memberships_without_vectors(store):
-    tracks, _head = library(store)
+def test_recent_listening_is_mapped_to_exact_graph_memberships_without_vectors(store, adaptive_library):
+    tracks, _head = adaptive_library
     identity = store.accounts.upsert_account('main', 'cred', None, True)
     for i, track in enumerate(tracks[:6]):
         store.history.record_play_event(identity, track.key, f'v{i}', 1200 + i)
@@ -309,8 +331,8 @@ def test_recent_listening_is_mapped_to_exact_graph_memberships_without_vectors(s
     assert reading['now']['segments'] and all(s['label'] == 'House' for s in reading['now']['segments'])
 
 
-def test_definitions_survive_regrouping_and_held_offers_keep_their_context(store):
-    tracks, head = library(store)
+def test_definitions_survive_regrouping_and_held_offers_keep_their_context(store, adaptive_library):
+    tracks, head = adaptive_library
     first = home_prepared.prepare(store, 1200)
     original = home_prepared.cards(store, first, 1300, service(store))
     historical = deepcopy(original.choice_context)
@@ -323,8 +345,8 @@ def test_definitions_survive_regrouping_and_held_offers_keep_their_context(store
     assert store.taste_groups.definition(original.protos[0]['group_version'])
 
 
-def test_taste_main_views_show_served_graph_and_hide_fixed_count_controls(store):
-    _tracks, head = library(store)
+def test_taste_main_views_show_served_graph_and_hide_fixed_count_controls(store, adaptive_library):
+    _tracks, head = adaptive_library
     view = group_viz.mode_layers(store, 1200, group_viz.prepared(store))
     assert view['adaptive']
     assert sum(m['size'] for m in view['modes']) == 64

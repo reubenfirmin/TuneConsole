@@ -121,7 +121,6 @@ def test_outage_defers_every_caller_until_recovery(boundary, store, failure):
     assert len(b.calls) == 1 and len(errors) == 3
     assert all(error.retry_at == 1030 and net.provider_outage(error) for error in errors)
     assert store.enrichment_state.integration_cooldown('discogs')['retry_at'] == 1030
-    discogs.reset()
     assert discogs.tripped()
     b.clock[0] = 1030
     assert discogs.release_details(123, store=store) == release()

@@ -9,11 +9,11 @@ import time
 from dataclasses import dataclass
 from uuid import uuid4
 
-from yt_playlist.core import radio_provenance
 from yt_playlist.library import playlist_generated
 from yt_playlist.library.playlist_metadata import versioned_title
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.rec.radio_candidates import eligible_seeds
+from yt_playlist.rec.radio_restored import RestoredCandidates
 from yt_playlist.web.radio_persistence import PREPARATION_TIMEOUT, restore
 from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending, readback_durations
 from yt_playlist.web.radio_mutations import RadioMutations
@@ -46,9 +46,7 @@ class RadioLaunch:
                 return
             for playlist in pending:
                 self.store.playlists.mark_generated_playlist(playlist)
-            with self.store.conn:
-                for playlist in pending:
-                    radio_provenance.remember(self.store.conn,playlist)
+            self.store.radio_checkpoints.remember_playlists(pending)
             self.store.transient_radio_playlists.difference_update(pending)
 
     def checkpoint_view(self, playing, *, reader=None):
@@ -59,7 +57,7 @@ class RadioLaunch:
             saved = {}
         active = bool(saved.get('playlist') and playing.get('playlist_ytm_id') == saved['playlist']
                       and not saved.get('stopped'))
-        return {**saved_view(saved, active=active), 'resolving': active}
+        return saved_view(saved, active=active)
 
     def resolve(self, candidates, client, identity, day, *, seed_video_id=None,
                 playlist_id=None, menu_id=None):
@@ -80,11 +78,7 @@ class RadioLaunch:
                 else next(iter(candidates.seed_offer(1)), None))
         if seed is None and seed_video_id:
             # A previously offered upload may outlive the prepared pool that contained it.
-            with self.store._lock:
-                row = self.store.conn.execute(
-                    "SELECT identity_key AS key, video_id, title, artist, album, thumbnail, "
-                    "duration_s AS duration, genre, mb_year AS year, available "
-                    "FROM catalog_tracks WHERE video_id=? LIMIT 1", (seed_video_id,)).fetchone()
+            row = self.store.radio_catalog.details([seed_video_id]).get(seed_video_id)
             if row:
                 seed = dict(row)
         if seed is not None and not seeds:
@@ -146,8 +140,7 @@ class RadioLaunch:
         choice = s.choices.pop(seed["video_id"])
         s.choices[seeds[0]["video_id"]] = choice
         if not getattr(self.store, 'activity_paused', False) and s.local_id is not None:
-            with self.store._lock,self.store.conn:
-                radio_provenance.remember(self.store.conn,s.playlist,s.identity)
+            self.store.radio_checkpoints.remember_playlists([s.playlist], s.identity)
         with self.lock:
             s.initial_tracks = seeds
             s.preparation_deadline = time.monotonic() + PREPARATION_TIMEOUT
@@ -226,12 +219,11 @@ class RadioLaunch:
                 or state["playlist"] != playing.get("playlist_ytm_id")
                 or not (state.get("tracks") or state.get("initial_tracks"))):
             return None, False
-        candidates = candidates_factory(self.store, self.now_fn(), state.get("tuning"),
-                                        comparison=state.get('comparison'))
-        # A paired session owns its already visible plans across daily cache
-        # publication and restart. Replenish naturally as those plans advance.
-        changed = state.get("fingerprint") != candidates.fingerprint and not state.get('comparison')
-        return restore(state, clients[identity], identity, candidates), changed
+        # These songs and branches have already been published. Reattachment
+        # needs their checkpoint and live ownership, not another ranking pass.
+        # The monitor loads current candidates when future planning needs them.
+        candidates = RestoredCandidates(self.store, self.now_fn, state, candidates_factory)
+        return restore(state, clients[identity], identity, candidates), False
 
     def accept(self, s, prepared: PreparedStart):
         """Publish the confirmed initial queue before the coordinator navigates."""

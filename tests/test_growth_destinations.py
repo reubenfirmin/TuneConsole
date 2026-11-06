@@ -1,12 +1,16 @@
 """Festival availability follows real serving outputs, including partial preparation."""
+import html
 import json
+import re
+from tests.enrichment_support import complete_entries, complete_discovered
+from tests.derived_rating_support import seed_dislike
 
 import pytest
 
 from tests.conftest import seed_catalog_track
 from tests.onboarding_support import publish_personal_mix
 from tests.test_tv_stream import video
-from yt_playlist.rec import account_growth, home_prepared, into_recently, onboarding, tv
+from yt_playlist.rec import account_growth, choice_evidence, home_prepared, into_recently, onboarding, tv
 
 
 def publish_destinations(store, now=1000):
@@ -38,7 +42,7 @@ def publish_destinations(store, now=1000):
              'display': f'New artist {i}'} for i in range(3)]}, now)
 
 
-def publish_full_journey(store, now=1000):
+def publish_journey_prefix(store, now=1000):
     from tests.test_growth_journey import early_journey
     from tests.test_growth_readiness import publish_vibe_menus
 
@@ -47,13 +51,21 @@ def publish_full_journey(store, now=1000):
     if not store.conn.execute("SELECT 1 FROM youtube_items WHERE video_id='prepared-0'").fetchone():
         publish_personal_mix(store, now=now)
     publish_vibe_menus(store)
+
+
+def finish_full_journey(store, now=1000):
     publish_destinations(store, now=now)
     store.settings.set_setting('radio_seed_offer', json.dumps({
         'menu_id': 'current-radio', 'tracks': [
             {'key': f'prepared {i}|artist', 'video_id': f'prepared-{i}'} for i in range(4)]}))
-    store.enrichment_queue.mark_enriched([row[0] for row in store.conn.execute('SELECT id FROM tracks')], now)
-    store.discovery.mark_discovered_enriched([row[0] for row in store.conn.execute(
+    complete_entries(store, [row[0] for row in store.conn.execute('SELECT id FROM tracks')], now)
+    complete_discovered(store, [row[0] for row in store.conn.execute(
         'SELECT identity_key FROM discovered_tracks')], now)
+
+
+def publish_full_journey(store, now=1000):
+    publish_journey_prefix(store, now=now)
+    finish_full_journey(store, now=now)
 
 
 @pytest.mark.parametrize('count', [1, 3, 4])
@@ -76,7 +88,7 @@ def test_four_eligible_mixes_are_required_everywhere(store, count):
         assert setup['complete'] is True  # Long play is an earlier usable format.
         assert 'id="onboarding-feed"' not in home.text
     if expected:
-        store.rec_model.record_dislike('prepared 0|artist', until=None, now=1000)
+        seed_dislike(store, 'prepared 0|artist', until=None, now=1000)
         assert not onboarding.prepared_mixes_ready(store, 1000)
         assert not client.get('/home/growth').json()['ready_formats']['mixes']
 
@@ -93,7 +105,7 @@ def test_new_destinations_require_usable_outputs_and_recheck_current_eligibility
     publish_full_journey(store)
     assert all(areas().values())
     store.rec_model.record_feedback('for_you', 'new 0|new artist 0', 'dismiss', now=1000)
-    store.rec_model.record_dislike('old 0|artist', until=None, now=1000)
+    seed_dislike(store, 'old 0|artist', until=None, now=1000)
     store.rec_proposals.put_proposals(tv.SURFACE, {'schema': tv.SCHEMA, 'key': 'empty',
         'at': 1000, 'attempted': [], 'items': []}, 1000)
     store.rec_proposals.put_proposals(into_recently.SURFACE,
@@ -187,3 +199,79 @@ def test_earned_mix_guard_does_not_assemble_later_vibe_readiness(store, monkeypa
                     base_url='http://127.0.0.1') as client:
         response = client.get('/home/cards')
     assert response.status_code == 200 and 'gen-wheelhouse' in response.text
+
+
+def test_vibe_access_matches_journey_and_omits_unrelated_destinations(
+        store, monkeypatch, full_journey_prefix, caplog):
+    from fastapi.testclient import TestClient
+    from yt_playlist.web.app import create_app
+
+    full_journey_prefix.restore(store)
+    finish_full_journey(store)
+    def agrees(now):
+        expected = account_growth.has_access(account_growth.view(store, now), 'vibes')
+        with monkeypatch.context() as patch:
+            patch.setattr(into_recently, 'load', lambda *a, **k: pytest.fail('Vibe access loaded articles'))
+            patch.setattr(account_growth.deepseek, 'settings', lambda *a, **k: pytest.fail('Vibe access loaded bonuses'))
+            assert account_growth.vibe_access(store, now) is expected
+        return expected
+    assert agrees(1000)
+    # Downstream Vibe preparation must not skip an unfinished required TV stop.
+    store.rec_proposals.put_proposals(tv.SURFACE, {}, 1001)
+    assert not agrees(1001)
+    # Deliberate prior TV use retains the preceding route even during refresh.
+    store.settings.set_setting('tv_draw', '1')
+    assert agrees(1002)
+    # Capture the actual rendered compact menu, rather than authoring a report
+    # or retaining a hidden recipe in a synthetic historical opportunity.
+    with TestClient(create_app(store, lambda: {}, now_fn=lambda: 1002,
+                              background_work=False), base_url='http://127.0.0.1') as client:
+        ordinary = client.get('/')
+        assert ordinary.status_code == 200
+        ordinary_recipes = [json.loads(html.unescape(value)) for value in
+                            re.findall(r"data-recipe='([^']*)'", ordinary.text)]
+        assert len(ordinary_recipes) == 4
+        for displayed in ordinary_recipes:
+            assert displayed.get('opportunity_id')
+            captured = choice_evidence.opportunity(store, displayed['opportunity_id'])
+            assert captured and 'vibe' not in captured
+            assert any(str(row['id']) == displayed['option_id'] for row in captured['options'])
+        assert not any('Mix choice capture failed' in record.getMessage() for record in caplog.records)
+        ordinary_recipe = ordinary_recipes[0]
+        for action in ('choice', 'start'):
+            assert choice_evidence.respond(store, ordinary_recipe['opportunity_id'], action, 1002,
+                option_id=ordinary_recipe['option_id'], synchronous=True)
+        usage = choice_evidence.compile_report(store, 1002)['home_format']
+        assert usage['episodes']['mixes'] == 1 and usage['vibe_episodes'] == 0
+        response = client.post('/home/vibe', data={'vibe': 'relax'})
+    assert response.status_code == 200
+    recipes = [json.loads(html.unescape(value)) for value in
+               re.findall(r"data-recipe='([^']*)'", response.text)]
+    assert len(recipes) == 4 and all(recipe['vibe'] == 'relax' for recipe in recipes)
+    recipe = recipes[0]
+    identity, option = recipe['opportunity_id'], recipe['option_id']
+    assert identity != ordinary_recipe['opportunity_id']
+    offer = choice_evidence.opportunity(store, identity)
+    assert offer['vibe'] == 'relax'
+    assert all('descriptor_id' in row and not {'recipe', 'tracks', 'keys'} & row.keys()
+               for row in offer['options'])
+    assert choice_evidence.respond(store, identity, 'choice', 1002, option_id=option,
+                                   synchronous=True)
+    assert not choice_evidence.compile_report(store, 1002)['home_format']['vibe_episodes']
+    # Historical TV access cannot fabricate usable specialist Vibe output.
+    with store.conn:
+        store.conn.execute('DELETE FROM recording_vibes')
+    assert not agrees(1003)
+    # Only confirmed playback earns access; output remains genuinely unready.
+    assert choice_evidence.respond(store, identity, 'start', 1004, option_id=option,
+                                   synchronous=True)
+    assert choice_evidence.compile_report(store, 1004)['home_format']['vibe_episodes'] == 1
+    assert account_growth.retained_access(store, 'vibes') and agrees(1004)
+    state = account_growth.view(store, 1004)
+    vibe = next(node for node in state['nodes'] if node['id'] == 'vibes')
+    assert not state['vibes_ready'] and vibe['used'] and vibe['unlocked']
+    # Corrections withdraw the real evidence instead of leaving a permanent flag.
+    assert choice_evidence.respond(store, identity, 'withdraw', 1005,
+        details={'action_id': f'{identity}:choice:{option}'}, synchronous=True)
+    assert not choice_evidence.compile_report(store, 1005)['home_format']['vibe_episodes']
+    assert not account_growth.retained_access(store, 'vibes') and not agrees(1005)

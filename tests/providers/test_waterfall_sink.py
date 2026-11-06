@@ -6,7 +6,6 @@ from yt_playlist.providers.base import EnrichmentResult
 
 class _FakeProvider:
     name = "fake"
-    def reset(self): pass
     def tripped(self): return False
     def available(self, store): return True
     def probe(self, t, store):

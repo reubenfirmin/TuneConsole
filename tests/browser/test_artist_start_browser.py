@@ -2,9 +2,8 @@
 import hashlib
 import inspect
 import json
-import threading
-import time
 from pathlib import Path
+import time
 from urllib.parse import urlsplit
 
 import pytest
@@ -12,8 +11,12 @@ import uvicorn
 from playwright.sync_api import expect
 
 from tests.browser_fixtures import _free_port
+from tests.live_server import LiveServer
 from tests.test_artist_start import Catalog, page as artist_page
 from yt_playlist.web.app import create_app
+from tests.browser.quiet_action_support import (  # noqa: F401 - shared evidence fixture
+    action_evidence, assert_quiet_action, fail_action,
+)
 
 
 @pytest.fixture
@@ -22,7 +25,7 @@ def artist_flow_evidence(page, tmp_path):
     static = root / 'src/yt_playlist/web/static'
     assets = {name: (static / name).read_bytes() for name in (
         'artist-start.js', 'artist-start.css', 'account-growth.js',
-        'account-growth.css', 'home.js', 'onboarding.css')}
+        'account-growth.css', 'home.js', 'onboarding.css', 'playlist-generation.js')}
     paths = [root / name for name in (
         'src/yt_playlist/rec/artist_start.py',
         'src/yt_playlist/rec/onboarding.py',
@@ -30,7 +33,9 @@ def artist_flow_evidence(page, tmp_path):
         'src/yt_playlist/web/app.py',
         'src/yt_playlist/web/routes/home.py',
         'src/yt_playlist/web/routes/home_artist_start.py',
+        'src/yt_playlist/web/routes/home_generation.py',
         'src/yt_playlist/web/routes/home_onboarding.py',
+        'src/yt_playlist/web/templates/_partials/artist_playback.html',
         'src/yt_playlist/web/templates/artist_start.html',
         'src/yt_playlist/web/templates/home.html',
         'src/yt_playlist/web/templates/_partials/account_growth.html',
@@ -56,6 +61,8 @@ def artist_flow_evidence(page, tmp_path):
         report['source_after'] = hashes()
         report['source_unchanged'] = report['source_before'] == report['source_after']
         (tmp_path / 'artist-first-listen-evidence.json').write_text(json.dumps(report, indent=2))
+        if report.get('report_path'):
+            Path(report['report_path']).write_text(json.dumps(report, indent=2))
         assert report['source_unchanged']
         if report['status'] == 'passed':
             assert report['served_assets'].keys() == assets.keys()
@@ -80,18 +87,15 @@ def artist_app(store):
             {'title': 'Artist ' + str(other), 'browseId': f'UCartist{other}'}
             for other in range(8) if other != index])
         fake._artists[f'UCartist{index}']['thumbnails'] = [{'url': 'https://example.com/artist.jpg'}]
+        # The controlled provider must be able to save and read back the same
+        # songs it offered through artist browsing.
+        for song in fake._artists[f'UCartist{index}']['songs']['results']:
+            fake._catalog[song['videoId']] = song
     app = create_app(store, lambda: {identity: fake}, now_fn=lambda: 1000., background_work=False)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=port, log_level='warning'))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 10
-    while not server.started and thread.is_alive() and time.monotonic() < deadline:
-        time.sleep(.02)
-    assert server.started
-    yield f'http://127.0.0.1:{port}'
-    server.should_exit = True
-    thread.join(timeout=5)
+    with LiveServer(server):
+        yield f'http://127.0.0.1:{port}'
 
 
 def _save_artists(page, base, count):
@@ -99,6 +103,57 @@ def _save_artists(page, base, count):
         response = page.request.post(base + '/home/onboard/artists/select', data={
             'browse_id': f'UCartist{index}', 'selected': True})
         assert response.ok
+
+
+def test_artist_failures_keep_the_draft_and_reconcile_a_lost_selection_reply(artist_app, store, page, action_evidence):
+    _save_artists(page, artist_app, 3)
+    page.goto(artist_app)
+    search = page.get_by_role('searchbox', name='Search YouTube Music artists')
+    for kind in ('plaintext', 'malformed', 'network', 'json'):
+        page.route('**/home/onboard/artists/search?*', lambda route, kind=kind: fail_action(route, kind))
+        search.fill('Artist 3')
+        expect(page.locator('.artist-start-feedback').filter(has_text='Search is unavailable')).to_be_visible()
+        expect(search).to_have_value('Artist 3')
+        assert len(store.discovery.starter_artists()) == 3
+        for index in range(3):
+            expect(page.get_by_role('button', name=f'Remove Artist {index}', exact=True)).to_be_enabled()
+        assert_quiet_action(page)
+        search.fill('')
+        page.unroute('**/home/onboard/artists/search?*')
+    search.fill('Artist 3')
+    choose = page.get_by_role('button', name='Choose Artist 3', exact=True)
+    expect(choose).to_be_visible()
+    writes, reads = [], []
+    def not_saved(route):
+        writes.append(route.request.post_data_json)
+        fail_action(route, 'plaintext')
+    page.route('**/home/onboard/artists/select', not_saved)
+    def check(route):
+        reads.append(route.request.url)
+        route.continue_()
+    page.route('**/home/onboard/artists/state', check)
+    choose.click()
+    expect(page.locator('.artist-start-status')).to_have_text('Choice not confirmed. Your selected artists are kept here.')
+    expect(choose).to_be_enabled()
+    assert len(store.discovery.starter_artists()) == 3 and len(writes) == len(reads) == 1
+    assert_quiet_action(page)
+    page.unroute('**/home/onboard/artists/select', not_saved)
+    def lost_reply(route):
+        writes.append(route.request.post_data_json)
+        response = route.fetch()
+        assert response.ok
+        fail_action(route, 'malformed')
+    page.route('**/home/onboard/artists/select', lost_reply)
+    choose.click()
+    expect(page.locator('.artist-start-status')).to_have_text('Choice saved.')
+    expect(page.get_by_role('button', name='Remove Artist 3', exact=True)).to_be_enabled()
+    assert len(store.discovery.starter_artists()) == 4
+    assert writes == [{'browse_id': 'UCartist3', 'selected': True}] * 2 and len(reads) == 2
+    assert_quiet_action(page)
+    page.screenshot(path=action_evidence + '.png', full_page=True)
+    page.reload()
+    expect(page.get_by_role('button', name='Remove Artist 3', exact=True)).to_be_enabled()
+    assert len(writes) == 2 and len(store.discovery.starter_artists()) == 4
 
 
 @pytest.mark.parametrize('width', [1440])
@@ -151,35 +206,72 @@ def test_related_artist_feedback_preserves_choices_search_and_retry(artist_app, 
 
 
 @pytest.mark.parametrize('width', [1440])
-def test_first_set_generation_failure_can_retry_without_losing_artists(artist_app, store, page, monkeypatch, width):
+def test_first_set_generation_failure_can_retry_without_losing_artists(
+        artist_app, store, page, monkeypatch, width, artist_flow_evidence):
     from yt_playlist.library import playlist_generated
 
     _save_artists(page, artist_app, 3)
+    selected = store.discovery.starter_artists()
     actual = playlist_generated.create_generated_playlist
-    attempts = []
+    attempts, completed = [], []
+    artist_flow_evidence['report_path'] = f'/tmp/tuneconsole-1069-retry-{width}.json'
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
 
     def fail_once(*args, **kwargs):
-        attempts.append(True)
+        attempts.append(args[3])
         if len(attempts) == 1:
             # A definite refusal can be retried. Unknown save outcomes instead
             # ask the user to check YouTube Music before creating another set.
             raise playlist_generated.TrackLengthLimitError('Controlled track-length refusal')
-        return actual(*args, **kwargs)
+        result = actual(*args, **kwargs)
+        completed.append(result)
+        return result
 
     monkeypatch.setattr(playlist_generated, 'create_generated_playlist', fail_once)
+    page.route('https://example.com/**', lambda route: route.fulfill(
+        path='src/yt_playlist/web/static/onboarding-albums.png', content_type='image/png'))
     page.set_viewport_size({'width': width, 'height': 1000})
     page.goto(artist_app)
     page.get_by_role('button', name='Find my first set', exact=True).click()
-    page.get_by_role('button', name='Play my first set', exact=True).click()
+    generation = lambda response: (response.request.method == 'POST'
+                                   and urlsplit(response.url).path == '/home/generate')
+    with page.expect_response(generation) as refused:
+        page.get_by_role('button', name='Play my first set', exact=True).click()
+    assert refused.value.status == 200
+    assert 'Controlled track-length refusal' in refused.value.text()
     expect(page.get_by_role('heading', name='Your first set needs another try.')).to_be_visible()
-    assert len(store.discovery.starter_artists()) == 3
+    assert len(attempts) == 1 and not completed and not attempts[0].created
+    assert store.discovery.starter_artists() == selected
     assert not store.conn.execute('SELECT 1 FROM play_events LIMIT 1').fetchone()
+    page.screenshot(path=f'/tmp/tuneconsole-1069-refused-{width}.png', full_page=True)
     page.get_by_role('button', name='Back to my first set', exact=True).click()
-    page.get_by_role('button', name='Play my first set', exact=True).click()
+    retry_started = time.monotonic()
+    # Generation performs a real remote save and local admission. Its response,
+    # rather than the click, starts the normal five-second rendering assertion.
+    with page.expect_response(generation) as saved:
+        page.get_by_role('button', name='Play my first set', exact=True).click()
+    assert saved.value.status == 200
+    assert 'data-generated-playlist=' in saved.value.text()
+    response_seconds = time.monotonic() - retry_started
     expect(page.get_by_role('heading', name='Your music is on its way.')).to_be_visible()
     assert len(attempts) == 2
-    assert len(store.discovery.starter_artists()) == 3
+    assert len(completed) == len(attempts[-1].created) == 1
+    result = completed[0]
+    videos = [track['video_id'] for track in result['tracks']]
+    assert result['added'] == len(videos) == 12
+    assert [song['videoId'] for song in attempts[-1].get_playlist(result['new_ytm'])['tracks']] == videos
+    assert [row[1] for row in store.playlists.get_playlist_tracks_with_meta(result['pid'])] == videos
+    expect(page.get_by_role('link', name='Open my first set', exact=True)).to_have_attribute(
+        'href', 'https://music.youtube.com/watch?list=' + result['new_ytm'])
+    assert store.discovery.starter_artists() == selected
     assert not store.conn.execute('SELECT 1 FROM play_events LIMIT 1').fetchone()
+    assert not errors
+    page.screenshot(path=f'/tmp/tuneconsole-1069-saved-{width}.png', full_page=True)
+    artist_flow_evidence.update(status='passed', generation_attempts=len(attempts),
+        remote_creates=len(attempts[-1].created), playlist=result['new_ytm'],
+        saved_videos=videos, retry_response_seconds=response_seconds,
+        rendered_seconds=time.monotonic() - retry_started, browser=page.context.browser.version)
 
 
 @pytest.mark.parametrize('width', [1440])
@@ -197,7 +289,7 @@ def test_required_picker_suggestions_spotify_draft_and_first_listen(
             outcome = sync_all(store, {1: fake}, 1000.)
         assert outcome['status'] == 'partial'
         assert store.settings.get_setting('last_sync_at') is None
-        assert store.history.get_recent_history_keys(0) == {'one past song|past artist'}
+        assert set(dict(store.history.recent_plays_with_ts())) == {'one past song|past artist'}
         if catalog_state == 'incidental_live':
             for index in range(5):
                 store.history.record_play_event(1, f'incidental {index}|past artist', f'incidental-{index}', 900. + index)

@@ -80,7 +80,7 @@ def test_mixed_waterfall_commits_each_track_and_keeps_unfinished_work(store, mon
     class Provider:
         name = "musicbrainz"
         def available(self, _store): return True
-        def reset(self): self.dead = False
+        dead = False
         def tripped(self): return self.dead
         def probe(self, track, _store):
             if track["title"] == "New":

@@ -12,8 +12,9 @@ import sqlite3
 import time
 import uuid
 
-from .. import db_handles, db_space, policy_documents, policy_recovery
+from .. import db_handles, db_space, group_admission, policy_documents
 from . import build, files, install
+from .sqlite_checks import tables
 
 
 def _tree_bytes(path):
@@ -34,7 +35,7 @@ def _owned_files(conn):
     references rather than being inferred from SQL text.
     """
     paths = {Path(path) for _, _, references in files.owners(conn) for path in references}
-    for table in policy_recovery._tables(conn):
+    for table in tables(conn):
         columns = [row[1] for row in conn.execute('PRAGMA main.table_info('+build.quote(table)+')')
                    if (row[1] == 'filename' or row[1].endswith('_filename'))
                    and (table, row[1]) != ('action_backups', 'filename')]
@@ -53,7 +54,7 @@ def _files(conn):
     from .. import (collection_recovery, group_documents, legacy_evidence, metadata_delivery_files,
                    metadata_destination_files, preparation_files, recommendation_outputs, saved_preparation_files,
                    sample_files)
-    tables = policy_recovery._tables(conn)
+    source_tables = tables(conn)
     with ExitStack() as stack:
         from .. import file_owners
         stack.enter_context(file_owners.readers(conn.execute('PRAGMA database_list').fetchone()[2],
@@ -63,7 +64,7 @@ def _files(conn):
         from .. import metadata_runtime_files, served_facts
         if served_facts.available(conn):
             stack.enter_context(policy_documents.retained_reader(served_facts.directory(conn)))
-        if 'metadata_runtime_state' in tables:
+        if 'metadata_runtime_state' in source_tables:
             stack.enter_context(policy_documents.retained_reader(metadata_runtime_files.directory(conn)))
         for table, module in (('sample_attributes',sample_files),
                 ('album_feedback',collection_recovery),('recommendation_policies',policy_documents),
@@ -71,7 +72,7 @@ def _files(conn):
                 ('metadata_deliveries',metadata_delivery_files),
                 ('published_metadata_destination_deliveries',metadata_destination_files),
                 ('legacy_catalog_evidence',legacy_evidence)):
-            if table in tables:
+            if table in source_tables:
                 stack.enter_context(policy_documents.retained_reader(module.directory(conn)))
         if saved_preparation_files.available(conn):
             stack.enter_context(policy_documents.retained_reader(saved_preparation_files.directory(conn)))
@@ -122,7 +123,9 @@ def run(store, *, destination=None, rebuild=False, resume=False, scratch=None, p
         if cancelled():
             raise InterruptedError('Storage compaction interrupted')
         progress(name,detail or {})
-    with install.owner(database):
+    # Reserve the existing publisher/collector lifetime before the serving
+    # lock or any durable rebuild state, and retain it through either reopen.
+    with install.owner(database), group_admission.admission(store, blocking=False):
         old = db_handles.state(database)
         if old and old['phase'] in db_handles.ACTIVE:
             raise RuntimeError('Interrupted compaction needs startup recovery before retry')

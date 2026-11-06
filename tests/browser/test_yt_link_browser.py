@@ -4,16 +4,14 @@ Needs a real browser: the behavior under test is playback-controls.js's capture-
 TestClient cannot run.
 """
 import socket
-import threading
-import time
 
 import pytest
 import uvicorn
 from playwright.sync_api import expect
 
-from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.live_server import LiveServer
 
 pytestmark = pytest.mark.browser
 
@@ -27,9 +25,8 @@ def _free_port():
 
 
 @pytest.fixture
-def live_album_app():
-    s = Store(":memory:")
-    s.init_schema()
+def live_album_app(store):
+    s = store
     iid = s.accounts.upsert_account("Main", "cred", None, True)
     album = {"title": "The Album", "year": "2001", "artists": [{"name": "Artist X"}], "thumbnails": [],
              "tracks": [{"title": "One", "videoId": "v1", "duration": "3:01",
@@ -37,13 +34,8 @@ def live_album_app():
     app = create_app(s, lambda: {iid: FakeClient(albums={"MPREb_x": album})}, now_fn=lambda: 1.0)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    while not server.started:
-        time.sleep(0.02)
-    yield f"http://127.0.0.1:{port}"
-    server.should_exit = True
-    thread.join(timeout=5)
+    with LiveServer(server):
+        yield f"http://127.0.0.1:{port}"
 
 
 def _wire(page, plays):

@@ -1,8 +1,10 @@
 """Select historical action custody without losing IDs or admitting remote writes."""
+from contextlib import contextmanager
 from dataclasses import replace
 import json
 from pathlib import Path
 import sqlite3
+import time
 
 import pytest
 
@@ -23,6 +25,18 @@ def stage(conn, *, size=128):
         if result.complete:
             return result.id
     pytest.fail('Action map did not finish bounded fixture')
+
+
+def rejection_inputs(store):
+    # A relative historical filename preserves exact original JSON across
+    # private directories. The external witness is copied separately per case.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.chdir(store._db_path.parent)
+        _, path, identities = seed(store, backup_path='retained-backup.json')
+        preparation.JOB.install(store.conn)
+        finish(store.conn)
+        assert publication.OWNER.selected(store.conn) is None
+        return identities, path.read_bytes(), (path.stat().st_dev, path.stat().st_ino)
 
 
 @pytest.mark.parametrize('installed', [79, 93, 97], indirect=True)
@@ -81,11 +95,15 @@ def test_preopened_readers_use_selected_actions_and_preserve_external_formats(in
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['fields','target','step','placement','resolution','extra','omitted','original','recovery','plan'])
-def test_wrong_fields_members_coverage_or_files_cannot_publish(installed, failure):
+def test_wrong_fields_members_coverage_or_files_cannot_publish(installed, staged_custody, failure, monkeypatch):
     store, _ = installed
-    _, _, identities = seed(store)
-    preparation.JOB.install(store.conn)
-    finish(store.conn)
+    logical = tuple((preparation.table(suffix), 'backup_filename') for suffix in ('backups', 'steps'))
+    identities, backup, source_inode = staged_custody(
+        installed, 'action-ledger', rejection_inputs, logical_coordinates=logical)
+    monkeypatch.chdir(store._db_path.parent)
+    path = Path('retained-backup.json')
+    path.write_bytes(backup)
+    assert (path.stat().st_dev, path.stat().st_ino) != source_inode
     header = preparation.head(store.conn, identities[0])
     with store.conn:
         if failure == 'fields':
@@ -111,6 +129,7 @@ def test_wrong_fields_members_coverage_or_files_cannot_publish(installed, failur
     with pytest.raises((MigrationError, ValueError, OSError)):
         publication.OWNER.publish(store.conn, stage=selected)
     assert publication.OWNER.selected(store.conn) is None
+    assert path.read_bytes() == backup
     regular.migrate(store.conn)
 
 
@@ -206,31 +225,71 @@ def test_sequence_and_reference_races_are_fenced_without_reassigning_ids(install
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_bounded_maps_and_interrupted_cutover_resume_without_losing_archives(installed):
+def test_bounded_maps_and_interrupted_cutover_resume_without_losing_archives(installed, monkeypatch, record_property):
+    @contextmanager
+    def phase(name):
+        began = time.perf_counter()
+        try:
+            yield
+        finally:
+            record_property('action_map_' + name + '_seconds', time.perf_counter() - began)
+
     store, _ = installed
-    for index in range(259):
-        store.actions.record_action('remove_track', '{}', '{}', 'executed', '{}', index)
-    preparation.JOB.install(store.conn)
-    # One original part per action; use a larger bounded-fixture iteration limit.
-    for _ in range(270):
-        if preparation.JOB.step(store.conn).status == 'prepared':
-            break
-    first = publication.OWNER.step(store.conn)
+    # Batch only the initial source writes. The real preparation, map and
+    # publication operations below still own their individual transactions.
+    with phase('source_actions'), store._lock, store.conn.atomic():
+        for index in range(259):
+            store.actions.record_action('remove_track', '{}', '{}', 'executed', '{}', index)
+    assert not store.conn.in_transaction
+    assert [tuple(row) for row in store.conn.execute(
+        'SELECT id,kind,params_json,plan_json,undo_json,status,created_at,executed_at '
+        'FROM main.actions ORDER BY id')] == [
+            (index+1, 'remove_track', '{}', '{}', '{}', 'executed', index, None)
+            for index in range(259)]
+
+    publish_encoded = preparation.policy_documents._publish_encoded
+    file_calls, file_seconds = 0, 0.0
+    def measured_publish(*args, **kwargs):
+        nonlocal file_calls, file_seconds
+        began = time.perf_counter()
+        try:
+            return publish_encoded(*args, **kwargs)
+        finally:
+            file_calls += 1
+            file_seconds += time.perf_counter() - began
+
+    with monkeypatch.context() as patch, phase('preparation'):
+        # Observe actual original/recovery/plan publication, including its
+        # durability work. This time is contained within the preparation phase.
+        patch.setattr(preparation.policy_documents, '_publish_encoded', measured_publish)
+        preparation.JOB.install(store.conn)
+        # One original part per action; use a larger bounded-fixture iteration limit.
+        for _ in range(270):
+            if preparation.JOB.step(store.conn).status == 'prepared':
+                break
+    record_property('action_map_preparation_file_calls', file_calls)
+    record_property('action_map_preparation_file_seconds', file_seconds)
+    with phase('first_map_checkpoint'):
+        first = publication.OWNER.step(store.conn)
     assert first.copied == 128 and not first.complete
-    second = publication.OWNER.step(store.conn)
+    with phase('second_map_checkpoint'):
+        second = publication.OWNER.step(store.conn)
     assert second.id == first.id and second.copied == 256 and not second.complete
-    completed = publication.OWNER.step(store.conn)
+    with phase('tail_map_checkpoint'):
+        completed = publication.OWNER.step(store.conn)
     assert completed.complete and completed.copied == 259
     with store.conn:
         store.conn.execute('CREATE TRIGGER controlled_action_cutover BEFORE INSERT ON '+publication.OWNER.table('head')+
             " BEGIN SELECT RAISE(ABORT,'controlled cutover'); END")
-    with pytest.raises(sqlite3.IntegrityError, match='controlled cutover'):
+    with phase('failed_selection'), pytest.raises(sqlite3.IntegrityError, match='controlled cutover'):
         publication.OWNER.publish(store.conn, stage=completed.id)
     assert not store.conn.execute('SELECT 1 FROM '+publication.OWNER.table('generations')).fetchone()
     with store.conn:
         store.conn.execute('DROP TRIGGER controlled_action_cutover')
-    publication.OWNER.publish(store.conn, stage=completed.id)
-    assert [a.id for a in store.actions.get_actions()] == list(range(259, 0, -1))
+    with phase('selection_retry'):
+        publication.OWNER.publish(store.conn, stage=completed.id)
+    with phase('original_readback'):
+        assert [a.id for a in store.actions.get_actions()] == list(range(259, 0, -1))
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -270,11 +329,11 @@ def test_missing_files_and_failed_job_do_not_hold_regular_ddl_and_retry_is_expli
     publication.OWNER.publish(store.conn, stage=stage(store.conn))
 
 
-def test_frozen_native_owner_wins_and_retained_map_guards_survive(tmp_path):
+def test_frozen_native_owner_wins_and_retained_map_guards_survive(tmp_path, _pristine_installed_schema):
     path = tmp_path / 'upgrade.db'
     store = Store(path)
     try:
-        runner.migrate(store.conn, registry=registry.MIGRATIONS[:93])
+        _pristine_installed_schema(93).backup(store.conn)
         store.init_schema(defer_metadata=True)
         _, _, identities = seed(store)
         selected = stage(store.conn)

@@ -4,9 +4,8 @@ import zipfile
 
 import pytest
 
-from yt_playlist.core.store import Store
 from yt_playlist.library.spotify_data import (SpotifyDataFormatError, import_spotify_data,
-                                               load_streaming_history, prepare_streaming_history)
+                                               prepare_streaming_history)
 
 
 def _row(title="Song", artist="Artist", ts="2024-01-01T10:00:00Z", uri="spotify:track:abc"):
@@ -32,21 +31,24 @@ def test_zip_loads_every_audio_history_file_and_ignores_video_and_podcasts():
              "spotify_episode_uri": "spotify:episode:x"}],
         "Spotify Extended Streaming History/Streaming_History_Video_2024.json": [_row(title="Video")],
     })
-    rows, skipped = load_streaming_history(raw)
+    rows, quality = prepare_streaming_history(raw)
     assert [row["ts"] for row in rows] == sorted(row["ts"] for row in rows)
-    assert len(rows) == 2 and skipped == 1
+    assert len(rows) == 2
+    assert quality == {'invalid': 1, 'duplicates': 0, 'conflicting_duplicates': 0,
+                       'private': 0, 'short': 0, 'unknown_duration': 0,
+                       'parsed': 3, 'eligible': 2, 'skipped': 1}
 
 
 def test_plain_audio_json_is_supported_and_bad_upload_is_rejected():
-    assert len(load_streaming_history(json.dumps([_row()]))[0]) == 1
+    rows, quality = prepare_streaming_history(json.dumps([_row()]))
+    assert len(rows) == quality['eligible'] == 1 and quality['skipped'] == 0
     with pytest.raises(SpotifyDataFormatError):
-        load_streaming_history(b"not json")
+        prepare_streaming_history(b"not json")
     with pytest.raises(SpotifyDataFormatError):
-        load_streaming_history(_zip({"unrelated.json": []}))
+        prepare_streaming_history(_zip({"unrelated.json": []}))
 
 
-def test_import_matches_library_is_idempotent_and_marks_event_source():
-    store = Store(":memory:"); store.init_schema()
+def test_import_matches_library_is_idempotent_and_marks_event_source(store):
     store.accounts.upsert_account("main", "bridge", None, True)
     store.tracks.upsert_track("yt-song", "Song", "Artist", None, 180)
     raw = json.dumps([_row(), _row("Unknown", "Elsewhere", "2024-01-02T10:00:00Z")])
@@ -59,8 +61,7 @@ def test_import_matches_library_is_idempotent_and_marks_event_source():
     assert again["plays_added"] == 0 and again["events_added"] == 0
 
 
-def test_no_identity_returns_error():
-    store = Store(":memory:"); store.init_schema()
+def test_no_identity_returns_error(store):
     assert import_spotify_data(store, json.dumps([])) == {"error": "no identity configured"}
 
 

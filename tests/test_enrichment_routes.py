@@ -23,9 +23,12 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
                                   store.tracks.upsert_track("v1", "S1", "Y", "Al", 200, 1),
                                   store.tracks.upsert_track("v2", "Sx", "Z", "Al", 200, 1)])
     only_provider(store, "musicbrainz")          # the waterfall runs MusicBrainz only
+    for track in store.tracks.tracks_for_waterfall(a):
+        store.enrichment.apply_provider_fields(track['id'], 'deezer', {'bpm': 120, 'energy': .5, 'danceability': .5})
+        store.tracks.set_track_art(track['id'], 'https://example.com/cover.jpg')
     c = _client(store, lambda: {iid: FakeClient()})
 
-    assert len(store.tracks.tracks_to_enrich(a)) == 3
+    assert len(store.tracks.tracks_for_waterfall(a)) == 3
     jid = c.post(f"/playlist/{a}/enrich").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid}") as st:
         body = "".join(st.iter_text())
@@ -38,7 +41,7 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     assert detail["v0"] == ("Rock", "1998") and detail["v1"] == ("Jazz", "2003")
     assert detail["v2"] == ("", "")                      # no match this run
     # fully-resolved tracks are done; the no-match one stays eligible for a re-run
-    assert [t["video_id"] for t in store.tracks.tracks_to_enrich(a)] == ["v2"]
+    assert [t["video_id"] for t in store.tracks.tracks_for_waterfall(a)] == ["v2"]
 
     # re-run after MusicBrainz gains a genre for v2. It fills the gap and v2 is now complete
     monkeypatch.setattr(mb, "enrich_full",
@@ -49,10 +52,11 @@ def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
         "".join(st.iter_text())
     v2 = next(t for t in store.charts.playlist_tracks_detail(a) if t["video_id"] == "v2")
     assert (v2["genre"], v2["year"]) == ("Ambient", "2010")
-    assert store.tracks.tracks_to_enrich(a) == []
+    assert store.tracks.tracks_for_waterfall(a) == []
 
     # a blank result must never clobber values we already have
-    store.tracks.set_track_enrichment(store.tracks.track_ids_for_videos(["v0"])["v0"], "", "")
+    store.enrichment.apply_provider_fields(store.tracks.track_ids_for_videos(['v0'])['v0'],
+                                          'musicbrainz', {'genre': '', 'year': ''})
     v0 = next(t for t in store.charts.playlist_tracks_detail(a) if t["video_id"] == "v0")
     assert (v0["genre"], v0["year"]) == ("Rock", "1998")
 
@@ -77,12 +81,12 @@ def test_page_rejoins_active_enrichment(store):
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
 
-    assert f"enrichPanel({a}, false, 0, '', null, 0)" in c.get(f"/playlist/{a}").text   # nothing to rejoin
+    assert f"enrichPanel({a}, 0, '', null, 0)" in c.get(f"/playlist/{a}").text   # nothing to rejoin
     job = app.state.ctx.jobs.create(); job.playlist_id = a; job.source = "waterfall"
     page = c.get(f"/playlist/{a}").text
-    assert f"enrichPanel({a}, false, {job.id}, 'waterfall', null, 0)" in page and "rejoinIfActive()" in page
+    assert f"enrichPanel({a}, {job.id}, 'waterfall', null, 0)" in page and "rejoinIfActive()" in page
     job.done = True
-    assert f"enrichPanel({a}, false, 0, '', null, 0)" in c.get(f"/playlist/{a}").text   # finished -> no rejoin
+    assert f"enrichPanel({a}, 0, '', null, 0)" in c.get(f"/playlist/{a}").text   # finished -> no rejoin
 
 
 def test_discogs_fills_genre_and_year(store, monkeypatch):
@@ -244,6 +248,11 @@ def test_lastfm_without_key_reports_error(store, monkeypatch, tmp_path):
     jid = c.post(f"/playlist/{a}/enrich").json()["job_id"]
     with c.stream("GET", f"/playlist/enrich/events/{jid}") as st:
         body = "".join(st.iter_text())
-    assert "no API key" in body                       # Last.fm enabled but keyless -> skipped, not run
+    assert "no API key" not in body
+    assert "No enrichment sources are ready" in body
+    events = [_json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ")]
+    assert next(event for event in events if event['type'] == 'done')['blocked']
+    job = c.app.state.ctx.jobs.get(jid)
+    assert any('no API key' in event.get('text', '') for _, event in job.events.since(0)[1])
 
 

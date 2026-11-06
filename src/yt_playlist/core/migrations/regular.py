@@ -58,7 +58,8 @@ def _validate_group_progress(conn):
 
 
 def _retire_genre_choice_capture(conn, context):
-    if conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='genre_preferences'").fetchone():
+    if (conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='genre_preferences'").fetchone()
+            and conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name GLOB 'prepare_genre_choices_dependency_*'").fetchone()):
         from .v085_genre_preferences import retire_preparation_capture
         retire_preparation_capture(conn)
 
@@ -72,7 +73,8 @@ def _validate_retired_genre_capture(conn):
 
 
 def _retire_taste_capture(conn, context):
-    if conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='taste_axes'").fetchone():
+    if (conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='taste_axes'").fetchone()
+            and conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name GLOB 'prepare_taste_axes_dependency_*'").fetchone()):
         from .v088_taste_axes import retire_preparation_capture
         retire_preparation_capture(conn)
 
@@ -86,7 +88,9 @@ def _validate_retired_taste_capture(conn):
 
 
 def _retire_metadata_capture(conn, context):
-    if conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='metadata_observations'").fetchone():
+    if (conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='metadata_observations'").fetchone()
+            and conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name GLOB 'prepare_metadata_dependency_*' "
+                             "OR name GLOB 'prepare_metadata_conflicts_dependency_*'").fetchone()):
         from .v080_metadata_evidence import retire_preparation_capture
         retire_preparation_capture(conn)
 
@@ -297,6 +301,21 @@ def after_owner_upgrade(conn):
     if conn.execute("SELECT 1 FROM schema_changes WHERE name='grouping_checkpoint_retention'").fetchone():
         from .. import group_checkpoint_retention
         group_checkpoint_retention.install(conn)
+    if conn.execute("SELECT 1 FROM schema_changes WHERE name='collection_recovery_ownership_epoch'").fetchone():
+        from .. import collection_recovery_epoch
+        collection_recovery_epoch.install(conn)
+    if conn.execute("SELECT 1 FROM schema_changes WHERE name='collection_recovery_scan_keys'").fetchone():
+        from .. import collection_recovery_epoch
+        collection_recovery_epoch.install_keys(conn)
+    if conn.execute("SELECT 1 FROM schema_changes WHERE version=29 AND name='revalidated_recommendation_pools'").fetchone():
+        from .. import recommendation_revalidations
+        recommendation_revalidations.install_guards(conn)
+    if conn.execute("SELECT 1 FROM schema_changes WHERE version=31 AND name='shared_vibe_model_generations'").fetchone():
+        from yt_playlist.repos import vibe_models
+        vibe_models.install_conditioning_guards(conn)
+    if conn.execute("SELECT 1 FROM schema_changes WHERE version=32 AND name='bounded_embedding_basis_guards'").fetchone():
+        from .. import embedding_files
+        embedding_files.install_basis_guards(conn)
 
 
 def _install_policy_history_capture(conn, context):
@@ -329,6 +348,66 @@ def _validate_group_checkpoint_retention(conn):
     group_checkpoint_retention.validate(conn)
 
 
+def _install_collection_recovery_epoch(conn, context):
+    from .. import collection_recovery_epoch
+    collection_recovery_epoch.install(conn, context)
+
+
+def _validate_collection_recovery_epoch(conn):
+    from .. import collection_recovery_epoch
+    collection_recovery_epoch.validate(conn)
+
+
+def _install_collection_recovery_keys(conn, context):
+    from .. import collection_recovery_epoch
+    collection_recovery_epoch.install_keys(conn, context)
+
+
+def _validate_collection_recovery_keys(conn):
+    from .. import collection_recovery_epoch
+    collection_recovery_epoch.validate_keys(conn)
+
+
+def _install_recommendation_revalidations(conn, context):
+    from .. import recommendation_revalidations
+    recommendation_revalidations.install(conn, context)
+
+
+def _validate_recommendation_revalidations(conn):
+    from .. import recommendation_revalidations
+    recommendation_revalidations.validate(conn)
+
+
+def _install_album_feedback_outbox(conn, context):
+    from .. import album_feedback_outbox
+    album_feedback_outbox.install(conn, context)
+
+
+def _validate_album_feedback_outbox(conn):
+    from .. import album_feedback_outbox
+    album_feedback_outbox.validate(conn)
+
+
+def _install_joint_vibes(conn, context):
+    from yt_playlist.repos import vibe_models
+    vibe_models.install(conn, context)
+
+
+def _validate_joint_vibes(conn):
+    from yt_playlist.repos import vibe_models
+    vibe_models.validate(conn)
+
+
+def _install_embedding_basis_guards(conn, context):
+    from .. import embedding_files
+    embedding_files.install_basis_guards(conn, context)
+
+
+def _validate_embedding_basis_guards(conn):
+    from .. import embedding_files
+    embedding_files.validate_basis_guards(conn)
+
+
 CHANGES = (
     Change(1, 'independent_playback_feedback_receipts', _install_receipts, validate_receipts),
     Change(2, 'group_preparation_failure_progress', _install_group_progress, _validate_group_progress),
@@ -356,6 +435,12 @@ CHANGES = (
     Change(24, 'continuing_historical_policy_attribution', _install_policy_history_capture, _validate_policy_history_capture),
     Change(25, 'continuing_installed_embedding_order', _install_embedding_order, _validate_embedding_order),
     Change(26, 'grouping_checkpoint_retention', _install_group_checkpoint_retention, _validate_group_checkpoint_retention),
+    Change(27, 'collection_recovery_ownership_epoch', _install_collection_recovery_epoch, _validate_collection_recovery_epoch),
+    Change(28, 'collection_recovery_scan_keys', _install_collection_recovery_keys, _validate_collection_recovery_keys),
+    Change(29, 'revalidated_recommendation_pools', _install_recommendation_revalidations, _validate_recommendation_revalidations),
+    Change(30, 'durable_album_feedback_responses', _install_album_feedback_outbox, _validate_album_feedback_outbox),
+    Change(31, 'shared_vibe_model_generations', _install_joint_vibes, _validate_joint_vibes),
+    Change(32, 'bounded_embedding_basis_guards', _install_embedding_basis_guards, _validate_embedding_basis_guards),
 )
 
 
@@ -436,7 +521,7 @@ def validate(conn):
 
 def migrate(conn, *, changes=None, clock=time.time):
     """Commit each bounded change separately, regardless of pending layout work."""
-    from .registry import MIGRATIONS
+    from ..schema_inspection import reuse_tables
 
     changes = CHANGES if changes is None else tuple(changes)
     if ([change.version for change in changes] != list(range(1, len(changes) + 1))
@@ -444,9 +529,17 @@ def migrate(conn, *, changes=None, clock=time.time):
         raise MigrationError('Invalid regular schema registry')
     if conn.in_transaction:
         raise MigrationError('Cannot change schema with an outstanding caller transaction')
+    with reuse_tables(conn) as inspections:
+        _migrate(conn, changes, clock, inspections)
+
+
+def _migrate(conn, changes, clock, inspections):
+    from .registry import MIGRATIONS
+
     while True:
         try:
             conn.execute('BEGIN')
+            inspections.refresh()
             version = history(conn, MIGRATIONS)
             if version < 79:
                 raise MigrationError('Regular schema changes require a supported installed layout (79+)')
@@ -457,6 +550,7 @@ def migrate(conn, *, changes=None, clock=time.time):
                 return
             conn.rollback()
             conn.execute('BEGIN IMMEDIATE')
+            inspections.refresh()
             # Another startup may have advanced either ledger after the read
             # plan. Recheck under the reservation before applying bounded DDL.
             version = history(conn, MIGRATIONS)

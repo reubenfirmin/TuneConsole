@@ -12,7 +12,6 @@ from yt_playlist.core import fao
 import math
 import time
 
-from yt_playlist.core import group_evidence
 from yt_playlist.core.activity import WorkBudgetExceeded, check_cancellable_work
 from . import group_roots
 from .choice_context import checkpoint
@@ -68,10 +67,8 @@ class Backfill:
         owner_kind = 'offer' if kind == 'opportunity' else kind
         # A current producer already established these exact immutable roots.
         # Never reinterpret an explicitly unresolved historical reference later.
-        with self.store._lock:
-            if self.store.conn.execute('SELECT 1 FROM group_evidence_owners WHERE kind=? AND external_key=?',
-                                       (owner_kind, identity)).fetchone():
-                return
+        if self.store.group_evidence.has_owner(owner_kind, identity):
+            return
         # Choice owners no longer depend on historical groups. Preparation
         # releases existing pins only after publishing the replacement learners.
         # Backfill must neither recreate a pin nor manufacture an unknown owner.
@@ -82,19 +79,11 @@ class Backfill:
         self.paths, self.pending_path, self.after = None, None, ''
 
     def _proposals(self):
-        with self.store.read_view() as reader:
-            row = reader.conn.execute('SELECT surface,length(CAST(payload AS BLOB)) FROM rec_proposals '
-                'WHERE surface>? AND (surface IN (?,?,?,?,?) OR surface LIKE ? ESCAPE \'\\\') '
-                'ORDER BY surface LIMIT 1',
-                (self.after, *sorted(group_roots.PREPARED), r'model\_pair:%')).fetchone()
-            if row is None:
-                self._advance()
-                return 0, None
-            surface, size = row
-            if size > MAX_RECORD_BYTES:
-                raise WorkBudgetExceeded('Historical prepared group evidence exceeds its admitted memory')
-            payload, at = reader.conn.execute('SELECT payload,built_at FROM rec_proposals WHERE surface=?',
-                                              (surface,)).fetchone()
+        row = self.store.group_evidence.next_prepared(self.after, MAX_RECORD_BYTES)
+        if row is None:
+            self._advance()
+            return 0, None
+        surface, size, payload, at = row
         value = json.loads(payload)
         data = value if isinstance(value, dict) else {}
         if surface.startswith('model_pair:') and isinstance(data.get('data'), dict):
@@ -113,13 +102,11 @@ class Backfill:
         return size, Proposal(surface, payload, at, value, contexts)
 
     def _orphan(self, ledger):
-        with self.store._lock:
-            row = self.store.conn.execute("SELECT external_key FROM group_evidence_owners WHERE kind='offer' "
-                                           'AND external_key>? ORDER BY external_key LIMIT 1', (self.after,)).fetchone()
-        if row is None:
+        identities = self.store.group_evidence.identities('offer', self.after, 1)
+        if not identities:
             self._advance()
             return
-        identity = row[0]
+        identity = identities[0]
         # The admission lock fences every file publisher. A queued offer has
         # its own pending root until it establishes the durable offer root.
         self.after = identity
@@ -134,24 +121,22 @@ class Backfill:
                     return
                 except ValueError:
                     pass
-            group_evidence.retain_unknown_context(self.store.conn, operation.kind, operation.identity,
-                                                  operation.raw, operation.reason, operation.at)
+            self.store.group_evidence.retain_unknown(operation.kind, operation.identity,
+                                                     operation.raw, operation.reason, operation.at)
         elif isinstance(operation, Proposal):
             # Admission fences publishers while preparation happens outside the
             # serving lock. Also verify the exact SQL input before installing roots.
-            if self.store.conn.execute('SELECT 1 FROM rec_proposals WHERE surface=? AND payload=? AND built_at IS ?',
-                    (operation.surface, operation.payload, operation.at)).fetchone():
-                group_roots.replace_prepared(self.store, operation.surface, operation.data, operation.at,
-                                            historical=True, resolved_contexts=operation.contexts)
+            if self.store.group_evidence.matches_prepared(operation.surface, operation.payload, operation.at):
+                self.store.group_evidence.replace_prepared(operation.surface, operation.data, operation.at,
+                    historical=True, resolved_contexts=operation.contexts)
         else:
             group_roots.release(self.store, 'offer', operation)
 
     def step(self):
         if not group_roots.enabled(self.store):
             return False
-        with self.store._lock:
-            if self.store.conn.execute('SELECT roots_complete FROM group_retention_state WHERE id=1').fetchone()[0]:
-                return False
+        if self.store.group_evidence.roots_complete():
+            return False
         with group_roots.admission(self.store):
             if self._retry_cursor is not None:
                 self.stage, self.paths, self.pending_path, self.after = self._retry_cursor
@@ -173,7 +158,7 @@ class Backfill:
                         check_cancellable_work()
                         self._apply(operation)
                     if self.stage == len(KINDS):
-                        self.store.conn.execute('UPDATE group_retention_state SET roots_complete=1 WHERE id=1')
+                        self.store.group_evidence.complete_roots()
             except BaseException:
                 self._retry_cursor = cursor
                 raise

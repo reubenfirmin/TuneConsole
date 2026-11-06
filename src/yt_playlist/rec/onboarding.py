@@ -1,5 +1,4 @@
-"""Guided onboarding for thin / new accounts (#62): show a simple seed-your-taste Home view while the
-taste model is too thin to drive the normal feed, and graduate automatically once it is ready."""
+"""Guide new accounts until useful listening offers arrive, then retain setup completion."""
 import random
 
 from yt_playlist.rec import mix_tuning, rec_params
@@ -46,11 +45,6 @@ def _remember_completion(store, complete):
         store.settings.set_setting(SETUP_COMPLETE, '1')
 
 
-def feedback_count(store) -> int:
-    """Likes + dislikes recorded so far (the explicit taste signal onboarding collects)."""
-    return len(store.rec_model.recent_liked_keys()) + len(store.rec_model.list_dislikes())
-
-
 def library_size(store) -> int:
     return store.rec_query.tracks_total()
 
@@ -70,11 +64,10 @@ def arrival_status(store, now=None) -> dict:
     from yt_playlist.rec import account_growth, artist_start
 
     with store.read_view() as reader:
-        songs = reader.conn.execute("SELECT COUNT(*) FROM playable_library_tracks").fetchone()[0]
-        covers = reader.conn.execute(
-            "SELECT video_id, thumbnail FROM playable_library_tracks ORDER BY identity_key LIMIT 6").fetchall()
+        facts = reader.readiness.arrival()
+        songs, covers = facts['songs'], facts['covers']
         coverage = reader.enrichment_reports.coverage_stats()
-        modes = reader.conn.execute("SELECT COUNT(*) FROM taste_modes WHERE active=1").fetchone()[0]
+        modes = facts['modes']
         model_tracks = reader.rec_model.rec_content_vectors_count()
         discoveries = reader.rec_model.rec_discovered_content_vectors_count()
         imported = reader.settings.get_setting("last_sync_at") is not None
@@ -135,14 +128,6 @@ def _has_synced(store) -> bool:
     return any(store.settings.get_setting(k) is not None for k in ("last_sync_at", "last_plays_sync_at"))
 
 
-def _taste_ready(store) -> bool:
-    # At least one active taste mode means the model can drive the normal feed. A mode cannot be built
-    # without enriched content vectors, so its existence already implies enrichment ran - we do not
-    # also gate on a coverage percentage (the `processed` bookkeeping is an unreliable proxy, and
-    # coverage without modes can't fill the mode cards anyway).
-    return bool(store.modes.list_modes(active_only=True))
-
-
 def onboarding_active(store, now) -> bool:
     """Keep a synced account in setup until useful offers arrive or it dismisses setup."""
     if setup_completed(store) or store.settings.get_setting("onboard_dismissed") == "1":
@@ -155,11 +140,7 @@ def onboarding_active(store, now) -> bool:
 def library_sample(store, n=12) -> list[dict]:
     """A genre-diverse sample of owned tracks: round-robin across genre families, so ratings teach
     breadth. Falls back to any owned tracks when genres are sparse."""
-    with store.read_view() as reader:
-        rows = reader.conn.execute(
-            "SELECT identity_key k, title, artist, album, video_id vid, thumbnail thumb, genre, "
-            "duration_s AS duration FROM playable_library_tracks WHERE "
-            + reader.rec_eligibility.track_length_clause()).fetchall()
+    rows = store.readiness.library_sample(n)
     if not rows:
         return []
     by_fam = {}

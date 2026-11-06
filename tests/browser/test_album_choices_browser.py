@@ -2,13 +2,41 @@ import pytest
 from urllib.parse import parse_qs
 
 from tests.test_mode_cards_route import prepare_home as prepare_current_home
-from tests.home_fixture_support import browser_store as store, returning_listener
-from tests.test_home_other_genres import seed_genres
+from tests.home_fixture_support import browser_store, returning_listener
+from tests.prepared_fixture_support import prepared_template
+from tests.browser.quiet_action_support import (  # noqa: F401 - shared evidence fixture
+    action_evidence, assert_quiet_action, fail_action,
+)
 
 
 def prepare_home(store, now=1):
     returning_listener(store, 'mixes', 'albums', now=now)
     prepare_current_home(store, now)
+
+
+@pytest.fixture(scope='module')
+def album_home_template(_pristine_current_schema, genre_candidates_template):
+    def build(source):
+        genre_candidates_template.restore(source)
+        # Match live_app's pre-preparation account/playlist state. Each live
+        # consumer later upserts these identities in its own private copy.
+        identity = source.accounts.upsert_account('main', 'cred', None, True)
+        source.playlists.upsert_playlist(identity, 'PLZ', 'Old Mix', 3, 'h', 0.0)
+        source.settings.set_setting('last_sync_at', '1')
+        source.settings.set_setting('onboard_dismissed', '1')
+        prepare_home(source, 1)
+        assert not source.rec_proposals.get_proposals('album_prepared')
+
+    with prepared_template(_pristine_current_schema, build) as template:
+        yield template
+
+
+@pytest.fixture
+def store(browser_store, album_home_template):
+    # Restore before live_app starts. Home is prepared, but albums, visibility
+    # responses, choices, notes and all subsequent mutations belong to the case.
+    album_home_template.restore(browser_store)
+    return browser_store
 
 
 @pytest.mark.parametrize("width", [1440])
@@ -18,10 +46,6 @@ def test_album_tab_visibility_and_remembered_default(live_app, store, page, widt
     from playwright.sync_api import expect
     from tests.onboarding_support import publish_personal_mix
 
-    seed_genres(store)
-    store.settings.set_setting("last_sync_at", "1")
-    store.settings.set_setting("onboard_dismissed", "1")
-    prepare_home(store, 1)
     returning_listener(store, 'radio', now=1)
     tracks = publish_personal_mix(store, now=1)
     store.settings.set_setting('radio_seed_offer', json.dumps({
@@ -52,7 +76,7 @@ def test_album_tab_visibility_and_remembered_default(live_app, store, page, widt
         content_type='image/svg+xml', body='''<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800"><defs><linearGradient id="g"><stop stop-color="#214653"/><stop offset="1" stop-color="#a67c57"/></linearGradient></defs><path fill="url(#g)" d="M0 0h1200v800H0z"/><circle cx="600" cy="260" r="130" fill="#c3ab8f"/><path d="M290 800v-120a310 310 0 0 1 620 0v120" fill="#253b42"/></svg>'''))
     store.rec_proposals.put_proposals("album_prepared", {'items': albums, 'context': {}, 'built_at': 1}, 1)
     page.set_viewport_size({"width": width, "height": 1100})
-    page.goto(live_app + "/")
+    page.goto(live_app + "/", wait_until='domcontentloaded')
     expect(page.locator("#home-album-choices")).to_be_hidden()
     # A hidden tab was rendered, but browser visibility must not be invented.
     assert not [row for row in store.rec_ledger.evidence().records("response")
@@ -152,7 +176,7 @@ def test_album_tab_visibility_and_remembered_default(live_app, store, page, widt
     assert page.evaluate("""async () => (await fetch('/home/format', {method:'POST',
         headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'format=albums'})).status""") == 204
     assert store.settings.get_setting('home_format') == 'albums'
-    page.goto(live_app + "/")
+    page.goto(live_app + "/", wait_until='domcontentloaded')
     expect(page.get_by_role("tab", name="Long play", exact=True)).to_have_attribute("aria-selected", "true")
     card.locator('.album-choice-art').click()
     artist = card.locator('.album-inline tbody tr.srow a.alink').first
@@ -162,26 +186,28 @@ def test_album_tab_visibility_and_remembered_default(live_app, store, page, widt
 
 
 @pytest.mark.parametrize('delayed', [False, True])
-def test_album_tuner_keyboard_apply_reset_and_recorded_policy(live_app, store, page, delayed):
+def test_album_tuner_keyboard_apply_reset_and_recorded_policy(live_app, store, page, delayed, action_evidence, monkeypatch):
     from playwright.sync_api import expect
     from tests.rec.test_album_menu import records
     from yt_playlist.rec import album_tuning, choice_evidence
 
-    seed_genres(store)
-    store.settings.set_setting('last_sync_at', '1')
-    store.settings.set_setting('onboard_dismissed', '1')
-    prepare_home(store, 1)
     for album in records()[:6]:
         store.collection.add_saved_album({**album, 'browse': album['browse_id']})
     store.rec_proposals.put_proposals('album_prepared', {
         'built_at': 1, 'context': {}, 'items': records()}, 1)
     pending = []
+    from yt_playlist.web.routes import home_discovery
+    album_context = home_discovery.album_context
     if delayed:
+        # Exercise the genuine lazy-fragment path even when the normal Home
+        # response can already embed this fixture's prepared album board.
+        monkeypatch.setattr(home_discovery, 'album_context', lambda *args, **kwargs: None)
         page.route('**/home/album-choices', lambda route: pending.append(route))
     page.set_viewport_size({'width': 1440, 'height': 1100})
-    page.goto(live_app + '/#album-choices')
+    page.goto(live_app + '/#album-choices', wait_until='domcontentloaded')
     tune = page.get_by_role('button', name='Adjust album parameters')
     if delayed:
+        monkeypatch.setattr(home_discovery, 'album_context', album_context)
         expect(tune).to_be_visible()
         expect(tune).to_be_disabled()
         assert len(pending) == 1
@@ -195,6 +221,22 @@ def test_album_tuner_keyboard_apply_reset_and_recorded_policy(live_app, store, p
     slider.focus()
     slider.press('End')
     dialog.get_by_label('Jazz', exact=True).check()
+    failed = []
+    for kind in ('plaintext', 'network', 'json'):
+        def unavailable(route, kind=kind):
+            failed.append(parse_qs(route.request.post_data))
+            fail_action(route, kind)
+        page.route('**/home/album-choices/tune', unavailable)
+        dialog.get_by_role('button', name='Apply', exact=True).click()
+        expect(dialog.get_by_role('status')).to_have_text('Changes not confirmed. Your choices are kept here.')
+        expect(dialog.get_by_role('button', name='Apply', exact=True)).to_be_enabled()
+        expect(slider).to_have_value('100')
+        expect(dialog.get_by_label('Jazz', exact=True)).to_be_checked()
+        assert_quiet_action(page)
+        page.unroute('**/home/album-choices/tune', unavailable)
+    assert len(failed) == 3
+    assert all(body['novelty'] == ['100'] and body['genre'] == ['jazz'] for body in failed)
+    page.screenshot(path=action_evidence + '.png')
     page.screenshot(path='/tmp/tuneconsole-album-tuner.png', animations='disabled')
     dialog.get_by_role('button', name='Apply', exact=True).click()
     expect(dialog).not_to_be_visible()
@@ -224,11 +266,8 @@ def test_album_tuner_keyboard_apply_reset_and_recorded_policy(live_app, store, p
 def test_album_tab_recovers_when_preparation_finishes_after_initial_load(live_app, store, page):
     from playwright.sync_api import expect
 
-    seed_genres(store)
-    store.settings.set_setting('last_sync_at', '1')
-    store.settings.set_setting('onboard_dismissed', '1')
-    prepare_home(store, 1)
-    page.goto(live_app + '/')
+    assert not store.rec_proposals.get_proposals('album_prepared')
+    page.goto(live_app + '/', wait_until='domcontentloaded')
     page.get_by_role('tab', name='Long play', exact=True).click()
     expect(page.locator('#home-album-choices')).to_have_attribute('hx-trigger', 'every 3s')
     store.rec_proposals.put_proposals('album_prepared', {

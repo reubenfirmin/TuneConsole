@@ -5,19 +5,23 @@ All public builders below are pure. build() is the single worker-facing data-loa
 """
 from collections import Counter
 from statistics import median
-from urllib.parse import quote
 
 from yt_playlist.rec.recap_metrics import baselines, calendar_day, month_bounds, shift_month, typical
 
 MAX_FINDINGS = 3
 MIN_BASELINE_MONTHS = 3
 SHARE_CHANGE = .15
+MIN_NEW_PLAYS = 8
+MIN_NEW_DAYS = 3
 
 
 def new_this_month(data, month):
     since, until = month_bounds(month)
     events = [p for p in data["plays"] if calendar_day(p)[:7] == month]
     counts = Counter(p["identity_key"] for p in events)
+    track_days = {}
+    for play in events:
+        track_days.setdefault(play['identity_key'], set()).add(calendar_day(play))
     # A new installation/import must not turn its entire first month into discoveries.
     established = bool(data["first"]) and min(data["first"].values()) <= since - 30 * 86400
     albums = []
@@ -31,12 +35,12 @@ def new_this_month(data, month):
                 continue
             albums.append({"title": album["title"], "subtitle": album["artist"],
                            "detail": f"{len(heard)} of {len(keys)} tracks played",
-                           "href": f"/album?browse={quote(album['browse_id'], safe='')}",
                            "heard": len(heard)})
     albums.sort(key=lambda a: (-a["heard"], a["title"]))
     artist_counts = Counter()
     artist_first = {}
     artist_names = {}
+    artist_days = {}
     for key, first in data["first"].items():
         card = data['meta'].get(key,{})
         artist = card.get('artist')
@@ -45,22 +49,31 @@ def new_this_month(data, month):
             artist_names.setdefault(aid,data.get('artist_labels',{}).get(aid,artist))
             artist_first[aid] = min(artist_first.get(aid,first),first)
             artist_counts[aid] += counts[key]
-    artists = [{"title": artist_names[a], "detail": f"{n} plays",
-                "href": f"/artist?name={quote(artist_names[a], safe='')}"}
+            artist_days.setdefault(aid, set()).update(track_days.get(key, ()))
+    artists = [{"title": artist_names[a], "detail": f"{n} plays over {len(artist_days[a])} days",
+                "plays": n, "days": len(artist_days[a])}
                for a, n in sorted(artist_counts.items(), key=lambda pair: (-pair[1], pair[0]))
-               if established and n > 3 and artist_first[a] >= since
+               if established and n >= MIN_NEW_PLAYS and len(artist_days[a]) >= MIN_NEW_DAYS
+               and artist_first[a] >= since
                and a not in data["familiar_artists"]]
     playlist_plays = Counter(p.get("playlist_ytm_id") for p in events)
+    playlist_days = {}
+    for play in events:
+        playlist_days.setdefault(play.get('playlist_ytm_id'), set()).add(calendar_day(play))
     playlists = []
     for p in data["playlists"]:
         if calendar_day(p, "created_at")[:7] != month:
             continue
         songs = p["track_count"]
         plays = playlist_plays[p["provider_playlist_id"]]
+        days = len(playlist_days.get(p['provider_playlist_id'], ()))
+        if plays < MIN_NEW_PLAYS or days < MIN_NEW_DAYS:
+            continue
         size = f"{songs:,} song{'s' if songs != 1 else ''} · " if songs is not None else ""
         playlists.append({"title": p["title"] or "Untitled playlist",
-                          "detail": f"{size}{plays:,} play{'s' if plays != 1 else ''}",
-                          "href": f"https://music.youtube.com/playlist?list={quote(p['provider_playlist_id'], safe='')}"})
+                          "detail": f"{size}{plays:,} plays over {days} days",
+                          "plays": plays, "days": days})
+    playlists.sort(key=lambda p: (-p['plays'], p['title']))
     groups = [{"label": label, "entries": entries[:3], "total": len(entries)}
               for label, entries in (("Albums", albums), ("Playlists", playlists), ("Artists", artists))
               if entries]
@@ -224,7 +237,37 @@ def comparison_screens(current, previous, artist_labels=None):
 def screens(data, month):
     new = new_this_month(data, month)
     current, previous = baselines(data, month)
-    return ([new] if new else []) + comparison_screens(current, previous,data.get('artist_labels'))
+    return slides(([new] if new else []) + comparison_screens(current, previous,data.get('artist_labels')))
+
+
+def slides(beats):
+    """One finding per slide, including already published grouped recaps.
+
+    This only reshapes prepared data. Old artist/playlist entries without dated
+    listening support stay out until background preparation refreshes them.
+    """
+    result = []
+    for beat in beats:
+        if beat['kind'] == 'new_this_month' and 'groups' in beat:
+            discoveries = []
+            for group in beat['groups']:
+                for entry in group['entries']:
+                    album = group['label'] == 'Albums'
+                    supported = (entry.get('heard', 0) >= 3 if album else
+                                 entry.get('plays', 0) >= MIN_NEW_PLAYS
+                                 and entry.get('days', 0) >= MIN_NEW_DAYS)
+                    if supported:
+                        discoveries.append({'kind': 'new_this_month',
+                            'title': {'Albums': 'New album', 'Artists': 'New artist',
+                                      'Playlists': 'New playlist'}[group['label']],
+                            'entry': {k: entry[k] for k in ('title', 'subtitle', 'detail') if k in entry}})
+            result.extend(discoveries[:MAX_FINDINGS])
+        elif beat['kind'] in ('different', 'same') and 'findings' in beat:
+            result.extend({**beat, 'findings': [finding], 'entry': finding}
+                          for finding in beat['findings'])
+        else:
+            result.append(beat)
+    return result
 
 
 def build(store, month):

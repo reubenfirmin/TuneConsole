@@ -3,9 +3,33 @@ the modes axis at the three timescales it exists on (NOW / SESSION / PERMANENT),
 axis at the two it exists on (SESSION / TRANSIENT).
 """
 import numpy as np
+from tests.derived_rating_support import seed_dislike, seed_like
+from tests.retained_rating_support import observe_rating
 import pytest
 
+from tests.repository_mock_support import no_database, repository_store, transient_repository_store
 from yt_playlist.rec import embedding_vectors as embed, graduation, layers, rec_params, scoring, taste_viz, transient
+
+
+@pytest.fixture
+def learning_store(no_database):
+    return transient_repository_store(
+        rec_signals={'theme_rows': [], 'recent_graduations': []},
+        rec_model={'weight_records': {}},
+        modes={'choice_learning_rows': []},
+    )
+
+
+@pytest.fixture
+def transparency_store(no_database):
+    return transient_repository_store(
+        rec_signals={'theme_rows': []},
+        rec_model={'weight_records': {}, 'get_rec_vectors': []},
+        rec_query={'genre_play_distribution': {}, 'era_play_distribution': {}},
+        rec_proposals={'group_checkpoint': None},
+        charts={'top_artists': []},
+        modes={'list_modes': []},
+    )
 
 
 def _install_now_modes(store):
@@ -25,21 +49,23 @@ def _install_now_content_vectors(store, monkeypatch, keys, V):
     return V, idx
 
 
-def _seed_jazz(store):
-    """A jazz track that has been played, so it registers in the play-weighted genre distribution."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
-    store.tracks.set_track_genre(t, "Jazz")
-    store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
-    return iid
+def _jazz_inputs(store):
+    store.rec_query.genre_play_distribution.return_value = {'Jazz': 2}
+    store.rec_query.track_genres.return_value = {'song|band': 'Jazz'}
+    store.rec_query.track_artists.return_value = {'song|band': 'Band'}
+    store.genres.feature_axes.return_value = {'Jazz': ('jazz', None)}
+    store.history.recent_plays_with_ts.return_value = [('song|band', 1.)]
 
 
-def test_learning_progress_groups_all_evidence_without_reinterpreting_genres(store):
-    for i in range(15):
-        store.rec_signals.bump_theme(f"artist:Artist {i:02}", .1 + i * .01, 1.0)
-    store.rec_signals.bump_theme("artist:AC:DC", -.9, 1.0)
-    store.rec_signals.bump_theme("genre:other:alternative metal", .6, 1.0)
-    store.rec_signals.bump_theme("era:1990", 1.8, 1.0)
+def test_learning_progress_groups_all_evidence_without_reinterpreting_genres(learning_store):
+    store = learning_store
+    store.rec_signals.theme_rows.return_value = [
+        {'facet': f'artist:Artist {i:02}', 'score': .1 + i * .01, 'updated_at': 1.}
+        for i in range(15)] + [
+        {'facet': 'artist:AC:DC', 'score': -.9, 'updated_at': 1.},
+        {'facet': 'genre:other:alternative metal', 'score': .6, 'updated_at': 1.},
+        {'facet': 'era:1990', 'score': 1.8, 'updated_at': 1.},
+    ]
     data = taste_viz.learning_progress(store, 1.0)
     artists, genres, eras = data["groups"]
     assert len(artists["rows"]) == 16  # pagination must not discard the rest
@@ -56,11 +82,13 @@ def test_learning_progress_groups_all_evidence_without_reinterpreting_genres(sto
 
 
 @pytest.mark.parametrize("axis", ["artist", "genre", "era"])
-def test_learning_progress_orders_by_latest_evidence_not_strength(store, axis):
-    for name, score, updated_at in (("Strong boost", .9, 10), ("Strong reduction", -.9, 20),
-                                    ("Small boost", .1, 30), ("Small reduction", -.1, 40),
-                                    ("Epoch", .3, 0)):
-        store.rec_signals.bump_theme(f"{axis}:{name}", score, updated_at)
+def test_learning_progress_orders_by_latest_evidence_not_strength(learning_store, axis):
+    store = learning_store
+    entries = [{'facet': f'{axis}:{name}', 'score': score, 'updated_at': at}
+               for name, score, at in (("Strong boost", .9, 10), ("Strong reduction", -.9, 20),
+                                      ("Small boost", .1, 30), ("Small reduction", -.1, 40),
+                                      ("Epoch", .3, 0))]
+    store.rec_signals.theme_rows.return_value = entries
 
     def rows():
         return next(group["rows"] for group in taste_viz.learning_progress(store, 100)["groups"]
@@ -69,13 +97,17 @@ def test_learning_progress_orders_by_latest_evidence_not_strength(store, axis):
     assert [row["name"] for row in rows()] == ["Small reduction", "Small boost", "Strong reduction",
                                                "Strong boost", "Epoch"]
     assert [row["updated_at"] for row in rows()] == [40, 30, 20, 10, 0]
-    store.rec_signals.bump_theme(f"{axis}:Strong boost", .001, 50)
+    store.rec_signals.theme_rows.return_value = [
+        {**entry, 'score': .901, 'updated_at': 50} if entry['facet'] == f'{axis}:Strong boost'
+        else entry for entry in entries]
     assert rows()[0]["name"] == "Strong boost"
     assert rows()[0]["updated_at"] == 50
 
 
-def test_learning_source_curves_follow_configured_half_lives(store):
-    rec_params.set_param(store, "play_halflife_d", 7)
+def test_learning_source_curves_follow_configured_half_lives(learning_store):
+    store = learning_store
+    store.settings.get_setting.side_effect = {
+        rec_params.SETTING_PREFIX + 'play_halflife_d': '7'}.get
     data = taste_viz.learning_progress(store, 1.0)
     assert [row["title"] for row in data["activity"]] == ["Plays", "Likes", "Mood choices", "Dislikes", "Skips"]
     play = data["activity"][0]
@@ -137,9 +169,9 @@ def test_overview_includes_week_old_feedback_without_turning_radio_plays_into_le
     for i, key in enumerate(keys):
         store.history.record_play_event(iid, key, f"v{i}", now - 60,
                                         playlist_ytm_id="radio", source_timezone="UTC")
-    store.rec_model.record_like(keys[0], now - 6 * 86400, provenance="action")
-    store.rec_model.record_like(keys[1], now - 2 * 86400, provenance="sync")
-    store.rec_model.record_dislike(keys[2], now + 86400, now - 3 * 86400)
+    seed_like(store, keys[0], now - 6 * 86400, provenance="action")
+    seed_like(store, keys[1], now - 2 * 86400, provenance="sync")
+    seed_dislike(store, keys[2], now + 86400, now - 3 * 86400)
     graduation.graduate_facet(store, "genre:other:alternative metal", 2,
                              now - 2 * 86400, source_label="like")
 
@@ -157,19 +189,19 @@ def test_overview_includes_week_old_feedback_without_turning_radio_plays_into_le
 
 def test_recent_rating_inputs_preserve_provenance_bounds_and_sync_idempotence(store):
     since, now = 10.0, 20.0
-    store.rec_model.record_like("old|artist", since - 1, provenance="action")
-    store.rec_model.record_like("future|artist", now + 1, provenance="action")
-    store.rec_model.record_like("action|artist", since, provenance="action")
-    store.rec_model.record_like("synced|artist", now, provenance="sync")
-    store.rec_model.record_like("synced|artist", now + 1, provenance="sync")
-    store.rec_model.record_dislike("negative|artist", 100, now)
+    observe_rating(store, 'old|artist', 'LIKE', since - 1, provenance='action')
+    observe_rating(store, 'future|artist', 'LIKE', now + 1, provenance='action')
+    observe_rating(store, 'action|artist', 'LIKE', since, provenance='action')
+    observe_rating(store, 'synced|artist', 'LIKE', now)
+    observe_rating(store, 'synced|artist', 'LIKE', now + 1)
+    observe_rating(store, 'negative|artist', 'DISLIKE', now)
     store.rec_model.record_feedback("other", "negative|artist", "dislike", now=now)
     store.rec_model.mark_graduated_once("action|artist", "like_grad", now)
 
     assert store.rec_model.recent_rating_inputs(since, now) == {
         "likes": 1, "synced_likes": 1, "dislikes": 1}
     # Re-reading an old rating during sync does not make it new feedback this week.
-    store.rec_model.record_like("old|artist", now, provenance="sync")
+    observe_rating(store, 'old|artist', 'LIKE', now)
     assert store.rec_model.recent_rating_inputs(since, now)["likes"] == 1
 
 
@@ -198,21 +230,23 @@ def test_recent_saved_changes_filters_time_before_limiting(store):
     assert [r["axis"] for r in rows] == ["artist:Latest", "genre:other:metal", "era:1990"]
 
 
-def test_viz_reflects_param_overrides(store):
+def test_viz_reflects_param_overrides(transparency_store):
+    store = transparency_store
     # #85: stale_decay_halflife_d and the "freshness" payload key are gone (no sync-staleness relax
     # any more); the equivalent per-source override now shows up in sources.halflife_days.
-    store.accounts.upsert_account("main", "cred", None, True)
-    rec_params.set_param(store, "mood_halflife_d", 10)
+    store.settings.get_setting.side_effect = {
+        rec_params.SETTING_PREFIX + 'mood_halflife_d': '10'}.get
     payload = taste_viz.model_transparency(store, now=1000.0)
     assert payload["sources"]["halflife_days"]["mood"] == 10
 
 
 # ── The facet axes: PERMANENT x TRANSIENT = EFFECTIVE ───────────────────────
 
-def test_chain_multiplies_permanent_by_standing_by_transient(store):
-    _seed_jazz(store)
-    store.rec_model.set_weight("genre:jazz", 1.5)
-    store.rec_model.set_lean("genre:jazz", 1.2, 1000.0)
+def test_chain_multiplies_permanent_by_standing_by_transient(transparency_store):
+    store = transparency_store
+    _jazz_inputs(store)
+    store.rec_model.get_weights.return_value = {'genre:jazz': 1.5}
+    store.rec_model.get_leans.return_value = {'genre:jazz': 1.2}
     payload = taste_viz.model_transparency(store, now=1000.0)
     jazz = next(r for r in payload["genres"] if r["name"] == "jazz")
     assert jazz["permanent_weight"] == pytest.approx(1.5)
@@ -221,13 +255,14 @@ def test_chain_multiplies_permanent_by_standing_by_transient(store):
     assert jazz["effective"] == pytest.approx(1.5 * 1.2 * jazz["transient_mult"])
 
 
-def test_effective_equals_the_multiplier_scoring_actually_applies(store):
+def test_effective_equals_the_multiplier_scoring_actually_applies(transparency_store):
     """The whole point of the card: `effective` must be the number `scoring._axis_mult` composes, not
     a re-clamped lookalike. A weight above the genre band would previously be shown clamped here and
     applied unclamped there."""
-    _seed_jazz(store)
-    store.rec_model.set_weight("genre:jazz", 1.9)
-    store.rec_model.set_lean("genre:jazz", 1.4, 1000.0)
+    store = transparency_store
+    _jazz_inputs(store)
+    store.rec_model.get_weights.return_value = {'genre:jazz': 1.9}
+    store.rec_model.get_leans.return_value = {'genre:jazz': 1.4}
     now = 1000.0
 
     row = next(r for r in taste_viz.model_transparency(store, now=now)["genres"] if r["name"] == "jazz")
@@ -242,10 +277,11 @@ def test_effective_equals_the_multiplier_scoring_actually_applies(store):
     assert row["effective"] == pytest.approx(expected)
 
 
-def test_transient_multiplier_reflects_a_recent_play(store):
+def test_transient_multiplier_reflects_a_recent_play(transparency_store):
     """A recent play pushes its genre's transient lean positive, so the TRANSIENT rose has a shape
     while PERMANENT stays neutral. This is the contrast the card exists to draw."""
-    _seed_jazz(store)
+    store = transparency_store
+    _jazz_inputs(store)
     row = next(r for r in taste_viz.model_transparency(store, now=1.0)["genres"] if r["name"] == "jazz")
     assert row["transient_lean"] > 0
     assert row["transient_mult"] > 1.0
@@ -253,11 +289,14 @@ def test_transient_multiplier_reflects_a_recent_play(store):
     assert row["effective"] == pytest.approx(row["transient_mult"])
 
 
-def test_cold_start_is_neutral_everywhere(store):
+def test_cold_start_is_neutral_everywhere(transparency_store):
+    store = transparency_store
     payload = taste_viz.model_transparency(store, now=1000.0)
     assert payload["genres"] == [] and payload["eras"] == [] and payload["artists"] == []
     assert payload["sources"]["plays"] == 0
     assert payload["modes"]["modes"] == []
+    assert (payload['modes']['now']['segments'] == payload['modes']['session']['segments']
+            == payload['modes']['permanent']['segments'] == [])
 
 
 @pytest.mark.parametrize("saved", [1.8, 0.4])
@@ -277,8 +316,11 @@ def test_lane_provenance_matches_the_served_weight_after_fading(store, saved):
     assert lane["fade_delta"] == pytest.approx(served - saved)
 
 
-def test_lane_provenance_distinguishes_default_from_saved_neutral(store):
-    store.rec_model.set_weight("lane:deep_cut", 1.0, now=1.0)
+def test_lane_provenance_distinguishes_default_from_saved_neutral(transparency_store):
+    store = transparency_store
+    store.rec_model.get_weights.return_value = {'lane:deep_cut': 1.}
+    store.rec_model.weight_records.return_value = {
+        'lane:deep_cut': {'weight': 1., 'updated_at': 1.}}
     lanes = {r["name"]: r for r in taste_viz.model_transparency(store, now=1.0)["lanes"]}
     assert lanes["deep_cut"]["has_record"] is True
     assert lanes["rotation"]["has_record"] is False
@@ -286,12 +328,16 @@ def test_lane_provenance_distinguishes_default_from_saved_neutral(store):
     assert lanes["rotation"]["age_days"] is None
 
 
-def test_funnel_reports_threshold(store):
-    store.rec_signals.bump_theme("genre:jazz", 0.6, 1000.0)
+def test_funnel_reports_threshold(transparency_store):
+    store = transparency_store
+    store.settings.get_setting.side_effect = {
+        rec_params.SETTING_PREFIX + 'theme_threshold': '2.4'}.get
+    store.rec_signals.theme_rows.return_value = [
+        {'facet': 'genre:jazz', 'score': .6, 'updated_at': 1000.}]
     payload = taste_viz.model_transparency(store, now=1000.0)
     row = next(r for r in payload["funnel"] if r["facet"] == "genre:jazz")
-    assert row["threshold"] == rec_params.THEME_THRESHOLD
-    assert abs(row["frac"] - 0.6 / rec_params.THEME_THRESHOLD) < 1e-6
+    assert row["threshold"] == 2.4
+    assert row["frac"] == pytest.approx(.25)
 
 
 def test_artists_populate_from_play_history(store):
@@ -309,13 +355,12 @@ def test_artists_populate_from_play_history(store):
     assert abs(arts["Alice"]["share"] + arts["Bob"]["share"] - 1.0) < 1e-9
 
 
-def test_artist_shares_normalize_over_all_artists(store):
+def test_artist_shares_normalize_over_all_artists(no_database):
     # Shares must be normalized over ALL artists (like genres), not just the displayed top-N, so the
     # Artists card's "what you play" bars are on the same footing as the genre rose's.
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    for i in range(13):
-        store.tracks.upsert_track(f"v{i}", f"S{i}", f"Art{i}", None, None)
-        store.history.record_history_plays(iid, 10.0 + i, [f"s{i}|art{i}"], source_timezone="UTC")
+    artists = [{'artist': f'Art{i}', 'plays': 1} for i in range(13)]
+    store = repository_store(charts={'top_artists': []})
+    store.charts.top_artists.side_effect = lambda *, limit: artists[:limit]
     shares = dict(taste_viz._artist_shares(store, top=12))
     assert len(shares) == 12                                  # displays the top 12
     # each is 1/13 (normalized over all 13), so the 12 shown sum to 12/13, NOT 1.0
@@ -379,20 +424,20 @@ def test_mode_evidence_reports_unmapped_realtime_plays(store, monkeypatch):
     assert evidence["session"]["mapped"] == 1
 
 
-def test_mode_layers_permanent_stands_alone_when_the_fast_layers_are_quiet(store):
+def test_mode_layers_permanent_stands_alone_when_the_fast_layers_are_quiet(transparency_store):
     # Modes exist, but no recent plays -> NOW and SESSION are below the confidence gate and report
     # nothing, while PERMANENT still describes the durable shape. Quiet is not the same as absent.
-    _install_now_modes(store)
+    store = transparency_store
+    store.modes.list_modes.return_value = [
+        {'mode_id': 1, 'label': 'Warehouse techno', 'size': 60,
+         'centroid': np.array([1., 0.], dtype=np.float32)},
+        {'mode_id': 2, 'label': 'Chill acoustic', 'size': 20,
+         'centroid': np.array([0., 1.], dtype=np.float32)},
+    ]
     ml = taste_viz.model_transparency(store, now=1_000_000.0)["modes"]
     assert ml["now"]["segments"] == [] and ml["session"]["segments"] == []
     assert {s["mode_id"] for s in ml["permanent"]["segments"]} == {1, 2}
     assert [m["mode_id"] for m in ml["modes"]] == [1, 2]
-
-
-def test_mode_layers_empty_without_modes(store):
-    ml = taste_viz.model_transparency(store, now=1000.0)["modes"]
-    assert ml["modes"] == []
-    assert ml["now"]["segments"] == ml["session"]["segments"] == ml["permanent"]["segments"] == []
 
 
 def test_saved_style_portrait_survives_a_content_space_change(store, monkeypatch):
@@ -433,7 +478,8 @@ def test_generation_examples_read_prepared_pools_and_filter_hidden_tracks(store)
 
 # ── The embedding axis: SESSION / TRANSIENT ─────────────────────────────────
 
-def test_centroid_tilt_quiet_on_cold_store(store):
+def test_centroid_tilt_quiet_on_cold_store(transparency_store):
+    store = transparency_store
     panel = taste_viz.centroid_tilt_panel(store, now=1000.0)
     assert panel["families"] == []
     assert panel["has_session"] is False and panel["has_transient"] is False
@@ -448,16 +494,16 @@ def _install_tilt_space(store, monkeypatch, session, transient_dir):
     V = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64)
     idx = {k: i for i, k in enumerate(keys)}
     monkeypatch.setattr(taste_viz.vectors, "load_vectors", lambda s: (keys, V, idx))
-    for title, artist, genre in (("t", "techno", "Techno"), ("j", "jazz", "Jazz")):
-        track = store.tracks.upsert_track(f"tilt-{artist}", title, artist, None, 200)
-        store.tracks.set_track_genre(track, genre)
+    store.rec_query.track_genres.return_value = {'t|techno': 'Techno', 'j|jazz': 'Jazz'}
+    store.genres.feature_axes.return_value = {'Techno': ('techno', None), 'Jazz': ('jazz', None)}
     monkeypatch.setattr(taste_viz.layers, "session_tilt", lambda *a: session)
     monkeypatch.setattr(taste_viz.transient, "centroid_tilt", lambda *a: transient_dir)
 
 
-def test_centroid_tilt_projects_both_layers_onto_the_same_centroids(store, monkeypatch):
+def test_centroid_tilt_projects_both_layers_onto_the_same_centroids(transparency_store, monkeypatch):
     # Session leans hard toward techno; transient leans toward jazz. Both are cosines against the same
     # family centroids, so the two bars sit on one comparable scale and can visibly disagree.
+    store = transparency_store
     _install_tilt_space(store, monkeypatch,
                         session=np.array([1.0, 0.0]), transient_dir=np.array([0.0, 1.0]))
     panel = taste_viz.centroid_tilt_panel(store, now=1000.0)
@@ -469,9 +515,10 @@ def test_centroid_tilt_projects_both_layers_onto_the_same_centroids(store, monke
     assert fams["jazz"]["transient"] == pytest.approx(1.0, abs=1e-6)
 
 
-def test_centroid_tilt_reports_transient_alone_when_session_is_gated(store, monkeypatch):
+def test_centroid_tilt_reports_transient_alone_when_session_is_gated(transparency_store, monkeypatch):
     # A quiet session (below now_min_events) must leave the transient row intact and mark itself
     # absent, rather than suppressing the whole panel.
+    store = transparency_store
     _install_tilt_space(store, monkeypatch, session=None, transient_dir=np.array([0.0, 1.0]))
     panel = taste_viz.centroid_tilt_panel(store, now=1000.0)
     assert panel["has_session"] is False and panel["has_transient"] is True
@@ -479,7 +526,8 @@ def test_centroid_tilt_reports_transient_alone_when_session_is_gated(store, monk
     assert {f["name"] for f in panel["families"]} == {"techno", "jazz"}
 
 
-def test_centroid_tilt_display_preserves_fading_magnitude(store, monkeypatch):
+def test_centroid_tilt_display_preserves_fading_magnitude(transparency_store, monkeypatch):
+    store = transparency_store
     _install_tilt_space(store, monkeypatch,
                         session=np.array([0.5, 0.0]), transient_dir=np.array([0.0, 0.125]))
     panel = taste_viz.centroid_tilt_panel(store, now=1000)
@@ -488,9 +536,10 @@ def test_centroid_tilt_display_preserves_fading_magnitude(store, monkeypatch):
     assert fams["jazz"]["transient"] == pytest.approx(0.125)
 
 
-def test_now_layer_has_no_embedding_direction(store, monkeypatch):
+def test_now_layer_has_no_embedding_direction(transparency_store, monkeypatch):
     """NOW is categorical over modes by design (layers.py: an hour of plays cannot place a direction
     without whiplash). Pin that the embedding panel never grows a `now` row."""
+    store = transparency_store
     _install_tilt_space(store, monkeypatch,
                         session=np.array([1.0, 0.0]), transient_dir=np.array([0.0, 1.0]))
     panel = taste_viz.centroid_tilt_panel(store, now=1000.0)
@@ -564,13 +613,15 @@ def test_playlist_influence_identifies_behavior_fallback_as_listening(store):
     assert panel["contexts"][0]["percent_label"] == "100%"
 
 
-def test_engine_panel_reports_counts_without_loading_playlist_model(store, monkeypatch):
+def test_engine_panel_reports_counts_without_loading_playlist_model(no_database, monkeypatch):
+    store = repository_store(settings={'get_setting': None}, rec_model={'rec_vectors_count': 0})
     def unexpected(*args, **kwargs):
         raise AssertionError("Technical setup must not load playlist taste")
 
     monkeypatch.setattr(taste_viz.scoring, "playlist_taste", unexpected)
     panel = taste_viz.engine_panel(store)
-    assert panel["vectors"] == store.rec_model.rec_vectors_count()
+    assert panel["vectors"] == 0
+    store.rec_model.rec_vectors_count.assert_called_once_with()
     assert panel["dim"] >= 1
 
 
@@ -578,14 +629,3 @@ def test_breadth_word_thresholds():
     assert taste_viz._breadth_word(0.9) == "eclectic"
     assert taste_viz._breadth_word(0.5) == "balanced"
     assert taste_viz._breadth_word(0.1) == "focused"
-
-
-def test_recent_play_counts_are_frequency_weighted(store):
-    # Exact replay events count individually; repeated coarse captures of a day do not.
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    store.tracks.upsert_track("v1", "Hit", "Star", None, None)
-    store.tracks.upsert_track("v2", "Bsong", "Other", None, None)
-    store.history.import_play_events(iid, [("hit|star", "v1", ts) for ts in (10.0, 20.0, 30.0)])
-    store.history.import_play_events(iid, [("bsong|other", "v2", 40.0)])
-    counts = store.history.recent_play_counts(1000)
-    assert counts["hit|star"] == 3 and counts["bsong|other"] == 1

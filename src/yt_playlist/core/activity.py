@@ -11,6 +11,7 @@ from typing import Callable
 
 from yt_playlist.core.work_diagnostics import work_span
 from yt_playlist.core.priority import yield_to_requests
+from yt_playlist.core.work_errors import WorkBudgetExceeded
 
 _CURRENT_WORK = ContextVar("tuneconsole_activity", default=None)
 _CANCELLATION = ContextVar("tuneconsole_cancellation", default=None)
@@ -19,10 +20,6 @@ _DEADLINE = ContextVar("tuneconsole_work_deadline", default=None)
 
 class WorkClosing(RuntimeError):
     pass
-
-
-class WorkBudgetExceeded(RuntimeError):
-    """A disposable calculation used its allotted wall time."""
 
 
 @dataclass
@@ -117,8 +114,8 @@ class Activity:
 
     def start_thread(self, target, *, args=(), kwargs=None, name=None):
         run = self.wrap(name or target.__name__, target, *args, **(kwargs or {}))
-        thread = threading.Thread(target=run, name=name, daemon=True)
         try:
+            thread = threading.Thread(target=run, name=name, daemon=True)
             thread.start()
         except BaseException:
             run.release()
@@ -190,7 +187,7 @@ def check_stopping():
     if stopped():
         raise WorkClosing("TuneConsole is shutting down; background work stopped.")
     if deadline is not None and time.monotonic() >= deadline:
-        raise WorkBudgetExceeded("Background preparation exhausted its time budget")
+        raise WorkBudgetExceeded("This operation exceeded its time limit. Please try again.")
 
 
 @contextmanager

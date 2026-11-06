@@ -61,12 +61,16 @@ def collect(store):
 def test_partial_rows_are_hidden_until_one_atomic_head_switch(recommendations):
     store = recommendations
     prepared = plan(store)
+    prepared = replace(prepared, slots=prepared.slots + tuple(
+        replace(prepared.slots[0], mode_key=f'genre-{i}') for i in range(18)))
     build = store.recommendations.claim(prepared)
     assert store.recommendations.head('home') is None
     assert store.recommendations.page('home', 'all', 'wheelhouse') == []
     store.recommendations.stage(prepared, build)
     assert store.recommendations.head('home') is None
     assert store.conn.execute('SELECT status FROM recommendation_generations').fetchone()[0] == 'ready'
+    # Retry crosses the bounded selection page without duplicating sealed pools.
+    store.recommendations.stage(prepared, build)
     with pytest.raises(RuntimeError, match='transaction'):
         store.recommendations.publish(build, 11)
     with store.conn:
@@ -74,6 +78,8 @@ def test_partial_rows_are_hidden_until_one_atomic_head_switch(recommendations):
         store.recommendations.publish(build, 11)
     assert store.recommendations.head('home')['id'] == build.generation_id
     assert [row['key'] for row in store.recommendations.page('home', 'small-genre', 'wheelhouse')] == ['one', 'two']
+    assert [row['key'] for row in store.recommendations.page('home', 'genre-17', 'wheelhouse')] == ['one', 'two']
+    assert len(store.recommendations.selections('home', 'wheelhouse')) == 20
     assert store.recommendations.output('home', 'framing') == {'title': 'one'}
     assert not store.conn.execute('SELECT 1 FROM recommendation_builds').fetchone()
     assert store.conn.execute('SELECT count(*) FROM recommendation_pools').fetchone()[0] == 1
@@ -99,7 +105,8 @@ def test_queried_bundle_framing_is_typed_and_frozen_with_its_generation(recommen
                                             framing=replace(framing, year_high=1900)))
 
 
-def test_interrupted_members_resume_the_exact_committed_prefix(recommendations, monkeypatch):
+@pytest.mark.parametrize('interruption', ['closing', 'superseded'])
+def test_interrupted_members_resume_the_exact_committed_prefix(recommendations, monkeypatch, interruption):
     store = recommendations
     with store.conn:
         store.conn.executemany('INSERT INTO recordings(id,identity_key) VALUES (?,?)',
@@ -113,10 +120,16 @@ def test_interrupted_members_resume_the_exact_committed_prefix(recommendations, 
         if start and not interrupted:
             interrupted = True
             raise WorkClosing('controlled interrupted publication')
-        return original(conn, pool, candidates, start)
+        result = original(conn, pool, candidates, start)
+        if interruption == 'superseded':
+            interrupted = True
+        return result
     monkeypatch.setattr(publication.pools, 'append', append)
-    with pytest.raises(WorkClosing):
-        store.recommendations.stage(prepared, build)
+    if interruption == 'closing':
+        with pytest.raises(WorkClosing):
+            store.recommendations.stage(prepared, build)
+    else:
+        assert store.recommendations.stage(prepared, build, still_current=lambda: not interrupted) is False
     assert store.conn.execute('SELECT count(*) FROM recommendation_candidates').fetchone()[0] == publication.BATCH_ROWS
     assert store.recommendations.head('home') is None
     resumed = store.recommendations.claim(prepared, owner=build.owner)
@@ -131,6 +144,51 @@ def test_interrupted_members_resume_the_exact_committed_prefix(recommendations, 
         identities.extend(row['recording_id'] for row in page)
         after = page[-1]['rank']
     assert identities == list(range(1, 303))
+
+
+@pytest.mark.parametrize('interruption', ['closing', 'superseded'])
+def test_interrupted_slot_batch_resumes_all_remaining_shared_selections(recommendations, monkeypatch, interruption):
+    store = recommendations
+    first = plan(store)
+    slots = tuple(publication.Slot('home', f'style-{i}', 'wheelhouse', first.slots[0].pool)
+                  for i in range(publication.SLOT_BATCH_ROWS + 2))
+    prepared = replace(first, slots=slots)
+    build = store.recommendations.claim(prepared)
+    original = publication._pool
+    calls, changed = 0, False
+
+    def interrupted(repo, current, pool, **kwargs):
+        nonlocal calls, changed
+        calls += 1
+        if interruption == 'closing' and calls == publication.SLOT_BATCH_ROWS + 1:
+            raise WorkClosing('controlled interruption after the first slot batch')
+        result = original(repo, current, pool, **kwargs)
+        if interruption == 'superseded' and calls == publication.SLOT_BATCH_ROWS:
+            changed = True
+        return result
+
+    with monkeypatch.context() as boundary:
+        boundary.setattr(publication, '_pool', interrupted)
+        if interruption == 'closing':
+            with pytest.raises(WorkClosing):
+                store.recommendations.stage(prepared, build)
+        else:
+            assert store.recommendations.stage(prepared, build, still_current=lambda: not changed) is False
+    assert store.recommendations.head('home') is None
+    assert store.conn.execute('SELECT count(*) FROM recommendation_surface_pools').fetchone()[0] == publication.SLOT_BATCH_ROWS
+    resumed = store.recommendations.claim(prepared, owner=build.owner)
+    assert resumed == build
+    store.recommendations.stage(prepared, resumed)
+    with store.conn:
+        store.conn.execute('BEGIN IMMEDIATE')
+        store.recommendations.publish(resumed, 12)
+    assert {row['mode_key'] for row in store.recommendations.selections('home', 'wheelhouse')} == {
+        slot.mode_key for slot in slots}
+    assert store.conn.execute('SELECT count(*) FROM recommendation_pools').fetchone()[0] == 1
+    assert store.conn.execute('SELECT count(*) FROM recommendation_candidates').fetchone()[0] == 2
+    for slot in slots:
+        assert [row['key'] for row in store.recommendations.page('home', slot.mode_key, 'wheelhouse')] == ['one', 'two']
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
 def test_changed_pool_does_not_replace_unchanged_ranking_facts(recommendations):
@@ -191,6 +249,56 @@ def test_late_snapshot_conflict_and_late_sql_failure_leave_last_good_head(recomm
     assert store.recommendations.head('home')['id'] == previous.generation_id
     assert store.conn.execute('SELECT owner FROM recommendation_builds WHERE generation_id=?',
                               (build.generation_id,)).fetchone()[0] == build.owner
+
+
+def test_changed_inputs_during_output_files_stop_staging_and_keep_last_good_head(recommendations, monkeypatch):
+    store = recommendations
+    previous = publish(store, plan(store))
+    store.settings.set_setting('output-publication-guard', 'before')
+    documents = tuple(publication.Output('home', f'part-{i}',
+        outputs.encode('home', f'part-{i}', {'part': i}))
+        for i in range(publication.OUTPUT_BATCH_ROWS * 2 + 2))
+    prepared = replace(plan(store, 'obsolete-output-build'), outputs=documents)
+    original_publish, changed = outputs.publish, []
+
+    def publish_file(root, encoded):
+        result = original_publish(root, encoded)
+        if not changed:
+            # A real strict input changes while durable files are still private.
+            # This runs outside the manifest writer transaction.
+            store.settings.set_setting('output-publication-guard', 'after')
+            changed.append(True)
+        return result
+
+    with store.read_snapshot() as snapshot:
+        assert snapshot.store.settings.get_setting('output-publication-guard') == 'before'
+        snapshot.release_reader()
+        build = store.recommendations.claim(prepared)
+        with monkeypatch.context() as boundary:
+            boundary.setattr(outputs, 'publish', publish_file)
+            assert store.recommendations.stage(
+                prepared, build, still_current=snapshot.is_current) is False
+        assert changed == [True]
+        staged = store.conn.execute(
+            'SELECT chunk_key FROM prepared_outputs WHERE generation_id=?', (build.generation_id,)).fetchall()
+        assert 0 < len(staged) < len(documents), 'Obsolete work must stop before staging every output'
+        assert not snapshot.publish(lambda: store.recommendations.publish(build, 12))
+    assert store.recommendations.head('home')['id'] == previous.generation_id
+    assert store.recommendations.output('home', 'framing') == {'title': 'one'}
+    assert store.recommendations.output('home', 'part-0') is None
+
+    # A new build can still publish every output after the changed input settles.
+    with store.read_snapshot() as current:
+        assert current.store.settings.get_setting('output-publication-guard') == 'after'
+        current.release_reader()
+        renewed = replace(prepared, external_key='current-output-build')
+        ready = store.recommendations.claim(renewed)
+        assert store.recommendations.stage(renewed, ready, still_current=current.is_current)
+        assert current.publish(lambda: store.recommendations.publish(ready, 13))
+    assert store.recommendations.head('home')['id'] == ready.generation_id
+    for i in range(len(documents)):
+        assert store.recommendations.output('home', f'part-{i}') == {'part': i}
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
 def test_published_rows_cannot_mutate_and_seal_requires_exact_complete_membership(recommendations):

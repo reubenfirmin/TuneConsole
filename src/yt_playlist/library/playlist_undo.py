@@ -13,7 +13,7 @@ from yt_playlist.library.playlist_mutation import mutation_status, restore_playl
 from yt_playlist.library.playlist_positions import cancel_insertions
 from yt_playlist.library.playlist_snapshot import (
     http_status as _http_status, playlist_if_present)
-from yt_playlist.library.undo_conflicts import keeper_target, playlist_state, require_unchanged_copy
+from yt_playlist.library.undo_conflicts import UndoConflict, keeper_target, playlist_state, require_unchanged_copy
 
 
 def _existing(client, playlist_id):
@@ -201,8 +201,7 @@ def _delete_copy(store, clients, step, save, now):
             raise ValueError('The prior copy deletion outcome is unknown. The playlist still appears present; '
                              'it was preserved and no deletion was replayed. Recheck this same Undo later.')
         require_unchanged_copy(step.get("post"), playlist_state(detail))
-        from yt_playlist.core import action_work
-        if action_work.available(store.conn) and not step.get('deletion_backup'):
+        if store.actions.has_durable_targets() and not step.get('deletion_backup'):
             from yt_playlist.library.playlist_backups import backup_remote_playlist
             step['deletion_backup'] = backup_remote_playlist(
                 store,step['identity'],step['ytm'],detail.get('title'),now,detail)
@@ -252,6 +251,7 @@ def undo_action(store, action_id, clients, now):
             elif recovery["version"] != 2:
                 raise ValueError("Unsupported recovery journal version. Review this action manually.")
             recovery.pop("error", None)
+            recovery.pop("reason", None)
             save()
             for identity,remote in store.actions.target_lock_keys(action_id,'recovery'):
                 claims.enter_context(claim_deletion_target(store,identity,remote))
@@ -297,6 +297,8 @@ def undo_action(store, action_id, clients, now):
             store.actions.finish_undo(action_id, undo, now,claim_token=action.execution_token,target_claims=target_claims)
         except Exception as exc:
             recovery["error"] = str(exc) or type(exc).__name__
+            if isinstance(exc, UndoConflict):
+                recovery['reason'] = exc.reason
             store.actions.save_undo_progress(action_id, undo, now, failed=True,claim_token=action.execution_token,target_claims=target_claims)
             complete = sum(s["phase"] == "complete" for s in recovery["steps"])
             raise ValueError(f"Undo incomplete ({complete}/{len(recovery['steps'])} steps complete). "

@@ -253,14 +253,59 @@ def _backup_library(source, destination):
     if not source.exists():
         pytest.skip("No saved library; set TUNECONSOLE_BENCH_DB")
     started = time.monotonic()
+    import shutil
+    from types import SimpleNamespace
+    from tests.prepared_fixture_support import PreparedTemplate, coordinates, roots
+    from yt_playlist.core.db_rebuild import job
+    from yt_playlist.core import preparation_files
     with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)) as reader:
+        reader.row_factory = sqlite3.Row
+        reader.execute('PRAGMA query_only=ON')
         # Pin a WAL read transaction: a busy live writer otherwise keeps restarting
         # SQLite's paged backup, which can take arbitrarily long to finish.
-        reader.execute("BEGIN")
-        source_schema = reader.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-        with closing(sqlite3.connect(destination)) as writer:
-            reader.backup(writer, pages=1024)
-    return {'backup_s': time.monotonic() - started, 'source_schema': source_schema}
+        with job._files(reader):
+            reader.execute("BEGIN")
+            source_schema = reader.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+            preparation = tuple(preparation_files.references(reader))
+            manifest = (preparation_files.export(reader, destination.with_name(
+                destination.name + '.fixture-custody')) if preparation else None)
+            prepared_columns = {(owner['table'], owner['columns'][0]) for owner in preparation}
+            # Old action exports may retain an absolute human export name.
+            # Only retained_filename is the physical file coordinate.
+            logical = {('action_backups', 'filename')}
+            ordinary = tuple((table, column, filename)
+                for table, column, filename in coordinates(reader)
+                if (table.strip('"'), column.strip('"')) not in prepared_columns | logical)
+            files = roots(reader)
+            external = []
+            for _table, _column, filename in ordinary:
+                path = Path(filename)
+                if any(path.is_relative_to(root) for root in files.values()):
+                    continue
+                # A supported installed copy can keep file custody in its
+                # previous compaction tree. Match that finite domain's root;
+                # arbitrary external filenames still fail admission.
+                matches = [(len(parent.parts), name, path.relative_to(parent))
+                    for name, root in files.items() for parent in path.parents
+                    if (parent.name.endswith(root.name[len(source.name):])
+                        if root.name.startswith(source.name + '.') else parent.name == root.name)]
+                assert matches, 'Unmanaged benchmark file coordinate: ' + filename
+                _depth, name, relative = max(matches)
+                external.append((filename, name, relative))
+            template = PreparedTemplate(SimpleNamespace(conn=reader), files, ordinary, {}, None, manifest)
+            target = Store(destination)
+            try:
+                # These are disposable fixture bytes, not a recovery-acceptance
+                # export. Reuse private cloning and coordinate relocation instead
+                # of publishing and restoring every immutable file twice.
+                # The source snapshot's lifetime fences keep committed files
+                # alive; concurrent publishers' private streams are not inputs.
+                template.restore(target, ignore=shutil.ignore_patterns('.fao-pending-*', '.fao-restore-*'),
+                                 external_files=external)
+            finally:
+                target.conn.close()
+    return {'backup_s': time.monotonic() - started, 'source_schema': source_schema,
+            'clone_method': 'private-byte-copies', 'file_domains': sorted(files)}
 
 
 def _saved_library_run(tmp_path, *, full_generation=False, refresh=None, projection=None, inline_checkpoint=False):

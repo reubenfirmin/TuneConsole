@@ -32,6 +32,7 @@ MAX_BYTES = 4_000_000
 PREPARE_BUDGET_S = 10
 SUMMARY_BUDGET_S = 2
 _LOG = logging.getLogger(__name__)
+_CAPACITY_READERS = {surface: json_cache.DecodeCache() for surface in (SURFACE, 'home_tuned', 'home_choice')}
 
 
 class _NoJobs:
@@ -40,9 +41,13 @@ class _NoJobs:
 
 
 def tuning_key(store, now=None):
-    from yt_playlist.rec import candidate_refresh
     now = time.time() if now is None else now
     vibe = home_vibe.current(store, now)
+    return store.memoized_read(('home-tuning', now, vibe), lambda: _tuning_key(store, now, vibe))
+
+
+def _tuning_key(store, now, vibe):
+    from yt_playlist.rec import candidate_refresh
     genres = store.rec_proposals.get_proposals("home_genre_request") or {}
     if not mix_tuning.genre_active(store, genres):
         genres = {}
@@ -92,11 +97,16 @@ def _proposal_generation(reader, bundles_json, now=None, *, preview=None):
 
 
 def prepare(store, now):
-    """Prepare a bounded batch privately and publish only against unchanged inputs."""
+    """Prepare independent summaries, then a bounded mix batch."""
     # Discovery remains usable while a model change invalidates the mix menus,
     # or a large mix assembly spends its entire preparation budget.
     prepare_discovery(store, now)
     prepare_revisit(store, now)
+    return prepare_mixes(store, now)
+
+
+def prepare_mixes(store, now):
+    """Bound the complete mix calculation, including reader setup and cleanup."""
     result = None
     try:
         # Complete one full menu on large accounts within the existing bounded
@@ -142,6 +152,7 @@ def load_discovery(store):
 
 def prepare_discovery(store, now):
     """Publish discovery separately, without waiting for complete mix menus."""
+    published = False
     try:
         with work_budget(SUMMARY_BUDGET_S), store.read_snapshot() as snapshot:
             reader = snapshot.store
@@ -157,13 +168,14 @@ def prepare_discovery(store, now):
                 'discovery_tracks': tracks,
             }
             encoded = json.dumps(payload, separators=(',', ':'))
-            if snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(
+            published = snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(
                     encoded, now, surface=DISCOVERY_SURFACE, input_revision=snapshot._changes),
-                    allow_stale_tables=mode_surfaces.RANKING_CHURN_TABLES):
-                return payload
+                    allow_stale_tables=mode_surfaces.RANKING_CHURN_TABLES)
     except WorkBudgetExceeded:
-        _LOG.debug('Discovery preparation deferred; keeping the last display pool')
-    return None
+        if not published:
+            _LOG.debug('Discovery preparation deferred; keeping the last display pool')
+    # The off-lock checkpoint can exhaust the budget after durable publication.
+    return payload if published else None
 
 
 def prepare_revisit(store, now):
@@ -354,19 +366,19 @@ def _has_complete_menu(store, payload, now):
                for menu in payload['menus'])
 
 
-def load(store, now, schedule=lambda: None):
+def load(store, now, schedule=lambda: None, *, display_only=False):
     """A missing/corrupt cache never falls back to synchronous ranking."""
     mix_tuning.expire(store, now)
-    return peek(store, now, schedule)
+    return peek(store, now, schedule, display_only=display_only)
 
 
-def peek(store, now, schedule=lambda: None):
+def peek(store, now, schedule=lambda: None, *, readiness_only=False, display_only=False):
     """Select the serving payload without publishing or recording a menu."""
     key = tuning_key(store, now)
     fallback = None
     vibe = home_vibe.current(store, now)
     for surface in ("home_tuned", SURFACE):
-        payload = _load_surface(store, surface)
+        payload = _load_surface(store, surface, readiness_only=readiness_only, display_only=display_only)
         if payload is None:
             continue
         if payload.get("tuning") == key:
@@ -381,16 +393,182 @@ def peek(store, now, schedule=lambda: None):
     return fallback
 
 
-def _load_surface(store, surface):
-    try:
-        payload = store.rec_proposals.get_proposals(surface)
-        if (not _valid(payload) or (payload.get('group_policy') == 'adaptive'
-                and store.settings.get_setting('rec_group_serving') == 'legacy')):
-            return None
-        return payload
-    except (ValueError, TypeError, KeyError):
-        # A damaged tailored entry must not hide a healthy baseline collection.
+def _capacity_payload(value):
+    """The same menus and selection policy, without unused musical evidence."""
+    if not isinstance(value, dict):
+        return value
+    # Validate the original complete display before dropping fields that cannot
+    # affect capacity. Corrupt collections must keep the ordinary fallback.
+    if 'menus' in value and not _valid(value):
         return None
+    def proto(item):
+        if not isinstance(item, dict):
+            return item
+        result = {key: child for key, child in item.items() if key in (
+            'lane', 'experiment_id', 'mode_id', 'name', 'label', 'note', 'recipe', 'tracks',
+            'experiment', 'counterfactual')}
+        if isinstance(item.get('tracks'), list):
+            result['tracks'] = [{key: child for key, child in track.items() if key in (
+                                    'key', 'title', 'artist', 'video_id', 'genre')}
+                                if isinstance(track, dict) else track for track in item['tracks']]
+        if isinstance(item.get('recipe'), dict):
+            result['recipe'] = {'genre_request': item['recipe'].get('genre_request') or {}}
+        if isinstance(item.get('experiment'), dict):
+            result['experiment'] = {}
+        if isinstance(item.get('counterfactual'), dict):
+            result['counterfactual'] = proto(item['counterfactual'])
+        return result
+    def menu(item):
+        if not isinstance(item, dict):
+            return item
+        result = dict(item)
+        if isinstance(item.get('protos'), list):
+            result['protos'] = [proto(p) for p in item['protos']]
+        if isinstance(item.get('slots'), list):
+            def slot(value):
+                if not isinstance(value, dict):
+                    return value
+                projected = proto(value.get('proto'))
+                # The display normally repeats each offer in its slot. Share
+                # identical projected values within this detached document so
+                # copying it does not visit the same tracks twice.
+                projected = next((p for p in result.get('protos', []) if p == projected), projected)
+                return {**value, 'proto': projected}
+            result['slots'] = [slot(value) for value in item['slots']]
+        return result
+    result = {key: child for key, child in value.items()
+              if key not in ('album_choices', 'album_choice_context', 'play_exposure')}
+    for field in ('rediscover', 'rediscover_albums', 'rediscover_tracks', 'discovery_albums',
+                  'discovery_artists', 'discovery_tracks'):
+        if field in result:
+            result[field] = []
+    if isinstance(value.get('choice_context'), dict):
+        result['choice_context'] = {key: child for key, child in value['choice_context'].items()
+                                   if key in ('group_generation', 'comparison')}
+    if isinstance(value.get('menus'), list):
+        result['menus'] = [menu(item) for item in value['menus']]
+    if isinstance(value.get('menu'), dict):
+        result['menu'] = menu(value['menu'])
+    return result
+
+
+def _capacity_read(store, surface):
+    encoded = store.rec_proposals._proposal_json(surface)
+    return _CAPACITY_READERS[surface].decode(encoded, project=_capacity_payload,
+        cache_projection=True) if encoded is not None else None
+
+
+def _display_payload(value):
+    selection = _capacity_payload(value)
+    if not isinstance(selection, dict) or 'menus' not in selection:
+        return None
+    # Selection uses menu identities, mode IDs and frozen context, rather than
+    # every alternative's complete track metadata. Reuse the capacity projection
+    # for those menus; restore all display and evidence fields from this exact
+    # document after selecting a menu, including repair offers.
+    return {key: selection['menus'] if key == 'menus' else child for key, child in value.items()
+            if key not in ('album_choices', 'album_choice_context', 'play_exposure')}
+
+
+class _DisplayPayload(dict):
+    """Detached selection metadata with access to its exact verified document."""
+
+    def __init__(self, value, decoder, encoded):
+        super().__init__(value)
+        self._decoder = decoder
+        self._encoded = encoded
+
+    def restore_menu(self, menu):
+        index = next((i for i, candidate in enumerate(self['menus']) if candidate is menu), None)
+        # A held or comparison menu already owns its complete frozen evidence.
+        if index is None:
+            return menu
+        return self._decoder.decode(self._encoded, project=lambda value: value['menus'][index])
+
+    def restore_protos(self, protos):
+        positions = {id(proto): (i, j) for i, menu in enumerate(self['menus'])
+                     for j, proto in enumerate(menu['protos'])}
+        selected = [positions.get(id(proto)) for proto in protos]
+        if not any(position is not None for position in selected):
+            return protos
+        restored = iter(self._decoder.decode(self._encoded, project=lambda value: [
+            value['menus'][position[0]]['protos'][position[1]]
+            for position in selected if position is not None]))
+        return [next(restored) if position is not None else proto for position, proto in zip(selected, protos)]
+
+
+def _display_read(store, surface):
+    # The same bounded decoder retains at most its capacity and display
+    # projections for one exact document. Physical integrity is checked first.
+    encoded = store.rec_proposals._proposal_json(surface)
+    if encoded is None:
+        return None
+    decoder = _CAPACITY_READERS[surface]
+    value = decoder.decode(encoded, project=_display_payload, cache_projection=True)
+    return _DisplayPayload(value, decoder, encoded) if value is not None else None
+
+
+def _selection_context(value):
+    if not _valid(value):
+        return None
+    result = {field: child for field, child in value.items()
+              if field not in ('menus', 'album_choices', 'album_choice_context', 'play_exposure')}
+    # These independent collection rows are retained for the legacy display
+    # fallback, but their musical profiles do not select or order the new mix.
+    # Leave the original publications intact and restore complete evidence only
+    # for the tracks the Vibe assembler actually selects.
+    for field in ('rediscover_tracks', 'discovery_tracks'):
+        if field in result:
+            result[field] = [{key: child for key, child in track.items() if key != 'musical'}
+                             for track in result[field]]
+    return result
+
+
+def selection_context(store, now, schedule=lambda: None):
+    """Keep controls and frozen context when replacing the complete menu.
+
+    Validate the same stored documents as peek, but do not copy offers that the
+    explicit selection is about to replace. Readiness still checks those offers
+    independently before the request is admitted.
+    """
+    key, vibe = tuning_key(store, now), home_vibe.current(store, now)
+    fallback = None
+    for surface in ('home_tuned', SURFACE):
+        try:
+            encoded = store.rec_proposals._proposal_json(surface)
+            payload = (_CAPACITY_READERS[surface].decode(encoded, project=_selection_context, cache_projection=True)
+                       if encoded is not None else None)
+        except (ValueError, TypeError, KeyError):
+            payload = None
+        if (payload is None or payload.get('group_policy') == 'adaptive'
+                and store.settings.get_setting('rec_group_serving') == 'legacy'):
+            continue
+        if payload['tuning'] == key:
+            if now - payload['built_at'] >= MAX_AGE_S:
+                schedule()
+            return payload
+        if fallback is None or surface == SURFACE and not vibe:
+            fallback = payload
+    schedule()
+    return fallback
+
+
+def _load_surface(store, surface, *, readiness_only=False, display_only=False):
+    def read():
+        try:
+            payload = (_capacity_read(store, surface) if readiness_only
+                       else _display_read(store, surface) if display_only
+                       else store.rec_proposals.get_proposals(surface))
+            if (not _valid(payload) or (payload.get('group_policy') == 'adaptive'
+                    and store.settings.get_setting('rec_group_serving') == 'legacy')):
+                return None
+            return payload
+        except (ValueError, TypeError, KeyError):
+            # A damaged tailored entry must not hide a healthy baseline collection.
+            return None
+    # Read the current publication and its physical files on every request.
+    # SQL revisions alone cannot detect an unavailable or damaged file.
+    return read()
 
 
 def _valid(payload):
@@ -487,7 +665,12 @@ def _valid(payload):
         return False
 
 
-def remember(store, payload, result, now):
+def _cache_tracks(tracks):
+    """Normalize preview objects while retaining complete prepared track evidence."""
+    return [asdict(track) if isinstance(track, surfaces.ForYouItem) else track for track in tracks]
+
+
+def remember(store, payload, result, now, *, tuning=None):
     """Reuse the user's explicit tailored result on subsequent ordinary reads."""
     # An explicit build or a completed pool replaces the assigned whole menu.
     # Keep its frozen model inputs, but never give this new menu the old arm's
@@ -502,8 +685,17 @@ def remember(store, payload, result, now):
             proto['experiment']['assignment'] = None
             proto['experiment']['ranker_controlled'] = False
     # Pool slots may contain a live job with locks; only the completed offers are cached.
-    menu = asdict(home_cards.CardsResult(result.protos, [], result.genre_notice, result.genre_warning,
-                                       result.genre_options, result.requested_genres, result.epoch, result.vibe))
+    menu = vars(home_cards.CardsResult(result.protos, [], result.genre_notice, result.genre_warning,
+                                      result.genre_options, result.requested_genres, result.epoch, result.vibe)).copy()
+    # Preview paths also produce ForYouItem objects. Normalize their tracks at
+    # this persistence boundary, including shadow offers, without recursively
+    # copying the large profiles already carried by prepared track dictionaries.
+    menu['protos'] = []
+    for proto in result.protos:
+        cached = {**proto, 'recipe': dict(proto['recipe']), 'tracks': _cache_tracks(proto['tracks'])}
+        if shadow := proto.get('counterfactual'):
+            cached['counterfactual'] = {**shadow, 'tracks': _cache_tracks(shadow['tracks'])}
+        menu['protos'].append(cached)
     for proto in menu["protos"]:
         proto["experiment_id"] = home_cards.experiment_id(proto)
         proto["recipe"]["experiment_id"] = proto["experiment_id"]
@@ -518,7 +710,7 @@ def remember(store, payload, result, now):
                 "pool": {**slot["pool"], "job": None, "building": False}})
     tailored = {**(payload or {}), "schema": SCHEMA, "built_at": now,
                 "group_policy": 'adaptive' if context.get('group_generation') else 'legacy',
-                "tuning": tuning_key(store, now), "menus": [menu],
+                "tuning": tuning_key(store, now) if tuning is None else tuning, "menus": [menu],
                 "genre_options": result.genre_options,
                 "choice_context": context,
                 "fingerprint": (payload or {}).get("fingerprint", {
@@ -533,8 +725,10 @@ def remember(store, payload, result, now):
             "experiments": [p["experiment_id"] for p in menu["protos"]],
             "menu": menu, "choice_context": context,
             "assignment": None}
-    store.rec_proposals.remember_home(json.dumps(tailored, separators=(",", ":")),
-                                      json.dumps(held, separators=(",", ":")), now)
+    # Small, explicit menus need compression, but not the large pool format's
+    # repeated-profile expansion and validation pass on every publication/read.
+    store.rec_proposals.remember_home(json_cache.encode(tailored, shared_profiles=False),
+                                      json_cache.encode(held, shared_profiles=False), now)
 
 
 def _eligible_protos(store, protos, now):
@@ -594,15 +788,17 @@ def _eligible_protos(store, protos, now):
     return kept
 
 
-def _restore_missing_cards(store, chosen, menus, protos, now):
+def _restore_missing_cards(store, chosen, menus, protos, now, *, display=None):
     """Repair lost lanes from bounded prepared offers, preserving usable held cards."""
     lanes = {slot['proto']['lane'] if slot['proto'] else slot['pool']['lane']
              for slot in chosen['slots'] if slot['proto'] or slot['pool']}
     missing = lanes - {p['lane'] for p in protos}
     if not missing:
         return chosen, protos, False
-    alternatives = _eligible_protos(store, [p for menu in menus for p in menu['protos']
-                                           if p['lane'] in missing], now)
+    alternatives = [p for menu in menus for p in menu['protos'] if p['lane'] in missing]
+    if display is not None:
+        alternatives = display.restore_protos(alternatives)
+    alternatives = _eligible_protos(store, alternatives, now)
     used = {t['key'] for p in protos for t in p['tracks']}
     used_modes = {p.get('mode_id') for p in protos if p.get('mode_id') is not None}
     replacements = {}
@@ -631,7 +827,7 @@ def _restore_missing_cards(store, chosen, menus, protos, now):
     return chosen, [by_lane[p['lane']] for p in chosen['protos'] if p['lane'] in by_lane], True
 
 
-def _prepared_choice(store, payload, now, epoch, tuning, schedule, *, record):
+def _prepared_choice(store, payload, now, epoch, tuning, schedule, *, record, readiness_only=False):
     """Select and check one cache without recording an offer that may be replaced."""
     refreshing = payload['tuning'] != tuning
     menus = payload["menus"]
@@ -640,7 +836,8 @@ def _prepared_choice(store, payload, now, epoch, tuning, schedule, *, record):
     # Each menu was already diversified and ordered. This draw is bounded by the
     # batch size, and can react to feedback without recomputing a single track score.
     try:
-        held = store.rec_proposals.get_proposals("home_choice") or {}
+        held = (_capacity_read(store, 'home_choice') if readiness_only
+                else store.rec_proposals.get_proposals('home_choice')) or {}
         if not isinstance(held, dict) or not isinstance(held.get("experiments"), list):
             held = {}
     except (TypeError, ValueError):
@@ -695,6 +892,8 @@ def _prepared_choice(store, payload, now, epoch, tuning, schedule, *, record):
                 "candidates": [{"menu": menu["epoch"], "probability": probability}
                                for menu, probability in zip(candidates, probabilities)],
                 "generation": payload.get("generation"), "at": now}}
+    if isinstance(payload, _DisplayPayload):
+        chosen = payload.restore_menu(chosen)
     protos = _eligible_protos(store, chosen["protos"], now)
     changed = (len(protos) != len(chosen["protos"])
                or sum(len(p["tracks"]) for p in protos) != sum(len(p["tracks"]) for p in chosen["protos"]))
@@ -710,7 +909,8 @@ def _prepared_choice(store, payload, now, epoch, tuning, schedule, *, record):
     if ((held.get('choice_context') or {}).get('group_generation')
             != (payload.get('choice_context') or {}).get('group_generation')):
         repair_menus = [chosen]
-    chosen, protos, repaired = _restore_missing_cards(store, chosen, repair_menus, protos, now)
+    chosen, protos, repaired = _restore_missing_cards(store, chosen, repair_menus, protos, now,
+        display=payload if isinstance(payload, _DisplayPayload) else None)
     if repaired:
         # A repaired board is no longer the randomized whole-menu offer. Use
         # current preparation context and never credit it to the old comparison.
@@ -728,7 +928,8 @@ def _matches_genre_request(protos, requested):
         for p in protos for key in ('include', 'avoid'))
 
 
-def cards(store, payload, now, service, schedule=lambda: None, *, record=True):
+def cards(store, payload, now, service, schedule=lambda: None, *, record=True, readiness_only=False,
+          writer=None):
     """Choose an experiment from prepared alternatives using current mode evidence."""
     epoch = home_cards._epoch(store, "cards")
     tuning = tuning_key(store, now)
@@ -747,17 +948,20 @@ def cards(store, payload, now, service, schedule=lambda: None, *, record=True):
                 parameters.update(lane=lane, epoch=epoch)
             slots.append({'proto': None, 'pool': service.pool_view(parameters, genre_options=options)})
         return home_cards.CardsResult([], slots, None, None, options, requested, epoch, vibe, preparing=True)
-    choice = _prepared_choice(store, payload, now, epoch, tuning, schedule, record=record)
+    choice = _prepared_choice(store, payload, now, epoch, tuning, schedule, record=record,
+                              readiness_only=readiness_only)
     if len(choice[2]) < 4:
         schedule()
         # Exhausted tailored offers must not hide a usable baseline (or vice
         # versa). Replace the whole set so every card keeps its own generation's
         # frozen context. Only the selected set reaches exposure recording below.
         for surface in ('home_tuned', SURFACE):
-            alternative = _load_surface(store, surface)
+            alternative = _load_surface(store, surface, readiness_only=readiness_only,
+                                        display_only=isinstance(payload, _DisplayPayload))
             if alternative is None or alternative == payload:
                 continue
-            candidate = _prepared_choice(store, alternative, now, epoch, tuning, schedule, record=record)
+            candidate = _prepared_choice(store, alternative, now, epoch, tuning, schedule, record=record,
+                                         readiness_only=readiness_only)
             # A smaller usable genre selection takes precedence over unrelated
             # cards. Keep its whole menu and context while missing lanes refill.
             if (requested and choice[2] and _matches_genre_request(choice[2], requested)
@@ -825,6 +1029,7 @@ def cards(store, payload, now, service, schedule=lambda: None, *, record=True):
         preparing=refreshing or len(protos) < 4,
         preference_notice=notice)
     if record:
+        writer = store if writer is None else writer
         remembered = {"epoch": epoch, "tuning": tuning,
             "prepared_tuning": payload['tuning'],
             "group_policy": payload.get('group_policy', 'legacy'),
@@ -832,11 +1037,10 @@ def cards(store, payload, now, service, schedule=lambda: None, *, record=True):
             "menu": chosen,
             "choice_context": held.get('choice_context'),
             "assignment": held.get("assignment")}
-        if remembered != store.rec_proposals.get_proposals('home_choice'):
-            store.rec_proposals.put_proposals('home_choice', remembered, now)
+        if remembered != writer.rec_proposals.get_proposals('home_choice'):
+            writer.rec_proposals.put_proposals('home_choice', remembered, now)
         if protos:
             service.record_modes(protos, epoch, now)
-            service.record_offer(protos, now, epoch=epoch)
     return result
 
 
@@ -849,7 +1053,9 @@ def collections(store, payload, now):
     """Rotate small prepared pools, retaining current source and feedback eligibility."""
     # Collections belong to their current worker publication, independently of
     # an older tailored mix board retained for a temporary taste adjustment.
-    payload = store.rec_proposals.get_proposals(SURFACE) or payload or {}
+    payload = store.rec_proposals.proposal_fields(SURFACE, (
+        'schema', 'rediscover', 'rediscover_albums', 'rediscover_tracks',
+        'discovery_albums', 'discovery_artists', 'discovery_tracks')) or payload or {}
     revisit = store.rec_proposals.get_proposals(REVISIT_SURFACE) or {}
     payload = {**payload, **{field: revisit[field] for field in
         ('rediscover', 'rediscover_albums', 'rediscover_tracks') if field in revisit}}
@@ -857,7 +1063,7 @@ def collections(store, payload, now):
     playlists = [{**p, **current} for p in payload.get('rediscover', [])
                  if (current := store.playlists.home_preview(p['id']))]
     saved = store.collection.saved_album_ids(browse_ids=[a['browse_id'] for a in payload.get('rediscover_albums', [])])
-    recency = store.collection.saved_albums_recency(include_generated=True)
+    recency = store.collection.saved_albums_recency(include_generated=True, browse_ids=saved)
     albums = [a for a in payload.get("rediscover_albums", []) if a["browse_id"] in saved
               and recency.get(a['browse_id']) is not None and recency[a['browse_id']] <= now-30*86400]
     tracks = surfaces.rediscover_tracks(store, now, keys=[t['key'] for t in payload.get('rediscover_tracks', [])])

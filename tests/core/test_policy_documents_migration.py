@@ -1,5 +1,6 @@
 """Shared policy files retain compact variants, integrity and writer-fenced lifetime."""
 import json
+import hashlib
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -18,11 +19,11 @@ from yt_playlist.repos import policy_storage
 
 
 @pytest.fixture
-def predecessor(tmp_path):
+def predecessor(tmp_path, _pristine_installed_schema):
     conn = sqlite3.connect(tmp_path / 'policies.db')
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys=ON')
-    migrate(conn, registry=registry.MIGRATIONS[:69])
+    _pristine_installed_schema(69).backup(conn)
     base = json.dumps({'shared': {'setting': ['preserved', 1]}, 'unicode': 'é'})
     with conn:
         conn.execute('INSERT INTO rec_policy_bases(base_version,configuration,byte_size,created_at) '
@@ -35,8 +36,10 @@ def predecessor(tmp_path):
         # Existing tables have distinct identities even when their text keys coincide.
         conn.execute('INSERT INTO rec_serving_policies VALUES (?,?,?)',
                      ('shared', json.dumps({'standalone': True}), 3))
-    yield conn
-    conn.close()
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def apply(conn):
@@ -247,12 +250,30 @@ def test_bulk_reader_pins_each_pack_once_and_verifies_each_record(tmp_path,monke
 
 
 def test_individual_large_policy_has_its_own_pack_without_splitting_the_record(tmp_path):
+    empty_root = tmp_path / 'empty'
+    assert list(files.publish_many(empty_root, ())) == []
+    assert not empty_root.exists()
     large = {'large': 'x' * files.PACK_BYTES}
     values = [{'small': 1}, large, {'small': 2}]
-    records = list(files.publish_many(tmp_path, values))
+    consumed = []
+    def configurations():
+        for value in values:
+            consumed.append(value)
+            yield value
+    published = files.publish_many(tmp_path, configurations())
+    assert consumed == []
+    first = next(published)
+    assert consumed == values[:2]
+    records = [first, *published]
     assert len({row[0] for row in records}) == 3
     assert records[1][2] > files.PACK_BYTES
     for (filename, digest, size, offset), value in zip(records, values):
+        encoded = json.dumps({'format': 'recommendation-policy-1', 'configuration': value},
+                             sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
+        packed = b'TuneConsole recommendation policies 1\n' + encoded
+        assert fao.read_bytes(filename) == packed
+        assert Path(filename) == tmp_path / hashlib.sha256(packed).hexdigest()[:2] / (hashlib.sha256(packed).hexdigest() + '.json')
+        assert (digest, size, offset) == (hashlib.sha256(encoded).hexdigest(), len(encoded), len(files.PACK_HEADER))
         assert files.read(filename, digest, offset=offset, size=size) == value
 
 

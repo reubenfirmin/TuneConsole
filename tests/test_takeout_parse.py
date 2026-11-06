@@ -4,7 +4,7 @@ import json
 import pytest
 
 from yt_playlist.library.takeout import (TakeoutFormatError, load_watch_history,
-                                         parse_watch_history, parse_watch_history_html)
+                                         _parse_watch_history, parse_watch_history_html)
 
 
 def _entry(title="Watched Suave", artist="Danny Wabbit - Topic",
@@ -17,7 +17,9 @@ def _entry(title="Watched Suave", artist="Danny Wabbit - Topic",
 
 
 def test_parses_music_entry_with_video_id_and_epoch_ts():
-    (p,) = parse_watch_history(json.dumps([_entry()]))
+    rows, unparsed = load_watch_history(json.dumps([_entry()]))
+    (p,) = rows
+    assert unparsed == 0
     assert p["video_id"] == "Kzjh-EzG5gI"
     assert p["title"] == "Suave" and p["artist"] == "Danny Wabbit"
     assert p["ts"] == 1709294400.0                       # 2024-03-01T12:00:00Z
@@ -27,32 +29,39 @@ def test_skips_non_music_and_malformed_rows():
     rows = [_entry(),
             _entry(header="YouTube", url="https://www.youtube.com/watch?v=abc"),  # plain YT: skipped
             {"title": "Watched a video that has been removed"},                    # no url/time: skipped
+            _entry(time="unreadable date"),
             "not even a dict"]
-    out = parse_watch_history(json.dumps(rows))
-    assert len(out) == 1
+    out, unparsed = load_watch_history(json.dumps(rows))
+    assert len(out) == 1 and unparsed == 1
 
 
 def test_music_url_without_music_header_is_kept():
-    (p,) = parse_watch_history(json.dumps([_entry(header="YouTube")]))
+    rows, unparsed = load_watch_history(json.dumps([_entry(header="YouTube")]))
+    (p,) = rows
+    assert unparsed == 0
     assert p["video_id"] == "Kzjh-EzG5gI"
 
 
 def test_missing_subtitles_and_watched_prefix_variants():
-    (p,) = parse_watch_history(json.dumps([_entry(title="Suave", subtitles=[])]))
+    rows, unparsed = load_watch_history(json.dumps([_entry(title="Suave", subtitles=[])]))
+    (p,) = rows
+    assert unparsed == 0
     assert p["title"] == "Suave" and p["artist"] == ""
 
 
 def test_sorted_oldest_first():
     rows = [_entry(time="2024-03-02T00:00:00Z"), _entry(time="2024-03-01T00:00:00Z")]
-    out = parse_watch_history(json.dumps(rows))
+    out, unparsed = load_watch_history(json.dumps(rows))
+    assert unparsed == 0
     assert out[0]["ts"] < out[1]["ts"]
 
 
-def test_non_json_raises_format_error_for_html_hint():
+def test_json_parser_rejects_html_and_wrong_top_level_shape():
+    # The loader accepts HTML. The JSON parser must still reject it at its own boundary.
     with pytest.raises(TakeoutFormatError):
-        parse_watch_history("<html><body>Takeout</body></html>")
+        _parse_watch_history("<html><body>Takeout</body></html>")
     with pytest.raises(TakeoutFormatError):
-        parse_watch_history(json.dumps({"not": "a list"}))
+        load_watch_history(json.dumps({"not": "a list"}))
 
 
 def _zip_bytes(members):
@@ -198,12 +207,6 @@ def test_html_mixed_music_and_non_music_rows():
     rows, unparsed = parse_watch_history_html(doc)
     assert unparsed == 0
     assert [r["video_id"] for r in rows] == ["vid1", "vid3"]   # oldest first; vid2 (non-music) dropped
-
-
-def test_load_watch_history_json_path_unchanged_with_zero_unparsed():
-    rows, unparsed = load_watch_history(json.dumps([_entry()]))
-    assert len(rows) == 1
-    assert unparsed == 0
 
 
 def test_load_watch_history_raw_html_routes_to_html_parser():

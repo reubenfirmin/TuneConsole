@@ -6,8 +6,7 @@ green after each Alpine->htmx conversion (rename, year/genre cells, enrich, remo
 alternates). Asserts on user-visible outcomes, not the transport.
 """
 import socket
-import threading
-import time
+from tests.enrichment_support import seed_enrichment
 import re
 import json
 from pathlib import Path
@@ -18,10 +17,10 @@ import uvicorn
 from playwright.sync_api import expect
 from websockets.sync.client import connect
 
-from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
 from tests.conftest import FakeClient
+from tests.live_server import LiveServer
 
 pytestmark = pytest.mark.browser
 
@@ -35,9 +34,8 @@ def _free_port():
 
 
 @pytest.fixture
-def live_playlist_app():
-    s = Store(":memory:")
-    s.init_schema()
+def live_playlist_app(store):
+    s = store
     iid = s.accounts.upsert_account("Main", "cred", None, True)
     pid = s.playlists.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
     t0 = s.tracks.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)
@@ -55,27 +53,35 @@ def live_playlist_app():
     app = create_app(s, lambda: {iid: client}, now_fn=lambda: 1.0)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    try:
-        deadline = time.monotonic() + 10
-        while not server.started:
-            assert thread.is_alive() and time.monotonic() < deadline, 'Playlist server did not start'
-            time.sleep(0.02)
+    with LiveServer(server):
         yield {"base": f"http://127.0.0.1:{port}", "pid": pid, "store": s, "client": client}
-    finally:
-        server.should_exit = True
-        thread.join(timeout=5)
-        assert not thread.is_alive(), 'Playlist server did not stop'
-        s.conn.close()
 
 
-def test_rename_playlist_updates_heading(live_playlist_app, page):
+@pytest.mark.parametrize('failed_first', [False, True])
+def test_rename_playlist_updates_heading(live_playlist_app, page, monkeypatch, failed_first):
     base, pid = live_playlist_app["base"], live_playlist_app["pid"]
     page.goto(f"{base}/playlist/{pid}")
     page.get_by_role("heading", name="Mix").click()        # click-to-edit
     inp = page.locator("input.title-input")
     inp.fill("Renamed Mix")
+    if failed_first:
+        client = live_playlist_app['client']
+        original = client.edit_playlist
+        calls = []
+        def unavailable(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise TypeError('Private provider diagnostic')
+        monkeypatch.setattr(client, 'edit_playlist', unavailable)
+        with page.expect_response(f'**/playlist/{pid}/rename') as response:
+            inp.press('Enter')
+        assert response.value.status == 503 and response.value.body() == b''
+        with page.expect_response(f'**/playlist/{pid}'):
+            pass
+        expect(inp).to_have_value('Renamed Mix')
+        expect(inp).to_be_visible()
+        expect(page.locator('#toasts [role="alert"], #connection-error')).to_have_count(0)
+        assert len(calls) == 1 and live_playlist_app['store'].playlists.get_playlist(pid).title == 'Mix'
+        monkeypatch.setattr(client, 'edit_playlist', original)
     inp.press("Enter")
     expect(page.get_by_role("heading", name="Renamed Mix")).to_be_visible()
     # survives a reload (persisted, not just a DOM poke)
@@ -91,7 +97,7 @@ def test_lane_only_generated_heading_uses_the_mix_description(live_playlist_app,
     store.playlists.mark_generated_playlist('PL1')
     page.set_viewport_size({'width': width, 'height': 950})
     page.goto(f'{base}/playlist/{pid}')
-    heading = page.get_by_role('heading', name='Songs close to what you play most', exact=False)
+    heading = page.get_by_role('heading', name='More of what you love', exact=True)
     expect(heading).to_be_visible()
     expect(page.locator('.pl-type-badge')).to_have_text('More in your wheelhouse')
     expect(page.locator('.pl-version')).to_have_text('Version 3')
@@ -198,6 +204,53 @@ def test_generated_heading_keeps_the_full_title_when_editing_and_after_rename(
         page.add_style_tag(content=f'html {{ font-size: {font_scale * 100}% !important; }}')
     page.evaluate('document.fonts.ready')
     assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+
+
+@pytest.mark.parametrize('width', [1280, 1920])
+def test_generated_mix_title_stays_balanced_with_era_and_artwork(live_playlist_app, page, width):
+    base, pid, store = (live_playlist_app[key] for key in ('base', 'pid', 'store'))
+    original = 'From your catalog - October 31 2026 #2'
+    store.playlists.set_playlist_title(pid, original, 1)
+    store.playlists.mark_generated_playlist('PL1')
+    tracks = []
+    artwork = ('natural', 'cruise', 'release', 'relax')
+    for i in range(11):
+        tid = store.tracks.upsert_track(
+            f'880-{i}', f'Collection song {i}', f'Artist {i}', 'Album', 210, 1,
+            thumbnail=f'/static/vibes/{artwork[i % len(artwork)]}.webp')
+        store.tracks.set_track_genre(tid, 'Drum & Bass' if i < 8 else 'Ambient')
+        store.tracks.set_track_year(tid, str(2014 if i < 5 else 2022 if i < 9 else 1994))
+        tracks.append(tid)
+    store.playlists.set_playlist_tracks(pid, tracks)
+    scope = store.playlists.get_playlist(pid).playlist_scope_id
+    store.playlist_recipes.set_recipe(scope, {'lane': 'explore', 'vibe': 'release'})
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.set_viewport_size({'width': width, 'height': 1080})
+    page.goto(f'{base}/playlist/{pid}')
+    heading = page.get_by_role('heading', name='Rediscover your drum & bass', exact=True)
+    expect(heading).to_be_visible()
+    expect(page.locator('.pl-title-context')).to_have_text('Mostly from the 2010s and 2020s')
+    expect(page.locator('.pl-version')).to_have_text('Version 2')
+    expect(page.locator('.pl-vibe-badge')).to_have_text('Let off steam')
+    page.evaluate('document.fonts.ready')
+    page.wait_for_function("[...document.querySelectorAll('.pl-art img')].every(img => img.complete && img.naturalWidth)")
+    css = page.request.get(f'{base}/static/library-entities.css')
+    assert css.body() == (Path(__file__).resolve().parents[2]
+                          / 'src/yt_playlist/web/static/library-entities.css').read_bytes()
+    assert heading.evaluate('el => parseFloat(getComputedStyle(el).fontSize)') <= 48
+    assert heading.evaluate('el => el.clientHeight / parseFloat(getComputedStyle(el).lineHeight)') <= 2.1
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.screenshot(path=f'/tmp/tuneconsole-880-{width}.png', full_page=True)
+    heading.click()
+    editor = page.locator('input.title-input')
+    expect(editor).to_have_value(original)
+    expect(page.locator('.pl-title-context')).to_be_hidden()
+    editor.press('Escape')
+    expect(heading).to_be_visible()
+    expect(page.locator('.pl-title-context')).to_be_visible()
+    assert store.playlists.get_playlist(pid).title == original
+    assert not errors
 
 
 @pytest.mark.parametrize('width', [1440])
@@ -341,7 +394,7 @@ def test_initial_playlist_launch_times_out_once_and_allows_deliberate_retry(live
     page.clock.fast_forward(13000)
     expect(header).to_be_enabled()
     expect(header).not_to_have_attribute('aria-busy', 'true')
-    expect(page.locator('#playback-error')).to_contain_text('Couldn’t start playback')
+    expect(page.locator('#playback-error, #toasts [role="alert"]')).to_have_count(0)
     assert requests == [{'url': 'https://music.youtube.com/playlist?list=PL1'}]
     page.clock.fast_forward(13000)
     assert len(requests) == 1, 'a timeout must not replay an uncertain launch automatically'
@@ -375,8 +428,8 @@ def test_playlist_header_retains_observed_state_when_control_is_not_confirmed(li
         pending[0].fulfill(content_type='text/plain', body='unavailable')
     else:
         pending[0].fulfill(json={'ok': failure == 'unconfirmed', 'paused': False})
-    expect(page.locator('#playback-error')).to_contain_text('Playback was not confirmed')
     expect(header).to_be_enabled()
+    expect(page.locator('#playback-error, #toasts [role="alert"]')).to_have_count(0)
     expect(page.locator('.global-now-playing').get_by_role('button', name='Pause', exact=True)).to_be_visible()
     assert len(pending) == 1 and launches == []
     header.click()
@@ -406,7 +459,7 @@ def test_set_year_from_song_menu(live_playlist_app, page):
 def test_conflict_provider_opens_lookup_without_changing_choice(live_playlist_app, page):
     base, pid, store = (live_playlist_app[key] for key in ("base", "pid", "store"))
     tid = store.charts.playlist_tracks_detail(pid)[0]["track_id"]
-    store.tracks.set_track_enrichment(tid, None, "1952")
+    seed_enrichment(store, tid, None, "1952")
     store.enrichment.upsert_conflict(tid, "year", [{"provider": "musicbrainz", "value": "1952"},
                                          {"provider": "discogs", "value": "2001"}])
     page.context.route("https://www.discogs.com/**", lambda route: route.fulfill(body="Provider results"))

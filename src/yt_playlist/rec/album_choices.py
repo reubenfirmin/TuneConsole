@@ -176,6 +176,7 @@ def prepare(store, now, discoveries):
         if album["classification"] == "discovery":
             album["classification"] = album['unsaved_classification']
     feedback = feedback_state(store, candidates)
+    genre_axes = store.genres.feature_axes(album.get('genre') for album in candidates.values())
     ranked, features, collab_features = [], [], []
     for album in candidates.values():
         if feedback.get(album["browse_id"], {}).get("kind") == "reject":
@@ -184,7 +185,7 @@ def prepare(store, now, discoveries):
             album = {**album, "classification": "known"}
         rows = [index[key] for key in album.get("keys", []) if key in index]
         vector = (matrix[rows].mean(0) if rows else
-                  content_model.encode_content(model, album.get("genre"), album.get("year"), {},conn=store.conn) if model else None)
+                  content_model.encode_content(model, album.get("genre"), album.get("year"), {},genre_axes=genre_axes) if model else None)
         collab_rows = [collab_index[key] for key in album.get('keys', []) if key in collab_index]
         collab_vector = collaborative[collab_rows].mean(0) if collab_rows else None
         def unit(value):
@@ -278,18 +279,21 @@ def selection(store, items, now, controls, epoch=0, genres=(), *, exclude=(), cu
             return selection(reader, items, now, controls, epoch, genres,
                              exclude=exclude, current=current)
     pool = [album for album in eligible(store, items, now) if album['browse_id'] != current]
-    chosen, policy = menu(pool, controls, epoch, genres, exclude=exclude, conn=store.conn)
+    axes = store.genres.feature_axes(item.get('genre') for item in pool) if genres else None
+    chosen, policy = menu(pool, controls, epoch, genres, exclude=exclude, genre_axes=axes)
     return pool, chosen, policy
 
 
-def menu(items, controls, epoch=0, genres=(), *, exclude=(), conn=None):
+def menu(items, controls, epoch=0, genres=(), *, exclude=(), genre_axes=None):
     """Allocate an explicit observational menu from already scored options.
 
     Discovery and fit are distinct dimensions. A missing discovery bucket stays a
     recorded coverage gap. Positions rotate; this is not randomized causal exposure.
     """
     from yt_playlist.util import genre_map
-    candidates = [item for item in items if not genres or genre_map.family(item.get('genre') or '',conn=conn) in genres]
+    candidates = [item for item in items if not genres or
+                  (genre_axes.get(item.get('genre'), ('', None))[0] if genre_axes is not None
+                   else genre_map.family(item.get('genre') or '')) in genres]
     excluded = set(exclude)
     novel = lambda item: item.get('classification') in {'discovery', 'familiar_artist'}
     novelty = controls['novelty']

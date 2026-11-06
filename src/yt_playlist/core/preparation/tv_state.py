@@ -6,6 +6,7 @@ source writes are reconciled without adding retirement gates to their owners.
 """
 from dataclasses import dataclass
 import hashlib
+from itertools import groupby
 import json
 import math
 from pathlib import Path
@@ -13,6 +14,7 @@ import re
 import sqlite3
 
 from .. import recommendation_outputs as files, tv_recommendation_state as state
+from ..activity import check_cancellable_work
 from ..schema_contract import MigrationError
 from . import artist_lookup
 from .ordered_rows import OrderedJob
@@ -197,14 +199,26 @@ def begin(conn, row, generation, plan):
         (row['surface'], generation, row['built_at'], plan.digest, plan.size, plan.part_count, plan.row_count))
 
 
-def resolve(conn, fields, kind):
+def _video(conn, identity):
+    return conn.execute('SELECT recording_id FROM youtube_items WHERE video_id=?', (identity,)).fetchone()
+
+
+def resolve(conn, fields, kind, *, cache=None):
+    def lookup_once(lookup, raw):
+        if cache is None:
+            return lookup(conn, raw)
+        key = lookup, raw
+        if key not in cache:
+            cache[key] = lookup(conn, raw)
+        return cache[key]
+
     def capture(name, raw, lookup, reason):
-        reference = lookup(conn, raw)
+        reference = lookup_once(lookup, raw)
         fields[name] = reference
         fields[reason[0]] = None if reference is not None else reason[1]
     if kind == 'item':
         capture('source_recording_id', fields['source_key'], state._recording, ('source_resolution', 'missing_recording'))
-        video = conn.execute('SELECT recording_id FROM youtube_items WHERE video_id=?', (fields['video_id'],)).fetchone()
+        video = lookup_once(_video, fields['video_id'])
         fields.update(recording_id=video[0] if video else None, video_resolution=None if video else 'external_video')
     elif kind == 'attempt':
         capture('recording_id', fields['raw_key'], state._recording, ('resolution_reason', 'missing_recording'))
@@ -226,6 +240,29 @@ def copy(conn, row, generation, position, unit):
     columns = ','.join('"' + field + '"' for field in fields)
     conn.execute(f'INSERT INTO {relation(table)}(source,preparation_revision,{columns}) VALUES (?,?,{",".join("?" for _ in fields)})',
                  (row['surface'], generation, *fields.values()))
+
+
+def copy_batch(conn, row, generation, selected):
+    """Insert each bounded slice in order, resolving repeats only in this transaction."""
+    cache = {}
+    for table, group in groupby(selected, key=lambda pair: pair[1][0]):
+        batch = []
+        columns = None
+        for _, (_, values, kind) in group:
+            check_cancellable_work()
+            if table == 'file':
+                batch.append((row['surface'], generation, values, *kind))
+            else:
+                fields = dict(values)
+                resolve(conn, fields, kind, cache=cache)
+                columns = ','.join('"' + field + '"' for field in fields)
+                batch.append((row['surface'], generation, *fields.values()))
+        if table == 'file':
+            sql = f'INSERT INTO {tables(row["surface"])[2]} VALUES (?,?,?,?,?,?)'
+        else:
+            sql = (f'INSERT INTO {relation(table)}(source,preparation_revision,{columns}) '
+                   f'VALUES ({",".join("?" for _ in batch[0])})')
+        conn.executemany(sql, batch)
 
 
 def complete(conn, row, generation, plan):
@@ -288,7 +325,8 @@ def repair_files(conn, progress, *, surface):
 def worker(surface):
     from functools import partial
     return OrderedJob(definition(surface), prepare, begin, copy, complete, delete,
-                      repair_files=partial(repair_files, surface=surface))
+                      repair_files=partial(repair_files, surface=surface),
+                      copy_batch=copy_batch if surface == 'tv_continuations' else None)
 
 
 JOBS = {name: worker(surface) for name, surface in SOURCES.items()}

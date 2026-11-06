@@ -7,16 +7,15 @@ import sqlite3
 import pytest
 
 from yt_playlist.core.config import AccountConfig
-from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations import v078_account_contracts as migration
 from yt_playlist.core.migrations.runner import Context, MigrationError
 from yt_playlist.core.store import Store
 
 
 @pytest.fixture
-def predecessor(tmp_path):
+def predecessor(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path / 'accounts.db')
-    migrate(store.conn, registry=registry.MIGRATIONS[:69])
+    _pristine_installed_schema(69).backup(store.conn)
     store._bind_repositories()
     with store.conn:
         store.conn.executemany('INSERT INTO identities(id,label,credential_ref,brand_account_id,is_master,active) '
@@ -82,18 +81,13 @@ def test_account_values_child_history_and_installed_sql_survive_replacement(pred
     with store.conn:
         store.conn.execute("UPDATE identities SET label='Renamed' WHERE id=2")
     assert store.conn.execute('SELECT value FROM installed_account_receipts').fetchone()[0] == 'Renamed'
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-
-
-@pytest.mark.parametrize('column,value', [('active', 7), ('active', -1), ('active', 0.5),
-                                          ('is_master', 2), ('is_master', 'yes'), ('is_master', None)])
-def test_invalid_persisted_flags_are_rejected(predecessor, column, value):
-    store = predecessor
-    apply(store)
     before = accounts(store)
-    with pytest.raises(sqlite3.IntegrityError), store.conn:
-        store.conn.execute(f'UPDATE identities SET {column}=? WHERE id=2', (value,))
-    assert accounts(store) == before
+    for column, value in (('active', 7), ('active', -1), ('active', 0.5),
+                          ('is_master', 2), ('is_master', 'yes'), ('is_master', None)):
+        with pytest.raises(sqlite3.IntegrityError), store.conn:
+            store.conn.execute(f'UPDATE identities SET {column}=? WHERE id=2', (value,))
+        assert accounts(store) == before, (column, value)
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
 def test_active_master_uniqueness_allows_transactional_exchange_and_empty_setup(predecessor):
@@ -181,22 +175,6 @@ def test_invalid_predecessor_stops_without_ddl_or_data_loss(predecessor, corrupt
     assert store.conn.execute('PRAGMA foreign_keys').fetchone()[0] == 1
 
 
-@pytest.mark.parametrize('column,value', [
-    ('own_pct', -1), ('own_pct', 101), ('own_pct', 0.5), ('own_pct', None),
-    ('familiarity_pct', -1), ('familiarity_pct', 101), ('familiarity_pct', 0.5),
-    ('target_minutes', 14), ('target_minutes', 721), ('target_minutes', 30.5),
-    ('created_at', float('inf')), ('updated_at', float('-inf')), ('updated_at', 'unknown'),
-])
-def test_invalid_recipe_storage_is_rejected(predecessor, column, value):
-    store = predecessor
-    recipe = store.road_trip.save_road_trip_recipe(None, 'Trip', 50, [], [], 270, 1)
-    apply(store)
-    before = tuple(store.conn.execute('SELECT * FROM road_trip_recipes WHERE id=?', (recipe,)).fetchone())
-    with pytest.raises(sqlite3.IntegrityError), store.conn:
-        store.conn.execute(f'UPDATE road_trip_recipes SET {column}=? WHERE id=?', (value, recipe))
-    assert tuple(store.conn.execute('SELECT * FROM road_trip_recipes WHERE id=?', (recipe,)).fetchone()) == before
-
-
 def test_recipe_replacement_preserves_draft_ids_sequence_and_supported_boundaries(predecessor):
     store = predecessor
     first = store.road_trip.save_road_trip_recipe(None, 'Short', 0, ['Artist'], ['Rock'], 15, -1,
@@ -213,6 +191,17 @@ def test_recipe_replacement_preserves_draft_ids_sequence_and_supported_boundarie
     returned = store.road_trip.save_road_trip_recipe(None, 'Long', 100, [], [], 720, 4, familiarity_pct=0)
     assert returned > retired
     assert store.road_trip.get_road_trip_draft(first) == {'revision': 'retained', 'slots': []}
+    before = list(map(tuple, store.conn.execute('SELECT * FROM road_trip_recipes ORDER BY id')))
+    for column, value in (
+            ('own_pct', -1), ('own_pct', 101), ('own_pct', 0.5), ('own_pct', None),
+            ('familiarity_pct', -1), ('familiarity_pct', 101), ('familiarity_pct', 0.5),
+            ('target_minutes', 14), ('target_minutes', 721), ('target_minutes', 30.5),
+            ('created_at', float('inf')), ('updated_at', float('-inf')), ('updated_at', 'unknown')):
+        with pytest.raises(sqlite3.IntegrityError), store.conn:
+            store.conn.execute(f'UPDATE road_trip_recipes SET {column}=? WHERE id=?', (value, first))
+        assert list(map(tuple, store.conn.execute(
+            'SELECT * FROM road_trip_recipes ORDER BY id'))) == before, (column, value)
+        assert store.road_trip.get_road_trip_draft(first) == {'revision': 'retained', 'slots': []}
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 

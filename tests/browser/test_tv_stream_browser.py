@@ -1,11 +1,15 @@
 """Continuous TV, keyboard transport, and actual backdrop image recovery."""
 import pytest
+from urllib.parse import parse_qs
 from playwright.sync_api import expect
 
 from tests.browser.test_tv_browser import store, tv_ui
 from tests.test_tv_stream import video
 from yt_playlist.rec import tv, tv_artwork
 from yt_playlist.util.matching import search_squash
+from tests.browser.quiet_action_support import (  # noqa: F401 - shared evidence fixture
+    DIAGNOSTIC, action_evidence, assert_quiet_action, fail_action,
+)
 
 
 MODEL = 'Alpine.$data(document.querySelector(".tv-home"))'
@@ -18,6 +22,106 @@ def publish_pool(store, live_app, count):
     store.rec_proposals.put_proposals(tv_artwork.SURFACE, {
         search_squash(item['artist']): {'images': [live_app + '/tv-artist.svg'], 'retry_at': 86401}
         for item in items}, 1)
+
+
+def test_tv_failures_preserve_the_player_queue_draft_and_bounded_continuation(page, live_app, tv_ui, store, action_evidence):
+    publish_pool(store, live_app, 7)
+    starts, opens, parameters, resets, refills = [], [], [], [], []
+    page.clock.install()
+    page.goto(live_app + '/#tv')
+    play = page.get_by_role('button', name='Play TV', exact=True)
+    for kind in ('plaintext', 'malformed', 'network', 'json'):
+        def failed_start(route, kind=kind):
+            starts.append(route.request.url)
+            fail_action(route, kind)
+        page.route('**/home/tv/play', failed_start)
+        play.click()
+        expect(page.locator('.tv-message')).to_have_text('TV start not confirmed. Check your playlists before trying again.')
+        expect(play).to_be_enabled()
+        assert not page.evaluate(f'{MODEL}.playerMounted')
+        assert_quiet_action(page)
+        page.unroute('**/home/tv/play', failed_start)
+    # A rejected fetch can carry an Error rather than a browser TypeError.
+    # Exercise that actual catch with a diagnostic that must stay off screen.
+    page.evaluate('''diagnostic => {
+        window.actionOriginalFetch = window.fetch;
+        window.fetch = (url, options) => String(url) === '/home/tv/play'
+          ? Promise.reject(new Error(diagnostic)) : window.actionOriginalFetch(url, options);
+    }''', DIAGNOSTIC)
+    play.click()
+    expect(page.locator('.tv-message')).to_have_text('TV start not confirmed. Check your playlists before trying again.')
+    expect(play).to_be_enabled()
+    assert_quiet_action(page)
+    page.evaluate('() => { window.fetch = window.actionOriginalFetch; }')
+    play.click()
+    page.wait_for_function(f'{MODEL}.playing')
+    page.evaluate('window.originalTvPlayer = window.tvPlayer; window.tvPlayer.position = 37')
+    before = page.evaluate(f'''({{playlist: {MODEL}.playlistId,
+        queue: {MODEL}.items.map(item => item.queue_id), calls: window.tvCalls}})''')
+    for kind in ('plaintext', 'malformed', 'network', 'json'):
+        def failed_open(route, kind=kind):
+            opens.append(route.request.url)
+            fail_action(route, kind)
+        page.route('**/home/tv/playlist/999999', failed_open)
+        page.evaluate(f'{MODEL}.openPlaylist("999999")')
+        expect(page.locator('.tv-message')).to_have_text('Couldn’t open this video playlist. Choose another playlist or try again.')
+        assert page.evaluate(f'{MODEL}.playing && window.tvPlayer === window.originalTvPlayer')
+        assert page.evaluate('window.tvPlayer.position') == 37
+        assert page.evaluate('window.tvCalls') == before['calls']
+        assert_quiet_action(page)
+        page.unroute('**/home/tv/playlist/999999', failed_open)
+    page.get_by_role('button', name='Adjust TV parameters').click()
+    dialog = page.get_by_role('dialog', name='TV parameters')
+    slider = dialog.get_by_role('slider')
+    slider.press('End')
+    draft = slider.input_value()
+    for kind in ('plaintext', 'malformed', 'network', 'json'):
+        def failed_parameters(route, kind=kind):
+            parameters.append(route.request.post_data)
+            fail_action(route, kind)
+        page.route('**/home/tv', failed_parameters)
+        dialog.get_by_role('button', name='Apply', exact=True).click()
+        expect(dialog.locator('p[role="status"]')).to_have_text('Changes not confirmed. Your choice is kept here.')
+        expect(dialog.get_by_role('button', name='Apply', exact=True)).to_be_enabled()
+        expect(slider).to_have_value(draft)
+        assert page.evaluate(f'{MODEL}.playing && window.tvPlayer === window.originalTvPlayer')
+        assert_quiet_action(page)
+        page.unroute('**/home/tv', failed_parameters)
+    def failed_reset(route):
+        resets.append(route.request.url)
+        fail_action(route, 'plaintext')
+    page.route('**/home/tv/reset', failed_reset)
+    dialog.get_by_role('button', name='Reset playlist', exact=True).click()
+    expect(page.locator('.tv-message')).to_have_text('Reset not confirmed. Keep watching or try again.')
+    assert page.evaluate(f'{MODEL}.playing && window.tvPlayer === window.originalTvPlayer')
+    assert page.evaluate(f'{MODEL}.playlistId') == before['playlist']
+    assert page.evaluate(f'{MODEL}.items.map(item => item.queue_id)') == before['queue']
+    assert page.evaluate('window.tvCalls') == before['calls']
+    assert len(starts) == len(opens) == len(parameters) == 4 and len(resets) == 1
+    assert all(body == 'max_minutes=unlimited' for body in parameters)
+    assert_quiet_action(page)
+    page.screenshot(path=action_evidence + '-retained.png', full_page=True)
+    def failed_refill(route):
+        refills.append(parse_qs(route.request.post_data))
+        fail_action(route, 'plaintext')
+    page.route('**/home/tv/playlist/*/refill', failed_refill)
+    page.evaluate(f'{MODEL}.select(4)')
+    for attempt in range(1, 4):
+        if attempt > 1:
+            page.clock.run_for(3000)
+        page.wait_for_function(f'{MODEL}.refillAttempts === {attempt} && !{MODEL}.refilling')
+    assert len(refills) == 3
+    assert len({body['request_id'][0] for body in refills}) == 1
+    assert page.evaluate(f'{MODEL}.playing && window.tvPlayer === window.originalTvPlayer')
+    assert page.evaluate(f'{MODEL}.items.map(item => item.queue_id)') == before['queue']
+    page.evaluate(f'{MODEL}.select(6)')
+    page.evaluate('window.tvPlayer.options.events.onStateChange({data:0,target:window.tvPlayer})')
+    expect(page.locator('.tv-message')).to_have_text('The next videos could not load. Reset TV to continue.')
+    expect(page.get_by_role('button', name='Reset TV', exact=True)).to_be_enabled()
+    page.clock.run_for(6000)
+    assert len(refills) == 3 and len(resets) == 1 and len(starts) == 4
+    assert_quiet_action(page)
+    page.screenshot(path=action_evidence + '-continuation.png', full_page=True)
 
 
 def test_tv_keeps_playing_advancing_and_refilling_across_home_tabs(page, live_app, tv_ui, store):
@@ -102,10 +206,19 @@ def test_tv_keeps_playing_advancing_and_refilling_across_home_tabs(page, live_ap
     assert page.evaluate('window.tvPlayer === window.originalTvPlayer')
 
 
-def test_tv_continues_across_many_batches_with_bounded_history(page, live_app, tv_ui, store):
+def test_tv_continues_across_many_batches_with_bounded_history(page, live_app, tv_ui, store, record_property):
     publish_pool(store, live_app, 7)
-    batches = []
-    page.on('response', lambda response: batches.append(response) if response.url.endswith('/refill') else None)
+    batches, ended, playing = [], [], []
+    def record_response(response):
+        if response.url.endswith('/refill'):
+            batches.append(response)
+        elif response.url.endswith('/event'):
+            body = response.request.post_data or ''
+            if body.startswith('kind=ended&'):
+                ended.append(response)
+            elif body.startswith('kind=state&state=playing&'):
+                playing.append(response)
+    page.on('response', record_response)
     page.goto(live_app + '/#tv')
     page.get_by_role('button', name='Play TV', exact=True).click()
     page.wait_for_function(f'{MODEL}.playing')
@@ -113,15 +226,35 @@ def test_tv_continues_across_many_batches_with_bounded_history(page, live_app, t
     publish_pool(store, live_app, 60)
     played = []
     for _ in range(75):
-        current = page.evaluate(f'{MODEL}.current.queue_id')
-        played.append(page.evaluate('window.tvPlayer.id'))
-        page.evaluate('window.tvPlayer.options.events.onStateChange({data:0,target:window.tvPlayer})')
-        page.wait_for_function(f'id => {MODEL}.current.queue_id !== id && {MODEL}.playing', arg=current)
-        assert page.evaluate(f'{MODEL}.items.length') <= 30
-        assert page.evaluate(f'{MODEL}.revealedCount <= {MODEL}.selected + 2')
+        previous = page.evaluate(f'''() => {{
+            const previous = {{queue: {MODEL}.current.queue_id, video: window.tvPlayer.id}};
+            window.tvPlayer.options.events.onStateChange({{data:0,target:window.tvPlayer}});
+            return previous;
+        }}''')
+        played.append(previous['video'])
+        # Capture both bounds when the real player has advanced, instead of
+        # making separate browser reads after every playback transition.
+        state = page.wait_for_function(f'''id => {{
+            const model = {MODEL};
+            return model.current.queue_id !== id && model.playing && {{
+                count: model.items.length, revealed: model.revealedCount, selected: model.selected
+            }};
+        }}''', arg=previous['queue']).json_value()
+        assert state['count'] <= 30
+        assert state['revealed'] <= state['selected'] + 2
+    # Playback reports are queued separately from the player. Await their real
+    # responses so closing a faster browser loop cannot discard its history.
+    if len(ended) < 75 or len(playing) < 76:
+        page.wait_for_event('response', predicate=lambda _: len(ended) >= 75 and len(playing) >= 76)
+    assert len(ended) == 75 and all(response.status == 200 for response in ended)
+    assert len(playing) == 76 and all(response.status == 200 for response in playing)
     assert len(set(played)) > 7
     assert all(a != b for a, b in zip(played, played[1:]))
-    assert len([response for response in batches if response.status == 200]) >= 15
+    refills = len([response for response in batches if response.status == 200])
+    record_property('tv_transitions', len(played))
+    record_property('tv_successful_refills', refills)
+    record_property('tv_completed_ended_reports', len(ended))
+    assert refills >= 15
     assert page.locator('.tv-filmstrip').inner_text().strip() == ''
     assert all(len(store.charts.playlist_tracks_detail(p.id)) <= 60
                for p in store.playlists.get_playlists())

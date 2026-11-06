@@ -7,7 +7,7 @@ import pytest
 
 from tests.core.test_predecessor_writes import installed
 from yt_playlist.core import recommendation_pools as pools
-from yt_playlist.core.db_rebuild import build as retained_copy
+from yt_playlist.core.db_rebuild import build as rebuild
 from yt_playlist.core.store import Store
 from yt_playlist.repos import policy_storage, recommendation_publication as publication
 
@@ -25,7 +25,7 @@ def test_exact_installed_format_personal_values_hidden_ids_and_sequences(install
         store.conn.execute("INSERT INTO compaction_implicit(rowid,value,other) VALUES(91,'same','text')")
     before = list(store.conn.iterdump())
     output = tmp_path/'compact.db'
-    report = retained_copy.build(store._db_path, output)
+    report = rebuild.build(store._db_path, output)
     assert report['installed_version'] == version
     assert report['freelist_pages'] == 0
     assert list(store.conn.iterdump()) == before
@@ -40,9 +40,8 @@ def test_exact_installed_format_personal_values_hidden_ids_and_sequences(install
 
 
 @pytest.fixture
-def ranked(tmp_path):
-    store = Store(tmp_path/'ranked.db')
-    store.init_schema()
+def ranked(tmp_path, consumer_store):
+    store = consumer_store(tmp_path/'ranked.db')
     with store.conn:
         policy_storage.publish(store.conn, [('policy', '{}', 1)])
         store.conn.executemany('INSERT INTO recordings(id,identity_key) VALUES(?,?)', [(i,'recording-'+str(i)) for i in range(1,130)])
@@ -70,7 +69,7 @@ def test_retains_historical_references_live_builds_and_all_candidates(ranked,tmp
     current,plan = publish('current')
     pending = store.recommendations.claim(replace(plan,external_key='in flight',created_at=20))
     before = list(store.conn.iterdump())
-    report = retained_copy.build(store._db_path,tmp_path/'compact.db',now=21)
+    report = rebuild.build(store._db_path,tmp_path/'compact.db',now=21)
     assert list(store.conn.iterdump()) == before
     assert report['tables']['recommendation_generations']['rows'] == 3
     with closing(sqlite3.connect(tmp_path/'compact.db')) as copied:
@@ -91,7 +90,7 @@ def test_unknown_reference_owner_preserves_generation_and_complete_pool(ranked,t
         store.conn.execute('CREATE TABLE compaction_history(id INTEGER PRIMARY KEY,generation_id INTEGER '
                            'REFERENCES recommendation_generations(id),evidence TEXT)')
         store.conn.execute("INSERT INTO compaction_history VALUES(1,?,'historical explanation')",(old.generation_id,))
-    retained_copy.build(store._db_path,tmp_path/'compact.db',now=10000)
+    rebuild.build(store._db_path,tmp_path/'compact.db',now=10000)
     with closing(sqlite3.connect(tmp_path/'compact.db')) as copied:
         assert copied.execute('SELECT count(*) FROM recommendation_candidates').fetchone() == (131,)
         assert copied.execute('SELECT count(*) FROM recommendation_generations').fetchone() == (2,)
@@ -110,7 +109,7 @@ def test_metadata_retirement_refuses_an_unaudited_history_reference(tmp_path):
         before = list(store.conn.iterdump())
         output = tmp_path/'rejected.db'
         with pytest.raises(ValueError, match='new reference audit: future_metadata_owner.observation_id'):
-            retained_copy.build(store._db_path, output)
+            rebuild.build(store._db_path, output)
         assert not output.exists()
         assert list(store.conn.iterdump()) == before
     finally:
@@ -132,9 +131,9 @@ def test_failed_build_cannot_be_installed_and_leaves_source_exact(installed,tmp_
     if failure=='validation':
         def fail(conn):
             raise ValueError('controlled independent validation failure')
-        monkeypatch.setattr(retained_copy,'_verify',fail)
+        monkeypatch.setattr(rebuild,'_verify',fail)
     with pytest.raises((ValueError,sqlite3.OperationalError)):
-        retained_copy.build(store._db_path,output,progress=progress,cancelled=lambda:failure=='cancelled')
+        rebuild.build(store._db_path,output,progress=progress,cancelled=lambda:failure=='cancelled')
     assert not output.exists()
     if failure=='concurrent-write':
         assert store.settings.get_setting('accepted meanwhile')=='retained'
@@ -155,16 +154,16 @@ def test_rejects_persisted_value_faults_despite_sql_equality(installed, tmp_path
         store.conn.execute('CREATE TABLE personal_evidence(id INTEGER PRIMARY KEY, value ' + declaration + ')')
         store.conn.execute('INSERT INTO personal_evidence VALUES(1, ?)', (initial,))
     before = list(store.conn.iterdump())
-    verify = retained_copy._equal_rows
+    verify = rebuild._equal_rows
     def corrupt(conn, name, predicate):
         if name == 'personal_evidence':
             conn.execute('UPDATE compacted.personal_evidence SET value=? WHERE id=1', (replacement,))
             conn.commit()
             conn.execute('BEGIN')
         return verify(conn, name, predicate)
-    monkeypatch.setattr(retained_copy, '_equal_rows', corrupt)
+    monkeypatch.setattr(rebuild, '_equal_rows', corrupt)
     output = tmp_path / 'rejected.db'
     with pytest.raises(ValueError, match='changed retained values or IDs: personal_evidence'):
-        retained_copy.build(store._db_path, output)
+        rebuild.build(store._db_path, output)
     assert not output.exists()
     assert list(store.conn.iterdump()) == before

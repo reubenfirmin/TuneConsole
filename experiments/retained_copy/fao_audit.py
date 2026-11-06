@@ -11,13 +11,12 @@ OPERATIONS = {'open','read_text','read_bytes','write_text','write_bytes','unlink
 # another raw file operation elsewhere requires an explicit inventory decision.
 BOUNDARIES = {
  'offline whole-root custody, with application handles drained': {
-  'core/db_rebuild/files.py': ('stage', 'stage.member', '_move'),
+  'core/db_rebuild/files.py': ('_move',),
  },
  'native SQLite custody': {
   'core/db_rebuild/build.py': ('_source_identity','construct','build'),
   'core/db_rebuild/install.py': ('digest','sync','_rollback','replace','owner'),
   'core/db_rebuild/job.py': ('run',),
-  'core/playback_feedback_backup.py': ('_copy','pinned','restore'),
   'core/repair.py': ('_publish_backup',),
  },
  'TOML configuration or credentials': {
@@ -31,6 +30,12 @@ BOUNDARIES = {
  'SQL/code definition, never runtime JSON': {
   'core/db_rebuild/destination.py': ('signature',),
   'core/genre_contract.py': ('installed_definitions',),
+  # Bundled schema sources, including the frozen installed-format JSON
+  # contract. These exact readers never open account-owned runtime assets.
+  'core/schema_admission.py': ('reference',),
+  'core/destination_schema.py': ('definition',),
+  'core/schema_definition.py': ('_statements','_read_statements'),
+  'core/schema_transforms.py': ('saved_output_definitions',),
   'core/preparation/choice_learning.py': ('_contract',),
   'core/preparation/tv_state.py': ('_frozen',),
  },
@@ -39,19 +44,23 @@ BOUNDARIES = {
   'core/evidence_ledger.py': ('EvidenceLedger._budget','EvidenceLedger.generation',
       'EvidenceLedger._advance_generation','EvidenceLedger._maintain'),
   'core/playback_inbox.py': ('Inbox.admission',),
+  'core/album_feedback_outbox.py': ('fence',),
   'library/action_claim.py': ('_claim',),
   'rec/group_roots.py': ('_pending','_pending.close','reap_pending'),
  },
  'temporary SQLite recovery workspace and human report': {
-  'core/policy_recovery.py': ('recover',),
   'core/store.py': ('Store.__init__',),
+ },
+ 'repository-owned SQL reader lifetime, no raw file body': {
+  'rec/stored_groups.py': ('selection_reader',),
+  'rec/stored_home.py': ('preparation_inputs','_assemble'),
  },
  'external network, zip, package metadata, OS or developer log': {
   'core/updatecheck.py': ('_is_editable_install',),
   'core/work_diagnostics.py': ('CpuDiagnostics._native_cpu',),
   'egress.py': ('EgressGuard.recent',),
   'library/spotify_data.py': ('_load',), 'library/takeout.py': ('maybe_unzip','_unzip_html_member'),
-  'providers/transport.py': ('request_json',), 'rec/tv_visual.py': ('_read_image',),
+  'rec/tv_visual.py': ('_read_image',),
   'web/app.py': ('create_app.lifespan',),
  },
 }

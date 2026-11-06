@@ -1,5 +1,6 @@
 """Evidence and blind listening remain separate, scoped, versioned and retractable."""
 from copy import deepcopy
+from tests.enrichment_support import choose_field
 from dataclasses import replace
 
 import pytest
@@ -65,7 +66,7 @@ def test_observations_keep_native_units_actual_model_coverage_and_version_identi
     # Scratch descriptors retain their native vocabulary; production admission
     # rejects arbitrary fields rather than treating RMS as a catalog dimension.
     tid = store.tracks.upsert_track('video', 'Song', 'Artist', '', 100)
-    store.enrichment.set_track_field(tid, 'energy', .2)
+    choose_field(store, tid, 'energy', .2)
     selected = store.conn.execute('SELECT energy FROM catalog_tracks WHERE id=?', (tid,)).fetchone()[0]
     with pytest.raises(ValueError, match='Unsupported native metadata field'):
         store.enrichment_state.record_metadata_observations(tid, 'audio-lab', evidence, run_id='raw', now=10)

@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from tests.repos.test_album_aliases import OLD, ALIAS, release
-from yt_playlist.rec import album_choices, choice_evidence, scoring
+from yt_playlist.rec import album_choices, album_feedback, choice_evidence, scoring
 from yt_playlist.core import album_feedback_storage
 
 
@@ -75,6 +75,15 @@ def test_conflicts_resolve_by_time_then_source_and_replacement_withdraws_all_ori
     # Replacing a judgment must not leave the losing pre-merge action able to reappear.
     album_choices.set_feedback(store, ALIAS, 'more', 103, ALIAS)
     assert set(album_feedback_storage.original(store.conn)) == {ALIAS}
+    # Inline replay is bounded and may resume after an earlier outbox cursor.
+    # Every original response must already be withdrawn or have a durable intent.
+    published = store.rec_ledger.evidence().records('response')
+    pending = store.album_feedback.pending_responses(after=0, limit=128)
+    assert {row['id'] for row in responses} <= (
+        {row['details']['action_id'] for row in published if row['kind'] == 'withdraw'}
+        | {row['target_action_id'] for row in pending if row['kind'] == 'withdraw'})
+    album_feedback.drain(store)
+    assert not store.album_feedback.pending_responses(after=0, limit=128)
     ledger = store.rec_ledger.evidence()
     assert ledger.records('opportunity') == opportunities
     assert all(ledger.get('response', row['id']) == row for row in responses)
@@ -83,6 +92,7 @@ def test_conflicts_resolve_by_time_then_source_and_replacement_withdraws_all_ori
     latest = [row for row in ledger.records('response') if row['kind'] == 'feedback' and row['at'] == 103]
     assert len(latest) == 1 and latest[0]['option_id'] == ALIAS
     album_choices.set_feedback(store, OLD, 'clear', 104)
+    album_feedback.drain(store)
     assert album_choices.feedback_state(store) == {}
     assert {row['details']['action_id'] for row in ledger.records('response') if row['kind'] == 'withdraw'} == {
         row['id'] for row in responses + latest}

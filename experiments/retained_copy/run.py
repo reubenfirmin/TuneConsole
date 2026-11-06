@@ -9,10 +9,12 @@ import shutil
 import sqlite3
 import time
 
-from yt_playlist.core import playback_feedback_backup, policy_documents, preparation_files, retained_copy
+from yt_playlist.core import policy_documents, preparation_files
+from yt_playlist.core.db_rebuild import build as rebuild
+from experiments.retained_copy import playback_feedback_backup
 from yt_playlist.repos import group_retention
 
-Q = retained_copy.quote
+Q = rebuild.quote
 
 
 def save(path, value):
@@ -27,7 +29,7 @@ def digest(path):
 
 def connect(path, readonly=True):
     conn = sqlite3.connect(path.resolve().as_uri() + ('?mode=ro' if readonly else ''), uri=True)
-    retained_copy._configure(conn)
+    rebuild._configure(conn)
     return conn
 
 
@@ -37,7 +39,7 @@ def tables(conn):
 
 
 def key_definition(conn, table, keys):
-    types = {row[1]: row[2] for row in retained_copy._columns(conn, table)}
+    types = {row[1]: row[2] for row in rebuild._columns(conn, table)}
     # Matching affinity is necessary for indexed IS comparisons against rowids.
     # An untyped scratch key makes SQLite scan that set for each source row.
     return ','.join(Q(key) + ' ' + types.get(key, 'INTEGER') for key in keys)
@@ -169,7 +171,7 @@ class Plan:
     def owner(self, name, rule):
         if name not in self.names:
             return
-        _, keys = retained_copy._fields(self.conn, name)
+        _, keys = rebuild._fields(self.conn, name)
         self.keys[name] = keys
         key_list = ','.join(map(Q, keys))
         # CTAS can rename SELECT rowid to an INTEGER PRIMARY KEY's column name.
@@ -198,7 +200,7 @@ class Plan:
 
     def prepare(self):
         conn = self.conn
-        initial = retained_copy.plan(conn, now=self.now)
+        initial = rebuild.plan(conn, now=self.now)
         for name, predicate in initial.items():
             self.owner(name, 'existing recommendation retention rule: ' + predicate)
             self.add(name, predicate)
@@ -400,7 +402,7 @@ def build(root):
         phase = time.monotonic()
         report['tables'] = {}
         for table, item in contract['tables'].items():
-            fields, _ = retained_copy._fields(conn, table)
+            fields, _ = rebuild._fields(conn, table)
             columns = ','.join(map(Q, fields))
             began = time.monotonic()
             rows = conn.execute('INSERT INTO compacted.' + Q(table) + '(' + columns + ') SELECT '
@@ -419,7 +421,7 @@ def build(root):
         print('Verifying all retained values/types/IDs before relocating candidate file paths', flush=True)
         phase = time.monotonic()
         for table, item in contract['tables'].items():
-            retained_copy._equal_rows(conn, table, item['predicate'])
+            rebuild._equal_rows(conn, table, item['predicate'])
         if conn.execute('SELECT * FROM main.sqlite_sequence ORDER BY name').fetchall() != conn.execute(
                 'SELECT * FROM compacted.sqlite_sequence ORDER BY name').fetchall():
             raise ValueError('Sequence high-water marks changed')

@@ -31,9 +31,11 @@ def test_catalog_projections_are_read_only_and_owner_constraints_remain(store):
 def test_selected_fill_metadata_retains_lineage_and_explicit_choices(store):
     entry = store.tracks.upsert_track('a','Song','Artist',None,200)
     other = store.tracks.upsert_track('b','Other','Artist',None,200)
-    store.tracks.set_track_audio(entry,bpm=120,danceability=.7,loudness=-12)
-    store.tracks.set_track_audio(entry,bpm=130)
-    store.tracks.set_track_enrichment(entry,'Jazz','2001')
+    with store.conn:
+        metadata.fill(store.conn, entry, {'bpm': 120, 'danceability': .7, 'loudness': -12}, 'deezer')
+        metadata.fill(store.conn, entry, {'bpm': 130}, 'acousticbrainz')
+        metadata.fill(store.conn, entry, {'genre': 'Jazz', 'mb_year': '2001'}, 'musicbrainz', blank=True)
+    assert store.tracks.get_track_audio(entry) == (120, None, .7)
     with store.conn:
         catalog.choose_field(store.conn,entry,'bpm',None)
         catalog.choose_field(store.conn,entry,'genre','')
@@ -76,7 +78,8 @@ def test_metadata_fill_rolls_back_every_selection_if_one_field_is_invalid(store)
     entry = store.tracks.upsert_track('video','Song','Artist',None,200)
     before = list(store.conn.iterdump())
     with pytest.raises((ValueError,sqlite3.IntegrityError)):
-        store.tracks.set_track_audio(entry,bpm=120,instrumental=float('inf'))
+        with store.conn:
+            metadata.fill(store.conn, entry, {'bpm': 120, 'instrumental': float('inf')}, 'acousticbrainz')
     assert list(store.conn.iterdump())==before
 
 

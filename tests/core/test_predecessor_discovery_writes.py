@@ -34,7 +34,7 @@ def test_starter_selection_scan_candidates_and_distinct_impressions(installed):
     assert store.discovery.get_discovered_artists()[0]['because'] == []
 
 
-def test_source_cleanup_and_account_scoped_import_reset(installed):
+def test_acquired_track_pruning_and_account_scoped_import_reset(installed):
     store, _ = installed
     first = store.accounts.upsert_account('First', 'first.json', None, True)
     second = store.accounts.upsert_account('Second', 'second.json', None, False)
@@ -53,6 +53,8 @@ def test_source_cleanup_and_account_scoped_import_reset(installed):
     store.discovery.record_discovery_impressions('track', [key], 'track-visit', 30)
     store.discovery.record_discovery_impressions('track', [key], 'track-visit', 31)
     assert store.discovery.get_discovered_tracks()[0]['offered_count'] == 1
-    assert store.discovery.remove_discovery_source(key, 'MPRE-source')
+    store.discovery.prune_discovered_tracks({key}, held_keys={key})
+    assert store.discovery.discovered_track_keys() == {key}
+    store.discovery.prune_discovered_tracks({key})
     assert not store.discovery.get_discovered_tracks()
-    assert not store.discovery.discovered_source_tokens()
+    assert store.discovery.discovered_source_tokens('album') == {'MPRE-source'}

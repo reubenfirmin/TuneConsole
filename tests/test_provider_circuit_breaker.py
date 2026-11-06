@@ -5,43 +5,6 @@ import pytest
 
 from yt_playlist.providers import deezer, lastfm, musicbrainz
 from yt_playlist.providers.waterfall import run_waterfall
-from yt_playlist.util import net
-
-
-def test_breaker_trips_only_after_threshold_consecutive_failures():
-    b = net.CircuitBreaker(threshold=3)
-    dns = urllib.error.URLError("Name or service not known")
-    b.record(dns)
-    b.record(dns)
-    assert not b.tripped()
-    b.record(dns)
-    assert b.tripped()
-
-
-def test_server_response_or_success_resets_the_streak():
-    b = net.CircuitBreaker(threshold=2)
-    b.record(urllib.error.URLError("down"))
-    b.record(urllib.error.HTTPError("u", 404, "missing", {}, None))
-    assert b.consecutive == 0
-    b.record(urllib.error.URLError("down"))
-    b.record()
-    assert b.consecutive == 0
-
-
-def test_throttle_and_server_errors_do_not_clear_outage_streak():
-    b = net.CircuitBreaker(threshold=3)
-    b.record(TimeoutError())
-    b.record(urllib.error.HTTPError("u", 429, "throttled", {}, None))
-    b.record(urllib.error.HTTPError("u", 503, "busy", {}, None))
-    assert b.tripped()
-    b.record()
-    assert b.consecutive == 0
-
-
-def test_parse_error_counts_as_reachable():
-    b = net.CircuitBreaker(threshold=1)
-    b.record(ValueError("bad json"))
-    assert not b.tripped()
 
 
 @pytest.mark.parametrize("provider", [musicbrainz, deezer])

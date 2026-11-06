@@ -3,7 +3,6 @@ import json
 import logging
 from contextlib import ExitStack
 
-from yt_playlist.core import action_work
 from yt_playlist.library.action_claim import claim_deletion_target
 from yt_playlist.library.playlist_snapshot import validate_playlist
 from yt_playlist.util.action_kinds import ADD_TRACKS
@@ -82,7 +81,7 @@ def retry_insertions(store, playlist_id, client, now, *, attempts=3):
             with ExitStack() as stack:
                 stack.enter_context(claim_deletion_target(store,pl.account_id,pl.provider_playlist_id))
                 store.actions.require_known_remote_outcome(pl.account_id,pl.provider_playlist_id)
-                if action_work.available(store.conn):
+                if store.actions.has_durable_targets():
                     claims = store.actions.claim_forward_targets(action.id,'placement',now)
                     for claim in claims:
                         stack.callback(store.actions.release_deletion,claim)

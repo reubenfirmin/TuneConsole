@@ -85,6 +85,11 @@ class HistoryRepo(Repo):
         super().__init__(db)
         self._bucket_warnings = OrderedDict()
 
+    def repair_verified_imports(self):
+        """Repair only contradicted observations covered by verified imports."""
+        from yt_playlist.core import repair
+        repair.run_once(self._store)
+
     def _log_undated_buckets(self, account_id, skipped):
         if not skipped:
             return
@@ -170,13 +175,6 @@ class HistoryRepo(Repo):
             first_play.invalidate(self.conn)
 
     @synchronized
-    def get_recent_history_keys(self, since_ts) -> set[str]:
-        rows = self.conn.execute(
-            "SELECT DISTINCT identity_key FROM listening_activity WHERE at>=?",
-            (since_ts,)).fetchall()
-        return {r["identity_key"] for r in rows}
-
-    @synchronized
     def history_keys_before(self, ts) -> set[str]:
         """Keys strictly before a cutoff, using exact times where known.
 
@@ -204,26 +202,6 @@ class HistoryRepo(Repo):
             "SELECT DISTINCT account_id,identity_key,day FROM listening_activity WHERE at<?) "
             "GROUP BY identity_key", (ts,)).fetchall()
         return {r["k"]: int(r["c"]) for r in rows}
-
-    @synchronized
-    def recent_play_counts(self, limit) -> dict:
-        """Recent activity counts: exact repeats plus coarse days without an exact event."""
-        rows = self.conn.execute(
-            "SELECT identity_key k, COUNT(*) c FROM ("
-            "  SELECT identity_key FROM listening_activity "
-            "  ORDER BY at DESC,account_id,identity_key,event_id DESC LIMIT ?"
-            ") GROUP BY identity_key", (limit,)).fetchall()
-        return {r["k"]: r["c"] for r in rows}
-
-    @synchronized
-    def recent_keys_ordered(self, since_ts, limit=None) -> list[str]:
-        """Account keys played at/after since_ts, most recent activity first.
-        For the recent-mood centroid, which wants the latest plays, not an arbitrary subset of a set."""
-        rows = self.conn.execute(
-            "SELECT identity_key k,MAX(at) last FROM listening_activity WHERE at>=? "
-            "GROUP BY identity_key ORDER BY last DESC", (since_ts,)).fetchall()
-        keys = [r["k"] for r in rows]
-        return keys[:limit] if limit else keys
 
     @synchronized
     def recent_plays_with_ts(self, limit=None, exclude_list_ids=None) -> list:

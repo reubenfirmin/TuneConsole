@@ -29,9 +29,23 @@ class GenreRepo(Repo):
     @lookup_read
     def feature_axes(self, labels):
         """Detach current genre identity/family meanings for one model calculation."""
-        return {label: (genre_identity.family(self.conn,label),
-                        genre_identity.resolve(self.conn,label)[0])
-                for label in set(labels) if label}
+        return genre_identity.feature_axes(self.conn, labels)
+
+    @lookup_read
+    def family_members(self, families):
+        """Current, unretired genre identities in display-name order per family."""
+        families = list(dict.fromkeys(families))
+        result = {family: [] for family in families}
+        redirected = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='genre_redirects'").fetchone()
+        retired = ('AND NOT EXISTS(SELECT 1 FROM genre_redirects r WHERE r.retired_key=c.key) '
+                   if redirected else '')
+        for offset in range(0, len(families), 200):
+            page = families[offset:offset + 200]
+            for family, key in self.conn.execute(
+                    'SELECT c.family_key,c.key FROM genre_catalog c WHERE c.family_key IN ('
+                    + ','.join('?' for _ in page) + ') ' + retired + 'ORDER BY c.name COLLATE NOCASE', page):
+                result[family].append(key)
+        return result
 
     @synchronized
     def rename_genre(self, key, name):

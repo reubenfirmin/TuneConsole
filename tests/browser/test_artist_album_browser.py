@@ -9,16 +9,14 @@ Own fixture (shared live_app seeds discover data and is off-limits). Characteriz
 first: lock the CURRENT Alpine toggle, then keep it green after the htmx conversion.
 """
 import socket
-import threading
-import time
 
 import pytest
 import uvicorn
 from playwright.sync_api import expect
 
-from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.live_server import LiveServer
 
 pytestmark = pytest.mark.browser
 
@@ -71,9 +69,8 @@ def _free_port():
 
 
 @pytest.fixture
-def live_artist_app():
-    s = Store(":memory:")
-    s.init_schema()
+def live_artist_app(store):
+    s = store
     iid = s.accounts.upsert_account("Main", "cred", None, True)
     other = s.accounts.upsert_account("Other", "cred", "other", False)
     pid = s.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
@@ -85,19 +82,33 @@ def live_artist_app():
     app = create_app(s, lambda: clients, now_fn=lambda: 1.0, background_work=False)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    while not server.started:
-        time.sleep(0.02)
-    yield {"base": f"http://127.0.0.1:{port}", "store": s, "iid": iid, "other": other, "clients": clients}
-    server.should_exit = True
-    thread.join(timeout=5)
+    with LiveServer(server):
+        yield {"base": f"http://127.0.0.1:{port}", "store": s, "iid": iid, "other": other, "clients": clients}
 
 
-def test_save_album_flips_to_unsave_after_reload(live_artist_app, page):
+@pytest.mark.parametrize('failed_first', [False, True])
+def test_save_album_flips_to_unsave_after_reload(live_artist_app, page, monkeypatch, failed_first):
     page.goto(f"{live_artist_app['base']}/artist?name=Artist%20X")
     save = page.get_by_role("button", name="Save", exact=True)
     expect(save).to_be_visible()
+    if failed_first:
+        client = live_artist_app['clients'][live_artist_app['iid']]
+        original = client.get_album
+        calls = []
+        def unavailable(*args):
+            calls.append(args)
+            raise TypeError('Private provider diagnostic')
+        monkeypatch.setattr(client, 'get_album', unavailable)
+        with page.expect_response('**/collection/save-album') as response:
+            save.click()
+        assert response.value.status == 503 and response.value.body() == b''
+        expect(save).to_be_enabled()
+        with page.expect_response(lambda response: '/artist?' in response.url):
+            pass
+        expect(save).to_be_visible()
+        expect(page.locator('#toasts [role="alert"], #connection-error')).to_have_count(0)
+        assert len(calls) == 1 and client.rated == []
+        monkeypatch.setattr(client, 'get_album', original)
     save.click()
     expect(page.get_by_role("button", name="Unsave", exact=True)).to_be_visible()   # now saved
 
@@ -138,7 +149,8 @@ def test_album_status_track_links_and_save_from_artist(live_artist_app, page, wi
     expect(page.locator('.track-table a.alink')).to_have_count(2)
 
 
-def test_unsave_album_flips_to_save_after_reload(live_artist_app, page):
+@pytest.mark.parametrize('failed_first', [False, True])
+def test_unsave_album_flips_to_save_after_reload(live_artist_app, page, monkeypatch, failed_first):
     # start from a saved album so the button reads "Unsave"
     live_artist_app["store"].collection.add_saved_album({
         "browse": "MPREb_x", "title": "The Album", "artist": "Artist X",
@@ -146,6 +158,24 @@ def test_unsave_album_flips_to_save_after_reload(live_artist_app, page):
     page.goto(f"{live_artist_app['base']}/artist?name=Artist%20X")
     unsave = page.get_by_role("button", name="Unsave", exact=True)
     expect(unsave).to_be_visible()
+    if failed_first:
+        client = live_artist_app['clients'][live_artist_app['iid']]
+        original = client.rate_playlist
+        calls = []
+        def unavailable(*args):
+            calls.append(args)
+            raise TypeError('Private provider diagnostic')
+        monkeypatch.setattr(client, 'rate_playlist', unavailable)
+        with page.expect_response('**/collection/unsave-album') as response:
+            unsave.click()
+        assert response.value.status == 503 and response.value.body() == b''
+        with page.expect_response(lambda response: '/artist?' in response.url):
+            pass
+        expect(unsave).to_be_enabled()
+        expect(page.locator('#toasts [role="alert"], #connection-error')).to_have_count(0)
+        assert len(calls) == 1
+        assert live_artist_app['store'].collection.saved_album_ids() == {'MPREb_x'}
+        monkeypatch.setattr(client, 'rate_playlist', original)
     unsave.click()
     expect(page.get_by_role("button", name="Save", exact=True)).to_be_visible()      # now unsaved
 

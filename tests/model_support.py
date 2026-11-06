@@ -8,8 +8,18 @@ import json
 from yt_playlist.core.activity import check_stopping
 from yt_playlist.core import embeddings
 from yt_playlist.rec import (artist_model, content_model, embedding_training as training,
-                             embedding_vectors as vector_reads)
+                             embedding_vectors as vector_reads, taste_modes)
 from yt_playlist.util import genre_catalog
+
+
+def publish_modes(store, now, *, k=None, min_members=None):
+    """Install isolated prepared-mode fixtures; lifecycle tests use model_refresh."""
+    prepared = taste_modes.prepare_modes(store, now, k=k, min_members=min_members)
+    if prepared is None:
+        return len(store.modes.list_modes(active_only=True))
+    upserts, retired = prepared
+    store.modes.replace_modes(upserts, retired, now)
+    return len(upserts)
 
 
 def build_track_model(store, dim=None):

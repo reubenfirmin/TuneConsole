@@ -3,40 +3,69 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.musical_support import prepare_vibes
+from tests.musical_support import prepare_profiles, prepare_vibes
+from tests.prepared_fixture_support import prepared_template
 from tests.test_radio_catalog import catalog_track
-from tests.test_radio_genres import genre_pools
+from tests.test_radio_genres import genre_pools, seed_genre_pools
 from tests.radio_session_support import poc, play
 from tests.recommendation_support import publish_bundles
-from copy import deepcopy
 from yt_playlist.core import catalog
 from yt_playlist.rec import embedding_vectors, musical_character, radio_tuning
 from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, RadioCandidates
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.rec.radio_policy import RadioPolicy
 from yt_playlist.web import radio_session
+from yt_playlist.web.routes import radio_session as radio_routes
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+
+@pytest.fixture(scope='module')
+def intensity_template(_pristine_current_schema):
+    with prepared_template(_pristine_current_schema, seed_distant_chill) as template:
+        yield template
 
 
 @pytest.fixture
-def distant_chill(store, genre_pools):
-    pools = genre_pools
+def store(store, request):
+    # poc and other consumers add their own state after this private restore.
+    if 'distant_chill' in request.fixturenames:
+        store._fixture_intensity = request.getfixturevalue('intensity_template').restore(store)
+    return store
+
+
+@pytest.fixture
+def distant_chill(store):
+    return store._fixture_intensity
+
+
+@pytest.fixture
+def intensity_store(file_backed_store, intensity_template):
+    # The complete direction calculation opens many bounded readers. Give it
+    # real WAL readers instead of repeatedly copying an in-memory database.
+    file_backed_store._fixture_intensity = intensity_template.restore(file_backed_store)
+    return file_backed_store
+
+
+def seed_distant_chill(store):
+    pools = seed_genre_pools(store, publish=False)
     # A complete ordinary pool of unsuitable music hides the useful tail.
     for i in range(110):
         pools['9'].append(catalog_track(store, f'tail-{i}', label='Ambient')[0])
     quiet = pools['9'][-110:]
     quiet_keys = {track['key'] for track in quiet}
-    for rows in pools.values():
-        for track in rows:
-            tid = store.tracks.track_ids_for_videos([track['video_id']])[track['video_id']]
-            with store.conn:
-                catalog.choose_field(store.conn, tid, 'energy', .04 if track['key'] in quiet_keys else .96)
-    bundles = deepcopy(store._fixture_bundle_payload)
-    bundles['9']['wheelhouse'] = pools['9'][:12]
+    tracks = [track for rows in pools.values() for track in rows]
+    entries = store.tracks.track_ids_for_videos([track['video_id'] for track in tracks])
+    with store.conn:
+        for track in tracks:
+            tid = entries[track['video_id']]
+            catalog.choose_field(store.conn, tid, 'energy', .04 if track['key'] in quiet_keys else .96)
+    bundles = {mid: {'wheelhouse': rows[:12]} for mid, rows in pools.items()}
     bundles['all'] = {'wheelhouse': [t for rows in pools.values() for t in rows]}
     bundles['_radio'] = {'generation': None, 'space': '',
                          'members': {mid: [t['key'] for t in rows] for mid, rows in pools.items()}}
-    publish_bundles(store, bundles)
-    prepare_vibes(store)
+    prepare_profiles(store)
+    publish_bundles(store, bundles, vibes=True)
     return pools, quiet
 
 
@@ -45,10 +74,13 @@ def candidate(store, **tuning):
 
 
 @pytest.mark.parametrize('theme', [0, .5, 1])
-def test_intensity_escapes_styles_within_the_genre_constraint_and_relabels_each_stream(store, distant_chill, monkeypatch, theme):
-    pools, quiet = distant_chill
+def test_intensity_escapes_styles_within_the_genre_constraint_and_relabels_each_stream(intensity_store, monkeypatch, request, theme):
+    store = intensity_store
+    pools, quiet = store._fixture_intensity
+    assert len(quiet) == 110 > CLUSTER_POOL_LIMIT
     seed = pools['1'][0]
     c = candidate(store, theme=theme, comfort=1)
+    request.addfinalizer(c.close)
     assert '9' not in c.neighbours['1']
     assert all(t['key'] not in {q['key'] for q in quiet} for t in c.pools['9'])
     monkeypatch.setattr(embedding_vectors, 'load_content_vectors', lambda *a, **k: pytest.fail('full vector read'))
@@ -211,3 +243,51 @@ def test_live_retune_respects_genre_without_restarting_current_playback(poc, dis
     play(controller, future[0]['video_id'])
     assert controller.session.observed_video == future[0]['video_id']
     assert not controller.session.rejected
+
+
+@pytest.mark.parametrize('restored', [False, True])
+def test_real_tuning_route_replans_measured_candidates_and_persists_controls(poc, distant_chill, monkeypatch, restored):
+    controller, remote, frames, *_ = poc
+    pools, _ = distant_chill
+    monkeypatch.setattr(radio_session, 'RadioCandidates', RadioCandidates)
+    # Controlled earned access, with the production access guard and route.
+    controller.ctx.store.rec_proposals.put_proposals(
+        'listening_choices', {'home_format': {'vibe_episodes': 1}}, 1234)
+    assert controller.start(pools['1'][0]['video_id'])['ok']
+    play(controller, remote.ids[0])
+    if restored:
+        controller.suspend()
+        controller._persist(controller.session)
+        controller = radio_session.PlaylistRadio(controller.ctx)
+        controller.ctx.radio = controller
+        assert controller.join()['active']
+    history, playing = list(controller.session.heard), dict(controller.ctx.bridge.now_playing)
+    navigations = list(frames)
+    store = controller.ctx.store
+    taste = (store.rec_model.recent_liked_with_ts(limit=200), store.rec_model.disliked_with_ts(),
+             store.rec_model.get_weights(now=1234))
+    app = FastAPI()
+    app.include_router(radio_routes.build(controller.ctx))
+    menus = []
+    with TestClient(app) as client:
+        for energy in (0., 1.):
+            values = {'comfort': 1., 'theme': .5, 'energy': energy}
+            result = client.post('/radio/tune', json=values)
+            assert result.status_code == 200, result.text
+            result = result.json()
+            assert result['ok'] and result['tuning'] == values
+            future = [track for branch in result['directions'] for track in branch['tracks']]
+            assert future and all(musical_character.intensity(t) == (.04 if energy == 0 else .96)
+                                  for t in future)
+            menus.append({t['video_id'] for t in future})
+            assert client.get('/radio/status').json()['tuning'] == values
+            assert controller.persistence.load()['tuning'] == values
+            controller.listening.observe(controller.session)
+            controller.advance(controller.session)
+            assert not controller.status()['updating']
+            assert controller.session.heard == history
+            assert controller.ctx.bridge.now_playing == playing
+            assert frames == navigations
+        assert menus[0].isdisjoint(menus[1])
+    assert (store.rec_model.recent_liked_with_ts(limit=200), store.rec_model.disliked_with_ts(),
+            store.rec_model.get_weights(now=1234)) == taste

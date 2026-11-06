@@ -14,7 +14,7 @@ from yt_playlist.core.audio_vibe_contract import INTENSITY_CHANNELS, INTENSITY_R
 from yt_playlist.core.store import Store
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release, audio_vibe_relax as relax
 from yt_playlist.rec import audio_vibe_uplift as uplift, audio_vibe_energize as energize
-from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_preview as preview
+from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_prediction as predictor
 from yt_playlist.rec import home_vibe, musical_character, musical_preparation, progressive, vibe_preparation
 from .external_experiment import digest, save, stamp
 from .focus_experiment import inside, runtime
@@ -59,9 +59,9 @@ def replay(directory, seconds):
             for count in sorted({1, min(3, len(rows)), len(rows)}):
                 selected = rows[:count]
                 untouched = deepcopy(selected)
-                baseline = preview.predict(selected, require_complete=False)
+                baseline = predictor.predict(selected, require_complete=False)
                 patch.setenv(energize.MODE_KEY, 'active')
-                active = preview.predict(selected, require_complete=False)
+                active = predictor.predict(selected, require_complete=False)
                 patch.setenv(energize.MODE_KEY, 'off')
                 if {k: v for k, v in baseline.items() if k not in ('suitability', 'individual_models')} != {
                         k: v for k, v in active.items() if k not in ('suitability', 'individual_models')}:
@@ -132,7 +132,7 @@ def replay(directory, seconds):
                     raise ValueError('Radio intensity changed')
                 if old['energize']['source'] == 'audio_measurement':
                     inputs = store.vibe_predictions.inputs([key])[key]
-                    expected = preview.predict(inputs['samples'])['suitability']['energize']
+                    expected = predictor.predict(inputs['samples'])['suitability']['energize']
                     if abs(new['energize']['score'] - expected) > 1e-12:
                         raise ValueError('Published score differs from inference')
                     measured += 1

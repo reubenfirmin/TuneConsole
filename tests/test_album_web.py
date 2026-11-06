@@ -358,9 +358,19 @@ def test_inline_fetch_failure_does_not_show_incidental_library_subset(store):
     assert '<ol' not in r.text
 
 
-def test_create_playlist_from_album_redirects_to_new_playlist(store, monkeypatch, tmp_path):
+@pytest.mark.parametrize('failed_first', [False, True])
+def test_create_playlist_from_album_redirects_to_new_playlist(store, monkeypatch, tmp_path, failed_first):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     c, fc, iid = _client(store)
+    if failed_first:
+        from yt_playlist.library.ops import PlaylistOps
+        def unavailable(*args):
+            raise RuntimeError('Private provider diagnostic')
+        with monkeypatch.context() as fault:
+            fault.setattr(PlaylistOps, 'create_playlist_from_album', unavailable)
+            response = c.post('/album/create-playlist', data={'browse_id': 'MPREb_x', 'name': 'My Album Mix'})
+            assert response.status_code == 503 and response.content == b''
+            assert not fc.created
     r = c.post("/album/create-playlist", data={"browse_id": "MPREb_x", "name": "My Album Mix"})
     assert r.status_code == 200
     new_pl = next(p for p in store.playlists.get_playlists() if p.title == "My Album Mix")
@@ -396,7 +406,7 @@ def test_album_play_requires_connection_and_confirms_exact_queue_separately(stor
                              send_control=lambda message, **kwargs: sent.append(message))
     c.app.state.ctx.bridge = bridge
     response = c.post('/album/play', data={'browse_id': 'MPREb_x', 'opportunity_id': oid})
-    assert response.status_code == 422
+    assert response.status_code == 503 and response.content == b''
     assert not sent and store.rec_ledger.evidence().records('response') == []
     bridge.connected = True
     assert c.post('/album/play', data={'browse_id': 'MPREb_x', 'opportunity_id': oid}).status_code == 204

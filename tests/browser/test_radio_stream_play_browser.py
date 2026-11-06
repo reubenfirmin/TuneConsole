@@ -3,7 +3,7 @@ import re
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
-from playwright.sync_api import expect
+from playwright.sync_api import Error as PlaywrightError, expect
 
 from tests.browser.radio_ui_support import radio_ui
 from tests.template_support import web_templates
@@ -139,8 +139,50 @@ def test_pending_song_animates_and_grays_only_preceding_songs_until_playback(
 
     # An accepted request and a settled playlist do not establish playback.
     api.state = {**api.state, 'selection_error': None}
-    requests[0].fulfill(json={'ok': True, **api.state})
-    page.wait_for_function('Alpine.$data(document.querySelector(".radio-home")).pendingSong?.accepted === true')
+    receipt = {'ok': True, **api.state}
+    held_status, applies = [], []
+
+    def hold_status(route):
+        held_status.append(route)
+
+    def tune(route):
+        applies.append(route.request.post_data_json)
+        api.state = {**api.state, 'tuning': applies[-1], 'menu_id': 'after-tuning'}
+        route.fulfill(json={'ok': True, **api.state})
+
+    try:
+        if confirmation == 'bridge':
+            # The song is accepted before Apply but its older HTTP snapshot
+            # arrives afterward. Retain its acknowledgment and skip preview.
+            page.route('**/radio/tune', tune)
+            page.get_by_role('button', name='Tune streams', exact=True).click()
+            dialog = page.get_by_role('dialog', name='Tune streams')
+            dialog.get_by_role('slider', name='Discovery to Comfort').fill('10')
+            dialog.get_by_role('slider', name='Eclectic to Themed').fill('90')
+            with page.expect_response('**/radio/tune'):
+                dialog.get_by_role('button', name='Apply', exact=True).click()
+            page.wait_for_function('''() => {
+              const radio = Alpine.$data(document.querySelector('.radio-home'));
+              return !radio.tuningBusy && radio.tuningIntent === null;
+            }''')
+            page.route('**/radio/status', hold_status)
+        requests[0].fulfill(json=receipt)
+        page.wait_for_function('Alpine.$data(document.querySelector(".radio-home")).pendingSong?.accepted === true')
+        if confirmation == 'bridge':
+            assert page.evaluate('Alpine.$data(document.querySelector(".radio-home")).state.menu_id') == 'after-tuning'
+            assert page.evaluate('Alpine.$data(document.querySelector(".radio-home")).state.tuning') == {
+                'comfort': .1, 'theme': .9, 'energy': .5}
+            assert len(requests) == 1 and applies == [{'comfort': .1, 'theme': .9, 'energy': .5}]
+            assert not api.starts and not api.stops
+    finally:
+        if confirmation == 'bridge':
+            page.unroute('**/radio/status', hold_status)
+            for route in requests + held_status:
+                try:
+                    route.fulfill(json={'ok': True, **api.state})
+                except PlaywrightError:
+                    pass
+            page.unroute('**/radio/tune', tune)
     expect(status).to_be_visible()
     api.state = {**api.state, 'browser_age': 20, 'browser': {'player': {
         'playlist_ytm_id': 'PLRADIO', 'video_id': 'radio4', 'paused': False}}}
@@ -286,33 +328,78 @@ def test_stale_retry_is_bounded_and_never_changes_song_stream_or_session(page, r
     expect(page.locator('.is-skipping')).to_have_count(0)
 
 
-def test_latest_click_supersedes_a_stale_refresh_before_it_can_retry(page, radio_ui):
+@pytest.mark.parametrize('superseding', ['selection', 'tuning-before-stale', 'tuning-during-status'])
+def test_latest_click_supersedes_a_stale_refresh_before_it_can_retry(page, radio_ui, superseding):
     api = radio_ui
     show_session(page, api)
-    selections, refreshes = [], []
+    selections, refreshes, held_selections, applies = [], [], [], []
 
     def status(route):
         refreshes.append(route)
-        if len(refreshes) > 1:
+        if ((superseding == 'selection' and len(refreshes) > 1) or
+                (superseding == 'tuning-before-stale' and len(refreshes) == 1)):
             route.fulfill(json=api.state)
 
     def select(route):
         selections.append(route.request.post_data_json)
+        if superseding == 'tuning-before-stale' and len(selections) == 1:
+            held_selections.append(route)
+            return
         route.fulfill(json={'ok': False, 'stale': True} if len(selections) == 1 else {'ok': True, **api.state})
+
+    def tune(route):
+        applies.append(route.request.post_data_json)
+        api.state = {**api.state, 'menu_id': 'after-tuning', 'tuning': applies[-1]}
+        route.fulfill(json={'ok': True, **api.state})
 
     page.route('**/radio/status', status)
     page.route('**/radio/select', select)
-    with page.expect_request('**/radio/status'):
-        page.locator('.radio-direction[data-slot="1"] .radio-proposed-art').nth(2).click()
-    latest = page.locator('.radio-direction[data-slot="2"]')
-    latest.locator('.radio-proposed-art').nth(2).click()
-    with page.expect_response(lambda response: response.url.endswith('/radio/select')
-                             and response.request.post_data_json.get('video_id') == 'radio5'):
-        refreshes[0].fulfill(json=api.state)
-    assert [selection.get('video_id') for selection in selections] == ['radio4', 'radio5']
-    expect(latest.locator('.radio-song-pending')).to_contain_text('Night frequency 6')
-    expect(latest.locator('.is-skipping')).to_have_count(2)
-    expect(page.locator('.radio-selection-error:visible')).to_have_count(0)
+    page.route('**/radio/tune', tune)
+    try:
+        waiting_for = '**/radio/select' if superseding == 'tuning-before-stale' else '**/radio/status'
+        with page.expect_request(waiting_for):
+            page.locator('.radio-direction[data-slot="1"] .radio-proposed-art').nth(2).click()
+        if superseding == 'selection':
+            latest = page.locator('.radio-direction[data-slot="2"]')
+            latest.locator('.radio-proposed-art').nth(2).click()
+            with page.expect_response(lambda response: response.url.endswith('/radio/select')
+                                     and response.request.post_data_json.get('video_id') == 'radio5'):
+                refreshes[0].fulfill(json=api.state)
+            assert [selection.get('video_id') for selection in selections] == ['radio4', 'radio5']
+            expect(latest.locator('.radio-song-pending')).to_contain_text('Night frequency 6')
+            expect(latest.locator('.is-skipping')).to_have_count(2)
+            expect(page.locator('.radio-selection-error:visible')).to_have_count(0)
+        else:
+            old_state = api.state
+            page.get_by_role('button', name='Tune streams', exact=True).click()
+            dialog = page.get_by_role('dialog', name='Tune streams')
+            dialog.get_by_role('slider', name='Discovery to Comfort').fill('10')
+            with page.expect_response('**/radio/tune'):
+                dialog.get_by_role('button', name='Apply', exact=True).click()
+            page.wait_for_function('''() => {
+              const radio = Alpine.$data(document.querySelector('.radio-home'));
+              return !radio.tuningBusy && radio.tuningIntent === null;
+            }''')
+            if superseding == 'tuning-before-stale':
+                held_selections[0].fulfill(json={'ok': False, 'stale': True})
+            else:
+                refreshes[0].fulfill(json=old_state)
+            page.wait_for_function('!Alpine.$data(document.querySelector(".radio-home")).switchSending')
+            assert [selection.get('video_id') for selection in selections] == ['radio4']
+            assert page.evaluate('Alpine.$data(document.querySelector(".radio-home")).state.menu_id') == 'after-tuning'
+            assert page.evaluate('Alpine.$data(document.querySelector(".radio-home")).state.tuning') == applies[-1]
+            assert applies == [{'comfort': .1, 'theme': .5, 'energy': .5}]
+            assert not api.starts and not api.stops
+            expect(page.locator('.radio-song-pending:visible')).to_have_count(0)
+    finally:
+        page.unroute('**/radio/status', status)
+        page.unroute('**/radio/select', select)
+        page.unroute('**/radio/tune', tune)
+        for route in held_selections + refreshes:
+            try:
+                route.fulfill(json={'ok': True, **api.state})
+            except PlaywrightError:
+                pass
 
 
 @pytest.mark.parametrize('failure', ['network', 'server', 'stopped', 'direction'])
@@ -327,12 +414,15 @@ def test_pending_song_and_skip_feedback_clear_on_failure_or_session_change(page,
     if failure == 'network':
         requests[0].abort()
         expect(page.locator('.radio-selection-error:visible')).to_have_count(1)
+        expect(page.locator('.radio-selection-error:visible')).to_contain_text('Playback not confirmed')
+        intent = page.evaluate('Alpine.$data(document.querySelector(".radio-home")).selectionIntent')
+        assert intent['video_id'] == 'radio3' and intent['playlistId'] == 'PLRADIO'
         assert len(requests) == 1, 'An uncertain request must never be retried'
     else:
         requests[0].fulfill(json={'ok': True, **api.state})
         page.wait_for_function('Alpine.$data(document.querySelector(".radio-home")).pendingSong?.accepted === true')
         if failure == 'server':
-            api.state = {**api.state, 'selection_error': 'That song could not be added. Choose another song.'}
+            api.state = {**api.state, 'selection_error': 'socket timeout: internal-diagnostic-879'}
         elif failure == 'stopped':
             api.state = {'active': False}
         else:
@@ -343,9 +433,53 @@ def test_pending_song_and_skip_feedback_clear_on_failure_or_session_change(page,
     expect(page.locator('.is-pending')).to_have_count(0)
     expect(page.locator('.is-skipping')).to_have_count(0)
     expect(page.locator('.radio-song-pending:visible')).to_have_count(0)
+    expect(page.locator('body')).not_to_contain_text('internal-diagnostic-879')
 
 
-def test_song_play_requires_loaded_server_support_and_recovers_after_restart(page, radio_ui):
+@pytest.mark.parametrize('failure', ['http', 'rejected', 'invalid-body', 'stalled'])
+def test_unconfirmed_selection_reconciles_without_diagnostics_or_replay(page, radio_ui, failure):
+    api = radio_ui
+    show_session(page, api)
+    requests = []
+    page.evaluate('window.selectionDocument = document')
+
+    def select(route):
+        requests.append(route)
+        if failure == 'http':
+            route.fulfill(status=503, body='database timeout: internal-diagnostic-879')
+        elif failure == 'rejected':
+            route.fulfill(json={'ok': False, 'reason': 'socket failure: internal-diagnostic-879'})
+        elif failure == 'invalid-body':
+            route.fulfill(content_type='application/json', body='internal-diagnostic-879')
+        # The stalled response is deliberately left pending until the request
+        # deadline releases the control. A later response cannot confirm it.
+
+    page.route('**/radio/select', select)
+    page.locator('.radio-direction[data-slot="1"] .radio-proposed-art').nth(2).click()
+    message = page.locator('.radio-direction[data-slot="1"] .radio-selection-error')
+    expect(message).to_contain_text('Playback not confirmed', timeout=11000)
+    page.wait_for_function('!Alpine.$data(document.querySelector(".radio-home")).switchSending')
+    expect(page.locator('.is-pending, .is-skipping')).to_have_count(0)
+    expect(page.locator('body')).not_to_contain_text('internal-diagnostic-879')
+    assert page.evaluate('document === window.selectionDocument')
+    saved = page.evaluate('JSON.parse(sessionStorage.getItem("radio-selection"))')
+    assert saved['playlistId'] == 'PLRADIO' and saved['video_id'] == 'radio4' and saved['slot'] == 1
+    assert len(requests) == 1
+    if failure == 'stalled':
+        requests[0].fulfill(json={'ok': True, **api.state})
+
+    page.reload()
+    expect(message).to_contain_text('Playback not confirmed')
+    assert len(requests) == 1, 'Reload must only reconcile, never repeat an uncertain selection'
+    api.state = {**api.state, 'browser_age': 0, 'browser': {'player': {
+        'playlist_ytm_id': 'PLRADIO', 'video_id': 'radio4', 'paused': False}}}
+    page.evaluate('Alpine.$data(document.querySelector(".radio-home")).refresh()')
+    expect(page.locator('.radio-selection-error:visible')).to_have_count(0)
+    assert page.evaluate('sessionStorage.getItem("radio-selection")') is None
+    assert len(requests) == 1
+
+
+def test_song_play_requires_confirmed_support_without_restart_instructions(page, radio_ui):
     api = radio_ui
     api.ready.pop('can_play_songs')
     show_session(page, api)
@@ -360,7 +494,8 @@ def test_song_play_requires_loaded_server_support_and_recovers_after_restart(pag
     page.route('**/radio/select', legacy_select)
     button = page.locator('.radio-direction[data-slot="1"] .radio-proposed-art').nth(1)
     button.click()
-    expect(page.locator('.radio-selection-error:visible')).to_contain_text('Restart TuneConsole')
+    expect(page.locator('.radio-selection-error:visible')).to_contain_text('You can still choose a stream')
+    expect(page.locator('body')).not_to_contain_text('Restart TuneConsole')
     assert selections == []
     expect(page.locator('.radio-direction[data-slot="1"] .radio-direction-heading')).to_have_attribute(
         'aria-pressed', 'false')

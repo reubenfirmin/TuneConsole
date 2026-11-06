@@ -1,4 +1,6 @@
 """Track details retain exact-upload collection facts and honest listening precision."""
+from contextlib import closing
+from tests.enrichment_support import seed_audio
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -51,7 +53,7 @@ def test_musical_evidence_distinguishes_legacy_hints_corrections_and_unknowns(so
     store = songs['store']
     tid = store.tracks.track_ids_for_videos(['owned-song'])['owned-song']
     store.tracks.set_track_genre(tid, 'Ambient')
-    store.tracks.set_track_audio(tid, danceability=.8)
+    seed_audio(store, tid, danceability=.8)
     with store.conn:
         catalog.choose_field(store.conn, tid, 'energy', .9)
         catalog.choose_field(store.conn, tid, 'mood_happy', None)
@@ -97,7 +99,9 @@ def test_vibe_estimates_explain_audio_inheritance_and_unknowns_without_inference
     with store.conn:
         store.conn.execute('UPDATE rec_musical_profiles SET payload=? WHERE identity_key=?',
                            (json.dumps(profile), key))
-        store.vibe_predictions.publish(tracks, resolved, [], 1000)
+    with store.read_snapshot() as snapshot:
+        with closing(snapshot.store.vibe_predictions.prepare_publication(tracks, resolved, [], 1000)) as plan:
+            assert snapshot.publish(lambda: store.vibe_predictions.publish_prepared(plan))
     monkeypatch.setattr(musical_profiles, 'resolve', lambda *a, **kw: pytest.fail('Serving must not infer'))
     before = store.conn.total_changes
     body = songs['http'].get('/track/owned-song').text

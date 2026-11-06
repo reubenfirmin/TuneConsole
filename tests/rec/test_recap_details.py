@@ -38,7 +38,7 @@ def familiar_months(data, months=("2026-04", "2026-05", "2026-06", "2026-09"), *
 
 
 def findings(beats, kind):
-    return next((b["findings"] for b in beats if b["kind"] == kind), [])
+    return [finding for beat in beats if beat['kind'] == kind for finding in beat['findings']]
 
 
 def test_every_screen_is_independently_optional(data):
@@ -48,12 +48,14 @@ def test_every_screen_is_independently_optional(data):
     assert screens(data, "2026-09") == []
 
 
-def test_new_artists_require_four_actual_plays_and_prior_history(data):
-    add_plays(data, "2026-09", days=1, per_day=3)
+def test_new_artists_require_repeated_listening_across_days_and_prior_history(data):
+    add_plays(data, "2026-09", days=1, per_day=4)
     assert new_this_month(data, "2026-09") is None
-    add_plays(data, "2026-09", days=1, per_day=1)
+    add_plays(data, "2026-09", days=1, per_day=8)
+    assert new_this_month(data, "2026-09") is None
+    add_plays(data, "2026-09", days=2, per_day=2, offset=1)
     beat = new_this_month(data, "2026-09")
-    assert beat["groups"][0]["entries"][0]["detail"] == "4 plays"
+    assert beat["groups"][0]["entries"][0]["detail"] == "16 plays over 3 days"
     data["familiar_artists"].add("regular")
     assert new_this_month(data, "2026-09") is None
 
@@ -249,10 +251,13 @@ def test_repo_excludes_generated_plays_and_requires_real_playlist_dates(store):
     material = RecapRepo(store).snapshot(since, until)
     assert [p["identity_key"] for p in material["plays"]] == ["real"]
     assert [p["provider_playlist_id"] for p in material["playlists"]] == ["real"]
+    assert build(store, "2026-09") == []  # one play is not a recap highlight
+    for day in range(3):
+        for play in range(3):
+            _exact(store, 1, 'real', since + day * 86400 + play * 300 + 100, 'real')
     beat = build(store, "2026-09")[0]
-    assert beat["groups"] == [{"label": "Playlists", "total": 1, "entries": [
-        {"title": "real", "detail": "0 songs · 1 play",
-         "href": "https://music.youtube.com/playlist?list=real"}]}]
+    assert beat['entry'] == {'title': 'real', 'detail': '0 songs · 10 plays over 3 days'}
+    assert 'groups' not in beat
 
 
 def test_new_playlist_counts_do_not_multiply_copies_or_attribute_song_matches(store):
@@ -261,23 +266,27 @@ def test_new_playlist_counts_do_not_multiply_copies_or_attribute_song_matches(st
         iid = store.accounts.upsert_account(label, "cred", None, label == "main")
         store.playlists.upsert_playlist(iid, "real", "New mix", 4, "h", since, created_at=since)
     # The same song can be played from another playlist or with no known playlist.
-    # Only the two events attributed to this list during the recap month count.
+    # Only directly attributed events during the recap month count.
     for account,timestamp,playlist in [(1,since-1,'real'),(1,since+1,'real'),(2,since+2,'real'),
                                        (1,since+3,'another'),(1,since+4,None),(1,until,'real')]:
         _exact(store,account,'song',timestamp,playlist)
-    beat = build(store, "2026-09")[0]
-    playlists = next(g for g in beat["groups"] if g["label"] == "Playlists")
+    assert build(store, '2026-09') == []
+    for day in range(3):
+        for play in range(2):
+            _exact(store, 1, 'song', since + day * 86400 + play * 300 + 100, 'real')
+    material = RecapRepo(store).snapshot(since, until)
+    beat = new_this_month(material, '2026-09')
+    playlists = next(g for g in beat['groups'] if g['label'] == 'Playlists')
     assert playlists["total"] == 1
-    assert playlists["entries"][0]["detail"] == "4 songs · 2 plays"
+    assert playlists["entries"][0]["detail"] == "4 songs · 8 plays over 3 days"
 
 
-@pytest.mark.parametrize("songs,expected", [(1, "1 song · 0 plays"), (None, "0 plays")])
-def test_new_playlist_distinguishes_unknown_size_from_no_recorded_plays(data, songs, expected):
+@pytest.mark.parametrize('songs', [1, None])
+def test_unused_new_playlists_are_not_highlights_even_when_size_is_unknown(data, songs):
     since, _ = month_bounds("2026-09")
     data["playlists"] = [{"title": "New mix", "provider_playlist_id": "real",
                           "created_at": since, "track_count": songs}]
-    beat = new_this_month(data, "2026-09")
-    assert beat["groups"][0]["entries"][0]["detail"] == expected
+    assert new_this_month(data, "2026-09") is None
 
 
 def test_repo_preserves_true_counts_with_video_variants_and_coarse_familiarity(store):

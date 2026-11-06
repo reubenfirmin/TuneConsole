@@ -6,7 +6,6 @@ import random
 from yt_playlist.core.activity import check_stopping
 from yt_playlist.rec import group_learning, group_serving, home_themes, home_vibe, mode_surfaces, rec_params
 from yt_playlist.rec.eligibility import home_exclusions
-from yt_playlist.util import genre_map
 
 
 def inputs(store, now, preparation=None):
@@ -53,8 +52,8 @@ def _inputs(store, now, preparation):
         weights = store.rec_model.get_weights(now=now)
         maximum = 60 * rec_params.get_param(store, 'max_track_minutes')
         ranked_genres = {t['key']: t.get('genre') or '' for pool in pools.values() for t in pool}
-        genre_axes = {genre: (genre_map.family(genre,conn=store.conn), genre_map.subgenre(genre,conn=store.conn))
-                      for genre in set(genres.values()) | set(ranked_genres.values())}
+        genre_axes = {'': ('', None), None: ('', None),
+                      **store.genres.feature_axes(set(genres.values()) | set(ranked_genres.values()))}
         current = {}
         for key, track in owned.items():
             genre = genres.get(key) or ranked_genres.get(key) or ''

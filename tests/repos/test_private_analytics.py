@@ -6,16 +6,14 @@ import threading
 import pytest
 from fastapi.testclient import TestClient
 
-from yt_playlist.core.store import Store
 from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
 from yt_playlist.web.routes import charts as chart_routes
 
 
 @pytest.fixture
-def library(tmp_path):
-    store = Store(tmp_path / 'library.db')
-    store.init_schema()
+def library(file_backed_store):
+    store = file_backed_store
     account = store.accounts.upsert_account('main', 'cred', None, True)
     entry = store.tracks.upsert_track('video', 'Song', 'Artist', 'Album', 180,
                                      album_browse_id='B', thumbnail='/cover.png')
@@ -23,8 +21,7 @@ def library(tmp_path):
     store.playlists.set_playlist_tracks(playlist, [entry])
     store.collection.add_saved_album({'browse': 'B', 'title': 'Album', 'artist': 'Artist'})
     store.history.record_play_event(account, identity_key('Song', 'Artist'), 'video', 100)
-    yield store, account, playlist
-    store.conn.close()
+    return store, account, playlist
 
 
 OPERATIONS = [
@@ -37,18 +34,17 @@ OPERATIONS = [
     ('charts', 'playlist_tracks_detail', ('playlist',)),
     ('charts', 'album_tracks_detail', ('B',)),
     ('charts', 'artist_songs', ('Artist',)),
+    ('charts', 'story_tracks', ()),
     ('collection', 'taste_album_contexts', ()),
     ('collection', 'saved_albums_recency', ()),
     ('collection', 'collection_albums', ()),
     ('collection', 'collection_artists', ()),
     ('collection', 'artist_albums', ('Artist',)),
-    ('trends', 'repetition_series', (5,)),
+    ('rec_evidence', 'generated_only_keys_between', (0, 200000)),
     ('trends', 'ledger_day_counts', ()),
     ('trends', 'ledger_track_plays', (0, 200)),
     ('trends', 'ledger_artist_plays', (0, 200)),
     ('trends', 'play_hours', (0, 200)),
-    ('trends', 'history_track_first', ()),
-    ('trends', 'play_event_track_first', ()),
 ]
 
 
@@ -76,14 +72,15 @@ def test_slow_analytics_do_not_block_foreground_writes(library, monkeypatch, rep
 
     monkeypatch.setattr(store, '_make_reader', make_reader)
     values = tuple(playlist if value == 'playlist' else value for value in args)
+    kwargs = {'since': 0, 'artist': 'Artist'} if method == 'story_tracks' else {}
     with ThreadPoolExecutor(2) as workers:
-        pending = workers.submit(getattr(getattr(store, repo_name), method), *values)
+        pending = workers.submit(getattr(getattr(store, repo_name), method), *values, **kwargs)
         try:
             assert entered.wait(5), 'Analytics never used a private reader'
             workers.submit(store.settings.set_setting, 'foreground', 'saved').result(2)
         finally:
             release.set()
-        assert isinstance(pending.result(5), (dict, list, tuple))
+        assert isinstance(pending.result(5), (dict, list, tuple, set))
     assert not timed_out
     assert len(connections) == 1
     with pytest.raises(sqlite3.ProgrammingError, match='closed'):

@@ -1,7 +1,7 @@
 function artistStart(initial) {
   return {
     selected: initial.selected, minimum: initial.minimum, query: '', results: [], related: [],
-    stage: 'artists', saving: false, searching: false, error: '', searchNote: '',
+    stage: 'artists', saving: false, searching: false, error: '', searchNote: '', destroyed: false,
     relatedNote: '', relatedLoading: false,
     expanded: false, spotifySteps: false, searchVersion: 0, pendingPlaylist: null, relatedVersion: 0, resuming: false,
     get artistChoices() {
@@ -24,14 +24,21 @@ function artistStart(initial) {
       if (query.length < 2) { this.results = []; return; }
       this.searchController = new AbortController(); this.searching = true;
       try {
-        const response = await fetch('/home/onboard/artists/search?q=' + encodeURIComponent(query), {signal: this.searchController.signal});
+        const response = await fetch('/home/onboard/artists/search?q=' + encodeURIComponent(query),
+          {signal: AbortSignal.any([this.searchController.signal, AbortSignal.timeout(20000)])});
+        if (!response.ok) {
+          console.debug('[Artist setup] search response unavailable', response.status, await response.text());
+          throw new Error('Artist search failed');
+        }
         const body = await response.json();
         if (version !== this.searchVersion) return;
-        if (!response.ok) throw new Error(body.detail || 'Search is unavailable. Try again.');
+        if (!Array.isArray(body.artists)) throw new Error('Artist search response unavailable');
         this.results = body.artists;
         this.searchNote = this.results.length ? '' : 'No artists found. Try another name.';
       } catch (error) {
-        if (version === this.searchVersion && error.name !== 'AbortError') this.searchNote = error.message;
+        console.debug('[Artist setup] search unavailable', error);
+        if (version === this.searchVersion && !this.destroyed && error.name !== 'AbortError')
+          this.searchNote = 'Search is unavailable. Try again.';
       } finally { if (version === this.searchVersion) this.searching = false; }
     },
     async toggle(item) {
@@ -40,13 +47,18 @@ function artistStart(initial) {
       this.saving = true; this.error = '';
       try {
         const response = await fetch('/home/onboard/artists/select', {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
+          method: 'POST', signal: AbortSignal.timeout(20000), headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({browse_id: item.browse_id, selected: selecting})});
+        if (!response.ok) {
+          console.debug('[Artist setup] choice response unavailable', response.status, await response.text());
+          throw new Error('Artist choice failed');
+        }
         const body = await response.json();
-        if (!response.ok) throw new Error(body.detail || 'Could not save this choice. Try again.');
+        if (!Array.isArray(body.selected)) throw new Error('Artist choice response unavailable');
+        if (this.destroyed) return;
         this.selected = body.selected;
         if (selecting) {
-          this.related = body.related;
+          this.related = Array.isArray(body.related) ? body.related : [];
           this.suggestions();
           this.clearSearch();
         } else {
@@ -54,12 +66,20 @@ function artistStart(initial) {
           this.suggestions();
         }
       } catch (error) {
-        this.error = error.message;
+        console.debug('[Artist setup] choice not confirmed', error);
+        if (this.destroyed) return;
+        this.error = 'Choice not confirmed. Your selected artists are kept here.';
         // A catalog failure after saving must not erase the durable artist draft.
         try {
-          const response = await fetch('/home/onboard/artists/state');
-          if (response.ok) this.selected = (await response.json()).selected;
-        } catch (_) {}
+          const response = await fetch('/home/onboard/artists/state', {signal: AbortSignal.timeout(20000)});
+          if (response.ok) {
+            const state = await response.json();
+            if (!this.destroyed && Array.isArray(state.selected)) {
+              this.selected = state.selected;
+              if (this.isSelected(item) === selecting) this.error = 'Choice saved.';
+            }
+          }
+        } catch (error) { console.debug('[Artist setup] choice check unavailable', error); }
       } finally { this.saving = false; }
     },
     async suggestions() {
@@ -123,6 +143,7 @@ function artistStart(initial) {
       document.addEventListener('htmx:beforeSwap', this.beforeSwap);
     },
     destroy() {
+      this.destroyed = true;
       this.searchVersion++; this.relatedVersion++;
       this.searchController?.abort();
       document.removeEventListener('htmx:beforeSwap', this.beforeSwap);

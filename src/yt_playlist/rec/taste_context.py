@@ -14,20 +14,12 @@ class PlaylistTaste:
     def __bool__(self):
         return len(self.titles) > 0
 
-    def score(self, vec, top=3):
+    def context_contributions(self, vec):
+        """Signed, weighted context fits for explanations and the discovery eligibility gate."""
         if not self.titles:
-            return 0.0, []
+            return np.zeros(0)
         v = vec / (np.linalg.norm(vec) + 1e-9)
-        contributions = self.weights * (self.centroids @ v)
-        order = np.argsort(-contributions)[:top]
-        because = [(self.titles[i], float(contributions[i])) for i in order if contributions[i] > 0]
-        return float(contributions.sum()), because
-
-    def score_all(self, vectors):
-        if not self.titles or len(vectors) == 0:
-            return np.zeros(len(vectors))
-        normalized = vectors / (np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-9)
-        return self.weights @ (self.centroids @ normalized.T)
+        return self.weights * (self.centroids @ v)
 
     def allocated_scores(self, vectors):
         """Rank within each interest, then allocate slots by its serving weight.

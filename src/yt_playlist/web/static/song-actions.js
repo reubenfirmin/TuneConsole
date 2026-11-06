@@ -80,13 +80,30 @@ function applySongMetadata(videoId, metadata) {
 function songActions() {
   // Keep DOM nodes and the originating Alpine scope outside reactive data.
   let trigger = null, owner = null, request = 0, lookupStream = null, maintenanceObserver = null;
+  let lookupTimer;
+  const stopLookup = () => { clearTimeout(lookupTimer); lookupStream?.close(); lookupStream = null; };
   const metadataSaves = new Map();
+  const metadataEdits = new Map();
+  function markMetadataEdit(videoId, pending) {
+    for (const button of document.querySelectorAll('[data-song]')) {
+      if (JSON.parse(button.dataset.song).video_id !== videoId) continue;
+      let notice = button.querySelector('.song-edit-status');
+      if (!pending) { notice?.remove(); button.removeAttribute('aria-description'); continue; }
+      if (notice) continue;
+      notice = document.createElement('span');
+      notice.className = 'song-edit-status';
+      notice.setAttribute('role', 'status');
+      notice.textContent = 'Edit not confirmed';
+      button.setAttribute('aria-description', 'Metadata edit not confirmed. Open Edit Metadata to review.');
+      button.append(notice);
+    }
+  }
   return {
     song: {}, context: {}, mode: 'create', name: '', query: '', selected: '',
     playlists: [], multipleIdentities: false, loading: false, busy: false, error: '', result: null,
     artworkFailed: false, readOnly: document.documentElement.dataset.storageCompacting === 'true',
     metadata: { title: '', artist: '', genre: '', year: '' }, initialMetadata: {}, originals: {},
-    metadataLoaded: false, trackId: null, genreOptions: [], genres: [],
+    metadataLoaded: false, metadataPending: false, trackId: null, genreOptions: [], genres: [],
     lookupRunning: false, lookupStatus: '',
     reasons: [['vibe', 'Wrong vibe'], ['era', 'Wrong era'], ['mainstream', 'Too mainstream'],
               ['own_it', 'Already know it'], ['artist', 'Not this artist']],
@@ -107,6 +124,7 @@ function songActions() {
       trigger = detail.trigger;
       owner = Alpine.$data(trigger);
       this.song = detail.song;
+      this.metadataPending = metadataEdits.has(this.song.video_id);
       this.artworkFailed = false;
       this.context = detail.context;
       if (['create', 'add', 'metadata'].includes(detail.action)) {
@@ -176,9 +194,10 @@ function songActions() {
       if (reason === 'artist') values.axis = 'artist:' + this.song.artist;
       htmx.ajax('POST', '/recs/feedback', { values, target: trigger.closest('.tile'), swap: 'outerHTML' });
     },
-    destroy() { request++; lookupStream?.close(); maintenanceObserver?.disconnect(); },
+    destroy() { request++; stopLookup(); maintenanceObserver?.disconnect(); },
     async openDialog(mode) {
       if (document.documentElement.dataset.storageCompacting === 'true') return;
+      stopLookup();
       this.closeMenu();
       this.mode = mode;
       this.name = this.song.title;
@@ -197,6 +216,12 @@ function songActions() {
         // Reopening the same song waits for its pending write before reading defaults.
         if (mode === 'metadata') await metadataSaves.get(this.song.video_id);
         if (current !== request) return;
+        if (mode === 'metadata' && metadataEdits.has(this.song.video_id)) {
+          Object.assign(this, metadataEdits.get(this.song.video_id).fields, {
+            metadataLoaded: true, error: 'This edit was not confirmed. Review your changes before saving again.'
+          });
+          return;
+        }
         const data = await this.json('/songs/' + (mode === 'metadata' ? 'metadata' : 'playlists') +
           '?video_id=' + encodeURIComponent(this.song.video_id));
         if (current !== request) return;
@@ -227,33 +252,51 @@ function songActions() {
       if (this.lookupRunning || !this.trackId) return;
       const current = request;
       this.lookupRunning = true; this.lookupStatus = 'Looking up genres…';
+      const unavailable = () => {
+        stopLookup();
+        if (current === request) {
+          this.lookupRunning = false;
+          this.lookupStatus = 'Genre lookup did not finish. Your changes are kept.';
+        }
+      };
+      const watch = () => { clearTimeout(lookupTimer); lookupTimer = setTimeout(unavailable, 20000); };
       try {
         const job = await this.json(`/track/${this.trackId}/genre-lookup`, {});
         if (current !== request) return;
+        if (!Number.isSafeInteger(job.job_id)) throw new Error('Invalid genre lookup job');
         const stream = lookupStream = new EventSource(`/track/genre-lookup/events/${job.job_id}`);
+        watch();
         stream.onmessage = async message => {
           if (current !== request) { stream.close(); return; }
-          const event = JSON.parse(message.data);
-          if (event.text) this.lookupStatus = event.text;
+          let event;
+          try {
+            event = JSON.parse(message.data);
+            if (!event || typeof event !== 'object') throw new Error('Invalid genre lookup progress');
+          }
+          catch (error) { console.warn('Genre lookup progress could not be read', error); unavailable(); return; }
+          watch();
+          this.lookupStatus = genreLookupStatus(event);
           if (event.type !== 'end') return;
-          stream.close(); this.lookupRunning = false;
-          if (event.error) return;
+          stopLookup();
+          if (event.error) { this.lookupRunning = false; return; }
           try {
             const data = await this.json('/songs/metadata?video_id=' + encodeURIComponent(this.song.video_id));
             if (current === request) {
               this.genreOptions = data.genre_options;
               this.lookupStatus = data.genre_options.length ? 'Choose a suggestion or enter your own genre.' : 'No genre suggestions found.';
             }
-          } catch (error) { if (current === request) this.lookupStatus = error.message; }
+          } catch (error) {
+            console.warn('Genre suggestions could not be refreshed', error);
+            if (current === request) this.lookupStatus = 'Suggestions are not available yet. Your changes are kept.';
+          } finally { if (current === request) this.lookupRunning = false; }
         };
-        stream.onerror = () => {
-          stream.close();
-          if (current === request) {
-            this.lookupRunning = false; this.lookupStatus = 'Lookup progress is unavailable. Try again.';
-          }
-        };
+        stream.onerror = unavailable;
       } catch (error) {
-        if (current === request) { this.lookupRunning = false; this.lookupStatus = error.message; }
+        console.warn('Genre lookup start was not confirmed', error);
+        if (current === request) {
+          this.lookupRunning = false;
+          this.lookupStatus = 'Genre lookup was not confirmed. Your changes are kept.';
+        }
       }
     },
     focusDialog(ref) {
@@ -275,7 +318,7 @@ function songActions() {
     closeDialog() {
       if (this.busy) return;
       request++;
-      lookupStream?.close();
+      stopLookup();
       this.$refs.dialog.close();
       trigger?.focus();
       if (this.result && (this.context.refresh_on_save || this.result.url === location.pathname)) location.replace(location.href);
@@ -302,27 +345,35 @@ function songActions() {
       return this.playlists.filter(p => (p.title + ' ' + p.identity).toLocaleLowerCase().includes(query));
     },
     async json(url, body) {
-      const response = await fetch(url, body === undefined ? {} : {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Couldn’t save this song. Please try again.');
-      return data;
-    },
-    restoreMetadata(edit, message) {
-      if (this.$refs.dialog.open) return false;
-      this.closeMenu();
-      request++;
-      trigger = edit.trigger; owner = edit.owner;
-      Object.assign(this, edit.fields, { mode: 'metadata', busy: false, loading: false,
-        metadataLoaded: true, result: null, error: message, lookupRunning: false, lookupStatus: '' });
-      this.$refs.dialog.showModal();
-      this.focusDialog('metadataTitle');
-      return true;
+      let validation;
+      const messages = {
+        playlist_missing: 'Playlist no longer exists',
+        main_account_required: 'Choose a main account in Setup before continuing.',
+        account_disconnected: 'The required account is not connected',
+        song_playlist_name_required: 'Choose a song and give the playlist a name.',
+        playlist_regular_required: 'Choose a regular playlist.',
+        playlist_account_disconnected: "That playlist's account isn't connected.",
+        song_add_rejected: "YouTube couldn't add this song. Please try another song or playlist."
+      };
+      try {
+        const response = await fetch(url, body === undefined ? { signal: AbortSignal.timeout(20000) } : {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+          signal: AbortSignal.timeout(20000)
+        });
+        const data = await response.json();
+        if (response.ok) return data;
+        if ([400, 422].includes(response.status) && Object.hasOwn(messages, data?.code)) validation = messages[data.code];
+        throw new Error('Song request returned ' + response.status);
+      } catch (error) {
+        console.debug('[Song actions] Request unavailable', url, error);
+        throw new Error(validation || (body === undefined
+          ? 'Song details are unavailable. Try opening this control again.'
+          : 'This change was not confirmed. Review it before trying again.'));
+      }
     },
     saveMetadata() {
       if (!this.metadataLoaded) return;
-      const edit = { trigger, owner, fields: {
+      const edit = { fields: {
         song: { ...this.song }, context: { ...this.context }, metadata: { ...this.metadata },
         initialMetadata: { ...this.initialMetadata }, originals: { ...this.originals },
         trackId: this.trackId, genreOptions: [...this.genreOptions], genres: [...this.genres]
@@ -331,27 +382,21 @@ function songActions() {
         .filter(([field, value]) => value !== edit.fields.initialMetadata[field]));
       const videoId = edit.fields.song.video_id;
       this.closeDialog();
-      const current = request;
       const save = async () => {
         try {
           await this.json('/songs/metadata', { song: edit.fields.song, ...changes });
           const data = await this.json('/songs/metadata?video_id=' + encodeURIComponent(videoId));
           if (data.metadata) applySongMetadata(videoId, data.metadata);
+          metadataEdits.delete(videoId);
+          if (this.song.video_id === videoId) this.metadataPending = false;
+          markMetadataEdit(videoId, false);
         } catch (error) {
-          const message = error.message || 'Couldn’t save this song. Please try again.';
-          if (current === request && this.restoreMetadata(edit, message)) return;
-          // A later dialog owns the shared form. Keep this failed edit separately for retry.
-          const toast = document.createElement('div');
-          toast.className = 'toast toast-err';
-          toast.setAttribute('role', 'alert');
-          const text = document.createElement('span');
-          text.className = 'toast-body';
-          text.textContent = edit.fields.song.title + ': ' + message;
-          const retry = document.createElement('button');
-          retry.type = 'button'; retry.className = 'btn-ghost'; retry.textContent = 'Retry edit';
-          retry.onclick = () => { if (this.restoreMetadata(edit, message)) toast.remove(); };
-          toast.append(text, retry);
-          document.getElementById('toasts').prepend(toast);
+          // Keep this song's edits without taking over another song's form.
+          // Its existing Edit Metadata control restores the draft on demand.
+          console.debug('[Song actions] Metadata save unconfirmed', videoId, error);
+          metadataEdits.set(videoId, edit);
+          if (this.song.video_id === videoId) this.metadataPending = true;
+          markMetadataEdit(videoId, true);
         } finally {
           metadataSaves.delete(videoId);
         }
@@ -383,6 +428,6 @@ function toggleTrackLike(source, videoId, liked) {
   if (window.dispatchEvent(request)) {
     htmx.ajax('POST', '/track/like', {
       source, values: { video_id: videoId, on: liked ? '1' : '' }, swap: 'none',
-    }).catch(() => {}); // the completion event rolls back the heart; the response carries the toast
+    }).catch(() => {}); // the completion event rolls back the heart after an unconfirmed request
   }
 }

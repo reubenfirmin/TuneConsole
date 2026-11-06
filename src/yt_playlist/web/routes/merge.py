@@ -4,7 +4,9 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
+from yt_playlist.core.action_errors import ActionInputError
 from yt_playlist.library.merge_order import track_positions
+from yt_playlist.library.playlist_mutation import PlaylistWriteUnconfirmed
 from yt_playlist.rec.actions import refresh_cleanup
 
 
@@ -12,9 +14,9 @@ def build(ctx) -> APIRouter:
     router = APIRouter()
     store, now_fn, templates, logger = ctx.store, ctx.now_fn, ctx.templates, ctx.logger
 
-    def _toast(request, message):
+    def _outcome(request, control, error):
         return templates.TemplateResponse(
-            request, "_partials/error_toast.html", {"message": message},
+            request, "_partials/action_outcome.html", {"control": control, "message": str(error)},
             status_code=422, headers={"HX-Reswap": "none"})
 
     def _refresh():
@@ -169,24 +171,27 @@ def build(ctx) -> APIRouter:
     def merge_apply(request: Request):
         # Apply the N-way editor: set the kept playlist(s) to the draft's included tracks, in order.
         ids = _ids(request.query_params.get("ids", ""))
-        mt = _members_tracks(ids)
-        if mt is None:
-            return _toast(request, "Merge no longer available.")
-        members, tracks = mt
-        draft = _draft(ids, members)
-        draft_params = json.loads(draft.params_json)
-        draft_params["excluded"] = set(draft_params["excluded"])
-        vids = [t["video_id"] for t in _ordered(tracks, draft_params)
-                if t["tid"] not in draft_params["excluded"] and t["video_id"]]
-        member_ids = [m["id"] for m in members]   # the existing playlists only (not stale ?ids entries)
         try:
+            mt = _members_tracks(ids)
+            if mt is None:
+                raise ActionInputError('merge_unavailable')
+            members, tracks = mt
+            draft = _draft(ids, members)
+            draft_params = json.loads(draft.params_json)
+            draft_params["excluded"] = set(draft_params["excluded"])
+            vids = [t["video_id"] for t in _ordered(tracks, draft_params)
+                    if t["tid"] not in draft_params["excluded"] and t["video_id"]]
+            member_ids = [m["id"] for m in members]   # existing playlists only (not stale ?ids entries)
             s = ctx.ops().apply_merge(member_ids, vids, draft_params["keep"],
                                       reviewed_draft=(draft.id,draft.revision))
-        except ValueError as e:
-            return _toast(request, str(e))
+        except PlaylistWriteUnconfirmed:
+            logger.exception("merge/apply unconfirmed")
+            return Response(status_code=503, headers={"HX-Reswap": "none"})
+        except ActionInputError as exc:
+            return _outcome(request, 'merge-outcome', exc)
         except Exception:  # noqa: BLE001
             logger.exception("merge/apply failed")
-            return _toast(request, "YouTube returned an unexpected response.")
+            return Response(status_code=503, headers={"HX-Reswap": "none"})
         store.actions.delete_action(draft.id)
         parts = []
         if s["added"]:
@@ -211,11 +216,11 @@ def build(ctx) -> APIRouter:
         # execute_planned makes rapid-fire deletes safe (refuses if the kept copy lacks a track).
         try:
             title = ctx.ops().delete_dupe(source, target)
-        except ValueError as e:
-            return JSONResponse({"ok": False, "error": str(e)})
+        except ActionInputError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=422)
         except Exception:  # noqa: BLE001
             logger.exception("inline dupe delete failed")
-            return JSONResponse({"ok": False, "error": "YouTube returned an unexpected response."})
+            return JSONResponse({"ok": False}, status_code=503)
         # no page reload on this path, so keep the home card's cached pending-cleanup icons honest
         refresh_cleanup(store, now_fn())
         return JSONResponse({"ok": True, "deleted": title})
@@ -226,21 +231,27 @@ def build(ctx) -> APIRouter:
         # track set, each remote-verified against the keeper. One click resolves the whole group.
         try:
             _deleted, errors = ctx.ops().keep_one(keep)
-        except ValueError as e:
-            return _toast(request, str(e))
+        except ActionInputError as exc:
+            return _outcome(request, f'keep-outcome-{keep}', exc)
+        except Exception:  # noqa: BLE001
+            logger.exception("keep-one %s failed", keep)
+            return Response(status_code=503, headers={"HX-Reswap": "none"})
         if errors:
-            return _toast(request, "Couldn’t delete some copies: " + " · ".join(errors))
+            logger.warning("keep-one %s incomplete: %s", keep, errors)
+            if all(isinstance(error, ActionInputError) for error in errors):
+                return _outcome(request, f'keep-outcome-{keep}', errors[0])
+            return Response(status_code=503, headers={"HX-Reswap": "none"})
         return _refresh()
 
     @router.post("/playlist/delete-empty")
     def delete_empty(request: Request, playlist: int = Form(...)):
         try:
             ctx.ops().delete_empty(playlist)
-        except ValueError as e:
-            return _toast(request, str(e))
+        except ActionInputError as exc:
+            return _outcome(request, f'empty-outcome-{playlist}', exc)
         except Exception:  # noqa: BLE001
             logger.exception("delete-empty failed")
-            return _toast(request, "YouTube returned an unexpected response.")
+            return Response(status_code=503, headers={"HX-Reswap": "none"})
         # no page reload on this path, so keep the home card's cached pending-cleanup icons honest
         refresh_cleanup(store, now_fn())
         return HTMLResponse("")   # htmx fades + removes the row
@@ -249,8 +260,11 @@ def build(ctx) -> APIRouter:
     def forget_empty(request: Request, playlist: int = Form(...)):
         try:
             ctx.ops().forget_empty(playlist)
-        except ValueError as exc:
-            return _toast(request, str(exc))
+        except ActionInputError as exc:
+            return _outcome(request, f'empty-outcome-{playlist}', exc)
+        except Exception:  # noqa: BLE001
+            logger.exception("forget-empty failed")
+            return Response(status_code=503, headers={"HX-Reswap": "none"})
         refresh_cleanup(store, now_fn())
         return HTMLResponse("")
 

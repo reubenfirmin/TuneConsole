@@ -6,6 +6,7 @@ Optional TUNECONSOLE_GROUP_READONLY_DB freezes only prepared library/profile inp
 from mode=ro/query_only SQLite. TUNECONSOLE_GROUP_SNAPSHOT replays that JSON file;
 TUNECONSOLE_GROUP_REPORT selects the local output JSON. No migrations or provider calls.
 """
+import hashlib
 import json
 import time
 import pytest
@@ -55,7 +56,12 @@ def test_production_preparation_and_update_budgets_retain_lineage(tmp_path, stor
         assert published, 'The default worker must publish this admitted frozen library within its budgets'
         # Dynamic updates also need to fit after the first large generation;
         # identity/lineage reconciliation must not turn subsequent passes into permanent deferrals.
-        worker.request_rebuild()
+        key, payload, _profile = next(row for row in frozen['rows'] if row[1].get('library') is not None)
+        library = payload['library']
+        payload = {**payload, 'library': {**library, 'year': '2001' if library.get('year') != '2001' else '2002'}}
+        digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        with store.conn:
+            prepared_inputs.upsert(store.conn, key, payload, digest, 2_000_000_059, len(frozen['rows']) + 1)
         started = time.monotonic()
         updated = worker.step(2_000_000_060)
         current = store.taste_groups.head()

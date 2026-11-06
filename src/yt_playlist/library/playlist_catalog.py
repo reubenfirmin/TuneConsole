@@ -32,12 +32,13 @@ def search_versions(client, title, artist, exclude=None, limit=14):
     """Search unfiltered results first, then backfill missing durations from songs and videos."""
     base_title = _strip_parens(title) or title
     query = " ".join(part for part in (base_title, artist) if part).strip()
-    out, by_video = [], {}
+    out, by_video, failure = [], {}, None
     for kind in (None, "songs", "videos"):
         try:
             results = with_retry(lambda filter=kind: client.search(query, filter=filter)) or []
-        except Exception:
-            logger.warning("alternate-version search (%s) failed for %r", kind, query)
+        except Exception as exc:
+            logger.warning("alternate-version search (%s) failed for %r", kind, query, exc_info=True)
+            failure = exc
             results = []
         for result in results:
             video = result.get("videoId")
@@ -66,4 +67,7 @@ def search_versions(client, title, artist, exclude=None, limit=14):
             out.append(candidate)
         if len(out) >= limit and all(candidate["duration"] is not None for candidate in out):
             break
+    if failure is not None and not out:
+        # A failed read does not establish that no other versions exist.
+        raise failure
     return out

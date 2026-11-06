@@ -8,6 +8,7 @@ from datetime import date
 import hashlib
 import json
 import math
+from pathlib import Path
 
 from . import recommendation_outputs as files
 from .activity import check_cancellable_work
@@ -149,7 +150,7 @@ def publish(conn, publication):
     return identity
 
 
-def encoded(conn, surface):
+def _file(conn, surface):
     if surface in SURFACES:
         row = conn.execute('SELECT f.filename,f.content_digest,f.byte_size FROM listening_output_heads h '
             'JOIN listening_output_files f ON f.publication_id=h.publication_id '
@@ -158,13 +159,24 @@ def encoded(conn, surface):
     elif surface.startswith('listening_chunk:'):
         key = surface.removeprefix('listening_chunk:')
         if not _key(key):
-            return None
+            return None, surface, key
         row = conn.execute('SELECT f.filename,f.content_digest,f.byte_size FROM listening_output_heads h '
             'JOIN listening_output_files f ON f.publication_id=h.publication_id '
             "WHERE f.surface='listening_chunk' AND f.chunk_key=? ORDER BY h.slot LIMIT 1", (key,)).fetchone()
         surface = 'listening_chunk'
     else:
         raise ValueError('Unknown listening output surface')
+    return row, surface, key
+
+
+def present(conn, surface):
+    """Check the selected file descriptor without reading a display document."""
+    row = _file(conn, surface)[0]
+    return row is not None and Path(row[0]).is_file()
+
+
+def encoded(conn, surface):
+    row, surface, key = _file(conn, surface)
     if row is None:
         return None
     try:

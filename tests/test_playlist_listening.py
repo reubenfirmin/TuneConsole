@@ -187,7 +187,8 @@ def test_playlist_page_exposes_creation_separately_from_actual_partial_listening
                     base_url='http://127.0.0.1') as web:
         def row():
             markup = web.get('/playlists').text
-            rows = json.loads(re.search(r'playlistsTab\((\[.*?\])\)', markup)[1])
+            from tests.template_support import playlist_rows
+            rows = playlist_rows(markup)
             return next(row for row in rows if row['id'] == playlist)
 
         initial = row()

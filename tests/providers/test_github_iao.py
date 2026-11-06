@@ -205,10 +205,9 @@ def test_foreground_database_work_proceeds_while_update_check_waits_for_http(bou
         update.result(5)
 
 
-def test_reopened_database_keeps_cooldown_and_scoped_success_preserves_newer_wait(boundary, tmp_path):
-    path = tmp_path / 'github.db'
-    db = Store(path)
-    db.init_schema()
+def test_reopened_database_keeps_cooldown_and_scoped_success_preserves_newer_wait(boundary, file_backed_store):
+    db = file_backed_store
+    path = db._db_path
     try:
         db.enrichment_state.defer_integration('github', now=1000, retry_after=1100, error='old')
     finally:

@@ -23,10 +23,10 @@ def test_workflow_candidate_command_installs_an_unsigned_bundle(tmp_path):
         (Path(__file__).parents[1] / ".github/workflows/flatpak.yml").read_text(),
         Loader=yaml.BaseLoader,
     )
-    script = next(step["run"] for step in definition["jobs"]["build"]["steps"]
-                  if step.get("name") == "Build candidate and check packaged startup and bridge")
-    unsigned = script.rsplit("\nelse\n", 1)[1]
-    install = next(shlex.split(line.strip()) for line in unsigned.splitlines()
+    smoke = next(step for step in definition["jobs"]["build"]["steps"]
+                 if step.get("name") == "Check packaged startup and bridge")
+    assert smoke["if"] == "github.event_name == 'pull_request'"
+    install = next(shlex.split(line.strip()) for line in smoke["run"].splitlines()
                    if line.strip().startswith("flatpak install "))
     isolated = {**os.environ, "XDG_DATA_HOME": str(tmp_path / "data"),
                 "XDG_CONFIG_HOME": str(tmp_path / "config"), "XDG_CACHE_HOME": str(tmp_path / "cache"),

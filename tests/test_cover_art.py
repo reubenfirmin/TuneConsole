@@ -6,6 +6,7 @@ the same as "has a cover". These tests pin the distinction, the fill-only rule (
 is never overwritten by a provider's guess), and the Deezer-before-CoverArtArchive priority.
 """
 from yt_playlist.providers import deezer, waterfall
+from tests.enrichment_support import seed_audio, seed_enrichment
 from yt_playlist.providers.base import EnrichmentResult
 from yt_playlist.util.thumbnails import is_placeholder_art
 
@@ -89,10 +90,6 @@ class _FakeProvider:
 
     def tripped(self):
         return False
-
-    def reset(self):
-        pass
-
 
 def _run(store, track_id, providers, monkeypatch, caa=None):
     """Run the waterfall over one track with fake providers, stubbing Cover Art Archive."""
@@ -199,14 +196,14 @@ def test_waterfall_pending_includes_a_fully_enriched_track_with_placeholder_art(
     pending predicate the waterfall would never revisit it, so the cover could never arrive."""
     tid = store.tracks.upsert_track("v1", "T", "A", "Alb", 100, album_browse_id="MPREb_x",
                              thumbnail=_YT_TRACK_PH)
-    store.tracks.set_track_enrichment(tid, "Trance", "2000")
-    store.tracks.set_track_audio(tid, bpm=138.0, energy=0.8, danceability=0.7)
+    seed_enrichment(store, tid, "Trance", "2000")
+    seed_audio(store, tid, bpm=138.0, energy=0.8, danceability=0.7)
     pending = store.tracks.album_tracks_for_waterfall("MPREb_x")
     assert [p["id"] for p in pending] == [tid]
 
 
 def test_waterfall_pending_skips_a_fully_enriched_track_with_real_art(store):
     tid = store.tracks.upsert_track("v1", "T", "A", "Alb", 100, album_browse_id="MPREb_x", thumbnail=_REAL)
-    store.tracks.set_track_enrichment(tid, "Trance", "2000")
-    store.tracks.set_track_audio(tid, bpm=138.0, energy=0.8, danceability=0.7)
+    seed_enrichment(store, tid, "Trance", "2000")
+    seed_audio(store, tid, bpm=138.0, energy=0.8, danceability=0.7)
     assert store.tracks.album_tracks_for_waterfall("MPREb_x") == []

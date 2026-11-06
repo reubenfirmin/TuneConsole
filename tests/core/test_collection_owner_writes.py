@@ -1,5 +1,6 @@
 """Normal retained-format mutations preserve other owners' committed choices."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from copy import deepcopy
 import json
 import threading
@@ -9,6 +10,7 @@ import pytest
 from tests.core.test_predecessor_writes import installed
 from tests.core.test_collection_feedback_publication import prepare
 from tests.repos.test_album_aliases import release
+from tests.prepared_fixture_support import prepared_template
 from yt_playlist.core import album_feedback_storage, albums
 from yt_playlist.core.preparation import collection_feedback_publication
 from yt_playlist.core.store import Store
@@ -40,6 +42,44 @@ def prepare_owner(store, key, state):
         owner.worker.step(store.conn, batch_size=1)
         assert owner.selected(store.conn) is None
         assert owner.worker.progress(store.conn).prepared_revision is None
+
+
+def seed_feedback_writers(store):
+    store.accounts.upsert_account('Main', 'main.json', None, True)
+    for browse in ('baseline-release', 'first-release', 'second-release'):
+        document = deepcopy(release())
+        document['title'] = browse
+        document['tracks'][0]['videoId'] = browse
+        store.collection.observe_album_representation(browse, document)
+        choice_evidence.issue(store, 'albums', [{'id': browse}], 0, context={}, opportunity_id=browse)
+    album_feedback.set_feedback(store, 'baseline-release', 'reject', 1, 'baseline-release')
+
+
+@pytest.fixture(scope='module')
+def feedback_writer_templates(_pristine_installed_schema, tmp_path_factory):
+    # Source-only, partial and selected cases share just the ordinary catalog
+    # and evidence prefix. Every case still prepares its own owner and opens
+    # its second Store before exercising both real overlapping writes.
+    with ExitStack() as resources:
+        templates = {}
+
+        def get(version):
+            if version not in templates:
+                database = tmp_path_factory.mktemp('feedback-writer-prefix') / 'source.db'
+                templates[version] = resources.enter_context(prepared_template(
+                    _pristine_installed_schema(version), seed_feedback_writers,
+                    database=database, defer_metadata=True))
+            return templates[version]
+
+        yield get
+
+
+@pytest.fixture
+def feedback_writer_prefix(installed, feedback_writer_templates):
+    store, version = installed
+    template = feedback_writer_templates(version)
+    template.restore(store)
+    return template
 
 
 @pytest.mark.parametrize('installed,state', FORMATS, indirect=['installed'])
@@ -77,16 +117,10 @@ def test_existing_context_updates_keep_other_accounts(installed, operation, stat
 
 
 @pytest.mark.parametrize('installed,state', FORMATS, indirect=['installed'])
-def test_overlapping_normal_feedback_writers_keep_each_release(installed, state, monkeypatch):
+@pytest.mark.usefixtures('feedback_writer_prefix')
+def test_overlapping_normal_feedback_writers_keep_each_release(
+        installed, state, monkeypatch):
     store, version = installed
-    store.accounts.upsert_account('Main', 'main.json', None, True)
-    for browse in ('baseline-release', 'first-release', 'second-release'):
-        document = deepcopy(release())
-        document['title'] = browse
-        document['tracks'][0]['videoId'] = browse
-        store.collection.observe_album_representation(browse, document)
-        choice_evidence.issue(store, 'albums', [{'id': browse}], 0, context={}, opportunity_id=browse)
-    album_feedback.set_feedback(store, 'baseline-release', 'reject', 1, 'baseline-release')
     prepare_owner(store, 'album_feedback', state)
     other = Store(store._db_path)
     other.init_schema(defer_metadata=True)
@@ -136,6 +170,14 @@ def test_overlapping_normal_feedback_writers_keep_each_release(installed, state,
             later.result(timeout=5)
         actual = {key: value['kind'] for key, value in album_feedback_storage.original(store.conn).items()}
         assert actual == {'baseline-release': 'reject', 'first-release': 'more', 'second-release': 'known'}
+        # Competing writers may defer bounded evidence replay. Their committed
+        # judgments must each own either a published response or a durable intent.
+        published = store.rec_ledger.evidence().records('response')
+        pending = store.album_feedback.pending_responses(after=0, limit=128)
+        assert set(actual) <= ({row['opportunity_id'] for row in published}
+                               | {row['opportunity_id'] for row in pending})
+        album_feedback.drain(store)
+        assert not store.album_feedback.pending_responses(after=0, limit=128)
         responses = store.rec_ledger.evidence().records('response')
         assert sorted((row['opportunity_id'], row['kind']) for row in responses) == [
             ('baseline-release', 'feedback'), ('first-release', 'feedback'), ('second-release', 'feedback')], {
@@ -145,6 +187,37 @@ def test_overlapping_normal_feedback_writers_keep_each_release(installed, state,
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
     finally:
         resume.set()
+        other.conn.close()
+
+
+@pytest.mark.parametrize('installed', [79, 93, 107], indirect=True)
+def test_feedback_writer_prefix_has_private_sql_and_evidence(
+        installed, feedback_writer_prefix, tmp_path):
+    store, _ = installed
+    template = feedback_writer_prefix
+    other = Store(tmp_path / 'other.db')
+    try:
+        template.restore(other)
+        other.init_schema(defer_metadata=True)
+        before = album_feedback_storage.original(store.conn)
+        assert set(before) == {'baseline-release'}
+        original = template.source.rec_ledger.evidence().records('response')
+        assert len(original) == 1
+        album_feedback.set_feedback(other, 'first-release', 'more', 3, 'first-release')
+        assert set(album_feedback_storage.original(other.conn)) == {'baseline-release', 'first-release'}
+        assert album_feedback_storage.original(store.conn) == before
+        assert album_feedback_storage.original(template.source.conn) == before
+        assert store.rec_ledger.evidence().records('response') == original
+        assert template.source.rec_ledger.evidence().records('response') == original
+        # Damage bytes in a copied preexisting file: hard links would corrupt
+        # both the immutable source and the other case's original response.
+        source_file = next((template.source.rec_ledger.evidence().directory / 'response').glob('*/*.json'))
+        private = other.rec_ledger.evidence().directory / source_file.relative_to(
+            template.source.rec_ledger.evidence().directory)
+        private.write_bytes(b'controlled private damage')
+        assert store.rec_ledger.evidence().records('response') == original
+        assert template.source.rec_ledger.evidence().records('response') == original
+    finally:
         other.conn.close()
 
 

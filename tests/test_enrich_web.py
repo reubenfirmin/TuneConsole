@@ -1,5 +1,7 @@
 """Tools › Enrichment page: render, live stats fragment, pause toggle."""
 from fastapi.testclient import TestClient
+from tests.enrichment_support import complete_entries, complete_discovered, seed_enrichment
+from tests.metadata_provenance_support import metadata_provenance
 import pytest
 
 from yt_playlist.web.app import create_app
@@ -15,8 +17,8 @@ def _client(store):
 def _seed(store):
     t1 = store.tracks.upsert_track("v1", "A", "X", None, 200)
     t2 = store.tracks.upsert_track("v2", "B", "Y", None, 200)
-    store.tracks.set_track_enrichment(t1, "Rock", "1999")
-    store.enrichment_queue.mark_enriched([t1], now=5.0)                 # 1 of 2 processed, has genre+year
+    seed_enrichment(store, t1, "Rock", "1999")
+    complete_entries(store, [t1], now=5.0)                 # 1 of 2 processed, has genre+year
     return t1, t2
 
 
@@ -78,7 +80,7 @@ def test_saved_retry_status_is_visible_without_a_running_worker(store):
 def test_optional_artwork_retry_is_visible_without_reopening_metadata_queue(store):
     from yt_playlist.providers.coverart import CoverResult
     tid = store.tracks.upsert_track("art", "Art", "Artist", None, 200)
-    store.enrichment_queue.mark_enriched([tid], now=900)
+    complete_entries(store, [tid], now=900)
     store.enrichment_state.record_artwork_result(tid, ["release"], CoverResult("retry", retry_in=90), 990)
     html = _client(store).get("/enrich/stats").text
     assert "Artwork retries: 1" in html
@@ -110,7 +112,7 @@ def test_one_queue_counts_and_pages_library_and_discovery_in_shared_order(store)
 def test_discovery_completions_appear_in_live_progress(store):
     store.discovery.upsert_discovered_track("new|artist", "new", "New", "Artist", None, None,
                                   None, None, "radio:seed", 100.0)
-    store.discovery.mark_discovered_enriched(["new|artist"], 998.0)
+    complete_discovered(store, ["new|artist"], 998.0)
     html = _client(store).get("/enrich/stats").text
     assert "Last track completed 2s ago" in html
     assert "1 tracks checked in the past 15 minutes" in html
@@ -144,17 +146,72 @@ def test_live_worker_activity_is_visible(store):
     assert 'state-waiting' in c.get("/enrich/stats").text
 
 
-def test_no_providers_explains_why_queue_cannot_run(store):
+@pytest.mark.parametrize("availability", ["disabled", "unavailable"])
+def test_no_providers_explains_why_queue_cannot_run(store, monkeypatch, availability):
+    from functools import partial
+    from unittest.mock import Mock
+    from yt_playlist.enrich import artwork
     from yt_playlist.providers import enrichment
-    _seed(store)
-    enrichment.save_config(store, [{"name": p["name"], "enabled": False}
+    from yt_playlist.providers.base import EnrichmentResult
+    from yt_playlist.providers.waterfall import run_waterfall
+
+    checked, pending = _seed(store)
+    probed = []
+
+    class Provider:
+        name = "musicbrainz"
+        ready = availability == "disabled"
+        def available(self, _store): return self.ready
+        def tripped(self): return False
+        def probe(self, track, _store):
+            probed.append(track["id"])
+            return EnrichmentResult(self.name, {"genre": "Rock", "year": "2004"})
+
+    provider = Provider()
+    enrichment.save_config(store, [{"name": p["name"],
+                                    "enabled": availability == "unavailable" and p["name"] == provider.name}
                                    for p in enrichment.PROVIDERS])
     c = _client(store)
-    assert c.app.state.ctx.enrich_worker.drain_once() == 0
+    worker = c.app.state.ctx.enrich_worker
+    worker.waterfall_fn = partial(run_waterfall, registry={provider.name: provider})
+    art_retry = Mock(return_value=0)
+    monkeypatch.setattr(artwork, "retry_due", art_retry)
+    def timestamps():
+        return [tuple(row) for row in store.conn.execute(
+            "SELECT id,first_enriched_at,last_enriched_at FROM tracks ORDER BY id")]
+    before = timestamps()
+    assert worker.drain_once() == 0
     html = c.get("/enrich/stats").text
     assert "Needs setup" in html and "No enrichment providers are available" in html
     assert 'href="/setup?tab=enrichment"' in html
     assert store.enrichment_reports.queue_remaining() == 1
+    assert timestamps() == before and not probed and not worker.busy
+    art_retry.assert_called_once()
+    # Optional artwork remains independent of provider setup and metadata completion.
+    art_retry.return_value = 1
+    assert worker.drain_once() == 1
+    assert timestamps() == before and store.enrichment_reports.queue_remaining() == 1
+    assert 'state-blocked' in c.get("/enrich/stats").text
+    assert 'state-paused' in c.post("/enrich/toggle").text
+    assert worker.drain_once() == 0
+    assert art_retry.call_count == 2
+    c.post("/enrich/toggle")
+    assert 'state-blocked' in c.get("/enrich/stats").text
+    provider.ready = True
+    enrichment.save_config(store, [{"name": p["name"], "enabled": p["name"] == provider.name}
+                                   for p in enrichment.PROVIDERS])
+    art_retry.return_value = 0
+    assert worker.drain_once(limit=1) == 1
+    assert probed == [pending]
+    assert store.tracks.get_track_enrichment(pending) == ("Rock", "2004")
+    assert timestamps()[1][1:] == (1000.0, 1000.0)
+    assert "Needs setup" not in c.get("/enrich/stats").text
+    # Re-enabling also schedules ordinary provider coverage for the previously checked track.
+    assert worker.drain_once() == 1
+    assert probed == [pending, checked]
+    assert timestamps()[0][1:] == (5.0, 1000.0)
+    assert worker.drain_once() == 0
+    assert 'state-idle' in c.get("/enrich/stats").text
 
 
 @pytest.mark.parametrize("view", ["queue", "processed", "conflicts"])
@@ -169,7 +226,7 @@ def test_queue_and_processed_details_are_separate_and_paginated(store):
     ids = [store.tracks.upsert_track(f"vid{i}", f"Queue song {i:02}", "Artist", None, 200,
                               created_at=1.0) for i in range(41)]
     done = store.tracks.upsert_track("done", "Completed song", "Artist", None, 200)
-    store.enrichment_queue.mark_enriched([done], 995.0)
+    complete_entries(store, [done], 995.0)
     c = _client(store)
     first = c.get("/enrich/queue").text
     second = c.get("/enrich/queue?page=2").text
@@ -225,7 +282,7 @@ def test_click_save_returns_confirmation_and_allows_another_choice(store):
 
 
 def _keep_current_value(store, tid, *, user_choice):
-    assert store.enrichment_reports.metadata_provenance(tid)['fields']['genre'] == {
+    assert metadata_provenance(store, tid)['fields']['genre'] == {
         'value':'My own genre','override':user_choice,
         'source':'user' if user_choice else 'legacy_unknown'}
     store.enrichment.upsert_conflict(tid, "genre", [{"provider": "musicbrainz", "value": "Rock"},
@@ -239,7 +296,7 @@ def _keep_current_value(store, tid, *, user_choice):
     assert response.status_code == 200 and "Saved" in response.text
     assert "Your choice" in response.text
     assert store.tracks.get_track_enrichment(tid)[0] == "My own genre"
-    assert store.enrichment_reports.metadata_provenance(tid)['fields']['genre'] == {
+    assert metadata_provenance(store, tid)['fields']['genre'] == {
         'value':'My own genre','override':True,'source':'conflict_resolution'}
     assert store.enrichment_reports.outstanding_conflicts() == 0
 

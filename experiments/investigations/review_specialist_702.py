@@ -10,7 +10,7 @@ from yt_playlist.rec import audio_vibe_runtime as runtime
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release
 from yt_playlist.rec import audio_vibe_relax as relax, audio_vibe_uplift as uplift
 from yt_playlist.rec import audio_vibe_energize as energize, audio_vibe_focus as focus
-from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_preview as preview
+from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_prediction as predictor
 
 ROOT = Path(__file__).resolve().parents[2]
 REPORT = Path('/tmp/tuneconsole-review-specialists-702-20261102')
@@ -26,7 +26,7 @@ def digest(path):
 def test_real_capture_output_and_research_adapter_parity(monkeypatch, tmp_path):
     assert digest(BASELINE) == BASELINE_SHA
     expected = json.loads(BASELINE.read_bytes())
-    paths = [Path(module.__file__) for module in (*SPECIALISTS, shared, preview, runtime, routing)]
+    paths = [Path(module.__file__) for module in (*SPECIALISTS, shared, predictor, runtime, routing)]
     paths += [module.DEFAULT_PATH for module in (*SPECIALISTS, shared)]
     before = {str(path.relative_to(ROOT)): digest(path) for path in paths}
     monkeypatch.setattr(features, 'LOCAL_ENV', tmp_path/'absent.env')
@@ -46,7 +46,7 @@ def test_real_capture_output_and_research_adapter_parity(monkeypatch, tmp_path):
             case = expected['cases'][position]
             assert (case['video_id'], case['count']) == (metadata['video_id'], count)
             assert hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest() == case['samples_sha256']
-            assert preview.predict(rows, require_complete=False) == case['prediction']
+            assert predictor.predict(rows, require_complete=False) == case['prediction']
             for mode, wanted in zip(('off', 'shadow', 'active'), expected['routes'][position], strict=True):
                 assert routing.route_samples(group, rows, specialist_path=cruise.DEFAULT_PATH, mode=mode) == wanted
             position += 1

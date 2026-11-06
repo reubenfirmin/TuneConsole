@@ -3,7 +3,7 @@ import json
 import threading
 import time
 
-from yt_playlist.core import radio_checkpoint, radio_storage
+from yt_playlist.core import radio_checkpoint
 
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.web.radio_edits import AppendOperation, PlaylistOperation
@@ -48,9 +48,14 @@ def encode(s: Session) -> str:
         "started_at": s.started_at, "tracks": s.tracks, "position": s.position, "furthest": s.furthest,
         "fingerprint": s.candidates.fingerprint, "heard": s.heard, "transition": s.transition,
         **operation_values(s.edits.active), "initial_tracks": s.initial_tracks,
-        "initial_handles": s.initial_handles,
+        "initial_handles": s.initial_handles, "launch_id": s.launch_id,
         "tuning": s.candidates.tuning, "recent_states": s.edits.recent_states,
         'comparison': getattr(s.candidates, 'comparison', None),
+        'candidate_context': {'choice_context': getattr(s.candidates, 'choice_context', {}),
+            'now_posterior': getattr(s.candidates, 'now_posterior', {}),
+            'now_sampled_at': getattr(s.candidates, 'now_sampled_at', 0),
+            'now_gain': getattr(s.candidates, 'now_gain', 0.),
+            'encoding_model': getattr(s.candidates, 'encoding_model', None)},
         "requested_direction": ({k: v for k, v in s.requested_direction.items() if k != 'play'}
                                 if s.requested_direction else None),
         "choices": s.choices, "rejected": sorted(s.rejected),
@@ -78,6 +83,7 @@ def restore(state: dict, client, identity, candidates) -> Session:
     s.furthest = state.get("furthest", s.position)
     s.initial_tracks = state.get("initial_tracks", [])
     s.initial_handles = state.get("initial_handles", {})
+    s.launch_id = state.get("launch_id")
     s.edits.recent_states = state.get("recent_states", [])
     s.edits.requested = state.get("requested_direction")
     s.rejected = set(state.get("rejected", []))
@@ -87,6 +93,10 @@ def restore(state: dict, client, identity, candidates) -> Session:
     if s.initial_tracks:
         s.preparation_deadline = time.monotonic() + PREPARATION_TIMEOUT
     s.playback_confirmed = True
+    # The last heard entry is the last observed song, even when a queued
+    # replacement moved its position. Rejoining that same song is not a new
+    # listen; a genuinely different observation still records a transition.
+    s.observed_video = s.heard[-1]['video_id'] if s.heard else None
     s.directions = RadioDirections(candidates, (s.tracks or s.initial_tracks)[0])
     saved_directions = state.get("directions")
     if saved_directions:
@@ -118,52 +128,38 @@ def restore(state: dict, client, identity, candidates) -> Session:
 
 
 class RadioPersistence:
-    def __init__(self, settings, *, paused=lambda: False):
-        self.settings = settings
+    def __init__(self, checkpoints, *, paused=lambda: False, snapshot=encode):
+        self.checkpoints = checkpoints
         self.paused = paused
+        self.snapshot = snapshot
         self.transient = None
         self.last_saved = None
         self.lock = threading.RLock()
-        self.revision = None
-        self.legacy_checkpoint = None
-        store = getattr(settings,'_store',None)
-        if store is not None:
-            with store._lock:
-                if radio_storage.available(store.conn):
-                    _,self.revision = radio_storage.load(store.conn)
-                    return
-        raw = settings.get_setting(SESSION_KEY)
-        self.legacy_checkpoint = json.loads(raw) if raw else None
+        state, self.revision = checkpoints.load()
+        self.legacy_checkpoint = state if self.revision is None else None
 
     def load(self) -> dict | None:
-        store = getattr(self.settings,'_store',None)
-        if self.transient is None and store is not None:
-            with store._lock:
-                # The schema probe also uses the shared writer connection. It
-                # must be serialized with seed preparation and snapshot copies.
-                if radio_storage.available(store.conn):
-                    state,self.revision = radio_storage.load(store.conn)
-                    self.legacy_checkpoint = None
-                    return migrate(state) if state else None
-        raw = self.transient if self.transient is not None else self.settings.get_setting(SESSION_KEY)
-        if self.transient is None:
-            self.legacy_checkpoint = json.loads(raw) if raw else None
-        return migrate(json.loads(raw)) if raw else None
+        if self.transient is not None:
+            return migrate(json.loads(self.transient))
+        state, self.revision = self.checkpoints.load()
+        self.legacy_checkpoint = state if self.revision is None else None
+        return migrate(state) if state else None
 
     def view(self, reader) -> dict | None:
         """Project a committed page snapshot without changing our write token."""
         if self.transient is not None:
             return migrate(json.loads(self.transient))
-        with reader._lock:
-            if radio_storage.available(reader.conn):
-                state, _ = radio_storage.load(reader.conn)
-                return migrate(state) if state else None
-            raw = reader.settings.get_setting(SESSION_KEY)
-        return migrate(json.loads(raw)) if raw else None
+        state, _ = reader.radio_checkpoints.load()
+        return migrate(state) if state else None
 
     def save(self, session: Session):
         with self.lock:
-            self._write(encode(session))
+            # Capture after acquiring save/journal ownership, so a waiting save
+            # cannot publish a snapshot older than an intervening Stop or edit.
+            # The snapshot callback releases its live-state lock before I/O.
+            encoded = self.snapshot(session)
+            if encoded is not None:
+                self._write(encoded)
 
     def record_edit(self, episode_id: str, operation: PlaylistOperation):
         """Journal only this episode's edit, retaining a concurrent Stop or newer choice."""
@@ -181,33 +177,11 @@ class RadioPersistence:
         if self.paused() or ('local_id' in state and state['local_id'] is None):
             self.transient = encoded
             return
-        store = getattr(self.settings,'_store',None)
-        with store._lock if store is not None else self.lock:
-            if store is not None and radio_storage.available(store.conn):
-                self._write_current(store, encoded, state)
-            elif encoded != self.last_saved:
-                self.settings.set_setting(SESSION_KEY, encoded)
-                self.legacy_checkpoint = state
+        if encoded != self.last_saved or self.transient is not None:
+            self.revision = self.checkpoints.save(encoded, expected=self.revision,
+                                                 predecessor=self.legacy_checkpoint)
+            self.legacy_checkpoint = state if self.revision is None else None
         if encoded != self.last_saved:
             self.last_saved = encoded
         self.transient = None
 
-    def _write_current(self, store, encoded, state):
-        with store.conn:
-            # Serialize the cutover handoff with other checkpoint writers.
-            # Only the untouched import of our observed predecessor may
-            # replace its old revision-less token. Never rebase a newer
-            # save or Stop, even if it belongs to the same episode.
-            if self.revision is None and self.legacy_checkpoint is not None:
-                store.conn.execute('UPDATE radio_session_head SET session_id=session_id WHERE 0')
-                # Account corrections can change the read projection
-                # without another Radio save. Compare the published
-                # predecessor, keeping its exact upload and journal data.
-                imported,revision = radio_storage.load_published(store.conn)
-                if (revision == (self.legacy_checkpoint.get('episode_id'), 1)
-                        and imported is not None
-                        and radio_checkpoint.normalize(imported) == radio_checkpoint.normalize(self.legacy_checkpoint)):
-                    self.revision = revision
-            if encoded != self.last_saved or self.transient is not None:
-                self.revision = radio_storage.save(store.conn,state,expected=self.revision)
-                self.legacy_checkpoint = None

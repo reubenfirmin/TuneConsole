@@ -1,5 +1,7 @@
 """Retiring overlapping owners preserves the installed catalog and recovery."""
 import json
+from tests.enrichment_support import choose_field
+from tests.metadata_provenance_support import metadata_provenance
 import sqlite3
 import threading
 import time
@@ -15,11 +17,11 @@ from yt_playlist.providers.base import MetadataObservation
 
 
 @pytest.fixture
-def predecessor(tmp_path):
+def predecessor(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path / 'before-evidence.db')
-    migrate(store.conn, registry=registry.MIGRATIONS[:79])
-    store._bind_repositories()
     try:
+        _pristine_installed_schema(79).backup(store.conn)
+        store._bind_repositories()
         yield store
     finally:
         store.conn.close()
@@ -34,8 +36,8 @@ def seed(store):
     for field, value in {**fields, 'isrc': ['ONE']}.items():
         store.enrichment_state.log_enrichment(entry, 'original', 'a', field, value, now=10)
     store.enrichment_state.record_enrichment_attempt(key, 'a', fields, video_id='video', now=10)
-    store.enrichment.set_track_field(entry, 'bpm', None)
-    store.enrichment.set_track_field(entry, 'genre', '')
+    choose_field(store, entry, 'bpm', None)
+    choose_field(store, entry, 'genre', '')
     observation = MetadataObservation('tags', [{'name': 'Jazz', 'count': 4}], 'artist', 'artist',
         'reported', unit='provider_tag_count_or_order', match_evidence={'query_kind': 'artist'})
     store.enrichment_state.record_metadata_observations(entry, 'native', [observation], run_id='native-original', now=11)
@@ -66,13 +68,13 @@ def test_registered_upgrade_and_restart_preserve_the_catalog_and_evidence(predec
     assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == current.VERSION
     current.validate(store.conn)
     assert dict(store.conn.execute('SELECT * FROM catalog_tracks WHERE id=?', (entry,)).fetchone()) == before
-    assert store.enrichment_reports.metadata_provenance(entry)['lineage']['genre']['choice']['delivery']
+    assert metadata_provenance(store, entry)['lineage']['genre']['choice']['delivery']
     reopened = Store(store._db_path)
     try:
         reopened.init_schema()
         assert dict(reopened.conn.execute('SELECT * FROM catalog_tracks WHERE id=?', (entry,)).fetchone()) == before
         assert reopened.tracks.identity_key_for_video('video') == key
-        assert reopened.enrichment_reports.metadata_provenance(entry)['lineage']['genre']['choice']['delivery']
+        assert metadata_provenance(reopened, entry)['lineage']['genre']['choice']['delivery']
     finally:
         reopened.conn.close()
 
@@ -176,7 +178,7 @@ def test_suspended_regular_ddl_keeps_predecessor_writable(predecessor, monkeypat
         maintenance.join(20)
         assert maintenance.ready.is_set() and not reopened.activity_paused
         assert reopened.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 79
-        reopened.enrichment.set_track_field(entry, 'genre', 'Blues')
+        choose_field(reopened, entry, 'genre', 'Blues')
         assert reopened.tracks.get_track_enrichment(entry)[0] == 'Blues'
         trigger = reopened.conn.execute("SELECT sql FROM sqlite_temp_schema "
             "WHERE name='snapshot_revision_rec_musical_sources_update'").fetchone()

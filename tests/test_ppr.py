@@ -1,17 +1,5 @@
 import numpy as np
-import pytest
-from yt_playlist.core.store import Store
 from yt_playlist.rec import ppr
-
-
-@pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    try:
-        yield s
-    finally:
-        s.conn.close()
 
 
 def test_ppr_rank_favors_seed_neighbors():

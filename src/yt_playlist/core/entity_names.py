@@ -4,7 +4,8 @@ Current owners have one physical name. Explicit writer identifiers and read
 projections keep installed predecessors authoritative during preparation.
 """
 from dataclasses import dataclass
-import re
+
+from .schema_contract import TOKEN
 
 
 # Runtime compatibility owns this finite vocabulary independently of frozen DDL
@@ -36,8 +37,6 @@ PREDECESSOR_COLUMNS = {
     'overlap_kept': {'a': 'first_playlist_scope_id', 'b': 'second_playlist_scope_id'},
     'rec_mode_picks': {'playlist_id': 'membership_ref_id'},
 }
-_SQL_TOKENS = re.compile(r"--[^\n]*|/\*.*?\*/|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|"
-                         r"`(?:``|[^`])*`|\[[^]]*\]|[A-Za-z_]\w*|\S", re.S)
 
 
 def predecessor_definition(sql):
@@ -46,9 +45,8 @@ def predecessor_definition(sql):
     This is used only for known DDL contracts, never application statements,
     provider input or recovery documents. Frozen upgrades keep their own copy.
     """
-    tokens = [match.group() for match in _SQL_TOKENS.finditer(sql)]
-    identifiers = {token.strip('"`[]').lower() for token in tokens
-                   if not token.startswith(("'", '--', '/*'))}
+    identifiers = {match.group().strip('"`[]').lower() for match in TOKEN.finditer(sql)
+                   if not match.group().startswith(("'", '--', '/*'))}
     names = dict(PREDECESSOR_NAMES)
     if 'playlist_scopes' in identifiers:
         names.update(ref='id', provider_id='provider_playlist_id')
@@ -68,7 +66,7 @@ def predecessor_definition(sql):
         value = names.get(key.lower())
         return token if value is None else token[0]+value+token[-1] if quoted else value
 
-    return _SQL_TOKENS.sub(replace, sql)
+    return TOKEN.sub(replace, sql)
 
 
 @dataclass(frozen=True)

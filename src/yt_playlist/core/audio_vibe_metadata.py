@@ -37,11 +37,14 @@ FEATURES = (tuple('base.' + key for key in NUMERIC)
             + ('base.present.music_scale',))
 
 
-def subgenre(metadata=None, *, conn=None):
+def subgenre(metadata=None, *, conn=None, genre_axes=None):
     """One known specific genre identity; broad/unknown/missing all have no signal."""
     name = (metadata or {}).get('genre')
     if not isinstance(name, str):
         return None
+    if genre_axes is not None:
+        key = genre_axes.get(name, ('', None))[1]
+        return key if key is not None and key not in BROAD_GENRES else None
     if conn is not None:
         from yt_playlist.core import genre_identity
         key, _ = genre_identity.resolve(conn,name)

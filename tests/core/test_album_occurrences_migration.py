@@ -13,17 +13,21 @@ from yt_playlist.library.album_catalog import remember_album
 
 def installed_98(path):
     store = Store(path)
-    for sql in current.statements(version=98):
-        store.conn.execute(sql)
-    genre_identity.seed_catalog(store.conn)
-    store.conn.executemany('INSERT INTO settings VALUES (?,?)',current.SEED_SETTINGS.items())
-    for sql in ('INSERT INTO rec_preparation VALUES (1,0,0)','INSERT INTO rec_group_clock VALUES (1,0)',
-                'INSERT INTO group_retention_state VALUES (1,0)'):
-        store.conn.execute(sql)
-    store.conn.executemany('INSERT INTO schema_migrations VALUES (?,?,1)',[(m.version,m.name) for m in registry.MIGRATIONS[:98]])
-    store.conn.commit()
-    store._bind_repositories()
-    return store
+    try:
+        for sql in current.statements(version=98):
+            store.conn.execute(sql)
+        genre_identity.seed_catalog(store.conn)
+        store.conn.executemany('INSERT INTO settings VALUES (?,?)',current.SEED_SETTINGS.items())
+        for sql in ('INSERT INTO rec_preparation VALUES (1,0,0)','INSERT INTO rec_group_clock VALUES (1,0)',
+                    'INSERT INTO group_retention_state VALUES (1,0)'):
+            store.conn.execute(sql)
+        store.conn.executemany('INSERT INTO schema_migrations VALUES (?,?,1)',[(m.version,m.name) for m in registry.MIGRATIONS[:98]])
+        store.conn.commit()
+        store._bind_repositories()
+        return store
+    except BaseException:
+        store.conn.close()
+        raise
 
 
 def response(videos=('one','two','one')):
@@ -31,8 +35,8 @@ def response(videos=('one','two','one')):
             'tracks':[{'title':v,'videoId':v,'discNumber':1 if i==0 else 2,'trackNumber':i+1} for i,v in enumerate(videos)]}
 
 
-def test_legacy_occurrences_keep_unknown_order_incidental_evidence_and_exact_frozen_shares(tmp_path):
-    store = installed_98(tmp_path/'old.db')
+def test_legacy_occurrences_keep_unknown_order_incidental_evidence_and_exact_frozen_shares(tmp_path, legacy_owner_store):
+    store = legacy_owner_store(tmp_path/'old.db', 98)
     entry = store.tracks.upsert_track('one','One','Artist',None,10,album_browse_id='release')
     aid = albums.lookup(store.conn,'release')
     with store.conn:
@@ -122,8 +126,8 @@ def test_owner_source_count_and_frozen_capture_guards(store):
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
-def test_interruption_rolls_back_owner_replacement_then_restart_preserves_it(tmp_path,monkeypatch):
-    store = installed_98(tmp_path/'rollback.db')
+def test_interruption_rolls_back_owner_replacement_then_restart_preserves_it(tmp_path,monkeypatch,legacy_owner_store):
+    store = legacy_owner_store(tmp_path/'rollback.db', 98)
     store.tracks.upsert_track('one','One','Artist',None,10,album_browse_id='release')
     before = [dict(r) for r in store.conn.execute('SELECT * FROM album_tracks')]
     def interrupt(conn,context):
@@ -197,6 +201,52 @@ def test_unreferenced_provider_revisions_expire_but_frozen_occurrences_survive(s
     assert store.conn.execute('SELECT count(*) FROM album_tracklists').fetchone()[0]==4
     assert store.conn.execute('SELECT count(*) FROM album_track_occurrences WHERE tracklist_id=?',(first,)).fetchone()[0]==3
     assert album_tracklists.share(store.conn,aid,'release')['video_ids']==['one','two','one']
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
+
+
+def test_publication_collects_only_its_release_with_bounded_query_work(store):
+    from yt_playlist.core.activity import interrupt_query
+
+    def publish():
+        work = 0
+        def progress():
+            nonlocal work
+            work += 100
+            return 0
+        store.conn.set_progress_handler(progress, 100)
+        try:
+            remember_album(store, 'release', response())
+        finally:
+            store.conn.set_progress_handler(interrupt_query, 1000)
+        return work
+
+    small = publish()
+    aid = albums.lookup(store.conn, 'release')
+    with store.conn:
+        frozen = album_tracklists.freeze(store.conn, aid, 'release', 'Frozen', ['one','two','one'], now=1)
+        # Retained histories deliberately exceed keep. An unrelated publication must leave them
+        # alone; publication-time cleanup is not a global maintenance sweep.
+        for i in range(400):
+            provider_id = f'unrelated-{i}'
+            owner = albums.observe(store.conn, provider_id, title=provider_id)
+            for _ in range(6):
+                revision = album_tracklists.begin(store.conn, owner, provider_id)
+                album_tracklists.finish(store.conn, revision, complete=False)
+    untouched = [row[0] for row in store.conn.execute(
+        "SELECT id FROM album_tracklists WHERE provider_id<>'release' ORDER BY id")]
+    work = [publish() for _ in range(7)]
+    assert max(work) < small * 2 + 5000, (small, work)
+    assert [row[0] for row in store.conn.execute(
+        "SELECT id FROM album_tracklists WHERE provider_id<>'release' ORDER BY id")] == untouched
+    assert store.conn.execute("SELECT count(*) FROM album_tracklists WHERE provider_id='release'").fetchone()[0] == 4
+    partial = response(('one',))
+    partial['trackCount'] = 2
+    for _ in range(5):
+        remember_album(store, 'release', partial)
+    assert dict(store.conn.execute("SELECT status,count(*) FROM album_tracklists WHERE provider_id='release' GROUP BY status")) == {
+        'complete': 4, 'partial': 2}
+    assert store.conn.execute('SELECT tracklist_id FROM album_share_snapshots WHERE id=?', (frozen,)).fetchone()
+    assert album_tracklists.share(store.conn, aid, 'release')['video_ids'] == ['one','two','one']
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 

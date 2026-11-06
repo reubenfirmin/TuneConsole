@@ -70,18 +70,19 @@ def cache(conn, album_id, provider_id, keys, *, entries=None, now=None, complete
     for row in rows:
         occurrence(conn,tracklist,**row)
     finish(conn,tracklist,complete=bool(rows) and complete)
-    collect(conn)
+    collect(conn, provider='youtube', provider_id=provider_id)
     return tracklist
 
 
-def collect(conn, *, keep=2):
-    """Bound unreferenced provider revisions; captures and frozen shares survive."""
+def collect(conn, *, provider, provider_id, keep=2):
+    """Bound this publication's unreferenced revisions; captures and frozen shares survive."""
     if keep<0:
         raise ValueError('Retained revision count cannot be negative')
-    unused = conn.execute("SELECT t.id,t.provider,t.provider_id,t.status FROM album_tracklists t WHERE t.capture_kind='provider' "
+    unused = conn.execute("SELECT t.id,t.provider,t.provider_id,t.status FROM album_tracklists t "
+        "WHERE t.provider=? AND t.provider_id=? AND t.capture_kind='provider' "
         "AND t.status IN ('complete','partial') AND NOT EXISTS(SELECT 1 FROM albums a WHERE a.current_tracklist_id=t.id) "
         'AND NOT EXISTS(SELECT 1 FROM album_share_snapshots s WHERE s.tracklist_id=t.id) '
-        'ORDER BY t.provider,t.provider_id,t.status,t.id DESC').fetchall()
+        'ORDER BY t.status,t.id DESC', (provider, provider_id)).fetchall()
     retained = {}
     for row in unused:
         group = (row['provider'],row['provider_id'],row['status'])

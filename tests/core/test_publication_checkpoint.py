@@ -1,22 +1,19 @@
 """Every maintenance publication checkpoints outside the serving lock after atomic commit."""
 from concurrent.futures import ThreadPoolExecutor
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
 from yt_playlist.core import db_checkpoint, db_snapshot
 from yt_playlist.core.activity import WorkClosing
-from yt_playlist.core.store import Store
 from yt_playlist.rec import bundle_storage
 
 
 @pytest.fixture
-def database(tmp_path):
-    store = Store(tmp_path / 'publication.db')
-    store.init_schema()
-    store.conn.execute('PRAGMA wal_autocheckpoint=17')
-    yield store
-    store.conn.close()
+def database(file_backed_store):
+    file_backed_store.conn.execute('PRAGMA wal_autocheckpoint=17')
+    return file_backed_store
 
 
 @pytest.mark.parametrize('failure', [None, 'rollback', 'cancel', 'stale'])
@@ -69,12 +66,20 @@ def test_checkpoint_observes_finished_transaction_without_holding_serving_lock(d
 
 def test_checkpoint_error_does_not_report_a_committed_model_as_failed(database, monkeypatch):
     store = database
+    attempted = []
     with store.read_snapshot() as snapshot:
         def unavailable(*args, **kwargs):
+            attempted.append((args, kwargs))
             raise sqlite3.OperationalError('checkpoint unavailable')
 
-        monkeypatch.setattr(db_checkpoint.sqlite3, 'connect', unavailable)
+        # Replace only the checkpoint module's view of SQLite. Coverage and other
+        # readers must still be able to open their own databases during this test.
+        checkpoint_sqlite = SimpleNamespace(**vars(sqlite3))
+        checkpoint_sqlite.connect = unavailable
+        monkeypatch.setattr(db_checkpoint, 'sqlite3', checkpoint_sqlite)
         assert snapshot.publish(lambda: store.settings.publish_values({'model': 'new'}))
+    assert len(attempted) == 1
+    assert attempted[0][0] == (store._db_path.as_uri() + '?mode=rw',)
     assert store.settings.get_setting('model') == 'new'
     assert store.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == 17
 
@@ -157,18 +162,15 @@ def test_explicitly_disabled_checkpoint_policy_is_preserved(database, monkeypatc
     assert database.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == 0
 
 
-def test_in_memory_publication_does_not_attempt_a_file_checkpoint(monkeypatch):
-    store = Store(':memory:')
-    store.init_schema()
-    try:
-        policy = store.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0]
-        monkeypatch.setattr(db_snapshot, 'checkpoint_wal', lambda path: pytest.fail('unexpected checkpoint'))
-        with store.read_snapshot() as snapshot:
-            assert snapshot.publish(lambda: store.settings.publish_values({'model': 'new'}))
-        assert store.settings.get_setting('model') == 'new'
-        assert store.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == policy
-    finally:
-        store.conn.close()
+def test_in_memory_publication_does_not_attempt_a_file_checkpoint(store, monkeypatch):
+    assert store._db_path is None
+    assert store.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'memory'
+    policy = store.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0]
+    monkeypatch.setattr(db_snapshot, 'checkpoint_wal', lambda path: pytest.fail('unexpected checkpoint'))
+    with store.read_snapshot() as snapshot:
+        assert snapshot.publish(lambda: store.settings.publish_values({'model': 'new'}))
+    assert store.settings.get_setting('model') == 'new'
+    assert store.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == policy
 
 
 def test_cancellation_during_policy_cleanup_does_not_discredit_commit(database, monkeypatch):

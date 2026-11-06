@@ -17,9 +17,9 @@ from yt_playlist.core.store import Store
 
 
 @pytest.fixture
-def predecessor(tmp_path):
+def predecessor(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path / 'scope-state.db')
-    migrate(store.conn, registry=registry.MIGRATIONS[:69])
+    _pristine_installed_schema(69).backup(store.conn)
     store._bind_repositories()
     with store.conn:
         store.conn.executemany('INSERT INTO identities(id,label,credential_ref,is_master,active) '

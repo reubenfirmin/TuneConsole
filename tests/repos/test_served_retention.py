@@ -44,10 +44,9 @@ def test_retention_batches_converge_and_preserve_cutoff_and_both_policies(store)
     assert retained['pool_configuration'] == {'policy': 'keep-pool'}
 
 
-def test_policy_scan_passes_referenced_batch_and_resumes_after_restart(tmp_path):
+def test_policy_scan_passes_referenced_batch_and_resumes_after_restart(tmp_path, consumer_store, request):
     path = tmp_path / 'retention.db'
-    store = Store(path)
-    store.init_schema()
+    store = consumer_store(path)
     policies = [f'keep-{n:04}' for n in range(RETENTION_BATCH_SIZE)]
     disposable = [f'remove-{n:04}' for n in range(RETENTION_BATCH_SIZE)] + ['zzz-orphan']
     store.rec_ledger.record_prepared_policies([(version, '{}', 1) for version in policies + disposable])
@@ -57,6 +56,7 @@ def test_policy_scan_passes_referenced_batch_and_resumes_after_restart(tmp_path)
     assert store.conn.execute('SELECT count(*) FROM recommendation_policies').fetchone()[0] == RETENTION_BATCH_SIZE + 1
     store.conn.close()
     reopened = Store(path)
+    request.addfinalizer(reopened.conn.close)
     reopened.init_schema()
     try:
         reopened.rec_ledger.record_served_impressions('prune-again', 'home', [], 102, prune_before=50)

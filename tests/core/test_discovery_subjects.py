@@ -94,13 +94,15 @@ def test_account_and_import_withdrawal_preserves_independent_sources_and_lifetim
         assert provenance.remove_spotify_artists(store.conn,account_id=first,import_key='one')==0
     assert store.conn.execute('SELECT count(*) FROM discovery_artist_sources').fetchone()[0]==3
     candidate = store.discovery.get_discovered_artists()[0]
-    assert candidate['because']==[] and candidate['fits']==[] and candidate['offered_count']==1
+    assert candidate['because']==['Independent'] and candidate['fits']==['Playlist'] and candidate['offered_count']==1
     with store.conn:
         provenance.remove_spotify_artists(store.conn,account_id=first)
     assert store.conn.execute('SELECT count(*) FROM discovery_artist_sources').fetchone()[0]==2
     with store.conn:
         provenance.remove_spotify_artists(store.conn,account_id=second)
-    assert store.discovery.get_discovered_artists()[0]['offered_count']==1
+    candidate = store.discovery.get_discovered_artists()[0]
+    assert candidate['offered_count']==1
+    assert candidate['because']==['Independent'] and candidate['fits']==['Playlist']
     assert store.conn.execute('SELECT count(*) FROM discovery_artist_sources').fetchone()[0]==1
 
 

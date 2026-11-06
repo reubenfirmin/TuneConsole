@@ -1,27 +1,49 @@
 """Continuing style streams are independent of Home's finite card proposals."""
 import pytest
+from tests.derived_rating_support import remove_rating, seed_dislike
 
 from yt_playlist.rec import embedding_vectors, radio_tuning
 from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, RadioCandidates
-from tests.test_radio_catalog import catalog_track, seed
+from tests.test_radio_catalog import catalog_track, seed, seed_catalog
 from tests.musical_support import prepare_profiles
 from yt_playlist.core import catalog
 from yt_playlist.rec import musical_character
 from tests.recommendation_support import publish_bundles
+from tests.prepared_fixture_support import prepared_template
+from tests.radio_timing_support import radio_costs
+from yt_playlist.core.db_writes import atomic_write
 
 
 def indexed(store, seed, count=110, *, mixed=False, home=True):
-    tracks = [catalog_track(store, f'cluster-{i}', label='Indie Rock' if mixed and i % 2 else seed['genre'])[0]
-              for i in range(count)]
+    with atomic_write(store):
+        tracks = [catalog_track(store, f'cluster-{i}', label='Indie Rock' if mixed and i % 2 else seed['genre'])[0]
+                  for i in range(count)]
     publish_bundles(store, {
         '1': {'wheelhouse': [seed] if home else []}, '_radio': {'generation': None, 'space': '',
         'members': {'1': [seed['key'], *[track['key'] for track in tracks]]}}})
     return tracks
 
 
+@pytest.fixture(scope='module')
+def refill_template(_pristine_current_schema):
+    def build(store):
+        anchor = seed_catalog(store)
+        tracks = indexed(store, anchor)
+        assert len(tracks) == 110
+        return anchor, tracks
+
+    with prepared_template(_pristine_current_schema, build) as template:
+        yield template
+
+
+@pytest.fixture
+def refill_library(store, refill_template):
+    return refill_template.restore(store)
+
+
 @pytest.mark.parametrize('theme', [0, .5, 1])
-def test_every_dial_position_refills_beyond_home_and_catalog_batch(store, seed, monkeypatch, theme):
-    tracks = indexed(store, seed)
+def test_every_dial_position_refills_beyond_home_and_catalog_batch(store, refill_library, monkeypatch, theme):
+    seed, tracks = refill_library
     c = RadioCandidates(store, 1000, {**radio_tuning.DEFAULTS, 'theme': theme})
     monkeypatch.setattr(embedding_vectors, 'load_content_vectors', lambda *a, **kw: pytest.fail('request loaded full vectors'))
     sizes, read = [], c._read_vectors
@@ -57,7 +79,7 @@ def test_same_cluster_directions_use_distinct_positions_and_preserve_existing_pl
 def test_refill_rechecks_feedback_and_survives_an_unrelated_model_publication(store, seed):
     tracks = indexed(store, seed, 5)
     c = RadioCandidates(store, 1000, {**radio_tuning.DEFAULTS, 'theme': 1})
-    store.rec_model.record_dislike(tracks[0]['key'], 1001, 1)
+    seed_dislike(store, tracks[0]['key'], 1001, 1)
     store.settings.set_setting('rec_content_generation', 'new-generation')
     # An active session retains its published membership and directions. A new
     # incompatible basis is never decoded against the old saved centroids.
@@ -94,9 +116,9 @@ def test_continuing_refill_uses_shared_intensity_for_unprepared_recordings(store
 def test_correcting_feedback_readmits_a_recording_in_the_same_session(store, seed):
     track = indexed(store, seed, 1)[0]
     c = RadioCandidates(store, 1000, {**radio_tuning.DEFAULTS, 'theme': 1})
-    store.rec_model.record_dislike(track['key'], 1001, 1)
+    seed_dislike(store, track['key'], 1001, 1)
     assert c.next_track([seed]) is None
-    store.rec_model.clear_dislike(track['key'])
+    remove_rating(store, track['key'], 'dislike')
     assert c.next_track([seed])['key'] == track['key']
 
 

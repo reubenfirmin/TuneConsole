@@ -1,6 +1,8 @@
 """PlaylistRepo: playlists, their track membership/ordering, groups, and hidden flags."""
 from yt_playlist.core.playlist_scopes import ensure,resolve
 from yt_playlist.core import entity_names, playlist_scope_state as scope_state
+from yt_playlist.core.db_revisions import setting_reads
+from yt_playlist.core.action_errors import ActionInputError
 
 from yt_playlist.repos.base import Repo, synchronized, lookup_read, snapshot_read, GENERATED_GROUP
 from yt_playlist.repos.models import Playlist, PlaylistMemberships
@@ -18,7 +20,8 @@ class PlaylistRepo(Repo):
     def radio_playlist_ids(self):
         """Read retained Radio origins on an owned connection, including legacy settings."""
         from yt_playlist.core import radio_provenance
-        return radio_provenance.ids(self.conn)
+        with setting_reads(self._store, radio_provenance.KEYS):
+            return radio_provenance.ids(self.conn)
 
     @synchronized
     def playlist_reference(self, ytm, account_id=None):
@@ -260,13 +263,15 @@ class PlaylistRepo(Repo):
             if not incremental:
                 self.conn.execute("DELETE FROM playlist_items WHERE playlist_id=?", (playlist_id,))
                 self.conn.execute("DELETE FROM unresolved_playlist_items WHERE playlist_id=?", (playlist_id,))
-            for position, track in enumerate(tracks[start:], start):
-                catalog.upsert(
-                    self.conn, track["video_id"], track.get("title") or "", track.get("artist") or "",
-                    track.get("album") or "", track.get("duration"), thumbnail=track.get("thumbnail"),
-                    library=True)
-                self.conn.execute("INSERT INTO playlist_items VALUES (?,?,?)",
-                                  (playlist_id, track["video_id"], position))
+            for offset in range(start, len(tracks), 128):
+                members = []
+                for position, track in enumerate(tracks[offset:offset + 128], offset):
+                    catalog.upsert(
+                        self.conn, track["video_id"], track.get("title") or "", track.get("artist") or "",
+                        track.get("album") or "", track.get("duration"), thumbnail=track.get("thumbnail"),
+                        library=True)
+                    members.append((playlist_id, track["video_id"], position))
+                self.conn.executemany("INSERT INTO playlist_items VALUES (?,?,?)", members)
             # A new upload can disambiguate an older recording's text key.
             # Hash the final catalog identities after every upsert has settled.
             keys = self.conn.execute(
@@ -347,11 +352,11 @@ class PlaylistRepo(Repo):
                 playlist = self.conn.execute(
                     "SELECT track_count FROM playlists WHERE id=?", (playlist_id,)).fetchone()
                 if playlist is None:
-                    raise ValueError("playlist no longer exists")
+                    raise ActionInputError('playlist_missing')
                 if playlist[0] != 0 or self.conn.execute(
                         "SELECT 1 FROM playlist_tracks WHERE playlist_id=? LIMIT 1",
                         (playlist_id,)).fetchone():
-                    raise ValueError("This playlist has cached tracks. Re-sync before removing it.")
+                    raise ActionInputError('playlist_cached_tracks')
             self.conn.execute("DELETE FROM playlist_items WHERE playlist_id=?", (playlist_id,))
             self.conn.execute("DELETE FROM unresolved_playlist_items WHERE playlist_id=?", (playlist_id,))
             self.conn.execute("DELETE FROM main.playlists WHERE id=?", (playlist_id,))

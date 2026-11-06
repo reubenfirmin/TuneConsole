@@ -8,7 +8,9 @@ import pytest
 
 from tests.core.test_predecessor_writes import installed
 from tests.test_audio_vibes import sample
-from yt_playlist.core import copy_compaction, db_handles, fao, policy_recovery, sample_files
+from tests import file_custody_support as custody
+from yt_playlist.core import db_handles, fao, sample_files
+from yt_playlist.core.db_rebuild import job
 from yt_playlist.core.policy_documents import coordinate_updates
 from yt_playlist.core.store import Store
 
@@ -22,7 +24,7 @@ def capture(store):
 
 
 @pytest.mark.parametrize('installed', [79, 107], indirect=True)
-@pytest.mark.parametrize('kind', ['compact', 'verified-backup'])
+@pytest.mark.parametrize('kind', ['restored', 'snapshot'])
 def test_public_recovery_retains_samples_without_producer(installed, tmp_path, kind):
     store, _ = installed
     values = capture(store)
@@ -32,16 +34,16 @@ def test_public_recovery_retains_samples_without_producer(installed, tmp_path, k
               for path in root.glob('*/*.json')}
     clocks = {path.stem: (fao.stat(path).mtime_ns, fao.stat(path).ctime_ns)
               for path in root.glob('*/*.json')}
-    report = policy_recovery.recover(store._db_path, tmp_path/'recovered', progress=lambda _: None)
-    candidate_path = Path(report['compact_database'])
-    if kind == 'verified-backup':
+    report = custody.snapshot_library(store._db_path, tmp_path/'recovered')
+    candidate_path = Path(report['restored'])
+    if kind == 'snapshot':
         candidate_path = tmp_path/'separate-restore'/'restored.db'
         candidate_path.parent.mkdir()
-        with closing(sqlite3.connect(report['verified_backup'])) as source, \
+        with closing(sqlite3.connect(report['snapshot'])) as source, \
                 closing(sqlite3.connect(candidate_path)) as target:
             source.backup(target)
             target.row_factory = sqlite3.Row
-            policy_recovery._restore_files(target, report['verified_backup_file_manifests'])
+            custody.restore_files(target, report['manifests'])
     hidden = root.with_name('hidden-producer-samples')
     root.rename(hidden)
     try:
@@ -78,8 +80,8 @@ def test_recovery_refuses_unavailable_input_without_success(installed, tmp_path,
     original = list(store.conn.iterdump())
     output = tmp_path/'recovery'
     with pytest.raises((OSError, ValueError)):
-        policy_recovery.recover(store._db_path, output, progress=lambda _: None)
-    assert not (output/'report.json').exists()
+        custody.snapshot_library(store._db_path, output)
+    assert not (output/'restored.db').exists()
     assert list(store.conn.iterdump()) == original
     assert len(store.audio_vibes.samples('captured-run')) == 2
 
@@ -130,13 +132,12 @@ def test_compactor_inventory_and_retained_original_recovery_include_samples(inst
     store, _ = installed
     values = capture(store)
     paths = [Path(row[0]) for row in store.conn.execute('SELECT filename FROM sample_attributes')]
-    inventory = copy_compaction._owned_files(store.conn)
+    inventory = job._owned_files(store.conn)
     assert inventory['files'] >= 3
     assert inventory['bytes'] >= sum(path.stat().st_size for path in paths)
-    copy_compaction.run(store)
+    job.run(store)
     state = db_handles.state(store._db_path)
     assert state['phase'] == 'complete'
-    assert copy_compaction.db_handles is db_handles
     candidate_path = tmp_path/'backup-restore'/'copy.db'
     candidate_path.parent.mkdir()
     # The current job retains the original database and immutable file owners.
@@ -145,13 +146,13 @@ def test_compactor_inventory_and_retained_original_recovery_include_samples(inst
     with closing(sqlite3.connect(Path(state['original']).as_uri()+'?mode=ro', uri=True)) as backup, \
             closing(sqlite3.connect(candidate_path)) as target:
         backup.row_factory = sqlite3.Row
-        with copy_compaction._files(backup), backup:
+        with job._files(backup), backup:
             backup.execute('BEGIN')
-            manifests = policy_recovery._export_files(backup, candidate_path)
+            manifests = custody.export_files(backup, candidate_path)
         backup.backup(target)
         target.row_factory = sqlite3.Row
         assert 'samples' in manifests
-        policy_recovery._restore_files(target, manifests)
+        custody.restore_files(target, manifests)
     hidden = sample_files.directory(store.conn).with_name('hidden-producer-samples')
     sample_files.directory(store.conn).rename(hidden)
     try:

@@ -1,11 +1,14 @@
 """Verified atomic publication and continuing writes across the retained format."""
+from contextlib import closing
 import json
 import sqlite3
 
 import pytest
 
 from tests.core.test_predecessor_writes import installed
-from yt_playlist.core import recommendation_work
+from tests.prepared_fixture_support import coordinates
+from tests.test_installed_fixture import state
+from yt_playlist.core import file_owners, recommendation_work
 from yt_playlist.core.migrations import MigrationError, migrate, registry, regular
 from yt_playlist.core.preparation.recommendation_state import BYTE_LIMITS, JOBS
 from yt_playlist.core.preparation import work_publication
@@ -19,8 +22,53 @@ def prepare(store):
     return JOBS['work'].step(store.conn).prepared_revision
 
 
+@pytest.fixture(scope='module')
+def published_work_template(tmp_path_factory, _pristine_installed_schema):
+    root = tmp_path_factory.mktemp('published-work-template')
+    with closing(sqlite3.connect(':memory:')) as template:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv('YT_PLAYLIST_HOME', str(root / 'app-home'))
+            source = Store(root / 'source.db')
+            with closing(source.conn):
+                _pristine_installed_schema(81).backup(source.conn)
+                source.init_schema()
+                work_publication.publish(source.conn, revision=prepare(source))
+                assert not coordinates(source.conn)
+                source.conn.backup(template)
+        template.execute('PRAGMA query_only=ON')
+        yield template
+
+
+@pytest.fixture
+def published_work(tmp_path, published_work_template):
+    store = Store(tmp_path / 'invalid.db')
+    with closing(store.conn):
+        published_work_template.backup(store.conn)
+        history = [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')]
+        store.init_schema()
+        assert recommendation_work.prepared_owner(store.conn)
+        assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 81
+        assert store.conn.execute('PRAGMA foreign_keys').fetchone()[0] == 1
+        assert store.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
+        yield store
+        assert [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')] == history
+        assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
+
+
+def published_state(conn):
+    result = state(conn)
+    # Independent real producers observe different wall-clock instants. Keep
+    # all other schema/data/history values, including source observation times.
+    for table, column in ((JOBS['work'].state, 'updated_at'), ('published_work', 'published_at')):
+        columns = [row[1] for row in conn.execute(f'PRAGMA table_info({table})')]
+        index = columns.index(column)
+        kind, sql, rows = result[table]
+        result[table] = kind, sql, sorted((row[:index] + row[index + 1:] for row in rows), key=repr)
+    return result
+
+
 @pytest.mark.parametrize('installed', [79, 81], indirect=True)
-def test_publication_preserves_originals_and_supports_existing_and_new_readers(installed):
+def test_publication_preserves_originals_and_supports_existing_and_new_readers(installed, request):
     store, version = installed
     revision = prepare(store)
     assert revision is not None and not recommendation_work.available(store.conn)
@@ -31,6 +79,28 @@ def test_publication_preserves_originals_and_supports_existing_and_new_readers(i
     assert recommendation_work.available(store.conn)
     assert store.model_selection.next_daily_at() == 123
     assert store.tv_preparation.state() == {'failed': False, 'at': 99}
+    if version == 81:
+        clone = request.getfixturevalue('published_work')
+        template = request.getfixturevalue('published_work_template')
+        control = Store(request.getfixturevalue('tmp_path') / 'genuine-published.db')
+        with closing(control.conn):
+            # The installed fixture defers regular changes. Independently replay
+            # the matrix's original non-deferred admission and full producer.
+            migrate(control.conn, registry=registry.MIGRATIONS[:81])
+            control.init_schema()
+            work_publication.publish(control.conn, revision=prepare(control))
+            assert published_state(clone.conn) == published_state(template) == published_state(control.conn)
+            assert template.execute('PRAGMA query_only').fetchone()[0] == 1
+            before = list(template.iterdump())
+            with pytest.raises(sqlite3.OperationalError, match='readonly'):
+                template.execute('UPDATE prepared_model_selection_schedule SET next_at=999')
+            assert clone._db_path != control._db_path and clone._evidence_key != control._evidence_key
+            for module in file_owners.owners().values():
+                assert module.directory(clone.conn) != module.directory(control.conn)
+            clone.model_selection.schedule_daily(456, 200)
+            assert clone.model_selection.next_daily_at() == 456
+            assert control.model_selection.next_daily_at() == 123
+            assert list(template.iterdump()) == before
     # Prove runtime reads the admitted typed owner. The temporary change is
     # rolled back and cannot conceal a stale retained source write.
     store.conn.execute('BEGIN')
@@ -47,7 +117,7 @@ def test_publication_preserves_originals_and_supports_existing_and_new_readers(i
         reopened.conn.close()
     assert store.model_selection.next_daily_at() == 234
     assert store.rec_proposals.get_proposals('tv_preparation') == {'failed': True, 'at': 201}
-    with sqlite3.connect(store._db_path) as old_writer:
+    with closing(sqlite3.connect(store._db_path)) as old_writer, old_writer:
         old_writer.execute('UPDATE rec_proposals SET payload=?,built_at=300 WHERE surface=?',
                            ('{"next_at":345}', 'daily_model_schedule'))
     assert store.model_selection.next_daily_at() == 345
@@ -105,7 +175,7 @@ def test_interrupted_publication_rolls_back_and_explicit_historical_route_still_
         # publication retained every predecessor document and migration stamp.
         # Frozen table rebuilds run on a physical-owner connection, without
         # a serving connection's TEMP read adapters shadowing installed owners.
-        with sqlite3.connect(store._db_path) as converter:
+        with closing(sqlite3.connect(store._db_path)) as converter:
             converter.row_factory = sqlite3.Row
             converter.execute('PRAGMA foreign_keys=ON')
             migrate(converter, registry=registry.MIGRATIONS[:82])
@@ -126,22 +196,14 @@ def test_interrupted_publication_rolls_back_and_explicit_historical_route_still_
         '{"failed":false,"at":true}', '{"failed":false,"at":1e999}',
         '{"failed":false,"unknown":1}')
 ])
-def test_publication_fences_invalid_continuing_source_writes(tmp_path, surface, payload):
-    path = tmp_path / 'invalid.db'
-    store = Store(path)
-    try:
-        migrate(store.conn, registry=registry.MIGRATIONS[:81])
-        store.init_schema()
-        revision = prepare(store)
-        work_publication.publish(store.conn, revision=revision)
-        with pytest.raises(sqlite3.DatabaseError):
-            with store.conn:
-                store.conn.execute('UPDATE rec_proposals SET payload=? WHERE surface=?',
-                                   (payload, surface))
-        assert store.model_selection.next_daily_at() == 123
-        assert json.loads(store.conn.execute("SELECT payload FROM rec_proposals WHERE surface='daily_model_schedule'").fetchone()[0]) == {'next_at': 123}
-    finally:
-        store.conn.close()
+def test_publication_fences_invalid_continuing_source_writes(published_work, surface, payload):
+    store = published_work
+    with pytest.raises(sqlite3.DatabaseError):
+        with store.conn:
+            store.conn.execute('UPDATE rec_proposals SET payload=? WHERE surface=?',
+                               (payload, surface))
+    assert store.model_selection.next_daily_at() == 123
+    assert json.loads(store.conn.execute("SELECT payload FROM rec_proposals WHERE surface='daily_model_schedule'").fetchone()[0]) == {'next_at': 123}
 
 
 @pytest.mark.parametrize('installed', [81], indirect=True)

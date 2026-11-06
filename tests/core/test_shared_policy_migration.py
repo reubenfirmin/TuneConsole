@@ -34,9 +34,8 @@ def test_shared_policy_upgrade_preserves_legacy_payload_without_backup_or_rewrit
         store.conn.close()
 
 
-def test_current_schema_rejects_missing_shared_policy_structures(tmp_path):
-    store = Store(tmp_path / 'state.db')
-    store.init_schema()
+def test_current_schema_rejects_missing_shared_policy_structures(tmp_path, consumer_store):
+    store = consumer_store(tmp_path / 'state.db')
     store.conn.execute('DROP INDEX ix_recommendation_policy_base')
     with pytest.raises(MigrationError, match='ix_recommendation_policy_base'):
         store.init_schema()

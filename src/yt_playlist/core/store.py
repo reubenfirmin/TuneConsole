@@ -5,8 +5,9 @@ from contextlib import contextmanager, ExitStack
 from pathlib import Path
 
 from yt_playlist.core.activity import interrupt_query
-from yt_playlist.core.db_reads import MAX_READERS, read_view
+from yt_playlist.core.db_reads import MAX_READERS, ReaderDiagnostics, read_view
 from yt_playlist.core.db_snapshot import read_snapshot
+from yt_playlist.core.read_memo import ReadMemo
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.db_diagnostics import DiagnosticConnection
 from yt_playlist.core import evidence_ledger, file_owners
@@ -55,6 +56,16 @@ from yt_playlist.repos.road_trip import RoadTripRepo
 from yt_playlist.repos.discovery import DiscoveryRepo
 from yt_playlist.repos.search import SearchRepo
 from yt_playlist.repos.settings import SettingsRepo
+from yt_playlist.repos.radio_checkpoints import RadioCheckpointRepo
+from yt_playlist.repos.retention import RetentionRepo
+from yt_playlist.repos.sync import SyncRepo
+from yt_playlist.repos.readiness import ReadinessRepo
+from yt_playlist.repos.radio_catalog import RadioCatalogRepo
+from yt_playlist.repos.summary_inputs import SummaryInputsRepo
+from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
+from yt_playlist.repos.group_evidence import GroupEvidenceRepo
+from yt_playlist.repos.album_feedback import AlbumFeedbackRepo
+from yt_playlist.repos.playback_feedback import PlaybackFeedbackRepo
 from yt_playlist.repos.tracks import TrackRepo
 from yt_playlist.repos.trends import TrendsRepo
 from yt_playlist.repos.tv_preparation import TVPreparationRepo
@@ -65,9 +76,7 @@ class Store:
     def activity_paused(self):
         source = getattr(self, '_evidence_source', self)
         return (getattr(source, '_activity_paused', False)
-                or getattr(source, '_rebuild_source_version', None) == 64
-                or bool(getattr(source, '_evidence_maintenance', 0))
-                or getattr(source, '_evidence_recovery_pending', False))
+                or getattr(source, '_rebuild_source_version', None) == 64)
 
     @activity_paused.setter
     def activity_paused(self, value):
@@ -98,6 +107,9 @@ class Store:
         self._lock = ServingLock(self.priority)
         self._evidence_state_lock = threading.Lock()
         self._analytics_readers = threading.BoundedSemaphore(MAX_READERS)
+        self._background_readers = threading.BoundedSemaphore(MAX_READERS - 1)
+        self._reader_diagnostics = ReaderDiagnostics()
+        self._foreground_read_memo = ReadMemo()
         self.background_measurement = None
         self.transient_radio_playlists = set()
         self.maintenance_diagnostics = MaintenanceDiagnostics()
@@ -114,8 +126,8 @@ class Store:
         self.conn.create_function('tastenorm', 1, normalize, deterministic=True)
 
     @contextmanager
-    def read_snapshot(self, *, dependencies=None):
-        """Read-only background view, optionally restricted to declared revision keys."""
+    def _retained_readers(self):
+        """Keep every retained-file owner alive for a SQL reader's lifetime."""
         root = policy_documents.root_for_database(self._db_path, self._evidence_key)
         with ExitStack() as retained:
             retained.enter_context(file_owners.readers(self._db_path, self._evidence_key))
@@ -142,44 +154,25 @@ class Store:
                 from . import legacy_evidence
                 retained.enter_context(policy_documents.retained_reader(
                     legacy_evidence.root_for_database(self._db_path, self._evidence_key)))
+            yield
+
+    @contextmanager
+    def read_snapshot(self, *, dependencies=None):
+        """Read-only background view, optionally restricted to declared revision keys."""
+        with self._retained_readers():
             with read_snapshot(self, self._make_reader, dependencies=dependencies) as snapshot:
                 yield snapshot
 
     @contextmanager
-    def read_view(self):
-        """Private analytics reader; no revision map or publication support."""
+    def read_view(self, *, tracked=False):
+        """Bounded private reader, optionally tracking reusable input reads."""
         if getattr(self, '_read_only', False):
             # A composed read keeps its original WAL snapshot and file lifetime.
             # Opening another reader here also repeats repository construction.
             yield self
             return
-        root = policy_documents.root_for_database(self._db_path, self._evidence_key)
-        with ExitStack() as retained:
-            retained.enter_context(file_owners.readers(self._db_path, self._evidence_key))
-            retained.enter_context(policy_documents.retained_reader(root))
-            retained.enter_context(policy_documents.retained_reader(
-                evidence_ledger.root_for_database(self._db_path, self._evidence_key)))
-            retained.enter_context(policy_documents.retained_reader(
-                served_facts.root_for_database(self._db_path, self._evidence_key)))
-            if getattr(self, '_collection_files', False):
-                retained.enter_context(policy_documents.retained_reader(
-                    collection_recovery.root_for_database(self._db_path,self._evidence_key)))
-            if getattr(self, '_compact_group_files', False):
-                retained.enter_context(policy_documents.retained_reader(
-                    group_documents.root_for_database(self._db_path, self._evidence_key)))
-            if getattr(self, '_recommendation_files', False):
-                retained.enter_context(policy_documents.retained_reader(
-                    recommendation_outputs.root_for_database(self._db_path, self._evidence_key)))
-            if getattr(self, '_metadata_files', False):
-                retained.enter_context(policy_documents.retained_reader(
-                    metadata_delivery_files.root_for_database(self._db_path, self._evidence_key)))
-                retained.enter_context(policy_documents.retained_reader(
-                    metadata_runtime_files.root_for_database(self._db_path, self._evidence_key)))
-            if getattr(self, '_legacy_files', False):
-                from . import legacy_evidence
-                retained.enter_context(policy_documents.retained_reader(
-                    legacy_evidence.root_for_database(self._db_path, self._evidence_key)))
-            with read_view(self, self._make_reader) as reader:
+        with self._retained_readers():
+            with read_view(self, self._make_reader, tracked=tracked) as reader:
                 yield reader
 
     def _make_reader(self):
@@ -224,45 +217,42 @@ class Store:
                 from .preparation import genre_publication
                 genre_publication.install_reads(self.conn)
         self._repository_schema_version = self.conn.execute('PRAGMA schema_version').fetchone()[0]
-        self._collection_files = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
-                                                  "AND name='album_feedback'").fetchone() is not None
-        self._recommendation_work = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
-                                                       "AND name='model_selection_schedule'").fetchone() is not None
-        self._home_offer_dedup = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
-                                                  "AND name='home_offer_dedup'").fetchone() is not None
-        self._album_note_demand = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
-                                                   "AND name='album_note_requests'").fetchone() is not None
-        self._recommendation_requests = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
-                                                        "AND name='home_genre_requests'").fetchone() is not None
-        self._listening_files = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
-                                                  "AND name='listening_output_publications'").fetchone() is not None
-        self._home_display_files = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
-                                                     "AND name='home_display_publications'").fetchone() is not None
-        self._choice_learning = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
-                                                  "AND name='choice_learning_publications'").fetchone() is not None
-        self._recommendation_reports = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
-                                                        "AND name='recommendation_report_publications'").fetchone() is not None
-        self._tv_recommendations = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
-                                                     "AND name='tv_continuation_receipts'").fetchone() is not None
-        self._clicked_library_pools = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
-                                                       "AND name='clicked_library_pools'").fetchone() is not None
-        self._model_comparison_state = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
-                                                        "AND name='model_comparison_plan'").fetchone() is not None
-        self._model_projections = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
-                                                   "AND name='model_pair_heads'").fetchone() is not None
-        self._paid_descriptions = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
-                                                    "AND name='album_description_requests'").fetchone() is not None
-        self._compact_group_files = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
-                                                      "AND name='group_generations'").fetchone() is not None
-        self._recommendation_files = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
-                                                       "AND name='recommendation_generations'").fetchone() is not None
-        self._metadata_files = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
-                                                 "AND name='metadata_deliveries'").fetchone() is not None
-        self._legacy_files = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
-                                               "AND name='legacy_catalog_evidence'").fetchone() is not None
+        # sqlite_schema has no name index. Repeated probes each scan it and can
+        # spend a background reader's entire deadline yielding to foreground work.
+        tables = {row[0] for row in self.conn.execute(
+            "SELECT name FROM main.sqlite_schema WHERE type='table'").fetchall()}
+        self._collection_files = 'album_feedback' in tables
+        self._recommendation_work = 'model_selection_schedule' in tables
+        self._home_offer_dedup = 'home_offer_dedup' in tables
+        self._album_note_demand = 'album_note_requests' in tables
+        self._recommendation_requests = 'home_genre_requests' in tables
+        self._listening_files = 'listening_output_publications' in tables
+        self._home_display_files = 'home_display_publications' in tables
+        self._choice_learning = 'choice_learning_publications' in tables
+        self._recommendation_reports = 'recommendation_report_publications' in tables
+        self._tv_recommendations = 'tv_continuation_receipts' in tables
+        self._clicked_library_pools = 'clicked_library_pools' in tables
+        self._model_comparison_state = 'model_comparison_plan' in tables
+        self._model_projections = 'model_pair_heads' in tables
+        self._paid_descriptions = 'album_description_requests' in tables
+        self._compact_group_files = 'group_generations' in tables
+        self._recommendation_files = 'recommendation_generations' in tables
+        self._recommendation_revalidations = 'recommendation_pool_revalidations' in tables
+        self._metadata_files = 'metadata_deliveries' in tables
+        self._legacy_files = 'legacy_catalog_evidence' in tables
         self.overlaps = OverlapRepo(self)
         self.genres = GenreRepo(self)
         self.settings = SettingsRepo(self)
+        self.radio_checkpoints = RadioCheckpointRepo(self)
+        self.retention = RetentionRepo(self)
+        self.sync = SyncRepo(self)
+        self.readiness = ReadinessRepo(self)
+        self.radio_catalog = RadioCatalogRepo(self)
+        self.summary_inputs = SummaryInputsRepo(self)
+        self.listening_analytics = ListeningAnalyticsRepo(self)
+        self.group_evidence = GroupEvidenceRepo(self)
+        self.album_feedback = AlbumFeedbackRepo(self)
+        self.playback_feedback = PlaybackFeedbackRepo(self)
         self.actions = ActionRepo(self)
         self.album_descriptions = AlbumDescriptionsRepo(self)
         self.audio_vibes = AudioVibesRepo(self)

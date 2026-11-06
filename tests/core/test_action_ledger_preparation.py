@@ -21,11 +21,11 @@ def finish(conn, size=128):
     pytest.fail('Action preparation did not finish bounded fixture')
 
 
-def seed(store, *, count=3):
+def seed(store, *, count=3, backup_path=None):
     account = store.accounts.upsert_account('Action', 'action.json', None, True)
     member = store.playlists.upsert_playlist(account, 'SOURCE', 'Source', 0, '', 1)
     store.playlists.upsert_playlist(account, 'COPY', 'Copy', 0, '', 1)
-    path = store._db_path.parent / 'retained-backup.json'
+    path = store._db_path.parent / 'retained-backup.json' if backup_path is None else Path(backup_path)
     backup = {'snapshot_version': 2, 'identity_id': account, 'ytm_playlist_id': 'SOURCE',
               'tracks': [{'video_id': 'one'}, {'video_id': 'one'}], 'paid': {'captured': '東京'}}
     path.write_text(json.dumps(backup, ensure_ascii=False, indent=2))

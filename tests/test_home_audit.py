@@ -52,14 +52,15 @@ def test_audit_snapshots_actual_genres_and_decades_with_unknown_coverage(store, 
     assert 'track_keys' not in card and 'recipe' not in card
 
 
-def test_routes_audit_mode_offers_previews_and_refreshes(store, audit_path):
-    from tests.test_mode_cards_route import _seed_bundles, _client
-    _seed_bundles(store)
-    client = _client(store)
-    assert client.get("/home/cards").status_code == 200
-    assert client.get("/home/cards").status_code == 200
-    assert client.post("/home/breadth", data={"breadth_bias": "0.5"}).status_code == 200
-    assert client.post("/home/refresh-cards").status_code == 200
+def test_routes_audit_mode_offers_previews_and_refreshes(store, audit_path, mode_cards_home_template):
+    from tests.home_fixture_support import prepared_client
+
+    mode_cards_home_template.restore(store)
+    with prepared_client(store) as client:
+        assert client.get("/home/cards").status_code == 200
+        assert client.get("/home/cards").status_code == 200
+        assert client.post("/home/breadth", data={"breadth_bias": "0.5"}).status_code == 200
+        assert client.post("/home/refresh-cards").status_code == 200
     rows = _rows(audit_path)
     assert [r["source"] for r in rows] == ["/home/cards", "/home/cards", "/home/breadth", "/home/refresh-cards"]
     assert [r["menu_epoch"] for r in rows] == [0, 0, 0, 1]

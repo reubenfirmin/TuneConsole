@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 
-from yt_playlist.core import policy_documents
+from yt_playlist.core import fao, policy_documents
 
 _INBOX = """CREATE TABLE IF NOT EXISTS playback_feedback_inbox (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,6 +71,8 @@ class Inbox:
             conn.execute(_INBOX)
             conn.execute('CREATE INDEX IF NOT EXISTS ix_playback_feedback_rating '
                          'ON playback_feedback_inbox(kind,account_id,video_id,sequence)')
+            conn.execute('CREATE INDEX IF NOT EXISTS ix_playback_feedback_filename '
+                         'ON playback_feedback_inbox(filename)')
             return conn
         except BaseException:
             conn.close()
@@ -102,11 +104,14 @@ class Inbox:
         capture = uuid.uuid4().hex
         video = body.get('video_id') if kind == 'rating' else body.get('videoId')
         status = body.get('status') if kind == 'rating' else None
-        owner = self._publish(capture, kind, body)
-        with self.admission(), closing(self.connect()) as conn, conn:
-            conn.execute('INSERT INTO playback_feedback_inbox(capture_id,kind,account_id,observed_at,video_id,rating_status,'
-                         'filename,content_digest,byte_size) VALUES (?,?,?,?,?,?,?,?,?)',
-                         (capture, kind, identity, now, video, status, *owner))
+        # A collector cannot visit file-before-SQL publication, even when
+        # backup admission is held or publication subsequently rolls back.
+        with fao.retained_reader(self.directory):
+            owner = self._publish(capture, kind, body)
+            with self.admission(), closing(self.connect()) as conn, conn:
+                conn.execute('INSERT INTO playback_feedback_inbox(capture_id,kind,account_id,observed_at,video_id,rating_status,'
+                             'filename,content_digest,byte_size) VALUES (?,?,?,?,?,?,?,?,?)',
+                             (capture, kind, identity, now, video, status, *owner))
         return capture
 
     def pending(self):
@@ -162,10 +167,41 @@ def inbox(store):
 
 
 def deferred(store):
-    return bool(store.activity_paused or inbox(store).pending())
+    return bool(store.activity_paused or store.playback_feedback.pending())
 
 
 def capture(store, kind, identity, body, now):
-    return inbox(store).capture(kind, identity, body, now)
+    return store.playback_feedback.capture(kind, identity, body, now)
 
 
+def _queue(conn):
+    path = conn.execute('PRAGMA database_list').fetchone()[2]
+    return Inbox(Path(path).resolve() if path else None, getattr(conn, '_policy_memory_key', str(id(conn))))
+
+
+def directory(conn):
+    return _queue(conn).directory
+
+
+def owns_file(conn, filename):
+    """Pending captures remain required even if main already has a receipt.
+
+    The collector holds the observation root exclusively, excluding capture.
+    Backup's admission fence prevents acknowledgements while it copies pending
+    rows, so a current row protects both replay and coherent backup custody.
+    A busy or predecessor inbox is retained and retried without waiting.
+    """
+    queue = _queue(conn)
+    if not queue.path.exists():
+        return False
+    try:
+        with closing(sqlite3.connect(queue.path.resolve().as_uri() + '?mode=ro', uri=True, timeout=0)) as reader:
+            columns = {row[1] for row in reader.execute('PRAGMA table_info(playback_feedback_inbox)')}
+            if 'filename' not in columns:
+                return True
+            return reader.execute('SELECT 1 FROM playback_feedback_inbox WHERE filename=? LIMIT 1',
+                                  (str(filename),)).fetchone() is not None
+    except sqlite3.OperationalError as exc:
+        if 'locked' in str(exc) or 'busy' in str(exc):
+            return True
+        raise

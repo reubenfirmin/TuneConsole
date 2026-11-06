@@ -2,17 +2,18 @@
 import json
 import hashlib
 
-from yt_playlist.core import audio_vibe_metadata
+from yt_playlist.core import audio_vibe_metadata, fao
 from yt_playlist.core.audio_vibe_contract import INTENSITY_CHANNELS
 from yt_playlist.core.activity import check_stopping, WorkBudgetExceeded
-from yt_playlist.rec import audio_vibe_cruise, audio_vibe_energize, audio_vibe_focus, audio_vibe_model, audio_vibe_preview, audio_vibe_relax, audio_vibe_release, audio_vibe_uplift, home_vibe
+from yt_playlist.rec import audio_vibe_cruise, audio_vibe_energize, audio_vibe_focus, audio_vibe_model, audio_vibe_prediction, audio_vibe_relax, audio_vibe_release, audio_vibe_uplift, home_vibe
 from yt_playlist.rec import musical_profiles as profiles
 from yt_playlist.rec import vibe_prediction as policy
+from yt_playlist.rec import vibe_joint_model, vibe_joint_preparation
 
 
 def serving_prefix():
     """Compatible fit semantics, independent of a replacement model's identity."""
-    return '/'.join(('recording-vibes-1', policy.VERSION, profiles.VERSION, audio_vibe_preview.VERSION)) + '/'
+    return '/'.join(('recording-vibes-1', policy.VERSION, profiles.VERSION, audio_vibe_prediction.VERSION)) + '/'
 
 
 def compatible_version(stamp):
@@ -29,12 +30,16 @@ def version():
 
 def due(store):
     return (store.settings.get_setting('rec_vibe_version') != version()
-            or store.vibe_predictions.pending() is not None)
+            or store.vibe_predictions.pending() is not None or vibe_joint_preparation.due(store))
 
 
-def step(store, batch=32):
+def step(store, batch=32, *, seconds=10, memory_bytes=vibe_joint_model.MEMORY_BYTES):
     store.vibe_predictions.ensure_version(version())
-    return store.vibe_predictions.fanout(batch)
+    if store.vibe_predictions.fanout(batch):
+        return True
+    if store.prepared_content.has_pending() or store.musical_profiles.pending():
+        return False
+    return vibe_joint_preparation.step(store, seconds=seconds, memory_bytes=memory_bytes)
 
 
 def measured(inputs, sources, selected, overrides):
@@ -51,7 +56,7 @@ def measured(inputs, sources, selected, overrides):
 def _measured(inputs, sources, selected, overrides):
     samples = inputs['samples']
     if samples:
-        prediction = audio_vibe_preview.predict(samples, metadata=inputs['metadata'])
+        prediction = audio_vibe_prediction.predict(samples, metadata=inputs['metadata'])
         shared_scores = {row['vibe']: row['score'] for row in prediction['ranking']}
         suitability = {**(prediction.get('suitability') or shared_scores),
                        **{channel: shared_scores[vibe] for channel, vibe in INTENSITY_CHANNELS.items()}}
@@ -94,13 +99,20 @@ def _measured(inputs, sources, selected, overrides):
 
 def recordings(reader, rows, musical, *, source_inputs=None):
     inputs = reader.vibe_predictions.inputs([row[0] for row in rows])
+    recording_ids = {key:value['recording'] for key,value in inputs.items()}
     if source_inputs is None:
         source_inputs = reader.musical_profiles.recording_inputs([row[0] for row in rows])
-    tracks, changed, group_keys = {}, {}, set()
+    tracks, changed = {}, {}
     stamp = version()
+    decoded = {key: json.loads(raw) for key, _revision, raw, _digest, _different in rows}
+    labels = {features.get('genre') for payload in decoded.values()
+              for features in (payload.get('library'), payload.get('discovered')) if features is not None}
+    labels.update(value['metadata'].get('genre') for value in inputs.values() if value.get('metadata'))
+    labels.update(overrides.get('genre') for _sources, overrides, _truncated in source_inputs.values())
+    axes = reader.genres.feature_axes(labels)
     for key, _revision, raw, _digest, _different in rows:
         check_stopping()
-        features = json.loads(raw)
+        features = decoded[key]
         features = features['library'] or features['discovered']
         if features is None and inputs[key]['samples'] and inputs[key]['metadata']:
             # A played, exactly matched catalog recording can teach the library
@@ -108,19 +120,24 @@ def recordings(reader, rows, musical, *, source_inputs=None):
             metadata = inputs[key]['metadata']
             features = {'genre': metadata.get('genre'), 'audio': metadata}
         old = inputs[key]['old']
-        if old:
-            group_keys.update(policy.groups(old['artist'], old['genre']))
         track = None
         if features is not None:
             sources, overrides, _truncated = source_inputs[key]
             sources = [s for s in sources if s['version'] == profiles.VERSION]
             genre = overrides.get('genre') if 'genre' in overrides else features.get('genre')
-            track = {'artist': inputs[key]['artist'], 'genre': audio_vibe_metadata.subgenre({'genre': genre},conn=reader.conn),
+            track = {'artist': inputs[key]['artist'], 'genre': audio_vibe_metadata.subgenre({'genre': genre}, genre_axes=axes),
                      'evidence': measured(inputs[key], sources, features.get('audio'), overrides), 'version': stamp}
-            group_keys.update(policy.groups(track['artist'], track['genre']))
         tracks[key] = track
         if old != track:
             changed[key] = (old, track)
+    usable = {key for key, payload, _version, _digest in musical if payload is not None}
+    channels = {*home_vibe.PRESETS, *INTENSITY_CHANNELS}
+    # Own measurements win every measured channel. Only tracks with a missing
+    # channel consume cohort statistics; changes still fan out to all affected
+    # cohorts, including old memberships and groups outside this batch.
+    group_keys = {group for key in usable
+                  if not tracks[key]['evidence'] or channels - tracks[key]['evidence']['fits'].keys()
+                  for group in policy.groups(tracks[key]['artist'], tracks[key]['genre'])}
     cohorts = reader.vibe_predictions.groups(sorted(group_keys))
     touched = set()
     for key, (old, new) in changed.items():
@@ -128,6 +145,9 @@ def recordings(reader, rows, musical, *, source_inputs=None):
             if not track or not track['evidence']:
                 continue
             for group in policy.groups(track['artist'], track['genre']):
+                touched.add(group)
+                if group not in cohorts:
+                    continue
                 cohort = cohorts[group]
                 cohort['stats'] = policy.adjust(cohort['stats'], track['evidence'], -1 if remove else 1)
                 for vibe, fit in track['evidence']['fits'].items():
@@ -138,8 +158,36 @@ def recordings(reader, rows, musical, *, source_inputs=None):
                         inputs.pop(key, None)
                     else:
                         inputs[key] = None  # Resolved to the new immutable measurement at publication.
-                touched.add(group)
     updated, resolved = [], {}
+    retained = reader.vibe_predictions.retained_joint_fits(list(tracks))
+    albums = reader.vibe_predictions.joint_albums(list(tracks)) if vibe_joint_preparation.qualified() else {}
+    pooled, repairs = {}, set()
+    for vibe in (*home_vibe.PRESETS, *INTENSITY_CHANNELS):
+        eligible = [key for key in usable if not tracks[key]['evidence']
+                    or vibe not in tracks[key]['evidence']['fits']]
+        pooled[vibe] = None
+        if not eligible:
+            continue
+        try:
+            prepared = vibe_joint_preparation.posterior(reader, vibe)
+            if prepared:
+                generation, posterior = prepared
+                training = {row['recording'] for row in posterior.rows}
+                estimates = {}
+                for key in eligible:
+                    check_stopping()
+                    # A same-batch retraction can precede SQL invalidation.
+                    # Never predict from the target's own previous measurement.
+                    if recording_ids[key] not in training:
+                        estimates[key] = posterior.predict(json.loads(tracks[key]['artist'] or '[]'),
+                            tracks[key]['genre'], album=albums.get(key), recording=recording_ids[key])
+                pooled[vibe] = generation, estimates
+                # Retain only bounded score receipts across channels, never
+                # eight dense posteriors during a foreground preparation turn.
+                del posterior
+            del prepared
+        except fao.CorruptFile:
+            repairs.add('!joint:' + vibe)
     for key, payload, profile_version, _digest in musical:
         if payload is None:
             updated.append((key, payload, profile_version, None))
@@ -154,16 +202,30 @@ def recordings(reader, rows, musical, *, source_inputs=None):
             fallback[channel] = fallback[vibe]
         candidates = []
         for group in policy.groups(track['artist'], track['genre']):
-            stats = cohorts[group]['stats']
+            stats = cohorts[group]['stats'] if group in cohorts else {}
             if track['evidence']:
                 stats = policy.adjust(stats, track['evidence'], -1)
             candidates.append((group, stats))
         profile['vibes'] = policy.resolve(fallback, track['evidence'], candidates)
+        for vibe, fit in profile['vibes']['fits'].items():
+            if fit['source'] in ('audio_measurement', 'provider_measurement'):
+                continue
+            prepared = pooled[vibe]
+            if prepared:
+                generation, estimates = prepared
+                estimate = estimates.get(key)
+                if estimate:
+                    profile['vibes']['fits'][vibe] = {**estimate, 'generation': generation,
+                                                      'model_version': vibe_joint_model.VERSION}
+            elif (vibe in retained.get(key, {}) and not (
+                    vibe_joint_preparation.current(reader, state := vibe_joint_preparation.state(reader, vibe))
+                    and state.get('outcome') == 'empty')):
+                profile['vibes']['fits'][vibe] = retained[key][vibe]
         profile['vibes']['inputs_version'] = stamp
         resolved[key] = {}
         for vibe, fit in profile['vibes']['fits'].items():
             projected = dict(fit)
-            if fit['source'] in policy.CAPS:
+            if fit['source'] in policy.CAPS and not fit.get('generation') and not fit.get('retain'):
                 group = next(group for group, _stats in candidates if json.loads(group)[0] == fit['source'])
                 projected['inputs'] = {identity: mid for identity, mid in cohorts[group]['inputs'].get(vibe, {}).items()
                                        if identity != key}
@@ -173,4 +235,4 @@ def recordings(reader, rows, musical, *, source_inputs=None):
         updated.append((key, profiles.canonical(profile), profile_version, profiles.digest(profile)))
     if version() != stamp:
         raise WorkBudgetExceeded('Configured vibe model changed during capture')
-    return updated, (tracks, resolved, sorted(touched))
+    return updated, (tracks, resolved, sorted(touched | repairs))

@@ -32,11 +32,11 @@
       </defs>
       <image class="festival-grounds" href="/static/festival-grounds-v4.png" width="1536" height="1024"/>
       <g class="festival-routes" mask="url(#festival-path-surface)" aria-hidden="true">
-        {# Explored trails and the single preparation frontier get light; other future paths stay in the art. #}
-        {% for stop in growth.nodes %}<g data-destination="{{ stop.id }}" :class="'growth-route is-' + node('{{ stop.id }}').state" :data-parent="node('{{ stop.id }}').parent" x-show="node('{{ stop.id }}').state === 'explored' || (node('{{ stop.id }}').state === 'preparing' && !node('{{ stop.id }}').optional)"{% if stop.state != 'explored' %} style="display:none"{% endif %}><path d="{{ stop.route }}" :d="node('{{ stop.id }}').route"/></g>{% endfor %}
+        {# Available trails and the single preparation frontier get light; later paths stay in the art. #}
+        {% for stop in growth.nodes %}<g data-destination="{{ stop.id }}" :class="'growth-route is-' + (node('{{ stop.id }}').connected ? 'connected' : node('{{ stop.id }}').state)" :data-parent="node('{{ stop.id }}').parent" x-show="node('{{ stop.id }}').connected || node('{{ stop.id }}').ready || (node('{{ stop.id }}').state === 'preparing' && !node('{{ stop.id }}').optional)"{% if not stop.ready and not stop.connected %} style="display:none"{% endif %}><path d="{{ stop.route }}" :d="node('{{ stop.id }}').route"/></g>{% endfor %}
       </g>
       {% for stop in growth.nodes %}
-      <g class="landmark-art{% if growth_intro|default(false) and stop.id == 'first' %} is-soundcheck{% endif %}" :class="{['is-' + node('{{ stop.id }}').state]: true, 'is-lit': hovered === '{{ stop.id }}' || selected === '{{ stop.id }}'}" aria-hidden="true">
+      <g class="landmark-art{% if growth_intro|default(false) and stop.id == 'first' %} is-soundcheck{% endif %}" data-landmark="{{ stop.id }}" :class="{['is-' + node('{{ stop.id }}').state]: true, 'is-connected': node('{{ stop.id }}').connected, 'is-lit': hovered === '{{ stop.id }}' || selected === '{{ stop.id }}'}" aria-hidden="true">
         <path class="landmark-halo" d="{{ stop.shape }}" filter="url(#festival-glow)"/>
         <image class="landmark-light" href="/static/festival-grounds-v4.png" width="1536" height="1024" clip-path="url(#festival-{{ stop.id }})"/>
       </g>
@@ -56,15 +56,14 @@
         <path class="landmark-hit" d="{{ stop.shape }}"/>
         <g class="landmark-sign" text-anchor="start" transform="translate({{ stop.sign_x }}, {{ stop.sign_y }})">
           <text class="landmark-label">{{ {'takeout': 'Past listening', 'lastfm': 'Music details', 'deepseek': 'Album stories'}.get(stop.id, stop.label) }}</text>
-          {% if growth_intro|default(false) and stop.id == 'first' %}<text class="landmark-hint" y="25">You are here</text>{% endif %}
-          {% if stop.id != 'first' %}<text class="landmark-hint" y="25" x-show="node('{{ stop.id }}').state !== 'untouched'" x-text="node('{{ stop.id }}').state === 'explored' ? (isNew(node('{{ stop.id }}')) ? 'New · Explored' : 'Explored') : node('{{ stop.id }}').optional ? 'Optional · Explore' : node('{{ stop.id }}').ready ? (isNew(node('{{ stop.id }}')) ? 'New · Explore' : 'Explore') : 'Preparing'"></text>{% endif %}
+          <text class="landmark-hint" y="25" x-show="node('{{ stop.id }}').upcoming"{% if not stop.upcoming %} style="display:none"{% endif %} x-text="node('{{ stop.id }}').state === 'preparing' ? 'Preparing' : 'Up next'"></text>
         </g>
       </g>
       {% endfor %}
     </svg>
   </div>
   <p class="festival-swipe-hint" x-show="!mapPanned">Swipe to explore the festival</p>
-  <ul class="growth-legend" aria-label="Path key" x-show="pathStates.includes('explored')" x-cloak>
-    <li class="is-explored" x-show="pathStates.includes('explored')" x-cloak><i></i>Explored</li>
+  <ul class="growth-legend" aria-label="Path key" x-show="pathStates.includes('open')" x-cloak>
+    <li class="is-explored" x-show="pathStates.includes('open')" x-cloak><i></i>Open paths</li>
   </ul>
 </section>

@@ -1,5 +1,7 @@
 """Deletion recovery must describe remote contents, never the last local sync."""
 import json
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -91,12 +93,15 @@ def test_incomplete_remote_read_preserves_playlist_and_publishes_nothing(
     assert not list(tmp_path.glob("backups/*"))
 
 
-@pytest.mark.parametrize("failure", ["fetch", "write", "publish", "fsync"])
+@pytest.mark.parametrize("failure", ["fetch", "write", "publish", "fsync", "file_fsync",
+                                     pytest.param("directory_fsync", marks=pytest.mark.skipif(
+                                         os.name == "nt", reason="POSIX directory durability"))])
 def test_failed_backup_does_not_delete_or_overwrite_prior_recovery(
         store, source, tmp_path, monkeypatch, failure):
     _, pid, client, _ = source
     prior = Path(playlist_backups.backup_playlist(store, pid, 2, client))
     saved = prior.read_bytes()
+    boundary_reached = []
 
     def fail(*args, **kwargs):
         raise OSError("Backup unavailable")
@@ -107,15 +112,46 @@ def test_failed_backup_does_not_delete_or_overwrite_prior_recovery(
         monkeypatch.setattr(playlist_backups.json, "dumps", fail)
     elif failure == "publish":
         monkeypatch.setattr(playlist_backups.os, "replace", fail)
-    else:
+    elif failure == "fsync":
         monkeypatch.setattr(playlist_backups.os, "fsync", fail)
+    else:
+        fsync = playlist_backups.os.fsync
+
+        def fail_at_boundary(fd):
+            info = os.fstat(fd)
+            if failure == "file_fsync" and stat.S_ISREG(info.st_mode):
+                boundary_reached.append(failure)
+                fail()
+            if (failure == "directory_fsync" and stat.S_ISDIR(info.st_mode)
+                    and os.path.samestat(info, prior.parent.stat())
+                    and len(list(prior.parent.glob("SOURCE_*.json"))) == 2):
+                boundary_reached.append(failure)
+                fail()
+            return fsync(fd)
+
+        monkeypatch.setattr(playlist_backups.os, "fsync", fail_at_boundary)
     with pytest.raises(OSError, match="Backup unavailable"):
         executor.delete_playlist(store, pid, client, 2)
+    if failure in {"file_fsync", "directory_fsync"}:
+        assert boundary_reached == [failure]
     assert prior.read_bytes() == saved
-    assert set((tmp_path / "backups").iterdir()) == {prior, prior.parent / ".fao.lock"}
+    retained = set(prior.parent.iterdir())
+    if failure == "directory_fsync":
+        # The atomic rename completed, but its directory entry is not yet durable.
+        assert len(retained - {prior, prior.parent / ".fao.lock"}) == 1
+        assert len(list(prior.parent.glob("SOURCE_*.json"))) == 2
+    else:
+        assert retained == {prior, prior.parent / ".fao.lock"}
+    assert not list(prior.parent.glob(".fao-pending-*"))
     assert not client.deleted
     assert store.playlists.get_playlist(pid) is not None
     assert store.actions.get_actions() == []
+    if failure in {"file_fsync", "directory_fsync"}:
+        monkeypatch.setattr(playlist_backups.os, "fsync", fsync)
+        executor.delete_playlist(store, pid, client, 3)
+        assert client.deleted == ["SOURCE"]
+        assert store.actions.get_actions()[0].status == "executed"
+        assert prior.read_bytes() == saved
 
 
 def test_merge_gate_and_backup_use_the_same_source_snapshot(store, source, monkeypatch):

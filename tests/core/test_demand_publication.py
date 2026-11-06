@@ -28,6 +28,18 @@ def ready(conn, size=1):
     pytest.fail('Demand publication did not finish')
 
 
+@pytest.mark.parametrize('installed', [86], indirect=True)
+def test_selected_presence_reads_no_demand_document(installed, monkeypatch):
+    store, _ = installed
+    seed(store)
+    publication.publish(store.conn, identity=ready(store.conn))
+    def forbidden(*args, **kwargs):
+        pytest.fail('Presence read a selected demand document')
+    monkeypatch.setattr(publication, 'read', forbidden)
+    for surface, value in EXPECTED.items():
+        assert bool(store.rec_proposals.has_proposals(surface)) == bool(value)
+
+
 @pytest.mark.parametrize('installed',[79,86],indirect=True)
 def test_selected_requests_preserve_identity_order_sources_and_supported_upgrade(installed,tmp_path):
     store,_ = installed

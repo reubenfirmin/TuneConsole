@@ -4,17 +4,36 @@ The existing ranked full-depth pools supply taste scores and eligible catalog
 coverage. Controls only assemble these bounded prepared opportunities.
 """
 from collections import Counter
+from dataclasses import dataclass
+import math
+from types import MappingProxyType
 
 from yt_playlist.core import json_cache
 from yt_playlist.core.activity import check_cancellable_work
+from yt_playlist.core.db_revisions import column_group_reads
 from yt_playlist.rec import home_vibe, musical_character, musical_profiles, radio_intensity, rec_params
 from yt_playlist.rec.eligibility import home_exclusions
 from yt_playlist.rec.vibe_pool_contract import GENRE_RESERVE, POOL_LIMIT
-from yt_playlist.util import genre_map
 from yt_playlist.util.matching import normalize
 
 _LABELS = {'wheelhouse': 'More in your wheelhouse', 'explore': 'From your catalog',
            'fresh': 'Fresh songs', 'comfort': 'Comfort listening'}
+
+
+@dataclass(frozen=True)
+class _Catalog:
+    """Immutable scalar SQL rows shared by dependency-tracked readers."""
+    groups: tuple
+
+    def __post_init__(self):
+        object.__setattr__(self, 'groups', tuple(
+            MappingProxyType({key: MappingProxyType(dict(row)) for key, row in group.items()})
+            for group in self.groups))
+
+    def __deepcopy__(self, memo):
+        # The query projections contain only SQLite scalars. Neither the maps
+        # nor their rows can change, so detached readers can share their value.
+        return self
 
 
 def _reserve(items, preset, limit=POOL_LIMIT):
@@ -49,6 +68,9 @@ def prepare(store, bundles, now, policies):
     pools = bundles.get('all', {})
     library = {item['key']: item for lane in ('explore', 'wheelhouse') for item in pools.get(lane, [])}
     menus, genre_menus = {}, {}
+    # Every preset/lane sees the same taxonomy on this preparation snapshot.
+    # Resolve each exact provider label once without retaining it across builds.
+    axes = store.genres.feature_axes({item.get('genre') for item in unique.values()})
     cuts = bundles.get('_meta', {}).get('year_cuts')
     band_pools = {}
     if cuts:
@@ -69,7 +91,9 @@ def prepare(store, bundles, now, policies):
                                                  f'{home_vibe.VERSION}:{preset}:{lane}')
             families = {}
             for item in candidates.values():
-                family = genre_map.family(item.get('genre'),conn=store.conn)
+                check_cancellable_work()
+                genre = item.get('genre')
+                family = axes.get(genre, ('', None))[0]
                 if family:
                     families.setdefault(family, []).append(item)
             genre_menus[preset][lane] = {family: policies.stamp(_reserve(items, preset, GENRE_RESERVE),
@@ -144,32 +168,48 @@ def candidates(store, preset, lane, *, bundles=None, include_genres=(), avoid_ge
 
 def _stored_candidates(store, preset, lane, include_genres, avoid_genres):
     """Read selected bounded vibe pools without opening the old mode bundle."""
+    return _stored_pools(store, preset, [lane], include_genres, avoid_genres)[lane]
+
+
+def _stored_pools(store, preset, lanes, include_genres, avoid_genres, *, ranking_only=False):
+    """Share catalog and musical evidence across the requested lanes."""
     if not getattr(store, '_read_only', False):
         with store.read_view() as reader:
-            return _stored_candidates(reader, preset, lane, include_genres, avoid_genres)
+            return _stored_pools(reader, preset, lanes, include_genres, avoid_genres, ranking_only=ranking_only)
+    pools = {lane: {} for lane in lanes}
     surface = 'vibe:' + preset
     head = store.recommendations.head(surface)
     if head is None:
-        return []
+        return {lane: [] for lane in lanes}
     generation = head['id']
     framing = store.recommendations.framing(surface, generation=generation) or {}
     if framing.get('vibe_version') != home_vibe.VERSION:
-        return []
-    modes = ['']
-    if include_genres or avoid_genres:
-        modes.extend(row['mode_key'] for row in store.recommendations.selections(surface, lane, generation=generation)
-                     if row['mode_key'] and row['mode_key'] not in avoid_genres
-                     and (not include_genres or row['mode_key'] in include_genres))
-    pool = {}
-    for mode in modes:
-        after = -1
-        while True:
-            check_cancellable_work()
-            page = store.recommendations.candidate_page(surface, mode, lane, generation=generation,
-                                                         after=after, limit=POOL_LIMIT)
-            profiles = musical_character.load(store, [item['key'] for item in page['tracks']])
-            axes = (store.genres.feature_axes(item.get('genre') for item in page['tracks'])
-                    if include_genres or avoid_genres else {})
+        return {lane: [] for lane in lanes}
+    pending = []
+    for lane in lanes:
+        modes = ['']
+        if include_genres or avoid_genres:
+            modes.extend(row['mode_key'] for row in store.recommendations.selections(surface, lane, generation=generation)
+                         if row['mode_key'] and row['mode_key'] not in avoid_genres
+                         and (not include_genres or row['mode_key'] in include_genres))
+        pending.extend((mode, lane, -1) for mode in modes)
+    profiles = {}
+    while pending:
+        check_cancellable_work()
+        selected, pending = pending[:16], pending[16:]
+        pages = store.recommendations.candidate_pages(surface, selected, generation=generation, limit=POOL_LIMIT)
+        keys = list(dict.fromkeys(item['key'] for page in pages for item in page['tracks']
+                                 if item['key'] not in profiles))
+        scores = store.vibe_predictions.fit_scores(keys, preset) if ranking_only else {}
+        scores = {key: score for key, score in scores.items()
+                  if type(score) in (int, float) and math.isfinite(score) and 0 <= score <= 1}
+        profiles.update(musical_character.load(store, [key for key in keys if key not in scores]))
+        profiles.update({key: {'_rank_only': True, 'vibes': {'fits': {preset: {'score': score}}}}
+                         for key, score in scores.items()})
+        axes = (store.genres.feature_axes(item.get('genre') for page in pages for item in page['tracks'])
+                if include_genres or avoid_genres else {})
+        for (mode, lane, _), page in zip(selected, pages):
+            pool = pools[lane]
             for item in page['tracks']:
                 family = axes.get(item.get('genre'), ('', None))[0]
                 if family in avoid_genres or include_genres and family not in include_genres:
@@ -178,24 +218,57 @@ def _stored_candidates(store, preset, lane, include_genres, avoid_genres):
             # Filters can reject a full page. Continue through this selected
             # pool while retaining only the best bounded result in memory.
             if len(pool) > POOL_LIMIT:
-                pool = {item['key']: item for item in sorted(pool.values(), key=lambda item: home_vibe.order_key(item, preset))[:POOL_LIMIT]}
-            if page['exhausted'] or not (include_genres or avoid_genres):
-                break
-            after = page['after']
-    result = list(pool.values())
-    if include_genres or avoid_genres:
-        result.sort(key=lambda item: home_vibe.order_key(item, preset))
-    return result[:POOL_LIMIT]
+                pools[lane] = {item['key']: item for item in sorted(pool.values(), key=lambda item: home_vibe.order_key(item, preset))[:POOL_LIMIT]}
+            if not page['exhausted'] and (include_genres or avoid_genres):
+                pending.append((mode, lane, page['after']))
+        retained = {key for pool in pools.values() for key in pool}
+        profiles = {key: value for key, value in profiles.items() if key in retained}
+    result = {}
+    for lane, pool in pools.items():
+        rows = list(pool.values())
+        if include_genres or avoid_genres:
+            rows.sort(key=lambda item: home_vibe.order_key(item, preset))
+        result[lane] = rows[:POOL_LIMIT]
+    return result
 
 
-def eligibility_inputs(store, items, now, *, include_discoveries=True):
+def eligibility_inputs(store, items, now, *, include_discoveries=True, hydrated=False):
     """Resolve live exclusions once for a set of already prepared candidates."""
-    keys = [item['key'] for item in items]
+    keys = list(dict.fromkeys(item['key'] for item in items))
     blocked = home_exclusions(store, keys, now)
-    owned = store.rec_query.tracks_by_keys(keys)
-    discoveries = (store.discovery.discovered_tracks_by_keys(keys, available_only=True)
-                   if include_discoveries else {})
-    metadata = store.rec_eligibility.offer_metadata([item['video_id'] for item in [*owned.values(), *discoveries.values()]])
+    if hydrated:
+        # candidate_pages already resolved current membership and upload metadata
+        # on this pinned reader. Reuse it rather than querying each owner again.
+        owned = {item['key']: item for item in items if not item['_radio_fresh']}
+        discoveries = {item['key']: item for item in items if item['_radio_fresh']}
+        metadata = {item['video_id']: item for item in items}
+    else:
+        def catalog():
+            # These projections consume catalog fields, never enrichment's
+            # scheduling timestamps. Metadata and membership changes still
+            # invalidate the result through their real owner revisions.
+            with column_group_reads(store, 'recordings', 'catalog'):
+                owned = {key: {**row, 'album': row.get('album') or ''}
+                         for key, row in store.rec_query.group_candidates(keys).items()}
+                # Fresh lanes always reject an owned recording, and other
+                # lanes use its owned entry. Do not hydrate that recording's
+                # unused discovery alternative a second time.
+                discoveries = (store.discovery.candidate_tracks_by_keys([key for key in keys if key not in owned])
+                               if include_discoveries else {})
+                owned_videos = {row['video_id'] for row in owned.values()}
+                metadata = store.rec_eligibility.offer_metadata(
+                    [item['video_id'] for item in discoveries.values()
+                     if item['video_id'] not in owned_videos])
+                # The owned-entry query already resolved these same catalog
+                # fields. Do not resolve its uploads again through catalog_tracks.
+                metadata.update({row['video_id']: {'video_id': row['video_id'], 'genre': row['genre'],
+                                                   'duration': row['duration_s']} for row in owned.values()})
+            return _Catalog((owned, discoveries, metadata))
+        # Catalog fields do not depend on the request clock. A tracked reader
+        # can reuse them only while their actual SQL dependencies are unchanged;
+        # feedback, expiring exclusions and weights are always resolved below.
+        owned, discoveries, metadata = store.memoized_read(
+            ('vibe-eligibility-catalog', tuple(keys), include_discoveries), catalog).groups
     weights = store.rec_model.get_weights(now=now)
     maximum = 60 * rec_params.get_param(store, 'max_track_minutes')
     muted = {normalize(artist) for artist in store.rec_model.muted_artists()}
@@ -206,10 +279,15 @@ def eligibility_inputs(store, items, now, *, include_discoveries=True):
 
 
 def eligible(store, items, now, lane, excluded=(), *, include_genres=(), avoid_genres=(), inputs=None):
+    return list(iter_eligible(store, items, now, lane, excluded,
+                             include_genres=include_genres, avoid_genres=avoid_genres, inputs=inputs))
+
+
+def iter_eligible(store, items, now, lane, excluded=(), *, include_genres=(), avoid_genres=(), inputs=None):
+    """Yield live eligible candidates; ordered consumers can stop after filling their menu."""
     blocked, owned, discoveries, metadata, weights, maximum, muted, axes = (
         inputs if inputs is not None else eligibility_inputs(store, items, now, include_discoveries=lane == 'fresh'))
     blocked = blocked | set(excluded)
-    result = []
     for item in items:
         current = (discoveries if lane == 'fresh' else owned).get(item['key'])
         if (not current or item['key'] in blocked or (lane == 'fresh' and item['key'] in owned)
@@ -225,9 +303,8 @@ def eligible(store, items, now, lane, excluded=(), *, include_genres=(), avoid_g
                 or (details.get('duration') and details['duration'] > maximum)
                 or (item.get('genre') and family != axes[item['genre']][0])):
             continue
-        result.append({**item, **{key: current[key] for key in ('title', 'artist', 'video_id', 'thumbnail')
-                                  if key in current}})
-    return result
+        yield {**item, **{key: current[key] for key in ('title', 'artist', 'video_id', 'thumbnail')
+                         if key in current}}
 
 
 def diversify(items, artist_cap, album_cap, *, size=12):
@@ -256,6 +333,7 @@ def pick(store, now, preset, lane, excluded=(), *, bundles=None, size=12,
 
 
 def assemble(store, now, preset, epoch=0, *, bundles=None, include_genres=(), avoid_genres=()):
+    selected = None
     if bundles is None and getattr(store, '_recommendation_files', False):
         if not getattr(store, '_read_only', False):
             with store.read_view() as reader:
@@ -264,15 +342,35 @@ def assemble(store, now, preset, epoch=0, *, bundles=None, include_genres=(), av
         meta = {**meta, 'comfort_pool': meta.get('comfort_pool') or 0,
                 'year_cuts': ([meta['year_low'], meta['year_high']]
                                      if meta.get('year_low') is not None else None)}
+        lanes = list(_LABELS)
+        if meta.get('year_cuts'):
+            lanes.append(f'temporal:{epoch % 3}')
+        selected = _stored_pools(store, preset, lanes, include_genres, avoid_genres, ranking_only=True)
+        inputs = eligibility_inputs(store, [item for pool in selected.values() for item in pool], now, hydrated=True)
+        artist_cap = int(rec_params.get_param(store, 'modes_artist_cap'))
+        album_cap = int(rec_params.get_param(store, 'modes_album_cap'))
     else:
         bundles = bundles if bundles is not None else store.rec_proposals.get_proposals('mode_bundles') or {}
         meta = bundles.get('_meta', {})
     def select(lane, seen):
+        if selected is not None:
+            pool = eligible(store, selected[lane], now, lane.split(':')[0], seen,
+                            include_genres=include_genres, avoid_genres=avoid_genres, inputs=inputs)
+            pool.sort(key=lambda item: home_vibe.order_key(item, preset))
+            return diversify(pool, artist_cap, album_cap)
         return pick(store, now, preset, lane, seen, bundles=bundles,
                     include_genres=include_genres, avoid_genres=avoid_genres)
     cards = assemble_lanes(meta, epoch, rec_params.get_param(store, 'comfort_min_pool'), select)
+    return _finish_cards(store, preset, cards)
+
+
+def _finish_cards(store, preset, cards):
+    profiles = musical_character.load(store, list(dict.fromkeys(item['key'] for card in cards for item in card['tracks']
+        if (item.get('musical') or {}).get('_rank_only'))))
     for card in cards:
         lane = card.pop('pool_lane')
+        card['tracks'] = [{**item, 'musical': profiles[item['key']]} if item['key'] in profiles else item
+                          for item in card['tracks']]
         card['tracks'] = [{**item, 'serving_context': {**item.get('serving_context', {}),
             'ordering_ranker': home_vibe.VERSION, 'source_ranker': lane, 'vibe': preset,
             'vibe_affinity': home_vibe.affinity(item, preset), 'taste_score': home_vibe.taste_score(item),

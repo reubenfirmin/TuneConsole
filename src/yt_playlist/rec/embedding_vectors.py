@@ -54,7 +54,9 @@ def build_discovered_content_vectors(store) -> int:
         snapshot = store.rec_model.content_generation()
         if not snapshot["model"]:
             return 0
-        out = content_model.encode_discovered(store.discovery.get_discovered_tracks(), json.loads(snapshot["model"]),conn=store.conn)
+        rows = store.discovery.get_discovered_tracks()
+        axes = store.genres.feature_axes(row.get('genre') for row in rows)
+        out = content_model.encode_discovered(rows, json.loads(snapshot["model"]),genre_axes=axes)
         if store.rec_model.publish_content_generation(snapshot["library"], out, snapshot["model"],
                 snapshot["revision"] or "", snapshot["inputs"], snapshot["generation"]):
             return len(out)

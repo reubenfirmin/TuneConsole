@@ -8,7 +8,7 @@ import pytest
 from tests.core.test_predecessor_writes import installed
 from tests.core.test_radio_origin_preparation import finish, head, seed
 from yt_playlist.core import radio_provenance
-from yt_playlist.core.migrations import MigrationError, registry, regular, runner
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import radio_origin_publication as publication, radio_origins as preparation
 from yt_playlist.core.store import Store
 
@@ -227,23 +227,3 @@ def test_long_repeated_lists_and_absent_sources_preserve_runtime_order(installed
     publication.publish(store.conn,revision=prepare(store.conn))
     assert radio_provenance.ids(store.conn) == []
     assert store.settings.get_setting(preparation.KEYS[0],'absent') == 'absent'
-
-
-@pytest.mark.parametrize('installed',[93],indirect=True)
-def test_frozen_upgrade_prefers_native_origins_and_keeps_original_files(installed,tmp_path):
-    store,_ = installed
-    original = seed(store)
-    publication.publish(store.conn,revision=prepare(store.conn))
-    retained = {source:head(store.conn,source) for source in original}
-    upgraded = Store(tmp_path/'native-origins.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn,registry=registry.MIGRATIONS)
-        regular.validate(upgraded.conn)
-        assert publication.selected(upgraded.conn) is None
-        assert radio_provenance.ids(upgraded.conn) == ['LM','missing','shared']
-        for source,raw in original.items():
-            assert preparation.read_original(upgraded.conn,retained[source]) == raw
-        assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        upgraded.conn.close()

@@ -137,7 +137,8 @@ def eligible(store, items, maximum, now):
              and all(isinstance(t.get(k), str) for k in
                      ('video_id', 'title', 'artist', 'kind', 'source_key', 'source_artist'))
              and _VIDEO.fullmatch(t['video_id']) and type(t.get('duration')) is int]
-    upload_keys = {t['video_id']: (store.tracks.identity_key_for_video(t['video_id'])
+    identities = store.tracks.identity_keys_for_videos(t['video_id'] for t in items)
+    upload_keys = {t['video_id']: (identities.get(t['video_id'])
                                   or identity_key(t['title'], t['artist'])) for t in items}
     blocked = home_exclusions(store, [t['source_key'] for t in items], now)
     # Video uploads are deliberately saved in Generated playlists. That origin

@@ -65,28 +65,31 @@ def test_refresh_alternate_id_disable_and_key_change_reuse_paid_copy(store, gene
     assert copy.identity(ALBUM) != copy.identity({**ALBUM, 'title': ALBUM['title'].replace('DJ Mix', 'Unmixed')})
 
 
-def test_durable_copy_survives_database_reopen_and_home_cache_eviction(tmp_path, generated):
-    path = tmp_path / 'state.db'
-    first = Store(path)
-    first.init_schema()
+def test_durable_copy_survives_database_reopen_and_home_cache_eviction(file_backed_store, generated):
+    first = file_backed_store
+    path = first._db_path
     own_album(first)
     description = copy.get(first, ALBUM, 100)[0]
+    assert first.rec_proposals.publish_album_note(ALBUM['browse_id'], {'description': description}, 100)
+    assert first.rec_proposals.get_proposals('album_notes')[ALBUM['browse_id']]['description'] == description
     for number in range(130):
-        first.rec_proposals.publish_album_note(str(number), {'description': None}, 200)
+        assert first.rec_proposals.publish_album_note(str(number), {'description': None}, 200)
+    cache = first.rec_proposals.get_proposals('album_notes')
+    assert len(cache) == 128 and ALBUM['browse_id'] not in cache
     first.conn.close()
     second = Store(path)
-    second.init_schema()
     try:
+        second.init_schema()
         assert copy.get(second, ALBUM, 99999999)[0] == description
         assert len(generated) == 1
     finally:
         second.conn.close()
 
 
-def test_daily_limit_counts_failures_survives_restart_and_does_not_reset_on_new_key(tmp_path, generated, monkeypatch):
-    path = tmp_path / 'state.db'
-    store = Store(path)
-    store.init_schema()
+def test_daily_limit_counts_failures_survives_restart_and_does_not_reset_on_new_key(
+        file_backed_store, generated, monkeypatch):
+    store = file_backed_store
+    path = store._db_path
     own_album(store)
     store.settings.set_setting('deepseek_daily_limit', '1')
     def fail(album, send):
@@ -96,8 +99,8 @@ def test_daily_limit_counts_failures_survives_restart_and_does_not_reset_on_new_
     assert copy.get(store, ALBUM, 100)[1]['status'] == 'unavailable'
     store.conn.close()
     store = Store(path)
-    store.init_schema()
     try:
+        store.init_schema()
         monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: 'another-key')
         store.rec_proposals.wake_album_descriptions(200)
         deferred = copy.get(store, other_album(store, 'Another release'), 200)[1]
@@ -131,12 +134,11 @@ def test_atomic_lease_prevents_overlapping_workers_and_expired_claim_cannot_eras
     assert copy.settings(store, 164)['requests_today'] == 2
 
 
-def test_two_database_connections_share_the_reservation(tmp_path):
-    path = tmp_path / 'state.db'
-    first, second = Store(path), Store(path)
-    first.init_schema()
-    second.init_schema()
+def test_two_database_connections_share_the_reservation(file_backed_store):
+    first = file_backed_store
+    second = Store(first._db_path)
     try:
+        second.init_schema()
         own_album(first)
         album_id = first.album_descriptions.album_id(ALBUM)
         first.album_descriptions.claim(album_id, deepseek.description_policy(), 'key-id', 20, 100)
@@ -144,7 +146,6 @@ def test_two_database_connections_share_the_reservation(tmp_path):
                                                'key-id', 20, 101)['status'] == 'busy'
         assert second.album_descriptions.requests_today(101) == 1
     finally:
-        first.conn.close()
         second.conn.close()
 
 
@@ -225,28 +226,33 @@ def test_usage_and_generated_records_do_not_contain_credentials(store, generated
     assert not store.conn.execute("SELECT 1 FROM rec_proposals WHERE surface LIKE 'album_description%'").fetchone()
 
 
-def test_worker_prepares_refreshed_menu_instead_of_buying_copy_for_previous_menu(store):
+def test_worker_prepares_refreshed_menu_instead_of_buying_copy_for_previous_menu(store, monkeypatch):
     from types import SimpleNamespace
     from fastapi.testclient import TestClient
-    from yt_playlist.web.app import create_app
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, home
     from yt_playlist.rec import album_choices, album_notes, home_prepared
     from yt_playlist.rec.worker_tasks import ServingTasks
     from tests.test_growth_journey import early_journey
     early_journey(store)
-    client = TestClient(create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False),
-                        base_url='http://127.0.0.1')
+    # Keep the real Home routes, template globals and shutdown ownership.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx) for module in
+                                                        (home, app_update, audio_preview)])
+    app = webapp.create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
     albums = [{'browse_id': f'record-{i}', 'artist': f'Artist {i}', 'title': f'Album {i}',
                'score': 1 - i / 20, 'classification': 'discovery'} for i in range(12)]
     payload = {'items': albums, 'context': {}, 'built_at': 1}
     store.rec_proposals.put_proposals('album_prepared', payload, 1)
-    client.get('/home/album-choices')
-    initial, = store.rec_ledger.evidence().records('opportunity')
-    response = client.post('/home/album-choices/refresh', data={'opportunity_id': initial['id']})
-    assert response.status_code == 200
-    offers = store.rec_ledger.evidence().records('opportunity')
-    current = next(offer for offer in offers if offer['id'] != initial['id'])
-    expected = {option['browse_id'] for option in current['options']}
-    assert expected.isdisjoint({option['browse_id'] for option in initial['options']})
+    with TestClient(app, base_url='http://127.0.0.1') as client:
+        assert client.get('/home/album-choices').status_code == 200
+        initial, = store.rec_ledger.evidence().records('opportunity')
+        response = client.post('/home/album-choices/refresh', data={'opportunity_id': initial['id']})
+        assert response.status_code == 200
+        offers = store.rec_ledger.evidence().records('opportunity')
+        current = next(offer for offer in offers if offer['id'] != initial['id'])
+        expected = {option['browse_id'] for option in current['options']}
+        assert expected.isdisjoint({option['browse_id'] for option in initial['options']})
+    assert not app.state.ctx.work.active
     prepared = []
     def stage(name, target, *args, **kwargs):
         if target is album_choices.prepare_cached:

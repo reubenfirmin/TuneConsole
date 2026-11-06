@@ -100,7 +100,7 @@ def test_continuing_capture_and_source_removal_withdraw_and_reconcile(installed)
         newer = ready(job)
         assert newer != identity
         publication.publish(job, identity=newer)
-    assert 'new|unresolved' in store.history.get_recent_history_keys(0)
+    assert dict(store.history.recent_plays_with_ts())['new|unresolved'] == 1705000000
     with store._lock, store.conn:
         from yt_playlist.core.listening import remove_source
         assert store.conn.execute("SELECT 1 FROM main.play_event_sources WHERE source='live'").fetchone()

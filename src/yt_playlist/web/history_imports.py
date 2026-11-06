@@ -45,15 +45,16 @@ class HistoryImports:
                     store.settings.set_setting(source + '_imported_at', str(self.ctx.now_fn()))
                     if source == 'takeout':
                         progress('Checking imported history…')
-                        from yt_playlist.core import repair
-                        repair.run_once(store)
+                        store.history.repair_verified_imports()
                 elif source == 'takeout':
                     store.settings.set_setting('takeout_nag_dismissed_at', str(self.ctx.now_fn()))
                 progress('Adding unmatched artists to Discovery…')
                 min_plays = max(3, round(report['span_days'] / 365))
                 if source == 'spotify':
-                    account_id = report.get('account_id')
-                    if account_id is None:
+                    # The importer captures identity before parsing. Presence
+                    # of that field is authoritative even if main changed.
+                    account_id = report.get('identity_id', report.get('account_id'))
+                    if 'identity_id' not in report and 'account_id' not in report:
                         account_id = spotify_data.resolve_import_identity(store)
                     seeded = store.discovery.seed_spotify_artists(
                         account_id,

@@ -24,11 +24,13 @@ def _save(store, action_id, undo, now,claims=None):
 
 
 def _prune(store, action, entry):
-    # IDs can change after a re-sync. Match the remote account and playlist too.
-    for playlist in store.playlists.get_playlists():
-        if (playlist.account_id == entry["identity"]
-                and playlist.provider_playlist_id == entry["ytm"]):
-            store.playlists.remove_playlist(playlist.id)
+    # Confirmed remote absence applies to every saved membership of that object.
+    # Resolve system lists through their account so their scopes stay separate.
+    with store._lock:
+        scope = store.playlists.playlist_reference(entry["ytm"], entry["identity"])
+        for playlist in store.playlists.get_playlists():
+            if playlist.playlist_scope_id == scope:
+                store.playlists.remove_playlist(playlist.id)
     if action.kind == GC_GENERATED:
         store.playlist_recipes.delete_cluster_canvas(entry["ytm"])
 

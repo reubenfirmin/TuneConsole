@@ -291,9 +291,11 @@ def test_route_persists_cooldown_and_other_requests_use_it(boundary, store):
     assert store.enrichment_state.integration_cooldown('spotify')['retry_at'] == 1060
 
 
-def test_reopened_database_keeps_wait_and_success_cannot_clear_a_newer_deadline(boundary, tmp_path):
+def test_reopened_database_keeps_wait_and_success_cannot_clear_a_newer_deadline(
+        boundary, tmp_path, _pristine_current_schema):
     path = tmp_path / 'spotify.db'
     db = Store(path)
+    _pristine_current_schema.backup(db.conn)
     db.init_schema()
     try:
         db.enrichment_state.defer_integration('spotify', now=1000, retry_after=1100, error='old')

@@ -12,7 +12,7 @@ import sqlite3
 import sys
 import time
 
-from yt_playlist.core import copy_compaction, retained_copy
+from yt_playlist.core.db_rebuild import build, job
 
 
 def check(source,output):
@@ -34,7 +34,7 @@ def check(source,output):
             conn.row_factory = sqlite3.Row
             report['source_sql_bytes'] = source.stat().st_size
             try:
-                report['source_files'] = copy_compaction._owned_files(conn)
+                report['source_files'] = job._owned_files(conn)
                 report['file_custody_established'] = True
             except FileNotFoundError as error:
                 # A borrowed native path can have expired after this isolated
@@ -44,8 +44,8 @@ def check(source,output):
             report['source_rows'] = dict(conn.execute("SELECT name,0 FROM sqlite_schema WHERE type='table' "
                                                      "AND name NOT GLOB 'sqlite_*'"))
             for table in report['source_rows']:
-                report['source_rows'][table] = conn.execute('SELECT count(*) FROM '+retained_copy.quote(table)).fetchone()[0]
-        report['copy'] = retained_copy.build(source,output,progress=progress)
+                report['source_rows'][table] = conn.execute('SELECT count(*) FROM '+build.quote(table)).fetchone()[0]
+        report['copy'] = build.build(source,output,progress=progress)
         report['status'] = 'sql-passed' if not report['file_custody_established'] else 'passed'
     except BaseException as error:
         report.update(status='failed',error=repr(error))

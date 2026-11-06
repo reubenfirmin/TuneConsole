@@ -27,24 +27,27 @@ class RecCandidatesRepo(Repo):
                 params[f'key{i}'] = key
                 names.append(f':key{i}')
             restriction = ' AND t.identity_key IN (' + ','.join(names) + ')'
-        # Identity projections are views after the subject cutover. Materialize
-        # this small lookup once so the calendar-only branch can index it instead
-        # of rescanning an account's events for each imported listening day.
+        # Reconcile only the requested songs' days. Installed identity views
+        # compute these keys: casting the materialized key gives SQLite the
+        # affinity it needs to index this lookup for the calendar-only branch.
         rows = self.conn.execute(
-            'WITH exact_days AS MATERIALIZED (SELECT pe.identity_key,pe.account_id,c.day '
-            'FROM play_event_subjects pe JOIN play_event_calendar c ON c.event_id=pe.id), '
-            'names AS (SELECT t.identity_key key,MIN(t.title) title,MIN(t.artist) artist,'
+            'WITH names AS MATERIALIZED (SELECT t.identity_key key,MIN(t.title) title,MIN(t.artist) artist,'
             'MIN(t.album) album,MIN(t.video_id) video_id,MIN(t.thumbnail) thumbnail,'
             f'MAX(CASE WHEN {LIKED_EXISTS} THEN 1 ELSE 0 END) liked '
             'FROM playable_library_tracks t WHERE t.video_id IS NOT NULL AND t.video_id<>\'\' '
             f'AND {self._store.rec_eligibility.track_length_clause("t.duration_s")}{restriction} '
-            'GROUP BY t.identity_key), heard AS ('
-            'SELECT pe.identity_key,pe.played_at at FROM play_event_subjects pe JOIN names n ON n.key=pe.identity_key '
+            'GROUP BY t.identity_key), '
+            'exact_days AS MATERIALIZED (SELECT CAST(pe.identity_key AS TEXT) identity_key,pe.account_id,c.day '
+            'FROM play_event_subjects pe JOIN play_event_calendar c ON c.event_id=pe.id '
+            'WHERE pe.identity_key IN (SELECT key FROM names)), heard AS ('
+            'SELECT pe.identity_key,pe.played_at at FROM play_event_subjects pe '
+            'WHERE pe.identity_key IN (SELECT key FROM names) '
             'UNION ALL SELECT d.identity_key,d.day_ts+86400 FROM listening_days d '
-            'JOIN names n ON n.key=d.identity_key WHERE NOT EXISTS ('
+            'WHERE d.identity_key IN (SELECT key FROM names) AND NOT EXISTS ('
             'SELECT 1 FROM exact_days pe WHERE pe.identity_key=d.identity_key '
             'AND pe.account_id=d.account_id AND pe.day=d.day)), '
-            'totals AS (SELECT identity_key,COUNT(*) plays,MAX(at) last_played FROM heard GROUP BY identity_key) '
+            'totals AS MATERIALIZED (SELECT CAST(identity_key AS TEXT) identity_key, '
+            'COUNT(*) plays,MAX(at) last_played FROM heard GROUP BY identity_key) '
             'SELECT n.*,COALESCE(h.plays,0) plays,h.last_played FROM names n '
             'LEFT JOIN totals h ON h.identity_key=n.key '
             'WHERE (n.liked=1 OR h.plays>=2) AND (h.last_played IS NULL OR '
@@ -79,7 +82,8 @@ class RecCandidatesRepo(Repo):
         excl = self._store.rec_eligibility.excluded_playlist_ids()
         seed_excl = exclude_ids("pt.playlist_id", excl)
         rows = self.conn.execute(
-            "WITH tp AS (SELECT identity_key, COUNT(*) c FROM listening_days GROUP BY identity_key), "
+            "WITH tp AS MATERIALIZED (SELECT CAST(identity_key AS TEXT) identity_key, "
+            "COUNT(*) c FROM listening_days GROUP BY identity_key), "
             " seeds AS (SELECT identity_key k FROM tp ORDER BY c DESC LIMIT :seed_limit), "
             " seedpl AS (SELECT DISTINCT pt.playlist_id pid FROM playlist_tracks pt "
             "            JOIN tracks t ON t.id=pt.track_id JOIN seeds s ON s.k=t.identity_key"
@@ -104,7 +108,8 @@ class RecCandidatesRepo(Repo):
     def deep_cuts(self, limit=40) -> list[dict]:
         """Each heavily played artist's least-played track, ordered by affinity."""
         rows = self.conn.execute(
-            "WITH tp AS (SELECT identity_key, COUNT(*) c FROM listening_days GROUP BY identity_key), "
+            "WITH tp AS MATERIALIZED (SELECT CAST(identity_key AS TEXT) identity_key, "
+            "COUNT(*) c FROM listening_days GROUP BY identity_key), "
             " trk AS (SELECT t.identity_key key, MIN(t.title) title, MIN(t.artist) artist, "
             "                MIN(t.album) album, MIN(t.video_id) vid, MIN(t.thumbnail) thumb, "
             "                COALESCE(MAX(tp.c),0) plays "

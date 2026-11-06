@@ -1,5 +1,6 @@
 """Preparation can run ahead; onboarding access follows the same serial path."""
 import pytest
+from tests.derived_rating_support import remove_rating, seed_dislike
 
 from tests.conftest import seed_catalog_track
 from tests.onboarding_support import publish_personal_mix
@@ -65,9 +66,9 @@ def test_early_pool_then_small_discover_interlude_precede_four_playable_mixes(st
     assert before['listening']['state'] == 'preparing'
     assert before['radio']['state'] == 'untouched'
     tracks = publish_personal_mix(store)
-    store.rec_model.record_dislike(tracks[0]['key'], until=None, now=1000)
+    seed_dislike(store, tracks[0]['key'], until=None, now=1000)
     assert not stops(store)['listening']['ready']
-    store.rec_model.clear_dislike(tracks[0]['key'])
+    remove_rating(store, tracks[0]['key'], 'dislike')
     assert stops(store)['listening']['ready']
 
 
@@ -190,7 +191,7 @@ def test_saved_vibe_with_confirmed_use_does_not_reassemble_growth_menus(store, m
     assert home_vibe.current(store, 1002) == ''
 
 
-def test_previously_used_mix_remains_home_and_fragment_destination_without_ready_output(store):
+def test_previously_used_mix_remains_home_and_fragment_destination_without_ready_output(store, monkeypatch):
     from tests.test_onboarding_routes import _client
 
     _, client = _client(store)
@@ -201,7 +202,17 @@ def test_previously_used_mix_remains_home_and_fragment_destination_without_ready
     assert "|| 'directions'" in html
     response = client.get('/home/cards')
     assert response.status_code == 200
-    assert client.post('/home/format', data={'panel': 'directions'}).status_code == 204
+    def no_growth_scan(*_args, **_kwargs):
+        raise AssertionError('Remembering an earned section must not rebuild the growth map')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(account_growth, 'view', no_growth_scan)
+        assert client.post('/home/format', data={'panel': 'directions'}).status_code == 204
+        store.rec_proposals.put_proposals('listening_choices', {'home_format': {
+            'episodes': {'radio': 1}}}, 1000)
+        assert client.post('/home/format', data={'panel': 'radio'}).status_code == 204
+        assert store.settings.get_setting('home_last_panel') == 'radio'
+        assert client.post('/home/format', data={'panel': 'directions'}).status_code == 204
     assert store.settings.get_setting('home_last_panel') == 'directions'
     # Access does not turn incomplete menus into three ready format choices.
     assert client.post('/home/format', data={'format': 'radio'}).status_code == 409
@@ -211,7 +222,7 @@ def test_radio_checkpoint_probe_serializes_with_concurrent_home_reads(store, mon
     from yt_playlist.core import radio_storage
     from yt_playlist.web.radio_persistence import RadioPersistence
 
-    persistence = RadioPersistence(store.settings)
+    persistence = RadioPersistence(store.radio_checkpoints)
     available = radio_storage.available
     def checked_probe(connection):
         assert store._lock.held_by_current_thread
@@ -250,11 +261,13 @@ def test_radio_energy_cannot_bypass_vibes_but_can_be_reset(store, monkeypatch):
 
     _, client = _client(store)
     changes = []
-    def tune(values):
+    def tune(values, *, serial=None):
         changes.append(values)
         return {'ok': True}
     monkeypatch.setattr(client.app.state.ctx.radio, 'tune', tune)
-    assert client.post('/radio/tune', json={'energy': .9}).status_code == 409
+    neutral = {'comfort': .5, 'theme': .5, 'energy': .5}
+    assert client.post('/radio/tune', json={**neutral, 'energy': .9}).json() == {
+        'ok': False, 'tune_reason': 'energy_locked'}
     assert not changes
-    assert client.post('/radio/tune', json={'energy': .5}).json()['ok']
-    assert changes == [{'energy': .5}]
+    assert client.post('/radio/tune', json=neutral).json()['ok']
+    assert changes == [neutral]

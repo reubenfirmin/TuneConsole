@@ -151,14 +151,14 @@ the previous path. Each offer freezes its exact definition and hierarchy for
 See [the adaptive grouping design](../../../ADAPTIVE_TASTE_GROUPS.md) for serving,
 lineage, work budgets and isolated actual-library reproduction.
 
-Initial setup offers verified library songs as soon as they arrive. Leaving setup
-requires a completed import and usable prepared mixes; sparse accounts can receive
-these offers before any taste modes are fitted. Empty imported accounts have no
-library preparation to wait for. Metadata coverage is reported as counts rather
-than a readiness percentage. The obsolete
-`onboard_coverage_min` and `onboard_library_min` controls and their saved overrides
-are retired. `onboard_feedback_min` still controls when the optional getting-started
-suggestions end; it does not bypass prepared-offer readiness.
+Initial setup offers verified library songs as soon as they arrive. Completion
+follows usable prepared mix or album offers and their required progression;
+sparse accounts can receive these offers before any taste modes are fitted.
+Feedback alone does not complete setup. Metadata coverage is reported as counts
+rather than a readiness percentage. The obsolete `onboard_coverage_min`,
+`onboard_library_min` and `onboard_feedback_min` controls are retired. Historical
+settings and checkpoints remain readable; these keys no longer affect controls
+or readiness.
 
 Road-trip work has three owners:
 

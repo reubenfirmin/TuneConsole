@@ -61,6 +61,8 @@ def test_post_with_local_origin_allowed(store):
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.post("/sync", headers={"origin": "http://127.0.0.1"}, follow_redirects=False)
     assert r.status_code == 200  # starts a sync job (JSON), no longer a redirect
+    with c.stream("GET", f"/sync/events/{r.json()['job_id']}") as events:
+        "".join(events.iter_text())
 
 def test_get_with_foreign_host_still_allowed(store):
     # Reads are exempt: the guard only protects state-changing methods.

@@ -43,12 +43,15 @@ def seed(conn):
 
 
 @pytest.fixture(scope='module')
-def constrained(tmp_path_factory):
+def constrained(tmp_path_factory, _pristine_current_schema):
     store = Store(tmp_path_factory.mktemp('domains')/'current.db')
-    store.init_schema()
-    seed(store.conn)
-    yield store.conn
-    store.conn.close()
+    try:
+        _pristine_current_schema.backup(store.conn)
+        store.init_schema()
+        seed(store.conn)
+        yield store.conn
+    finally:
+        store.conn.close()
 
 
 INVALID = []
@@ -118,14 +121,39 @@ def test_final_account_and_recipe_boundaries_keep_valid_exchange_and_reload(cons
 
 def installed(path):
     store = Store(path)
-    for sql in current.statements(version=103):
-        store.conn.execute(sql)
-    genre_identity.seed_catalog(store.conn)
-    store.conn.executemany('INSERT INTO settings VALUES (?,?)',current.SEED_SETTINGS.items())
-    store.conn.executemany('INSERT INTO schema_migrations VALUES (?,?,1)',
-                          [(m.version,m.name) for m in registry.MIGRATIONS[:103]])
-    seed(store.conn)
+    try:
+        # This constructs one predecessor, not hundreds of separate durable
+        # DDL commits. Every test still runs its own admission and upgrade.
+        with store.conn:
+            store.conn.execute('BEGIN IMMEDIATE')
+            for sql in current.statements(version=103):
+                store.conn.execute(sql)
+            genre_identity.seed_catalog(store.conn)
+            store.conn.executemany('INSERT INTO settings VALUES (?,?)',current.SEED_SETTINGS.items())
+            store.conn.executemany('INSERT INTO schema_migrations VALUES (?,?,1)',
+                                  [(m.version,m.name) for m in registry.MIGRATIONS[:103]])
+            seed(store.conn)
+    except BaseException:
+        store.conn.close()
+        raise
     return store
+
+
+@pytest.fixture(scope='module')
+def admitted_predecessor(tmp_path_factory):
+    """Build regular DDL once; each domain failure still owns its database."""
+    source = installed(tmp_path_factory.mktemp('domain-predecessor')/'installed.db')
+    snapshot = sqlite3.connect(':memory:')
+    try:
+        admit_regular_schema(source)
+        from tests.prepared_fixture_support import coordinates
+        assert not coordinates(source.conn), 'SQL-only predecessor retains external files'
+        source.conn.backup(snapshot)
+        snapshot.execute('PRAGMA query_only=ON')
+        yield snapshot
+    finally:
+        snapshot.close()
+        source.conn.close()
 
 
 @pytest.mark.parametrize('value',[2,-1,1.5,'1'])
@@ -196,23 +224,38 @@ def test_installed_upgrade_preserves_values_sequences_dependencies_and_matches_f
     ('discovery_memberships','offered_count',1.5),('entry_artists','position',.5),
     ('discovery_impressions','shown_at',float('inf')),
 ])
-def test_invalid_predecessor_stops_with_exact_owner_and_retains_original_database(tmp_path,table,column,bad):
-    store = installed(tmp_path/'invalid.db')
+def test_invalid_predecessor_stops_with_exact_owner_and_retains_original_database(
+        tmp_path,admitted_predecessor,table,column,bad):
+    store = Store(tmp_path/'invalid.db')
     try:
+        admitted_predecessor.backup(store.conn)
         with store.conn:
             store.conn.execute(f'UPDATE {table} SET {column}=?',(bad,))
-        # Admission may independently adopt the existing receipt owner. Once
-        # committed, that exact ledger and all numbered v103 rows survive a
-        # later failed conversion along with every original application owner.
+        assert_invalid_upgrade_retains_database(store,table,column)
+    finally:
+        store.conn.close()
+
+
+def assert_invalid_upgrade_retains_database(store,table,column):
+    before = list(store.conn.iterdump())
+    with pytest.raises(MigrationError,match=table+r'\.'+column+r'.*original rows retained'):
+        migrate(store.conn, registry=registry.MIGRATIONS)
+    retained = sqlite3.connect(store._db_path.as_uri()+'?mode=ro',uri=True)
+    try:
+        assert list(retained.iterdump())==before
+    finally:
+        retained.close()
+
+
+def test_first_regular_admission_preserves_invalid_domain_before_failed_conversion(tmp_path):
+    store = installed(tmp_path/'first-admission.db')
+    try:
+        with store.conn:
+            store.conn.execute('UPDATE recordings SET provisional=7')
+        # Keep the independent first-admission boundary covered with invalid
+        # data. The five owner-specific failures above reuse only its setup.
         admit_regular_schema(store)
-        before = list(store.conn.iterdump())
-        with pytest.raises(MigrationError,match=table+r'\.'+column+r'.*original rows retained'):
-            migrate(store.conn, registry=registry.MIGRATIONS)
-        retained = sqlite3.connect((tmp_path/'invalid.db').as_uri()+'?mode=ro',uri=True)
-        try:
-            assert list(retained.iterdump())==before
-        finally:
-            retained.close()
+        assert_invalid_upgrade_retains_database(store,'recordings','provisional')
     finally:
         store.conn.close()
 

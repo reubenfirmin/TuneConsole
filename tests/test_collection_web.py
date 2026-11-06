@@ -50,6 +50,97 @@ def test_artists_page_includes_saved_albums_without_playlists(store):
     assert '/artist?name=Album%20artist' in response.text
 
 
+@pytest.mark.parametrize('headers,content_type', [({}, 'text/html'),
+    ({'HX-Request': 'true'}, None), ({'Accept': 'application/json'}, 'application/json')])
+def test_artists_read_deadline_defers_without_background_error(store, monkeypatch, caplog, headers, content_type):
+    from unittest.mock import Mock
+
+    from yt_playlist.core.activity import check_stopping, work_budget
+
+    def exhausted():
+        with work_budget(0):
+            check_stopping()
+
+    app = create_app(store, lambda: {}, background_work=False)
+    with TestClient(app, base_url='http://127.0.0.1') as client:
+        with monkeypatch.context() as patch:
+            patch.setattr(store.collection, 'collection_artists', exhausted)
+            def forbidden():
+                pytest.fail('Recovery template tried another database-backed helper')
+            for helper in ('storage_maintenance_status', 'initial_setup_pending',
+                           'has_multiple_identities'):
+                patch.setitem(app.state.ctx.templates.env.globals, helper, forbidden)
+            # These read environment settings or model files, not the database.
+            # Keep their real behavior available in the recovery document.
+            pure_helpers = {name: Mock(wraps=app.state.ctx.templates.env.globals[name])
+                            for name in ('audio_preview_available', 'audio_vibes_enabled')}
+            for name, helper in pure_helpers.items():
+                patch.setitem(app.state.ctx.templates.env.globals, name, helper)
+            response = client.get('/artists', headers=headers)
+            for helper in pure_helpers.values():
+                assert helper.called == (content_type == 'text/html')
+        assert response.status_code == 503
+        assert response.headers['Retry-After'] == '2'
+        assert response.headers['X-Read-Pending'] == 'true'
+        assert response.headers['Cache-Control'] == 'no-store'
+        if content_type == 'text/html':
+            assert 'Loading your library' in response.text
+            assert 'id="app-page"' in response.text
+            assert 'read-recovery.js' in response.text
+        elif content_type == 'application/json':
+            assert response.json() == {'pending': True}
+        else:
+            assert response.content == b''
+        assert 'time limit' not in response.text
+        assert 'Background preparation' not in response.text
+        warnings = [record for record in caplog.records
+                    if record.name == 'yt_playlist.web.app' and 'Request budget exceeded' in record.message]
+        assert len(warnings) == 1
+        assert 'GET /artists' in warnings[0].message
+        assert warnings[0].exc_info is None
+        assert client.get('/artists').status_code == 200
+        assert client.get('/storage-maintenance/status').status_code == 200
+
+
+def test_home_card_deadline_preserves_the_board_and_recovers(file_backed_store, monkeypatch, caplog):
+    import sqlite3
+    from tests.home_fixture_support import publish_menu, returning_listener
+    from yt_playlist.core.activity import work_budget
+    from yt_playlist.web.routes.home_views import HomeViews
+
+    store = file_backed_store
+    store.accounts.upsert_account('main', 'cred', None, True)
+    returning_listener(store, 'mixes', now=1000)
+    publish_menu(store, now=1000)
+    original = HomeViews.card_context
+    connections = []
+    expire = False
+
+    def context(views, request, now, **options):
+        if expire:
+            with views.store.read_view() as reader:
+                connections.append(reader.conn)
+                with work_budget(.005):
+                    reader.conn.execute('WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL '
+                        'SELECT x+1 FROM n WHERE x<100000000) SELECT SUM(x) FROM n').fetchone()
+        return original(views, request, now, **options)
+
+    monkeypatch.setattr(HomeViews, 'card_context', context)
+    with TestClient(create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)) as client:
+        baseline = client.get('/home/cards', headers={'HX-Request': 'true'})
+        assert baseline.status_code == 200 and 'id="gen-wheelhouse"' in baseline.text
+        expire = True
+        deferred = client.get('/home/cards', headers={'HX-Request': 'true'})
+        assert deferred.status_code == 503 and deferred.content == b''
+        assert deferred.headers['X-Read-Pending'] == 'true'
+        assert not any(record.exc_info for record in caplog.records)
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            connections[0].execute('SELECT 1')
+        expire = False
+        recovered = client.get('/home/cards', headers={'HX-Request': 'true'})
+        assert recovered.status_code == 200 and 'id="gen-wheelhouse"' in recovered.text
+
+
 def test_save_album_likes_and_refreshes(store):
     iid = store.accounts.upsert_account("main", "cred", None, True)
     fc = AlbumClient()

@@ -9,13 +9,40 @@ function syncTopbarH() {
 window.addEventListener('DOMContentLoaded', syncTopbarH);
 window.addEventListener('resize', syncTopbarH);
 
-// htmx: a 422 carries an OOB error toast. Process its body while retaining the failed
-// request status so optimistic controls roll back. The server sets `HX-Reswap: none` to keep the primary
-// target untouched while the OOB toast still lands in #toasts. Bind on `document`
+// Process explicit validation outcomes while retaining the failed request status
+// so optimistic controls roll back. HX-Reswap: none preserves the primary target
+// while an out-of-band outcome updates the action's controls. Bind on document
 // (not document.body): app.js loads in <head>, before <body> exists.
 document.addEventListener('htmx:beforeSwap', (e) => {
   if (e.detail.xhr.status === 422) e.detail.shouldSwap = true;
 });
+
+function actionOutcome(key) {
+  return {
+    failedAction: '',
+    start() {
+      this.$refs.outcome.textContent = '';
+    },
+    settle(event) {
+      const {failed, xhr, requestConfig} = event.detail;
+      this.failedAction = failed && xhr.status !== 422 ? requestConfig.path.split('?')[0] : '';
+    },
+    saveRecovery(event) {
+      const state = event.detail?.state;
+      if (state) (state.actionOutcomes ||= {})[key] = {
+        action: this.failedAction, message: this.$refs.outcome.textContent,
+      };
+    },
+    restoreRecovery(event) {
+      const saved = event.detail?.state?.actionOutcomes?.[key];
+      // A failed recovery keeps the old controls; it supplies no replacement
+      // state and must not erase the action's unresolved indication.
+      if (!saved) return;
+      this.failedAction = saved.action;
+      this.$refs.outcome.textContent = saved.message;
+    },
+  };
+}
 
 function authBanner(initial) {
   // The "session expired" bar, seeded from the server, and updated live by the sync panel so it

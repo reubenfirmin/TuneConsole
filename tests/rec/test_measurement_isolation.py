@@ -8,14 +8,12 @@ from types import SimpleNamespace
 import pytest
 
 from yt_playlist.core.activity import Activity, WorkClosing
-from yt_playlist.core.store import Store
 from yt_playlist.rec import measurement, rec_params, scorecard
 from yt_playlist.rec.rec_worker import RecWorker
 
 
-def test_ui_mutation_completes_during_fingerprint_and_offer_keeps_original_policy(tmp_path, monkeypatch):
-    store = Store(tmp_path / "state.db")
-    store.init_schema()
+def test_ui_mutation_completes_during_fingerprint_and_offer_keeps_original_policy(tmp_path, monkeypatch, consumer_store):
+    store = consumer_store(tmp_path / "state.db")
     started, release = threading.Event(), threading.Event()
     fingerprint = measurement._vector_identity
 
@@ -52,9 +50,8 @@ def test_measurement_propagates_shutdown_instead_of_swallowing_it(store, monkeyp
     assert store.conn.execute("SELECT COUNT(*) FROM rec_served_impressions").fetchone()[0] == 0
 
 
-def test_queued_offer_returns_before_fingerprint_and_retains_original_state(tmp_path, monkeypatch):
-    store = Store(tmp_path / "state.db")
-    store.init_schema()
+def test_queued_offer_returns_before_fingerprint_and_retains_original_state(tmp_path, monkeypatch, consumer_store):
+    store = consumer_store(tmp_path / "state.db")
     worker = RecWorker(SimpleNamespace(store=store, work=Activity(),
         logger=logging.getLogger(__name__), now_fn=lambda: 100), debounce_s=0)
     monkeypatch.setattr(worker, "_start_loop", lambda: None)
@@ -87,9 +84,8 @@ def test_queued_offer_returns_before_fingerprint_and_retains_original_state(tmp_
         store.conn.close()
 
 
-def test_queue_is_bounded_and_shutdown_closes_all_pinned_readers(tmp_path, monkeypatch, caplog):
-    store = Store(tmp_path / "state.db")
-    store.init_schema()
+def test_queue_is_bounded_and_shutdown_closes_all_pinned_readers(tmp_path, monkeypatch, caplog, consumer_store):
+    store = consumer_store(tmp_path / "state.db")
     worker = RecWorker(SimpleNamespace(store=store, work=Activity(),
         logger=logging.getLogger(__name__), now_fn=lambda: 100))
     monkeypatch.setattr(worker, "_start_loop", lambda: None)
@@ -121,9 +117,8 @@ def test_queue_is_bounded_and_shutdown_closes_all_pinned_readers(tmp_path, monke
         store.conn.close()
 
 
-def test_existing_worker_processes_measurement_without_holding_up_response(tmp_path, monkeypatch):
-    store = Store(tmp_path / "state.db")
-    store.init_schema()
+def test_existing_worker_processes_measurement_without_holding_up_response(tmp_path, monkeypatch, consumer_store):
+    store = consumer_store(tmp_path / "state.db")
     worker = RecWorker(SimpleNamespace(store=store, work=Activity(),
         logger=logging.getLogger(__name__), now_fn=lambda: 100), debounce_s=0)
     started, release = threading.Event(), threading.Event()

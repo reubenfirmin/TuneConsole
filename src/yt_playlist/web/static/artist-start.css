@@ -31,7 +31,7 @@
 .artist-start-count { color: var(--dim); }
 .artist-start-spotify { display: block; border: 0; background: transparent; color: var(--dim); padding: 24px 0 0; text-align: left; font: inherit; cursor: pointer; }
 .artist-start-spotify:hover { color: var(--text); text-decoration: underline; }
-.artist-start-error { color: var(--danger-pale); }
+.artist-start-status { color: var(--dim); }
 .artist-start-spotify-help { max-width: 780px; }
 .artist-start-spotify-help > p:not([class]) { max-width: 600px; color: var(--dim); font-size: 1.1rem; }
 .artist-start-help-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 24px; margin: 34px 0; }

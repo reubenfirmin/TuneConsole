@@ -2,7 +2,6 @@
 from contextlib import closing
 import errno
 import json
-from pathlib import Path
 import sqlite3
 import shutil
 import subprocess
@@ -12,15 +11,13 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.core.test_policy_upgrade import (
-    ExplicitStorageMaintenance, HistoricalPolicyMaintenance, _legacy, _open_legacy, _state,
-)
 from tests.conftest import FakeClient
-from yt_playlist.core import account_auth_state, db_space, playback_feedback, policy_upgrade
-from yt_playlist.core.policy_recovery import _counts, _fingerprint, _missing_references, _verify
+from yt_playlist.core import account_auth_state, db_handles, db_space, playback_feedback
+from yt_playlist.core.db_rebuild import build
+from yt_playlist.core.db_rebuild.sqlite_checks import tables
 from yt_playlist.core.store import Store
 from yt_playlist.core.storage_maintenance import (
-    DEFERRED_MESSAGE, LOW_SPACE_MESSAGE, MESSAGE, StorageCompacting,
+    COPY_DEFERRED_MESSAGE, COPY_LOW_SPACE_MESSAGE, MESSAGE, StorageCompacting, StorageMaintenance,
 )
 from yt_playlist.library import live_plays, player_events
 from yt_playlist.rec import transient
@@ -29,29 +26,14 @@ from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
 
 
 @pytest.fixture
-def current_vacuum_store(tmp_path, monkeypatch):
-    """Current UI owners with real compaction, independent of retired SQL policy.
-
-    The job selection is controlled; the SQLite worker, exclusive writer,
-    query-only serving connection, cancellation and resume remain real.
-    """
-    store = Store(tmp_path / 'current.db')
-    store.init_schema()
-    def compact_once(conn, *, progress, on_deferred):
-        progress('compacting')
-        policy_upgrade._compact(conn, store._db_path.parent)
-        return True
-    monkeypatch.setattr(policy_upgrade, 'run_once', compact_once)
-    monkeypatch.setattr(web_app, 'StorageMaintenance', ExplicitStorageMaintenance)
-    try:
-        yield store
-    finally:
-        store.conn.close()
+def current_copy_store(file_backed_store):
+    """Current schema and real retained-copy admission, build and installation."""
+    return file_backed_store
 
 
 @pytest.mark.parametrize('synced', [False, True])
-def test_ui_and_extension_playback_during_actual_vacuum(current_vacuum_store, monkeypatch, synced):
-    store = current_vacuum_store
+def test_ui_and_extension_playback_during_actual_copy(current_copy_store, monkeypatch, synced):
+    store = current_copy_store
     path = store._db_path
     iid = store.accounts.upsert_account('Main', 'bridge', None, True)
     pool = [{'videoId': f'radio-{i}', 'title': f'Radio song {i}',
@@ -86,38 +68,27 @@ def test_ui_and_extension_playback_during_actual_vacuum(current_vacuum_store, mo
                                'playback_synced': True, 'native': {'available': True}})
     monkeypatch.setattr(ctx.bridge, 'request_control', confirm_handoff)
     entered, release = threading.Event(), threading.Event()
-    original = policy_upgrade._compact
+    original = build.build
 
-    def hold_vacuum(conn, directory):
-        def progress():
-            if not entered.is_set():
-                entered.set()
-                while not release.wait(.01) and not ctx.storage_maintenance._stop.is_set():
-                    pass
-            return int(ctx.storage_maintenance._stop.is_set())
-        # Current schemas take enough preparation work to invoke a progress
-        # handler before compaction reserves its writer. Hold only the actual
-        # VACUUM statement, after its real guard connection owns that writer.
-        conn.set_trace_callback(lambda sql: conn.set_progress_handler(progress, 1000)
-                                if sql.startswith('VACUUM INTO') else None)
-        try:
-            original(conn, directory)
-        finally:
-            conn.set_trace_callback(None)
-            conn.set_progress_handler(None, 0)
-    monkeypatch.setattr(policy_upgrade, '_compact', hold_vacuum)
+    def hold_copy(source, target, **kwargs):
+        # The actual job already owns its writer reservation and file fences.
+        entered.set()
+        while not release.wait(.01) and not ctx.storage_maintenance._stop.is_set():
+            pass
+        return original(source, target, **kwargs)
+    monkeypatch.setattr(build, 'build', hold_copy)
     try:
         # Match the Linux application's loop, including cross-thread worker
         # wakeups; restricted runners cannot wake the selector socket pair.
         with TestClient(app, base_url='http://127.0.0.1', backend_options={'use_uvloop':True}) as client:
             # Prepare through the live route before explicitly selecting this
-            # controlled job. Ordinary startup never selects retired bulk work.
+            # current copy operation. Ordinary startup performs no such copy.
             assert client.get('/radio/seeds').json()['tracks']
             seed_impressions = store.conn.execute('SELECT count(*) FROM rec_impressions').fetchone()[0]
             # This starter fixture has no prepared album recommendations. Its
             # existing progression guard must remain identical during repair.
             assert client.get('/home/album-choices').status_code == 409
-            ctx.storage_maintenance.start()
+            ctx.storage_maintenance.start_compaction()
             assert entered.wait(10)
             with closing(sqlite3.connect(path, timeout=0)) as other:
                 with pytest.raises(sqlite3.OperationalError, match='locked'):
@@ -127,7 +98,7 @@ def test_ui_and_extension_playback_during_actual_vacuum(current_vacuum_store, mo
             assert status['active'] and status['message'] == MESSAGE and not status['recording']
             home = client.get('/')
             assert home.status_code == 200
-            assert 'Updating library storage; browsing and playback remain available.' in home.text
+            assert 'Optimizing app storage; some recommendations are temporarily unavailable.' in home.text
             assert '/static/storage-maintenance.css' in home.text
             assert "authBanner([])" in home.text
             for url in ('/playlists', '/cleanup', '/album?browse=MPREalbum',
@@ -143,7 +114,7 @@ def test_ui_and_extension_playback_during_actual_vacuum(current_vacuum_store, mo
             assert player_events.handle_player_event(ctx, event, 1000)
             assert playback_feedback.inbox(store).pending() == 1
             # A missed implicit write fails immediately, never holding Store's
-            # lock while waiting for the VACUUM writer to finish.
+                # lock while waiting for the copy's writer reservation.
             with pytest.raises(StorageCompacting):
                 store.settings.set_setting('personal-edit', 'must retry')
             assert store.settings.get_setting('personal-edit') is None
@@ -161,10 +132,10 @@ def test_ui_and_extension_playback_during_actual_vacuum(current_vacuum_store, mo
                 assert client.post('/album/play', data={'browse_id': 'MPREalbum'}).status_code == 204
                 assert ws.receive_json()['type'] == 'navigate'
                 # Exercise real seed ranking, remote playlist creation/readback,
-                # session journaling and UI rendering while VACUUM owns the writer.
+                # session journaling and UI rendering while the job fences writes.
                 offered = client.get('/radio/seeds').json()
                 assert offered['tracks']
-                before = _counts(store.conn)
+                before = counts(store.conn)
                 response = client.post('/radio/start', json={
                     'video_id': offered['tracks'][0]['video_id'], 'menu_id': offered['menu_id']})
                 assert response.status_code == 200, response.text
@@ -191,7 +162,7 @@ def test_ui_and_extension_playback_during_actual_vacuum(current_vacuum_store, mo
                 assert s.error is None
                 assert client.post('/radio/seen', json={'menu_id': ctx.radio.session.directions.menu_id}).json()['ok']
                 assert client.post('/radio/stop').json()['ok']
-                assert _counts(store.conn) == before
+                assert counts(store.conn) == before
                 assert ctx.auth_expired == {}
                 # The healthy bridge clears the live warning without saving
                 # anything during repair, and repair stays active throughout.
@@ -208,8 +179,9 @@ def test_ui_and_extension_playback_during_actual_vacuum(current_vacuum_store, mo
             assert store.settings.get_setting('radio_current_session') is None
             # Current receipt owners can replay both retained observations as
             # soon as the real compaction worker releases the writer.
-            assert playback_feedback.drain(store) == 2
+            assert playback_feedback.drain(store) == 0
             assert not playback_feedback.inbox(store).pending()
+            assert store.conn.execute('SELECT count(*) FROM playback_feedback_receipts').fetchone()[0] == 2
             assert client.get('/storage-maintenance/status').json()['recording']
             assert store.conn.execute('SELECT count(*) FROM play_events').fetchone()[0] == 1
             assert store.conn.execute("SELECT count(*) FROM player_events WHERE kind='state'").fetchone()[0] == 1
@@ -245,44 +217,14 @@ def test_ui_and_extension_playback_during_actual_vacuum(current_vacuum_store, mo
         release.set()
 
 
-def test_completed_vacuum_retries_pinned_checkpoint_without_repeating_compaction(tmp_path, monkeypatch):
-    path = tmp_path / 'state.db'
-    store, _ = _legacy(path)
-    original = policy_upgrade._compact
-    readers, compacted = [], threading.Event()
-    def pin_after_compacting(conn, directory):
-        assert not compacted.is_set()
-        original(conn, directory)
-        reader = sqlite3.connect(path, check_same_thread=False)
-        reader.execute('BEGIN')
-        reader.execute('SELECT * FROM settings').fetchall()
-        readers.append(reader)
-        compacted.set()
-    monkeypatch.setattr(policy_upgrade, '_compact', pin_after_compacting)
-    maintenance = HistoricalPolicyMaintenance(store)
-    maintenance.start()
-    try:
-        assert compacted.wait(10)
-        deadline = time.monotonic() + 5
-        while maintenance.phase != 'waiting' and time.monotonic() < deadline:
-            time.sleep(.01)
-        assert maintenance.active and maintenance.phase == 'waiting'
-        assert _state(store.conn)['phase'] == 'checkpointing'
-        readers.pop().close()
-        maintenance.join(10)
-        assert maintenance.phase == 'done' and _state(store.conn)['phase'] == 'done'
-        store.settings.set_setting('normal', 'recording')
-    finally:
-        for reader in readers:
-            reader.close()
-        maintenance.stop()
-        maintenance.join(5)
-        store.conn.close()
+def counts(conn):
+    return {table: conn.execute('SELECT count(*) FROM "' + table.replace('"', '""') + '"').fetchone()[0]
+            for table in tables(conn) if not table.startswith('sqlite_')}
 
 
 @pytest.mark.parametrize('failure', ['space_guard', 'sqlite_full', 'os_full', 'interrupted'])
-def test_deferred_compaction_warns_without_pausing_recording(current_vacuum_store, monkeypatch, failure):
-    store = current_vacuum_store
+def test_deferred_compaction_warns_without_pausing_recording(current_copy_store, monkeypatch, failure):
+    store = current_copy_store
     error = db_space.LowDiskSpace('injected insufficient compaction space')
     if failure == 'os_full':
         error = OSError(errno.ENOSPC, 'injected temporary filesystem full')
@@ -290,16 +232,16 @@ def test_deferred_compaction_warns_without_pausing_recording(current_vacuum_stor
         error = sqlite3.OperationalError('injected compaction failure')
         error.sqlite_errorcode = sqlite3.SQLITE_FULL if failure == 'sqlite_full' else sqlite3.SQLITE_INTERRUPT
 
-    def failed_compaction(conn, directory):
+    def failed_compaction(source, target, **kwargs):
         raise error
 
-    monkeypatch.setattr(policy_upgrade, '_compact', failed_compaction)
+    monkeypatch.setattr(build, 'build', failed_compaction)
     app = web_app.create_app(store, lambda: {}, background_work=False)
     maintenance = app.state.ctx.storage_maintenance
-    expected = DEFERRED_MESSAGE if failure == 'interrupted' else LOW_SPACE_MESSAGE
+    expected = COPY_DEFERRED_MESSAGE if failure == 'interrupted' else COPY_LOW_SPACE_MESSAGE
     try:
         with TestClient(app, base_url='http://127.0.0.1', backend_options={'use_uvloop':True}) as client:
-            maintenance.start()
+            maintenance.start_compaction()
             maintenance.join(10)
             status = client.get('/storage-maintenance/status').json()
             assert not status['active'] and status['recording'] and status['warning']
@@ -326,7 +268,7 @@ const assert = require('node:assert/strict'), fs = require('node:fs'), vm = requ
 let banner = null, textWrites = 0;
 const document = {readyState:'complete', documentElement:{dataset:{}}, getElementById: () => banner};
 const events=[];
-let refresh, fail=false, state={active:true,auth_labels:[],banner_message:'Updating library storage; browsing and playback remain available.'};
+let refresh, fail=false, state={active:true,auth_labels:[],banner_message:'Optimizing app storage; some recommendations are temporarily unavailable.'};
 vm.runInNewContext(fs.readFileSync('src/yt_playlist/web/static/storage-maintenance.js','utf8'), {
   document, window:{setInterval: callback => {refresh=callback;},dispatchEvent:event=>events.push(event)},
   CustomEvent:class {constructor(type,options){this.type=type;this.detail=options.detail;}},
@@ -347,13 +289,13 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
   fail=false; state={active:false,phase:'deferred',recording:true,warning:true,
     auth_labels:['Main'],message:'Detailed diagnostic text.',banner_message:'Free disk space to finish.'}; await refresh();
   assert.equal(document.documentElement.dataset.storageCompacting,'false');
-  assert.equal(banner.hidden,false); assert.equal(banner.textContent,state.banner_message);
+  assert.equal(banner.hidden,true); assert.equal(banner.textContent,'');
   assert.equal(banner.title,undefined,'API diagnostics must not become a warning tooltip');
-  assert.equal(banner.attributes.role,'alert'); assert.equal(banner.attributes['aria-live'],'assertive');
+  assert.equal(banner.attributes.role,'status'); assert.equal(banner.attributes['aria-live'],'polite');
   assert.equal(events.at(-1).detail.labels[0],'Main');
   fail=true; await refresh(); assert.equal(document.documentElement.dataset.storageCompacting,'false');
-  assert.equal(banner.textContent,state.banner_message); assert.equal(banner.hidden,false);
-  fail=false; state={active:true,auth_labels:[],banner_message:'Updating library storage; browsing and playback remain available.'}; await refresh();
+  assert.equal(banner.textContent,''); assert.equal(banner.hidden,true);
+  fail=false; state={active:true,auth_labels:[],banner_message:'Optimizing app storage; some recommendations are temporarily unavailable.'}; await refresh();
   assert.equal(document.documentElement.dataset.storageCompacting,'true');
   assert.equal(banner.attributes.role,'status'); assert.equal(banner.attributes['aria-live'],'polite');
   state={active:false,phase:'done',recording:true,warning:false,auth_labels:[]}; await refresh();
@@ -364,91 +306,36 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
     assert result.returncode == 0, result.stderr
 
 
-def test_saved_recovery_database_online_compaction(request, tmp_path):
-    """Rehearse the final background VACUUM on an already verified/shared copy."""
-    source = request.config.getoption('policy_recovery_source')
-    if not source:
-        pytest.skip('Pass --policy-recovery-source with a verified shared recovery database')
-    output = request.config.getoption('policy_recovery_output')
-    folder = Path(output) if output else tmp_path / 'online-compaction'
-    folder.mkdir(mode=0o700, parents=True, exist_ok=False)
-    path = folder / 'state.db'
-    with closing(sqlite3.connect(Path(source).resolve().as_uri() + '?mode=ro', uri=True)) as reader:
-        with closing(sqlite3.connect(path)) as target:
-            reader.backup(target)
-    path.chmod(0o600)
-    store = _open_legacy(path)
-    maintenance = HistoricalPolicyMaintenance(store)
-    try:
-        assert not policy_upgrade._has_legacy(store.conn), 'Use the verified shared recovery output as the source'
-        before, missing = _counts(store.conn), _missing_references(store.conn)
-        expected = {r[0]: _fingerprint(store.rec_ledger.policy_configuration(r[0])) for r in
-                    store.conn.execute('SELECT model_version FROM rec_serving_policies').fetchall()}
-        # Recreate disposable bloat to exercise real VACUUM of every data page,
-        # while keeping this rehearsal much smaller than the original 11 GB.
-        raw = json.dumps({'ranker': 'rehearsal', 'evidence': 'x' * 40000})
-        with store.conn:
-            store.conn.executemany('INSERT INTO rec_serving_policies VALUES (?,?,1)',
-                [(f'online-rehearsal-{i:04}', raw) for i in range(300)])
-        store.conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
-        original_bytes = path.stat().st_size
-        maintenance.start()
-        reads, deadline = 0, time.monotonic() + 120
-        while not maintenance.ready.wait(.01) and time.monotonic() < deadline:
-            with store._lock:
-                assert store.conn.execute('SELECT count(*) FROM identities').fetchone()[0] > 0
-            reads += 1
-        maintenance.join(5)
-        assert reads and _state(store.conn)['phase'] == 'done'
-        assert path.stat().st_size < original_bytes - 8 * 1024 * 1024
-        actual = {r[0]: _fingerprint(store.rec_ledger.policy_configuration(r[0])) for r in
-                  store.conn.execute('SELECT model_version FROM rec_serving_policies').fetchall()}
-        assert actual == expected
-        after = _counts(store.conn)
-        after['settings'] -= 1
-        assert after == before and _missing_references(store.conn) == missing
-        _verify(store.conn)
-        report = dict(original_bytes=original_bytes, compact_bytes=path.stat().st_size,
-            repair=_state(store.conn), concurrent_reads=reads, retained_configurations='identical',
-            non_policy_counts_unchanged=True, existing_missing_references=missing,
-            integrity_check='ok', foreign_key_check='ok', source_replaced=False)
-        (folder / 'online-report.json').write_text(json.dumps(report, indent=2) + '\n')
-        print(json.dumps(report, indent=2), flush=True)
-    finally:
-        maintenance.stop()
-        maintenance.join(5)
-        store.conn.close()
-
-
-def test_shutdown_interrupts_running_repair_and_reenables_recording(tmp_path, monkeypatch):
-    store, raw = _legacy(tmp_path / 'state.db')
+def test_shutdown_interrupts_current_copy_and_reenables_recording(current_copy_store, monkeypatch):
+    store = current_copy_store
+    store.settings.set_setting('before-copy', 'exact original value')
     entered = threading.Event()
-    original = policy_upgrade._compact
-
-    def expensive(conn, directory):
-        entered.set()
-        conn.execute('WITH RECURSIVE work(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM work WHERE n<100000000) '
-                     'SELECT sum(n) FROM work').fetchone()
-        original(conn, directory)
-    monkeypatch.setattr(policy_upgrade, '_compact', expensive)
-    maintenance = HistoricalPolicyMaintenance(store)
-    maintenance.start()
+    configure = build._configure
+    def expensive(conn, cancelled=lambda: False):
+        configure(conn, cancelled)
+        if not entered.is_set():
+            entered.set()
+            conn.execute('WITH RECURSIVE work(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM work '
+                         'WHERE n<100000000) SELECT sum(n) FROM work').fetchone()
+    monkeypatch.setattr(build, '_configure', expensive)
+    maintenance = StorageMaintenance(store)
+    maintenance.start_compaction()
     try:
         assert entered.wait(10)
         maintenance.stop()
         maintenance.join(5)
         assert maintenance.ready.is_set() and not maintenance.active and not store.activity_paused
         assert store.conn.execute('PRAGMA query_only').fetchone()[0] == 0
-        assert store.rec_ledger.policy_configuration('old-0000') == raw
-        assert _state(store.conn)['phase'] == 'compacting'
+        assert store.settings.get_setting('before-copy') == 'exact original value'
+        assert db_handles.state(store._db_path)['phase'] == 'failed'
         store.settings.set_setting('after-interruption', 'keep')
-        monkeypatch.setattr(policy_upgrade, '_compact', original)
-        resumed = HistoricalPolicyMaintenance(store)
-        resumed.start()
+        monkeypatch.setattr(build, '_configure', configure)
+        resumed = StorageMaintenance(store)
+        resumed.start_compaction()
         resumed.join(10)
-        assert _state(store.conn)['phase'] == 'done'
+        assert resumed.phase == 'done'
+        assert db_handles.state(store._db_path)['phase'] == 'complete'
         assert store.settings.get_setting('after-interruption') == 'keep'
     finally:
         maintenance.stop()
         maintenance.join(5)
-        store.conn.close()

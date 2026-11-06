@@ -36,7 +36,11 @@ def stage(owner, conn):
 @pytest.mark.parametrize('append', [False, True])
 def test_preopened_runtime_readers_keep_exact_operation_state_and_revision(installed, append, monkeypatch):
     store, version = installed
-    names, sources, recipe, state = seed(store, version, append=append)
+    # The account, playlist and original operation documents form one fixture
+    # prefix. Keep their ordinary writes, with one durable commit before the
+    # independent reader opens; preparation/publication keep their own commits.
+    with store.conn.atomic():
+        names, sources, recipe, state = seed(store, version, append=append)
     other = Store(store._db_path)
     try:
         other.init_schema(defer_metadata=True)
@@ -62,6 +66,15 @@ def test_preopened_runtime_readers_keep_exact_operation_state_and_revision(insta
         assert not other.conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='tv_append_intents'").fetchone()
     finally:
         other.conn.close()
+    reopened = Store(store._db_path)
+    try:
+        reopened.init_schema(defer_metadata=True)
+        assert reopened.playlist_recipes.get_recipe('TV') == recipe
+        actual, revision = radio_storage.load(reopened.conn)
+        assert actual == state
+        assert revision == (('episode', 1) if version >= 94 else None)
+    finally:
+        reopened.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

@@ -116,7 +116,9 @@ def test_radio_creation_finishing_after_repair_retains_only_source_provenance(po
 def test_shared_protocol_journals_before_transport_and_does_not_replay_lost_reply(replacement):
     saved = {SESSION_KEY: json.dumps({'version': 2, 'phase': 'playing', 'episode_id': 'episode'})}
     settings = SimpleNamespace(get_setting=saved.get, set_setting=saved.__setitem__)
-    persistence = RadioPersistence(settings)
+    checkpoints = SimpleNamespace(load=lambda: (json.loads(saved[SESSION_KEY]), None),
+        save=lambda encoded, **_kw: settings.set_setting(SESSION_KEY, encoded))
+    persistence = RadioPersistence(checkpoints)
     before, added = {'video_id': 'a'}, {'video_id': 'b'}
     edit = PlaylistEdit('add', ('a', 'b'), track=added)
     operation = RadioPlaylistTail([before], [added], 1) if replacement else AppendOperation(added)
@@ -179,7 +181,7 @@ def test_operation_owner_rejects_overlap_and_stale_completion():
 
 def test_superseded_episode_cannot_send_a_write():
     state = json.dumps({'version': 2, 'phase': 'playing', 'episode_id': 'newer'})
-    persistence = RadioPersistence(SimpleNamespace(get_setting=lambda _key: state))
+    persistence = RadioPersistence(SimpleNamespace(load=lambda: (json.loads(state), None)))
     owner = RadioMutations(None, persistence, None, lambda: 0.)
     operation = AppendOperation({'video_id': 'a'})
     edits = RadioEdits()

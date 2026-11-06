@@ -110,6 +110,31 @@ def test_preparation_does_not_wait_on_a_busy_session_lock(poc):
             caller.join(timeout=2)
 
 
+def test_seed_preparation_yields_to_an_active_foreground_request(poc, monkeypatch):
+    from yt_playlist.core.activity import check_stopping
+    controller, _, _, workers, _ = poc
+    entered, continued = threading.Event(), threading.Event()
+    release = controller.ctx.store.priority.enter()
+    def seeds():
+        entered.set()
+        check_stopping()
+        continued.set()
+    monkeypatch.setattr(controller, 'join', lambda: None)
+    monkeypatch.setattr(controller, 'seeds', seeds)
+    controller.prepare()
+    task = threading.Thread(target=lambda: _run_preparation(workers[-1]))
+    task.start()
+    try:
+        assert not continued.wait(.05)
+        release()
+        task.join(2)
+        assert entered.is_set() and continued.is_set()
+        assert not task.is_alive() and not controller.preparing
+    finally:
+        release()
+        task.join(2)
+
+
 def _presence_app(bridge, prepare):
     radio = SimpleNamespace(prepare=prepare, suspend=lambda: None)
     app = FastAPI()

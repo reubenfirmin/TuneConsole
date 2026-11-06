@@ -9,6 +9,15 @@ from yt_playlist.web import radio_session
 from yt_playlist.web.radio_session import PlaylistRadio
 
 
+def seed_pool(store):
+    pool = [{"key": f"k{i}", "video_id": f"v{i}", "title": f"Song {i}", "artist": f"Artist {i}"}
+            for i in range(1, 33)]
+    for track in pool:
+        tid = store.tracks.upsert_track(track["video_id"], track["title"], track["artist"], "", None)
+        track["key"] = store.tracks.catalog_subject(tid)["identity_key"]
+    return pool
+
+
 class Playlist:
     def __init__(self):
         self.ids = []
@@ -87,11 +96,10 @@ def poc(monkeypatch, store):
     controller = PlaylistRadio(ctx)
     ctx.radio = controller
     monkeypatch.setattr(controller.work, "start_thread", lambda *args, **kw: workers.append((args, kw)))
-    pool = [{"key": f"k{i}", "video_id": f"v{i}", "title": f"Song {i}", "artist": f"Artist {i}"}
-            for i in range(1, 33)]
-    for track in pool:
-        tid = store.tracks.upsert_track(track["video_id"], track["title"], track["artist"], "", None)
-        track["key"] = store.tracks.catalog_subject(tid)["identity_key"]
+    # The intensity fixture deliberately replaces the ordinary catalog with a
+    # larger genre seed. Add our pool to that state instead of overwriting it.
+    pool = (seed_pool(store) if hasattr(store, '_fixture_intensity')
+            else store._fixture_radio_pool)
 
     class Candidates:
         def __init__(self, store, now, tuning=None, *, now_source=None, comparison=None):
@@ -119,6 +127,9 @@ def poc(monkeypatch, store):
 
         def refresh_metadata(self, tracks):
             return False
+
+        def close(self):
+            pass
 
         def fits(self, track, anchor=None):
             return True

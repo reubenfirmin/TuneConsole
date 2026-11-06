@@ -1,4 +1,5 @@
 import json
+from tests.derived_rating_support import seed_like
 import sqlite3
 
 import pytest
@@ -75,7 +76,7 @@ def test_removal_clears_models_forecasts_and_rollbacks_but_keeps_user_choices(st
     key = store.tracks.identity_key_for_video('yt')
     store.history.import_listening_events(iid,[(key,None,1700000000)],source='spotify_export')
     store.rec_proposals.put_proposals('trend_rollups',{'private_model':'old'},100)
-    store.rec_model.record_like(key,100,provenance='action')
+    seed_like(store,key,100,provenance='action')
     store.settings.set_setting('user-setting','keep')
     store.settings.set_setting('spotify_imported_at','100')
     for name in ('rec_fit_inputs', 'rec_artist_fit_inputs', 'rec_mode_fit_inputs', 'rec_refresh_version'):

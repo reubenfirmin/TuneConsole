@@ -4,14 +4,6 @@ from yt_playlist.core.store import Store
 from yt_playlist.rec import choice_evidence as choices
 
 
-@pytest.fixture
-def store():
-    result = Store(":memory:")
-    result.init_schema()
-    yield result
-    result.conn.close()
-
-
 def offer(store, identity="menu", episode="episode", now=100):
     return choices.issue(store, "albums", [{"id": "a", "score": .9}, {"id": "b", "score": .8}],
                          now, context={"layers": ["now", "session", "recent", "saved"]},
@@ -227,11 +219,10 @@ def test_home_storage_inventory_belongs_to_daily_maintenance(store, monkeypatch)
     assert choices.refresh_report in stages and choices.maintain_storage not in stages
 
 
-def test_new_and_withdrawn_evidence_from_another_store_refreshes_projection(tmp_path):
+def test_new_and_withdrawn_evidence_from_another_store_refreshes_projection(tmp_path, consumer_store):
     path = tmp_path / 'shared.db'
-    first, second = Store(path), Store(path)
+    first, second = consumer_store(path), Store(path)
     try:
-        first.init_schema()
         second.init_schema()
         oid = offer(first)
         choices.refresh_report(first, 110)

@@ -3,6 +3,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
+from tests.metadata_provenance_support import metadata_provenance
 from yt_playlist.web.app import create_app
 
 
@@ -224,18 +225,44 @@ def test_song_creation_retains_destination_for_rejected_and_unconfirmed_addition
     assert songs['store'].actions.get_actions()
 
 
-def test_metadata_loads_current_values_originals_and_genre_sources(songs):
+@pytest.mark.parametrize('manual_genre', [None, 'Jazz'])
+def test_metadata_loads_current_values_originals_and_genre_sources(songs, manual_genre):
+    import time
+    from yt_playlist.providers.waterfall import TrackSink
+
     store = songs['store']
     tid = store.playlists.get_playlist_track_ids(songs['source'])[0]
     store.tracks.set_track_title(tid, 'Corrected title')
-    store.tracks.set_track_enrichment(tid, 'Electronic', '1995')
-    store.enrichment_state.log_enrichment(tid, 'run', 'discogs', 'genre', 'Art Pop', now=1)
-    data = songs['http'].get('/songs/metadata', params={'video_id': 'owned-song'}).json()
+    track = store.tracks.track_for_waterfall(tid)
+    providers = ('musicbrainz', 'discogs', 'lastfm')
+    sink = TrackSink(store, track, providers)
+    now = time.time()
+    for provider, fields in (
+            ('musicbrainz', {'genre': 'Electronic', 'year': '1995'}),
+            ('discogs', {'genre': 'Art Pop'}),
+            ('lastfm', {'genre': None})):
+        sink.capture_result('metadata-options', provider, fields, now)
+        for field, value in fields.items():
+            sink.log('metadata-options', provider, field, value)
+        sink.apply_fields(provider, fields)
+        store.enrichment_state.record_enrichment_attempt(
+            track['identity_key'], provider, fields, video_id=track['video_id'],
+            providers=providers, run_id='metadata-options', now=now,
+            delivery_id=sink.result_delivery(provider))
+    if manual_genre:
+        store.tracks.set_track_genre(tid, manual_genre)
+    response = songs['http'].get('/songs/metadata', params={'video_id': 'owned-song'})
+    assert response.status_code == 200
+    data = response.json()
     assert data['metadata'] == {
         'track_id': tid, 'title': 'Corrected title', 'artist': 'Artist & Friends',
-        'genre': 'Electronic', 'year': '1995', 'orig_title': 'Owned Song', 'orig_artist': 'Artist & Friends',
+        'genre': manual_genre or 'Electronic', 'year': '1995',
+        'orig_title': 'Owned Song', 'orig_artist': 'Artist & Friends',
     }
-    assert data['genre_options'] == [{'value': 'Art Pop', 'providers': ['discogs']}]
+    assert data['genre_options'] == [
+        {'value': 'Electronic', 'providers': ['musicbrainz']},
+        {'value': 'Art Pop', 'providers': ['discogs']},
+    ]
 
 
 def test_metadata_saves_all_fields_and_restores_originals(songs, monkeypatch):
@@ -269,7 +296,7 @@ def test_metadata_save_preserves_unchanged_provider_selection(songs):
     body = {'song': {'video_id': 'owned-song', 'title': 'Owned Song'},
             'title': 'Fixed title', 'artist': 'Artist & Friends', 'genre': 'Electronic', 'year': '1995'}
     assert songs['http'].post('/songs/metadata', json=body).status_code == 200
-    fields = store.enrichment_reports.metadata_provenance(tid)['fields']
+    fields = metadata_provenance(store, tid)['fields']
     assert fields['genre']['source'] == fields['mb_year']['source'] == 'discogs'
     assert not fields['genre']['override'] and not fields['mb_year']['override']
 

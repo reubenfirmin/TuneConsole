@@ -1,4 +1,5 @@
 """DAO suite for ChartsRepo (play-history stats for charts / artist / playlist pages)."""
+from tests.enrichment_support import seed_enrichment
 
 
 def _seed(store):
@@ -163,7 +164,7 @@ def test_story_songs_favor_recent_listens_including_spotify_and_collapse_uploads
     for video, title in [('recent', 'Recent'), ('once', 'Once'), ('old', 'Old favorite'),
                          ('unplayed', 'A new song'), ('wrong', 'Wrong genre')]:
         entry = store.tracks.upsert_track(video, title, 'Band', '', 180)
-        store.tracks.set_track_enrichment(entry,'Techno' if video=='wrong' else 'Shoegaze',None)
+        seed_enrichment(store, entry, 'Techno' if video=='wrong' else 'Shoegaze', None)
         keys[video] = entry
     store.tracks.upsert_track('second-upload', 'Recent', 'Band', '', 180)
     recording = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?',
@@ -172,7 +173,7 @@ def test_story_songs_favor_recent_listens_including_spotify_and_collapse_uploads
         evidence={'review': 'same recording'}, now=now)
     keys = {video: store.tracks.identity_key_for_video(video) for video in keys}
     unavailable = store.tracks.upsert_track('unavailable', 'Unavailable', 'Band', '', 180, available=False)
-    store.tracks.set_track_enrichment(unavailable,'Shoegaze',None)
+    seed_enrichment(store, unavailable, 'Shoegaze', None)
     with store.conn:
         from yt_playlist.core import metadata
         outside = catalog.upsert(store.conn, 'outside', 'Outside library', 'Band', '', 180, library=False)
@@ -209,7 +210,7 @@ def test_story_examples_deduplicate_displayed_songs_before_limiting(store):
                          ('remaster', 'Wise One (2020 Remaster)'),
                          ('other', 'Giant Steps'), ('live', 'Wise One (Live)')]:
         entry = store.tracks.upsert_track(video, title, 'John Coltrane', '', 180)
-        store.tracks.set_track_enrichment(entry, 'Free jazz', None)
+        seed_enrichment(store, entry, 'Free jazz', None)
     # Repeated exact uploads win the history ranking, yet must not consume every slot.
     for index, video in enumerate(['first', 'copy', 'remaster', 'other', 'live']):
         key = store.tracks.identity_key_for_video(video)
@@ -230,7 +231,7 @@ def test_story_activity_requires_recent_listening_and_preserves_collaboration_cr
         credits=[{'name': 'Band', 'id': 'UC_band'}, {'name': 'Guest', 'id': 'UC_guest'}])
     store.tracks.upsert_track('old', 'Old', 'Old artist', '', 180)
     store.tracks.upsert_track('unplayed', 'Unplayed', 'Unplayed artist', '', 180)
-    store.tracks.set_track_enrichment(entry,'Indie Pop',None)
+    seed_enrichment(store, entry, 'Indie Pop', None)
     playlist = store.playlists.upsert_playlist(iid, 'PL', 'Mix', 1, 'h', now)
     store.playlists.set_playlist_tracks(playlist, [entry])
     key = store.tracks.identity_key_for_video('collab')

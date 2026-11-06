@@ -65,11 +65,6 @@ class CompactTasteGroupsRepo(TasteGroupsRepo):
             return group_queries.leaf_members(conn, generation)
 
     @snapshot_read
-    def assignment_head(self):
-        with self._read() as conn:
-            return group_queries.assignment_head(conn)
-
-    @snapshot_read
     def lineage(self):
         with self._read() as conn:
             return group_queries.lineage(conn)
@@ -82,38 +77,6 @@ class CompactTasteGroupsRepo(TasteGroupsRepo):
     @snapshot_read
     def legacy_versions(self):
         return group_queries.legacy_versions(self.conn)
-
-    @synchronized
-    def publish_assignments(self, rows):
-        if not self.conn.in_transaction:
-            raise RuntimeError('Provisional assignments require an outer transaction')
-        for key, generation, version, similarity, support, digest, at in rows:
-            owner = self.conn.execute('SELECT id FROM recordings WHERE identity_key=?', (key,)).fetchone()
-            selected = self.conn.execute('SELECT g.id,x.group_version_id FROM group_generations g '
-                'JOIN group_publications p ON p.generation_id=g.id LEFT JOIN generation_groups x '
-                'ON x.generation_id=g.id AND x.external_version=? WHERE g.external_key=?', (version, generation)).fetchone()
-            if selected is None or version is not None and selected[1] is None:
-                raise ValueError('Provisional musical group assignment has an invalid generation or selected version')
-            table = 'group_assignments' if owner else 'unresolved_group_assignments'
-            column = 'recording_id' if owner else 'raw_key'
-            self.conn.execute(f'INSERT INTO {table}(generation_id,{column},group_version_id,similarity,support,'
-                f'profile_digest,prepared_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(generation_id,{column}) '
-                'DO UPDATE SET group_version_id=excluded.group_version_id,similarity=excluded.similarity,'
-                'support=excluded.support,profile_digest=excluded.profile_digest,prepared_at=excluded.prepared_at',
-                (selected[0], owner[0] if owner else key, selected[1], similarity, support, digest, at))
-
-    @lookup_read
-    def assignment(self, key):
-        owner = self.conn.execute('SELECT id FROM recordings WHERE identity_key=?', (key,)).fetchone()
-        table, column, identity = ('group_assignments', 'recording_id', owner[0]) if owner else (
-            'unresolved_group_assignments', 'raw_key', key)
-        row = self.conn.execute('SELECT g.external_key,x.external_version,a.similarity,a.support,a.profile_digest,a.prepared_at '
-            f'FROM {table} a JOIN group_head h ON h.generation_id=a.generation_id '
-            'JOIN group_generations g ON g.id=a.generation_id LEFT JOIN generation_groups x '
-            f'ON x.generation_id=a.generation_id AND x.group_version_id=a.group_version_id WHERE a.{column}=?',
-            (identity,)).fetchone()
-        return dict(zip(('identity_key', 'generation', 'version', 'similarity', 'support', 'profile_digest', 'prepared_at'),
-                        (key, *row))) if row else None
 
     def stage(self, prepared):
         return publication.stage(self, prepared)

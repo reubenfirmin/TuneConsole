@@ -183,6 +183,26 @@ def test_tuning_honors_a_pending_explicit_stream_selection(poc):
     assert c.ctx.bridge.now_playing["video_id"] == "v2"
 
 
+def test_tuning_keeps_pending_explicit_song_and_its_skipped_prefix(poc):
+    c, remote, frames, *_ = poc
+    assert c.start()['ok']
+    play(c, 'v2')
+    state = c.status()
+    branch = state['directions'][2]
+    song = branch['tracks'][2]['video_id']
+    assert c.select(branch['id'], state['menu_id'], song)['ok']
+    request = c.session.requested_direction
+    play_intent = dict(request['play'])
+    excluded = list(request['excluded'])
+    before = (list(remote.ids), list(remote.adds), list(remote.removes), list(frames))
+    assert c.tune({'comfort': .1, 'theme': .5, 'energy': .2})['ok']
+    assert c.session.requested_direction is request
+    assert request['play'] == play_intent
+    assert request['excluded'] == excluded
+    assert request['tracks'][0]['video_id'] == song
+    assert (remote.ids, remote.adds, remote.removes, frames) == before
+
+
 @pytest.mark.parametrize("retuned", [False, True])
 def test_bootstrap_preserves_staggered_decay_progress(poc, retuned):
     c, *_ = poc

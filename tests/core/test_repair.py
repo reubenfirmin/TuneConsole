@@ -11,20 +11,16 @@ import pytest
 
 from tests.historical_captures import retained_capture
 from yt_playlist.core import repair, listening
-from yt_playlist.core.store import Store
 
 DAY = 86400
 
 
 @pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    s.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (1,'me','c.json',1)")
-    s.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (2,'brand','c.json',0)")
-    s.conn.commit()
-    yield s
-    s.conn.close()
+def store(store):
+    store.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (1,'me','c.json',1)")
+    store.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (2,'brand','c.json',0)")
+    store.conn.commit()
+    return store
 
 
 def _hist(store, ident, day, keys, source="ytm_history"):
@@ -230,7 +226,7 @@ def test_run_once_does_nothing_without_a_takeout_import(store, monkeypatch, tmp_
     _ev(store, 1, "real", 10)
     _ev(store, 1, "real", 20)
     _hist(store, 1, 15, ["phantom"])
-    repair.run_once(store)                              # takeout_imported_at is unset
+    store.history.repair_verified_imports()             # takeout_imported_at is unset
     assert "phantom" in _keys(store)
     assert store.settings.get_setting(repair.PHANTOM_PURGE_SEEN) is None
 
@@ -242,13 +238,13 @@ def test_run_once_fires_after_a_takeout_import_and_then_stops(store, monkeypatch
     _ev(store, 1, "real", 20)
     _hist(store, 1, 15, ["phantom"])
     store.settings.set_setting("takeout_imported_at", "1000.0")
-    repair.run_once(store)
+    store.history.repair_verified_imports()
     assert "phantom" not in _keys(store)
     watermark = store.settings.get_setting(repair.PHANTOM_PURGE_SEEN)
     assert watermark
 
     _hist(store, 1, 16, ["phantom2"])                   # a fresh phantom after the repair ran
-    repair.run_once(store)                              # same import: must not run again
+    store.history.repair_verified_imports()              # same import: must not run again
     assert "phantom2" in _keys(store)
     assert store.settings.get_setting(repair.PHANTOM_PURGE_SEEN) == watermark
 

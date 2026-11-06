@@ -431,7 +431,7 @@ tick();
 assert.equal(latest().videoId, 'playing');
 assert.equal(latest().playlist, 'PL_playing');
 assert.equal(latest().position, 12);
-assert.equal(latest().duration, undefined, 'song length belongs to the app catalog');
+assert.equal(latest().duration, undefined, 'missing full-song metadata must leave length unknown');
 location.href = 'https://music.youtube.com/browse/VLPL_other';
 video.currentTime = 30;
 now += 2000;
@@ -617,7 +617,134 @@ assert.equal(windowHandlers.size, 0);
 vm.runInNewContext(source, context);
 assert.equal(timers.size, 1, 'a stopped sensor must restart even at the same version');
 assert.equal(windowHandlers.size, 2);
+// Full song metadata can schedule collection without borrowing a buffered endpoint.
+for (const length of ['195', 195, 195.5]) {
+  playerResponse = {videoDetails: {videoId: data.video_id, lengthSeconds: length}};
+  tick();
+  assert.equal(latest().duration, Number(length));
+  assert.equal(latest().position, video.currentTime);
+}
+for (const length of [undefined, null, '', ' ', '0x30', 'NaN', 'Infinity', '-1', 0, -1,
+                       Infinity, NaN, true, [], {}, 86401]) {
+  playerResponse = {videoDetails: {videoId: data.video_id, lengthSeconds: length}};
+  tick();
+  assert.equal(latest().duration, undefined, 'invalid full length must remain unknown');
+}
+playerResponse = {videoDetails: {videoId: 'stale-response', lengthSeconds: '240'}};
+tick();
+assert.equal(latest().duration, undefined, 'another song cannot supply the length');
+const responseId = data.video_id;
+player.getPlayerResponse = () => {
+  data = {...data, video_id: 'duration-changed'};
+  return {videoDetails: {videoId: responseId, lengthSeconds: '195'}};
+};
+tick();
+assert.equal(latest().duration, undefined, 'a changing response getter cannot attach stale length');
 """
     result = subprocess.run([node, "-e", script], cwd=Path(__file__).resolve().parents[1],
+                            text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_main_sensor_releases_replaced_media_and_stopped_callbacks():
+    node = shutil.which('node')
+    if node is None:
+        pytest.skip('Node.js is required to exercise the extension main-world sensor')
+    script = r"""
+const assert = require('node:assert/strict'), fs = require('node:fs'), vm = require('node:vm');
+const messages = [], timers = new Map(), windowHandlers = new Map();
+let serial = 0, video, data = {video_id:'first', title:'First', author:'Artist'}, playlist = 'old-queue';
+function media(position = 12) {
+  const handlers = new Map();
+  return {handlers, paused:true, muted:false, volume:.5, currentTime:position, duration:200,
+    addEventListener(type, fn) { assert(!handlers.has(type)); handlers.set(type, fn); },
+    removeEventListener(type, fn) { assert.equal(handlers.get(type), fn); handlers.delete(type); }};
+}
+video = media();
+const player = {getVideoData:() => data, getPlaylistId:() => playlist,
+  getCurrentTime:() => video?.currentTime};
+const window = {postMessage:msg => messages.push(msg),
+  addEventListener(type, fn) { assert(!windowHandlers.has(type)); windowHandlers.set(type, fn); },
+  removeEventListener(type, fn) {
+    if (windowHandlers.has(type)) { assert.equal(windowHandlers.get(type), fn); windowHandlers.delete(type); }
+  }};
+const context = {window, navigator:{}, URL, Date:{now:() => 30000},
+  document:{querySelector:selector => selector === 'video' ? video : selector === '#movie_player' ? player : null},
+  setInterval(fn) { timers.set(++serial, fn); return serial; }, clearInterval(id) { timers.delete(id); }};
+const source = fs.readFileSync('extension/nowplaying_main.js', 'utf8');
+const inject = () => vm.runInNewContext(source, context);
+const poll = () => [...timers.values()].forEach(fn => fn());
+const events = () => messages.filter(msg => msg.__tcPlayer).map(msg => msg.__tcPlayer);
+inject();
+assert.equal(video.handlers.size, 4);
+assert.equal(events().length, 0, 'binding a paused element must not manufacture a play');
+for (let i = 0; i < 200; i++) {
+  const old = video, stale = [...old.handlers.values()];
+  video = media();
+  stale.forEach(fn => fn()); // Replacement can precede the next periodic sample.
+  assert.equal(events().length, 0);
+  poll();
+  assert.equal(old.handlers.size, 0);
+  assert.equal(video.handlers.size, 4);
+  stale.forEach(fn => fn());
+  video = null;
+  poll();
+  assert.equal(events().length, 0);
+  video = media();
+  poll();
+}
+// Adopt the replacement identity only after reporting the previous track's exit.
+video.currentTime = 73;
+poll();
+const old = video, stalePlay = old.handlers.get('play');
+video = media(3); data = {video_id:'second', title:'Second', author:'Artist'}; playlist = 'new-queue';
+poll();
+assert.equal(old.handlers.size, 0);
+assert.equal(events().length, 1);
+assert.equal(events()[0].kind, 'track_exit');
+assert.equal(events()[0].videoId, 'first');
+assert.equal(events()[0].playlist, 'old-queue');
+assert.equal(events()[0].position, 73);
+stalePlay();
+assert.equal(events().length, 1);
+video.paused = false;
+video.handlers.get('play')();
+assert.equal(events().at(-1).kind, 'state');
+assert.equal(events().at(-1).videoId, 'second');
+assert.equal(events().at(-1).playlist, 'new-queue');
+poll(); // A normal heartbeat still works.
+assert.equal(events().at(-1).kind, 'tick');
+windowHandlers.get('message')({source:window, data:{__tcSensorProbe:{version:4,id:'repair'}}});
+assert.equal(messages.at(-1).__tcSensorProbeId, 'repair');
+const timer = [...timers.values()][0];
+const firstController = window.__tcNowPoller;
+inject();
+assert.equal(firstController, window.__tcNowPoller);
+assert.equal(timers.size, 1);
+assert.equal(video.handlers.size, 4);
+// Replacing a compatible older implementation releases its listeners too.
+const replacedCallbacks = [...video.handlers.values()];
+window.__tcNowPoller.revision--;
+inject();
+assert(firstController.stopped);
+assert.equal(timers.size, 1);
+assert.equal(video.handlers.size, 4);
+const afterReplacement = events().length;
+replacedCallbacks.forEach(fn => fn()); timer();
+assert.equal(events().length, afterReplacement, 'queued callbacks from a stopped sensor are inert');
+const stoppedCallbacks = [...video.handlers.values()], stoppedTimer = [...timers.values()][0];
+window.__tcNowPoller.stop();
+window.__tcNowPoller.stop();
+assert.equal(video.handlers.size, 0);
+assert.equal(timers.size, 0);
+assert.equal(windowHandlers.size, 0);
+stoppedCallbacks.forEach(fn => fn()); stoppedTimer();
+assert.equal(events().length, afterReplacement);
+inject();
+assert.equal(timers.size, 1);
+assert.equal(video.handlers.size, 4);
+window.__tcNowPoller.stop();
+"""
+    result = subprocess.run([node, '-e', script], cwd=Path(__file__).resolve().parents[1],
                             text=True, capture_output=True, check=False)
     assert result.returncode == 0, result.stderr

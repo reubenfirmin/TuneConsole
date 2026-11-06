@@ -10,6 +10,7 @@ import sqlite3
 import struct
 import time
 import uuid
+from dataclasses import dataclass
 
 from . import artists, embedding_files
 
@@ -138,10 +139,20 @@ def owner(conn, kind, key):
     return subject
 
 
-def publish(conn, name, upserts, removed=(), *, replace=False, model_version=None, now=None):
-    """Caller owns the transaction; validate before removing the previous basis."""
-    if not conn.in_transaction:
-        raise RuntimeError('Embedding publication requires an outer transaction')
+@dataclass(frozen=True)
+class Publication:
+    name: str
+    model_version: str
+    rows: tuple
+    removed: tuple
+    replace: bool
+    now: float
+    dimensions: int | None
+    files: tuple | None
+
+
+def prepare(conn, name, upserts, removed=(), *, replace=False, model_version=None, now=None):
+    """Resolve owners, ordering and immutable bytes on the guarded reader."""
     kind, space, table, column = descriptor(name)
     admitted, seen, size = [], set(), None
     for key, vector in upserts:
@@ -159,10 +170,7 @@ def publish(conn, name, upserts, removed=(), *, replace=False, model_version=Non
     now = time.time() if now is None else now
     if type(now) not in (int, float) or not math.isfinite(now):
         raise ValueError('Embedding publication time must be finite')
-    if replace:
-        conn.execute(f'DELETE FROM {table} WHERE space=?', (space,))
-        if embedding_files.available(conn):
-            conn.execute(f'DELETE FROM {kind}_embedding_files WHERE space=?', (space,))
+    retracted = []
     for key in removed:
         # A retired owner can be retracted without resolving it to a survivor.
         if kind == 'recording':
@@ -170,24 +178,61 @@ def publish(conn, name, upserts, removed=(), *, replace=False, model_version=Non
             subject = row[0] if row else None
         else:
             subject = int(key[8:]) if str(key).startswith('@artist:') else artists.lookup(conn, key)
-        conn.execute(f'DELETE FROM {table} WHERE {column}=? AND space=?', (subject, space))
-        if embedding_files.available(conn):
-            conn.execute(f'DELETE FROM {kind}_embedding_files WHERE {column}=? AND space=?', (subject, space))
-    if not admitted:
-        return
-    if embedding_files.available(conn):
+        retracted.append(subject)
+    files = None
+    if admitted and embedding_files.available(conn):
         logical = embedding_files.relation(conn, kind)
-        order = conn.execute(f'SELECT coalesce(max(insertion_order),0) FROM {logical} WHERE space=?', (space,)).fetchone()[0]
+        orders, order = {}, 0
+        if not replace:
+            subjects = [subject for subject, _vector in admitted]
+            qs = ','.join('?' for _ in subjects)
+            orders = dict(conn.execute(f'SELECT {column},insertion_order FROM {logical} '
+                f'WHERE space=? AND {column} IN ({qs})', (space, *subjects)))
+            removed_subjects = [subject for subject in retracted if subject is not None]
+            excluded = (f' AND {column} NOT IN (' + ','.join('?' for _ in removed_subjects) + ')'
+                        if removed_subjects else '')
+            order = conn.execute(f'SELECT COALESCE(MAX(insertion_order),0) FROM {logical} '
+                'WHERE space=?' + excluded, (space, *removed_subjects)).fetchone()[0]
+        # Retractions happen before appending new rows, as in the writer API.
+        for subject in retracted:
+            orders.pop(subject, None)
         values = []
         for subject, vector in admitted:
-            previous_order = conn.execute(f'SELECT insertion_order FROM {logical} WHERE {column}=? AND space=?',
-                                          (subject, space)).fetchone()
+            previous_order = orders.get(subject)
             if previous_order is None:
                 order += 1
-            values.append((subject, vector, now, previous_order[0] if previous_order else order))
-        embedding_files.publish(conn, kind, space, model_version, size, values)
+            values.append((subject, vector, now, previous_order if previous_order is not None else order))
+        files = embedding_files.prepare(conn, kind, size, values)
+    return Publication(name, model_version, tuple(admitted), tuple(retracted), replace, now, size, files)
+
+
+def publish_prepared(conn, publication):
+    """Only SQL references change after the snapshot has been revalidated."""
+    if not conn.in_transaction:
+        raise RuntimeError('Embedding publication requires an outer transaction')
+    kind, space, table, column = descriptor(publication.name)
+    file_owned = embedding_files.available(conn)
+    if publication.replace:
+        conn.execute(f'DELETE FROM {table} WHERE space=?', (space,))
+        if file_owned:
+            conn.execute(f'DELETE FROM {kind}_embedding_files WHERE space=?', (space,))
+    removed = [(subject, space) for subject in publication.removed]
+    conn.executemany(f'DELETE FROM {table} WHERE {column}=? AND space=?', removed)
+    if file_owned:
+        conn.executemany(f'DELETE FROM {kind}_embedding_files WHERE {column}=? AND space=?', removed)
+    if publication.files is not None:
+        embedding_files.publish_prepared(conn, kind, space, publication.model_version, publication.files)
         return
     conn.executemany(f'INSERT INTO {table}({column},space,model_version,dimensions,vector,built_at) '
                      f'VALUES (?,?,?,?,?,?) ON CONFLICT({column},space,model_version) '
                      'DO UPDATE SET vector=excluded.vector,built_at=excluded.built_at',
-                     ((subject, space, model_version, size, vector, now) for subject, vector in admitted))
+                     ((subject, space, publication.model_version, publication.dimensions, vector, publication.now)
+                      for subject, vector in publication.rows))
+
+
+def publish(conn, name, upserts, removed=(), *, replace=False, model_version=None, now=None):
+    """Caller owns the transaction; validate before removing the previous basis."""
+    if not conn.in_transaction:
+        raise RuntimeError('Embedding publication requires an outer transaction')
+    publish_prepared(conn, prepare(conn, name, upserts, removed,
+                                  replace=replace, model_version=model_version, now=now))

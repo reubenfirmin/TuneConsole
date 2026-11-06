@@ -1,9 +1,10 @@
 """A refresh cannot replace an eligible complete board with a thinner result."""
 from copy import deepcopy
+from tests.derived_rating_support import seed_dislike
 
 import pytest
 
-from tests.rec.test_home_prepared import prepared, service
+from tests.rec.test_home_prepared import prepared, service, store
 from tests.recommendation_support import publish_bundles
 from yt_playlist.rec import home_prepared
 
@@ -28,6 +29,9 @@ def test_partial_candidate_refresh_preserves_the_eligible_complete_board(store, 
     # The library and feedback do not change. Only the replacement candidate
     # publication is incomplete, as can happen during staged preparation.
     original = deepcopy(store._fixture_bundle_payload)
+    # Recovery needs four playable lanes, not a second preparation of every
+    # Vibes preset. Vibes publication/selection has its own integration checks.
+    original.pop('_vibes', None)
     thin_candidates(store)
     assert home_prepared.prepare(store, 1003) is None
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == prepared
@@ -49,7 +53,7 @@ def test_partial_refresh_does_not_retain_an_ineligible_old_board(store, prepared
     assert keys
     if reason == 'dislike':
         for key in keys:
-            store.rec_model.record_dislike(key, until=None, now=1001)
+            seed_dislike(store, key, until=None, now=1001)
     else:
         with store.conn:
             store.conn.executemany('UPDATE youtube_items SET available=0 WHERE recording_id='

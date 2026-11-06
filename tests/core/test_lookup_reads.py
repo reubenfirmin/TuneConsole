@@ -1,5 +1,6 @@
 """Verify the connection ownership guaranteed by the lookup_read boundary."""
 from concurrent.futures import ThreadPoolExecutor
+from tests.derived_rating_support import seed_dislike
 from contextlib import ExitStack
 import sqlite3
 import threading
@@ -7,7 +8,6 @@ import threading
 import pytest
 
 from yt_playlist.core.activity import WorkClosing, cancellable_work
-from yt_playlist.core.store import Store
 from yt_playlist.repos.base import Repo, lookup_read
 
 
@@ -38,9 +38,8 @@ class LookupProbe(Repo):
         return value
 
 
-def test_composed_read_keeps_its_original_snapshot_after_an_independent_commit(tmp_path):
-    store = Store(tmp_path / 'composed.db')
-    store.init_schema()
+def test_composed_read_keeps_its_original_snapshot_after_an_independent_commit(file_backed_store):
+    store = file_backed_store
     store.settings.set_setting('probe', 'original')
     try:
         with store.read_view() as outer:
@@ -57,9 +56,8 @@ def test_composed_read_keeps_its_original_snapshot_after_an_independent_commit(t
 
 @pytest.mark.parametrize('route', ['memory', 'available', 'owned', 'private'])
 @pytest.mark.parametrize('failure', [None, ValueError, WorkClosing])
-def test_lookup_owns_its_connection_and_releases_on_every_exit(tmp_path, route, failure):
-    store = Store(':memory:' if route == 'memory' else tmp_path / 'lookup.db')
-    store.init_schema()
+def test_lookup_owns_its_connection_and_releases_on_every_exit(request, route, failure):
+    store = request.getfixturevalue('store' if route == 'memory' else 'file_backed_store')
     store.settings.set_setting('probe', 'committed')
     observed = []
     try:
@@ -93,9 +91,8 @@ def test_lookup_owns_its_connection_and_releases_on_every_exit(tmp_path, route, 
 
 
 @pytest.mark.parametrize('failure', [None, ValueError, WorkClosing])
-def test_busy_lookup_owns_private_connection_and_closes_it_on_every_exit(tmp_path, failure):
-    store = Store(tmp_path / 'busy.db')
-    store.init_schema()
+def test_busy_lookup_owns_private_connection_and_closes_it_on_every_exit(file_backed_store, failure):
+    store = file_backed_store
     store.settings.set_setting('probe', 'committed')
     entered, release = threading.Event(), threading.Event()
     observed = []
@@ -139,11 +136,10 @@ def test_busy_lookup_owns_private_connection_and_closes_it_on_every_exit(tmp_pat
     'impression_counts', 'pick_counts', 'muted_album_ids', 'video_tracks_detail', 'get_playlist',
     'disliked_identity_keys', 'disliked_key_page', 'identity_key_for_video',
 ])
-def test_home_reads_keep_owned_changes_and_finish_before_a_busy_writer(tmp_path, operation):
-    store = Store(tmp_path / 'home-reads.db')
+def test_home_reads_keep_owned_changes_and_finish_before_a_busy_writer(file_backed_store, operation):
+    store = file_backed_store
     entered, release = threading.Event(), threading.Event()
     try:
-        store.init_schema()
         if operation in ('impression_counts', 'pick_counts'):
             from tests.mode_fixtures import seed_modes
 
@@ -168,7 +164,7 @@ def test_home_reads_keep_owned_changes_and_finish_before_a_busy_writer(tmp_path,
                 keys.append(store.tracks.identity_key_for_video(video))
             keys.sort()
             for key in (keys[0], keys[1], keys[3], keys[4]):
-                store.rec_model.record_dislike(key, until=200, now=100)
+                seed_dislike(store, key, until=200, now=100)
             # A second surface must not consume a distinct-key page slot, and
             # other feedback must not enter either dislike projection.
             store.rec_model.record_feedback('radio', keys[1], 'dislike', scope='other',

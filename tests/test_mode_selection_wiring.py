@@ -1,22 +1,11 @@
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
-from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
 
 pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
-
-
-@pytest.fixture
-def store():
-    s = Store(":memory:")
-    try:
-        s.init_schema()
-        yield s
-    finally:
-        s.conn.close()
 
 
 def _seed_bundles(store):
@@ -45,11 +34,9 @@ def _client(store, now=1000.0):
                       base_url="http://127.0.0.1")
 
 
-def test_cards_render_logs_impressions(store):
-    from tests.rec.test_home_prepared import seed
+def test_cards_render_logs_impressions(store, home_seed_inputs):
     from yt_playlist.rec import home_prepared
 
-    seed(store)
     assert home_prepared.prepare(store, 1000) is not None
     client = _client(store)
     r = client.get("/home/cards")
@@ -68,8 +55,7 @@ def test_generate_logs_pick(store):
         "tracks": '[{"video_id": "vX", "title": "T", "artist": "A"}]',
         "recipe": '{"model": "mode", "mode_id": 2}'})
     assert r.status_code == 200
-    rows = store.modes.pick_rows()
-    assert len(rows) == 1 and rows[0][1] == 2
+    assert store.modes.pick_counts() == {2: 1}
 
 
 def test_generate_no_pick_without_mode(store):
@@ -77,4 +63,4 @@ def test_generate_no_pick_without_mode(store):
     _client(store).post("/home/generate", data={
         "name": "M", "tracks": '[{"video_id": "vX", "title": "T", "artist": "A"}]',
         "recipe": 'null'})
-    assert store.modes.pick_rows() == []
+    assert store.modes.pick_counts() == {}

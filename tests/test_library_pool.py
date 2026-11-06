@@ -8,6 +8,7 @@ from tests.test_home_other_genres import seed_genres
 from tests.test_mode_cards_route import _client as _home_client
 from tests.home_fixture_support import returning_listener
 from tests.recommendation_support import publish_bundles
+from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import library_pool, mode_surfaces, surfaces
 from yt_playlist.util.matching import identity_key
 
@@ -17,9 +18,10 @@ def _client(store):
     return _home_client(store)
 
 
-def two_ready_cards(store, monkeypatch):
+def two_ready_cards(store, monkeypatch, *, bundles=None):
     """The screenshot case: ready Wheelhouse and Fresh, with no assigned Catalog or Comfort."""
-    bundles = seed_genres(store)
+    if bundles is None:
+        bundles = seed_genres(store)
     tracks = bundles["0"]["wheelhouse"][:12]
     monkeypatch.setattr(mode_surfaces, "assemble_cards", lambda *a, **kw: [
         {"lane": "wheelhouse", "label": "More in your wheelhouse", "mode_id": 0,
@@ -27,8 +29,8 @@ def two_ready_cards(store, monkeypatch):
     return tracks
 
 
-def test_two_ready_mixes_keep_all_four_slots_without_starting_work(store, monkeypatch):
-    two_ready_cards(store, monkeypatch)
+def test_two_ready_mixes_keep_all_four_slots_without_starting_work(store, monkeypatch, genre_candidates):
+    two_ready_cards(store, monkeypatch, bundles=genre_candidates)
     def unexpected(*args, **kwargs):
         raise AssertionError("Only a click may rank the missing pools")
     monkeypatch.setattr(library_pool, "prepare", unexpected)
@@ -45,8 +47,8 @@ def test_two_ready_mixes_keep_all_four_slots_without_starting_work(store, monkey
         assert 'hx-trigger="every 2s"' not in response.text
 
 
-def test_catalog_skeleton_click_ranks_once_preserves_genres_and_survives_restart(store, monkeypatch):
-    siblings = two_ready_cards(store, monkeypatch)
+def test_catalog_skeleton_click_ranks_once_preserves_genres_and_survives_restart(store, monkeypatch, genre_candidates):
+    siblings = two_ready_cards(store, monkeypatch, bundles=genre_candidates)
     started, release = threading.Event(), threading.Event()
     rows = []
     for i in range(30):
@@ -106,8 +108,7 @@ def test_catalog_skeleton_click_ranks_once_preserves_genres_and_survives_restart
     assert len(calls) == 1
 
 
-def test_empty_and_failed_library_builds_stop_polling_and_offer_retry(store, monkeypatch):
-    seed_genres(store)
+def test_empty_and_failed_library_builds_stop_polling_and_offer_retry(store, monkeypatch, genre_candidates):
     def fail(*args, **kwargs):
         raise RuntimeError("provider internals")
     for prepare in (lambda *a: None, fail):
@@ -126,8 +127,7 @@ def test_empty_and_failed_library_builds_stop_polling_and_offer_retry(store, mon
         assert "provider internals" not in response.text
 
 
-def test_library_pool_rejects_invalid_requests(store):
-    seed_genres(store)
+def test_library_pool_rejects_invalid_requests(store, genre_candidates):
     client = _client(store)
     for data in ({"lane": "unknown", "epoch": "0"}, {"lane": "explore", "epoch": "-1"},
                  {"lane": "explore", "epoch": "x"},
@@ -137,8 +137,8 @@ def test_library_pool_rejects_invalid_requests(store):
     assert client.get("/home/library-pool/99999").status_code == 404
 
 
-def test_temporal_pool_keeps_its_date_band_and_live_feedback(store):
-    bundles = seed_genres(store)
+def test_temporal_pool_keeps_its_date_band_and_live_feedback(store, genre_candidates):
+    bundles = genre_candidates
     keys = []
     for i, year in enumerate([1960, 1980, 1995, 2005, 2010, 2020]):
         title, artist = f"Song {year}", f"Artist {i}"
@@ -158,24 +158,27 @@ def test_catalog_build_reaches_unmodeled_library_beyond_other_genres(store):
     # A large library need not have vectors for every track. The requested genre is deep in
     # the catalog, and sibling cards already use some of it; neither condition makes it empty.
     keys = []
-    for i in range(340):
-        title, artist = f"Song {i}", f"Artist {i}"
-        tid = store.tracks.upsert_track(f"v{i}", title, artist, None, None)
-        store.tracks.set_track_genre(tid, "Jazz" if i >= 310 else "Techno")
-        keys.append(identity_key(title, artist))
+    # Keep every repository write, but publish the fixture as one committed input
+    # before candidate preparation or the explicit job can read it.
+    with atomic_write(store):
+        for i in range(340):
+            title, artist = f"Song {i}", f"Artist {i}"
+            tid = store.tracks.upsert_track(f"v{i}", title, artist, None, None)
+            store.tracks.set_track_genre(tid, "Jazz" if i >= 310 else "Techno")
+            keys.append(identity_key(title, artist))
     parameters = {"lane": "explore", "epoch": "0", "include_genres": ["jazz"],
                   "exclude_keys": json.dumps(keys[310:322])}
     # Ordinary Home waits for candidate dependencies; model the worker's pass
     # before exercising the explicit library-pool request.
     assert mode_surfaces.prepare_bundles(store, 1000) is not None
-    client = _client(store)
-    response = client.post("/home/library-pool", data=parameters)
-    for _ in range(200):
-        match = re.search(r'hx-get="(/home/library-pool/\d+)"', response.text)
-        if not match:
-            break
-        response = client.get(match[1])
-        time.sleep(.01)
+    with _client(store) as client:
+        response = client.post("/home/library-pool", data=parameters)
+        for _ in range(200):
+            match = re.search(r'hx-get="(/home/library-pool/\d+)"', response.text)
+            if not match:
+                break
+            response = client.get(match[1])
+            time.sleep(.01)
     assert response.status_code == 200
     assert response.text.count('class="gen-row"') == 12
     assert "Not enough matching songs" not in response.text

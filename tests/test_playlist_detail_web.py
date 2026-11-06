@@ -396,11 +396,11 @@ def test_lastfm_key_saved_via_form(store, monkeypatch, tmp_path):
     c = _client(store, lambda: {iid: FakeClient()})
 
     assert lf.api_key(store) is None
-    assert "enrichPanel(%d, false," % a in c.get(f"/playlist/{a}").text
+    assert 'providerKey(false, "/settings/lastfm-key")' in c.get('/setup?tab=enrichment').text
     r = c.post("/settings/lastfm-key", data={"key": " abc123 "})
     assert r.status_code == 204
     assert store.settings.get_setting("lastfm_api_key") == "abc123" and lf.api_key(store) == "abc123"
-    assert "enrichPanel(%d, true," % a in c.get(f"/playlist/{a}").text       # page now reflects configured
+    assert 'providerKey(true, "/settings/lastfm-key")' in c.get('/setup?tab=enrichment').text
 
 
 def test_generated_playlist_shows_feedback_control_panel(store):

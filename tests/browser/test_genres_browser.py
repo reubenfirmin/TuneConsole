@@ -1,15 +1,12 @@
 """Browser coverage for the genre tag editor under Enrichment / Advanced.
 
-The shared browser conftest seeds a playlist, not genres, and is off-limits, so
-this module brings its own live_app fixture (the same ~12-line uvicorn boilerplate)
-and relies on create_app seeding the built-in genre whitelist.
+This module seeds its own genre app and uses the shared live-server owner.
+It relies on create_app seeding the built-in genre whitelist.
 """
 import re
 import json
 from contextlib import contextmanager
 import socket
-import threading
-import time
 
 import pytest
 import uvicorn
@@ -17,6 +14,7 @@ from playwright.sync_api import expect
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.live_server import LiveServer
 
 pytestmark = pytest.mark.browser
 
@@ -37,13 +35,8 @@ def live_app(store):
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    while not server.started:
-        time.sleep(0.02)
-    yield f"http://127.0.0.1:{port}"
-    server.should_exit = True
-    thread.join(timeout=5)
+    with LiveServer(server):
+        yield f"http://127.0.0.1:{port}"
 
 
 @pytest.fixture(autouse=True)

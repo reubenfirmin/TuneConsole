@@ -1,5 +1,5 @@
 """Interrupted staging resumes committed prefixes without weakening publication guards."""
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from copy import deepcopy
 from dataclasses import replace
 import sqlite3
@@ -15,11 +15,8 @@ from yt_playlist.repos import group_publication
 
 
 @pytest.fixture
-def database(tmp_path):
-    store = Store(tmp_path / 'resume.db')
-    store.init_schema()
-    yield store
-    store.conn.close()
+def database(file_backed_store):
+    return file_backed_store
 
 
 def legacy(store):
@@ -87,7 +84,6 @@ def test_preparation_resumes_exact_plan_and_legacy_versions(database, monkeypatc
     seed(database, recordings([('House', 13, .3)]))
     monkeypatch.setattr(group_publication, 'BATCH_ROWS', 4)
     original = interrupt(monkeypatch, error=error)
-    worker.request_rebuild()
     if error is WorkClosing:
         with pytest.raises(WorkClosing):
             worker.step(2000)
@@ -256,9 +252,9 @@ def test_cached_plan_revalidates_original_guard_between_turns(database, monkeypa
     worker = group_preparation.Preparation(database)
     assert worker.step(1000)
     first = database.taste_groups.head(members=True)
+    seed(database, recordings([('House', 13, .3)]))
     monkeypatch.setattr(group_publication, 'BATCH_ROWS', 4)
     original = interrupt(monkeypatch)
-    worker.request_rebuild()
     assert not worker.step(2000)
     snapshot, plan = worker._pending
     probe = snapshot.publish
@@ -276,7 +272,7 @@ def test_cached_plan_revalidates_original_guard_between_turns(database, monkeypa
     elif change == 'unrelated-setting':
         database.settings.set_setting('foreground-setting', 'new')
     else:
-        with sqlite3.connect(database._db_path) as other:
+        with closing(sqlite3.connect(database._db_path)) as other, other:
             other.execute("INSERT INTO settings VALUES ('external-setting','new')")
     assert worker.step(2060)
     assert results == ([True, True] if change == 'unrelated-setting' else [False])

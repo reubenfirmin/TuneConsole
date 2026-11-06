@@ -64,7 +64,7 @@ def test_feedback_axis_routes_through_graduation_and_eventually_moves_weight(sto
                    base_url="http://127.0.0.1")
 
     # Why-chip steering goes through the graduation ledger now (#43 / §4b), not a direct nudge: a single
-    # event moves the ledger but leaves the permanent weight neutral (it is below THEME_THRESHOLD).
+    # event moves the ledger but leaves the permanent weight neutral (it is below theme_threshold).
     c.post("/recs/feedback", data={"item": "a|b", "kind": "less", "axis": "era:1990"})
     assert store.rec_model.get_weights(now=1.0).get("era:1990", 1.0) == 1.0     # one event: ledger only, weight untouched
     assert (store.rec_signals.get_theme("era:1990") or 0) < 0

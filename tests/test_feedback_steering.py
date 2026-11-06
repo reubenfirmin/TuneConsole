@@ -1,9 +1,11 @@
 """#43 / #38 §4b: every suggestion dismiss reason steers the taste model THROUGH the graduation
 ledger (not a direct nudge_weight), and 'too mainstream' drives a real popularity axis the scorer
 applies. The tell that steering went through the funnel: a single event moves the rec_theme ledger
-but leaves the permanent weight neutral (it is below THEME_THRESHOLD), whereas the old direct
+but leaves the permanent weight neutral (it is below theme_threshold), whereas the old direct
 nudge_weight moved the weight immediately."""
 from fastapi.testclient import TestClient
+from tests.enrichment_support import seed_audio
+from tests.repository_mock_support import no_database, transient_store
 
 from yt_playlist.rec import rec_params, scoring
 from yt_playlist.util import genre_map
@@ -57,9 +59,9 @@ def test_too_mainstream_steers_pop_only_when_track_is_mainstream(store):
     store.accounts.upsert_account("main", "cred", None, True)
     thresh = int(rec_params.get_param(store, "pop_mainstream_min"))
     hot = store.tracks.upsert_track("v1", "Hot", "A", None, None)
-    store.tracks.set_track_audio(hot, popularity=thresh + 1000)
+    seed_audio(store, hot, popularity=thresh + 1000)
     cold = store.tracks.upsert_track("v2", "Cold", "B", None, None)
-    store.tracks.set_track_audio(cold, popularity=1)
+    seed_audio(store, cold, popularity=1)
     _post(store, item="hot|a", surface="suggest", scope="7", kind="dismiss", reason="mainstream")
     assert (store.rec_signals.get_theme("pop:mainstream") or 0) < 0
     before = store.rec_signals.get_theme("pop:mainstream")
@@ -74,13 +76,12 @@ def test_why_chip_axis_routes_through_graduation_not_direct_nudge(store):
     assert store.rec_model.get_weights().get("genre:techno", 1.0) == 1.0     # the §4b leak is closed
 
 
-def test_pop_band_scorer_downweights_mainstream_tracks(store):
+def test_pop_band_scorer_downweights_mainstream_tracks(transient_store):
+    store = transient_store
     thresh = int(rec_params.get_param(store, "pop_mainstream_min"))
-    hot = store.tracks.upsert_track("v1", "Hot", "A", None, None)
-    store.tracks.set_track_audio(hot, popularity=thresh + 1000)
-    cold = store.tracks.upsert_track("v2", "Cold", "B", None, None)
-    store.tracks.set_track_audio(cold, popularity=1)
-    store.rec_model.set_weight("pop:mainstream", 0.5)                         # steered away from mainstream
+    store.rec_query.track_popularity.return_value = {'hot|a': thresh + 1000, 'cold|b': 1}
+    store.rec_query.track_artists.return_value = {'hot|a': 'A', 'cold|b': 'B'}
+    store.rec_model.get_weights.return_value = {'pop:mainstream': 0.5}
     mult = scoring._axis_weights_for(store, ["hot|a", "cold|b"])
     assert mult is not None
     assert mult["hot|a"] < mult["cold|b"]                          # the mainstream track ranks lower

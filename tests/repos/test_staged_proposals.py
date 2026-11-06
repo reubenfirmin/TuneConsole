@@ -17,11 +17,8 @@ from yt_playlist.repos import policy_storage, proposal_cache, recommendation_pub
 
 
 @pytest.fixture
-def database(tmp_path):
-    store = Store(tmp_path / 'publication.db')
-    store.init_schema()
-    yield store
-    store.conn.close()
+def database(file_backed_store):
+    return file_backed_store
 
 
 @pytest.mark.parametrize('kind,name', [
@@ -61,10 +58,9 @@ def test_staging_releases_writer_between_bounded_commits_and_keeps_last_good_vis
     assert database.recommendations.output('home', 'fixture') == {'title': 'café 🎵' * 1000}
 
 
-def test_interrupted_prefix_resumes_after_store_reopen_without_reinserting_rows(tmp_path, monkeypatch):
-    path = tmp_path / 'resume.db'
-    database = Store(path)
-    database.init_schema()
+def test_interrupted_prefix_resumes_after_store_reopen_without_reinserting_rows(file_backed_store, monkeypatch):
+    database = file_backed_store
+    path = database._db_path
     prepared = plan(database, 'resumable', count=400)
     build = database.recommendations.claim(prepared)
     append = pools.append
@@ -81,7 +77,6 @@ def test_interrupted_prefix_resumes_after_store_reopen_without_reinserting_rows(
     assert len(prefix) == publication.BATCH_ROWS * 2
     database.conn.close()
     database = Store(path)
-    database.init_schema()
     starts = []
     def resumed(conn, identity, candidates, start):
         starts.append(start)
@@ -89,6 +84,7 @@ def test_interrupted_prefix_resumes_after_store_reopen_without_reinserting_rows(
         return append(conn, identity, candidates, start)
     monkeypatch.setattr(pools, 'append', resumed)
     try:
+        database.init_schema()
         reclaimed = database.recommendations.claim(prepared, owner=build.owner)
         assert reclaimed == build
         database.recommendations.stage(prepared, reclaimed)

@@ -211,6 +211,77 @@ def test_unknown_tail():
     assert partial['journal_incomplete'] and partial['tests'] == recovered['tests']
 
 
+def test_journal_keeps_its_io_during_product_fault_injection(tmp_path, monkeypatch):
+    import ci_test_shards as journal
+
+    shard = journal.Shard(None, 1, 1, tmp_path / 'shard.json', 'unit', {})
+    node = 'test_product.py::test_fault'
+    shard.report.update(expected=[node], selected=[node], file_owners={'test_product.py': 1}, estimated_seconds=[1])
+    def fail(*args, **kwargs):
+        raise OSError('product-only fault')
+    with monkeypatch.context() as patch:
+        patch.setattr(json, 'dumps', fail)
+        patch.setattr(os, 'fsync', fail)
+        assert journal._diagnostic('failure details') == 'failure details'
+        shard.event('start', nodeid=node)
+        for phase in ('setup', 'call', 'teardown'):
+            shard.event('phase', nodeid=node, phase=phase)
+            shard.event('outcome', nodeid=node, phase=phase, result={'outcome': 'passed', 'seconds': .01})
+        shard.event('end', nodeid=node)
+        shard.pytest_sessionfinish(None, 0)
+    recovered = load_report(shard.path)
+    assert verify([recovered], 'unit', total=1)['cases'] == 1
+    events = [json.loads(line) for line in shard.journal.read_text().splitlines()]
+    assert [event['sequence'] for event in events] == list(range(len(events)))
+    assert events[-1]['event'] == 'finish'
+
+
+def test_real_journal_sync_failure_propagates_without_reusing_sequence_or_certifying_completion(tmp_path, monkeypatch):
+    import ci_test_shards as journal
+
+    shard = journal.Shard(None, 1, 1, tmp_path / 'shard.json', 'unit', {})
+    shard.report.update(expected=['test_product.py::test_fault'], selected=['test_product.py::test_fault'],
+                        file_owners={'test_product.py': 1}, estimated_seconds=[1])
+    def fail(fd):
+        raise OSError('actual journal sync failure')
+    monkeypatch.setattr(shard, '_sync', fail)
+    with pytest.raises(OSError, match='actual journal sync failure'):
+        shard.event('start', nodeid='test_product.py::test_fault')
+    before = shard.journal.read_bytes()
+    with pytest.raises(OSError, match='unavailable after a recording failure'):
+        shard.event('end', nodeid='test_product.py::test_fault')
+    shard.pytest_sessionfinish(None, 3)
+    assert shard.journal.read_bytes() == before
+    events = [json.loads(line) for line in before.splitlines()]
+    assert [event['sequence'] for event in events] == [0]
+    recovered = load_report(shard.path)
+    assert recovered['journal_incomplete'] and 'exitstatus' not in recovered
+    assert recovered['active'] == {'nodeid': 'test_product.py::test_fault', 'phase': 'starting'}
+    with pytest.raises(ValueError, match='did not pass'):
+        verify([recovered], 'unit', total=1)
+
+
+def test_failed_terminal_sync_cannot_certify_a_passing_shard(tmp_path, monkeypatch):
+    import ci_test_shards as journal
+
+    shard = journal.Shard(None, 1, 1, tmp_path / 'shard.json', 'unit', {})
+    node = 'test_product.py::test_fault'
+    shard.report.update(expected=[node], selected=[node], file_owners={'test_product.py': 1}, estimated_seconds=[1])
+    shard.event('start', nodeid=node)
+    for phase in ('setup', 'call', 'teardown'):
+        shard.event('outcome', nodeid=node, phase=phase, result={'outcome': 'passed', 'seconds': .01})
+    shard.event('end', nodeid=node)
+    def fail(fd):
+        raise OSError('terminal sync failed')
+    monkeypatch.setattr(shard, '_sync', fail)
+    with pytest.raises(OSError, match='terminal sync failed'):
+        shard.pytest_sessionfinish(None, 0)
+    recovered = load_report(shard.path)
+    assert recovered['journal_incomplete'] and 'exitstatus' not in recovered
+    with pytest.raises(ValueError, match='did not pass'):
+        verify([recovered], 'unit', total=1)
+
+
 def test_retained_diagnostics_are_bounded_and_keep_exception_tail():
     text = 'first line\n' + ('verbose output\n' * DIAGNOSTIC_BYTES) + 'last exception'
     retained = _diagnostic(text)

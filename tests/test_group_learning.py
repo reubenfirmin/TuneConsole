@@ -1,10 +1,10 @@
 from copy import deepcopy
 from dataclasses import replace
-import os
 
 import pytest
 
 from tests.group_support import publish, recordings
+from yt_playlist.core import fao
 from yt_playlist.rec import choice_evidence as choices, group_learning
 
 
@@ -158,6 +158,9 @@ def test_frozen_broad_support_survives_child_rejoin(store, monkeypatch, transiti
     from tests.test_group_preparation import seed
     from yt_playlist.rec import choice_bandit, choice_context, choice_retention, group_preparation
 
+    # Keep this contract on the current compact layout. Revision binding is
+    # independently checked against genuine startup in test_store_fixture.
+    assert store._compact_group_files
     tracks = recordings([('House', 3, .1)])
     seed(store, tracks)
     worker = group_preparation.Preparation(store)
@@ -198,7 +201,12 @@ def test_frozen_broad_support_survives_child_rejoin(store, monkeypatch, transiti
             if storage.endswith('released'):
                 serializing.setattr(choice_retention, 'DIAGNOSTIC_FRACTION', 0)
                 for path in ledger.directory.glob('artifact/*/*.json'):
-                    os.utime(path, (1, 1))
+                    file_before, raw = fao.stat(path), fao.read_bytes(path)
+                    fao.touch(path, mtime_ns=10**9)
+                    after = fao.stat(path)
+                    assert after.mtime_ns == 10**9 and after.ctime_ns == file_before.ctime_ns
+                    assert after.logical_bytes == file_before.logical_bytes == len(raw)
+                    assert fao.read_bytes(path) == raw
             choices.maintain_storage(store, 1074)
         identity = ledger.get('opportunity', oid)['context']
         saved = choice_context.checkpoint(ledger, identity)
@@ -214,7 +222,7 @@ def test_frozen_broad_support_survives_child_rejoin(store, monkeypatch, transiti
     if transition == 'rejoin':
         seed(store, [tracks[-1]])
     else:
-        worker.request_rebuild()
+        seed(store, [replace(tracks[0], year=tracks[0].year + 1)])
     assert worker.step(1120)
     current = store.taste_groups.head(members=True)
     retained = next(g for g in current['groups'] if g['group_id'] == broad_id)

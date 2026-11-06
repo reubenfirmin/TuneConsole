@@ -1,15 +1,15 @@
 """Move's compact table and selection ribbon, exercised against the live server."""
 import socket
 import threading
-import time
 
 import pytest
 import uvicorn
 from playwright.sync_api import expect
 
-from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
+from tests.live_server import LiveServer
+from tests.browser.quiet_action_support import action_evidence, assert_quiet_action
 
 pytestmark = pytest.mark.browser
 
@@ -23,10 +23,8 @@ def _free_port():
 
 
 @pytest.fixture
-def live_move_app(monkeypatch, tmp_path):
-    monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    s = Store(":memory:")
-    s.init_schema()
+def live_move_app(store):
+    s = store
     i1 = s.accounts.upsert_account("Main", "c1", None, True)
     i2 = s.accounts.upsert_account("Alt", "c2", None, False)
     tracks = {}
@@ -41,13 +39,8 @@ def live_move_app(monkeypatch, tmp_path):
     app = create_app(s, lambda: clients, now_fn=lambda: 1.0)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    while not server.started:
-        time.sleep(0.02)
-    yield {"base": f"http://127.0.0.1:{port}", "i1": i1, "i2": i2, "clients": clients}
-    server.should_exit = True
-    thread.join(timeout=5)
+    with LiveServer(server):
+        yield {"base": f"http://127.0.0.1:{port}", "i1": i1, "i2": i2, "clients": clients}
 
 
 def _pick(page, i1, i2):
@@ -150,7 +143,7 @@ def test_bulk_failure_shows_details_and_preserves_failed_source(live_move_app, p
     page.get_by_role("checkbox", name="Select all playlists", exact=True).check()
     page.get_by_role("button", name="Move", exact=True).click()
     expect(page.get_by_text("Moved 2 playlists. 1 failed.", exact=True)).to_be_visible()
-    expect(page.get_by_text("This playlist could not be created.", exact=True)).to_be_visible()
+    expect(page.get_by_text("Transfer not confirmed. Review Actions before trying again.", exact=True)).to_be_visible()
     expect(page.get_by_role("link", name="Mix", exact=True)).to_be_visible()
     expect(page.get_by_role("link", name="Evening", exact=True)).to_be_hidden()
     expect(page.get_by_role("region", name="Playlist actions")).to_be_hidden()
@@ -183,6 +176,68 @@ def test_pending_transfer_disables_repeat_actions_and_identity_changes(live_move
         release.set()
     expect(page.get_by_text("Copied 3 playlists.", exact=True)).to_be_visible()
     assert len(client.created) == 3
+
+
+@pytest.mark.parametrize('remote_deleted', [False, True])
+def test_uncertain_move_keeps_copy_and_rechecks_without_repeating_deletion(
+        live_move_app, store, page, monkeypatch, remote_deleted, action_evidence):
+    import json
+    from pathlib import Path
+
+    app = live_move_app
+    source, target = app['clients'][app['i1']], app['clients'][app['i2']]
+    original = next(p.id for p in store.playlists.get_playlists()
+                    if p.account_id == app['i1'] and p.provider_playlist_id == 'PL1')
+    delete = source.delete_playlist
+    attempts = []
+    diagnostic = 'sqlite3.OperationalError: internal-diagnostic-879-move'
+
+    def uncertain_delete(playlist):
+        attempts.append(playlist)
+        if remote_deleted:
+            delete(playlist)
+        raise RuntimeError(diagnostic)
+
+    monkeypatch.setattr(source, 'delete_playlist', uncertain_delete)
+    page.goto(app['base'] + '/move')
+    page.get_by_role('checkbox', name='Select Mix', exact=True).check()
+    page.get_by_role('button', name='Move', exact=True).click()
+    expect(page.get_by_text('Copy created. Source deletion needs review in Actions.', exact=True)).to_be_visible()
+    expect(page.get_by_text('Source kept', exact=False)).to_have_count(0)
+    expect(page.get_by_role('link', name='Mix', exact=True)).to_be_visible()
+    assert_quiet_action(page)
+    page.screenshot(path=action_evidence + '-move-uncertain.png')
+    action, = store.actions.get_actions()
+    assert action.status == 'delete_pending'
+    entry, = json.loads(action.undo_json)['deletions']
+    assert entry['phase'] == 'uncertain'
+    backup = Path(entry['backup']).read_bytes()
+    assert len(target.created) == len(target.added) == 1 and attempts == ['PL1']
+    destination, = [p for p in store.playlists.get_playlists()
+                    if p.account_id == app['i2'] and p.provider_playlist_id == target.created[0][0]]
+    assert destination.track_count == 1
+    page.reload()
+    expect(page.get_by_role('link', name='Mix', exact=True)).to_be_visible()
+    assert_quiet_action(page)
+    assert json.loads(store.actions.get_action(action.id).undo_json)['deletions'] == [entry]
+    page.goto(app['base'] + '/actions')
+    row = page.get_by_role('row').filter(has=page.get_by_role('cell', name=str(action.id), exact=True))
+    expect(row.get_by_role('button', name='Recheck deletion')).to_be_visible()
+    expect(page.locator('body')).not_to_contain_text(diagnostic)
+    page.screenshot(path=action_evidence + '-move-action-reload.png')
+    row.get_by_role('button', name='Recheck deletion').click()
+    expect(row.locator('td').nth(3)).to_have_text('executed' if remote_deleted else 'deletion failed')
+    final = store.actions.get_action(action.id)
+    assert final.status == ('executed' if remote_deleted else 'delete_failed')
+    assert (store.playlists.get_playlist(original) is None) == remote_deleted
+    assert len(target.created) == len(target.added) == 1 and attempts == ['PL1']
+    assert Path(entry['backup']).read_bytes() == backup
+    expect(page.locator('body')).not_to_contain_text(diagnostic)
+    expect(page.locator('#navigation-error, .toast-err, .notice.err.banner:visible')).to_have_count(0)
+    expect(page.locator('.notice.ok.banner')).to_contain_text(
+        'Deletion confirmed; the backup is ready for Undo.' if remote_deleted else
+        'The playlist still exists. No deletion was retried; the backup is saved.')
+    page.screenshot(path=action_evidence + '-move-reconciled.png')
 
 
 @pytest.mark.parametrize("width", [1280])

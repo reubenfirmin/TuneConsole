@@ -12,7 +12,7 @@ import sqlite3
 
 from ..migrations import current, regular
 from ..migrations.registry import MIGRATIONS
-from ..migrations.runner import Context
+from .. import destination_schema, schema_bootstrap
 from ..entity_names import PREDECESSOR_COLUMNS as COLUMNS
 from . import archives, development, mix_history, mix_verification, optimized, released, runtime_history, runtime_retention, source, verification
 from .build import Batch, Destination, Stage, _configure, quote
@@ -33,6 +33,7 @@ def signature():
     # A changed dependency cannot resume under the old candidate contract.
     root = Path(__file__).resolve().parents[2]
     result = hashlib.sha256(str(FORMAT).encode())
+    result.update(destination_schema.DEFINITION.read_bytes())
     for path in sorted([*root.rglob('*.py'),*root.rglob('*.sql')]):
         result.update(str(path.relative_to(root)).encode())
         result.update(path.read_bytes())
@@ -40,21 +41,24 @@ def signature():
 
 
 def initialize(target):
+    from ..schema_inspection import reuse_tables
+
+    # Initialization owns one private transaction. Reuse unchanged table
+    # structure across bootstrap and bounded-change validators; changed CREATE
+    # TABLE definitions are inspected again by the existing cache contract.
+    with reuse_tables(target):
+        _initialize(target)
+
+
+def _initialize(target):
     target.row_factory = sqlite3.Row
-    current.bootstrap(target,MIGRATIONS,0.)
-    target.execute(regular.HISTORY_SQL)
-    for change in regular.CHANGES:
-        change.apply(target,Context(0.))
-        change.validate(target)
-        target.execute('INSERT INTO schema_changes VALUES (?,?,?)',(change.version,change.name,0.))
+    schema_bootstrap.bootstrap(target,MIGRATIONS,regular.CHANGES,0.,validation=current.validate)
     # Copy captured values without replaying live invalidation/capture effects.
     # Cross-owner domain checks run before the canonical guards are restored.
     target.execute('CREATE TABLE '+TRIGGERS+'(name TEXT PRIMARY KEY,sql TEXT NOT NULL) WITHOUT ROWID')
     for name,sql in target.execute("SELECT name,sql FROM main.sqlite_schema WHERE type='trigger'").fetchall():
         target.execute('INSERT INTO '+TRIGGERS+' VALUES (?,?)',(name,sql))
         target.execute('DROP TRIGGER '+quote(name))
-    from .. import vibe_versions
-    vibe_versions.normalize_empty(target)
     # Bulk insertion maintains only primary/unique identities. Build secondary
     # indexes once before domain readers and converters need them.
     target.execute('CREATE TABLE '+INDEXES+'(name TEXT PRIMARY KEY,sql TEXT NOT NULL) WITHOUT ROWID')
@@ -106,7 +110,9 @@ def _copy_rows(reader, target, cursor, limit, *, table, destination, mapping, re
         for row in values:
             saved = vibe_provenance.read(reader, row['id'])
             if saved is not None:
-                provenance.append((row['id'], saved['inputs'], saved['artists']))
+                inputs = ({key:value for key,value in saved.items() if key != 'inputs'}
+                          if 'generation' in saved else saved['inputs'])
+                provenance.append((row['id'], inputs, saved['artists']))
         vibe_provenance.publish_many(target, provenance)
     return Batch(bookmark,scanned,done)
 

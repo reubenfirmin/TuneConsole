@@ -140,6 +140,32 @@ Existing saved dates are preserved during library sync. YouTube Music authentica
 in the browser, with no separate Google OAuth connection.
 
 
+## Tests
+
+Run focused checks with the normal command, for example:
+
+```bash
+uv run pytest tests/rec/test_ranking_playback_publication.py --no-cov
+```
+
+Pytest stores disposable fixtures in a unique directory under this checkout's
+`build/pytest`, using the checkout filesystem instead of shared `/tmp` capacity.
+Concurrent focused runs use separate directories and do not acquire the global
+suite lock. Each function's fixtures are removed after reporting, and session
+fixtures are removed when the session finishes, including failed runs.
+Reports and screenshots to retain must go outside the disposable directory.
+The application's disk-space reserve still applies to copied test databases.
+
+Use `--fixture-root=PATH` to choose another parent; pytest creates a unique base
+for each session there too. An explicit `--basetemp=PATH` takes precedence and
+uses that exact directory, so give concurrent runs different paths. Collection
+without fixture use does not create a fixture base.
+
+After a killed run, preview its abandoned default base with
+`./scripts/test-artifacts-cleanup.py build/pytest/run-PID-UUID`, then repeat with
+`--delete` to remove it. The command refuses a live owner or any process still
+using the directory; it preserves other sessions, reports, and shared lock files.
+
 ## Architecture
 
 ### Database upgrades and catalog identity
@@ -1908,26 +1934,6 @@ owned files and a 256 MiB reserve on each filesystem. Failure preserves recovery
 files and reports the reason; retry compaction explicitly after resolving it.
 Keep the installed library's existing external-file directories. Independent
 acceptance permits a separate, reviewed cleanup of recovery copies.
-The older `policy_recovery` rehearsal below remains a separate tool.
-
-For a separate recovery rehearsal on another filesystem:
-
-```bash
-uv run python -m yt_playlist.core.policy_recovery \
-  --source "$HOME/.local/share/yt-playlist/state.db" \
-  --output-dir /path/with/space/tuneconsole-recovery
-```
-
-The destination must be new and have approximately three times the source database's
-size available. The command opens the source read-only, keeps an untouched verified
-SQLite backup, collects unused policies on a working copy, shares retained policy
-bodies, and creates `compact.db`. `report.json` records integrity/foreign-key checks,
-non-policy table counts, exact retained configuration fingerprints and before/after
-sizes. It never replaces the source. Before using the candidate, stop all application
-writers and create a fresh candidate from that final state; a candidate created while
-the application was running excludes subsequent user changes. Preserve the stopped
-original database and its sidecars together before installing the candidate. Use the
-application version that supports the candidate's schema.
 
 The shared catalog separates a musical recording (`recordings.id`) from its playable
 uploads (`youtube_items.video_id`). New uploads get separate provisional recordings;

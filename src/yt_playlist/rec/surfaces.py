@@ -8,7 +8,6 @@ from dataclasses import dataclass
 import numpy as np
 
 from yt_playlist.library import analysis
-from yt_playlist.util import genre_map
 from yt_playlist.util.duration import ago as _ago
 from yt_playlist.util.matching import normalize
 from yt_playlist.rec import embedding_vectors as vectors, mix_tuning, rec_params, vector_math
@@ -164,9 +163,11 @@ def for_you(store, now, limit=24, include_traces=False) -> list[ForYouItem]:
         for item in out:
             if item.trace is None or item.key not in idx:
                 continue
-            _score, because = pt.score(V[idx[item.key]])
+            contributions = pt.context_contributions(V[idx[item.key]])
+            order = np.argsort(-contributions)[:3]
             item.trace["contexts"] = [
-                {"name": name, "contribution": value} for name, value in because]
+                {"name": pt.titles[i], "contribution": float(contributions[i])}
+                for i in order if contributions[i] > 0]
     return out
 
 
@@ -308,6 +309,7 @@ def taste_comparison(store, now, keys=None, limit=24) -> list[dict]:
     weights = store.rec_model.get_weights(
         now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     genres = store.rec_query.track_genres(wanted)
+    genre_axes = store.genres.feature_axes(genres.values())
     rows = []
     for key in wanted:
         if key not in traces or key not in meta:
@@ -316,7 +318,7 @@ def taste_comparison(store, now, keys=None, limit=24) -> list[dict]:
         artist = meta[key]["artist"]
         genre = genres.get(key)
         genre_muted = any(weights.get(f"genre:{token}") == 0
-                          for token in (genre_map.family(genre,conn=store.conn), genre_map.subgenre(genre,conn=store.conn)) if token)
+                          for token in genre_axes.get(genre, ('', None)) if token)
         reason = ("genre muted" if genre_muted else
                   "dismissed or snoozed" if key in suppressed else
                   "artist muted" if artist in muted else None)
@@ -414,6 +416,7 @@ def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
     suppressed = store.rec_model.suppressed_keys("for_you", now)
     muted = store.rec_model.muted_artists()
     candidates, facet_weights, family_weights = [], {}, {}
+    genre_axes = store.genres.feature_axes(r.get('genre') for r in rows)
     for r in rows:
         k = r["identity_key"]
         if k in suppressed or r.get("artist") in muted:
@@ -422,7 +425,7 @@ def cold_candidates(store, now, limit=None) -> list[ForYouItem]:
                         or any(value not in (None, "") for value in (r.get("audio") or {}).values()))
         if k not in scores and not has_metadata:
             continue
-        fam = genre_map.family(r.get("genre"),conn=store.conn) if r.get("genre") else None
+        fam = genre_axes[r['genre']][0] if r.get('genre') else None
         if fam not in family_weights:
             family_weights[fam] = discovery_facet_weight(store, fam, now)
         fw = family_weights[fam]
@@ -565,8 +568,9 @@ def explore_for_you(store, now, limit=24) -> list[ForYouItem]:
     muted = store.rec_model.muted_artists()
     weights = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     genres = dao.track_genres(order)
+    genre_axes = store.genres.feature_axes(genres.values())
     order = [k for k in order if k not in suppressed
-             and weights.get(f"genre:{genre_map.family(genres.get(k),conn=store.conn)}", 1.0) != 0]
+             and weights.get(f"genre:{genre_axes.get(genres.get(k), ('', None))[0]}", 1.0) != 0]
     meta = store.rec_query.tracks_by_keys(order)
     out: list[ForYouItem] = []
     for k in order:
@@ -606,8 +610,9 @@ def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem
     seed_artists = {a for key in members for a in artist_refs.get(key,())}
     dao = store.rec_query
     member_genres = [g for g in dao.track_genres(members).values() if g]
-    families = {genre_map.family(g,conn=store.conn) for g in member_genres}
-    subgenres = {genre_map.subgenre(g,conn=store.conn) for g in member_genres if genre_map.subgenre(g,conn=store.conn)}
+    genre_axes = store.genres.feature_axes(member_genres)
+    families = {value[0] for value in genre_axes.values()}
+    subgenres = {value[1] for value in genre_axes.values() if value[1]}
     if not seed_artists or not families:
         return []
 
@@ -625,14 +630,15 @@ def complete_playlist(store, playlist_id, limit=12, now=None) -> list[ForYouItem
     per_artist_cap = max(2, round(limit / distinct))
     ranked = []
     seen = set()
+    genre_axes = store.genres.feature_axes(c.get('genre') for c in candidates)
     for c in candidates:
         key, artist, genre = c.get("key"), c.get("artist") or "", c.get("genre") or ""
-        family = genre_map.family(genre,conn=store.conn) if genre else None
+        family = genre_axes[genre][0] if genre else None
         if (not key or key in members or key in seen or key in suppressed or artist in muted
                 or family not in families):
             continue
         seen.add(key)
-        sub = genre_map.subgenre(genre,conn=store.conn)
+        sub = genre_axes.get(genre, ('', None))[1]
         exact = int(bool(sub and sub in subgenres))
         score = float(c["artist_score"])
         ranked.append((exact, score, key, artist, family, c,

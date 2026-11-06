@@ -38,7 +38,7 @@
     <div class="radio-junction-space">
       <button class="radio-tune" x-ref="tuningControl" type="button" @click="openTuning()" aria-label="Tune streams" title="Tune streams"
               :style="'--queue-color: ' + queueColor(activeSlot)"
-              :disabled="tuningBusy" aria-haspopup="dialog" aria-controls="radio-tuning-dialog">
+              aria-haspopup="dialog" aria-controls="radio-tuning-dialog">
         <svg viewBox="0 0 32 24" aria-hidden="true"><path d="M3 5h5m6 0h15M3 12h16m6 0h4M3 19h8m6 0h12"/><circle cx="11" cy="5" r="3"/><circle cx="22" cy="12" r="3"/><circle cx="14" cy="19" r="3"/></svg>
       </button>
       <svg class="radio-junction" x-ref="junction" viewBox="0 0 1000 112" preserveAspectRatio="none" aria-hidden="true"
@@ -65,14 +65,13 @@
       </svg>
     </div>
     <div class="radio-directions" x-ref="directions" aria-label="Possible radio directions" @scroll.passive="measureQueues()"
-         :class="{'is-tuning': tuningBusy}" :aria-busy="tuningBusy.toString()"
          @mouseleave="hoveredSlot = null" @focusout="if (!$el.contains($event.relatedTarget)) focusedSlot = null">
       <template x-for="branch in displayDirections" :key="branch.slot">
         <section class="radio-direction" :class="{'is-active': branch.active, 'is-preview': previewSlot === branch.slot && !branch.active}"
                  :data-slot="branch.slot" :style="'--queue-color: ' + queueColor(branch.slot)"
                  @mouseenter="hoveredSlot = branch.slot" @focusin="focusedSlot = branch.slot">
           <button type="button" class="radio-direction-heading" @click="select(branch)"
-                  :disabled="busy || tuningBusy || !state.active || !branch.tracks.length"
+                  :disabled="busy || !state.active || !branch.tracks.length"
                   :aria-pressed="branch.active" :aria-label="pendingSong?.slot === branch.slot ? 'Starting ' + pendingSong.title + ' in stream ' + (branch.slot + 1) : (branch.active ? 'Active stream ' : 'Change to this stream, ') + (branch.slot + 1) + (branch.tracks[0] ? ', starting with ' + branch.tracks[0].title : '')">
             <svg class="radio-queue-drawing" viewBox="0 0 300 90" preserveAspectRatio="none" aria-hidden="true">
               <path d="M-20 26C52-24 90 82 170 37S265 5 320 30M-20 34C52-16 90 90 170 45S265 13 320 38M-20 42C52-8 90 98 170 53S265 21 320 46M-20 50C52 0 90 106 170 61S265 29 320 54M-20 58C52 8 90 114 170 69S265 37 320 62"/>
@@ -101,7 +100,7 @@
                   :title="(isSkippingSong(branch, song) ? 'Will be skipped · ' : '') + song.title + ' · ' + song.artist"
                   :aria-description="isSkippingSong(branch, song) ? 'Will be skipped when ' + pendingSong.title + ' starts' : null">
                 <button type="button" class="radio-proposed-art" @click="select(branch, song)"
-                        :disabled="busy || tuningBusy || !state.active || !songAvailable(branch, song)"
+                        :disabled="busy || !state.active || !songAvailable(branch, song)"
                         :aria-busy="isPendingSong(branch, song) ? 'true' : 'false'"
                         :aria-label="(isPendingSong(branch, song) ? 'Starting ' : 'Play ') + song.title + ' by ' + song.artist + ' in stream ' + (branch.slot + 1)">
                   <svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="24"/><circle cx="32" cy="32" r="8"/></svg>

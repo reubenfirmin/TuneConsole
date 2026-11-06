@@ -9,7 +9,7 @@ from tests.test_audio_vibe_cruise import samples
 from yt_playlist.core import catalog, features
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release
 from yt_playlist.rec import audio_vibe_focus as focus
-from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_preview as preview
+from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_prediction as predictor
 from yt_playlist.rec import home_vibe, musical_character, vibe_preparation
 
 
@@ -26,7 +26,7 @@ def production_models(isolated_app_home, monkeypatch, tmp_path):
 def baseline(rows, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setenv(release.MODE_KEY, 'off')
-        return preview.predict(rows, require_complete=False)
+        return predictor.predict(rows, require_complete=False)
 
 
 def controlled(tmp_path, value=.9):
@@ -42,7 +42,7 @@ def controlled(tmp_path, value=.9):
 def test_release_preserves_cruise_shared_classification_and_input(count, monkeypatch):
     rows = samples()[:count]
     original = deepcopy(rows)
-    before, after = baseline(rows, monkeypatch), preview.predict(rows, require_complete=False)
+    before, after = baseline(rows, monkeypatch), predictor.predict(rows, require_complete=False)
     assert {k: v for k, v in before.items() if k not in ('suitability', 'individual_models')} == {
         k: v for k, v in after.items() if k not in ('suitability', 'individual_models')}
     assert after['individual_models']['cruise'] == before['individual_models']['cruise']
@@ -107,20 +107,20 @@ def test_optional_failure_preserves_cruise_and_shared(failure, tmp_path, monkeyp
         path.write_text(json.dumps(artifact))
     if failure != 'disabled':
         monkeypatch.setenv(release.ENVIRONMENT_KEY, str(path))
-    assert preview.predict(rows) == before
+    assert predictor.predict(rows) == before
 
 
 def test_provenance_and_excerpt_bounds(monkeypatch):
     rows = samples()
     rows[-1]['artifact_hashes']['musicnn/model.json'] = 'f' * 64
-    assert preview.predict(rows) == preview.predict(rows, use_model=False)
+    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
     model = release.load(release.DEFAULT_PATH)
     for values in ([], [[.2] * 200] * 129, [[float('nan')] * 200], [[1e7] * 200], [[.2] * 199]):
         with pytest.raises(ValueError):
             release.score(model, values)
     monkeypatch.setenv(shared.ENVIRONMENT_KEY, '')
     rows = samples()
-    assert preview.predict(rows) == preview.predict(rows, use_model=False)
+    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
 
 
 def test_default_active_local_rollback_and_identity(monkeypatch):
@@ -150,7 +150,7 @@ def test_bounded_rollout_propagation_intensity_new_captures_and_rollback(store, 
     drain(store, batch=1)
     assert fits(store, own)['release']['source'] == 'heuristic'
     store.audio_vibes.save_sample(rows[2], 3)
-    store.audio_vibes.save_feedback(rows[0]['run_id'], [], ['relax'], preview.TAXONOMY_VERSION, None, 4)
+    store.audio_vibes.save_feedback(rows[0]['run_id'], [], ['relax'], predictor.TAXONOMY_VERSION, None, 4)
     feedback = store.audio_vibes.feedback(rows[0]['run_id'])
     drain(store, batch=1)
     keys = [own, neighbour]
@@ -202,7 +202,7 @@ def test_missing_metadata_still_uses_release(store):
     for now, row in enumerate(samples('bare'), 1):
         store.audio_vibes.save_sample(row, now)
     drain(store, batch=1)
-    assert fits(store, key)['release']['score'] == preview.predict(samples('bare'))['suitability']['release']
+    assert fits(store, key)['release']['score'] == predictor.predict(samples('bare'))['suitability']['release']
     assert fits(store, key)['release']['source'] == 'audio_measurement'
 
 
@@ -211,7 +211,7 @@ def test_high_release_does_not_replace_classification_or_explicit_intensity(stor
     rows = samples()
     before = baseline(rows, monkeypatch)
     monkeypatch.setenv(release.ENVIRONMENT_KEY, str(controlled(tmp_path, .99)))
-    after = preview.predict(rows)
+    after = predictor.predict(rows)
     assert after['suitability']['release'] == .99
     for name in ('ranking', 'vibe', 'vibes', 'selection_method', 'score_margin'):
         assert after[name] == before[name]

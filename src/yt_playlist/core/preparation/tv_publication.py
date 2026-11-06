@@ -36,8 +36,11 @@ def verify_rows(conn, header, value):
         rows[relation] = (columns, conn.execute('SELECT * FROM '+table+
             ' WHERE source=? AND preparation_revision=? ORDER BY '+order, (source, revision)))
     count = 0
+    # This verifier already owns one read transaction. Reuse only within it;
+    # the next verification must observe new catalog/reference state afresh.
+    cache = {} if source == 'tv_continuations' else None
     for relation, fields, kind in preparation.rows(source, value, built_at):
-        preparation.resolve(conn, fields, kind)
+        preparation.resolve(conn, fields, kind, cache=cache)
         fields.update(source=source, preparation_revision=revision)
         columns, reader = rows[relation]
         expected = tuple(float(fields[column['name']]) if column['type'] == 'REAL' and fields.get(column['name']) is not None

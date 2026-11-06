@@ -1,7 +1,9 @@
 """Album occurrence cutover proves source custody, grouping and continuing writes."""
 from dataclasses import replace
+from functools import wraps
 import json
 import sqlite3
+import time
 
 import pytest
 
@@ -41,6 +43,13 @@ def rich_source(store):
         missing_state = albums.observe(store.conn, 'no-state', title='Retained partial')
         store.conn.execute("INSERT INTO main.album_tracks(album_id,legacy_track_key,is_full,source) VALUES (?,'unknown|subject',1,'legacy')", (missing_state,))
     return album, entry
+
+
+def rejection_inputs(store):
+    seed(store)
+    preparation.JOB.install(store.conn)
+    finish(preparation.JOB, store.conn)
+    assert publication.selected(store.conn) is None
 
 
 def projection(conn, tracks, states, links, keys):
@@ -88,7 +97,7 @@ def test_preopened_projection_groups_match_frozen_native_without_losing_original
         assert preopened.charts.corpus_distribution('album') == native.charts.corpus_distribution('album')
         assert preopened.collection.complete_album_tracklist_ids() == native.collection.complete_album_tracklist_ids()
         assert preopened.rec_query.owned_albums() == native.rec_query.owned_albums()
-        assert preopened.tracks.album_tracks_to_enrich('release-alias') == native.tracks.album_tracks_to_enrich('release-alias')
+        assert preopened.tracks.album_tracks_for_waterfall('release-alias') == native.tracks.album_tracks_for_waterfall('release-alias')
         assert preopened.tracks.album_tracks_for_waterfall('partial') == native.tracks.album_tracks_for_waterfall('partial')
         assert preopened.enrichment_reports.conflict_count_for_album('release') == native.enrichment_reports.conflict_count_for_album('release')
         assert preopened.enrichment_reports.unresolved_conflicts_for_album('partial') == native.enrichment_reports.unresolved_conflicts_for_album('partial')
@@ -109,11 +118,10 @@ def test_preopened_projection_groups_match_frozen_native_without_losing_original
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['field','reference','provider','extra','omitted','state','original','group','group-omitted'])
-def test_invalid_typed_rows_originals_coverage_and_groups_cannot_publish(installed, failure, monkeypatch):
+def test_invalid_typed_rows_originals_coverage_and_groups_cannot_publish(
+        installed, staged_custody, failure, monkeypatch):
     store, _ = installed
-    seed(store)
-    preparation.JOB.install(store.conn)
-    finish(preparation.JOB, store.conn)
+    staged_custody(installed, 'album-occurrences', rejection_inputs)
     with store.conn:
         if failure == 'field':
             store.conn.execute("UPDATE prepared_album_track_rows SET captured_title='different'")
@@ -145,18 +153,44 @@ def test_invalid_typed_rows_originals_coverage_and_groups_cannot_publish(install
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_bounded_large_capture_real_writer_snapshot_and_immutable_custody(installed):
+def test_bounded_large_capture_real_writer_snapshot_and_immutable_custody(installed, monkeypatch, record_property):
+    costs = {}
+
+    def timed(name, operation):
+        @wraps(operation)
+        def call(*args, **kwargs):
+            started = time.perf_counter()
+            try:
+                return operation(*args, **kwargs)
+            finally:
+                values = costs.setdefault(name, [0, 0.0])
+                values[0] += 1
+                values[1] += time.perf_counter() - started
+        return call
+
+    for owner, attribute in ((preparation, 'entry'), (preparation, 'provider'),
+            (preparation, 'original'), (preparation, 'describe'),
+            (publication, 'step'), (publication, 'verify'), (publication, 'publish')):
+        name = owner.__name__.rsplit('.', 1)[-1] + '_' + attribute
+        monkeypatch.setattr(owner, attribute, timed(name, getattr(owner, attribute)))
     store, _ = installed
+    for owner, attribute in ((type(store.charts), 'album_tracks_detail'),
+                             (type(store.collection), 'cache_album_tracklist')):
+        monkeypatch.setattr(owner, attribute, timed(attribute, getattr(owner, attribute)))
+    started = time.perf_counter()
     album, entry = seed(store)
     with store.conn:
         store.conn.execute('DELETE FROM main.album_tracks WHERE album_id=? AND is_full=1', (album,))
         store.conn.executemany("INSERT INTO main.album_tracks(album_id,entry_id,position,is_full,source) VALUES (?,?,?,1,'large')",
             [(album, entry, position) for position in range(8192)])
         store.conn.execute('UPDATE main.album_fetch_state SET expected_track_count=8192 WHERE album_id=?', (album,))
+    record_property('large_seed_seconds', time.perf_counter() - started)
+    started = time.perf_counter()
     preparation.JOB.install(store.conn)
     for _ in range(300):
         if preparation.JOB.step(store.conn).status == 'prepared':
             break
+    record_property('large_preparation_seconds', time.perf_counter() - started)
     first = publication.step(store.conn)
     assert first.copied == 32 and not first.complete
     # A reopened worker resumes the same immutable stage and bounded cursor.
@@ -166,8 +200,16 @@ def test_bounded_large_capture_real_writer_snapshot_and_immutable_custody(instal
         assert publication.step(other).copied == 64
     finally:
         other.close()
+    started = time.perf_counter()
     identity = stage(store.conn)
+    record_property('large_publication_drain_seconds', time.perf_counter() - started)
+    before_entry_calls = costs.get('album_occurrences_entry', [0])[0]
     publication.publish(store.conn, identity=identity)
+    verification_entry_calls = costs['album_occurrences_entry'][0] - before_entry_calls
+    # The repeated entry remains checked once per real 32-row page, rather
+    # than once for every occurrence. No source/original comparison is skipped.
+    assert 1 < verification_entry_calls <= 257
+    record_property('large_publication_entry_reads', verification_entry_calls)
     assert len(store.charts.album_tracks_detail('release')) == 8192
     with store.read_snapshot() as snapshot:
         assert len(snapshot.store.charts.album_tracks_detail('release')) == 8192
@@ -186,10 +228,13 @@ def test_bounded_large_capture_real_writer_snapshot_and_immutable_custody(instal
         with pytest.raises(sqlite3.IntegrityError, match='retained|cleanup'):
             with store.conn:
                 store.conn.execute(sql)
+    for name, (calls, seconds) in costs.items():
+        record_property(name + '_calls', calls)
+        record_property(name + '_wall_s', seconds)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-@pytest.mark.parametrize('when', ['verification','after-verification','empty-after-verification'])
+@pytest.mark.parametrize('when', ['verification','provider-verification','after-verification','empty-after-verification'])
 def test_source_and_reference_races_reject_stale_cutover(installed, when, monkeypatch):
     store, _ = installed
     if when != 'empty-after-verification':
@@ -204,6 +249,8 @@ def test_source_and_reference_races_reject_stale_cutover(installed, when, monkey
             with other:
                 if when == 'empty-after-verification':
                     other.execute("INSERT INTO albums(title,metadata_rank) VALUES ('Continuing new album',0)")
+                elif when == 'provider-verification':
+                    other.execute("UPDATE album_provider_ids SET provider_id='changed-release' WHERE provider_id='release'")
                 else:
                     other.execute("UPDATE youtube_items SET title='Continuing metadata' WHERE video_id='one'")
     describe, verify = preparation.describe, publication.verify
@@ -216,8 +263,9 @@ def test_source_and_reference_races_reject_stale_cutover(installed, when, monkey
         result = verify(*args)
         change()
         return result
-    monkeypatch.setattr(preparation, 'describe', during if when == 'verification' else describe)
-    monkeypatch.setattr(publication, 'verify', after if when != 'verification' else verify)
+    during_verification = when in ('verification', 'provider-verification')
+    monkeypatch.setattr(preparation, 'describe', during if during_verification else describe)
+    monkeypatch.setattr(publication, 'verify', verify if during_verification else after)
     try:
         with pytest.raises(MigrationError, match='changed|reconciled|differs'):
             publication.publish(store.conn, identity=identity)
@@ -272,11 +320,11 @@ def test_interrupted_copy_cutover_failed_preparation_and_independent_ddl(install
     publication.publish(store.conn, identity=stage(store.conn))
 
 
-def test_native_upgrade_keeps_custody_and_validates_its_guards(tmp_path):
+def test_native_upgrade_keeps_custody_and_validates_its_guards(tmp_path, _pristine_installed_schema):
     path = tmp_path / 'upgrade.db'
     store = Store(path)
     try:
-        runner.migrate(store.conn, registry=registry.MIGRATIONS[:98])
+        _pristine_installed_schema(98).backup(store.conn)
         store.init_schema(defer_metadata=True)
         seed(store)
         identity = stage(store.conn)

@@ -342,9 +342,9 @@ def _axis_weights_for(store, keys, now=None, with_details=False, *, metadata=Non
                rec_params.get_param(store, "facet_mult_max"))
 
     mult, details, present = {}, {}, {}
+    genre_axes = store.genres.feature_axes(genres.values())
     for k in keys:
-        fam = genre_map.family(genres[k],conn=store.conn) if k in genres else None
-        sub = genre_map.subgenre(genres[k],conn=store.conn) if k in genres else None
+        fam, sub = genre_axes.get(genres.get(k), ('', None) if k in genres else (None, None))
         breadth = bfac.get(fam, 1.0)
         gm = _axis_mult(gw, "genre", fam, standing, leans, fparams) * breadth
         if sub and sub != fam:
@@ -406,7 +406,8 @@ def discovery_facet_weight(store, family, now, *, leans=None):
     yields zero techno discovery, matching the library's genre exclusions). The multiplier is
     permanent_weight × standing_lean × a DAMPED transient multiplier, so 'mute' bends hard while
     'less house lately' only nudges. An untagged candidate (family falsy) is neutral (1.0) and never
-    excluded. We don't banish what we can't classify."""
+    excluded. We don't banish what we can't classify. The transient shape uses fixed registry
+    defaults, independent of overrides for in-library ranking."""
     mix_tuning.expire(store, now)
     if not family:
         return 1.0
@@ -416,8 +417,9 @@ def discovery_facet_weight(store, family, now, *, leans=None):
     standing = store.rec_model.get_lean(f"genre:{family}")
     lean = (transient.facet_leans(store, now) if leans is None else leans).get(f"genre:{family}", 0.0)
     tmult = transient.facet_multiplier(lean * rec_params.DISCOVERY_TRANSIENT_DAMP,
-                                       rec_params.FACET_GAIN, rec_params.FACET_MULT_MIN,
-                                       rec_params.FACET_MULT_MAX)
+                                       rec_params.PARAMS_BY_NAME["facet_gain"].default,
+                                       rec_params.PARAMS_BY_NAME["facet_mult_min"].default,
+                                       rec_params.PARAMS_BY_NAME["facet_mult_max"].default)
     return max(rec_params.GENRE_MIN, min(rec_params.GENRE_MAX, perm * standing * tmult))
 
 

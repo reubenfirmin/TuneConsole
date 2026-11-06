@@ -146,15 +146,22 @@ def check(path, report_path, *, publish_controls=False, checkpoints=False, encod
                 assert actual == expected
                 report['checkpoint_publications'][name] = {'revision': revision,
                     'seconds': time.monotonic() - started, 'originals_exact': True, 'source_count': len(expected)}
+            runtime = Store(path)
+            try:
+                runtime.init_schema(defer_metadata=True)
+                served_checkpoints = {name: {key: runtime.settings.get_setting(key, 'missing')
+                    for key in model_checkpoints.SOURCES[job.name]}
+                    for name, job in model_checkpoints.JOBS.items()}
+            finally:
+                runtime.conn.close()
             reopened = Store(path)
             try:
                 reopened.init_schema(defer_metadata=True)
                 for name, job in model_checkpoints.JOBS.items():
                     revision = report['checkpoint_publications'][name]['revision']
                     assert checkpoint_publication.selected(reopened.conn, name) == revision
-                    for key in model_checkpoints.SOURCES[job.name]:
-                        assert reopened.settings.get_setting(key, 'missing') == checkpoint_publication.read(
-                            conn, name, revision, key, 'missing')
+                    assert {key: reopened.settings.get_setting(key, 'missing')
+                            for key in model_checkpoints.SOURCES[job.name]} == served_checkpoints[name]
                 report['checkpoint_reopened_runtime'] = 'passed'
             finally:
                 reopened.conn.close()

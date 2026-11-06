@@ -1,5 +1,8 @@
 """A live Radio reader over one retained, immutable recommendation publication."""
-from contextlib import nullcontext
+from collections import OrderedDict
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
+from copy import deepcopy
 from itertools import zip_longest
 import math
 import weakref
@@ -9,6 +12,16 @@ from yt_playlist.rec import group_roots, musical_character, radio_intensity
 
 PAGE_SIZE = 128
 LOOKAHEAD = 96
+_planning_read = ContextVar('radio_planning_read', default=None)
+
+
+def _cached(cache, key, load, limit):
+    if key not in cache:
+        cache[key] = load()
+        if len(cache) > limit:
+            cache.popitem(last=False)
+    cache.move_to_end(key)
+    return cache[key]
 
 
 def initial_pool(bucket, mid, blocked, muted, comfort):
@@ -69,7 +82,44 @@ class PreparedRadio:
                 self._lifetime = weakref.finalize(self, close)
 
     def _reader(self):
+        if self.current_reader is not None:
+            return nullcontext(self.current_reader)
         return nullcontext(self.store) if getattr(self.store, '_read_only', False) else self.store.read_view()
+
+    @property
+    def current_reader(self):
+        scope = _planning_read.get()
+        return scope['reader'] if scope is not None and scope['owner'] is self else None
+
+    @contextmanager
+    def planning_read(self):
+        """Reuse bounded pages only within one committed-data planning pass.
+
+        Every subsequent pass rehydrates current catalog/genre meanings. The
+        context stays local to its thread/task; concurrent candidate readers
+        cannot borrow its connection or retain its cache after it closes.
+        """
+        if self.current_reader is not None:
+            yield
+            return
+        with self._reader() as reader:
+            token = _planning_read.set(dict(owner=self, reader=reader, pages=OrderedDict(),
+                                           headings=OrderedDict(), axes=OrderedDict()))
+            try:
+                yield
+            finally:
+                _planning_read.reset(token)
+
+    def _cached_read(self, name, key, load, limit):
+        scope = _planning_read.get()
+        if scope is None or scope['owner'] is not self:
+            return load()
+        return _cached(scope[name], key, load, limit)
+
+    def genre_axes(self, label):
+        with self._reader() as reader:
+            return self._cached_read('axes', label,
+                lambda: reader.genres.feature_axes([label]).get(label, (None, None)), 512)
 
     def tracks(self, surface, mode, purpose, *, allowed, excluded=(), used=(), limit=LOOKAHEAD,
                band=None, genres=None, reader=None, include_display=True):
@@ -82,12 +132,18 @@ class PreparedRadio:
         with (nullcontext(reader) if reader is not None else self._reader()) as current:
             while len(result) < limit:
                 check_cancellable_work()
-                page = current.recommendations.candidate_page(self.surface(surface), mode, purpose, generation=self.generation,
-                    after=after, limit=PAGE_SIZE, band=band, genres=genres, include_display=include_display)
+                key = (surface, mode, purpose, after, band, tuple(genres) if genres is not None else None,
+                       include_display)
+                page = self._cached_read('pages', key, lambda: current.recommendations.candidate_page(
+                    self.surface(surface), mode, purpose, generation=self.generation, after=after,
+                    limit=PAGE_SIZE, band=band, genres=genres, include_display=include_display), 32)
                 after = page['after']
                 for track in page['tracks']:
                     if track['key'] in used or track['video_id'] in excluded or not allowed(track):
                         continue
+                    # Issued choices gain mode/profile metadata. Never let that
+                    # mutate a cached catalog page used by another branch.
+                    track = deepcopy(track)
                     if surface == 'radio' and purpose == 'membership':
                         track['_radio_catalog_score'] = track.get('score') or 0
                     result.append(track)
@@ -114,16 +170,39 @@ class PreparedRadio:
         allowed = lambda track: track['key'] not in blocked and (track.get('artist') or '').casefold() not in muted
         displays, pools = [], []
 
+        # Lanes share many recordings. Hydrate their bounded pages together,
+        # rather than repeating current catalog/genre reads for every lane.
+        lanes = ('wheelhouse', 'explore', 'comfort', 'temporal', 'fresh')
+        selected = {(mode, lane): [] for mode in modes for lane in lanes}
+        pending = [(mode, lane, -1) for mode, lane in selected]
+        while pending:
+            remaining = []
+            for offset in range(0, len(pending), 16):
+                check_cancellable_work()
+                batch = pending[offset:offset + 16]
+                pages = repo.candidate_pages(self.surface('home'), batch, generation=self.generation,
+                                             limit=PAGE_SIZE, include_display=False)
+                for (mode, lane, _), page in zip(batch, pages):
+                    tracks = selected[mode, lane]
+                    for track in page['tracks']:
+                        if allowed(track):
+                            tracks.append(deepcopy(track))
+                            if len(tracks) == LOOKAHEAD:
+                                break
+                    if len(tracks) < LOOKAHEAD and not page['exhausted']:
+                        remaining.append((mode, lane, page['after']))
+            pending = remaining
+
         def tracks(surface, mode, lane):
-            selected = self.tracks(surface, mode, lane, reader=reader, allowed=allowed, include_display=False)
-            ranks = [track['pool_rank'] for track in selected]
+            rows = (selected[mode, lane] if surface == 'home' and (mode, lane) in selected else
+                    self.tracks(surface, mode, lane, reader=reader, allowed=allowed, include_display=False))
+            ranks = [track['pool_rank'] for track in rows]
             chunks = repo.display_references(self.surface(surface), mode, lane, ranks, generation=self.generation)
-            displays.append((self.surface(surface), selected, ranks, chunks))
-            return selected
+            displays.append((self.surface(surface), rows, ranks, chunks))
+            return rows
 
         for mode in modes:
-            buckets = {lane: tracks('home', mode, lane)
-                       for lane in ('wheelhouse', 'explore', 'comfort', 'temporal', 'fresh')}
+            buckets = {lane: tracks('home', mode, lane) for lane in lanes}
             result[mode] = {'_radio_pool': initial_pool(buckets, mode, blocked, muted, comfort)}
             pools.append((mode, buckets, blocked, muted, comfort))
         if not any(value['_radio_pool'] for mode, value in result.items() if mode in modes) and not any(members.values()):
@@ -159,15 +238,17 @@ class PreparedRadio:
             return
         with self._reader() as reader:
             repo = reader.recommendations
-            bands = repo.intensity_bands(self.surface('radio'), mode, 'membership', generation=self.generation)
-            bands.sort(key=lambda band: (radio_intensity.loss(band / radio_intensity.RESOLUTION, energy),
-                                         abs(band / radio_intensity.RESOLUTION - energy)))
+            bands = self._cached_read('headings', ('bands', mode), lambda: repo.intensity_bands(
+                self.surface('radio'), mode, 'membership', generation=self.generation), 128)
+            bands = sorted(bands, key=lambda band: (radio_intensity.loss(band / radio_intensity.RESOLUTION, energy),
+                                                   abs(band / radio_intensity.RESOLUTION - energy)))
             for band in bands:
                 after = None
                 while True:
                     check_cancellable_work()
-                    headings = repo.band_page(self.surface('radio'), mode, 'membership', generation=self.generation,
-                                             band=band, after=after, limit=PAGE_SIZE)
+                    headings = self._cached_read('headings', ('genres', mode, band, after),
+                        lambda: repo.band_page(self.surface('radio'), mode, 'membership',
+                            generation=self.generation, band=band, after=after, limit=PAGE_SIZE), 128)
                     for row in headings:
                         if genre_allowed(row['genre_key']):
                             yield radio_intensity.loss(band / radio_intensity.RESOLUTION, energy), band, row['genre_key']

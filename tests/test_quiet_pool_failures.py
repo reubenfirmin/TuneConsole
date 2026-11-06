@@ -1,0 +1,82 @@
+"""Unexpected Fresh worker errors stay internal across actual cards and retries."""
+import re
+
+import pytest
+
+from tests.quiet_pool_support import DIAGNOSTIC, quiet_pool
+from yt_playlist.core.action_errors import ActionInputError
+from yt_playlist.core.activity import WorkClosing
+from yt_playlist.rec import fresh_pool
+from yt_playlist.web.jobs import start_fresh_pool
+
+
+@pytest.mark.parametrize('kind', ['json', 'value'])
+@pytest.mark.parametrize('boundary', ['populate', 'prepare'])
+def test_fresh_failure_preserves_menu_genres_and_requires_explicit_retry(quiet_pool, kind, boundary, caplog):
+    case = quiet_pool
+    http, ctx = case.http, case.ctx
+    chosen = http.post('/home/mix-genres', data={'genres': ['jazz']})
+    assert chosen.status_code == 200
+    titles = re.findall(r'data-title="([^"]*)"', chosen.text)
+    assert titles and 'data-requested-genres=\'["jazz"]\'' in chosen.text
+    case.fault, case.boundary = kind, boundary
+    started = http.post('/home/fresh-pool', data={'include_genres': ['jazz']})
+    assert started.status_code == 200 and DIAGNOSTIC not in started.text
+    assert ctx.work.wait(5)
+    parameters = {'include_genres': ['jazz'], 'avoid_genres': []}
+    job = ctx.jobs.latest('fresh_pool', parameters)
+    assert job.done and job.outcome == 'failed' and DIAGNOSTIC in job.error
+    assert job.validation_code is None and DIAGNOSTIC in caplog.text
+    for response in (http.get(f'/home/fresh-pool/{job.id}'), http.get('/home/cards')):
+        assert response.status_code == 200 and DIAGNOSTIC not in response.text
+        assert 'Fresh mix not completed. You can try again.' in response.text
+        assert 'Not enough matching songs yet' not in response.text
+        assert 'hx-trigger="every 2s"' not in response.text
+        assert 'aria-label="Find fresh songs"' in response.text
+    refreshed = http.get('/home/cards')
+    assert re.findall(r'data-title="([^"]*)"', refreshed.text) == titles
+    assert 'data-requested-genres=\'["jazz"]\'' in refreshed.text
+    assert case.calls == [parameters] and not case.refreshes
+    assert len(case.calculations) == int(boundary == 'prepare')
+
+    case.fault = None
+    assert http.post('/home/fresh-pool', data={'include_genres': ['jazz']}).status_code == 200
+    assert ctx.work.wait(5)
+    recovered = ctx.jobs.latest('fresh_pool', parameters)
+    assert recovered.id != job.id and recovered.done and not recovered.error
+    result = http.get(f'/home/fresh-pool/{recovered.id}')
+    assert 'Not enough matching songs yet' in result.text and DIAGNOSTIC not in result.text
+    assert 'hx-trigger="every 2s"' not in result.text
+    assert case.calls == [parameters, parameters] and len(case.refreshes) == 1
+    assert len(case.calculations) == int(boundary == 'prepare') + 1
+
+
+@pytest.mark.parametrize('validation', ['account', 'genres'])
+def test_actual_fresh_input_validation_uses_fixed_codes(quiet_pool, monkeypatch, validation):
+    case = quiet_pool
+    if validation == 'account':
+        monkeypatch.setattr(case.ctx, 'client_provider', lambda: {})
+    else:
+        monkeypatch.setattr(fresh_pool.home_themes, 'genre_options', lambda owner: [])
+    with pytest.raises(ActionInputError) as raised:
+        fresh_pool.populate(case.ctx)
+    assert raised.value.code == ('fresh_account_required' if validation == 'account' else 'fresh_genres_required')
+    assert not case.calculations
+
+
+def test_closed_real_work_admission_finishes_pool_reservation(quiet_pool):
+    ctx = quiet_pool.ctx
+    parameters = {'include_genres': ['jazz'], 'avoid_genres': []}
+    ctx.work.close_admission()
+    try:
+        with pytest.raises(WorkClosing):
+            start_fresh_pool(ctx, parameters)
+        failed = ctx.jobs.latest('fresh_pool', parameters)
+        assert failed.done and failed.outcome == 'failed' and failed.error
+        assert not quiet_pool.calls
+    finally:
+        ctx.work.open()
+    retry = start_fresh_pool(ctx, parameters)
+    assert ctx.work.wait(5)
+    assert retry.id != failed.id and retry.done and not retry.error
+    assert quiet_pool.calls == [parameters]

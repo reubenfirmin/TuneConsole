@@ -7,7 +7,7 @@ import pytest
 from tests.core.test_compact_groups_migration import predecessor
 from tests.repos.test_compact_group_publication import database
 from tests.repos.test_typed_recommendation_publication import recommendations, plan, publish
-from yt_playlist.core import (policy_config, policy_recovery, policy_upgrade, storage_maintenance,
+from yt_playlist.core import (policy_config, storage_maintenance,
                               policy_documents, recommendation_pools as pools)
 from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.repos import policy_storage, recommendation_publication as publication
@@ -109,28 +109,31 @@ def test_recovery_cleanup_uses_actual_typed_owners_and_preserves_retained_semant
     policy = store.recommendations.head('home')['policy_version']
     expected = store.rec_ledger.policy_configuration(policy)
     store.rec_ledger.record_serving_policy('recovery-unused', {'algorithm': 'unused'}, -10000)
-    counts, missing = policy_recovery._counts(store.conn), policy_recovery._missing_references(store.conn)
-    deleted, fingerprints = policy_recovery._clean_copy(store.conn, 100, lambda message: None)
+    before = [tuple(row) for row in store.conn.execute('SELECT * FROM recommendation_impression_policies')]
+    deleted = 0
+    while True:
+        candidates, cursor = policy_storage.retention_candidates(store.conn, 100)
+        with store.conn:
+            deleted += policy_storage.prune(store.conn, candidates, cursor)['policies_deleted']
+        if not cursor:
+            break
     assert deleted >= 1
-    assert 'recovery-unused' not in fingerprints and policy in fingerprints
+    assert store.rec_ledger.policy_configuration('recovery-unused') is None
     assert store.rec_ledger.policy_configuration(policy) == expected
-    assert policy_recovery._counts(store.conn) == counts
-    assert policy_recovery._missing_references(store.conn) == missing
+    assert [tuple(row) for row in store.conn.execute('SELECT * FROM recommendation_impression_policies')] == before
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
-def test_retired_policy_sharing_job_does_not_pause_recording_or_compact_new_schema(file_backed_store, monkeypatch):
+def test_current_startup_preserves_old_repair_marker_without_pausing_recording(file_backed_store):
     # A fully admitted current database has completed regular DDL. The typed
     # recommendation fixture deliberately owns only a partial historical schema.
     store = file_backed_store
     assert policy_storage.typed(store.conn)
-    store.settings.set_setting(policy_upgrade.KEY, json.dumps({'phase': 'sharing', 'cursor': 'old'}))
-    def forbidden(*args, **kwargs):
-        pytest.fail('Typed policies invoked the retired SQLite sharing job')
-    monkeypatch.setattr(policy_upgrade, '_has_legacy', forbidden)
-    monkeypatch.setattr(policy_upgrade, '_compact', forbidden)
-    assert policy_upgrade.run_once(store.conn, progress=forbidden)
+    marker = json.dumps({'phase': 'sharing', 'cursor': 'old'})
+    store.settings.set_setting('repair_shared_policies_v1', marker)
     maintenance = storage_maintenance.StorageMaintenance(store)
     maintenance.start()
     assert maintenance.phase == 'done' and not maintenance.active
     assert maintenance._thread is None and not getattr(store, 'activity_paused', False)
     assert store.conn.execute('PRAGMA query_only').fetchone()[0] == 0
+    assert store.settings.get_setting('repair_shared_policies_v1') == marker

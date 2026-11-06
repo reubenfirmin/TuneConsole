@@ -296,6 +296,13 @@ def _publication(path):
                 break
             time.sleep(.01)
         try:
+            # Precreated directories and retries after partial sync failures
+            # need the same boundary as newly created shards. Existence does
+            # not prove durability. Make the complete pathname durable before
+            # renaming; the final leaf sync then persists the file entry.
+            directory = path.parent.resolve()
+            for ancestor in (directory, *directory.parents):
+                _sync(ancestor)
             yield
         finally:
             unlock()
@@ -396,10 +403,6 @@ def write_bytes(path, data, *, immutable=False, max_bytes=MAX_BYTES, age=None):
         raise TypeError('Managed publication requires bytes')
     return _write(path, (memoryview(data)[i:i+BLOCK] for i in range(0, len(data), BLOCK)),
                   max_bytes=max_bytes, immutable=immutable, age=age)
-
-
-def write_stream(path, chunks, *, max_bytes=MAX_BYTES):
-    return _write(path, chunks, max_bytes=max_bytes)
 
 
 def stage_bytes(path, data, *, expected=None, max_bytes=MAX_BYTES):

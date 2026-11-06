@@ -1,6 +1,5 @@
 {% extends "base.html" %}{% from "_macros.html" import banner %}{% block title %}Action Log · TuneConsole{% endblock %}{% block page_class %}page-workflow page-actions{% endblock %}{% block body %}
 {% if flash %}{% call banner('ok') %}{{ flash }}{% endcall %}{% endif %}
-{% if flasherr %}{% call banner('err') %}{{ flasherr }}{% endcall %}{% endif %}
 <div class="page-head">
   <h1>Action Log</h1>
   <p>Review playlist changes, newest first. Use Undo to reverse a completed change when available.</p>
@@ -22,7 +21,8 @@
           {% if row.missing_snapshot and a.status != 'undone' %}<p class="text-dim">The change was recorded, but its post-action snapshot could not be verified or was not saved. Automatic Undo cannot safely remove these changes. Review the playlist in YouTube Music before recovering manually.</p>
             {% if row.copy_ytm %}<a href="https://music.youtube.com/playlist?list={{ row.copy_ytm|urlencode }}" target="_blank" rel="noopener">Review created playlist</a>{% endif %}
           {% endif %}
-          {% if row.recovery_error %}<p class="text-dim" role="alert">{{ row.recovery_error }} Progress is saved; retry this Undo to continue.</p>{% endif %}
+          {% if row.recovery_notice %}<p class="text-dim action-recovery-status">{{ row.recovery_notice }}</p>{% endif %}
+          {% if row.notice %}<p class="text-dim action-recovery-status">{{ row.notice }}</p>{% endif %}
           {% if row.recovered %}<p>Recovered playlists:
             {% for ytm in row.recovered %}<a href="https://music.youtube.com/playlist?list={{ ytm|urlencode }}" target="_blank" rel="noopener">View playlist</a>{% if not loop.last %}, {% endif %}{% endfor %}
           </p>{% endif %}

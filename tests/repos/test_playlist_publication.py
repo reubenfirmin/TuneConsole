@@ -16,11 +16,10 @@ def seed(store, remote='PL', identity=None):
     return identity, pid, ids
 
 
-def test_revision_guard_is_shared_by_independent_connections(tmp_path):
+def test_revision_guard_is_shared_by_independent_connections(tmp_path, consumer_store):
     path = tmp_path / 'ownership.db'
-    first, second = Store(path), Store(path)
+    first, second = consumer_store(path), Store(path)
     try:
-        first.init_schema()
         iid, pid, ids = seed(first)
         second.init_schema()
         revision = first.playlists.playlist_revision(iid, 'PL')
@@ -36,11 +35,10 @@ def test_revision_guard_is_shared_by_independent_connections(tmp_path):
         second.conn.close()
 
 
-def test_metadata_and_order_publish_in_one_transaction(tmp_path, monkeypatch):
+def test_metadata_and_order_publish_in_one_transaction(tmp_path, monkeypatch, consumer_store):
     path = tmp_path / 'publication.db'
-    store = Store(path)
+    store = consumer_store(path)
     try:
-        store.init_schema()
         iid, pid, ids = seed(store)
         revision = store.playlists.playlist_revision(iid, 'PL')
         original = store.playlists._set_playlist_tracks

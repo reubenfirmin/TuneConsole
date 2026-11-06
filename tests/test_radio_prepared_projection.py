@@ -11,6 +11,7 @@ from tests.test_radio_catalog import catalog_track, seed  # noqa: F401 - real pr
 from yt_playlist.core import json_cache
 from yt_playlist.rec import embedding_vectors, musical_character, musical_profiles, radio_candidates, radio_tuning
 from yt_playlist.rec.stored_radio import PreparedRadio
+from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
 from yt_playlist.repos.rec_proposals import encode_proposals
 
 
@@ -131,11 +132,20 @@ def test_real_constructor_preserves_full_session_state_and_stored_pools(store, s
     head = store.recommendations.head('home')
     ranks = list(map(tuple, store.conn.execute('SELECT * FROM recommendation_candidates ORDER BY pool_id,rank')))
     tuning = {**radio_tuning.DEFAULTS, 'comfort': comfort}
+    batches, candidate_pages = [], RecommendationPublicationsRepo.candidate_pages
+
+    def observed_pages(self, surface, selections, **kwargs):
+        batches.append(list(selections))
+        return candidate_pages(self, surface, selections, **kwargs)
+
+    monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_pages', observed_pages)
     projected = radio_candidates.RadioCandidates(store, 1000, tuning, comparison=False)
-    inputs = PreparedRadio.inputs
+    assert batches and all(len(batch) <= 16 for batch in batches)
+    assert len(batches) < sum(len(batch) for batch in batches), 'Initial lanes must share catalog hydration'
+    capture = PreparedRadio.capture_inputs
 
     def unprojected(self, reader, modes, space, generation, blocked, muted, comfort):
-        result = inputs(self, reader, modes, space, generation, blocked, muted, comfort)
+        result, _displays, _pools = capture(self, reader, modes, space, generation, blocked, muted, comfort)
         for mode in modes:
             bucket = {}
             for lane in ('wheelhouse', 'explore', 'comfort', 'temporal', 'fresh'):
@@ -149,11 +159,14 @@ def test_real_constructor_preserves_full_session_state_and_stored_pools(store, s
                         break
                 bucket[lane] = rows
             result[mode] = bucket
-        return result
+        # The reference constructor receives complete hydrated lanes from the pinned
+        # reader, rather than the bounded pools selected by the production capture.
+        return result, [], []
 
-    monkeypatch.setattr(PreparedRadio, 'inputs', unprojected)
-    original = radio_candidates.RadioCandidates(store, 1000, tuning, comparison=False)
+    monkeypatch.setattr(PreparedRadio, 'capture_inputs', unprojected)
+    original = None
     try:
+        original = radio_candidates.RadioCandidates(store, 1000, tuning, comparison=False)
         for field in ('pools', 'prior', 'by_key', 'by_video', 'membership', 'energies',
                       'fingerprint', 'cluster_members', 'now_posterior', 'now_gain'):
             assert getattr(projected, field) == getattr(original, field), field
@@ -162,7 +175,8 @@ def test_real_constructor_preserves_full_session_state_and_stored_pools(store, s
         assert list(map(tuple, store.conn.execute('SELECT * FROM recommendation_candidates ORDER BY pool_id,rank'))) == ranks
     finally:
         projected.close()
-        original.close()
+        if original is not None:
+            original.close()
 
 
 @pytest.mark.parametrize('value', [None, {}, []])

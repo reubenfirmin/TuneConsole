@@ -1,15 +1,19 @@
 """Neutral, bounded inference helpers for frozen audio-vibe specialists.
 
 Specialists own their artifact contracts, native targets and aggregation policy.
-This module owns configuration, coefficient arithmetic and optional-model isolation.
+This module owns bounded loading, validation, coefficient arithmetic and optional-model isolation.
 It never loads annotations, research modules or network resources.
 """
+from functools import lru_cache
 import hashlib
 import json
 import math
 import os
+from pathlib import Path
+from statistics import mean
 
 from yt_playlist.core import audio_embedding, fao, features
+from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
 
 MAX_EXCERPTS = 128
 MODEL_ERRORS = (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError)
@@ -74,6 +78,28 @@ def validate_stage(model, inputs, outputs, *, allow_rff=True):
         raise ValueError('Unsupported audio-vibe learner')
 
 
+def validate_consensus(artifact, expected, targets):
+    """Validate a source-native ridge consensus against its specialist's explicit header."""
+    label = expected['vibe'].capitalize()
+    if (not isinstance(artifact, dict)
+            or any(artifact.get(key) != value for key, value in expected.items())
+            or artifact.get('taxonomy_version') != TAXONOMY_VERSION
+            or artifact.get('feature_version') != audio_embedding.VERSION
+            or artifact.get('feature_names') != list(audio_embedding.FEATURES)
+            or artifact.get('score_semantics') != 'independent_uncalibrated_suitability'
+            or any(not valid_hash(artifact.get(key)) for key in
+                   ('embedding_signature', 'source_model_sha256', 'source_plan_sha256'))
+            or not isinstance(artifact.get('experts'), dict) or set(artifact['experts']) != set(targets)):
+        raise ValueError(f'Incompatible {label} model')
+    for source, names in targets.items():
+        expert = artifact['experts'][source]
+        if (not isinstance(expert, dict) or expert.get('target_names') != names
+                or type(expert.get('training_rows')) is not int or expert['training_rows'] <= 0):
+            raise ValueError(f'Invalid {label} source identity')
+        validate_stage(expert.get('model'), audio_embedding.DIMENSIONS, len(names), allow_rff=False)
+    return artifact
+
+
 def read_artifact(path, size, max_bytes, unpack, *, exact_size=True):
     """Read logical FAO bytes; callers retain their own two-entry identity cache.
 
@@ -94,6 +120,20 @@ def read_artifact(path, size, max_bytes, unpack, *, exact_size=True):
     return model
 
 
+def consensus_loader(validate, max_bytes):
+    """Give one specialist its own two-entry cache keyed by physical file identity."""
+    @lru_cache(maxsize=2)
+    def cached(path, file_identity, size):
+        return read_artifact(path, size, max_bytes, lambda artifact: {'header': validate(artifact)})
+
+    def load(path):
+        path = Path(path).resolve()
+        info = fao.stat(path)
+        return cached(str(path), info.identity, info.logical_bytes)
+
+    return load
+
+
 def predict(model, values):
     normalized = [(v - center) / scale for v, center, scale in
                   zip(values, model['mean'], model['scale'], strict=True)]
@@ -111,6 +151,12 @@ def predict(model, values):
     if not all(finite(v) for v in result):
         raise ValueError('Nonfinite audio-vibe native output')
     return [max(0., min(1., value)) for value in result]
+
+
+def native_attributes(model, targets, values):
+    """Predict and clip each excerpt before averaging each source-native target."""
+    predicted = [predict(model, row) for row in values]
+    return dict(zip(targets, (mean(column) for column in zip(*predicted, strict=True)), strict=True))
 
 
 def chunks(values):

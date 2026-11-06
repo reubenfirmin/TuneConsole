@@ -59,8 +59,13 @@ class CleanupAnalysis:
     def __init__(self, memberships: PlaylistMemberships, preferences: CleanupPreferences):
         self.memberships = memberships
         self.preferences = preferences
-        self.playlists = [p for p in memberships.playlists
-                          if _manageable(p) and p.id not in memberships.excluded]
+        # Accounts can save the same remote playlist. Compare each remote list
+        # once while retaining all account memberships in the detached input.
+        by_scope = {}
+        for playlist in memberships.playlists:
+            if _manageable(playlist) and playlist.id not in memberships.excluded:
+                by_scope.setdefault(playlist.playlist_scope_id, playlist)
+        self.playlists = list(by_scope.values())
         self._partitions = {}
 
     def _candidate_pairs(self, threshold):

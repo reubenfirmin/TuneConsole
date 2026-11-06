@@ -134,21 +134,6 @@ def leaf_members(conn, generation):
     return result
 
 
-def assignment_head(conn):
-    header = head_checkpoint(conn)
-    if header is None:
-        return None
-    groups = []
-    for version_id, external_version in conn.execute('SELECT v.id,x.external_version FROM generation_groups x '
-            'JOIN group_head h ON h.generation_id=x.generation_id JOIN group_versions v ON v.id=x.group_version_id '
-            'WHERE h.id=1 AND v.leaf=1 AND v.legacy=0 ORDER BY x.position'):
-        reps = [key for key, in conn.execute('SELECT COALESCE(r.identity_key,p.raw_key) '
-            'FROM group_representatives p LEFT JOIN recordings r ON r.id=p.recording_id '
-            'WHERE p.group_version_id=? ORDER BY p.position', (version_id,))]
-        groups.append({'version': external_version, 'rep_keys': reps})
-    return {'generation': header['generation'], 'policy': header['policy'], 'groups': groups}
-
-
 def _lineage(row):
     payload = group_documents.read(row['evidence_filename'], row['evidence_digest'],
                                     row['evidence_bytes'], row['evidence_offset'], 'lineage')

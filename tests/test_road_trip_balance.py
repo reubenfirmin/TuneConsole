@@ -6,7 +6,7 @@ import pytest
 from yt_playlist.rec import road_trip, road_trip_candidates as candidates
 from yt_playlist.rec import road_trip_axes as axes
 from tests.conftest import FakeClient
-from tests.road_trip_support import _recipe, _stub_pools, no_network
+from tests.road_trip_support import _recipe, _stub_pools, complete_draft, no_network
 
 def _share(state, party, axis):
     return next(a["share"] for a in state["axes"][party] if a["key"] == axis)
@@ -16,7 +16,7 @@ def test_a_slider_sits_at_the_share_that_genre_actually_has(store, monkeypatch):
     """The complaint this replaced: a 0-2 steering weight that always started centred told you
     nothing about the playlist. A bar now reads as the proportion in the list below it."""
     _stub_pools(monkeypatch, store, own_count=0)          # their side only: one genre, so it is all of it
-    state = road_trip.build_draft(store, FakeClient(), _recipe(own_pct=0), 1000.0, seed=5)
+    state = complete_draft(store, FakeClient(), _recipe(own_pct=0), 1000.0, seed=5)
 
     axis = next(a["key"] for a in state["axes"]["theirs"] if a["kind"] == "genre")
     assert _share(state, "theirs", axis) == 1.0
@@ -27,7 +27,7 @@ def test_sliding_one_decade_to_100_empties_the_others(store, monkeypatch):
     """Dragging a bar to 100% has to mean it: the other decades go, rather than quietly refilling
     the slots the moment that decade runs out. A quota, not a weight."""
     _stub_pools(monkeypatch, store, other_count=0)
-    state = road_trip.build_draft(store, FakeClient(), _recipe(own_pct=100), 1000.0, seed=5)
+    state = complete_draft(store, FakeClient(), _recipe(own_pct=100), 1000.0, seed=5)
     decades = {r["decade"] for r in state["picked"]}
     assert len(decades) > 1                                  # a mix of decades to start with
 
@@ -44,7 +44,7 @@ def test_asking_for_more_of_a_genre_than_the_pool_has_goes_and_finds_it(store, m
     asking for 100% of a genre queues searches to deepen the pool, and what comes back is filtered
     to that genre so a loose search can't pollute the mix."""
     _stub_pools(monkeypatch, store, own_count=10, other_count=4)
-    state = road_trip.build_draft(store, FakeClient(), _recipe(), 1000.0, seed=5)
+    state = complete_draft(store, FakeClient(), _recipe(), 1000.0, seed=5)
     axis = next(a["key"] for a in state["axes"]["theirs"] if a["kind"] == "genre")
     assert not state["pending"]
 
@@ -73,7 +73,7 @@ def test_asking_for_more_of_a_genre_than_the_pool_has_goes_and_finds_it(store, m
 
 def test_a_pin_survives_a_slot_being_crossed_out(store, monkeypatch):
     _stub_pools(monkeypatch, store, other_count=0)
-    state = road_trip.build_draft(store, FakeClient(), _recipe(own_pct=100), 1000.0, seed=5)
+    state = complete_draft(store, FakeClient(), _recipe(own_pct=100), 1000.0, seed=5)
     road_trip.set_share(state, "mine", "era:2010", 1.0, store)
     by_id = {c["video_id"]: c for c in state["pool"]}
 
@@ -84,7 +84,7 @@ def test_a_pin_survives_a_slot_being_crossed_out(store, monkeypatch):
 
 def test_moving_another_slider_rebalances_the_previous_targets(store, monkeypatch):
     _stub_pools(monkeypatch, store, other_count=0)
-    state = road_trip.build_draft(store, FakeClient(), _recipe(own_pct=100), 1000.0, seed=5)
+    state = complete_draft(store, FakeClient(), _recipe(own_pct=100), 1000.0, seed=5)
 
     road_trip.set_share(state, "mine", "era:2010", 0.5, store)
     before = dict(state["targets"]["mine"])
@@ -207,7 +207,7 @@ def test_loading_a_saved_balance_uses_one_100_percent_budget(shares, targets, ex
 
 def test_sliding_a_genre_down_reaches_the_requested_share(store, monkeypatch):
     _stub_pools(monkeypatch, store)
-    state = road_trip.build_draft(store, FakeClient(), _recipe(own_pct=100), 1000.0, seed=5)
+    state = complete_draft(store, FakeClient(), _recipe(own_pct=100), 1000.0, seed=5)
     axis = "era:1990"
     assert _share(state, "mine", axis) > 0.2
 
@@ -220,7 +220,7 @@ def test_sliding_a_genre_down_reaches_the_requested_share(store, monkeypatch):
 
 def test_sliding_a_genre_to_zero_removes_it_and_it_can_come_back(store, monkeypatch):
     _stub_pools(monkeypatch, store)
-    state = road_trip.build_draft(store, FakeClient(), _recipe(), 1000.0, seed=5)
+    state = complete_draft(store, FakeClient(), _recipe(), 1000.0, seed=5)
     assert any(r["source"] == "theirs" for r in state["picked"])
 
     axis = next(a["key"] for a in state["axes"]["theirs"] if a["kind"] == "genre")
@@ -257,7 +257,7 @@ def test_asking_for_40_percent_rock_gets_40_percent_of_the_playlist(store, monke
     draw hand back whatever proportion the pool happened to hold (ask 40, get 13); it has to be a
     floor too, filled first."""
     _mixed_library(monkeypatch, store)
-    state = road_trip.build_draft(store, FakeClient(), _recipe(own_pct=100), 1000.0, seed=5)
+    state = complete_draft(store, FakeClient(), _recipe(own_pct=100), 1000.0, seed=5)
     assert _genre_share(state, "Rock") < 0.2         # the pool is thin on rock to start with
     before = state["stats"]["own_count"]
 
@@ -272,7 +272,7 @@ def test_a_barely_played_song_is_still_reachable_when_its_genre_is_asked_for(sto
     """Nothing is held back in a sample: pin a genre high and the least-played songs of it get
     picked, because the whole collection is the pool."""
     _mixed_library(monkeypatch, store, rock=12, other=28)
-    state = road_trip.build_draft(store, FakeClient(),
+    state = complete_draft(store, FakeClient(),
                                   _recipe(own_pct=100, familiarity_pct=100), 1000.0, seed=5)
 
     road_trip.set_share(state, "mine", "genre:Rock", 1.0, store)
@@ -300,7 +300,7 @@ def test_a_bar_the_pool_can_no_longer_fill_goes_away(store, monkeypatch):
     """Sticky isn't forever. A bar left over from a pool that has since been re-drawn can never be
     satisfied again, so it stops taking up space - unless it's pinned, which is a standing request."""
     _stub_pools(monkeypatch, store, other_count=0)
-    state = road_trip.build_draft(store, FakeClient(), _recipe(own_pct=100), 1000.0, seed=5)
+    state = complete_draft(store, FakeClient(), _recipe(own_pct=100), 1000.0, seed=5)
     state["axes"]["mine"].append({"key": "genre:Ghost", "kind": "genre", "name": "Ghost",
                                   "share": 0.0, "target": None})
     state["axes"]["mine"].append({"key": "genre:Pinned Ghost", "kind": "genre",
@@ -318,7 +318,7 @@ def test_era_bars_stay_in_chronological_order(store, monkeypatch):
     """Decades are a number line. A decade that only turns up on a later re-pick still has to slot
     into place rather than land on the end."""
     _stub_pools(monkeypatch, store, other_count=0)
-    state = road_trip.build_draft(store, FakeClient(), _recipe(own_pct=100), 1000.0, seed=5)
+    state = complete_draft(store, FakeClient(), _recipe(own_pct=100), 1000.0, seed=5)
     eras = [a["name"] for a in state["axes"]["mine"] if a["kind"] == "era"]
     assert eras == sorted(eras)
 
@@ -332,7 +332,7 @@ def test_era_bars_stay_in_chronological_order(store, monkeypatch):
 
 def test_era_slider_reweights_years(store, monkeypatch):
     _stub_pools(monkeypatch, store, other_count=0)
-    state = road_trip.build_draft(store, FakeClient(), _recipe(own_pct=100), 1000.0, seed=5)
+    state = complete_draft(store, FakeClient(), _recipe(own_pct=100), 1000.0, seed=5)
     eras = {a["key"] for a in state["axes"]["mine"] if a["kind"] == "era"}
     assert eras == {"era:1990", "era:2000", "era:2010"}
 

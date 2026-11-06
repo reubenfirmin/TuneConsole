@@ -159,9 +159,9 @@ def publish(conn, prepared, *, store=None, generation=None, historical=False):
         if isinstance(context, dict) and context.get('artifact'):
             conn.execute('INSERT INTO model_pair_contexts VALUES (?,?,?)', (identity, field, context['artifact']))
     if store is not None:
-        from yt_playlist.rec import group_roots
-        group_roots.replace_prepared(store, prepared.surface, prepared.value, prepared.at,
-                                    historical=historical, owner_prefix=f'comparison-output:{identity}')
+        from .prepared_references import replace_prepared
+        replace_prepared(store, prepared.surface, prepared.value, prepared.at,
+                         historical=historical, owner_prefix=f'comparison-output:{identity}')
     else:
         # Registered earlier versions resolved these exact legacy references.
         # Copy them verbatim rather than guessing an artifact's current contents.

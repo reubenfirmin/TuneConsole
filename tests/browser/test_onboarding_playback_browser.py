@@ -15,7 +15,6 @@ def starter_mix(live_app, store, page):
         playlists=[{"playlistId": "PL1", "title": "Ready", "count": 1}],
         tracks={"PL1": [_track("ready", "First playable song", "Artist")]}), now=1)
     store.settings.set_setting("onboard_listening_format", "mixes")
-    store.settings.set_setting("onboard_format_pending", "0")
     status = {"connected": True, "now_playing": {
         "video_id": "other", "title": "Already listening", "artist": "Artist",
         "paused": False, "playlist_ytm_id": "OTHER_PLAYLIST"}}

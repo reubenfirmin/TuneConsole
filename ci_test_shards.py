@@ -4,8 +4,10 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import hashlib
 import json
+from json import dumps as _journal_dumps
 import math
 import os
+from os import fsync as _journal_fsync
 from pathlib import Path
 import statistics
 import time
@@ -22,7 +24,7 @@ def _diagnostic(value):
     raw = str(value).encode('utf-8', errors='replace')
     result = raw.decode('utf-8', errors='replace')
     width = DIAGNOSTIC_BYTES // 2
-    while len(json.dumps(result, ensure_ascii=False).encode()) > DIAGNOSTIC_BYTES:
+    while len(_journal_dumps(result, ensure_ascii=False).encode()) > DIAGNOSTIC_BYTES:
         result = (raw[:width] + b'\n[diagnostic truncated]\n' + raw[-width:]).decode('utf-8', errors='replace')
         width //= 2
     return result
@@ -74,6 +76,8 @@ def load_report(path):
                 raise ValueError('Shard journal source or sequence differs')
             _replay(report, event)
             sequence += 1
+    if report.get('journal_incomplete'):
+        report.pop('exitstatus', None)
     return report
 
 
@@ -140,6 +144,8 @@ class Shard:
         self.config, self.path, self.durations = config, path, durations
         self.started = time.monotonic()
         self.sequence = 0
+        self.journal_failed = False
+        self._sync = _journal_fsync
         self.journal = path.with_suffix('.events.jsonl')
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.journal.write_bytes(b'')
@@ -194,24 +200,41 @@ class Shard:
         self.event('end', nodeid=nodeid)
 
     def pytest_sessionfinish(self, session, exitstatus):
+        if self.journal_failed:
+            # The original recording error propagates to pytest. Never append
+            # a terminal success or reuse a possibly written sequence number.
+            self.report['journal_incomplete'] = True
+            self.write()
+            return
         self.event('finish', exitstatus=int(exitstatus), elapsed_seconds=time.monotonic() - self.started)
         self.write()
 
     def event(self, kind, **values):
+        if self.journal_failed:
+            raise OSError('Shard journal is unavailable after a recording failure')
         event = {'event': kind, 'journal_id': self.report['journal_id'], 'sequence': self.sequence, **values}
         # One bounded append per transition, never a rewrite of accumulated history.
         # Close flushes Python buffers; fsync keeps observed receipts durable too.
-        with self.journal.open('ab') as stream:
-            stream.write((json.dumps(event, ensure_ascii=False) + '\n').encode())
-            stream.flush()
-            os.fsync(stream.fileno())
+        try:
+            with self.journal.open('ab') as stream:
+                # Own these callables independently of product fault injection
+                # on the shared json/os modules. Real journal failures still
+                # propagate and leave the run explicitly incomplete.
+                stream.write((_journal_dumps(event, ensure_ascii=False) + '\n').encode())
+                stream.flush()
+                self._sync(stream.fileno())
+        except BaseException:
+            self.journal_failed = True
+            self.report['journal_incomplete'] = True
+            self.write()
+            raise
         self.sequence += 1
         _replay(self.report, event)
 
     def write(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix('.json.tmp')
-        temporary.write_text(json.dumps(self.report, indent=2) + "\n")
+        temporary.write_text(_journal_dumps(self.report, indent=2) + "\n")
         temporary.replace(self.path)
 
 

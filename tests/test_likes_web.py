@@ -142,7 +142,7 @@ def test_now_playing_rating_does_not_fall_back_to_another_account(store):
     c = _client(store, lambda: {other: remote})
     result = c.post("/now-playing/rate", json={"action": "like", "videoId": "v1", "likeStatus": "LIKE"})
     assert result.json()["ok"] is False
-    assert "not connected" in result.json()["error"]
+    assert result.json()["error"] == 'Rating not confirmed. Check it in YouTube Music before trying again.'
     assert remote.rated == []
     assert store.tracks.item_rating(main, "v1") is None
 

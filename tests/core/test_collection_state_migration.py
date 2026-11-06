@@ -16,24 +16,28 @@ from yt_playlist.rec import album_tuning
 
 def installed_92(path):
     store = Store(path)
-    for sql in current.statements(version=92):
-        store.conn.execute(sql)
-    genre_identity.seed_catalog(store.conn)
-    store.conn.executemany('INSERT INTO settings VALUES (?,?)',current.SEED_SETTINGS.items())
-    store.conn.execute('INSERT INTO rec_preparation VALUES (1,0,0)')
-    store.conn.execute('INSERT INTO rec_group_clock VALUES (1,0)')
-    store.conn.execute('INSERT INTO group_retention_state VALUES (1,0)')
-    store.conn.executemany('INSERT INTO schema_migrations VALUES (?,?,1)',
-                           [(item.version,item.name) for item in registry.MIGRATIONS[:92]])
-    store.conn.commit()
-    store._bind_repositories()
-    assert [row[1] for row in store.conn.execute('PRAGMA table_info(road_trip_drafts)')]==['recipe_id','state','updated_at']
-    return store
+    try:
+        for sql in current.statements(version=92):
+            store.conn.execute(sql)
+        genre_identity.seed_catalog(store.conn)
+        store.conn.executemany('INSERT INTO settings VALUES (?,?)',current.SEED_SETTINGS.items())
+        store.conn.execute('INSERT INTO rec_preparation VALUES (1,0,0)')
+        store.conn.execute('INSERT INTO rec_group_clock VALUES (1,0)')
+        store.conn.execute('INSERT INTO group_retention_state VALUES (1,0)')
+        store.conn.executemany('INSERT INTO schema_migrations VALUES (?,?,1)',
+                               [(item.version,item.name) for item in registry.MIGRATIONS[:92]])
+        store.conn.commit()
+        store._bind_repositories()
+        assert [row[1] for row in store.conn.execute('PRAGMA table_info(road_trip_drafts)')]==['recipe_id','state','updated_at']
+        return store
+    except BaseException:
+        store.conn.close()
+        raise
 
 
-def test_installed_collection_cutover_preserves_choices_and_unknown_author(tmp_path):
+def test_installed_collection_cutover_preserves_choices_and_unknown_author(tmp_path, legacy_owner_store):
     path = tmp_path/'collections.db'
-    old = installed_92(path)
+    old = legacy_owner_store(path)
     account = old.accounts.upsert_account('Main','main.json',None,True)
     recipe = old.road_trip.save_road_trip_recipe(None,'Trip',50,[],['Synth Pop'],60,10)
     state = {'picks':['first','first','second'],'banned':['excluded'],'seed':7,'building':True,'revision':'held'}
@@ -215,8 +219,8 @@ def test_account_auth_updates_and_clears_do_not_replace_other_context(store):
     assert not store.conn.execute("SELECT 1 FROM settings WHERE key='auth_expired_identities'").fetchone()
 
 
-def test_legacy_auth_unknown_account_is_retained_without_assigning_current_master(tmp_path):
-    old = installed_92(tmp_path/'legacy-auth.db')
+def test_legacy_auth_unknown_account_is_retained_without_assigning_current_master(tmp_path, legacy_owner_store):
+    old = legacy_owner_store(tmp_path/'legacy-auth.db')
     master = old.accounts.upsert_account('Main','main.json',None,True)
     old.settings.set_setting(account_auth_state.KEY,json.dumps({str(master):'Main','999':'Retired'}))
     migrate(old.conn, registry=registry.MIGRATIONS)
@@ -225,8 +229,8 @@ def test_legacy_auth_unknown_account_is_retained_without_assigning_current_maste
                                   'WHERE unresolved_account_id=999').fetchone())==(None,999)
 
 
-def test_failed_collection_conversion_rolls_back_schema_and_retains_original(tmp_path):
-    old = installed_92(tmp_path/'invalid-collection.db')
+def test_failed_collection_conversion_rolls_back_schema_and_retains_original(tmp_path, legacy_owner_store):
+    old = legacy_owner_store(tmp_path/'invalid-collection.db')
     old.settings.set_setting('album_feedback','{"release":{"kind":"more","at":1,"unknown":true}}')
     from yt_playlist.core.migrations import MigrationError
     with pytest.raises(MigrationError,match='original retained'):

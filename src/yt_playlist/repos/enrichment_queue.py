@@ -7,9 +7,15 @@ import json
 import time
 
 from yt_playlist.core import catalog
+from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core.db_diagnostics import database_operation
+from yt_playlist.core.db_revisions import column_group_reads, setting_reads
 from yt_playlist.repos.base import Repo, synchronized
 from yt_playlist.repos.enrichment_sql import TRACKS_CTE, eligible_providers, pending_coverage
+
+
+_QUEUE_FIELDS = ("recording_id", "source", "id", "identity_key", "video_id", "title", "artist",
+                 "last_enriched_at", "thumbnail", "mb_recording_id")
 
 
 class EnrichmentQueueRepo(Repo):
@@ -19,30 +25,16 @@ class EnrichmentQueueRepo(Repo):
                               [(now,now,rid) for rid in recording_ids])
         self.conn.commit()
 
-    @synchronized
-    def enrichment_memberships(self, recording_ids):
-        ids = list(recording_ids)
-        if not ids:
-            return set()
-        placeholders = ','.join('?' for _ in ids)
-        scopes = set()
-        if self.conn.execute(f'SELECT 1 FROM catalog_entries e JOIN library_memberships l ON l.entry_id=e.id WHERE e.recording_id IN ({placeholders}) LIMIT 1',ids).fetchone():
-            scopes.add('library')
-        if self.conn.execute(f'SELECT 1 FROM discovery_memberships WHERE recording_id IN ({placeholders}) LIMIT 1',ids).fetchone():
-            scopes.add('discovery')
-        return scopes
-
     @staticmethod
     def _queue_track(row):
         # Completion addresses the recording job; id identifies its exact input item/entry.
-        return {"job_id": row["recording_id"], **{k: row[k] for k in ("recording_id", "source", "id", "identity_key", "video_id", "title", "artist", "last_enriched_at",
-                                    "thumbnail", "mb_recording_id")
+        return {"job_id": row["recording_id"], **{k: row[k] for k in _QUEUE_FIELDS
                 if k != "id" or row[k] is not None}}
 
     # Track plays and the play sums of each track's playlist, album and artist containers.
     _QUEUE_CTES = """
-        WITH plays AS (SELECT identity_key, COUNT(*) c FROM listening_days GROUP BY identity_key),
-        tp AS (SELECT t.id,t.recording_id, COALESCE(p.c,0) sp FROM catalog_tracks t
+        WITH plays AS (SELECT CAST(identity_key AS TEXT) identity_key, COUNT(*) c FROM listening_days GROUP BY identity_key),
+        tp AS MATERIALIZED (SELECT t.id,t.recording_id, COALESCE(p.c,0) sp FROM catalog_tracks t
                LEFT JOIN plays p ON p.identity_key=t.identity_key),
         pl_plays AS (SELECT playlist_id,SUM(sp) c FROM (
                      SELECT DISTINCT pt.playlist_id,tp.recording_id,tp.sp FROM playlist_tracks pt
@@ -52,7 +44,11 @@ class EnrichmentQueueRepo(Repo):
                      JOIN tp ON tp.id=at.entry_id) GROUP BY album_id),
         ar_plays AS (SELECT ar,SUM(sp) c FROM (
                      SELECT DISTINCT t.artist ar,tp.recording_id,tp.sp FROM catalog_tracks t
-                     JOIN tp ON tp.id=t.id WHERE t.artist IS NOT NULL AND t.artist<>'') GROUP BY ar)
+                     JOIN tp ON tp.id=t.id WHERE t.artist IS NOT NULL AND t.artist<>'') GROUP BY ar),
+        recording_album_plays AS MATERIALIZED (
+            SELECT e.recording_id,MAX(ap.c) c FROM al_plays ap
+            JOIN {album_tracks} at ON at.album_id=ap.album_id
+            JOIN catalog_entries e ON e.id=at.entry_id GROUP BY e.recording_id)
     """
 
     @synchronized
@@ -124,35 +120,76 @@ class EnrichmentQueueRepo(Repo):
              "now": time.time() if now is None else now, "stale_before": stale_before}).fetchall()
         return [self._queue_track(row) for row in rows]
 
-    @synchronized
-    def _select_enrich_batch(self, limit, offset=0, *, providers=None, now=None):
-        row = self.conn.execute(
-            "SELECT value FROM settings WHERE key='enrich_caught_up_at'").fetchone()
-        caught_up = float(row["value"]) if row and row["value"] else 0.0
-        rows = self.conn.execute(self._QUEUE_CTES.format(album_tracks=self.album_tracks_table) + ", " + TRACKS_CTE + f""",
+    def _enrich_priority_order(self):
+        """Reuse the complete priority order only while its pinned inputs still match.
+
+        Completion timestamps and provider state affect eligibility and retry fairness,
+        not this order. Membership, listening, containers, catalog metadata and the
+        caught-up boundary remain guarded by the snapshot's ordinary revisions.
+        """
+        def prepare():
+            with setting_reads(self._store, ("enrich_caught_up_at",)):
+                row = self.conn.execute(
+                    "SELECT value FROM settings WHERE key='enrich_caught_up_at'").fetchone()
+            caught_up = float(row["value"]) if row and row["value"] else 0.0
+            # Catalog views authorize unused columns too. This calculation never
+            # consumes either enrichment scheduling timestamp from recordings.
+            with column_group_reads(self._store, "recordings", "catalog"):
+                cursor = self.conn.execute(self._QUEUE_CTES.format(album_tracks=self.album_tracks_table) + ", " + TRACKS_CTE + """,
           queue AS (
-            SELECT t.*, COALESCE(p.c, 0) sp,
+            SELECT t.queue_order,t.created_at,t.source,COALESCE(p.c,0) sp,
               MAX(COALESCE((SELECT MAX(plp.c) FROM playlist_tracks pt JOIN pl_plays plp
                             ON plp.playlist_id=pt.playlist_id WHERE pt.track_id=t.id), 0),
-                  COALESCE((SELECT MAX(ap.c) FROM al_plays ap JOIN {self.album_tracks_table} at ON at.album_id=ap.album_id
-                            JOIN catalog_entries e ON e.id=at.entry_id WHERE e.recording_id=t.recording_id), 0),
+                  COALESCE((SELECT c FROM recording_album_plays WHERE recording_id=t.recording_id), 0),
                   COALESCE((SELECT c FROM ar_plays WHERE ar=t.artist), 0)) AS best
             FROM enrichment_tracks t LEFT JOIN plays p ON p.identity_key=t.identity_key
-            WHERE (t.first_enriched_at IS NULL OR """ + pending_coverage() + ") AND " + eligible_providers(coverage=True) + """
           )
-            SELECT * FROM queue
+            SELECT queue_order FROM queue
             ORDER BY
-              COALESCE((SELECT MAX(s.at) FROM enrichment_provider_state s
-                WHERE s.recording_id=queue.recording_id AND s.cycle=COALESCE(queue.last_enriched_at,-1)),0),
               CASE WHEN created_at IS NOT NULL AND created_at > :caught_up THEN 0
                    WHEN sp > 0 THEN 1
                    WHEN best > 0 THEN 2 ELSE 3 END ASC,
               CASE WHEN created_at IS NOT NULL AND created_at > :caught_up THEN -created_at
                    WHEN sp > 0 THEN -sp ELSE -best END ASC,
-              created_at DESC, queue_order ASC, source ASC
-            LIMIT :limit OFFSET :offset""", {"caught_up": caught_up, "limit": limit, "offset": offset,
-                "providers": json.dumps(providers) if providers is not None else None,
-                "now": time.time() if now is None else now}).fetchall()
+              created_at DESC, queue_order ASC, source ASC""", {"caught_up": caught_up})
+                try:
+                    order = []
+                    while rows := cursor.fetchmany(512):
+                        check_cancellable_work()
+                        order.extend(row[0] for row in rows)
+                finally:
+                    cursor.close()
+            check_cancellable_work()
+            # Immutable encoded IDs avoid copying/hydrating the account's rows
+            # on every cache hit. SQLite seeks each current subject by its PK.
+            return json.dumps(order, separators=(",", ":"))
+        return self._store.memoized_read("enrichment-priority-order", prepare)
+
+    @synchronized
+    def _select_enrich_batch(self, limit, offset=0, *, providers=None, now=None):
+        if limit == 0 or (providers is not None and not providers):
+            return []
+        params = {"limit": limit, "offset": offset,
+                  "providers": json.dumps(providers) if providers is not None else None,
+                  "now": time.time() if now is None else now}
+        eligibility = "(t.first_enriched_at IS NULL OR " + pending_coverage() + ") AND " + eligible_providers(coverage=True)
+        # Fully deferred/finished queues need no listening/container calculation.
+        if self.conn.execute("WITH " + TRACKS_CTE + " SELECT 1 FROM enrichment_tracks t WHERE " +
+                             eligibility + " LIMIT 1", params).fetchone() is None:
+            return []
+        params["priorities"] = self._enrich_priority_order()
+        rows = self.conn.execute("WITH " + TRACKS_CTE + """, chosen AS MATERIALIZED (
+            SELECT t.queue_order,CAST(priority.key AS INTEGER) AS priority,
+              COALESCE((SELECT MAX(s.at) FROM enrichment_provider_state s
+                WHERE s.recording_id=t.recording_id AND s.cycle=COALESCE(t.last_enriched_at,-1)),0) AS attempted
+            FROM json_each(:priorities) priority CROSS JOIN enrichment_tracks t
+              ON t.queue_order=priority.value AND t.recording_id=t.queue_order
+            WHERE """ + eligibility + """
+            ORDER BY attempted,CAST(priority.key AS INTEGER) LIMIT :limit OFFSET :offset
+          ) SELECT """ + ",".join("t." + field for field in _QUEUE_FIELDS) + """
+            FROM chosen CROSS JOIN enrichment_tracks t
+              ON t.queue_order=chosen.queue_order AND t.recording_id=t.queue_order
+            ORDER BY chosen.attempted,chosen.priority""", params).fetchall()
         return [self._queue_track(r) for r in rows]
 
     def resweep_batch(self, limit, stale_before, *, providers=None, now=None) -> list:
@@ -189,19 +226,6 @@ class EnrichmentQueueRepo(Repo):
              "providers": json.dumps(providers) if providers is not None else None,
              "now": time.time() if now is None else now}).fetchall()
         return [self._queue_track(r) for r in rows]
-
-    @synchronized
-    def mark_enriched(self, track_ids, now) -> None:
-        """Set first_enriched_at once and bump last_enriched_at on every processed pass."""
-        if not track_ids:
-            return
-        track_ids = [catalog.resolve_entry(self.conn,t) for t in track_ids]
-        qs = ",".join("?" * len(track_ids))
-        self.conn.execute(
-            f"UPDATE recordings SET first_enriched_at = COALESCE(first_enriched_at, ?), "
-            f"last_enriched_at = ? WHERE id IN (SELECT recording_id FROM catalog_entries WHERE id IN ({qs}))",
-            [now, now, *track_ids])
-        self.conn.commit()
 
     @synchronized
     def requeue_enrichment(self, track_ids) -> None:

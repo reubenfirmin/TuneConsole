@@ -9,15 +9,12 @@ from contextlib import contextmanager
 import hashlib
 from itertools import permutations
 import json
-from pathlib import Path
-import sqlite3
-from tempfile import TemporaryDirectory
 
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.rec import (experiments, group_roots, home_themes, layers, mode_eval,
                              negative, rec_params, transient)
 from yt_playlist.rec.eligibility import home_exclusions
-from yt_playlist.util import genre_map
+from yt_playlist.repos.home_selection import CandidateFilter, HomeInputRepo, HomeSelectionRepo
 
 LANES = ('wheelhouse', 'explore', 'fresh', 'comfort', 'temporal')
 
@@ -25,20 +22,13 @@ LANES = ('wheelhouse', 'explore', 'fresh', 'comfort', 'temporal')
 @contextmanager
 def preparation_inputs():
     """Reuse per-recording checks within one batch without retaining a library in Python."""
-    with TemporaryDirectory(prefix='tuneconsole-home-inputs-') as directory:
-        conn = sqlite3.connect(Path(directory) / 'inputs.db')
-        try:
-            conn.execute('PRAGMA cache_size=-1024')
-            conn.execute('PRAGMA mmap_size=0')
-            conn.execute('CREATE TABLE inputs(key TEXT PRIMARY KEY,genre TEXT,blocked INTEGER) WITHOUT ROWID')
-            yield PreparationInputs(conn)
-        finally:
-            conn.close()
+    with HomeInputRepo.open() as inputs:
+        yield PreparationInputs(inputs)
 
 
 class PreparationInputs:
-    def __init__(self, conn):
-        self.conn, self.reader, self.now = conn, None, None
+    def __init__(self, inputs):
+        self.inputs, self.reader, self.now = inputs, None, None
 
     def resolve(self, reader, tracks, now):
         if self.reader is None:
@@ -48,36 +38,23 @@ class PreparationInputs:
         keys = [track['key'] for track in tracks]
         if not keys:
             return [], set()
-        cached = {key: (genre, blocked) for key, genre, blocked in self.conn.execute(
-            'SELECT key,genre,blocked FROM inputs WHERE key IN (' + ','.join('?' for _ in keys) + ')', keys)}
+        cached = self.inputs.get(keys)
         missing = [track for track in tracks if track['key'] not in cached]
         if missing:
             resolved = home_themes.resolved_genres(reader, missing)
             blocked = home_exclusions(reader, [track['key'] for track in missing], now)
             rows = [(track['key'], track.get('genre'), track['key'] in blocked) for track in resolved]
-            self.conn.executemany('INSERT OR IGNORE INTO inputs VALUES (?,?,?)', rows)
+            self.inputs.add(rows)
             cached.update({key: (genre, blocked) for key, genre, blocked in rows})
         return ([{**track, 'genre': cached[track['key']][0]} for track in tracks],
                 {key for key, (_, blocked) in cached.items() if blocked})
 
 
 class Selection:
-    def __init__(self, reader, generation, now, leans, conn, inputs=None):
+    def __init__(self, reader, generation, now, leans, ordering, inputs=None):
         self.reader, self.generation, self.now, self.leans = reader, generation, now, leans
         self.inputs = inputs
-        self.conn = conn
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute('PRAGMA cache_size=-1024')
-        self.conn.execute('PRAGMA temp_store=FILE')
-        self.conn.execute('PRAGMA mmap_size=0')
-        self.conn.execute('CREATE TABLE candidates(pool INTEGER,rank INTEGER,key TEXT,artist TEXT,album TEXT,'
-            'family TEXT,has_genre INTEGER,year INTEGER,tilt REAL,delta REAL,eligible INTEGER,'
-            'PRIMARY KEY(pool,rank)) WITHOUT ROWID')
-        self.conn.execute('CREATE TABLE seen(key TEXT PRIMARY KEY) WITHOUT ROWID')
-        self.conn.execute('CREATE TABLE considered(card INTEGER,key TEXT,delta REAL,PRIMARY KEY(card,key)) WITHOUT ROWID')
-        self.conn.execute('CREATE TABLE ordered(key TEXT PRIMARY KEY,delta REAL) WITHOUT ROWID')
-        self.conn.execute('CREATE TABLE ppr(mode TEXT,key TEXT,rank INTEGER,PRIMARY KEY(mode,key)) WITHOUT ROWID')
-        self.conn.create_function('distance', 2, genre_map.family_distance, deterministic=True)
+        self.ordering = ordering
         self.slots, self.loaded, self.owners, self.ppr_counts = {}, set(), {}, {}
         for lane in LANES:
             for slot in reader.recommendations.selections('home', lane, generation=generation):
@@ -102,9 +79,12 @@ class Selection:
                 blocked = home_exclusions(self.reader, [track['key'] for track in tracks], self.now)
             keys = [track['key'] for track in tracks]
             deltas = self.steering.for_keys(keys)
-            self.conn.executemany('INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?,?,?)', [
+            # Every row belongs to this pinned reader. Resolve exact labels once
+            # per bounded page; a later request still sees current taxonomy.
+            axes = self.reader.genres.feature_axes({track.get('genre') for track in tracks})
+            self.ordering.add_candidates([
                 (pool, track['pool_rank'], track['key'], track.get('artist') or '', track.get('album') or '',
-                 genre_map.family(track.get('genre'),conn=self.reader.conn), bool(track.get('genre')), track.get('year'),
+                 axes.get(track.get('genre'), ('', None))[0], bool(track.get('genre')), track.get('year'),
                  1.0 + self.leans.get('genre:' + (track.get('genre') or ''), 0.0),
                  deltas.get(track['key'], 0.0), track['key'] not in blocked and track.get('artist') not in self.muted)
                 for track in tracks])
@@ -125,17 +105,11 @@ class Selection:
             check_cancellable_work()
             rows = self.reader.recommendations.page('radio', mode, 'ppr', generation=self.generation,
                                                      after=after, limit=128)
-            self.conn.executemany('INSERT INTO ppr VALUES (?,?,?)', [(mode, row['key'], row['rank']) for row in rows])
+            self.ordering.add_ppr([(mode, row['key'], row['rank']) for row in rows])
             if len(rows) < 128:
                 break
             after = rows[-1]['rank']
         return self.ppr_counts[mode]
-
-    def rows(self, query, values):
-        cursor = self.conn.execute(query, values)
-        while rows := cursor.fetchmany(128):
-            check_cancellable_work()
-            yield from rows
 
     @staticmethod
     def diverse(rows, artist_cap, album_cap, initial=()):
@@ -155,37 +129,32 @@ class Selection:
                 break
         return selected
 
-    def considered(self, card, predicate, values):
-        self.conn.execute('INSERT OR IGNORE INTO considered SELECT ?,c.key,c.delta FROM candidates c WHERE ' + predicate,
-                          (card, *values))
-        self.conn.execute('INSERT OR IGNORE INTO ordered SELECT c.key,c.delta FROM candidates c WHERE ' + predicate, values)
-
-    def select(self, mode, ranker, predicate, values, caps, *, family=None, initial=()):
+    def select(self, mode, ranker, selected, caps, *, family=None, initial=()):
         scale = (max(1, self.ppr_counts[str(mode)]) if
-                 self.conn.execute('SELECT 1 FROM ordered WHERE delta<>0 LIMIT 1').fetchone() else 1)
-        order = 'COALESCE(p.rank,1073741824)/? - c.delta' if ranker == 'ppr' else '-c.tilt-c.delta'
-        parameters = [str(mode), *values]
-        if family:
-            order = 'distance(?,c.family),' + order
-            parameters.append(family)
-        if ranker == 'ppr':
-            parameters.append(float(scale))
-        rows = self.rows('SELECT c.* FROM candidates c LEFT JOIN ppr p ON p.mode=? AND p.key=c.key '
-                         'WHERE ' + predicate + ' ORDER BY ' + order + ',c.rank', parameters)
+                 self.ordering.has_negative_ordering() else 1)
+        rows = self.ordering.ranked(selected, mode=mode, ranker=ranker, family=family, scale=scale)
         return self.diverse(rows, *caps, initial=initial)
 
     def hydrate(self, rows, lane, ranker, mode):
+        selections = {}
+        for row in rows:
+            owner = self.owners[row['pool']]
+            selections.setdefault(owner, []).append(row['key'])
+        # A card holds at most twelve rows. Resolve their current catalog and
+        # display fields together, then restore selection order (the repository
+        # returns each pool's rows in rank order).
+        pages = self.reader.recommendations.selected_candidates('home',
+            [(owner, purpose, keys) for (owner, purpose), keys in selections.items()],
+            generation=self.generation)
+        candidates = {owner: {track['key']: track for track in tracks}
+                      for owner, tracks in zip(selections, pages, strict=True)}
         tracks = []
         for row in rows:
-            owner, purpose = self.owners[row['pool']]
-            page = self.reader.recommendations.candidate_page('home', owner, purpose,
-                generation=self.generation, after=row['rank'] - 1, limit=1)
-            track = page['tracks'][0]
-            position = self.conn.execute('SELECT rank FROM ppr WHERE mode=? AND key=?',
-                                         (str(mode), row['key'])).fetchone()
+            track = candidates[self.owners[row['pool']]][row['key']]
+            position = self.ordering.ppr_position(mode, row['key'])
             tracks.append({**track, 'serving_context': {**track['serving_context'],
                 'score_kind': 'candidate_fit', 'source_ranker': lane, 'ordering_ranker': ranker,
-                'ppr_position': position[0] if ranker == 'ppr' and position else None,
+                'ppr_position': position if ranker == 'ppr' else None,
                 'facet_tilt': row['tilt'], 'vibe': '', 'negative_delta': row['delta'], 'vibe_affinity': .5}})
         return tracks
 
@@ -197,7 +166,7 @@ class Selection:
         cohort.update(('{"caps": ' + json.dumps(list(caps)) + ', "leans": ' +
                        json.dumps(leans, sort_keys=True) + ', "negative": {').encode())
         count, negatives = 0, 0
-        for row in self.rows('SELECT key,delta FROM considered WHERE card=? ORDER BY key', (card,)):
+        for row in self.ordering.considered_rows(card):
             fingerprint.update(((', ' if count else '') + json.dumps(row['key'])).encode())
             count += 1
             if row['delta']:
@@ -289,19 +258,15 @@ def _assemble(reader, generation, now, epoch, avoid, include, mode_order, prepar
     if not modes:
         return []
     leans = preparation['leans'] if preparation is not None else transient.facet_leans(reader, now)
-    with TemporaryDirectory(prefix='tuneconsole-home-') as directory:
-        conn = sqlite3.connect(Path(directory) / 'cards.db')
-        try:
-            selection = Selection(reader, generation, now, leans, conn,
-                                  (preparation or {}).get('metadata_inputs'))
-            return _cards(selection, modes, framing, leans, epoch, avoid, include, mode_order)
-        finally:
-            conn.close()
+    with HomeSelectionRepo.open() as ordering:
+        selection = Selection(reader, generation, now, leans, ordering,
+                              (preparation or {}).get('metadata_inputs'))
+        return _cards(selection, modes, framing, leans, epoch, avoid, include, mode_order)
 
 
 def _cards(selection, modes, framing, leans, epoch, avoid, include, mode_order):
     from yt_playlist.rec import mode_selection
-    reader, now, conn = selection.reader, selection.now, selection.conn
+    reader, now, ordering = selection.reader, selection.now, selection.ordering
     caps = (int(rec_params.get_param(reader, 'modes_artist_cap')), int(rec_params.get_param(reader, 'modes_album_cap')))
     band = epoch % 3
     years = (framing.get('year_low'), framing.get('year_high'))
@@ -311,24 +276,10 @@ def _cards(selection, modes, framing, leans, epoch, avoid, include, mode_order):
     active = list(LANES[:3]) + ([fourth] if fourth else [])
 
     def predicate(mode, lane, *, eligible=False, unseen=False, date_band=True):
-        pool = selection.load(mode, lane)
-        parts, values = ['c.pool=?'], [pool]
-        if date_band and lane == 'temporal' and has_years:
-            parts.append(('c.year<=?' if band == 0 else 'c.year>? AND c.year<=?' if band == 1 else 'c.year>?'))
-            values.extend((years[0],) if band == 0 else years if band == 1 else (years[1],))
-        if avoid or include:
-            parts.append('c.has_genre=1')
-            if avoid:
-                parts.append('c.family NOT IN (' + ','.join('?' for _ in avoid) + ')')
-                values.extend(avoid)
-            if include:
-                parts.append('c.family IN (' + ','.join('?' for _ in include) + ')')
-                values.extend(include)
-        if eligible:
-            parts.append('c.eligible=1')
-        if unseen:
-            parts.append('NOT EXISTS(SELECT 1 FROM seen s WHERE s.key=c.key)')
-        return ' AND '.join(parts), values
+        return CandidateFilter(selection.load(mode, lane),
+            year_band=band if date_band and lane == 'temporal' and has_years else None,
+            years=years, include=tuple(include), avoid=tuple(avoid), tagged=bool(avoid or include),
+            eligible=eligible, unseen=unseen)
 
     if avoid or include:
         filtered = []
@@ -336,8 +287,7 @@ def _cards(selection, modes, framing, leans, epoch, avoid, include, mode_order):
             family = max(mode['families'], key=lambda value: value[1])[0] if mode.get('families') else None
             if family in avoid or include and family and family not in include:
                 continue
-            if any(conn.execute('SELECT count(*) FROM candidates c WHERE ' + query, values).fetchone()[0] >= 4
-                   for query, values in (predicate(mode['mode_id'], lane, date_band=False) for lane in LANES)):
+            if any(ordering.count(predicate(mode['mode_id'], lane, date_band=False)) >= 4 for lane in LANES):
                 filtered.append(mode)
         modes = filtered
     n = max(4, int(rec_params.get_param(reader, 'modes_menu_size')))
@@ -354,9 +304,8 @@ def _cards(selection, modes, framing, leans, epoch, avoid, include, mode_order):
     depths = {}
     for lane in active:
         for mode in chosen:
-            query, values = predicate(mode, lane, eligible=True)
-            depths[lane, mode] = len(selection.diverse(selection.rows(
-                'SELECT c.* FROM candidates c WHERE ' + query + ' ORDER BY c.rank', values), *caps))
+            selected = predicate(mode, lane, eligible=True)
+            depths[lane, mode] = len(selection.diverse(ordering.ranked(selected), *caps))
     priority = {mode: index for index, mode in enumerate(chosen)}
     def score(modes):
         sizes = [depths.get((lane, mode), 0) for lane, mode in zip(active, modes)]
@@ -368,34 +317,19 @@ def _cards(selection, modes, framing, leans, epoch, avoid, include, mode_order):
     cards, opportunity = [], 0
 
     def card_for(lane, mode, ranker, card):
-        query, values = predicate(mode, lane, eligible=True, unseen=True)
-        selection.considered(card, query, values)
-        selected = selection.select(mode, ranker, query, values, caps)
+        requested = predicate(mode, lane, eligible=True, unseen=True)
+        ordering.considered(card, requested)
+        selected = selection.select(mode, ranker, requested, caps)
         if lane != 'comfort' and len(selected) < 12:
             # Backfill may widen beyond an explicit include only to the mode's
             # close families. An avoid request always remains an exclusion.
-            pool = selection.load('all', lane)
-            parts, extra_values = ['c.pool=?', 'c.eligible=1',
-                'NOT EXISTS(SELECT 1 FROM seen s WHERE s.key=c.key)'], [pool]
-            if selected:
-                parts.append('c.key NOT IN (' + ','.join('?' for _ in selected) + ')')
-                extra_values.extend(row['key'] for row in selected)
-            if avoid:
-                parts.append('c.family NOT IN (' + ','.join('?' for _ in avoid) + ')')
-                extra_values.extend(avoid)
             family = families.get(mode)
-            if family:
-                parts.extend(('c.has_genre=1', 'distance(?,c.family)<=0.5'))
-                extra_values.append(family)
-            elif include:
-                parts.extend(('c.has_genre=1', 'c.family IN (' + ','.join('?' for _ in include) + ')'))
-                extra_values.extend(include)
-            if lane == 'temporal' and has_years:
-                parts.append('c.year<=?' if band == 0 else 'c.year>? AND c.year<=?' if band == 1 else 'c.year>?')
-                extra_values.extend((years[0],) if band == 0 else years if band == 1 else (years[1],))
-            query_extra = ' AND '.join(parts)
-            selection.considered(card, query_extra, extra_values)
-            selected = selection.select(mode, ranker, query_extra, extra_values, caps, family=family, initial=selected)
+            extra = CandidateFilter(selection.load('all', lane), eligible=True, unseen=True,
+                excluded=tuple(row['key'] for row in selected), avoid=tuple(avoid),
+                include=() if family else tuple(include), near_family=family, tagged=bool(family or include),
+                year_band=band if lane == 'temporal' and has_years else None, years=years)
+            ordering.considered(card, extra)
+            selected = selection.select(mode, ranker, extra, caps, family=family, initial=selected)
         if len(selected) < 4:
             return None
         label = mode_selection.BAND_LABELS[band] if lane == 'temporal' else mode_selection.CARD_LABELS[lane]
@@ -418,9 +352,7 @@ def _cards(selection, modes, framing, leans, epoch, avoid, include, mode_order):
                           {}).get('ppr_policy', {'algorithm': 'unknown-legacy-cache'})
                 card['experiment'] = selection.experiment(opportunity, policy, share, caps, leans, epoch, mode)
                 card['counterfactual'] = {'ranker': other, 'tracks': replay['tracks']}
-        query, values = predicate(mode, lane)
-        conn.execute('INSERT OR IGNORE INTO seen SELECT c.key FROM candidates c WHERE ' + query, values)
-        conn.executemany('INSERT OR IGNORE INTO seen VALUES (?)', [(track['key'],) for track in card['tracks']])
+        ordering.mark_seen(predicate(mode, lane), [track['key'] for track in card['tracks']])
         cards.append(card)
         return True
 
@@ -430,8 +362,7 @@ def _cards(selection, modes, framing, leans, epoch, avoid, include, mode_order):
         used = {card['mode_id'] for card in cards}
         available = [mode for mode in chosen if mode not in used]
         def count(mode):
-            query, values = predicate(mode, 'temporal')
-            return conn.execute('SELECT count(*) FROM candidates c WHERE ' + query, values).fetchone()[0]
+            return ordering.count(predicate(mode, 'temporal'))
         for fallback in sorted(available, key=lambda mode: -count(mode)):
             if attempt('temporal', fallback):
                 break

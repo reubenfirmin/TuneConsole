@@ -1,11 +1,14 @@
 """TV inherits prepared musical choices and resolves only bounded visual editions."""
 import json
+from tests.enrichment_support import complete_entries, complete_discovered
+from tests.derived_rating_support import seed_dislike, seed_like
 
 import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
 from tests.onboarding_support import publish_personal_mix
+from tests.prepared_fixture_support import prepared_template
 from yt_playlist.rec import account_growth, tv
 from yt_playlist.web.app import create_app
 
@@ -19,21 +22,39 @@ def prepare_tv_journey(store, *, mixes=4):
     from tests.test_growth_journey import early_journey
 
     early_journey(store)
+    return prepare_tv_formats(store, mixes=mixes)
+
+
+@pytest.fixture(scope='module')
+def early_journey_template(_pristine_current_schema):
+    from tests.test_growth_journey import early_journey
+
+    with prepared_template(_pristine_current_schema, early_journey) as template:
+        yield template
+
+
+@pytest.fixture
+def tv_journey_inputs(store, early_journey_template):
+    early_journey_template.restore(store)
+
+
+def prepare_tv_formats(store, *, mixes=4):
+    """Publish this case's mixes/radio after its independent early journey."""
     tracks = publish_personal_mix(store, count=mixes)
     store.settings.set_setting('radio_seed_offer', json.dumps({
         'menu_id': 'prepared-radio', 'tracks': tracks[:4]}))
-    store.enrichment_queue.mark_enriched([row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1000)
-    store.discovery.mark_discovered_enriched([row[0] for row in store.conn.execute(
+    complete_entries(store, [row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1000)
+    complete_discovered(store, [row[0] for row in store.conn.execute(
         'SELECT identity_key FROM discovered_tracks')], 1000)
     return tracks
 
 
-def test_home_keeps_tv_entry_with_prepared_queue_after_the_early_journey(store):
+def test_home_keeps_tv_entry_with_prepared_queue_after_the_early_journey(store, tv_journey_inputs):
     from tests.test_tv_stream import video
     iid = store.accounts.upsert_account('TV account', 'cred', None, True)
     store.settings.set_setting('last_sync_at', '1')
     store.settings.set_setting('home_format', 'mixes')
-    prepare_tv_journey(store)
+    prepare_tv_formats(store)
     store.rec_proposals.put_proposals(tv.SURFACE, {
         'schema': tv.SCHEMA, 'key': 'independent-tv', 'at': 1, 'attempted': [],
         'items': [video(i) for i in range(tv.QUEUE_SIZE)]}, 1)
@@ -50,11 +71,12 @@ def test_home_keeps_tv_entry_with_prepared_queue_after_the_early_journey(store):
 
 
 @pytest.mark.parametrize('failed', [False, True])
-def test_empty_and_failed_tv_status_remains_readable_when_the_journey_reaches_tv(store, failed):
+def test_empty_and_failed_tv_status_remains_readable_when_the_journey_reaches_tv(
+        store, failed, tv_journey_inputs):
     iid = store.accounts.upsert_account('TV account', 'cred', None, True)
     store.settings.set_setting('last_sync_at', '1')
     store.settings.set_setting('home_format', 'albums')
-    prepare_tv_journey(store)
+    prepare_tv_formats(store)
     store.rec_proposals.put_proposals(tv.SURFACE, {
         'schema': tv.SCHEMA, 'key': 'independent-tv', 'at': 1, 'attempted': [],
         'items': [], 'state': 'no_sources'}, 1)
@@ -72,12 +94,13 @@ def test_empty_and_failed_tv_status_remains_readable_when_the_journey_reaches_tv
 
 
 @pytest.mark.parametrize('missing', ['fourth_mix', 'twelfth_video', 'predecessor'])
-def test_tv_preparation_cannot_bypass_mix_queue_or_predecessor_requirements(store, missing):
+def test_tv_preparation_cannot_bypass_mix_queue_or_predecessor_requirements(
+        store, missing, tv_journey_inputs):
     from tests.test_onboarding_routes import _client
     from tests.test_tv_stream import video
 
     _, client = _client(store)
-    prepare_tv_journey(store, mixes=3 if missing == 'fourth_mix' else 4)
+    prepare_tv_formats(store, mixes=3 if missing == 'fourth_mix' else 4)
     if missing == 'predecessor':
         store.rec_proposals.put_proposals('album_prepared', {'built_at': 1000, 'items': []}, 1000)
     count = tv.QUEUE_SIZE - (missing == 'twelfth_video')
@@ -175,7 +198,7 @@ def test_detailed_audio_evidence_overrules_misleading_visual_title(store, detail
 def test_pool_uses_likes_unowned_artist_tracks_and_discovery_without_exposure(store, monkeypatch):
     seeds = publish_personal_mix(store)
     for seed in seeds:
-        store.rec_model.record_like(seed['key'], 1000)
+        seed_like(store, seed['key'], 1000)
     fresh = [{'key': f'fresh-{i}', 'title': f'New {i}', 'artist': artist, 'video_id': f'new-{i}'}
              for i, artist in enumerate(['Artist', 'Discovery A', 'Artist', 'Discovery B'])]
     monkeypatch.setattr(tv.fresh_pool, 'pick', lambda *args, **kwargs: fresh)
@@ -196,7 +219,7 @@ def prepare_pool(store, client, now=1, *, seeds=None):
     if seeds is None:
         seeds = publish_personal_mix(store, now=now)
     for seed in seeds:
-        store.rec_model.record_like(seed['key'], now)
+        seed_like(store, seed['key'], now)
     while tv.prepare(store, client, now):
         pass
     return tv.cached(store)
@@ -234,7 +257,7 @@ def test_empty_home_refresh_keeps_available_prepared_videos_but_respects_feedbac
     assert tv.cached(store)['items'] == previous['items']
     assert tv.queue(store, 2)
     for item in previous['items']:
-        store.rec_model.record_dislike(item['source_key'], until=None, now=3)
+        seed_dislike(store, item['source_key'], until=None, now=3)
     assert not tv.prepare(store, client, 3)
     assert not tv.queue(store, 3)
 
@@ -263,7 +286,7 @@ def test_expired_pool_remains_playable_during_unsuccessful_refresh(store):
     assert tv.cached(store)['items'] == previous['items']
     assert tv.queue(store, now)
     for item in previous['items']:
-        store.rec_model.record_dislike(item['source_key'], until=None, now=now + 1)
+        seed_dislike(store, item['source_key'], until=None, now=now + 1)
     assert not tv.queue(store, now + 1)
 
 
@@ -303,7 +326,7 @@ def test_lost_pool_recovers_saved_tv_output_offline_without_restoring_excluded_s
     # This fixture has one artist, so the ordinary artist cap still applies.
     assert len(tv.queue(store, 1001)) == 3
     for item in previous['items']:
-        store.rec_model.record_dislike(item['source_key'], until=None, now=1002)
+        seed_dislike(store, item['source_key'], until=None, now=1002)
     with store.conn.atomic():
         tv_output_retention.clear_disposable(store.conn)
     if refresh == 'failed-search':
@@ -328,7 +351,7 @@ def test_failed_search_cannot_publish_saved_tv_after_inputs_change(store, monkey
     assert tv.seed_tracks(store, 1001)
     def offline(*args, **kwargs):
         if change == 'feedback':
-            store.rec_model.record_dislike(previous['items'][0]['source_key'], until=None, now=1001)
+            seed_dislike(store, previous['items'][0]['source_key'], until=None, now=1001)
         else:
             store.rec_proposals.put_proposals('home_tuned', {}, 1001)
         raise ConnectionError('changed while offline')
@@ -346,14 +369,14 @@ def test_saved_tv_failure_recovery_preserves_eligibility_and_cancellation(store,
 
     seeds = publish_personal_mix(store, now=1000)
     for seed in seeds:
-        store.rec_model.record_like(seed['key'], 1000)
+        seed_like(store, seed['key'], 1000)
     items = [{**video(i), 'source_key': seeds[i]['key'], 'source_artist': seeds[i]['artist']}
              for i in range(6)]
     items[1]['source_key'] = 'removed-source'
     items[2]['artist'] = 'Muted singer'
     items[3]['duration'] = 901
     store.rec_model.record_feedback('for_you', 'artist:Muted singer', 'mute', now=1000)
-    store.rec_model.record_dislike(items[4]['source_key'], until=None, now=1000)
+    seed_dislike(store, items[4]['source_key'], until=None, now=1000)
     store.rec_proposals.publish_tv_visual(items[5]['video_id'], {
         'version': tv.tv_visual.VERSION, 'verdict': 'static', 'at': 1000}, 1000)
     recipe = {'lane': 'tv', 'media': 'video', 'videos': items}
@@ -469,7 +492,11 @@ def test_precalculated_serving_parameters_generation_and_sidebar_launch(store, c
             store.rec_model.record_feedback('for_you', 'artist:' + artist, 'mute', now=1)
         assert not web.get('/home/tv').json()['ready']
         pending = web.post('/home/tv/play')
-        assert pending.status_code == 409
+        # Earned access survives a temporarily empty eligible pool. Playback
+        # requests preparation without creating a playlist from muted videos.
+        assert pending.status_code == 202
+        assert pending.json()['preparing']
+        assert len(client.created) == 1
         assert 'current TV choices' in web.get('/home/tv').json()['message']
         assert web.post('/home/tv', data={'max_minutes': '0'}).status_code == 400
         assert web.post('/home/tv', data={'max_minutes': 'nan'}).status_code == 400

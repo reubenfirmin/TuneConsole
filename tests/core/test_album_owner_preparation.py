@@ -144,7 +144,7 @@ def test_failure_interrupt_missing_plan_retry_and_independent_ddl(installed, mon
     job = shares.JOB
     job.install(store.conn)
     publish = policy_documents._publish_encoded
-    def fail(*args):
+    def fail(*args, age=None):
         assert not store.conn.in_transaction
         raise OSError('controlled album file failure')
     monkeypatch.setattr(policy_documents, '_publish_encoded', fail)

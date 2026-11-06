@@ -1,5 +1,6 @@
 """Taste overview, topic navigation and listening readings."""
 import numpy as np
+from tests.derived_rating_support import seed_dislike, seed_like
 import pytest
 from fastapi.testclient import TestClient
 
@@ -71,9 +72,9 @@ def test_overview_shows_weekly_model_inputs_when_the_play_comparison_is_unavaila
                                         source_timezone="UTC")
     elif source == "dated":
         store.history.record_history_plays(iid, now, ["song|artist"], source_timezone="UTC")
-    store.rec_model.record_like("liked|artist", now - 6 * 86400, provenance="action")
-    store.rec_model.record_like("synced|artist", now, provenance="sync")
-    store.rec_model.record_dislike("disliked|artist", now + 86400, now - 2 * 86400)
+    seed_like(store, "liked|artist", now - 6 * 86400, provenance="action")
+    seed_like(store, "synced|artist", now, provenance="sync")
+    seed_dislike(store, "disliked|artist", now + 86400, now - 2 * 86400)
     store.rec_signals.log_graduation("era:1990", "like", 2, 1.1, 1.1, now - 5 * 86400)
 
     html = client.get("/taste/panels/overview").text
@@ -95,7 +96,7 @@ def test_overview_shows_weekly_model_inputs_when_the_play_comparison_is_unavaila
 
 
 def test_overview_shows_feedback_even_without_a_content_model_or_music_groups(store):
-    store.rec_model.record_like("liked|artist", 1, provenance="action")
+    seed_like(store, "liked|artist", 1, provenance="action")
 
     html = _client(store).get("/taste/panels/overview").text
 

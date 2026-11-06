@@ -54,22 +54,33 @@ def copy(conn, owner, key, row):
                  ','.join(field + '=excluded.' + field for field in values if field != identity), tuple(values.values()))
 
 
-def describe(conn, owner, row):
+def _reference(conn, operation, identity, cache):
+    if cache is None:
+        return operation(conn, identity)
+    if identity not in cache:
+        cache[identity] = operation(conn, identity)
+    return cache[identity]
+
+
+def describe(conn, owner, row, references=None):
+    # Verification may reuse identical catalog/provider references within one
+    # bounded page. Its caller still fences every dependency before publication.
+    entries, providers = references if references is not None else (None, None)
     encoded = canonical(row)
     if len(encoded) > MAX_ROW_BYTES:
         raise ValueError('Album row exceeds its preparation byte budget')
     digest = hashlib.sha256(encoded).hexdigest()
     if owner == 'album_fetch_state':
-        remote = provider(conn, row['album_id'])
+        remote = _reference(conn, provider, row['album_id'], providers)
         return dict(album_id=row['album_id'], source_digest=digest,
             fetched_at=finite(row['fetched_at']) if row['fetched_at'] is not None else None, complete=row['complete'],
             expected_track_count=integer(row['expected_track_count'], minimum=0), provider_id_snapshot=remote,
             resolution_reason=None if remote else 'missing_provider')
-    observed = entry(conn, row['entry_id'])
+    observed = _reference(conn, entry, row['entry_id'], entries)
     recording = observed['recording_id'] if observed else row['recording_id']
     source_ref = (observed['video_id'] or observed['source_ref']) if observed else None
     source_provider = ('youtube' if observed['video_id'] else 'local' if (observed['source_ref'] or '').startswith('local:') else 'unresolved') if observed else None
-    remote = provider(conn, row['album_id']) if row['is_full'] else None
+    remote = _reference(conn, provider, row['album_id'], providers) if row['is_full'] else None
     return {'row_id': row['id'], 'source_digest': digest, 'album_id': row['album_id'], 'is_full': row['is_full'],
         'entry_id': row['entry_id'], 'captured_recording_id': row['recording_id'], 'recording_id': recording,
         'raw_identity_key': row['legacy_track_key'], 'raw_source_ref': source_ref,

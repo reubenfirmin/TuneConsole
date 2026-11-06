@@ -59,27 +59,6 @@ class TasteGroupsRepo(Repo):
         return result
 
     @synchronized
-    def assignment_head(self):
-        """Only the published policy and leaf representatives needed for hints.
-
-        The generation's graph diagnostics, definition explanations and historical
-        membership do not contribute to provisional assignment scores.
-        """
-        row = self.conn.execute('SELECT g.generation,g.policy FROM rec_group_generations g '
-            'JOIN rec_group_head h ON h.generation=g.generation '
-            'JOIN rec_group_publications p ON p.generation=g.generation WHERE h.id=1').fetchone()
-        if row is None:
-            return None
-        groups = [{'version': item['version'], 'rep_keys': json.loads(item['rep_keys'])}
-                  for item in self.conn.execute(
-                      "SELECT version,json_extract(payload,'$.rep_keys') rep_keys "
-                      'FROM rec_group_definitions WHERE generation=? '
-                      "AND json_extract(payload,'$.leaf')=1 "
-                      "AND NOT COALESCE(json_extract(payload,'$.legacy'),0) ORDER BY rowid",
-                      (row['generation'],))]
-        return {**dict(row), 'groups': groups}
-
-    @synchronized
     def definitions(self, generation, *, members=False):
         result = []
         for row in self.conn.execute('SELECT d.* FROM rec_group_definitions d '
@@ -159,42 +138,6 @@ class TasteGroupsRepo(Repo):
         return {**json.loads(row['payload']), **{key: row[key] for key in
                 ('version', 'group_id', 'generation', 'parent_version', 'created_at')}} if row else None
 
-    @synchronized
-    def inputs_for(self, keys, *, max_bytes=4 * 1024 * 1024):
-        if not keys:
-            return []
-        if len(keys) > 32:
-            raise ValueError('Group assignment input page exceeds 32 recordings')
-        qs = ','.join('?' for _ in keys)
-        profile_size = (profile_files.recording_size_sql() if profile_files.available(self.conn) else 'length(CAST(m.payload AS BLOB))')
-        used = self.conn.execute('SELECT COALESCE(SUM(' + prepared_inputs.byte_bound()
-            + '+COALESCE((' + profile_size + ')*4,0)),0) '
-            'FROM prepared_recording_inputs p JOIN recordings r ON r.id=p.recording_id '
-            'LEFT JOIN rec_musical_profiles m ON m.identity_key=r.identity_key '
-            f'WHERE r.identity_key IN ({qs})', keys).fetchone()[0]
-        if used > max_bytes:
-            raise WorkBudgetExceeded('Group assignment evidence exceeds page budget')
-        cache = profile_files.Cache()
-        return [(row['identity_key'], prepared_inputs.payload(row), self._profile(row, cache))
-                for row in self.conn.execute('SELECT r.identity_key,p.*,m.payload profile FROM prepared_recording_inputs p '
-                    'JOIN recordings r ON r.id=p.recording_id LEFT JOIN rec_musical_profiles m ON m.identity_key=r.identity_key '
-                    f'WHERE r.identity_key IN ({qs})', keys)]
-
-    @synchronized
-    def publish_assignments(self, rows):
-        if not self.conn.in_transaction:
-            raise RuntimeError('Provisional assignments require an outer transaction')
-        self.conn.executemany('INSERT INTO rec_group_assignments VALUES (?,?,?,?,?,?,?) '
-            'ON CONFLICT(generation,identity_key) DO UPDATE SET version=excluded.version,'
-            'similarity=excluded.similarity,support=excluded.support,profile_digest=excluded.profile_digest,'
-            'prepared_at=excluded.prepared_at', rows)
-
-    @synchronized
-    def assignment(self, key):
-        row = self.conn.execute('SELECT a.* FROM rec_group_assignments a JOIN rec_group_head h '
-            'ON h.generation=a.generation WHERE a.identity_key=?', (key,)).fetchone()
-        return dict(row) if row else None
-
     def stage(self, prepared):
         """Prepare a hidden generation in bounded transactions, yielding between batches."""
         return group_publication.stage(self, prepared)
@@ -229,6 +172,13 @@ class TasteGroupsRepo(Repo):
     def finish_staged(self, generation, owner):
         """Only the guarded snapshot publisher may advance the last-good head."""
         group_publication.finish(self.conn, generation, owner)
+
+    @synchronized
+    def finish_preparation(self, generation, owner, serial, now):
+        self.finish_staged(generation, owner)
+        from yt_playlist.core import group_preparation_state
+        if group_preparation_state.available(self.conn):
+            group_preparation_state.checkpoint(self.conn, generation, serial, now)
 
     @synchronized
     def publish(self, prepared):

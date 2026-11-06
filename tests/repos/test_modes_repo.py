@@ -5,13 +5,6 @@ import pytest
 from yt_playlist.core.store import Store
 
 
-@pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    return s
-
-
 def _mode(mid, label, fams, vec, size, reps):
     return {"mode_id": mid, "label": label, "families": fams,
             "centroid": np.asarray(vec, dtype=np.float32), "size": size, "rep_keys": reps}

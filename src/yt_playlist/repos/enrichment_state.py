@@ -13,7 +13,7 @@ from yt_playlist.core.db_diagnostics import database_operation
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core import provider_frontiers
-from yt_playlist.core import metadata_runtime
+from yt_playlist.core import metadata_runtime, provider_queries
 from yt_playlist.core.preparation import metadata_destinations, metadata_publication
 from yt_playlist.repos.base import Repo, snapshot_read, synchronized
 
@@ -127,8 +127,8 @@ class EnrichmentStateRepo(Repo):
 
     @synchronized
     def record_enrichment_attempt(self, identity_key, provider, fields, *, retry=False, now=None,
-                                  video_id=None, error="", cooldown=False, retry_after=0, providers=(),
-                                  manage_cooldown=True, run_id=None, delivery_id=None):
+                                  video_id=None, error="", retry_after=0, providers=(),
+                                  run_id=None, delivery_id=None):
         key = catalog.resolve_key(self.conn, identity_key, video_id)
         row = self.conn.execute("SELECT id,COALESCE(last_enriched_at,-1) cycle FROM recordings WHERE identity_key=?", (key,)).fetchone()
         result = {"at": time.time() if now is None else now,
@@ -148,11 +148,8 @@ class EnrichmentStateRepo(Repo):
                 if metadata_runtime.record_attempt(self.conn, entry[0], provider, fields, cycle=row['cycle'],
                         retry=retry, now=result['at'], retry_after=retry_after, error=error,
                         run_id=run_id, delivery_id=delivery_id):
-                    deadline = self.conn.execute('SELECT retry_at FROM enrichment_provider_state WHERE recording_id=? '
-                        'AND provider=?', (row['id'], provider)).fetchone()[0]
                     self._attempt_effects(row['id'], provider, fields, retry=retry, at=result['at'],
-                        deadline=deadline, error=error, cooldown=cooldown,
-                        manage_cooldown=manage_cooldown, providers=providers)
+                        providers=providers)
             return
         if row is not None and metadata_attempts.available(self.conn):
             with self.conn:
@@ -166,11 +163,8 @@ class EnrichmentStateRepo(Repo):
                     cycle=row['cycle'], retry=retry, now=result['at'], retry_after=retry_after,
                     error=error, run_id=run_id, delivery_id=delivery_id)
                 if inserted:
-                    deadline = self.conn.execute('SELECT retry_at FROM enrichment_provider_state '
-                        'WHERE recording_id=? AND provider=?', (row['id'], provider)).fetchone()[0]
                     self._attempt_effects(row['id'], provider, fields, retry=retry, at=result['at'],
-                        deadline=deadline, error=error, cooldown=cooldown,
-                        manage_cooldown=manage_cooldown, providers=providers)
+                        providers=providers)
             return
         if row is None:
             if legacy_evidence.available(self.conn):
@@ -198,19 +192,10 @@ class EnrichmentStateRepo(Repo):
                 (row["id"],provider,row["cycle"],result["at"],result["status"],
                  json.dumps(retained),failures,deadline,error))
             self._attempt_effects(row['id'], provider, fields, retry=retry, at=result['at'],
-                deadline=deadline, error=error, cooldown=cooldown, manage_cooldown=manage_cooldown, providers=providers)
+                providers=providers)
         self.conn.commit()
 
-    def _attempt_effects(self, recording_id, provider, fields, *, retry, at, deadline, error,
-                         cooldown, manage_cooldown, providers):
-        if cooldown and manage_cooldown:
-            old = self.conn.execute('SELECT * FROM enrichment_provider_cooldowns WHERE provider=?', (provider,)).fetchone()
-            count = (old['failures'] if old else 0) + 1
-            deadline = max(deadline, at + min(3600, 30 * 2 ** min(count - 1, 7)), old['retry_at'] if old else 0)
-            self.conn.execute('INSERT OR REPLACE INTO enrichment_provider_cooldowns VALUES (?,?,?,?)',
-                              (provider, count, deadline, error))
-        elif not retry and manage_cooldown:
-            self.conn.execute('DELETE FROM enrichment_provider_cooldowns WHERE provider=?', (provider,))
+    def _attempt_effects(self, recording_id, provider, fields, *, retry, at, providers):
         if not retry:
             refresh = self.conn.execute('SELECT 1 FROM enrichment_provider_jobs WHERE recording_id=? AND provider=?',
                                         (recording_id, provider)).fetchone()
@@ -281,6 +266,8 @@ class EnrichmentStateRepo(Repo):
             "LEFT JOIN enrichment_provider_config cfg ON cfg.provider=s.provider "
             "WHERE s.status='retry' AND s.cycle=COALESCE(r.last_enriched_at,-1) "
             "AND (cfg.provider IS NULL OR cfg.status='available') "
+            "AND (s.provider<>'lastfm' OR EXISTS (SELECT 1 FROM catalog_enrichment_tracks t "
+            "WHERE t.recording_id=r.id AND " + provider_queries.lastfm_ready_sql() + ")) "
             "ORDER BY retry_at,s.at").fetchall()
         return {"count": len(rows), "retry_at": rows[0]["retry_at"] if rows else None,
                 "error": rows[0]["error"] if rows else ""}

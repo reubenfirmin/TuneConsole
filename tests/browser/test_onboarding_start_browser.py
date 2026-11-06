@@ -1,5 +1,6 @@
 """The first mix arrives through local polling while the initial library sync is unfinished."""
 import json
+from tests.derived_rating_support import seed_like
 import re
 
 from playwright.sync_api import expect
@@ -220,7 +221,6 @@ def test_album_first_onboarding_preserves_player_and_opens_ready_albums(live_app
     expect(page.locator('#arrival-title')).to_be_visible()
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     page.screenshot(path=f'/tmp/tuneconsole-welcome-{width}.png', full_page=True)
-    expect(page.get_by_role('heading', name='How do you like to listen?')).to_have_count(0)
     expect(page.locator('.global-now-playing')).to_contain_text('Still playing')
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     page.evaluate('window.firstDocument = document; window.firstPlayer = document.querySelector(".global-now-playing")')
@@ -241,7 +241,6 @@ def test_album_first_onboarding_preserves_player_and_opens_ready_albums(live_app
             window.dispatchEvent(new CustomEvent('setup-status', {detail: data}));
         }''')
     if not already_ready:
-        expect(page.locator('#listening-format-title')).to_have_count(0)
         finish_import()
     expect(page.get_by_role('tab', name='Long play', exact=True)).to_have_attribute('aria-selected', 'true', timeout=6500)
     expect(page.locator('.album-choice')).to_have_count(2)
@@ -514,7 +513,7 @@ def test_welcome_starting_tent_is_visible_above_the_fold_and_player(live_app, st
         return Math.abs(art.top - frame.top) < 1 && Math.abs(art.left - frame.left) < 1
             && copy.top >= art.top && copy.bottom < tent.top;
     }''')
-    expect(page.locator('.festival-routes .growth-route:not(.is-explored):not(.is-preparing):visible')).to_have_count(0)
+    expect(page.locator('.festival-routes .growth-route:not(.is-explored):not(.is-ready):not(.is-preparing):visible')).to_have_count(0)
     frontier = page.locator('.festival-routes .growth-route.is-preparing')
     expect(frontier).to_have_count(1)
     expect(frontier).to_have_attribute('data-destination', 'foundation')
@@ -610,6 +609,8 @@ def test_setup_banner_follows_navigation_and_finishes_when_models_are_ready(live
     banner = page.locator(".setup-banner")
     expect(banner).to_be_visible()
     expect(banner).to_contain_text("Preparing your personal mixes")
+    assert banner.bounding_box()['y'] == 0
+    expect(page.locator('.account-health, #account-health-slot')).to_have_count(0)
     expect(page.locator("#arrival-title")).to_have_text("Welcome to TuneConsole")
     expect(page.locator('.festival-intro-sub')).to_have_text('Your first set is ready')
     expect(page.locator(".arrival-features, .arrival-counts, #library-import-details")).to_have_count(0)
@@ -635,7 +636,7 @@ def test_setup_banner_follows_navigation_and_finishes_when_models_are_ready(live
     # with an empty Mix tapes page, including ordinary Home navigation and Back.
     store.settings.set_setting("onboard_dismissed", "1")
     for i in range(30):
-        store.rec_model.record_like(f"imported {i}|artist", now=1)
+        seed_like(store, f"imported {i}|artist", now=1)
     page.goto(live_app)
     expect(page.locator("#onboarding-feed")).to_be_visible()
     expect(page.locator(".setup-banner")).to_be_visible()
@@ -656,6 +657,7 @@ def test_setup_banner_follows_navigation_and_finishes_when_models_are_ready(live
     page.keyboard.press("Escape")
     page.reload()
     expect(page.locator(".setup-banner")).to_have_count(0)
+    expect(page.locator('.account-health, #account-health-slot')).to_have_count(0)
     assert errors == []
 
 
@@ -809,7 +811,10 @@ def test_ready_radio_starter_uses_existing_session_controls(live_app, store, pag
     expect(recovery.get_by_role('button', name='Try this selection again')).to_be_enabled()
     with page.expect_request('**/radio/start') as retried:
         recovery.get_by_role('button', name='Try this selection again').click()
-    assert retried.value.post_data_json == request.value.post_data_json
+    initial, retry = request.value.post_data_json, retried.value.post_data_json
+    assert initial['launch_id'] and retry['launch_id'] != initial['launch_id']
+    assert {key: value for key, value in retry.items() if key != 'launch_id'} == {
+        key: value for key, value in initial.items() if key != 'launch_id'}
     expect(recovery.get_by_role('button', name='Try this selection again')).to_be_enabled()
     recovery.scroll_into_view_if_needed()
     page.evaluate('''async () => {
@@ -933,6 +938,14 @@ def test_extension_setup_and_live_import_details(live_app, page, width):
     expect(page.locator(".arrival-progress")).to_be_visible()
     expect(page.locator(".arrival-progress")).to_contain_text("Reading playlist 2 of 5")
     expect(details.get_by_text("Reading playlist 2 of 5: Confessionals")).to_be_visible(timeout=6500)
+    for preference in ("reduce", "no-preference"):
+        page.emulate_media(reduced_motion=preference)
+        animation = page.locator(".setup-banner").evaluate("""el => {
+            const style = getComputedStyle(el, '::after');
+            return [style.animationName, style.animationDuration,
+                    style.animationIterationCount, style.animationPlayState];
+        }""")
+        assert animation == ["setup-working", "4s", "infinite", "running"], preference
     assert first.locator('.landmark-halo').evaluate('el => getComputedStyle(el).animationName') == 'none'
     status["setup"]["running"] = False
     status["outcome"] = "partial"

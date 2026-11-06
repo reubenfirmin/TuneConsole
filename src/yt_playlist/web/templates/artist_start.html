@@ -38,7 +38,7 @@
     </div>
     <button class="btn-ghost" type="button" x-show="hasMoreArtists" @click="expanded = !expanded"
             x-text="expanded ? 'Show fewer artists' : 'Show more artists'"></button>
-    <p class="artist-start-error" role="alert" x-show="error" x-text="error" x-cloak></p>
+    <p class="artist-start-status" role="status" x-show="error" x-text="error" x-cloak></p>
     <div class="artist-start-continue" x-show="selected.length >= minimum" x-cloak>
       <button class="btn btn-primary artist-start-primary" type="button" :disabled="saving" @click="listen()">
         <span>Find my first set</span>

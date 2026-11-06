@@ -26,7 +26,7 @@ def status(conn, domain):
 
 def maintain(store, now):
     """One bounded prefix per enabled owner, including idle worker turns."""
-    return {domain: step(store, domain, now) for domain in DOMAINS}
+    return store.retention.maintain_runtime_history(now)
 
 
 def main():

@@ -1,21 +1,18 @@
 """Publication follows consumed inputs, rather than all writes on a busy serving connection."""
 import gc
+from contextlib import closing
 import sqlite3
 import weakref
 
 import pytest
 
-from yt_playlist.core.store import Store
 from yt_playlist.core import catalog
 from yt_playlist.core.db_revisions import column_group_reads
 
 
 @pytest.fixture(params=["memory", "file"])
-def database(request, tmp_path):
-    store = Store(":memory:" if request.param == "memory" else tmp_path / "state.db")
-    store.init_schema()
-    yield store
-    store.conn.close()
+def database(request):
+    return request.getfixturevalue('store' if request.param == 'memory' else 'file_backed_store')
 
 
 def test_unrelated_settings_and_analytics_do_not_invalidate_catalog_snapshot(database):
@@ -106,20 +103,15 @@ def test_unannotated_setting_read_after_key_lookup_tracks_entire_table(database)
         assert not snapshot.publish(lambda: pytest.fail("missed raw setting read"))
 
 
-def test_external_commit_and_schema_change_remain_conservative(tmp_path):
-    path = tmp_path / "state.db"
-    store = Store(path)
-    store.init_schema()
-    try:
-        with store.read_snapshot() as snapshot:
-            with sqlite3.connect(path) as other:
-                other.execute("INSERT INTO settings VALUES ('external','changed')")
-            assert not snapshot.publish(lambda: pytest.fail("missed external commit"))
-        with store.read_snapshot() as snapshot:
-            store.conn.execute("CREATE TABLE extra_input(value TEXT)")
-            assert not snapshot.publish(lambda: pytest.fail("missed schema change"))
-    finally:
-        store.conn.close()
+def test_external_commit_and_schema_change_remain_conservative(file_backed_store):
+    store = file_backed_store
+    with store.read_snapshot() as snapshot:
+        with closing(sqlite3.connect(store._db_path)) as other, other:
+            other.execute("INSERT INTO settings VALUES ('external','changed')")
+        assert not snapshot.publish(lambda: pytest.fail("missed external commit"))
+    with store.read_snapshot() as snapshot:
+        store.conn.execute("CREATE TABLE extra_input(value TEXT)")
+        assert not snapshot.publish(lambda: pytest.fail("missed schema change"))
 
 
 @pytest.mark.parametrize('change', ['new-owner', 'new-column'])
@@ -197,21 +189,16 @@ def test_ranking_tolerance_does_not_relax_unlisted_preferences(database):
                                     allow_stale_tables={'recordings'})
 
 
-def test_ranking_tolerance_keeps_external_writer_guard(tmp_path):
-    path = tmp_path / 'state.db'
-    store = Store(path)
-    store.init_schema()
+def test_ranking_tolerance_keeps_external_writer_guard(file_backed_store):
+    store = file_backed_store
     tid = store.tracks.upsert_track('video', 'Song', 'Artist', None, None)
-    try:
-        with store.read_snapshot() as snapshot:
-            snapshot.store.rec_query.track_content()
-            with sqlite3.connect(path) as other:
-                other.row_factory = sqlite3.Row
-                catalog.choose_field(other, tid, 'genre', 'House')
-            assert not snapshot.publish(lambda: pytest.fail('ignored an external writer'),
-                                        allow_stale_tables={'recordings'})
-    finally:
-        store.conn.close()
+    with store.read_snapshot() as snapshot:
+        snapshot.store.rec_query.track_content()
+        with closing(sqlite3.connect(store._db_path)) as other, other:
+            other.row_factory = sqlite3.Row
+            catalog.choose_field(other, tid, 'genre', 'House')
+        assert not snapshot.publish(lambda: pytest.fail('ignored an external writer'),
+                                    allow_stale_tables={'recordings'})
 
 
 def test_scoped_capture_keeps_complete_counters_and_bounds_work_after_key_churn(database):
@@ -323,6 +310,9 @@ def test_released_reader_keeps_original_guard_after_context_exit(database, chang
         with pytest.raises(sqlite3.ProgrammingError, match='closed'):
             snapshot.store.conn.execute('SELECT 1')
     database.settings.set_setting('input' if changed else 'foreground-setting', 'new')
+    changes = database.conn.total_changes
+    assert snapshot.is_current() == (not changed)
+    assert database.conn.total_changes == changes and not database.conn.in_transaction
     published = []
     assert snapshot.publish(lambda: published.append(True)) == (not changed)
     assert published == ([] if changed else [True])

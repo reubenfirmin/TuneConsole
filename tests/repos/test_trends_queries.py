@@ -1,13 +1,10 @@
 import pytest
-from yt_playlist.core.store import Store
 
 
 @pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    s.accounts.upsert_account("me", "c", None, True)   # identity id=1, referenced by history/playlist FKs
-    return s
+def store(store):
+    store.accounts.upsert_account("me", "c", None, True)   # identity id=1, referenced by history/playlist FKs
+    return store
 
 
 def _snap(store, day, keys):
@@ -18,10 +15,6 @@ def _snap(store, day, keys):
 def _track(store, key, artist, genre=""):
     from tests.conftest import seed_catalog_track
     seed_catalog_track(store,key,"T"+key,artist,video_id="v"+key,genre=genre)
-
-
-def _track_id(store, key):
-    return store.conn.execute("SELECT id FROM tracks WHERE identity_key = ?", (key,)).fetchone()["id"]
 
 
 def test_play_day_counts_and_meta(store):
@@ -35,63 +28,6 @@ def test_play_day_counts_and_meta(store):
     assert store.trends.track_meta() == {"k1": ((artists['A1'],), "House"), "k3": ((artists['A2'],), "Techno")}
 
 
-def test_never_played_and_last(store):
-    _track(store, "k1", "A1", "house")
-    _track(store, "k2", "A1", "house")     # never appears in a snapshot
-    _snap(store, 5, ["k1"])
-    # 2 tracks total, k2 never played -> 1
-    assert store.trends.never_played() == (2, 1)
-    last = dict(store.trends.track_last_play())
-    assert last["k1"] == 5*86400.0+43200 and last["k2"] is None
-
-
-def test_never_played_reads_history_once_for_all_owned_tracks(store):
-    for i in range(30):
-        _track(store, f"k{i}", "Artist")
-    calls = []
-    store.conn.create_function("count_history_read", 1,
-                               lambda key: (calls.append(key), key)[1])
-    store.conn.execute("CREATE TEMP TABLE history_probe(identity_key TEXT)")
-    store.conn.executemany("INSERT INTO history_probe VALUES (?)", [(f"k{i}",) for i in range(20)])
-    store.conn.execute("CREATE TEMP VIEW listening_days AS "
-                       "SELECT count_history_read(identity_key) identity_key FROM history_probe")
-    store.conn.commit()
-    assert store.trends.never_played() == (30, 10)
-    assert len(calls) == 20
-
-
-def test_dead_playlists_threshold_and_order(store):
-    _track(store, "ka", "A1")
-    _track(store, "kb", "A2")
-    _track(store, "kc", "A3")
-
-    pid_zeta = store.playlists.upsert_playlist(1,'pl_zeta','Zeta',1,'h',0)
-    pid_alpha = store.playlists.upsert_playlist(1,'pl_alpha','Alpha',1,'h',0)
-    pid_beta = store.playlists.upsert_playlist(1,'pl_beta','Beta',1,'h',0)
-
-    store.playlists.set_playlist_tracks(pid_zeta,[_track_id(store,'ka')])
-    store.playlists.set_playlist_tracks(pid_alpha,[_track_id(store,'kb')])
-    store.playlists.set_playlist_tracks(pid_beta,[_track_id(store,'kc')])
-
-    # kc (Beta's only track) played 3 times: day2, day5, day7. ka/kb (Zeta/Alpha) never played.
-    _snap(store, 2, ["kc"])
-    _snap(store, 5, ["kc"])
-    _snap(store, 7, ["kc"])
-
-    # max_listens=1: Beta (listens=3) excluded; Zeta and Alpha (listens=0 each) tie, broken by
-    # case-insensitive title -> Alpha before Zeta.
-    low = store.trends.dead_playlists(1)
-    assert [(d["title"], d["listens"], d["last_listen"]) for d in low] == [
-        ("Alpha", 0, None), ("Zeta", 0, None)]
-
-    # max_listens=3: all three included, listens ascending then title.
-    full = store.trends.dead_playlists(3)
-    assert [(d["title"], d["listens"]) for d in full] == [("Alpha", 0), ("Zeta", 0), ("Beta", 3)]
-    beta = next(d for d in full if d["title"] == "Beta")
-    assert beta["last_listen"] == 7*86400.0+43200
-    assert beta["playlist_id"] == pid_beta
-
-
 def test_track_cards_and_month_track_plays(store):
     _track(store, "k1", "A1", "house")               # ensure the tracks row carries title/thumbnail
     store.conn.execute("UPDATE youtube_items SET thumbnail='http://x/1.jpg', album_browse_id='MPRE1' "
@@ -103,14 +39,3 @@ def test_track_cards_and_month_track_plays(store):
     # month window covering days 2 and 5 -> k1 played twice
     since, until = 0.0, 40 * 86400.0
     assert store.trends.month_track_plays(since, until) == {"k1": 2}
-
-
-def test_rediscover_tracks_old_favorites(store):
-    _track(store, "hot", "A1"); _track(store, "cold", "A2")
-    # cold: 3 plays, newest day 5. hot: 1 play, newest day 100.
-    for d in (1, 3, 5):
-        _snap(store, d, ["cold"])
-    _snap(store, 100, ["hot"])
-    # before_ts = day 40 -> only 'cold' (last day 5 < 40) qualifies; 'hot' (day 100) excluded.
-    got = store.trends.rediscover_tracks(before_ts=40 * 86400.0, limit=3)
-    assert [r["identity_key"] for r in got] == ["cold"] and got[0]["plays"] == 3

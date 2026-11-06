@@ -119,13 +119,6 @@ def _video_id(url):
         return None
 
 
-def parse_watch_history(raw) -> list:
-    """Takeout watch-history JSON -> [{'video_id','title','artist','ts'}], oldest first. Music rows
-    only (YouTube Music header, or a music.youtube.com URL); rows without a parseable time are
-    skipped. Raises TakeoutFormatError when the input is not the JSON export at all."""
-    return _parse_watch_history(raw)[0]
-
-
 def _parse_watch_history(raw) -> tuple[list, int]:
     try:
         data = json.loads(raw)

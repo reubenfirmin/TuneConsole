@@ -4,21 +4,10 @@ Generated membership quarantines learning evidence. It does not suppress a song
 that is independently eligible for recommendation.
 """
 import numpy as np
-import pytest
+from tests.derived_rating_support import seed_dislike
 
-from yt_playlist.core.store import Store
 from yt_playlist.repos.base import GENERATED_GROUP
 from yt_playlist.rec import mode_surfaces as ms
-
-
-@pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    try:
-        yield s
-    finally:
-        s.conn.close()
 
 
 def _eye(i, d=4):
@@ -68,7 +57,7 @@ def test_generated_membership_preserves_independently_eligible_cached_candidates
     assert offered, "cards should still render"
     assert offered & set(bundled), "generated membership alone must not suppress candidates"
     assert offered & set(keys[6:]), "the untouched songs are still fair game"
-    store.rec_model.record_dislike(bundled[0], until=None, now=11)
+    seed_dislike(store, bundled[0], until=None, now=11)
     assert bundled[0] not in _offered(ms.assemble_cards(store, now=12, epoch=0))
 
 

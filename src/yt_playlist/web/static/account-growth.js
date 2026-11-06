@@ -4,7 +4,7 @@ function accountGrowth(initial) {
     growth: initial, seen: [], later: false, selected: null, choosing: false,
     homeChoice: '', choiceError: '', savingChoice: false, refreshing: false,
     growthPanel: location.hash.slice(1), twinkling: false, hovered: null, mapPanned: false,
-    destinationPopup: null,
+    destinationPopup: null, destroyed: false, choiceVersion: 0,
     get newNodes() {
       return this.growth.nodes.filter(node => node.ready && !node.bonus
         && node.id !== 'first' && !this.seen.includes(node.id));
@@ -18,7 +18,7 @@ function accountGrowth(initial) {
       return ['unlocks', 'notices'].includes(panel) || this.growth.ready_areas[panel] === true ||
         this.growth.nodes.some(node => node.unlocked && node.href === '/#' + panel);
     },
-    get pathStates() { return this.growth.nodes.some(node => node.state === 'explored') ? ['explored'] : []; },
+    get pathStates() { return this.growth.nodes.some(node => node.ready || node.connected) ? ['open'] : []; },
     isNew(node) { return this.newNodes.some(item => item.id === node.id); },
     saveVisibility() {
       try { localStorage.setItem('tc-growth-notices-v1', JSON.stringify({seen: this.seen, later: this.later})); } catch (_) {}
@@ -54,22 +54,50 @@ function accountGrowth(initial) {
     },
     async saveHome() {
       if (!this.homeChoice || this.savingChoice) return;
+      const choice = this.homeChoice;
+      this.choiceVersion++;
       this.savingChoice = true; this.choiceError = '';
       try {
         const response = await fetch('/home/growth/format', {method: 'POST',
-          headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: new URLSearchParams({format: this.homeChoice})});
-        if (!response.ok) throw new Error(await response.text());
-        this.growth.home_choice_available = false; this.choosing = false; this.later = true;
-        this.$refs.homeDialog.close(); this.saveVisibility();
-      } catch (error) { this.choiceError = error.message || 'Could not save your choice. Try again.'; }
+          signal: AbortSignal.timeout(20000), headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: new URLSearchParams({format: choice})});
+        if (!response.ok) {
+          console.debug('[Home choice] response unavailable', response.status, await response.text());
+          throw new Error('Home choice failed');
+        }
+        if (!this.destroyed) this.homeSaved(choice);
+      } catch (error) {
+        console.debug('[Home choice] save not confirmed', error);
+        if (this.destroyed) return;
+        this.choiceError = 'Choice not confirmed. Your selection is kept here.';
+        // The write may have completed before its reply was lost. Read the
+        // saved choice once; never replay the POST to discover its outcome.
+        try {
+          const response = await fetch('/home/growth', {signal: AbortSignal.timeout(20000)});
+          if (response.ok) {
+            const state = await response.json();
+            if (!this.destroyed && state.home_choice === choice) this.homeSaved(choice);
+          }
+        } catch (error) { console.debug('[Home choice] saved choice unavailable', error); }
+      }
       finally { this.savingChoice = false; }
+    },
+    homeSaved(choice) {
+      this.choiceVersion++;
+      this.growth.home_choice = choice; this.growth.home_choice_available = false;
+      this.choosing = false; this.later = true; this.choiceError = '';
+      this.$refs.homeDialog.close(); this.saveVisibility();
     },
     async refresh() {
       if (this.refreshing || document.hidden) return;
+      const choiceVersion = this.choiceVersion;
       this.refreshing = true;
       try {
         const response = await fetch('/home/growth');
-        if (response.ok) this.growth = await response.json();
+        if (response.ok) {
+          const state = await response.json();
+          if (!this.destroyed && choiceVersion === this.choiceVersion) this.growth = state;
+        }
       } catch (_) { /* Keep the last real snapshot during a temporary disconnect. */ }
       finally { this.refreshing = false; }
     },
@@ -86,6 +114,6 @@ function accountGrowth(initial) {
       this.twinkleTimer = setTimeout(() => { this.twinkling = false; }, 1800);
       this.timer = setInterval(() => this.refresh(), 15000);
     },
-    destroy() { clearInterval(this.timer); clearTimeout(this.twinkleTimer); },
+    destroy() { this.destroyed = true; clearInterval(this.timer); clearTimeout(this.twinkleTimer); },
   };
 }

@@ -16,7 +16,7 @@ import pytest
 from yt_playlist.core.store import Store
 from yt_playlist.core.migrations import migrate
 from yt_playlist.core.migrations.registry import MIGRATIONS
-from yt_playlist.rec import audio_vibe_model, audio_vibe_preview, musical_character, musical_preparation
+from yt_playlist.rec import audio_vibe_model, audio_vibe_prediction, musical_character, musical_preparation
 from yt_playlist.rec import vibe_preparation, musical_profiles
 from yt_playlist.rec.progressive import Preparation
 from yt_playlist.util.matching import normalize
@@ -130,7 +130,7 @@ def test_saved_library_vibe_startup(tmp_path, monkeypatch, record_property, requ
             layers.update(row['source'] for row in profile['vibes']['fits'].values())
             if profile['vibes']['fits']['relax']['source'] == 'audio_measurement':
                 inputs = store.vibe_predictions.inputs([key])[key]
-                expected = audio_vibe_preview.predict(inputs['samples'], metadata=inputs['metadata'])
+                expected = audio_vibe_prediction.predict(inputs['samples'], metadata=inputs['metadata'])
                 actual = profile['vibes']['fits']
                 assert {row['vibe']: row['score'] for row in expected['ranking']} == {
                     vibe: row['score'] for vibe, row in actual.items()}

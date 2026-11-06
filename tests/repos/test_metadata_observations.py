@@ -1,5 +1,6 @@
 """Source evidence retains scope and disagreement without selecting catalog facts."""
 from dataclasses import replace
+from tests.metadata_provenance_support import metadata_provenance
 
 import pytest
 
@@ -27,7 +28,7 @@ def test_competing_evidence_is_idempotent_per_delivery_and_does_not_change_choic
         ('source-a', 0.8, 10), ('source-b', 0.2, 12), ('source-a', 0.8, 13)]
     assert [r['provenance']['delivery_id'] for r in rows] == ['run-1', 'run-1', 'run-2']
     assert store.tracks.get_track_audio(tid)[1] is None
-    assert store.enrichment_reports.metadata_provenance(tid)['fields']['energy'] == {
+    assert metadata_provenance(store, tid)['fields']['energy'] == {
         'value': None, 'override': True, 'source': 'user'}
     assert store.conn.execute('SELECT energy FROM recordings').fetchone()[0] is None
 

@@ -1,5 +1,7 @@
 """Saved discovery metadata queues background preparation with the established models."""
 import logging
+from tests.enrichment_support import (complete_entries, complete_discovered, seed_audio,
+                                      seed_discovered_enrichment)
 from types import SimpleNamespace
 
 import numpy as np
@@ -54,7 +56,7 @@ def test_fresh_waits_for_metadata_then_generates_a_playlist_without_a_model(stor
 
     # Metadata makes an unscored fallback eligible even before a taste/artist model exists.
     for key in keys:
-        store.discovery.set_discovered_enrichment(key, None, "2000")
+        seed_discovered_enrichment(store, key, None, "2000")
     fresh_pool.prepare(store, 250)
     picked = fresh_pool.pick(store, 250)
     assert {t["key"] for t in picked} == set(keys)
@@ -91,10 +93,10 @@ def test_enrichment_updates_fresh_modes_and_generated_playlist(store, monkeypatc
             store.tracks.set_track_genre(tid, fields["genre"])
             store.tracks.set_track_year(tid, fields["year"])
             if fields["audio"]:
-                store.tracks.set_track_audio(tid, **fields["audio"])
+                seed_audio(store, tid, **fields["audio"])
         pid = store.playlists.upsert_playlist(iid, group, group, 10, group, 1)
         store.playlists.set_playlist_tracks(pid, tids)
-        store.enrichment_queue.mark_enriched(tids, 200)
+        complete_entries(store, tids, 200)
         groups.append(sorted(store.playlists.get_playlist_track_keys(pid)))
     store.settings.set_setting("rec_dim", "8")
     assert model_refresh.rebuild(store, 200) is not None
@@ -128,7 +130,7 @@ def test_enrichment_updates_fresh_modes_and_generated_playlist(store, monkeypatc
                                           b["genre"], b["year"], "genre:techno", 100,
                                           audio=b["audio"])
             target.append(key)
-    store.discovery.mark_discovered_enriched(reference, 200)
+    complete_discovered(store, reference, 200)
     embed.build_discovered_content_vectors(store)
     fresh_pool.prepare(store, 200)
     assert [t["key"] for t in fresh_pool.pick(store, 200, size=4)] == reference

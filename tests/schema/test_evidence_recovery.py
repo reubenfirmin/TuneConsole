@@ -15,6 +15,7 @@ import pytest
 import uvicorn
 
 from tests.browser_fixtures import _free_port
+from tests.live_server import LiveServer
 from yt_playlist.core import album_description_files, group_evidence, legacy_evidence
 from yt_playlist.core.store import Store
 from yt_playlist.rec import choice_context, choice_evidence, choice_retention, group_roots
@@ -189,12 +190,7 @@ def test_actual_library_recovers_while_cached_home_remains_usable(request, tmp_p
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=port,
                                          lifespan='off', log_level='warning'))
-    server_thread = threading.Thread(target=server.run, daemon=True)
-    server_thread.start()
-    deadline = time.monotonic() + 10
-    while not server.started:
-        assert time.monotonic() < deadline, 'Isolated HTTP server did not start'
-        time.sleep(.02)
+    owner = LiveServer(server, startup_timeout=10)
 
     def recover():
         for turn in range(100):
@@ -242,14 +238,15 @@ def test_actual_library_recovers_while_cached_home_remains_usable(request, tmp_p
             home = client.get('/')
             report['home_seconds_during_recovery'] = time.monotonic() - started
             assert home.status_code == 200
-            assert 'Updating library storage; browsing and playback remain available.' in home.text
+            assert 'Optimizing app storage; some recommendations are temporarily unavailable.' in home.text
             assert 'class="gen-card-body' in home.text
             assert client.get('/playlists').status_code == 200
             assert client.get('/storage-maintenance/status').json()['active']
             assert report['home_seconds_during_recovery'] < 3
             assert not future.done()
             page.goto(f'http://127.0.0.1:{port}/', wait_until='domcontentloaded')
-            expect(page.locator('#storage-maintenance')).to_have_text('Updating library storage; browsing and playback remain available.')
+            expect(page.locator('#storage-maintenance')).to_have_text(
+                'Optimizing app storage; some recommendations are temporarily unavailable.')
             expect(page.locator('#home-mode-cards .gen-card-body').first).to_be_visible()
             page.screenshot(path=str(tmp_path / 'recovery-pending.png'), full_page=True)
         finally:
@@ -280,9 +277,9 @@ def test_actual_library_recovers_while_cached_home_remains_usable(request, tmp_p
         executor.shutdown(wait=True, cancel_futures=True)
         if report['status'] != 'passed':
             report['status'] = 'failed'
-        server.should_exit = True
-        server_thread.join(5)
+        owner.close()
         worker.shutdown()
+        worker.join(30)
         client.close()
         with store._lock:
             store.conn.close()

@@ -105,12 +105,12 @@ def forbid_bundle(monkeypatch):
 def test_small_initial_lookahead_uses_point_ppr_ranks_and_keeps_exact_publication(radio, monkeypatch):
     store, generation, _ = radio
     forbid_bundle(monkeypatch)
-    pages, original = [], RecommendationPublicationsRepo.candidate_page
+    pages, original = [], RecommendationPublicationsRepo.candidate_pages
     def page(self, *args, **kwargs):
         value = original(self, *args, **kwargs)
-        pages.append((kwargs['limit'], len(value['tracks'])))
+        pages.extend((kwargs['limit'], len(page['tracks'])) for page in value)
         return value
-    monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_page', page)
+    monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_pages', page)
     candidates = RadioCandidates(store, 10, comparison=None)
     try:
         assert candidates.prepared.generation == generation
@@ -165,6 +165,47 @@ def test_intensity_reads_selected_rare_region_and_rechecks_live_source_metadata(
             ('fresh-259', 'corrected', 200)]
     finally:
         candidates.close()
+
+
+def test_planning_reuses_pages_but_rechecks_used_tracks_and_next_pass_catalog(radio, monkeypatch):
+    store, _, _ = radio
+    prepared = PreparedRadio(store, 10)
+    reads, original = [], RecommendationPublicationsRepo.candidate_page
+
+    def page(self, *args, **kwargs):
+        reads.append((args, kwargs))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_page', page)
+
+    def pick(used=()):
+        return prepared.intensity_pool('1', .8, genre_allowed=lambda label: label == 'jazz',
+            allowed=lambda track: track.get('available') != 0, excluded=(), used=used, limit=1)[1]
+
+    try:
+        with prepared.planning_read():
+            first = pick()[0]
+            assert first['key'] == 'fresh-258'
+            first['title'] = 'private branch mutation'
+            first['serving_context']['recommendation_pool_rank'] = -1
+            repeated = pick()[0]
+            assert repeated['title'] != first['title']
+            assert repeated['serving_context']['recommendation_pool_rank'] == 258
+            assert pick({first['key']})[0]['key'] == 'fresh-259'
+            assert len(reads) == 1, 'Successive song slots must reuse the hydrated rank page'
+        assert prepared.current_reader is None
+        with store.conn:
+            store.conn.execute("UPDATE youtube_items SET available=0 WHERE video_id='fresh-upload-258'")
+            store.conn.execute("UPDATE youtube_items SET title='new catalog title' WHERE video_id='fresh-upload-259'")
+        with pytest.raises(RuntimeError, match='cancel this plan'):
+            with prepared.planning_read():
+                current = pick()[0]
+                assert current['key'] == 'fresh-259' and current['title'] == 'new catalog title'
+                assert len(reads) == 2
+                raise RuntimeError('cancel this plan')
+        assert prepared.current_reader is None
+    finally:
+        prepared.close()
 
 
 def test_active_radio_outlives_head_switch_then_releases_generation_on_close(radio):

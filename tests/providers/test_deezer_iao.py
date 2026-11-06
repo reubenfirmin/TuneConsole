@@ -143,7 +143,6 @@ def test_host_retry_after_is_shared_with_candidates_and_new_instances(boundary, 
     assert first[0].provider == second[0].provider == 'deezer'
     assert first[0].retry_at == second[0].retry_at == deadline
     assert store.enrichment_state.integration_cooldown('deezer')['failures'] == 1
-    deezer.reset()
     assert deezer.available(store) and deezer.tripped()
     restarted = access.DeezerIAO(now_fn=lambda: b.clock[0],
         open_fn=lambda *a, **kw: pytest.fail('New instance ignored persisted deadline'),
@@ -409,9 +408,11 @@ def test_foreground_write_proceeds_during_vendor_io(boundary, store):
     assert len(b.calls) == 1
 
 
-def test_cooldown_survives_database_reopen_and_recovery_clears_only_observed_wait(boundary, tmp_path):
+def test_cooldown_survives_database_reopen_and_recovery_clears_only_observed_wait(
+        boundary, tmp_path, _pristine_current_schema):
     path = tmp_path / 'deezer.db'
     db = Store(path)
+    _pristine_current_schema.backup(db.conn)
     db.init_schema()
     try:
         db.enrichment_state.defer_integration('deezer', now=1000, retry_after=1100, error='old outage')

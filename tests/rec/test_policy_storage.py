@@ -23,7 +23,7 @@ def _publish(store, now=1, rankers=('first', 'second'), body=None):
 @pytest.fixture
 def legacy_policy_store(tmp_path):
     """The genuine SQL-policy predecessor for its retained cleanup contracts."""
-    from tests.core.test_policy_upgrade import _open_legacy
+    from tests.legacy_policy_support import open_legacy as _open_legacy
 
     store = _open_legacy(tmp_path / 'legacy-policies.db')
     try:
@@ -73,17 +73,18 @@ def check_preparation_retention(store, monkeypatch, *, generations, variants, ev
     monkeypatch.setattr(candidate_refresh, 'prepared_settings', lambda *args: {})
     seed_catalog_track(store, 'song', 'Song', 'Artist', video_id='song')
     def calculate(reader, now, policies):
-        # Publish every policy variant through the actual preparation owner.
-        # One representative pool establishes the latest configuration; this
-        # test's scale contract concerns unused policies, not pool cardinality.
+        # Calculate several variants, but publish only the last one. Unused
+        # calculated variants must not become retained policy identities.
         for n in range(variants):
             latest = policies.stamp([{'key': 'song'}], f'vibe:lane:family-{n}')
         return {'0': {'wheelhouse': latest}}, []
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', calculate)
     for tick in range(generations):
-        assert mode_surfaces.prepare_bundles(store, 10000 + 120 * tick) is not None
+        now = 10000 + 120 * tick
+        assert mode_surfaces.prepare_bundles(store, now) is not None
         if tick == 0:
-            assert store.conn.execute('SELECT count(*) FROM recommendation_policies').fetchone()[0] == variants + 1
+            assert store.conn.execute('SELECT count(*) FROM recommendation_policies').fetchone()[0] == 2
+            original_versions = {row[0] for row in store.conn.execute('SELECT version FROM recommendation_policies')}
         # Between preparation cycles the worker also retires the replaced pool.
         # Complete actual bounded maintenance before checking unused retention.
         for _ in range(3):
@@ -91,9 +92,21 @@ def check_preparation_retention(store, monkeypatch, *, generations, variants, ev
                 break
         else:
             pytest.fail('Replaced recommendation generations did not finish bounded cleanup')
+        # Retiring replaced pools releases their policy roots. Finish that
+        # separate maintenance owner too, as the real worker does.
+        assert measurement.maintain_storage(store, now)
     assert store.conn.execute('SELECT count(*) FROM rec_served_impressions').fetchone()[0] == 0
-    assert store.conn.execute('SELECT count(*) FROM recommendation_policies').fetchone()[0] <= maximum_generations * (variants + 1)
-    assert store.conn.execute('SELECT count(*) FROM recommendation_policy_bodies').fetchone()[0] <= maximum_generations
+    policies = store.conn.execute('SELECT version,created_at,base_version FROM recommendation_policies').fetchall()
+    # Unchanged tracks reuse the first immutable pool. Its original generation
+    # and pool policies remain meaningful roots beyond the three-tick grace
+    # window; later unused revalidation policies must still be collected.
+    expired = {row['version'] for row in policies if row['created_at'] < now - policy_storage.GRACE_SECONDS}
+    roots = {row[0] for row in store.conn.execute('SELECT policy_version FROM recommendation_generations '
+        'UNION SELECT policy_version FROM recommendation_pools')}
+    assert expired == original_versions
+    assert expired <= roots
+    assert len(policies) <= (maximum_generations + 1) * 2
+    assert store.conn.execute('SELECT count(*) FROM recommendation_policy_bodies').fetchone()[0] <= maximum_generations + 1
     stored = store.conn.execute('SELECT sum(byte_size) FROM recommendation_policies').fetchone()[0]
     stored += store.conn.execute('SELECT sum(byte_size) FROM recommendation_policy_bodies').fetchone()[0]
     assert stored < byte_bound
@@ -129,9 +142,8 @@ def test_unused_retention_protects_both_impression_paths_proposals_sessions_and_
     assert store.rec_ledger.policy_configuration('session') == {'policy': 'session'}
 
 
-def test_prepared_reference_change_defers_cleanup(tmp_path, monkeypatch):
-    store = Store(tmp_path / 'state.db')
-    store.init_schema()
+def test_prepared_reference_change_defers_cleanup(file_backed_store, monkeypatch):
+    store = file_backed_store
     store.rec_ledger.record_serving_policy('old-policy', {'exact': True}, 1)
     original = policy_storage.protected_references
     def raced(conn):
@@ -146,9 +158,8 @@ def test_prepared_reference_change_defers_cleanup(tmp_path, monkeypatch):
         store.conn.close()
 
 
-def test_queued_offer_restores_collected_pool_with_its_impression(tmp_path):
-    store = Store(tmp_path / 'state.db')
-    store.init_schema()
+def test_queued_offer_restores_collected_pool_with_its_impression(file_backed_store):
+    store = file_backed_store
     rows, base = _publish(store, rankers=('pool-ranker',))
     version = rows[0][0]
     offer = measurement.CapturedOffer(store, 'home', [{'key': 'song', 'pool_policy': version}], 2)
@@ -189,9 +200,8 @@ def test_failed_policy_publication_rolls_back_bodies_variants_and_links(store):
         assert store.conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] == 0
 
 
-def test_sqlite_full_rolls_back_new_policy_and_keeps_personal_data(tmp_path):
-    store = Store(tmp_path / 'state.db')
-    store.init_schema()
+def test_sqlite_full_rolls_back_new_policy_and_keeps_personal_data(file_backed_store):
+    store = file_backed_store
     store.settings.set_setting('personal', 'keep')
     # Policy bodies live in files now. Force a genuine SQLITE_FULL during the
     # associated SQL owner insert, independent of the body's compression ratio.
@@ -215,15 +225,14 @@ def test_sqlite_full_rolls_back_new_policy_and_keeps_personal_data(tmp_path):
         store.conn.close()
 
 
-def test_low_headroom_allows_existing_startup_and_core_writes_but_defers_preparation(tmp_path, monkeypatch):
-    path = tmp_path / 'state.db'
-    store = Store(path)
-    store.init_schema()
+def test_low_headroom_allows_existing_startup_and_core_writes_but_defers_preparation(file_backed_store, monkeypatch):
+    path = file_backed_store._db_path
+    store = file_backed_store
     store.conn.close()
     monkeypatch.setattr(db_space.shutil, 'disk_usage', lambda path: SimpleNamespace(free=10 * 1024 * 1024))
     store = Store(path)
-    store.init_schema()
     try:
+        store.init_schema()
         store.settings.set_setting('personal', 'saved')
         with pytest.raises(db_space.LowDiskSpace, match='10.0 MiB available'):
             _publish(store)

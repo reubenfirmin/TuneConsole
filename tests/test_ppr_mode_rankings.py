@@ -1,17 +1,5 @@
 import numpy as np
-import pytest
-from yt_playlist.core.store import Store
 from yt_playlist.rec import ppr, embedding_vectors as embed
-
-
-@pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    try:
-        yield s
-    finally:
-        s.conn.close()
 
 
 def test_ppr_rank_tol_early_stops_at_fixed_point():

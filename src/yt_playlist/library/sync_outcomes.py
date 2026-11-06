@@ -1,7 +1,5 @@
 """Sync results and durable freshness, shared by manual and automatic jobs."""
-import json
 from copy import deepcopy
-from yt_playlist.core import sync_state
 
 MAX_AGE_S = 86400
 RETRY_BASE_S = 300
@@ -12,7 +10,7 @@ class SyncSchedule:
     """Use persisted resource outcomes without treating a retry as a full refresh."""
 
     def __init__(self, store, now, *, automatic=False, retry_now=False, max_age_s=MAX_AGE_S):
-        self.state = sync_state.state(store)
+        self.state = store.sync.state()
         self.now, self.automatic, self.retry_now = now, automatic, retry_now
         self.max_age_s = max_age_s
 
@@ -55,27 +53,17 @@ def combined_status(results):
 
 
 def begin_attempt(store, now):
-    if sync_state.available(store.conn):
-        with store._lock,store.conn:
-            return sync_state.begin(store.conn,now)
-    store.settings.set_setting("last_sync_attempt_at", str(now))
+    return store.sync.begin_attempt(now)
 
 
 def finish_attempt(store, result, now, *, expected_revision=None):
     """Failed attempts must not refresh successful timestamps, including individual resources."""
-    if sync_state.available(store.conn):
-        with store._lock,store.conn:
-            store.conn.execute('UPDATE sync_attempts SET revision=revision WHERE 0')
-            row = store.conn.execute('SELECT revision FROM sync_attempts WHERE id=1').fetchone()
-            if expected_revision is not None and (row is None or row[0]!=expected_revision):
-                raise ValueError('Sync attempt was superseded; retained progress was not overwritten')
-            return _finish_attempt(store,result,now)
-    return _finish_attempt(store,result,now)
+    return store.sync.finish_attempt(now, expected_revision=expected_revision,
+                                    calculate=lambda previous: stamp_result(result, previous, now))
 
 
-def _finish_attempt(store,result,now):
-    previous = sync_state.read(store.conn)
-
+def stamp_result(result, previous, now):
+    """Apply freshness and retry policy to supplied state without database access."""
     def stamp(current, old):
         for name, item in current.items():
             previous_item = old.get(name, {})
@@ -104,13 +92,6 @@ def _finish_attempt(store,result,now):
         stamp({account_id: account}, {account_id: old})
     stamp(result.get("resources", {}), previous.get("resources", {}))
     result["last_attempt_at"] = now
-    if sync_state.available(store.conn):
-        sync_state.write(store.conn,result,now,last_success=now if result['status']=='complete' else None)
-    else:
-        store.settings.set_setting("library_sync_state", json.dumps(result))
-        store.settings.set_setting("last_sync_outcome", result["status"])
-        if result["status"] == "complete":
-            store.settings.set_setting("last_sync_at", str(now))
     return result
 
 

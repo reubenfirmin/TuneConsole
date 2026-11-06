@@ -4,26 +4,21 @@ from yt_playlist.core.store import Store
 from tests.historical_support import upgrade_fixture
 
 
-def _store(tmp_path):
-    s = Store(str(tmp_path / "t.db")); s.init_schema()
-    return s
-
-
-def test_discovered_genre_round_trip(tmp_path):
-    s = _store(tmp_path)
+def test_discovered_genre_round_trip(file_backed_store):
+    s = file_backed_store
     s.discovery.upsert_discovered_artist("Aphex Twin", 0.9, ["bridge"], ["fits"], "th", 100.0, genre="IDM")
     s.discovery.upsert_discovered_album("bid1", "Aphex Twin", "SAW II", "1994", "th", 100.0, genre="IDM")
     assert s.discovery.get_discovered_artists()[0]["genre"] == "IDM"
     assert s.discovery.get_discovered_albums()[0]["genre"] == "IDM"
 
 
-def test_discovered_genre_defaults_none(tmp_path):
-    s = _store(tmp_path)
+def test_discovered_genre_defaults_none(file_backed_store):
+    s = file_backed_store
     s.discovery.upsert_discovered_artist("Boards of Canada", 0.5, [], [], None, 1.0)
     assert s.discovery.get_discovered_artists()[0]["genre"] is None
 
 
-def test_genre_migration_on_preexisting_db(tmp_path):
+def test_genre_migration_on_preexisting_db(tmp_path, request):
     """A DB whose discovered_* tables predate the genre column gets it added, losslessly."""
     db = str(tmp_path / "old.db")
     con = sqlite3.connect(db)
@@ -35,14 +30,15 @@ def test_genre_migration_on_preexisting_db(tmp_path):
         "INSERT INTO discovered_artists(artist, score) VALUES ('Old Artist', 0.3);")
     con.commit(); con.close()
     s = Store(db)
+    request.addfinalizer(s.conn.close)
     upgrade_fixture(s)
     rows = s.discovery.get_discovered_artists()
     assert any(r["artist"] == "Old Artist" for r in rows)        # existing data preserved
     assert all("genre" in r for r in rows)                       # column now present
 
 
-def test_artist_genres_dominant_per_artist(tmp_path):
-    s = _store(tmp_path)
+def test_artist_genres_dominant_per_artist(file_backed_store):
+    s = file_backed_store
     i1 = s.tracks.upsert_track("v1", "T1", "Aphex Twin", None, None)
     i2 = s.tracks.upsert_track("v2", "T2", "Aphex Twin", None, None)
     i3 = s.tracks.upsert_track("v3", "T3", "Aphex Twin", None, None)

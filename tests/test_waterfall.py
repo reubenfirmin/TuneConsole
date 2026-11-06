@@ -26,10 +26,6 @@ class FakeProv:
     def tripped(self):
         return False
 
-    def reset(self):
-        pass
-
-
 def _cfg(*names_enabled):
     return [{"name": n, "label": n.title(), "enabled": e} for n, e in names_enabled]
 
@@ -146,8 +142,6 @@ def test_tracks_skipped_after_provider_breaker_are_not_reported_as_attempted(sto
             return result
         def tripped(self):
             return getattr(self, "dead", False)
-        def reset(self):
-            self.dead = False
 
     provider = TripsAfterFirst("musicbrainz")
     attempted = run_waterfall(

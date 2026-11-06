@@ -43,7 +43,6 @@ def test_only_two_ahead_is_sampled_and_static_replacements_stay_hidden(page, liv
     assert checked == ['visual00002', 'visual00003'], store.rec_proposals.get_proposals(tv_visual.SURFACE)
     assert tv_visual.static_ids(store) == {'visual00002'}
     assert all(event['video_id'] != 'visual00002' for event in store.history.play_events_since(0))
-    page.screenshot(path='/tmp/tuneconsole-439-hidden-visual-check.png')
     page.evaluate('window.tvPlayer.options.events.onStateChange({data:0,target:window.tvPlayer})')
     page.wait_for_function(f'{MODEL}.current.video_id === "visual00001" && {MODEL}.playing')
     expect(page.locator('.tv-filmstrip button')).to_have_count(3)

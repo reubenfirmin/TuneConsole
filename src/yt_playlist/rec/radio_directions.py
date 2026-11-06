@@ -1,5 +1,7 @@
 """Four stable, session-scoped continuations. No playlist or database writes."""
 from collections import Counter
+from contextlib import nullcontext
+from copy import deepcopy
 from uuid import uuid4
 
 from yt_playlist.util import genre_map
@@ -33,12 +35,16 @@ class RadioDirections:
         self.decay = {}
         self.transition = 0
 
+    def snapshot(self):
+        """Detach mutable menu state without copying the shared candidate model."""
+        return deepcopy(self, {id(self.candidates): self.candidates})
+
     def _allowed(self, track):
         return track["video_id"] not in self.blocked
 
     def _genres(self, history, *, current=None):
         theme = getattr(self.candidates, 'tuning', {}).get('theme', .5)
-        store = getattr(self.candidates,'store',None)
+        store = getattr(self.candidates, 'read_store', getattr(self.candidates, 'store', None))
         return GenrePolicy(theme, history, current=current, store=store)
 
     def continue_sequence(self, history, prefix, anchor, excluded):
@@ -59,7 +65,7 @@ class RadioDirections:
         return proposal
 
     def _label(self, tracks, anchor):
-        store = getattr(self.candidates,'store',None)
+        store = getattr(self.candidates, 'read_store', getattr(self.candidates, 'store', None))
         axes = store.genres.feature_axes([t.get('genre') for t in tracks]) if store else None
         families = Counter(axes.get(t.get('genre'), (None, None))[0] if axes is not None
                            else genre_map.family(t.get('genre')) for t in tracks)
@@ -73,6 +79,11 @@ class RadioDirections:
     @work_span("radio: plan local directions")
     def update(self, history, scheduled, transition, *, force=False):
         """Advance the active plan; age alternatives on song changes, never on polling."""
+        prepared = getattr(self.candidates, 'prepared', None)
+        with prepared.planning_read() if prepared is not None else nullcontext():
+            return self._update(history, scheduled, transition, force=force)
+
+    def _update(self, history, scheduled, transition, *, force=False):
         context = (tuple(t["video_id"] for t in history[-8:]),
                    tuple(t["video_id"] for t in scheduled), transition, self.active,
                    frozenset(self.blocked), frozenset(self.retired), genre(history[-1]) if history else "")

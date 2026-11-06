@@ -183,6 +183,7 @@ class Reads:
         self.dependencies = set()
         self._record_keys = {}
         self._captures = []
+        self._authorized = set()
 
     def include(self, dependencies):
         self.dependencies.update(dependencies)
@@ -194,15 +195,18 @@ class Reads:
         """Capture complete dependencies, including reads already seen by an outer calculation."""
         dependencies = set()
         self._captures.append(dependencies)
+        self._authorized.clear()
         try:
             yield dependencies
         finally:
             self._captures.pop()
+            self._authorized.clear()
 
     @contextmanager
     def records(self, table, keys, *, prefix="key:"):
         previous = self._record_keys.get(table)
         self._record_keys[table] = tuple(prefix + key for key in keys)
+        self._authorized.clear()
         try:
             yield
         finally:
@@ -210,6 +214,15 @@ class Reads:
                 self._record_keys.pop(table)
             else:
                 self._record_keys[table] = previous
+            self._authorized.clear()
+
+    def _include_authorized(self, token, dependencies):
+        # SQLite reports every column read, often many times while expanding
+        # catalog views. One inclusion per scope is sufficient. Scope changes
+        # clear this set so nested captures and exact-key reads remain complete.
+        if token not in self._authorized:
+            self.include(dependencies())
+            self._authorized.add(token)
 
     def authorize(self, operation, table, _column, database, _trigger):
         if database == "main":
@@ -218,17 +231,17 @@ class Reads:
             if operation == sqlite3.SQLITE_READ:
                 keys = self._record_keys.get(table)
                 if keys is not None:
-                    self.include({(table, key) for key in keys})
+                    self._include_authorized((table, 'keys'), lambda: {(table, key) for key in keys})
                     if _column in _KEY_COLUMN_EXCLUSIONS.get(table, ()):
                         # A caller consuming bookkeeping needs its full guard;
                         # keyed membership counters deliberately omit it.
-                        self.include({(table, "")})
+                        self._include_authorized((table, ''), lambda: {(table, "")})
                 elif table == 'metadata_runtime_state' and _column in ('id', 'active'):
                     # Format detection reads this owner directly. File-GC cursor
                     # changes must not invalidate model calculations or rankings.
-                    self.include({(table, 'group:format')})
+                    self._include_authorized((table, 'group:format'), lambda: {(table, 'group:format')})
                 else:
-                    self.include({(table, "")})
+                    self._include_authorized((table, ''), lambda: {(table, "")})
         return sqlite3.SQLITE_OK
 
 

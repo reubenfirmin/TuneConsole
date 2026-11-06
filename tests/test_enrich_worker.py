@@ -1,5 +1,7 @@
 """EnrichWorker drain logic, exercised synchronously via drain_once with a fake waterfall."""
 import logging
+import sqlite3
+from tests.enrichment_support import complete_entries, seed_enrichment
 from functools import partial
 from types import SimpleNamespace
 
@@ -24,6 +26,91 @@ def make_worker(store, now=1000.0, fill=None):
     w = EnrichWorker(ctx, waterfall_fn=fake_wf)
     w.calls = calls
     return w
+
+
+def test_ticker_yields_to_foreground_and_stops_without_another_batch(store, monkeypatch):
+    from yt_playlist.core.activity import check_stopping
+    worker = make_worker(store)
+    checkpoints = []
+    monkeypatch.setattr(store.priority, 'checkpoint', lambda stopped: checkpoints.append(stopped()))
+    batches = []
+    def drain():
+        check_stopping()
+        batches.append(True)
+        worker.shutdown()
+        return 0
+    monkeypatch.setattr(worker, 'drain_once', drain)
+    worker._loop()
+    assert batches == [True]
+    assert False in checkpoints and True in checkpoints
+
+
+@pytest.mark.parametrize('stop', ['admission', 'worker'])
+def test_shutdown_sql_interrupt_exits_without_batch_failure(store, monkeypatch, caplog, stop):
+    worker = make_worker(store)
+    batches, interruptions = [], []
+
+    def stop_during_query():
+        assert worker.work.active == ('enrichment',)
+        assert not worker.work.wait(0)
+        interruptions.append(stop)
+        if stop == 'admission':
+            worker.work.close_admission()
+            assert not worker._shutdown
+        else:
+            worker.shutdown()
+        return 0
+
+    store.conn.create_function('stop_enrichment', 0, stop_during_query)
+
+    def drain():
+        batches.append(True)
+        # The Store's real progress handler must interrupt this running query.
+        store.conn.execute('WITH RECURSIVE n(x) AS (VALUES(stop_enrichment()) UNION ALL '
+            'SELECT x+1 FROM n WHERE x<100000000) SELECT SUM(x) FROM n').fetchone()
+        pytest.fail('Shutdown did not interrupt enrichment SQL')
+
+    monkeypatch.setattr(worker, 'drain_once', drain)
+    # A broken classification must terminate instead of idling indefinitely.
+    idle = Mock(side_effect=lambda _timeout: worker.shutdown())
+    monkeypatch.setattr(worker._wake, 'wait', idle)
+    with caplog.at_level(logging.WARNING, logger='test'):
+        worker._loop()
+    assert batches == [True] and interruptions == [stop]
+    idle.assert_not_called()
+    assert not [record for record in caplog.records if record.name == 'test']
+    assert worker.work.wait(0) and worker.work.active == ()
+    assert not store.conn.in_transaction
+    store.settings.set_setting('after_enrichment_shutdown', 'saved')
+    assert store.settings.get_setting('after_enrichment_shutdown') == 'saved'
+
+
+@pytest.mark.parametrize('failure', ['interrupted', 'missing-table'])
+def test_unexpected_sql_failure_still_logs_batch_traceback(store, monkeypatch, caplog, failure):
+    worker = make_worker(store)
+    batches = []
+    store.conn.create_function('interrupt_enrichment', 0, lambda: (store.conn.interrupt(), 0)[1])
+
+    def drain():
+        batches.append(True)
+        if failure == 'interrupted':
+            store.conn.execute('SELECT interrupt_enrichment()').fetchone()
+        else:
+            store.conn.execute('SELECT * FROM missing_enrichment_table').fetchall()
+        pytest.fail('Controlled SQL failure was not raised')
+
+    monkeypatch.setattr(worker, 'drain_once', drain)
+    monkeypatch.setattr(worker._wake, 'wait', lambda _timeout: worker.shutdown())
+    with caplog.at_level(logging.WARNING, logger='test'):
+        worker._loop()
+    failures = [record for record in caplog.records if record.message == 'enrich worker batch failed']
+    assert batches == [True] and len(failures) == 1
+    assert isinstance(failures[0].exc_info[1], sqlite3.OperationalError)
+    assert failures[0].exc_info[2] is not None
+    assert ('interrupted' if failure == 'interrupted' else 'no such table') in str(failures[0].exc_info[1])
+    assert worker.work.wait(0) and worker.work.active == ()
+    store.settings.set_setting('after_enrichment_failure', 'saved')
+    assert store.settings.get_setting('after_enrichment_failure') == 'saved'
 
 
 def _unprocessed(store, vid="v1", title="S", artist="A"):
@@ -96,7 +183,6 @@ def test_radio_request_interrupts_bulk_at_the_next_track_boundary(store):
     class Provider:
         name = "musicbrainz"
         def available(self, _store): return True
-        def reset(self): pass
         def tripped(self): return False
         def probe(self, track, _store):
             probed.append(track["id"])
@@ -123,7 +209,7 @@ def test_radio_priority_respects_pause_and_recent_attempts(store):
     assert w.drain_once() == 0
     assert not w.calls
     store.settings.set_setting("enrich_worker_enabled", "1")
-    store.enrichment_queue.mark_enriched([tid], now=999.)
+    complete_entries(store, [tid], now=999.)
     assert store.enrichment_queue.priority_enrich_batch([key], 24, stale_before=900, now=1000) == []
     assert w.drain_once() == 0
     assert not w.calls
@@ -134,7 +220,7 @@ def test_visible_radio_retries_incomplete_tracks_before_the_bulk_resweep_window(
     shown = _unprocessed(store, "shown", "Shown")
     key = store.tracks.catalog_subject(shown)["identity_key"]
     now = 400_000.
-    store.enrichment_queue.mark_enriched([shown], now=now - 3 * 86400)
+    complete_entries(store, [shown], now=now - 3 * 86400)
     worker = make_worker(store, now=now)
     worker.prioritize([key])
     assert worker.drain_once(limit=1) == 1
@@ -153,7 +239,7 @@ def test_resweep_reprocesses_stale_incomplete(store):
     t = store.tracks.upsert_track("v1", "S", "A", None, 200, created_at=1.0)
     store.settings.set_setting("enrich_caught_up_at", "100")
     store.settings.set_setting("enrich_resweep_days", "0")          # everything older than 'now' is stale
-    store.enrichment_queue.mark_enriched([t], now=1.0)                      # processed, still missing all fields
+    complete_entries(store, [t], now=1.0)                      # processed, still missing all fields
     w = make_worker(store, now=1000.0)
     assert store.enrichment_queue.next_enrich_batch(10) == []               # not in primary (already processed)
     assert w.drain_once() == 1                             # picked up by re-sweep
@@ -165,7 +251,7 @@ def test_resweep_reprocesses_stale_incomplete(store):
 def test_enrichment_fills_via_waterfall_are_persisted(store):
     t = _unprocessed(store)
     # a fake waterfall that actually fills genre, like the real one would
-    w = make_worker(store, now=1000.0, fill=lambda s, tr: s.tracks.set_track_enrichment(tr["id"], "Rock", "1999"))
+    w = make_worker(store, now=1000.0, fill=lambda s, tr: seed_enrichment(s, tr["id"], "Rock", "1999"))
     w.drain_once()
     assert store.enrichment_reports.coverage_stats()["genre"] == 1
 
@@ -204,7 +290,6 @@ def test_real_waterfall_commits_each_track_before_next_lookup(store, interrupt):
     class Provider:
         name = "musicbrainz"
         def available(self, _store): return True
-        def reset(self): pass
         def tripped(self): return False
         def probe(self, track, _store):
             assert worker.busy
@@ -238,7 +323,7 @@ def test_breaker_skipped_tracks_stay_queued_with_live_warning(store):
     class Provider:
         name = "musicbrainz"
         def available(self, _store): return True
-        def reset(self): self.dead = False
+        dead = False
         def tripped(self): return self.dead
         def probe(self, track, _store):
             self.dead = True

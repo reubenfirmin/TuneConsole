@@ -1,39 +1,18 @@
-# tests/test_rec_lean.py
-from yt_playlist.core.store import Store
+"""Repository lean lifecycle: defaults, canonical keys, graduation and clearing."""
 
 
-def _store():
-    s = Store(":memory:")
-    s.init_schema()
-    return s
-
-
-def test_set_and_get_lean():
-    s = _store()
+def test_lean_setting_graduation_and_clear_share_one_lifecycle(store):
+    s = store
     s.rec_model.set_lean("genre:Techno", 1.4, 1000.0)
     assert s.rec_model.get_lean("genre:Techno") == 1.4
     assert s.rec_model.get_lean("genre:House") == 1.0          # default neutral
     assert s.rec_model.get_leans() == {"genre:techno": 1.4}
-
-
-def test_lean_rows_and_graduated_day():
-    s = _store()
-    s.rec_model.set_lean("genre:Techno", 1.4, 1000.0)
     s.rec_model.set_lean_graduated_day("genre:Techno", "2026-06-25")
     row = {r["axis"]: r for r in s.rec_model.lean_rows()}["genre:techno"]
     assert row["value"] == 1.4
     assert row["updated_at"] == 1000.0
     assert row["last_graduated_day"] == "2026-06-25"
-
-
-def test_clear_lean():
-    s = _store()
-    s.rec_model.set_lean("genre:Techno", 1.4, 1000.0)
     s.rec_model.clear_lean("genre:Techno")
     assert s.rec_model.get_leans() == {}
-
-
-def test_lean_reachable_via_flat_store_proxy():
-    s = _store()
-    s.rec_model.set_lean("genre:Techno", 1.2, 1.0)   # flat proxy path (what routes use)
-    assert s.rec_model.get_lean("genre:Techno") == 1.2
+    assert s.rec_model.get_lean('genre:Techno') == 1.0
+    assert s.rec_model.lean_rows() == []

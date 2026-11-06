@@ -12,9 +12,9 @@ def prepared_mixes_ready(store, now=None) -> bool:
     now = time.time() if now is None else now
     service = home_cards.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__))
     try:
-        payload = home_prepared.peek(store, now)
+        payload = home_prepared.peek(store, now, readiness_only=True)
         return bool(payload and len(home_prepared.cards(
-            store, payload, now, service, record=False).protos) >= MIN_MIXES)
+            store, payload, now, service, record=False, readiness_only=True).protos) >= MIN_MIXES)
     except (ValueError, TypeError, KeyError):
         pass
     return False
@@ -41,14 +41,5 @@ def starter_album(store):
             return {**album, 'saved': True, 'upload': is_upload_album(album['browse'])}
         # Count distinct owned recordings, not playlist occurrences or partial
         # imports. Catalog releases need not have been saved to be worth trying.
-        rows = reader.conn.execute(
-            "WITH familiar AS (SELECT t.artist,COUNT(DISTINCT t.identity_key) songs,"
-            "SUM(COALESCE(d.plays,0)) plays FROM playable_library_tracks t "
-            "LEFT JOIN listening_day_counts d ON d.identity_key=t.identity_key GROUP BY t.artist) "
-            "SELECT p.provider_id browse,a.title,a.artist,a.year,a.type,a.thumbnail,f.songs,f.plays "
-            "FROM albums a JOIN album_primary_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
-            "JOIN familiar f ON f.artist=a.artist COLLATE NOCASE "
-            "ORDER BY (f.songs>=2 OR f.plays>=2) DESC,f.plays DESC,f.songs DESC,a.title COLLATE NOCASE"
-        ).fetchall()
-        album = next((dict(row) for row in rows if usable(dict(row))), None)
+        album = next((row for row in reader.readiness.familiar_albums() if usable(row)), None)
     return {**album, 'saved': False, 'upload': is_upload_album(album['browse'])} if album else None

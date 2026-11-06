@@ -14,28 +14,67 @@ function automaticMixRefresh(detail) {
     && path.pathname === '/home/cards' && path.searchParams.has('prepare_attempt');
 }
 
+function backgroundHomeRefresh(detail) {
+  return detail.target?.id === 'home'
+    && detail.requestConfig?.headers?.['X-Home-Refresh'] === 'sync';
+}
+
+const homeBoardUpdates = new Set();
+const homeRefreshRevisions = new WeakMap();
+let homeBoardRevision = 0;
+
 document.addEventListener('htmx:beforeRequest', event => {
-  const board = event.detail.elt;
-  if (automaticMixRefresh(event.detail) && genHomeBusy(board)) event.preventDefault();
+  const detail = event.detail;
+  if (automaticMixRefresh(detail) || backgroundHomeRefresh(detail)) {
+    if (homeBoardUpdates.size || genHomeBusy(detail.target)) event.preventDefault();
+  }
+});
+
+document.addEventListener('htmx:beforeSend', event => {
+  const detail = event.detail;
+  if (automaticMixRefresh(detail) || backgroundHomeRefresh(detail)) {
+    homeRefreshRevisions.set(detail.xhr, homeBoardRevision);
+  } else if (detail.requestConfig?.verb === 'post'
+      && ['home-mode-cards', 'fingerprint'].includes(detail.target?.id)) {
+    homeBoardRevision++;
+    homeBoardUpdates.add(detail.xhr);
+  }
+});
+
+document.addEventListener('htmx:afterRequest', event => {
+  homeBoardUpdates.delete(event.detail.xhr);
 });
 
 document.addEventListener('htmx:beforeSwap', event => {
   const target = event.detail.target;
-  const backgroundHome = target?.id === 'home'
-    && event.detail.requestConfig?.headers?.['X-Home-Refresh'] === 'sync';
-  if ((target?.id === 'home-mode-cards' && automaticMixRefresh(event.detail) || backgroundHome)
-      && genHomeBusy(target)) {
+  if ((target?.id === 'home-mode-cards' && automaticMixRefresh(event.detail)
+        || backgroundHomeRefresh(event.detail))
+      && (homeBoardUpdates.size || homeRefreshRevisions.get(event.detail.xhr) !== homeBoardRevision
+          || genHomeBusy(target))) {
     // A request may already be in flight when a mix opens. Keep its shell and
-    // save target mounted; polling can resume after the user returns to the board.
+    // save target mounted. An older refresh must also yield to a new tuning
+    // request, even if its response arrives after that request has finished.
     event.detail.shouldSwap = false;
   }
 });
 
 function genReveal(id) {
   requestAnimationFrame(() => {
-    document.querySelectorAll('#' + CSS.escape(id) + ' .gen-focus img').forEach((img) => { img.loading = 'eager'; });
-    const play = document.querySelector('#' + CSS.escape(id) + ' .gen-play');
-    if (play) requestAnimationFrame(() => play.focus({ preventScroll: true }));
+    const card = document.getElementById(id);
+    if (!card) return;
+    card.querySelectorAll('.gen-focus img').forEach((img) => { img.loading = 'eager'; });
+    requestAnimationFrame(() => {
+      const back = card.querySelector('.gen-back')?.getBoundingClientRect();
+      if (back?.width) {
+        // The Back control sits above the focused card. Frame that control,
+        // including space for horizontal navigation on shorter desktops.
+        const navigation = document.querySelector('.topbar')?.getBoundingClientRect();
+        const top = navigation && navigation.left < back.right && navigation.right > back.left
+          ? Math.max(0, navigation.bottom) : 0;
+        window.scrollTo({top: Math.max(0, scrollY + back.top - top - 12), behavior: 'smooth'});
+      }
+      card.querySelector('.gen-play')?.focus({ preventScroll: true });
+    });
   });
 }
 

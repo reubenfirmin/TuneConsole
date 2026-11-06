@@ -5,7 +5,7 @@ so deletion hides expired discoveries on every surface without rewriting ranking
 The retained legacy codec is checked separately, without reviving its old writer.
 """
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from dataclasses import replace
 import json
@@ -19,25 +19,40 @@ import pytest
 
 from yt_playlist.core import fao, json_cache
 from yt_playlist.core.activity import Activity, WorkBudgetExceeded, WorkClosing
-from yt_playlist.core.store import Store
 from yt_playlist.rec import bundle_storage
 from yt_playlist.repos import discovery_cache, proposal_cache
 from yt_playlist.repos.rec_proposals import encode_proposals
 from tests.conftest import seed_catalog_track
+from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles
 
 DAY = 86400
 
 
+@pytest.fixture(scope='module')
+def population_templates(_pristine_current_schema):
+    templates = {}
+    with ExitStack() as resources:
+        def template(count):
+            if count not in templates:
+                templates[count] = resources.enter_context(prepared_template(
+                    _pristine_current_schema, lambda source: populate(source, count)))
+            return templates[count]
+        yield template
+
+
 @pytest.fixture
-def database(tmp_path):
-    store = Store(tmp_path / 'cleanup.db')
-    store.init_schema()
-    yield store
-    store.conn.close()
+def database(file_backed_store, population_templates):
+    # Actual publication runs once for each unchanged size; every cleanup,
+    # staged successor, race and failure still uses independent WAL/files.
+    file_backed_store._fixture_cleanup_population = population_templates
+    return file_backed_store
 
 
 def populate(store, count=200):
+    templates = getattr(store, '_fixture_cleanup_population', None)
+    if templates is not None:
+        return templates(count).restore(store)
     key = store.discovery.upsert_discovered_track(
         'gone', 'gone-video', 'Gone', 'Artist', None, None, 'House', '2000', 'old-album', 0)
     items = [{'key': key if n == 0 else f'keep-{n}', 'title': f'Track {n}',
@@ -91,10 +106,8 @@ def replace_fresh(store, items):
         assert snapshot.publish(lambda: store.recommendations.publish(build, 2))
 
 
-def cleanup(store, operation):
-    if operation == 'gc':
-        return store.discovery.gc_discovery_pool(100 * DAY, 30, set())
-    return store.discovery.remove_discovery_source('gone', 'old-album')
+def cleanup(store):
+    return store.discovery.gc_discovery_pool(100 * DAY, 30, set())
 
 
 def published_state(store):
@@ -136,12 +149,11 @@ def visible(store):
     return {slot: served(store, *slot) for slot in SLOTS}
 
 
-@pytest.mark.parametrize('operation,staged,count', [
-    ('gc', False, 8), ('gc', True, 8), ('source', False, 8), ('source', True, 8),
-    ('gc', False, 8000), ('source', True, 8000),
+@pytest.mark.parametrize('staged,count', [
+    (False, 8), (True, 8), (False, 8000),
 ])
 def test_large_cleanup_prepares_after_reader_close_and_allows_foreground_writes(
-        database, monkeypatch, operation, staged, count):
+        database, monkeypatch, staged, count):
     key, bundles = populate(database, count=count)
     successor = stage_successor(database) if staged else None
     if count == 8000:
@@ -182,7 +194,7 @@ def test_large_cleanup_prepares_after_reader_close_and_allows_foreground_writes(
     monkeypatch.setattr(database, 'read_snapshot', tracked_snapshot)
     monkeypatch.setattr(discovery_cache, 'prepare', prepare)
     with ThreadPoolExecutor(2) as pool:
-        work = pool.submit(cleanup, database, operation)
+        work = pool.submit(cleanup, database)
         try:
             assert entered.wait(5)
 
@@ -194,7 +206,7 @@ def test_large_cleanup_prepares_after_reader_close_and_allows_foreground_writes(
         finally:
             release.set()
         result = work.result(15)
-    assert result == ({'albums': 0, 'artists': 0, 'tracks': 1} if operation == 'gc' else True)
+    assert result == {'albums': 0, 'artists': 0, 'tracks': 1}
     assert database.discovery.get_discovered_tracks() == []
     assert visible(database) == {slot: [row for row in rows if row['key'] != key]
                                  for slot, rows in before_visible.items()}
@@ -215,11 +227,10 @@ def test_large_cleanup_prepares_after_reader_close_and_allows_foreground_writes(
     assert not database.conn.in_transaction
 
 
-@pytest.mark.parametrize('operation', ['gc', 'source'])
 @pytest.mark.parametrize('change', ['cache', 'library', 'rediscovered'])
 @pytest.mark.parametrize('staged', [False, True])
 def test_stale_preparation_cannot_delete_membership_or_overwrite_newer_cache(
-        database, monkeypatch, operation, change, staged):
+        database, monkeypatch, change, staged):
     key, bundles = populate(database)
     if staged:
         stage_successor(database)
@@ -242,7 +253,7 @@ def test_stale_preparation_cannot_delete_membership_or_overwrite_newer_cache(
 
     monkeypatch.setattr(discovery_cache, 'prepare', prepare)
     with pytest.raises(WorkBudgetExceeded, match='inputs changed'):
-        cleanup(database, operation)
+        cleanup(database)
     assert mutations == [change]
     assert set(database.discovery.discovered_tracks_by_keys([key])) == {key}
     assert 'old-album' in {row['source_token'] for row in database.discovery.discovery_sources_for_track(key)}
@@ -256,20 +267,19 @@ def test_stale_preparation_cannot_delete_membership_or_overwrite_newer_cache(
     assert not database.conn.in_transaction
 
     monkeypatch.setattr(discovery_cache, 'prepare', original)
-    result = cleanup(database, operation)
+    result = cleanup(database)
     if change == 'rediscovered':
-        assert result == ({'albums': 0, 'artists': 0, 'tracks': 0} if operation == 'gc' else False)
+        assert result == {'albums': 0, 'artists': 0, 'tracks': 0}
         assert set(database.discovery.discovered_tracks_by_keys([key])) == {key}
         assert published_state(database) == before
     else:
-        assert result == ({'albums': 0, 'artists': 0, 'tracks': 1} if operation == 'gc' else True)
+        assert result == {'albums': 0, 'artists': 0, 'tracks': 1}
         assert database.discovery.get_discovered_tracks() == []
         if change == 'cache':
             assert [row['key'] for row in served(database, 'fresh', 'all', 'fresh')] == ['new-cache']
 
 
-@pytest.mark.parametrize('operation', ['gc', 'source'])
-def test_concurrent_successor_staging_keeps_cleanup_inputs_valid(database, monkeypatch, operation):
+def test_concurrent_successor_staging_keeps_cleanup_inputs_valid(database, monkeypatch):
     key, _bundles = populate(database)
     before = published_state(database)
     original = discovery_cache.prepare
@@ -281,8 +291,8 @@ def test_concurrent_successor_staging_keeps_cleanup_inputs_valid(database, monke
         return prepared
 
     monkeypatch.setattr(discovery_cache, 'prepare', prepare)
-    result = cleanup(database, operation)
-    assert result == ({'albums': 0, 'artists': 0, 'tracks': 1} if operation == 'gc' else True)
+    result = cleanup(database)
+    assert result == {'albums': 0, 'artists': 0, 'tracks': 1}
     assert database.discovery.discovered_tracks_by_keys([key]) == {}
     assert published_state(database) == before
     assert len(successors) == 1
@@ -292,9 +302,8 @@ def test_concurrent_successor_staging_keeps_cleanup_inputs_valid(database, monke
     assert not database.conn.in_transaction
 
 
-@pytest.mark.parametrize('operation', ['gc', 'source'])
 @pytest.mark.parametrize('failure', ['publish', 'cancel', 'invalid'])
-def test_cleanup_failure_preserves_sources_membership_and_rankings(database, monkeypatch, operation, failure):
+def test_cleanup_failure_preserves_sources_membership_and_rankings(database, monkeypatch, failure):
     key, _bundles = populate(database)
     before = published_state(database)
     sources = database.discovery.discovery_sources_for_track(key)
@@ -320,23 +329,11 @@ def test_cleanup_failure_preserves_sources_membership_and_rankings(database, mon
         monkeypatch.setattr(proposal_cache, 'logical_rows', read)
         error = ValueError
     with pytest.raises(error, match='injected'):
-        cleanup(database, operation)
+        cleanup(database)
     assert published_state(database) == before
     assert database.discovery.discovery_sources_for_track(key) == sources
     assert set(database.discovery.discovered_tracks_by_keys([key])) == {key}
     assert not database.conn.in_transaction
-
-
-def test_direct_cache_prune_rejects_a_serving_transaction_before_decoding(database, monkeypatch):
-    populate(database)
-
-    def unexpected(*args):
-        pytest.fail('Cache decoding began while the serving lock was owned')
-
-    monkeypatch.setattr(proposal_cache, 'logical_rows', unexpected)
-    with database._lock, database.conn:
-        with pytest.raises(RuntimeError, match='outside the serving lock'):
-            database.discovery._prune_cached_tracks({'gone'})
 
 
 @pytest.mark.parametrize('encoded', [False, True])

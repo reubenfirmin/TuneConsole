@@ -99,7 +99,7 @@ def test_album_operation_round_trips_through_live_bridge_without_blocking_loop(s
                 pending = pool.submit(http.post, '/collection/' + ('save-album' if saved else 'unsave-album'),
                                       data={'browse_id': 'MPREb_x'})
                 if failure == 'dispatch':
-                    with pytest.raises(pytest.fail.Exception, match='finished before its bridge request: 422'):
+                    with pytest.raises(pytest.fail.Exception, match='finished before its bridge request: 503'):
                         _request_frame(ws, pending)
                     return
                 lookup = _request_frame(ws, pending)
@@ -122,8 +122,8 @@ def test_album_operation_round_trips_through_live_bridge_without_blocking_loop(s
                                                      if failure == 'rating' else {})})
                 response = pending.result(timeout=5)
     if failure:
-        assert response.status_code == 422 and response.headers['hx-reswap'] == 'none'
-        assert 'YouTube refused' in response.text
+        assert response.status_code == 503 and response.headers['hx-reswap'] == 'none'
+        assert response.content == b''
         assert store.collection.get_saved_albums() == before
     else:
         assert response.status_code == 200 and response.headers['hx-refresh'] == 'true'

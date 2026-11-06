@@ -3,11 +3,12 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 import json
 
-from yt_playlist.core import audio_vibe_metadata, genre_identity, metadata_evidence, metadata_native, sample_files, vibe_provenance, vibe_versions
+from yt_playlist.core import audio_vibe_metadata, genre_identity, metadata_evidence, metadata_native, sample_files, vibe_model_files, vibe_provenance, vibe_versions
 from yt_playlist.core.audio_vibe_contract import INTENSITY_CHANNELS, PREDICTION_VERSION
 from yt_playlist.core.activity import WorkBudgetExceeded, check_stopping
 from yt_playlist.core.db_revisions import column_group_reads, keyed_reads
-from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.repos.base import Repo, snapshot_read, synchronized
+from yt_playlist.repos import vibe_models
 
 
 @dataclass
@@ -21,6 +22,7 @@ class PreparedVibes:
     staged: list
     markers: list
     roots: list
+    generations: list
 
     def close(self):
         for publication in self.staged:
@@ -33,22 +35,40 @@ class VibePredictionsRepo(Repo):
         """Plan original IDs, reuse and exact file contents on the private reader."""
         if not getattr(self._store,'_read_only',False):
             raise RuntimeError('Vibe preparation requires a guarded private snapshot')
-        ids = {key:row[0] for key in tracks for row in self.conn.execute(
-            'SELECT id FROM recordings WHERE identity_key=?',(key,))}
+        with keyed_reads(self._store, 'recordings', tracks):
+            qs = ','.join('?' for _ in tracks)
+            ids = dict(self.conn.execute(
+                f'SELECT identity_key,id FROM recordings WHERE identity_key IN ({qs})', list(tracks)))
         next_mid = self.conn.execute('SELECT coalesce(max(id),0)+1 FROM measurements').fetchone()[0]
         next_pid = vibe_provenance.next_id(self.conn)
         measured_version = vibe_versions.column(self.conn, 'measurements')
+        with keyed_reads(self._store, 'vibe_versions', []):
+            stamps = {version: vibe_versions.lookup(self.conn, version)
+                      for version in {track['version'] for track in tracks.values() if track}}
+            previous_projection = vibe_versions.projection(self.conn, 'recording_vibes', 'v')
+            previous_rows = {}
+            rqs = ','.join('?' for _ in ids)
+            for row in self.conn.execute('SELECT '+previous_projection+
+                    f' FROM recording_vibes v WHERE recording_id IN ({rqs})', list(ids.values())):
+                previous_rows.setdefault(row['recording_id'], {})[row['vibe']] = row
         measurements, samples, mids, originals = [], [], {}, {}
+        requests = [(ids[key], stamps[track['version']], track['evidence']['input_digest'])
+                    for key, track in tracks.items() if key in ids and track and track['evidence']]
+        current_measurements = {}
+        if requests:
+            values = ','.join('(?,?,?)' for _ in requests)
+            current_measurements = {(row[0], row[1]): tuple(row[2:]) for row in self.conn.execute(
+                'WITH wanted(recording_id,version,digest) AS (VALUES '+values+') '
+                'SELECT m.recording_id,m.vibe,m.id,m.score,m.support,m.source FROM wanted w '
+                'JOIN measurements m ON m.recording_id=w.recording_id AND '
+                f'm.{measured_version}=w.version AND m.input_digest=w.digest',
+                [value for request in requests for value in request])}
         for key,track in tracks.items():
             if key not in ids or not track or not track['evidence']:
                 continue
             evidence, rid = track['evidence'],ids[key]
-            with keyed_reads(self._store, 'vibe_versions', []):
-                stamp = vibe_versions.lookup(self.conn, track['version'])
             for vibe,fit in evidence['fits'].items():
-                row = self.conn.execute('SELECT id,score,support,source FROM measurements WHERE '
-                    f'recording_id=? AND vibe=? AND {measured_version}=? AND input_digest=?',
-                    (rid,vibe,stamp,evidence['input_digest'])).fetchone()
+                row = current_measurements.get((rid, vibe))
                 if row:
                     mid = row[0]
                     if tuple(row[1:]) != (fit['score'],fit['support'],evidence['source']):
@@ -60,27 +80,76 @@ class VibePredictionsRepo(Repo):
                 originals[mid] = (vibe,rid)
                 mids[key,vibe] = mid
                 samples.extend((mid,sid) for sid in evidence.get('sample_ids',[]))
-        predictions, provenance, publications, deleted = [], [], [], []
+        # Resolve the existing original identities once for the entire batch.
+        # The exact same per-prediction distinct-recording checks below remain;
+        # shared cohort contributors no longer require thousands of point reads.
+        referenced = {mids.get((identity, vibe), original)
+                      for key, fits in resolved.items() if key in ids
+                      for vibe, fit in fits.items()
+                      if not fit.get('retain') and not fit.get('generation')
+                      and fit['source'] in ('artist_genre', 'artist', 'genre')
+                      for identity, original in fit['inputs'].items()}
+        referenced = [mid for mid in referenced if mid is not None and mid not in originals]
+        for start in range(0, len(referenced), 128):
+            check_stopping()
+            batch = referenced[start:start + 128]
+            qs = ','.join('?' for _ in batch)
+            originals.update((row[0], tuple(row[1:])) for row in self.conn.execute(
+                f'SELECT id,vibe,recording_id FROM measurements WHERE id IN ({qs})', batch))
+        predictions, provenance, publications, deleted, generations = [], [], [], [], []
         cohorts = set(touched)
+        validated_genres, validated_artists = set(), set()
         for key,track in tracks.items():
             rid = ids.get(key)
             if rid is None:
                 continue
-            with keyed_reads(self._store, 'vibe_versions', []):
-                previous = {r['vibe']:r for r in self.conn.execute('SELECT '+
-                    vibe_versions.projection(self.conn, 'recording_vibes', 'v')+
-                    ' FROM recording_vibes v WHERE recording_id=?',(rid,))}
+            previous = previous_rows.get(rid, {})
             for vibe in previous.keys()-resolved.get(key,{}).keys():
                 deleted.append((rid,vibe))
             if track is None:
                 continue
-            if track['genre']:
+            if track['genre'] and track['genre'] not in validated_genres:
                 genre,reason = genre_identity.resolve(self.conn,track['genre'])
                 if reason is not None or genre != track['genre']:
                     raise ValueError('Prediction conditioning requires a canonical specific genre key')
+                validated_genres.add(genre)
             for vibe,fit in resolved.get(key,{}).items():
+                if fit.get('retain'):
+                    continue
                 source,mid,pid = fit['source'],mids.get((key,vibe)),None
                 if source in ('artist_genre','artist','genre'):
+                    model = fit.get('generation')
+                    if model:
+                        old = previous.get(vibe)
+                        artists = json.loads(track['artist'] or '[]')
+                        for artist in artists:
+                            if artist not in validated_artists and not self.conn.execute(
+                                    'SELECT 1 FROM artists WHERE id=?', (artist,)).fetchone():
+                                raise ValueError('Unknown conditioning artist')
+                            validated_artists.add(artist)
+                        receipt = vibe_model_files.receipt(model, artists, fit['mean_variance'], fit['new_track_variance'])
+                        stamp = track['version'] + '/' + fit['model_version']
+                        if (old and old['prediction_id'] is not None and old['source'] == source
+                                and old['score'] == fit['score'] and old['support'] == fit['support']
+                                and old['artist_key'] == track['artist'] and old['subgenre_key'] == track['genre']
+                                and old['inputs_version'] == stamp
+                                and vibe_provenance.same_receipt(self.conn, old['prediction_id'], receipt)):
+                            pid = old['prediction_id']
+                        else:
+                            # Model files are already durable and pinned by this
+                            # reader. The generation manifest was validated at fit
+                            # publication; no per-target contributor graph is built.
+                            pid, next_pid = next_pid, next_pid + 1
+                            predictions.append((pid,rid,vibe,fit['score'],fit['support'],
+                                track['genre'] if source != 'artist' else None,source,stamp,now))
+                            provenance.append((pid,receipt,artists))
+                            generations.append((pid,bytes.fromhex(model)))
+                        mid = None
+                        values = (rid,vibe,fit['score'],fit['support'],source,None,pid,stamp,track['artist'],
+                                  track['genre'],fit.get('recordings'),None)
+                        if vibe not in previous or tuple(previous[vibe]) != values:
+                            publications.append(values)
+                        continue
                     inputs = {mids.get((identity,vibe),original) for identity,original in fit['inputs'].items()}
                     if not inputs or None in inputs:
                         raise ValueError('A prediction requires original measurement inputs')
@@ -94,10 +163,7 @@ class VibePredictionsRepo(Repo):
                     if pid is None:
                         subjects = set()
                         for original in inputs:
-                            if original not in originals:
-                                row = self.conn.execute('SELECT vibe,recording_id FROM measurements WHERE id=?',(original,)).fetchone()
-                                originals[original] = tuple(row) if row else None
-                            subject = originals[original]
+                            subject = originals.get(original)
                             if not subject or subject[0]!=vibe or subject[1]==rid or subject[1] in subjects:
                                 raise ValueError('Prediction inputs require distinct original recordings of the same vibe')
                             subjects.add(subject[1])
@@ -105,8 +171,10 @@ class VibePredictionsRepo(Repo):
                         if source!='genre' and not artists:
                             raise ValueError('Complete calculation requires original artist conditioning')
                         for artist in artists:
-                            if not self.conn.execute('SELECT 1 FROM artists WHERE id=?',(artist,)).fetchone():
+                            if artist not in validated_artists and not self.conn.execute(
+                                    'SELECT 1 FROM artists WHERE id=?',(artist,)).fetchone():
                                 raise ValueError('Unknown conditioning artist')
+                            validated_artists.add(artist)
                         pid,next_pid = next_pid,next_pid+1
                         predictions.append((pid,rid,vibe,fit['score'],fit['support'],
                             track['genre'] if source!='artist' else None,source,track['version'],now))
@@ -117,7 +185,7 @@ class VibePredictionsRepo(Repo):
                 if vibe not in previous or tuple(previous[vibe])!=values:
                     publications.append(values)
         staged,markers,roots = vibe_provenance.stage_many(self.conn,provenance)
-        return PreparedVibes(measurements,samples,predictions,publications,deleted,cohorts,staged,markers,roots)
+        return PreparedVibes(measurements,samples,predictions,publications,deleted,cohorts,staged,markers,roots,generations)
 
     @synchronized
     def publish_prepared(self, plan):
@@ -137,6 +205,7 @@ class VibePredictionsRepo(Repo):
                               'VALUES (?,?,?,?,?,?,?,?,?)', [(*row[:7],versions[row[7]],row[8]) for row in plan.predictions])
         for publication in plan.staged:
             publication.publish()
+        self.conn.executemany('INSERT INTO prediction_model_generations VALUES (?,?)',plan.generations)
         self.conn.executemany('INSERT OR IGNORE INTO prediction_measurement_roots VALUES (?)',[(mid,) for mid in plan.roots])
         self.conn.executemany("INSERT INTO prediction_provenance VALUES (?,?,?,'ready')",plan.markers)
         self.conn.executemany('DELETE FROM recording_vibes WHERE recording_id=? AND vibe=?',plan.deleted)
@@ -146,7 +215,10 @@ class VibePredictionsRepo(Repo):
             f'{current_version}=excluded.{current_version},artist_key=excluded.artist_key,subgenre_key=excluded.subgenre_key,'
             'recordings=excluded.recordings,variance=excluded.variance',
             [(*row[:7],versions[row[7]],*row[8:]) for row in plan.publications])
-        self._queue(sorted(plan.cohorts))
+        repairs = {key.removeprefix('!joint:') for key in plan.cohorts if key.startswith('!joint:')}
+        if repairs:
+            self._store.settings.publish_values({vibe_model_files.STATE_PREFIX + vibe: '' for vibe in repairs})
+        self._queue(sorted(key for key in plan.cohorts if not key.startswith('!joint:')))
         if plan.deleted or plan.publications:
             self._store.rec_refresh.publish_notification()
 
@@ -204,9 +276,10 @@ class VibePredictionsRepo(Repo):
         self.conn.executemany('INSERT INTO rec_vibe_pending(group_key) VALUES (?) '
             "ON CONFLICT(group_key) DO UPDATE SET revision=revision+1,cursor=''", [(key,) for key in keys])
 
-    def _current(self, rid):
+    def _current(self, rid, *, projection=None):
         with keyed_reads(self._store, 'vibe_versions', []):
-            rows = self.conn.execute('SELECT '+vibe_versions.projection(self.conn, 'recording_vibes', 'v')+
+            projection = projection or vibe_versions.projection(self.conn, 'recording_vibes', 'v')
+            rows = self.conn.execute('SELECT '+projection+
                 ',m.input_digest FROM recording_vibes v LEFT JOIN measurements m ON m.id=v.measurement_id '
                 'WHERE v.recording_id=? ORDER BY v.vibe', (rid,)).fetchall()
         if not rows:
@@ -250,10 +323,12 @@ class VibePredictionsRepo(Repo):
                 guards.enter_context(keyed_reads(self._store, 'native_metadata_observations',
                                                 [r[0] for r in references]))
                 guards.enter_context(keyed_reads(self._store, 'metadata_deliveries', [r[1] for r in references]))
+            with keyed_reads(self._store, 'vibe_versions', []):
+                projection = vibe_versions.projection(self.conn, 'recording_vibes', 'v')
             for key in keys:
                 check_stopping()
                 rid = ids.get(key)
-                old = self._current(rid) if rid else None
+                old = self._current(rid, projection=projection) if rid else None
                 artists = [r[0] for r in self.conn.execute('SELECT DISTINCT a.artist_id FROM catalog_entries e '
                     f'JOIN {self.entry_artists_table} a ON a.entry_id=e.id WHERE e.recording_id=? ORDER BY a.artist_id LIMIT 17', (rid,))]
                 artist = json.dumps(artists, separators=(',', ':')) if 0 < len(artists) <= 16 else None
@@ -277,7 +352,7 @@ class VibePredictionsRepo(Repo):
                     if len(captured) == 3:
                         samples, metadata = captured, audio_vibe_metadata.read(self.conn, run[1])
                         break
-                result[key] = {'old': old, 'artist': artist, 'samples': samples, 'metadata': metadata}
+                result[key] = {'old': old, 'artist': artist, 'samples': samples, 'metadata': metadata, 'recording': rid}
         return result
 
     @synchronized
@@ -295,99 +370,77 @@ class VibePredictionsRepo(Repo):
                     'JOIN recordings r ON r.id=v.recording_id JOIN measurements m ON m.id=v.measurement_id '
                     f'WHERE {where} AND m.support>0 ORDER BY v.recording_id,v.vibe', args)
             stats, inputs = {}, {}
-            for identity, mid, vibe, score, support in rows:
-                check_stopping()
-                identity = identities.setdefault(identity, identity)
-                inputs.setdefault(vibe, {})[identity] = mid
-                values = stats.setdefault(vibe, [0, 0., 0., 0.])
-                for i, amount in enumerate((1, support, support * score, support * score * score)):
-                    values[i] += amount
+            while batch := rows.fetchmany(128):
+                for identity, mid, vibe, score, support in batch:
+                    check_stopping()
+                    identity = identities.setdefault(identity, identity)
+                    inputs.setdefault(vibe, {})[identity] = mid
+                    values = stats.setdefault(vibe, [0, 0., 0., 0.])
+                    for i, amount in enumerate((1, support, support * score, support * score * score)):
+                        values[i] += amount
             result[key] = {'stats': stats, 'inputs': inputs}
         return result
 
     @synchronized
-    def publish(self, tracks, resolved, touched, now):
-        """History, prediction inputs and current scores commit together."""
-        if not self.conn.in_transaction:
-            raise RuntimeError('Vibe predictions require guarded publication')
-        ids = {key: row[0] for key in tracks for row in self.conn.execute(
+    def joint_inputs(self, vibe, limit):
+        """Current originals only, once per canonical recording, exact versions.
+
+        Album linkage is used only when one canonical browse identity is
+        unambiguous. An upload, replay or extra provider never becomes a row.
+        The guarded snapshot fences measurement and conditioning changes.
+        """
+        return vibe_models.training_manifest(self.conn, vibe, limit)
+
+    @synchronized
+    def joint_albums(self, keys):
+        ids = {key:row[0] for key in keys for row in self.conn.execute(
             'SELECT id FROM recordings WHERE identity_key=?', (key,))}
-        measured_version = vibe_versions.column(self.conn, 'measurements')
-        predicted_version = vibe_versions.column(self.conn, 'predictions')
-        current_version = vibe_versions.column(self.conn, 'recording_vibes')
-        mids = {}
-        for key, track in tracks.items():
-            if not track or not track['evidence']:
-                continue
-            evidence, rid = track['evidence'], ids[key]
-            for vibe, fit in evidence['fits'].items():
-                stamp = vibe_versions.stored(self.conn, track['version'])
-                args = (rid, vibe, stamp, evidence['input_digest'])
-                self.conn.execute(f'INSERT INTO measurements(recording_id,vibe,score,support,source,{measured_version},input_digest,measured_at) '
-                    f'VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(recording_id,vibe,{measured_version},input_digest) DO NOTHING',
-                    (rid, vibe, fit['score'], fit['support'], evidence['source'], stamp, evidence['input_digest'], now))
-                mid = self.conn.execute('SELECT id FROM measurements WHERE recording_id=? AND vibe=? '
-                                        f'AND {measured_version}=? AND input_digest=?', args).fetchone()[0]
-                mids[key, vibe] = mid
-                self.conn.executemany('INSERT OR IGNORE INTO measurement_samples VALUES (?,?)',
-                                      [(mid, sid) for sid in evidence.get('sample_ids', [])])
-        changed, provenance, publications = False, [], []
-        for key, track in tracks.items():
-            rid = ids.get(key)
-            if rid is None:
-                continue
-            if track is None:
-                changed |= self.conn.execute('DELETE FROM recording_vibes WHERE recording_id=?', (rid,)).rowcount > 0
-                continue
-            if track['genre']:
-                resolved_key, reason = genre_identity.resolve(self.conn,track['genre'])
-                if reason is not None or resolved_key != track['genre']:
-                    raise ValueError('Prediction conditioning requires a canonical specific genre key')
-            previous = {row['vibe']: row for row in self.conn.execute('SELECT '+
-                vibe_versions.projection(self.conn, 'recording_vibes', 'v')+' FROM recording_vibes v WHERE recording_id=?', (rid,))}
-            for vibe in previous.keys() - resolved.get(key, {}).keys():
-                self.conn.execute('DELETE FROM recording_vibes WHERE recording_id=? AND vibe=?', (rid, vibe))
-                changed = True
-            for vibe, fit in resolved.get(key, {}).items():
-                source, mid, pid = fit['source'], mids.get((key, vibe)), None
-                if source in ('artist_genre', 'artist', 'genre'):
-                    inputs = {mids.get((identity, vibe), mid) for identity, mid in fit['inputs'].items()}
-                    if not inputs or None in inputs:
-                        raise ValueError('A prediction requires original measurement inputs')
-                    old = previous.get(vibe)
-                    if (old and old['prediction_id'] is not None and old['source'] == source
-                            and old['score'] == fit['score'] and old['support'] == fit['support']
-                            and old['inputs_version'] == track['version'] and old['artist_key'] == track['artist']
-                            and old['subgenre_key'] == track['genre']):
-                        if vibe_provenance.same_inputs(self.conn, old['prediction_id'], inputs):
-                            pid = old['prediction_id']
-                    if pid is None:
-                        pid = vibe_provenance.next_id(self.conn) if vibe_provenance.available(self.conn) else None
-                        pid = self.conn.execute(f'INSERT INTO predictions(id,recording_id,vibe,score,support,subgenre_key,kind,{predicted_version},predicted_at) '
-                            'VALUES (?,?,?,?,?,?,?,?,?)', (pid, rid, vibe, fit['score'], fit['support'],
-                            track['genre'] if source != 'artist' else None, source, vibe_versions.stored(self.conn, track['version']), now)).lastrowid
-                        artists = json.loads(track['artist'] or '[]') if source != 'genre' else []
-                        if vibe_provenance.available(self.conn):
-                            provenance.append((pid, inputs, artists))
-                        else:
-                            self.conn.executemany('INSERT INTO prediction_artists VALUES (?,?)', [(pid, aid) for aid in artists])
-                            self.conn.executemany('INSERT INTO prediction_inputs VALUES (?,?)', [(pid, mid) for mid in sorted(inputs)])
-                    mid = None
-                values = (rid, vibe, fit['score'], fit['support'], source, mid, pid, track['version'], track['artist'], track['genre'],
-                          fit.get('recordings'), fit.get('variance'))
-                if vibe not in previous or tuple(previous[vibe]) != values:
-                    publications.append((*values[:7], vibe_versions.stored(self.conn, track['version']), *values[8:]))
-                    changed = True
-        if provenance:
-            vibe_provenance.publish_many(self.conn, provenance)
-        self.conn.executemany('INSERT INTO recording_vibes VALUES (?,?,?,?,?,?,?,?,?,?,?,?) '
-            'ON CONFLICT(recording_id,vibe) DO UPDATE SET score=excluded.score,support=excluded.support,'
-            'source=excluded.source,measurement_id=excluded.measurement_id,prediction_id=excluded.prediction_id,'
-            f'{current_version}=excluded.{current_version},artist_key=excluded.artist_key,subgenre_key=excluded.subgenre_key,'
-            'recordings=excluded.recordings,variance=excluded.variance', publications)
-        self._queue(touched)
-        if changed:
-            self._store.rec_refresh.publish_notification()
+        albums = vibe_models.conditioning_albums(self.conn, ids.values())
+        return {key:albums.get(rid) for key,rid in ids.items()}
+
+    @synchronized
+    def stage_joint_model(self, value):
+        return vibe_models.stage(self.conn, value)
+
+    @synchronized
+    def joint_model(self, generation):
+        return vibe_models.read(self.conn, generation)
+
+    @synchronized
+    def publish_joint_model(self, vibe, generation, outcome, measurements, staged, refresh):
+        if not self.conn.in_transaction:
+            raise RuntimeError('Joint model publication requires a guarded writer')
+        if staged:
+            staged.publish()
+        vibe_models.root_measurements(self.conn, measurements)
+        self._store.settings.publish_values({vibe_model_files.HEAD_PREFIX + vibe: generation,
+                                            vibe_model_files.STATE_PREFIX + vibe: json.dumps(outcome)})
+        if refresh:
+            self._queue(['*'])
+
+    @synchronized
+    def defer_joint_model(self, vibe, outcome, refresh):
+        """Keep the last head and atomically schedule healthy partial results."""
+        with self.conn:
+            if not self.conn.in_transaction:
+                self.conn.execute('BEGIN IMMEDIATE')
+            self._store.settings.publish_values({vibe_model_files.STATE_PREFIX + vibe: json.dumps(outcome)})
+            if refresh:
+                self._queue(['*'])
+
+    @synchronized
+    def retained_joint_fits(self, keys):
+        result = {}
+        with keyed_reads(self._store, 'recordings', keys):
+            ids = {key:row[0] for key in keys for row in self.conn.execute(
+                'SELECT id FROM recordings WHERE identity_key=?', (key,))}
+        with keyed_reads(self._store, 'recording_vibes', ids.values()):
+            for key, rid in ids.items():
+                result[key] = {row['vibe']: {**{name:row[name] for name in ('score','support','source','recordings','variance')},
+                                            'retain': True}
+                    for row in self.conn.execute('SELECT v.* FROM recording_vibes v '
+                        'JOIN prediction_model_generations g ON g.prediction_id=v.prediction_id WHERE recording_id=?', (rid,))}
+        return result
 
     @synchronized
     def overlay(self, profiles):
@@ -414,6 +467,26 @@ class VibePredictionsRepo(Repo):
                 else:
                     vibes['fits'][row['vibe']] = fit
         return profiles
+
+    @snapshot_read
+    def fit_scores(self, keys, preset):
+        """Read the relational scores overlaid on prepared recording profiles.
+
+        Ranking needs one score; exact profile bodies are read for the selected
+        tracks and for candidates without a relational specialist result.
+        """
+        keys = list(dict.fromkeys(keys))
+        result = {}
+        for offset in range(0, len(keys), 512):
+            page = keys[offset:offset + 512]
+            marks = ','.join('?' for _ in page)
+            with keyed_reads(self._store, 'recordings', page), \
+                    keyed_reads(self._store, 'rec_musical_profiles', page):
+                result.update(dict(self.conn.execute('SELECT r.identity_key,v.score FROM recordings r '
+                    'JOIN rec_musical_profiles p ON p.identity_key=r.identity_key '
+                    'JOIN recording_vibes v ON v.recording_id=r.id '
+                    f'WHERE r.identity_key IN ({marks}) AND v.vibe=?', (*page, preset))))
+        return result
 
     @synchronized
     def ranked(self, vibe, limit=100):

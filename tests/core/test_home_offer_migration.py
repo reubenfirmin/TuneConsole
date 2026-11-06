@@ -1,8 +1,6 @@
-"""Offer accounting survives output eviction, restarts and competing writers."""
-from concurrent.futures import ThreadPoolExecutor
+"""Offer storage survives migration, output eviction, rollback and restarts."""
 import json
 import sqlite3
-from threading import Barrier
 
 import pytest
 
@@ -13,9 +11,9 @@ from yt_playlist.core.store import Store
 
 
 @pytest.fixture
-def predecessor(tmp_path):
+def predecessor(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path / 'offers.db')
-    migrate(store.conn, registry=registry.MIGRATIONS[:82])
+    _pristine_installed_schema(82).backup(store.conn)
     store._bind_repositories()
     yield store
     store.conn.close()
@@ -34,21 +32,24 @@ def upgrade(store):
     store._bind_repositories()
 
 
-def test_upgrade_eviction_restart_and_epoch_rotation_preserve_offer_accounting(predecessor):
+def test_upgrade_eviction_restart_and_continuing_writes_preserve_offer_state(predecessor):
     store = predecessor
     seed(store)
     upgrade(store)
     assert store.rec_proposals.get_proposals('home_shown') == {'epoch': 4, 'signatures': ['first', 'second']}
     assert tuple(store.conn.execute('SELECT epoch,built_at FROM home_offer_dedup').fetchone()) == (4, 1234.5)
     assert [row[0] for row in store.conn.execute('SELECT surface FROM rec_proposals')] == ['unrelated-output']
-    assert store.rec_ledger.claim_home_offers(4, ['second', 'third'], 2000) == {'third'}
+    updated = {'epoch': 4, 'signatures': ['first', 'second', 'third']}
+    store.rec_proposals.put_proposals('home_shown', updated, 2000)
+    assert store.rec_proposals.get_proposals('home_shown') == updated
     with store.conn:
         store.conn.execute('DELETE FROM rec_proposals')
     reopened = Store(store._db_path)
     try:
         reopened.init_schema()
-        assert reopened.rec_ledger.claim_home_offers(4, ['first', 'second', 'third'], 2100) == set()
-        assert reopened.rec_ledger.claim_home_offers(5, ['first'], 2200) == {'first'}
+        assert reopened.rec_proposals.get_proposals('home_shown') == updated
+        assert reopened.conn.execute('SELECT built_at FROM home_offer_dedup').fetchone()[0] == 2000
+        reopened.rec_proposals.put_proposals('home_shown', {'epoch': 5, 'signatures': ['first']}, 2200)
         assert reopened.rec_proposals.get_proposals('home_shown') == {'epoch': 5, 'signatures': ['first']}
         assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchall()
     finally:
@@ -87,7 +88,9 @@ def test_empty_legacy_state_does_not_invent_an_offer_window(predecessor):
     upgrade(predecessor)
     assert predecessor.rec_proposals.get_proposals('home_shown') is None
     assert not predecessor.rec_proposals.has_proposals('home_shown')
-    assert predecessor.rec_ledger.claim_home_offers(0, ['first'], 2000) == {'first'}
+    value = {'epoch': 0, 'signatures': ['first']}
+    predecessor.rec_proposals.put_proposals('home_shown', value, 2000)
+    assert predecessor.rec_proposals.get_proposals('home_shown') == value
 
 
 def test_interrupted_cutover_rolls_back_then_retries(predecessor):
@@ -103,7 +106,7 @@ def test_interrupted_cutover_rolls_back_then_retries(predecessor):
             Migration(83, 'home_offer_deduplication', interrupted)))
     assert list(predecessor.conn.iterdump()) == before
     upgrade(predecessor)
-    assert predecessor.rec_ledger.claim_home_offers(4, ['first', 'second'], 2000) == set()
+    assert predecessor.rec_proposals.get_proposals('home_shown') == {'epoch': 4, 'signatures': ['first', 'second']}
 
 
 def test_fresh_and_upgraded_offer_owners_have_the_same_contract(predecessor, store):
@@ -117,54 +120,28 @@ def test_fresh_and_upgraded_offer_owners_have_the_same_contract(predecessor, sto
     current.validate(store.conn)
 
 
-def test_concurrent_connections_claim_each_offer_once(tmp_path):
-    path = tmp_path / 'concurrent.db'
-    first, second = Store(path), Store(path)
-    try:
-        first.init_schema()
-        second.init_schema()
-        ready = Barrier(2)
-
-        def claim(store):
-            ready.wait(timeout=10)
-            return store.rec_ledger.claim_home_offers(7, ['same', 'other'], 1000)
-
-        with ThreadPoolExecutor(max_workers=2) as workers:
-            results = list(workers.map(claim, (first, second)))
-        assert sorted(map(len, results)) == [0, 2]
-        assert set.union(*results) == {'same', 'other'}
-    finally:
-        first.conn.close()
-        second.conn.close()
-
-
-def test_offer_claim_joins_and_rolls_back_with_outer_publication(store):
-    store.rec_ledger.claim_home_offers(1, ['original'], 1000)
+def test_offer_storage_joins_and_rolls_back_with_outer_publication(store):
+    store.rec_proposals.put_proposals('home_shown', {'epoch': 1, 'signatures': ['original']}, 1000)
     with pytest.raises(ValueError, match='Controlled rollback'), store.conn.atomic():
-        assert store.rec_ledger.claim_home_offers(1, ['new'], 1100) == {'new'}
+        store.rec_proposals.put_proposals('home_shown', {'epoch': 1, 'signatures': ['new']}, 1100)
         store.conn.execute("INSERT INTO settings VALUES ('offer-publication','changed')")
         raise ValueError('Controlled rollback')
     assert store.rec_proposals.get_proposals('home_shown') == {'epoch': 1, 'signatures': ['original']}
     assert store.settings.get_setting('offer-publication') is None
-    assert store.rec_ledger.claim_home_offers(1, ['new'], 1200) == {'new'}
-
-
-def test_readonly_maintenance_does_not_change_offer_accounting(store):
-    store.rec_ledger.claim_home_offers(1, ['original'], 1000)
-    before = list(store.conn.iterdump())
-    store.activity_paused = True
-    assert store.rec_ledger.claim_home_offers(2, ['new'], 1100) == {'new'}
-    assert list(store.conn.iterdump()) == before
+    store.rec_proposals.put_proposals('home_shown', {'epoch': 1, 'signatures': ['new']}, 1200)
+    assert store.rec_proposals.get_proposals('home_shown') == {'epoch': 1, 'signatures': ['new']}
 
 
 def test_signature_budget_is_bounded_for_domain_writer_and_raw_sql(store):
     original = [f'{i:03}' for i in range(100)]
-    assert store.rec_ledger.claim_home_offers(1, original, 1000) == set(original)
+    store.rec_proposals.put_proposals('home_shown', {'epoch': 1, 'signatures': original}, 1000)
     with pytest.raises(sqlite3.IntegrityError, match='window budget'), store.conn:
         store.conn.execute("INSERT INTO home_offer_signatures VALUES (1,'new')")
-    assert store.rec_ledger.claim_home_offers(1, ['new'], 1100) == {'new'}
-    value = store.rec_proposals.get_proposals('home_shown')
-    assert len(value['signatures']) == 100 and 'new' in value['signatures']
+    with pytest.raises(ValueError, match='Invalid Home offer signatures'):
+        store.rec_proposals.put_proposals('home_shown', {'epoch': 1, 'signatures': original + ['new']}, 1100)
+    assert store.rec_proposals.get_proposals('home_shown') == {'epoch': 1, 'signatures': original}
+    store.rec_proposals.put_proposals('home_shown', {'epoch': 2, 'signatures': ['new']}, 1200)
+    assert store.rec_proposals.get_proposals('home_shown') == {'epoch': 2, 'signatures': ['new']}
 
 
 @pytest.mark.parametrize('sql,values', [

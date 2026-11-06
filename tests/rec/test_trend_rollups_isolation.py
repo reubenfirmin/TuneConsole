@@ -10,16 +10,14 @@ import pytest
 
 from tests.conftest import seed_catalog_track
 from yt_playlist.core.activity import Activity
-from yt_playlist.core.store import Store
 from yt_playlist.rec import trend_rollups
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.repos.trends import TrendsRepo
 
 
 @pytest.fixture(params=["memory", "file"])
-def database(request, tmp_path):
-    store = Store(":memory:" if request.param == "memory" else tmp_path / "state.db")
-    store.init_schema()
+def database(request, tmp_path, consumer_store):
+    store = consumer_store(":memory:" if request.param == "memory" else tmp_path / "state.db")
     store.accounts.upsert_account("me", "c", None, True)
     seed_catalog_track(store, "song", "Song", "Artist", video_id="video")
     store.history.record_history_plays(1, 5 * 86400, ["song"], source_timezone="UTC")
@@ -27,9 +25,8 @@ def database(request, tmp_path):
     store.conn.close()
 
 
-def test_slow_rollup_sql_allows_ui_reads_and_writes_before_shutdown(tmp_path, monkeypatch):
-    store = Store(tmp_path / "state.db")
-    store.init_schema()
+def test_slow_rollup_sql_allows_ui_reads_and_writes_before_shutdown(tmp_path, monkeypatch, consumer_store):
+    store = consumer_store(tmp_path / "state.db")
     store.accounts.upsert_account('Listener','c',None,True)
     store.history.record_history_plays(1,86400,['saved'],source_timezone='UTC')
     store.trends.refresh_first_play()
@@ -128,10 +125,9 @@ def test_reader_cannot_modify_source_and_retains_its_input_snapshot(database):
     assert store.settings.get_setting("input") == "new"
 
 
-def test_other_connection_commit_is_detected_even_without_primary_connection_changes(tmp_path):
+def test_other_connection_commit_is_detected_even_without_primary_connection_changes(tmp_path, consumer_store):
     path = tmp_path / "state.db"
-    store = Store(path)
-    store.init_schema()
+    store = consumer_store(path)
     try:
         with store.read_snapshot() as snapshot:
             with sqlite3.connect(path) as writer:

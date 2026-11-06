@@ -8,7 +8,7 @@ import pytest
 
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.store import Store
-from yt_playlist.rec import home_cards, measurement, rec_params, scorecard
+from yt_playlist.rec import measurement, rec_params, scorecard
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.repos.rec_model import RecModelRepo
 from tests.conftest import seed_catalog_track
@@ -29,14 +29,6 @@ def _record_visible_tracks(store, now):
                            'ranker': selected['ranker'], 'experiment': card['experiment'],
                            'policy_kind': policy, 'propensity': .5 if policy == 'live' else 0})
     measurement.record_offers(store, 'radio', offers, now)
-
-
-def test_mix_theme_visibility_never_records_unexposed_track_impressions(store, monkeypatch):
-    def forbidden(*args, **kwargs):
-        pytest.fail('Mix visibility must not measure its unexposed tracks (#688)')
-    monkeypatch.setattr(measurement, 'record_offers', forbidden)
-    home_cards._record_served_cards(store, _cards(), 100)
-    assert not store.conn.execute('SELECT 1 FROM rec_served_impressions').fetchone()
 
 
 def test_track_response_shares_policy_and_unchanged_models_skip_full_reads(store, monkeypatch):
@@ -98,9 +90,8 @@ def test_catalog_inputs_invalidate_baskets_and_content_space_settings(store):
     assert measurement.serving_policy(store, 100)[1]["models"]["content_space"] != after["content_space"]
 
 
-def test_external_vector_write_invalidates_cached_identity(tmp_path):
-    store = Store(tmp_path / "state.db")
-    store.init_schema()
+def test_external_vector_write_invalidates_cached_identity(tmp_path, consumer_store):
+    store = consumer_store(tmp_path / "state.db")
     try:
         seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='video')
         before = measurement.serving_policy(store, 100)[1]["models"]["collaborative"]
@@ -150,9 +141,8 @@ def test_failed_card_does_not_drop_remaining_response_measurements(store, monkey
     assert store.conn.execute("SELECT COUNT(*) FROM rec_served_impressions").fetchone()[0] == 7
 
 
-def test_batched_queue_preserves_offer_bound_and_offer_time_attribution(tmp_path, monkeypatch):
-    store = Store(tmp_path / "state.db")
-    store.init_schema()
+def test_batched_queue_preserves_offer_bound_and_offer_time_attribution(tmp_path, monkeypatch, consumer_store):
+    store = consumer_store(tmp_path / "state.db")
     seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='video')
     worker = RecWorker(SimpleNamespace(store=store, work=Activity(), logger=logging.getLogger(__name__),
                                        now_fn=lambda: 100))

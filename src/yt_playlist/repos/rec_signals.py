@@ -21,11 +21,6 @@ class RecSignalsRepo(Repo):
         limit = MOOD_EVENT_CAP if limit is None else limit
         return mood.recent(self.conn, limit)
 
-    def active_mood(self, now, window_h=8) -> list:
-        """Deprecated alias for recent_mood_events(), retained for callers not yet updated to the
-        persistent API. Time-window args are ignored; all stored events are returned newest-first."""
-        return self.recent_mood_events()
-
     @synchronized
     def bump_theme(self, facet, contribution, now) -> float:
         column = taste_axes.column(self.conn, 'facet')
@@ -60,7 +55,7 @@ class RecSignalsRepo(Repo):
     def log_graduation(self, axis, source, score, factor, new_weight, now) -> None:
         """Record one graduation event: the axis, the source signal that drove it, the ledger value at
         the crossing, the nudge factor, and the resulting permanent weight. Append-only; read by the
-        model-health panel to show graduation counts by source and to tune SOURCE_W_* on evidence."""
+        model-health panel to show graduation counts by source and to tune source weights on evidence."""
         table, column = taste_axes.table(self.conn,'rec_grad_log'), taste_axes.column(self.conn)
         self.conn.execute(
             f"INSERT INTO {table}({column}, source, score, factor, new_weight, created_at) "

@@ -1,6 +1,7 @@
 """Runtime cutover precedes analytics, with normal writes between the phases."""
 from contextlib import closing
 from dataclasses import replace
+from functools import wraps
 import hashlib
 import json
 import sqlite3
@@ -17,14 +18,56 @@ from yt_playlist.core.metadata_observations import MetadataObservation
 from yt_playlist.core.store import Store
 
 
+@pytest.fixture(autouse=True)
+def rebuild_phase_costs(monkeypatch, record_property):
+    """Record inclusive real-operation costs without replacing their work."""
+    from yt_playlist.core.db_rebuild import destination, runtime_retention
+    from yt_playlist.core.preparation import metadata_runtime_verification
+
+    costs, lock = {}, threading.Lock()
+
+    def track(owner, name):
+        operation = getattr(owner, name)
+        label = owner.__name__.rsplit('.', 1)[-1] + '.' + name
+
+        @wraps(operation)
+        def timed(*args, **kwargs):
+            began = time.perf_counter()
+            try:
+                return operation(*args, **kwargs)
+            finally:
+                elapsed = time.perf_counter() - began
+                with lock:
+                    value = costs.setdefault(label, {'calls': 0, 'seconds': 0.})
+                    value['calls'] += 1
+                    value['seconds'] += elapsed
+
+        monkeypatch.setattr(owner, name, timed)
+
+    for owner, name in (
+            (destination, 'for_source'), (destination, 'initialize'),
+            (build, 'construct'), (build, 'finish_analytics'),
+            (job, 'run'), (job, 'finish_analytics'),
+            (verification, 'converted'), (verification, 'predictions'),
+            (runtime_retention, 'retired_metadata'),
+            (metadata_runtime_verification, 'verify_selected')):
+        track(owner, name)
+    try:
+        yield
+    finally:
+        record_property('rebuild_inclusive_phase_costs', json.dumps(costs, sort_keys=True))
+
+
 @pytest.mark.parametrize(('source_fixture', 'active'), [
     ('production64', False), ('development93', False), ('development93', True)])
 def test_rebuild_discards_metadata_caches_and_refreshes_without_losing_user_choices(
-        request, source_fixture, active, monkeypatch):
+        request, source_fixture, active, monkeypatch, record_property):
     from yt_playlist.core import metadata, metadata_attempts, metadata_conflicts, provider_frontiers
     from yt_playlist.core.preparation import metadata_runtime as preparation
     from yt_playlist.core.preparation.metadata_runtime_verification import verify_selected
+    began = time.perf_counter()
     path = request.getfixturevalue(source_fixture)
+    record_property('installed_source_seconds', time.perf_counter() - began)
     at = time.time()
     fields = {'bpm': 120}
     card = {'schema': 1, 'protos': [{'label': 'Keep listening', 'tracks': [{'video_id': 'video-8'}]}]}
@@ -234,42 +277,47 @@ def test_saved_playback_and_sync_own_new_playlist_scopes(development93):
         store.conn.close()
 
 
-@pytest.mark.parametrize(('mode', 'restart'), [
-    ('existing_before', False), ('new_source', False), ('existing_during', False),
-    ('existing_before', True), ('new_source', True)])
-def test_foreground_provider_results_survive_analytics_and_restart(development93, mode, restart):
+@pytest.mark.parametrize('restart', [False, True], ids=['uninterrupted', 'reopened'])
+def test_foreground_provider_results_survive_analytics_and_restart(development93, restart):
     from yt_playlist.core.storage_maintenance import StorageMaintenance
     with closing(sqlite3.connect(development93)) as source:
         source.row_factory = sqlite3.Row
         build._configure(source)
         with source:
             source.execute('BEGIN IMMEDIATE')
-            metadata_native.record(source, 108, 'native', [MetadataObservation(
-                field, value, 'recording', 'native-id', 'prediction', unit='classifier_probability')
-                for field, value in [('mood_party', .2), ('energy', .4)]],
-                run_id='original', now=17, recording_id=8)
-        old_key, old_revision = source.execute('SELECT source_key,revision FROM rec_musical_sources').fetchone()
+            for entity, energy in [('before-native-id', .4), ('during-native-id', .6)]:
+                metadata_native.record(source, 108, 'native', [MetadataObservation(
+                    field, value, 'recording', entity, 'prediction', unit='classifier_probability')
+                    for field, value in [('mood_party', .2), ('energy', energy)]],
+                    run_id='original', now=17, recording_id=8)
+        original_revisions = source.execute('SELECT source_key,revision FROM rec_musical_sources').fetchall()
     store = Store(development93)
     try:
         store.init_schema()
         first = job.run(store, rebuild=True)
-        original_document = metadata_runtime_files.read(store.conn, 'native', (old_key,), old_revision)
-        entity = 'new-native-id' if mode == 'new_source' else 'native-id'
-        key = json.dumps(['native', 'recording', entity], separators=(',', ':'))
-        def lookup():
+        original_documents = {(key, revision): metadata_runtime_files.read(store.conn, 'native', (key,), revision)
+                              for key, revision in original_revisions}
+        def source_key(entity):
+            return json.dumps(['native', 'recording', entity], separators=(',', ':'))
+        def lookup(entity, score):
             assert not store.activity_paused
             store.enrichment_state.record_metadata_observations(108, 'native', [MetadataObservation(
-                'mood_party', .91, 'recording', entity, 'prediction', unit='classifier_probability')],
-                run_id='foreground-lookup', now=30)
-            assert metadata_native.source_values(store.conn, key)['mood_party']['value'] == .91
-        if mode != 'existing_during':
-            lookup()
+                'mood_party', score, 'recording', entity, 'prediction', unit='classifier_probability')],
+                run_id='foreground-'+entity, now=30)
+            assert metadata_native.source_values(store.conn, source_key(entity))['mood_party']['value'] == score
+        # Different source keys coexist in one real analytics pass. Existing
+        # and newly accepted foreground results must both survive that pass.
+        lookup('before-native-id', .91)
+        lookup('new-native-id', .73)
+        during_accepted = False
         def progress(phase, detail):
+            nonlocal during_accepted
             if detail['stage'] == 'served-facts':
-                if mode == 'existing_during':
-                    lookup()
                 if restart:
                     raise InterruptedError('after accepted foreground result')
+                if not during_accepted:
+                    lookup('during-native-id', .82)
+                    during_accepted = True
         if restart:
             with pytest.raises(InterruptedError, match='after accepted foreground result'):
                 job.finish_analytics(store, progress=progress)
@@ -289,12 +337,18 @@ def test_foreground_provider_results_survive_analytics_and_restart(development93
         else:
             job.finish_analytics(store, progress=progress)
         assert not db_handles.state(development93)['analytics_pending']
-        assert metadata_native.source_values(store.conn, key)['mood_party']['value'] == .91
-        assert store.conn.execute('SELECT run_id FROM metadata_native_delivery_heads '
-                                  'WHERE source_key=?', (key,)).fetchone()[0] == 'foreground-lookup'
-        assert metadata_runtime_files.read(store.conn, 'native', (old_key,), old_revision) == original_document
-        if mode != 'new_source':
-            assert metadata_native.source_values(store.conn, key)['energy']['value'] == .4
+        assert during_accepted == (not restart)
+        for entity, score in [('before-native-id', .91), ('new-native-id', .73),
+                              ('during-native-id', .2 if restart else .82)]:
+            key = source_key(entity)
+            assert metadata_native.source_values(store.conn, key)['mood_party']['value'] == score, entity
+            expected_run = 'original' if entity == 'during-native-id' and restart else 'foreground-'+entity
+            assert store.conn.execute('SELECT run_id FROM metadata_native_delivery_heads '
+                                      'WHERE source_key=?', (key,)).fetchone()[0] == expected_run, entity
+        for (key, revision), document in original_documents.items():
+            assert metadata_runtime_files.read(store.conn, 'native', (key,), revision) == document
+        for entity, energy in [('before-native-id', .4), ('during-native-id', .6)]:
+            assert metadata_native.source_values(store.conn, source_key(entity))['energy']['value'] == energy
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
     finally:
         store.conn.close()

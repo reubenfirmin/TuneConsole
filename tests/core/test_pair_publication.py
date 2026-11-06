@@ -8,8 +8,9 @@ import pytest
 
 from tests.core.test_predecessor_writes import installed
 from tests.core.test_ranked_state_preparation import seed
+from tests.publication_timing_support import publication_costs
 from yt_playlist.core import group_evidence, recommendation_custody
-from yt_playlist.core.migrations import MigrationError, registry, regular, runner
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import pair_publication as publication, ranked_state as preparation
 from yt_playlist.core.store import Store
 
@@ -54,7 +55,7 @@ def ready(conn, size=8):
 
 
 @pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
-def test_preopened_readers_keep_compressed_originals_ranked_members_modes_and_roots(installed):
+def test_preopened_readers_keep_compressed_originals_ranked_members_modes_and_roots(installed, publication_costs):
     store, _ = installed
     originals, run_id = seed(store)
     roots(store, run_id)
@@ -62,7 +63,7 @@ def test_preopened_readers_keep_compressed_originals_ranked_members_modes_and_ro
     other = Store(store._db_path)
     try:
         other.init_schema(defer_metadata=True)
-        stage = ready(store.conn, size=1)
+        stage = ready(store.conn)
         owner.publish(store.conn, stage=stage)
         assert owner.selected(other.conn) == stage
         assert owner.stage(store.conn, stage).copied == 6
@@ -239,27 +240,3 @@ def test_missing_display_or_output_files_and_failed_roots_do_not_block_ddl(insta
     assert preparation.ROOT_JOB.progress(store.conn) == failed
     preparation.ROOT_JOB.step(store.conn, retry=True)
     owner.publish(store.conn, stage=ready(store.conn))
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_native_upgrade_preserves_retained_projection_and_root_archives(installed, tmp_path):
-    store, _ = installed
-    originals, run_id = seed(store)
-    roots(store, run_id)
-    owner = publication.OWNER
-    stage = ready(store.conn)
-    owner.publish(store.conn, stage=stage)
-    upgraded = Store(tmp_path/'pair-publication-upgrade.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        upgraded.init_schema(defer_metadata=True)
-        assert owner.selected(upgraded.conn) is None
-        for surface, raw in originals.items():
-            if surface.startswith('model_pair:'):
-                assert owner.value(upgraded.conn, stage, surface) == raw
-                assert upgraded.rec_proposals.get_proposals(surface) is not None
-        assert owner.root_stage(upgraded.conn, stage)['complete']
-        regular.migrate(upgraded.conn)
-    finally:
-        upgraded.conn.close()

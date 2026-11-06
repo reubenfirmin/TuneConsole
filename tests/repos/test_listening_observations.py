@@ -17,13 +17,10 @@ def stamp(local,zone):
 
 
 @pytest.fixture
-def listening_store():
-    store = Store(':memory:')
-    store.init_schema()
+def listening_store(store):
     store.accounts.upsert_account('main','bridge',None,True)
     store.accounts.upsert_account('other','bridge','other',False)
-    yield store
-    store.conn.close()
+    return store
 
 
 @pytest.mark.parametrize('zone',['America/Costa_Rica','Pacific/Kiritimati'])
@@ -61,7 +58,7 @@ def test_event_generation_policy_does_not_change_with_later_playlist_curation(li
     s.playlists.adopt_generated_playlist('PL')
     assert s.trends.ledger_track_plays(ts-1,ts+7200)=={'ordinary':1}
     assert s.history.listening_day_counts()=={'ordinary':1}
-    assert s.rec_evidence.generated_only_play_days()=={(int(ts//86400),'generated')}
+    assert s.rec_evidence.generated_only_keys_between(ts-1,ts+7200)=={'generated'}
 
 
 def test_installed_layout_retains_raw_evidence_and_unknown_precision():
@@ -219,8 +216,6 @@ def test_playlist_counts_and_taste_weights_ignore_confirmed_alternate_upload(lis
     np.testing.assert_array_equal(after.weights,before.weights)
     np.testing.assert_array_equal(after.centroids,before.centroids)
     assert len(s.charts.get_playlist_track_recency()[first])==1
-    health = {row['playlist_id']:row['listens'] for row in s.trends.dead_playlists(10)}
-    assert health=={first:3,second:4}
     assert s.history.listening_day_counts(1)[key]==2
     assert s.history.event_play_counts(1)[key]==2
 

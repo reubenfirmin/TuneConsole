@@ -212,22 +212,47 @@ def test_failure_interruption_explicit_retry_and_independent_regular_ddl(install
 @pytest.mark.parametrize('installed', [93], indirect=True)
 def test_recovery_disk_failure_does_not_change_settings_or_other_jobs(installed, monkeypatch):
     store, _ = installed
-    _, originals = seed(store)
+    values, originals = seed(store)
     checkpoint, baseline = preparation.JOBS['checkpoint'], preparation.JOBS['baseline']
     for job in (checkpoint, baseline):
         job.install(store.conn)
+    settings = dict(store.conn.execute('SELECT key,CAST(value AS BLOB) FROM settings'))
     publish = policy_documents._publish_encoded
-    def failed(*args):
+    failures = []
+    def failed(root, encoded, digest, *, age=None):
         assert not store.conn.in_transaction
+        failures.append((root, digest, age))
         raise OSError('controlled taste disk failure')
     monkeypatch.setattr(policy_documents, '_publish_encoded', failed)
-    with pytest.raises(OSError, match='disk failure'):
+    with pytest.raises(OSError, match='controlled taste disk failure'):
         checkpoint.step(store.conn)
+    assert len(failures) == 1
+    failed_progress = checkpoint.progress(store.conn)
+    assert failed_progress.status == 'failed'
+    assert preparation.head(store.conn, preparation.CHECKPOINT) is None
+    assert dict(store.conn.execute('SELECT key,CAST(value AS BLOB) FROM settings')) == settings
     monkeypatch.setattr(policy_documents, '_publish_encoded', publish)
     finish(baseline, store.conn)
+    assert checkpoint.progress(store.conn) == failed_progress
+    with pytest.raises(MigrationError, match='retry explicitly'):
+        checkpoint.step(store.conn)
     checkpoint.step(store.conn, retry=True)
     finish(checkpoint, store.conn)
+    for job, source, kind, expected in (
+            (baseline, preparation.BASELINE, 'taste-comparison',
+             [item['trace'] for item in values[preparation.BASELINE]]),
+            (checkpoint, preparation.CHECKPOINT, 'taste-checkpoint',
+             values[preparation.CHECKPOINT]['params'])):
+        assert job.progress(store.conn).status == 'prepared'
+        head = preparation.head(store.conn, source)
+        assert preparation.read_original(store.conn, head) == originals[source]
+        assert collection_recovery.read(head['recovery_filename'], head['recovery_digest'], head['recovery_bytes'],
+                                        kind=kind, owner=1) == expected
+    assert len(members(store.conn, preparation.BASELINE, 'entries')) == 3
+    assert len(members(store.conn, preparation.CHECKPOINT, 'weights')) == 2
+    assert dict(store.conn.execute('SELECT key,CAST(value AS BLOB) FROM settings')) == settings
     assert dict(store.conn.execute('SELECT key,value FROM settings WHERE key IN (?,?,?)', tuple(originals))) == originals
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)

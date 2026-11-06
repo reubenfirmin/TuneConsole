@@ -1,4 +1,5 @@
 """Populated capture conversion retains uncertain evidence and recovery originals."""
+from contextlib import ExitStack, closing
 import json
 import sqlite3
 
@@ -6,6 +7,7 @@ import pytest
 
 from tests.historical_captures import legacy_capture
 from tests.historical_support import upgrade_fixture
+from tests.prepared_fixture_support import PreparedTemplate, cleanup_memory_files, coordinates, roots
 from yt_playlist.core import catalog, repair
 from yt_playlist.core.migrations import Migration, MigrationError, migrate
 from yt_playlist.core.migrations import current
@@ -14,8 +16,9 @@ from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.store import Store
 
 
-def _predecessor(path=':memory:'):
+def _predecessor(stack, path=':memory:'):
     store = Store(path)
+    stack.callback(store.conn.close)
     migrate(store.conn, registry=MIGRATIONS[:32])
     with store.conn:
         store.conn.executemany('INSERT INTO identities(id,label,credential_ref,is_master) VALUES (?,?,?,?)',
@@ -34,6 +37,30 @@ def _predecessor(path=':memory:'):
     return store
 
 
+@pytest.fixture
+def predecessor():
+    with ExitStack() as stack:
+        yield lambda path=':memory:': _predecessor(stack, path)
+
+
+@pytest.fixture(scope='session')
+def converted_capture_template():
+    with ExitStack() as stack:
+        source = _predecessor(stack)
+        upgrade_fixture(source)
+        files = roots(source.conn)
+        cleanup_memory_files(source, files)
+        current.validate(source.conn)
+        source.conn.execute('PRAGMA query_only=ON')
+        yield PreparedTemplate(source, files, tuple(coordinates(source.conn)), {}, None)
+
+
+@pytest.fixture
+def converted_capture(store, converted_capture_template):
+    converted_capture_template.restore(store)
+    return store
+
+
 def _registry(apply=capture.apply):
     return (*MIGRATIONS[:32], Migration(33, 'capture_evidence', apply))
 
@@ -45,8 +72,8 @@ def _originals(conn):
         'ORDER BY hi.rowid')))
 
 
-def test_populated_conversion_preserves_originals_precision_receipts_and_projection():
-    store = _predecessor()
+def test_populated_conversion_preserves_originals_precision_receipts_and_projection(predecessor):
+    store = predecessor()
     originals = _originals(store.conn)
     days = list(map(tuple, store.conn.execute('SELECT * FROM listening_days ORDER BY identity_id,identity_key')))
     observations = [dict(r) for r in store.conn.execute('SELECT * FROM listening_observations')]
@@ -77,13 +104,13 @@ def test_populated_conversion_preserves_originals_precision_receipts_and_project
         assert store.conn.execute('SELECT 1 FROM sqlite_master WHERE name=?', (name,)).fetchone() is None
 
 
-def test_file_upgrade_preserves_evidence_and_reopens_without_backups(tmp_path):
-    store = _predecessor(tmp_path / 'state.db')
+def test_file_upgrade_preserves_evidence_and_reopens_without_backups(tmp_path, predecessor):
+    store = predecessor(tmp_path / 'state.db')
     originals = _originals(store.conn)
     migrate(store.conn, registry=_registry())
     store.conn.close()
     assert not (tmp_path / 'backups').exists()
-    with sqlite3.connect(tmp_path / 'state.db') as reopened:
+    with closing(sqlite3.connect(tmp_path / 'state.db')) as reopened, reopened:
         migrate(reopened, registry=_registry())
         capture.validate(reopened)
         assert reopened.execute('SELECT COUNT(*) FROM listening_capture_receipts').fetchone() == (4,)
@@ -94,8 +121,8 @@ def test_file_upgrade_preserves_evidence_and_reopens_without_backups(tmp_path):
             'ORDER BY capture_item_id')) == originals
 
 
-def test_conversion_failure_restores_original_tables_rows_and_version(tmp_path):
-    store = _predecessor(tmp_path / 'state.db')
+def test_conversion_failure_restores_original_tables_rows_and_version(tmp_path, predecessor):
+    store = predecessor(tmp_path / 'state.db')
     originals = _originals(store.conn)
 
     def interrupted(conn, context):
@@ -111,10 +138,10 @@ def test_conversion_failure_restores_original_tables_rows_and_version(tmp_path):
     capture.validate(store.conn)
 
 
-def test_first_confirmed_calendar_preserves_unknown_capture_dates_and_precision():
+def test_first_confirmed_calendar_preserves_unknown_capture_dates_and_precision(predecessor):
     from yt_playlist.core import listening
 
-    store = _predecessor()
+    store = predecessor()
     with store.conn:
         store.conn.execute("UPDATE listening_calendars SET timezone='UTC',confirmed=0 WHERE identity_id=1")
     migrate(store.conn, registry=_registry())
@@ -128,8 +155,8 @@ def test_first_confirmed_calendar_preserves_unknown_capture_dates_and_precision(
     current.validate(store.conn)
 
 
-def test_converted_capture_removal_and_reset_preserve_other_accounts_and_exact_plays():
-    store = _predecessor()
+def test_converted_capture_removal_and_reset_preserve_other_accounts_and_exact_plays(predecessor):
+    store = predecessor()
     legacy_capture(store.conn, 2, 1792540801, ['ytm'], source='ytm_history')
     upgrade_fixture(store)
     other_rows = list(map(tuple, store.conn.execute(
@@ -164,8 +191,8 @@ def test_converted_capture_removal_and_reset_preserve_other_accounts_and_exact_p
     current.validate(store.conn)
 
 
-def test_converted_capture_reassociation_retains_raw_evidence_and_rolls_back(monkeypatch):
-    store = _predecessor()
+def test_converted_capture_reassociation_retains_raw_evidence_and_rolls_back(monkeypatch, predecessor):
+    store = predecessor()
     entries = []
     # Populate the frozen v32 schema without invoking today's catalog writer.
     with store.conn:
@@ -211,9 +238,8 @@ def test_converted_capture_reassociation_retains_raw_evidence_and_rolls_back(mon
     current.validate(store.conn)
 
 
-def test_interrupted_reset_rolls_back_observations_and_retains_receipts():
-    store = _predecessor()
-    upgrade_fixture(store)
+def test_interrupted_reset_rolls_back_observations_and_retains_receipts(converted_capture):
+    store = converted_capture
     store.trends.refresh_first_play()
     with store.conn:
         store.conn.execute("CREATE TRIGGER interrupt_reset BEFORE DELETE ON listening_capture_receipts "
@@ -225,10 +251,9 @@ def test_interrupted_reset_rolls_back_observations_and_retains_receipts():
     assert list(store.conn.iterdump()) == before
 
 
-def test_migrated_repair_backup_restores_complete_capture_evidence(tmp_path):
-    store = _predecessor()
+def test_migrated_repair_backup_restores_complete_capture_evidence(tmp_path, converted_capture):
+    store = converted_capture
     day = 1792540800 // 86400
-    upgrade_fixture(store)
     with store.conn:
         store.conn.execute(
             'INSERT INTO takeout_imports(account_id,fingerprint,imported_at,unparsed_dates,'
@@ -256,9 +281,8 @@ def test_migrated_repair_backup_restores_complete_capture_evidence(tmp_path):
 
 
 @pytest.mark.parametrize('assignment', [pytest.param('account_id=2', id='identity_id=2'), 'first_observed_at=0', "day='2026-10-01'"])
-def test_current_validation_rejects_capture_receipt_disagreement(assignment):
-    store = _predecessor()
-    upgrade_fixture(store)
+def test_current_validation_rejects_capture_receipt_disagreement(assignment, converted_capture):
+    store = converted_capture
     with store.conn:
         store.conn.execute('UPDATE listening_observations SET ' + assignment + ' WHERE capture_item_id=1')
     with pytest.raises(MigrationError, match='capture receipt'):
@@ -273,8 +297,8 @@ def test_current_validation_rejects_capture_receipt_disagreement(assignment):
     ('calendar_day', 'UTC', 1, 99),
 ])
 def test_unknown_captures_cannot_claim_exact_or_confirmed_calendar_precision(
-        precision, timezone, capture_id, item_id):
-    store = _predecessor()
+        precision, timezone, capture_id, item_id, predecessor):
+    store = predecessor()
     migrate(store.conn, registry=_registry())
     with pytest.raises(sqlite3.IntegrityError):
         store.conn.execute(

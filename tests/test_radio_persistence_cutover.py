@@ -14,39 +14,39 @@ from yt_playlist.web.radio_state import Phase, Session
 
 
 @pytest.fixture
-def predecessor(tmp_path):
+def predecessor(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path / 'radio.db')
-    migrate(store.conn, registry=registry.MIGRATIONS[:93])
-    history = [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')]
-    assert [(row[0], row[1]) for row in history] == [
-        (migration.version, migration.name) for migration in registry.MIGRATIONS[:93]]
-    store.init_schema(defer_metadata=True)
-    assert [tuple(row) for row in store.conn.execute(
-        'SELECT * FROM schema_migrations ORDER BY version')] == history
-    account = store.accounts.upsert_account('Radio', 'radio.json', None, True)
-    local_id = store.playlists.upsert_playlist(account, 'RADIO', 'Radio', 1, 'fixture', 1)
-    tracks = [
-        {'video_id': 'current', 'title': 'Current', 'artist': 'Artist', 'key': 'current|artist'},
-        {'video_id': 'pending', 'title': 'Pending', 'artist': 'Artist', 'key': 'pending|artist'},
-    ]
-    # Seed the genuine predecessor's catalog. Current catalog mutation APIs
-    # also update listening columns introduced after this schema version.
-    with store.conn:
-        for track in tracks:
-            recording = store.conn.execute(
-                'INSERT INTO recordings(identity_key,title,artist,created_at) VALUES (?,?,?,1)',
-                (track['key'], track['title'], track['artist'])).lastrowid
-            store.conn.execute('INSERT INTO youtube_items(video_id,recording_id,title,artist) VALUES (?,?,?,?)',
-                (track['video_id'], recording, track['title'], track['artist']))
-            store.conn.execute('INSERT INTO catalog_entries(recording_id,video_id) VALUES (?,?)',
-                (recording, track['video_id']))
-    session = Session(None, SimpleNamespace(fingerprint='checkpoint', tuning={}), account,
-        'Radio', phase=Phase.APPENDING, playlist='RADIO', local_id=local_id,
-        tracks=[tracks[0]], position=0, furthest=0, started_at=1, episode_id='cutover-episode')
-    operation = AppendOperation(tracks[1])
-    operation.write = PendingWrite(PlaylistEdit('add', ('current', 'pending'), track=tracks[1]), 10, None)
-    session.edits.begin(operation)
     try:
+        _pristine_installed_schema(93).backup(store.conn)
+        history = [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')]
+        assert [(row[0], row[1]) for row in history] == [
+            (migration.version, migration.name) for migration in registry.MIGRATIONS[:93]]
+        store.init_schema(defer_metadata=True)
+        assert [tuple(row) for row in store.conn.execute(
+            'SELECT * FROM schema_migrations ORDER BY version')] == history
+        account = store.accounts.upsert_account('Radio', 'radio.json', None, True)
+        local_id = store.playlists.upsert_playlist(account, 'RADIO', 'Radio', 1, 'fixture', 1)
+        tracks = [
+            {'video_id': 'current', 'title': 'Current', 'artist': 'Artist', 'key': 'current|artist'},
+            {'video_id': 'pending', 'title': 'Pending', 'artist': 'Artist', 'key': 'pending|artist'},
+        ]
+        # Seed the genuine predecessor's catalog. Current catalog mutation APIs
+        # also update listening columns introduced after this schema version.
+        with store.conn:
+            for track in tracks:
+                recording = store.conn.execute(
+                    'INSERT INTO recordings(identity_key,title,artist,created_at) VALUES (?,?,?,1)',
+                    (track['key'], track['title'], track['artist'])).lastrowid
+                store.conn.execute('INSERT INTO youtube_items(video_id,recording_id,title,artist) VALUES (?,?,?,?)',
+                    (track['video_id'], recording, track['title'], track['artist']))
+                store.conn.execute('INSERT INTO catalog_entries(recording_id,video_id) VALUES (?,?)',
+                    (recording, track['video_id']))
+        session = Session(None, SimpleNamespace(fingerprint='checkpoint', tuning={}), account,
+            'Radio', phase=Phase.APPENDING, playlist='RADIO', local_id=local_id,
+            tracks=[tracks[0]], position=0, furthest=0, started_at=1, episode_id='cutover-episode')
+        operation = AppendOperation(tracks[1])
+        operation.write = PendingWrite(PlaylistEdit('add', ('current', 'pending'), track=tracks[1]), 10, None)
+        session.edits.begin(operation)
         yield store, session
     finally:
         store.conn.close()
@@ -76,8 +76,8 @@ def test_same_controller_flushes_and_stops_after_cutover(predecessor, through, o
     store, session = predecessor
     paused = {'value': False}
     if observed == 'loaded':
-        RadioPersistence(store.settings).save(session)
-    persistence = RadioPersistence(store.settings, paused=lambda: paused['value'])
+        RadioPersistence(store.radio_checkpoints).save(session)
+    persistence = RadioPersistence(store.radio_checkpoints, paused=lambda: paused['value'])
     if observed == 'saved':
         persistence.save(session)
     original = json.loads(encode(session))
@@ -117,7 +117,7 @@ def test_same_controller_flushes_and_stops_after_cutover(predecessor, through, o
 def test_pre_cutover_controller_cannot_adopt_a_different_checkpoint(predecessor, replacement):
     store, session = predecessor
     paused = {'value': False}
-    stale = RadioPersistence(store.settings, paused=lambda: paused['value'])
+    stale = RadioPersistence(store.radio_checkpoints, paused=lambda: paused['value'])
     stale.save(session)
     paused['value'] = True
     session.error = 'Transient journal must not replace another writer'
@@ -129,7 +129,7 @@ def test_pre_cutover_controller_cannot_adopt_a_different_checkpoint(predecessor,
         store.settings.set_setting('radio_current_session', json.dumps(state))
     cutover(store)
     if replacement != 'predecessor_changed':
-        newer = RadioPersistence(store.settings)
+        newer = RadioPersistence(store.radio_checkpoints)
         if replacement == 'stop':
             session.request_stop()
             session.move(Phase.STOPPED)
@@ -148,7 +148,7 @@ def test_pre_cutover_controller_cannot_adopt_a_different_checkpoint(predecessor,
 def test_controller_created_during_repair_can_save_into_an_empty_head(predecessor):
     store, session = predecessor
     paused = {'value': True}
-    persistence = RadioPersistence(store.settings, paused=lambda: paused['value'])
+    persistence = RadioPersistence(store.radio_checkpoints, paused=lambda: paused['value'])
     persistence.save(session)
     cutover(store)
     assert radio_storage.load(store.conn) == (None, None)
@@ -164,7 +164,7 @@ def test_loaded_v1_checkpoint_can_resume_after_cutover(predecessor):
     legacy.pop('phase')
     store.settings.set_setting('radio_current_session', json.dumps(legacy))
     paused = {'value': True}
-    persistence = RadioPersistence(store.settings, paused=lambda: paused['value'])
+    persistence = RadioPersistence(store.radio_checkpoints, paused=lambda: paused['value'])
     assert persistence.load()['phase'] == Phase.APPENDING
     session.error = 'Retained while converting a v1 checkpoint'
     persistence.save(session)
@@ -178,7 +178,7 @@ def test_loaded_v1_checkpoint_can_resume_after_cutover(predecessor):
 def test_canonical_key_correction_keeps_same_controller_admission(predecessor, flush):
     store, session = predecessor
     paused = {'value': False}
-    persistence = RadioPersistence(store.settings, paused=lambda: paused['value'])
+    persistence = RadioPersistence(store.radio_checkpoints, paused=lambda: paused['value'])
     persistence.save(session)
     original = json.loads(encode(session))
     paused['value'] = True
@@ -215,7 +215,7 @@ def test_canonical_key_correction_keeps_same_controller_admission(predecessor, f
     session.request_stop()
     session.move(Phase.STOPPED)
     persistence.save(session)
-    restarted = RadioPersistence(store.settings).load()
+    restarted = RadioPersistence(store.radio_checkpoints).load()
     assert restarted['phase'] == Phase.STOPPED
     assert restarted['tracks'][0]['key'] == corrected_key
     assert restarted['pending'] == original['pending']

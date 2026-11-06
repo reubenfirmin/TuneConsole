@@ -269,6 +269,8 @@ def test_http_result_exposes_partial_destination_and_recovery(store, monkeypatch
     assert result["status"] == "partial"
     assert result["copy"]["added"] == 1 and result["copy"]["uncertain"] == 1
     assert result["copy"]["new_ytm"] == json.loads(store.actions.get_actions()[0].undo_json)["new_ytm"]
-    assert "Action Log" in result["message"]
+    assert "1 addition(s) not confirmed" in result["message"]
+    assert "Action Log" in result["guidance"]
+    assert "Repeating Copy creates another playlist" in result["guidance"]
     assert "were kept" in result["guidance"]
     assert "1 addition(s) remain unconfirmed" in client.get("/actions").text

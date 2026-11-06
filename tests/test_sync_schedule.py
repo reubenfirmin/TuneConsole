@@ -7,6 +7,9 @@ import pytest
 from tests.conftest import FakeClient, _track
 from yt_playlist.library import sync
 from yt_playlist.library.sync_outcomes import RETRY_BASE_S, sync_due
+from yt_playlist.core import playlist_scopes, sync_state
+from yt_playlist.core.album_snapshot import PlaylistSnapshot
+from yt_playlist.core.store import Store
 from yt_playlist.web.app import _background_sync_loop
 
 
@@ -146,6 +149,89 @@ def test_retaining_a_failed_listing_keeps_child_deadlines_and_blocks_ineffective
     assert not sync_due(store, 400, 86400)
     assert sync_due(store, 500, 86400)
     assert client.reads["listing"] == 2
+
+
+@pytest.mark.parametrize('failed', [False, True], ids=['expired-success', 'failed-retry'])
+def test_deleted_playlist_history_does_not_reenter_active_sync(file_backed_store, failed):
+    store = file_backed_store
+    iid = store.accounts.upsert_account('Main', 'bridge', None, True)
+    client = CountedClient(2)
+    if failed:
+        client.partial = {'PL1'}
+    sync.sync_all(store, {iid: client}, 100)
+    scope = playlist_scopes.resolve(store.conn, 'PL1', iid)
+    store.playlist_recipes.set_recipe(scope, {'model': 'keep-curation'}, 100)
+    client._playlists = [row for row in client._playlists if row['playlistId'] != 'PL1']
+    client.partial.clear()
+    deleted = sync.sync_all(store, {iid: client}, 200)
+    assert set(deleted['accounts'][str(iid)]['resources']['playlists']['items']) == {'PL0'}
+    assert store.playlist_recipes.get_recipe(scope) == {'model': 'keep-curation'}
+    assert store.conn.execute("SELECT count(*) FROM sync_cursors WHERE collection='playlist' "
+                              'AND playlist_scope_id=?', (scope,)).fetchone()[0] == 1
+    reopened = Store(store._db_path)
+    reopened._bind_repositories()
+    try:
+        state = sync_state.state(reopened)
+        assert set(state['accounts'][str(iid)]['resources']['playlists']['items']) == {'PL0'}
+        for now in (400, 430, 460, 1000):
+            assert not sync_due(reopened, now, 86400)
+            sync.sync_all(reopened, {iid: client}, now, automatic=True)
+            assert not sync_due(reopened, now + 30, 86400)
+        # An incomplete new listing retains the active child's retry history.
+        client.library_failed = True
+        retained = sync.sync_all(reopened, {iid: client}, 1100)
+        assert set(retained['accounts'][str(iid)]['resources']['playlists']['items']) == {'PL0'}
+        assert not sync_due(reopened, 1200, 86400)
+        client.library_failed = False
+        client._playlists.append({'playlistId': 'PL1', 'title': 'List 1'})
+        restored = sync.sync_all(reopened, {iid: client}, 1400, automatic=True)
+        assert set(restored['accounts'][str(iid)]['resources']['playlists']['items']) == {'PL0', 'PL1'}
+        assert playlist_scopes.resolve(reopened.conn, 'PL1', iid) == scope
+        assert reopened.playlist_recipes.get_recipe(scope) == {'model': 'keep-curation'}
+        assert not sync_due(reopened, 1430, 86400)
+    finally:
+        reopened.conn.close()
+
+
+@pytest.mark.parametrize('listing', ['unverified-empty', 'exception', 'verified-empty'])
+def test_only_verified_listing_can_retire_active_child_deadlines(file_backed_store, monkeypatch, listing):
+    store = file_backed_store
+    iid = store.accounts.upsert_account('Main', 'bridge', None, True)
+    client = CountedClient(2)
+    client.partial = {'PL1'}
+    sync.sync_all(store, {iid: client}, 100)
+    before = sync_state.state(store)['accounts'][str(iid)]['resources']['playlists']['items']
+    actual_listing = client.get_library_playlists
+
+    def unavailable(limit=None):
+        if listing == 'exception':
+            raise ValueError('Unavailable listing')
+        return PlaylistSnapshot() if listing == 'verified-empty' else []
+
+    monkeypatch.setattr(client, 'get_library_playlists', unavailable)
+    sync.sync_all(store, {iid: client}, 200)
+    reopened = Store(store._db_path)
+    reopened._bind_repositories()
+    try:
+        resources = sync_state.state(reopened)['accounts'][str(iid)]['resources']
+        if listing == 'verified-empty':
+            assert resources['playlists']['items'] == {}
+            assert reopened.playlists.get_playlists() == []
+            assert resources['playlist_listing']['status'] == 'complete'
+        else:
+            assert resources['playlists']['items'] == before
+            assert resources['playlist_listing']['status'] == 'failed'
+            assert {p.provider_playlist_id for p in reopened.playlists.get_playlists()} == {'PL0'}
+        assert not sync_due(reopened, 400, 86400)
+        monkeypatch.setattr(client, 'get_library_playlists', actual_listing)
+        client.partial.clear()
+        sync.sync_all(reopened, {iid: client}, 500, automatic=True, retry_now=listing == 'verified-empty')
+        if listing != 'verified-empty':
+            assert client.reads['PL0'] == 1
+            assert client.reads['PL1'] == 2
+        assert not sync_due(reopened, 530, 86400)
+    finally:
+        reopened.conn.close()
 
 
 def test_reconnect_retry_survives_a_busy_manual_sync_lock(store, monkeypatch):

@@ -56,6 +56,48 @@ def family(conn, label):
     return genre_family_data.family(label)
 
 
+def feature_axes(conn, labels):
+    """Resolve a bounded set with the same collision and redirect rules as resolve."""
+    labels = list(dict.fromkeys(label for label in labels if label))
+    if any(not isinstance(label, str) for label in labels):
+        raise ValueError('A genre label must be text or null')
+    if not labels:
+        return {}
+    redirected = conn.execute("SELECT 1 FROM sqlite_schema WHERE name='genre_redirects'").fetchone() is not None
+    result = {}
+    from yt_playlist.util import genre_family_data
+    for offset in range(0, len(labels), 200):
+        page = labels[offset:offset + 200]
+        wanted = ','.join('(?,?)' for _ in page)
+        current = 'COALESCE(d.genre_key,m.genre_key)' if redirected else 'm.genre_key'
+        redirects = 'LEFT JOIN genre_redirects d ON d.retired_key=m.genre_key ' if redirected else ''
+        # Filter unindexed display labels once before joining the requested
+        # labels. Otherwise SQLite can scan the complete alias/name tables for
+        # every label in a large first-selection batch.
+        rows = conn.execute('WITH wanted(label,normalized) AS (VALUES ' + wanted + '),'
+            'names AS MATERIALIZED (SELECT name,key FROM genre_catalog '
+            'WHERE name COLLATE NOCASE IN (SELECT label FROM wanted)),'
+            'aliases AS MATERIALIZED (SELECT label,genre_key FROM genre_alias '
+            'WHERE label COLLATE NOCASE IN (SELECT label FROM wanted)),matches AS ('
+            'SELECT w.label,c.key genre_key FROM wanted w JOIN genre_catalog c ON c.key=w.label '
+            'UNION SELECT w.label,c.key FROM wanted w JOIN names c ON c.name=w.label COLLATE NOCASE '
+            'UNION SELECT w.label,a.genre_key FROM wanted w JOIN genre_alias a ON a.label_key=w.normalized '
+            'UNION SELECT w.label,a.genre_key FROM wanted w JOIN aliases a ON a.label=w.label COLLATE NOCASE) '
+            'SELECT m.label,' + current + ',c.family_key FROM matches m ' + redirects +
+            'JOIN genre_catalog c ON c.key=' + current,
+            [value for label in page for value in (label, normalize(label))])
+        matches = {label: {} for label in page}
+        for label, key, family_key in rows:
+            matches[label][key] = family_key or 'other:' + key
+        for label, choices in matches.items():
+            if len(choices) == 1:
+                key, family_key = next(iter(choices.items()))
+                result[label] = family_key, key
+            else:
+                result[label] = ('other:' + normalize(label) if choices else genre_family_data.family(label)), None
+    return result
+
+
 def add_custom(conn, label):
     """Admit a deliberate custom preference, preserving an existing identity."""
     if not isinstance(label, str) or not label.strip() or len(label.encode()) > 1024:

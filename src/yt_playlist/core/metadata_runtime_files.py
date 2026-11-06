@@ -70,6 +70,9 @@ def _prepared(conn, kind, owner, revision, data):
         old = None
     if old is not None:
         if old == encoded:
+            # A previous attempt may have renamed the file but failed its
+            # final directory sync before SQL committed. Renew durability.
+            fao.write_bytes(path, encoded, immutable=True, max_bytes=MAX_BYTES)
             return path, None
         # A failed transaction may leave its next revision on disk. Only a
         # committed/current revision is immutable; no snapshot owns an orphan.
@@ -173,6 +176,41 @@ def references(conn, *, include_expired=False):
             yield 'choices', (identity,), number, True
     for identity, revision in conn.execute('SELECT id,revision FROM metadata_runtime_conflicts'):
         yield 'conflicts', (identity,), revision, True
+
+
+def owns_file(conn, filename):
+    """Keep committed heads/history; collect valid ownerless documents after grace.
+
+    Caller holds the domain snapshot fence and a SQL writer reservation.
+    Inspect one bounded document because native source keys are hashed in paths.
+    Unknown or damaged evidence is retained rather than guessed to be orphaned.
+    Prepared inactive heads have the same ownership rules as active heads.
+    """
+    try:
+        encoded = fao.read_bytes(filename, max_bytes=MAX_BYTES)
+        body = json.loads(encoded)['body']
+        kind, owner, revision = body['kind'], body['owner'], body['revision']
+        if not isinstance(owner, list) or len(owner) != (2 if kind == 'alternatives' else 1):
+            return True
+        if Path(filename).resolve() != (directory(conn) / relative(kind, owner, revision)).resolve():
+            return True
+        _verified_data(encoded, kind, owner, revision)
+    except (ValueError, KeyError, TypeError):
+        return True
+    if not conn.execute("SELECT 1 FROM sqlite_schema WHERE name='metadata_runtime_state'").fetchone():
+        return True
+    if kind == 'native':
+        row = conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?', owner).fetchone()
+        return row is not None and row[0] == revision
+    if kind == 'choices':
+        row = conn.execute('SELECT revision FROM metadata_runtime_choices WHERE id=?', owner).fetchone()
+        return row is not None and 1 <= revision <= row[0]
+    if kind == 'conflicts':
+        row = conn.execute('SELECT revision FROM metadata_runtime_conflicts WHERE id=?', owner).fetchone()
+        return row is not None and row[0] == revision
+    row = conn.execute('SELECT s.at FROM enrichment_provider_state s JOIN metadata_runtime_providers p '
+        'ON p.name=s.provider WHERE s.recording_id=? AND p.id=?', owner).fetchone()
+    return row is not None and row[0] == revision
 
 
 def export(conn, root):

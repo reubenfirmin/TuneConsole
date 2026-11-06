@@ -4,11 +4,10 @@ These reads know about catalogue joins and evidence eligibility. They do not
 choose explanation kinds, rank explanations, or construct surface responses.
 """
 from dataclasses import dataclass
-from yt_playlist.core import embedding_files
+from yt_playlist.core import embedding_files, genre_identity
 
 from yt_playlist.repos.base import GENERATED_GROUP, Repo, synchronized
 from yt_playlist.repos.playlist_eligibility import QUARANTINED_PLAYLIST_IDS_SQL
-from yt_playlist.util import genre_map
 from yt_playlist.util.matching import search_squash
 
 
@@ -112,8 +111,8 @@ class ClusterEvidenceRepo(Repo):
             album=AlbumNeighbor(album['al'], album['ar']) if album else None,
             same_day=same_day is not None,
             path_genres=tuple(r['genre'] for r in genres), path_years=tuple(r['mb_year'] for r in years),
-            family=genre_map.family(child['genre'],conn=self.conn),
-            path_families=tuple(genre_map.family(r['genre'],conn=self.conn) for r in genres))
+            family=genre_identity.family(self.conn, child['genre']),
+            path_families=tuple(genre_identity.family(self.conn, r['genre']) for r in genres))
 
     @synchronized
     def seed_matches(self, query, *, limit=8) -> SeedMatches:

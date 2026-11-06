@@ -17,7 +17,8 @@ The extension uses site-specific access to find YouTube Music, the TuneConsole w
 and the local player at `127.0.0.1` or `localhost`. It does not request the broad `tabs`
 or `history` permissions. Chrome hides unrelated tabs' URLs and titles from the extension.
 The remaining permissions provide signed-in YouTube Music cookies (`cookies`), bridge
-reconnection checks (`alarms`), and installation of the page controls (`scripting`).
+reconnection checks (`alarms`), installation of the page controls (`scripting`), and
+durable pending audio metadata (`storage`). Raw audio is never stored there.
 
 ## Connect the extension to the backend
 
@@ -74,20 +75,37 @@ playing song and displays mood predictions without a capture click or
 sharing picker. **Stop analysis** cancels the job; **Analyse again** is an optional
 retry. Reload the extension and app page after updating the extension.
 
+Normal collection and the preview tool share `audio_capture.js`, the
+`worker/audio_capture.js` broker, and `audio_capture_frame.html` / `.js` for
+tab-local inference. The preview alone uses `AudioCaptureSession` from
+`audio-capture-session.js`. Collection scheduling belongs to the extension's
+`worker/audio_sampler.js` and `worker/audio_collection.js`, independently of app documents.
+The `tc-audio-collection` port now observes protocol 1 and imports pre-upgrade
+pending metadata; an older worker must be reloaded before the app can observe it.
+The music-tab capture and frame message identifiers remain unchanged.
+The legacy capture-controller marker is retained only
+to prevent duplicate injection in already-open music tabs during an update.
+
 The app page opens a Chrome runtime port. The worker accepts only a top-level
 app page on the configured local app origin (including its localhost
 alias and exact port), and selects the existing playback-owner tab. Capture,
 offline decoding and inference all stay in that YouTube Music tab. A private
 MessageChannel transfers 16 kHz mono PCM into an extension-owned frame and worker
 embedded there. Bounded scores, diagnostics and one versioned 200-value frozen
-MusiCNN embedding per excerpt cross runtime ports to the app. The embedding is
+MusiCNN embedding per excerpt cross runtime ports to the extension worker. Collection
+posts this metadata directly to the configured local backend's `/audio-vibes/samples`.
+Only the two recognized extension origins may POST collection metadata across origins;
+other app mutations retain their same-origin protection. The embedding is
 the mean of full-patch pre-activation features; model artifacts, layer, graph
 policy and pooling identify its source. The broker permits only this typed
 embedding payload and rejects PCM, spectrograms and arbitrary feature arrays.
 Analysis needs neither a sharing picker nor a new user gesture.
-Only one preview job runs across pages, including inference. Stop, closed pages,
-disconnected ports, changed playback and deadlines release capture and pending
-work. The source recording remains unverified and results do not update metadata
+Only one audio capture runs across collection and preview pages, including inference.
+Opening preview cancels an unfinished collection reservation or recording. A completed
+excerpt finishes inference and enters durable delivery before preview starts. Collection
+resumes after the last preview disconnects. Closing or navigating an observing app page
+does not stop collection. Preview Stop, music-tab disconnection, changed playback and
+deadlines release their capture work. The source recording remains unverified and results do not update metadata
 or recommendations. A brief recorder flush margin is discarded; model input
 contains exactly ten seconds of captured audio, without zero padding.
 
@@ -97,11 +115,14 @@ Scores remain uncalibrated; they do not establish useful vibe selection yet.
 General music tags remain available under a disclosure. Nothing is adopted into
 On Air or Mix Tapes recommendations.
 
-Normal app pages collect automatic ten-second samples at 30 seconds, halfway and
-two-thirds through ordinary playback. The separate `tc-audio-collection` connection
+The extension collects automatic ten-second samples at 30 seconds, halfway and
+two-thirds through ordinary playback, including with no app page open. Full song length
+comes from player-response metadata matching the playing video. Until matching
+metadata arrives, only the 30-second point is available;
+buffered duration and the continuous media timeline do not supply song length. Its capture owner
 checks the packaged model manifest before permitting capture. Production builds
 include the complete runtime and model weights. An incomplete installation reports
-that audio checks are unavailable and retries once per minute.
+that audio checks are unavailable until the completed extension installation is reloaded.
 
 The opt-in `YT_PLAYLIST_AUDIO_VIBES=1` app flag adds only the developer
 prediction/feedback banner. Collection and sample APIs work with this flag off;
@@ -116,9 +137,17 @@ with the current playback's sample IDs, leaving the earlier answer intact.
 Unanswered cards stay
 in the shared browser stack across songs and navigation. Each saved excerpt
 lights one green indicator; failed or pending checks stay unlit.
-One app tab owns capture. The music tab waits for each sampling point against
-its media clock, so a backgrounded app's timers cannot delay the next excerpt.
-Other open app tabs display the same results. Typed, bounded sample attributes
+One extension worker owns collection. The music tab waits for each sampling point against
+its media clock, so app navigation and throttled app timers cannot delay the next excerpt.
+Open app tabs observe the same occurrence and saved results. The extension retains up
+to twelve completed metadata payloads in `chrome.storage.local`, writing before delivery.
+Retries back off from five to at most sixty seconds. Only a matching sample UUID receipt
+removes a queued payload; worker restarts and lost acknowledgements resend the same
+immutable sample, which the backend accepts idempotently. A full queue pauses capture
+while playback identity and human feedback continue. Rejected payloads remain queued.
+Pre-upgrade app outboxes are removed only after extension storage acknowledges them.
+Recent occurrence summaries restore cards on return; existing pending human judgments
+and explicit edits remain in the app's separate durable card index. Typed, bounded sample attributes
 are saved in immutable JSON files referenced by `sample_attributes`;
 `audio_vibe_runs` and `audio_session_labels` retain playback and feedback state.
 Labels preserve the exact
@@ -196,6 +225,13 @@ and the gap between the top two fits; they are hypotheses to correct. The measur
 inspector reports attribute coverage, tempo/confidence and excerpt-loudness ranges,
 and replacement excerpts. Missing attributes and varied tempo estimates remain visible.
 
+The shared production predictor is `rec/audio_vibe_prediction.py`. Background Vibe
+preparation and the development hypothesis/feedback interface use it. Its persisted
+version remains unchanged by the module rename, so existing predictions stay compatible.
+The `/audio-preview` route, template and page controller name the separate diagnostic
+capture tool; the stable preview-named extension port/message identifiers remain wire
+compatibility identifiers. Frozen historical research snapshots keep their original bytes.
+
 The initial fits are engineering hypotheses. Energize follows activation regardless
 of positive/dark tone; Lift my mood uses positive/sad mood outputs independently of
 energy; Let off steam emphasizes force even at low energy. Cruise favors a measured
@@ -220,10 +256,12 @@ CSP allows packaged WebAssembly without JavaScript eval.
 
 ### Access-only diagnostic
 
-The earlier `audio_probe.js` access-only diagnostic is retained for explicit
-developer injection and browser tests. Normal startup and sensor repair no longer
-install it, so no separate three-second capture runs outside the app's opt-in
-feature. When explicitly injected into the extension's isolated YouTube Music
+The access-only diagnostic lives at `experiments/audio_lab/audio_probe.js` and is
+excluded from the production extension. For explicit developer injection, first
+make a disposable unpacked extension copy using the staging instructions in
+`experiments/audio_lab/README.md`. Browser fixtures stage the same source in their
+temporary extension copies. Normal startup and sensor repair do not install it.
+When explicitly injected into that extension's isolated YouTube Music
 world, its **Audio access check** banner attempts one three-second check as soon
 as music is playing. No capture button or sharing picker is required.
 **Run check again** is an optional retry; **Stop check** cancels the current check.
@@ -414,7 +452,6 @@ the public site's Local Player button reuses an existing app tab.
   automatically at most twice across Music tabs and browser restarts, using Music's local
   storage and a shared Web Lock. Dismissal keeps that tab quiet for its session. A TC icon
   with an attention badge opens the same reminder on demand; connection hides both.
-- `audio_probe.js`: explicitly injected three-second access diagnostic; normal startup does not install it.
 - `setup.html`, `setup.js`, `setup.css`: toolbar connection and setup panel.
 - `worker/site.js`: public-site connection status and local-player tab activation, with its own
   coalesced open request. It receives no music/library state.

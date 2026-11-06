@@ -128,7 +128,9 @@ class ArtistNeighborhoods:
             if name not in self.contexts:
                 batch = candidates.artist_context(client, name)
                 self.remember(name, candidates.to_candidates(batch.rows, store), batch.related)
-            self.contexts[name]['family'] = genre_map.family(self.contexts[name]['genre'],conn=store.conn)
+        genre_axes = store.genres.feature_axes(self.contexts[name]['genre'] for name in self.artists)
+        for name in self.artists:
+            self.contexts[name]['family'] = genre_axes.get(self.contexts[name]['genre'], ('', None))[0]
 
     def resolve(self, pool, store, client, genre, cap):
         """Return a bounded seed neighborhood; None allows an independent genre acquisition."""
@@ -140,7 +142,7 @@ class ArtistNeighborhoods:
                 return ClusterBatch(pool, [])  # an obsolete derived slider cannot broaden discovery
             return None
         genre = axes.canonical_genre(genre)
-        family = genre_map.family(genre,conn=store.conn)
+        family = store.genres.feature_axes([genre]).get(genre, ('', None))[0]
         kept = []
         for candidate in pool:
             if candidate["source"] == "theirs" and axes.matches(candidate, "genre:" + genre):

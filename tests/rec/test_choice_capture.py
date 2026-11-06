@@ -10,22 +10,21 @@ import pytest
 from yt_playlist.core.activity import Activity
 from yt_playlist.core import fao
 from yt_playlist.core.evidence_ledger import EvidenceLedger
-from yt_playlist.core.store import Store
 from yt_playlist.rec import choice_evidence as choices, choice_outcomes
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.rec.worker_queue import Job
 
 
 @pytest.fixture
-def capture(tmp_path, monkeypatch):
-    store = Store(tmp_path / 'state.db')
-    store.init_schema()
+def capture(file_backed_store, monkeypatch):
+    store = file_backed_store
     worker = RecWorker(SimpleNamespace(store=store, work=Activity(),
         logger=logging.getLogger(__name__), now_fn=lambda: 100), debounce_s=0)
-    monkeypatch.setattr(worker, '_start_loop', lambda: None)
-    yield store, worker
-    worker.shutdown()
-    store.conn.close()
+    try:
+        monkeypatch.setattr(worker, '_start_loop', lambda: None)
+        yield store, worker
+    finally:
+        worker.shutdown()
 
 
 def test_capture_freezes_menu_and_observations_before_worker_writes(capture, monkeypatch):
@@ -327,6 +326,7 @@ def test_failed_preparation_is_not_memoized_as_a_success(capture, monkeypatch):
 
 @pytest.mark.parametrize('phase', ['before-maintenance', 'after-ledger-inventory'])
 def test_ledger_retention_preserves_response_admitted_after_protection_inventory(capture, monkeypatch, phase):
+    from yt_playlist.core.evidence_inventory import Inventory
     from yt_playlist.rec import rec_params
 
     store, worker = capture
@@ -335,39 +335,48 @@ def test_ledger_retention_preserves_response_admitted_after_protection_inventory
     now = 100 + (rec_params.get_param(store, 'choice_retention_d') + 1) * 86400
     offer = choices.issue(store, 'albums', [{'id': 'a'}], 100, context={'at': 100, 'groups': []})
     worker._flush_measurements()
+    original = ledger.get('opportunity', offer)
+    context = choices.resolve_context(store, {'artifact': original['context']})
+    assert context['at'] == 100
+    assert not store.choice_capture.opportunities() and not worker.jobs.measurements
     for path in ledger.directory.glob('artifact/*/*.json'):
         fao.touch(path, mtime_ns=1_000_000_000)
-    maintain = ledger.maintain
+    boundaries = []
+    scan = Inventory.scan
 
-    def admit_after_inventory(before, **kwargs):
-        assert offer not in kwargs['protected_opportunities']
-        def admit():
-            assert choices.respond(store, offer, 'choice', now, option_id='a', action_id='late-response')
-        if phase == 'before-maintenance':
+    def admit():
+        assert ledger.get('opportunity', offer) == original
+        assert choices.respond(store, offer, 'choice', now, option_id='a', action_id='late-response')
+        assert offer in store.choice_capture.opportunities()
+        assert len(worker.jobs.measurements) == 1
+        assert ledger.get('response', 'late-response') is None
+        boundaries.append('admission')
+
+    def after_inventory(inventory):
+        assert inventory.ledger is ledger
+        rows = scan(inventory)
+        assert not any(path.parts[-3] == 'response' for path in rows)
+        boundaries.append('inventory')
+        if phase == 'after-ledger-inventory':
+            assert boundaries == ['inventory']
             admit()
-            return maintain(before, **kwargs)
-        records = ledger.records
+        return rows
 
-        def after_response_inventory(kind):
-            rows = records(kind)
-            if kind == 'response':
-                admit()
-            return rows
-
-        with monkeypatch.context() as patch:
-            patch.setattr(ledger, 'records', after_response_inventory)
-            return maintain(before, **kwargs)
-
-    monkeypatch.setattr(ledger, 'maintain', admit_after_inventory)
+    monkeypatch.setattr(Inventory, 'scan', after_inventory)
+    if phase == 'before-maintenance':
+        admit()
     # Exercise the ledger's final deletion guard directly. The application
     # maintenance wrapper now pauses new recording before taking inventory.
     result = ledger.maintain(now - rec_params.get_param(store, 'choice_retention_d') * 86400,
                             protected_opportunities=(), pending_protection=store.choice_capture.protection)
-    assert ledger.get('opportunity', offer)
+    assert boundaries == (['admission', 'inventory'] if phase == 'before-maintenance'
+                          else ['inventory', 'admission'])
+    assert ledger.get('opportunity', offer) == original
+    assert choices.resolve_context(store, {'artifact': original['context']}) == context
     assert result['retired_unanswered'] == 0
     worker._flush_measurements()
     assert ledger.get('response', 'late-response')['opportunity_id'] == offer
-    assert not store.choice_capture.opportunities()
+    assert not store.choice_capture.opportunities() and not worker.jobs.measurements
 
 
 def test_snapshot_maintenance_uses_live_owner_pins(capture, monkeypatch):

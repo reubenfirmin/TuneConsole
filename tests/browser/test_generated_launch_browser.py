@@ -1,5 +1,6 @@
 """Real save requests and popup lifecycle, with a controlled provider/player."""
 import base64
+import json
 from pathlib import Path
 import re
 import time
@@ -12,28 +13,94 @@ from tests.conftest import FakeClient, _track
 from yt_playlist.library.sync import sync_identity
 
 
+def _generation_provider():
+    return FakeClient(playlists=[{'playlistId': 'SOURCE', 'title': 'Ready', 'count': 2}],
+                      tracks={'SOURCE': [_track('one', 'First song', 'Artist'),
+                                         _track('two', 'Second song', 'Artist')]})
+
+
+@pytest.fixture(scope='session')
+def generated_board_template(_pristine_current_schema):
+    from tests.prepared_fixture_support import prepared_template
+    from tests.test_home_other_genres import seed_genres
+    from tests.test_mode_cards_route import prepare_home
+
+    def build(source):
+        account = source.accounts.upsert_account('main', 'cred', None, True)
+        source.playlists.upsert_playlist(account, 'PLZ', 'Old Mix', 3, 'h', 0.0)
+        sync_identity(source, account, _generation_provider(), now=1)
+        source.settings.set_setting('onboard_listening_format', 'mixes')
+        # Keep the original six genres, four lanes and twenty songs per lane.
+        seed_genres(source)
+        for key, value in (('last_sync_at', '1'), ('onboard_dismissed', '1'),
+                           ('home_format', 'mixes')):
+            source.settings.set_setting(key, value)
+        prepare_home(source, 1)
+        catalog = {'v': _track('v', 'Prepared song', 'Artist')}
+        for track in source.conn.execute(
+                'SELECT video_id,title,artist,duration_s FROM catalog_tracks WHERE video_id IS NOT NULL'):
+            catalog[track['video_id']] = _track(track['video_id'], track['title'], track['artist'],
+                track['duration_s'] or 200, set_video_id='set-' + track['video_id'])
+        return catalog
+
+    with prepared_template(_pristine_current_schema, build) as template:
+        yield template
+
+
+@pytest.fixture
+def generated_board_app(store, generated_board_template):
+    import socket
+    import uvicorn
+    from tests.live_server import LiveServer
+    from yt_playlist.web.app import create_app
+
+    # Restore before starting the private app; no running request observes a
+    # partially copied Store. Providers, bridges and launch state are never shared.
+    catalog = generated_board_template.restore(store)
+    provider = _generation_provider()
+    provider._catalog.update(catalog)
+    account = store.accounts.get_master_account().id
+    app = create_app(store, lambda: {account: provider}, now_fn=lambda: 1.0)
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        port = sock.getsockname()[1]
+        server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=port, log_level='warning'))
+        with LiveServer(server, sockets=[sock]):
+            yield f'http://127.0.0.1:{port}', app.state.ctx, provider
+
+
 @pytest.fixture
 def generation_app(request, monkeypatch, store, page):
     from yt_playlist.web import app as app_module
 
-    original, apps = app_module.create_app, []
+    if getattr(request, 'param', None) == 'board':
+        base, ctx, provider = request.getfixturevalue('generated_board_app')
+        from yt_playlist.rec import account_growth
+        growth_view = account_growth.view
 
-    def capture(*args, **kwargs):
-        app = original(*args, **kwargs)
-        apps.append(app)
-        return app
+        def unlocked_mixes(*args, **kwargs):
+            result = growth_view(*args, **kwargs)
+            result['ready_formats']['mixes'] = True
+            result['ready_areas']['directions'] = True
+            return result
 
-    monkeypatch.setattr(app_module, 'create_app', capture)
-    base = request.getfixturevalue('live_app')
-    ctx = apps[0].state.ctx
-    account = store.accounts.get_master_account().id
-    provider = FakeClient(playlists=[{'playlistId': 'SOURCE', 'title': 'Ready', 'count': 2}],
-                          tracks={'SOURCE': [_track('one', 'First song', 'Artist'),
-                                             _track('two', 'Second song', 'Artist')]})
-    sync_identity(store, account, provider, now=1)
-    ctx.client_provider = lambda: {account: provider}
-    store.settings.set_setting('onboard_listening_format', 'mixes')
-    store.settings.set_setting('onboard_format_pending', '0')
+        monkeypatch.setattr(account_growth, 'view', unlocked_mixes)
+    else:
+        original, apps = app_module.create_app, []
+
+        def capture(*args, **kwargs):
+            app = original(*args, **kwargs)
+            apps.append(app)
+            return app
+
+        monkeypatch.setattr(app_module, 'create_app', capture)
+        base = request.getfixturevalue('live_app')
+        ctx = apps[0].state.ctx
+        account = store.accounts.get_master_account().id
+        provider = _generation_provider()
+        sync_identity(store, account, provider, now=1)
+        ctx.client_provider = lambda: {account: provider}
+        store.settings.set_setting('onboard_listening_format', 'mixes')
     bridge, frames = ctx.bridge, []
     bridge._send = lambda frame: None
 
@@ -48,56 +115,127 @@ def generation_app(request, monkeypatch, store, page):
         return True
 
     monkeypatch.setattr(bridge, 'send_control', navigate)
-    if getattr(request, 'param', None) == 'board':
-        from tests.test_home_other_genres import seed_genres
-        from tests.test_mode_cards_route import prepare_home
-
-        from yt_playlist.rec import account_growth
-        growth_view = account_growth.view
-
-        def unlocked_mixes(*args, **kwargs):
-            result = growth_view(*args, **kwargs)
-            result['ready_formats']['mixes'] = True
-            result['ready_areas']['directions'] = True
-            return result
-
-        monkeypatch.setattr(account_growth, 'view', unlocked_mixes)
-        provider._catalog['v'] = _track('v', 'Prepared song', 'Artist')
-        # Seed before the browser starts polling the shared in-memory fixture.
-        seed_genres(store)
-        store.settings.set_setting('last_sync_at', '1')
-        store.settings.set_setting('onboard_dismissed', '1')
-        store.settings.set_setting('onboard_welcomed', '1')
-        store.settings.set_setting('home_format', 'mixes')
-        prepare_home(store, 1)
-        for track in store.conn.execute('SELECT video_id,title,artist,duration_s FROM catalog_tracks WHERE video_id IS NOT NULL'):
-            provider._catalog[track['video_id']] = _track(track['video_id'], track['title'], track['artist'],
-                track['duration_s'] or 200, set_video_id='set-' + track['video_id'])
     page.route('https://i.ytimg.com/**', lambda route: route.abort())
     page.goto(base)
     return base, provider, bridge, frames
 
 
-def test_save_closes_its_popup_and_confirms_actual_player(generation_app, page):
-    base, provider, bridge, frames = generation_app
-    errors = []
-    page.on('pageerror', lambda error: errors.append(str(error)))
-    with page.expect_popup() as opened:
-        page.get_by_role('button', name='Save and play this mix').click()
-    popup = opened.value
-    page.wait_for_url(re.compile(r'/playlist/\d+$'))
-    assert popup.is_closed()
-    page.evaluate('window.playbackStatus.refresh()')
-    expect(page.locator('.pl-headmain')).to_be_visible()
-    expect(page.locator('[data-generated-playback]')).to_have_count(0)
-    assert len(provider.created) == len(frames) == 1
-    assert provider.created[0][0] in frames[0]['url']
-    assert not errors
+@pytest.fixture
+def save_deadline(generation_app, page, stalled_routes, request):
+    # HTMX sends XMLHttpRequest, whose timeout is native and is not advanced
+    # by Playwright's JavaScript clock. Keep the production deadline installed
+    # until the real save has finished, then shorten that same native timer.
+    page.evaluate('''() => {
+      document.addEventListener('htmx:beforeSend', event => {
+        if (event.detail.requestConfig.path !== '/home/generate') return;
+        const xhr = event.detail.xhr;
+        const state = window.generatedSaveDeadline = {
+          requested: event.detail.requestConfig.timeout, installed: xhr.timeout,
+          started: performance.now(), armed: false, timedOut: false
+        };
+        xhr.addEventListener('timeout', event => {
+          state.timedOut = true; state.trusted = event.isTrusted;
+          state.expiredAt = performance.now();
+        });
+        state.arm = () => {
+          state.armedAt = performance.now();
+          state.shortened = Math.ceil(state.armedAt - state.started) + 200;
+          xhr.timeout = state.shortened;
+          state.armed = true;
+        };
+      });
+    }''')
+
+    def expire(popup):
+        _, provider, _, frames = generation_app
+        deadline = time.monotonic() + 10
+        while not stalled_routes and time.monotonic() < deadline:
+            page.wait_for_timeout(10)
+        assert len(stalled_routes) == len(provider.created) == len(frames) == 1
+        state = page.evaluate('''() => ({requested: generatedSaveDeadline.requested,
+          installed: generatedSaveDeadline.installed, armed: generatedSaveDeadline.armed,
+          timedOut: generatedSaveDeadline.timedOut})''')
+        assert state == {'requested': 20000, 'installed': 20000, 'armed': False, 'timedOut': False}
+        assert page.evaluate('() => [...generationWindows.values()].every(record => !record.uncertain)')
+        assert not popup.is_closed()
+        expect(popup.get_by_role('status', name='Preparing playlist')).to_be_visible()
+        expect(popup.get_by_role('alert')).not_to_be_visible()
+        page.evaluate('generatedSaveDeadline.arm()')
+        expect(popup.get_by_role('alert')).to_contain_text('couldn’t confirm playback')
+        state = page.evaluate('''() => ({...generatedSaveDeadline, arm: undefined})''')
+        assert state['armed'] and state['timedOut'] and state['trusted']
+        assert state['shortened'] < 20000
+        assert state['expiredAt'] >= state['armedAt']
+        assert state['expiredAt'] - state['started'] >= state['shortened'] - 1
+        report = '/tmp/tuneconsole-1001-save-deadline-' + re.sub(r'[^\w.-]', '-', request.node.name) + '.json'
+        Path(report).write_text(json.dumps({'test': request.node.nodeid, 'native_deadline': state,
+            'completed_saves': len(provider.created), 'playback_frames': len(frames)}, indent=2))
+        return state
+
+    return expire
+
+
+def test_prepared_board_copies_keep_catalog_sql_and_files_private(
+        generated_board_template, store, _pristine_current_schema):
+    from contextlib import closing
+    from tests.store_fixture_support import initialize_consumer
+    from yt_playlist.core.store import Store
+    from yt_playlist.rec import home_prepared, mode_surfaces
+
+    template = generated_board_template
+    bundles = template.bundles
+    assert {str(mid) for mid in range(6)} <= bundles.keys()
+    assert all(set(bundles[str(mid)]) == set(mode_surfaces.CARD_SURFACES) for mid in range(6))
+    assert all(len(rows) == 20 for mid in range(6) for rows in bundles[str(mid)].values())
+    first_catalog = template.restore(store)
+    sibling = Store(':memory:')
+    with closing(sibling.conn):
+        initialize_consumer(sibling, _pristine_current_schema)
+        second_catalog = template.restore(sibling)
+        owners = (template.source, store, sibling)
+        assert len({id(owner.conn) for owner in owners}) == 3
+        assert len({owner._evidence_key for owner in owners}) == 3
+        expected = template.source.rec_proposals.get_proposals(home_prepared.SURFACE)
+        assert home_prepared._valid(expected)
+        for owner in owners:
+            assert owner.rec_proposals.get_proposals(home_prepared.SURFACE) == expected
+            assert len(owner.modes.list_modes()) == 6
+            source = next(p for p in owner.playlists.get_playlists() if p.provider_playlist_id == 'SOURCE')
+            assert [track[1] for track in owner.playlists.get_playlist_tracks_with_meta(source.id)] == ['one', 'two']
+
+        def files(owner):
+            return {tuple(row[:3]): Path(row[3]) for row in owner.conn.execute(
+                'SELECT publication_id,surface,chunk_key,filename FROM home_display_files')}
+
+        original, first, second = (files(owner) for owner in owners)
+        assert original and original.keys() == first.keys() == second.keys()
+        before = {key: path.read_bytes() for key, path in original.items()}
+        for key, path in original.items():
+            assert first[key].read_bytes() == second[key].read_bytes() == before[key]
+            assert not path.samefile(first[key]) and not path.samefile(second[key])
+            assert not first[key].samefile(second[key])
+        first_provider, second_provider = _generation_provider(), _generation_provider()
+        first_provider._catalog.update(first_catalog)
+        second_provider._catalog.update(second_catalog)
+        title = second_provider._catalog['v']['title']
+        first_provider._catalog['v']['title'] = 'Private edit'
+        first_provider._tracks['SOURCE'].append(_track('private', 'Only here', 'Artist'))
+        first_provider.create_playlist('Private save', 'Only this test')
+        assert second_provider._catalog['v']['title'] == template.result['v']['title'] == title
+        assert len(second_provider._tracks['SOURCE']) == 2 and not second_provider.created
+        store.settings.set_setting('generated_board_private', 'changed')
+        store.rec_proposals.put_proposals(home_prepared.SURFACE, {**expected, 'built_at': 2}, 2)
+        for owner in (sibling, template.source):
+            assert owner.settings.get_setting('generated_board_private') is None
+            assert owner.rec_proposals.get_proposals(home_prepared.SURFACE) == expected
+        assert {key: path.read_bytes() for key, path in original.items()} == before
+        assert {key: path.read_bytes() for key, path in second.items()} == before
 
 
 def test_save_keeps_loader_until_playlist_opens_without_a_confirmation_screen(generation_app, page):
     base, provider, bridge, frames = generation_app
-    pending = {}
+    pending, errors = {}, []
+    page.on('pageerror', lambda error: errors.append(str(error)))
 
     def hold_save(route):
         pending['response'] = route.fetch()
@@ -112,11 +250,19 @@ def test_save_keeps_loader_until_playlist_opens_without_a_confirmation_screen(ge
             window.confirmationScreens++;
         }
       }).observe(document.body, {childList: true, subtree: true});
-      window.addEventListener('pagehide', () => {
+      window.addEventListener('app-page-leaving', () => {
         const record = Array.from(generationWindows.values())[0];
         sessionStorage.setItem('mix-navigation-check', JSON.stringify({
           confirmations: window.confirmationScreens,
           loaderOpen: !!record?.tab && !record.tab.closed
+        }));
+      }, {once: true});
+      window.addEventListener('app-page-changed', () => {
+        const record = Array.from(generationWindows.values())[0];
+        sessionStorage.setItem('mix-ready-check', JSON.stringify({
+          confirmations: window.confirmationScreens,
+          loaderOpen: !!record?.tab && !record.tab.closed,
+          destinationReady: !!document.querySelector('.pl-headmain')
         }));
       }, {once: true});
     }''')
@@ -140,36 +286,111 @@ def test_save_keeps_loader_until_playlist_opens_without_a_confirmation_screen(ge
             pending.pop('route').fulfill(response=pending['response'])
     page.wait_for_url(re.compile(r'/playlist/\d+$'))
     expect(page.locator('.pl-headmain')).to_be_visible()
+    if not popup.is_closed():
+        popup.wait_for_event('close', timeout=10000)
     assert popup.is_closed()
     assert page.evaluate("JSON.parse(sessionStorage.getItem('mix-navigation-check'))") == {
         'confirmations': 0, 'loaderOpen': True}
+    assert page.evaluate("JSON.parse(sessionStorage.getItem('mix-ready-check'))") == {
+        'confirmations': 0, 'loaderOpen': True, 'destinationReady': True}
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(page.locator('[data-generated-playback]')).to_have_count(0)
     page.screenshot(path='/tmp/tuneconsole-mix-normal-playlist.png')
     assert len(provider.created) == len(frames) == 1
-
-
-@pytest.mark.parametrize('generation_app', ['board'], indirect=True)
-def test_focused_four_mix_board_saves_and_launches_once(generation_app, page):
-    base, provider, bridge, frames = generation_app
-    errors = []
-    page.on('pageerror', lambda error: errors.append(str(error)))
-    page.goto(base)
-    card = page.locator('#gen-wheelhouse')
-    expect(card).to_be_visible()
-    card.locator('.gen-poster').click()
-    expect(card).to_have_class(re.compile('is-focused'))
-    with page.expect_popup() as opened:
-        card.get_by_role('button', name='Save and play this mix').click()
-    page.wait_for_url(re.compile(r'/playlist/\d+$'))
-    assert opened.value.is_closed()
-    page.evaluate('window.playbackStatus.refresh()')
-    expect(page.locator('.pl-headmain')).to_be_visible()
-    expect(page.locator('[data-generated-playback]')).to_have_count(0)
-    assert len(provider.created) == len(frames) == 1
+    assert provider.created[0][0] in frames[0]['url']
     assert not errors
 
 
+def test_uncertain_save_allows_a_different_synced_selection_and_keeps_original_recovery(
+        generation_app, store, page, stalled_routes, save_deadline):
+    base, provider, bridge, frames = generation_app
+    posts, errors, popups = [], [], []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    original = page.locator('.starter-mix').evaluate('node => generationContext(node)')
+
+    def hold_only_first_receipt(route):
+        posts.append(route.request)
+        response = route.fetch()
+        assert response.status == 200
+        if len(posts) > 1:
+            route.fulfill(response=response)
+        else:
+            stalled_routes.append(route)
+
+    page.route('**/home/generate', hold_only_first_receipt)
+    try:
+        with page.expect_popup() as opened:
+            page.get_by_role('button', name='Save and play this mix').click()
+        unknown_popup = opened.value
+        popups.append(unknown_popup)
+        save_deadline(unknown_popup)
+        expect(unknown_popup.get_by_role('alert')).to_contain_text('couldn’t confirm playback', timeout=30000)
+        expect(page.locator('#toasts [role="alert"]')).to_have_count(0)
+        old = page.evaluate('''() => {
+          const record = generationWindows.get('gen-onboard_library');
+          return {key: record.key, token: record.token};
+        }''')
+        page.evaluate('genComplete("a-different-launch-token", null, true)')
+        assert not unknown_popup.is_closed()
+        third = _track('three', 'Third song', 'Another artist')
+        provider._tracks['SOURCE'].append(third)
+        provider._playlists[0]['count'] = 3
+        provider._catalog['three'] = third
+        sync_identity(store, store.accounts.get_master_account().id, provider, now=2)
+        expect(page.locator('#connection-error')).to_have_count(0)
+        card = page.locator('.starter-mix')
+        expect(card.locator('.gen-row')).to_have_count(3, timeout=10000)
+        assert {track['video_id'] for track in card.evaluate('node => generationContext(node).tracks')} == {
+            'one', 'two', 'three'}
+        play = card.get_by_role('button', name='Save and play this mix')
+        expect(play).to_be_enabled()
+        with page.expect_popup() as opened_new:
+            play.click()
+        new_popup = opened_new.value
+        popups.append(new_popup)
+        page.wait_for_url(re.compile(r'/playlist/\d+$'))
+        page.wait_for_function('() => !window.__ytTab || window.__ytTab.closed')
+        if not new_popup.is_closed():
+            new_popup.wait_for_event('close', timeout=10000)
+        assert new_popup.is_closed()
+        assert not unknown_popup.is_closed()
+        assert len(posts) == len(provider.created) == len(frames) == 2
+        assert {track['videoId'] for track in provider._tracks[provider.created[0][0]]} == {'one', 'two'}
+        assert {track['videoId'] for track in provider._tracks[provider.created[1][0]]} == {'one', 'two', 'three'}
+        assert page.evaluate('key => sessionStorage.getItem(key)', old['key']) == old['token']
+        assert page.evaluate('key => JSON.parse(sessionStorage.getItem(key)).tracks',
+                             'tc-mix-launch:' + old['token']) == original['tracks']
+        # The first popup still restores its own attempted two-song context
+        # after a different three-song save completed and retired its window.
+        unknown_popup.get_by_role('button', name='Back to this mix').click()
+        page.wait_for_url(base + '/#gen-onboard_library')
+        expect(card.locator('.gen-row')).to_have_count(2)
+        assert card.evaluate('node => generationContext(node).tracks') == original['tracks']
+        expect(play).to_be_disabled()
+        play.evaluate("button => htmx.trigger(button, 'click')")
+        assert len(posts) == len(provider.created) == len(frames) == 2
+        page.screenshot(path='/tmp/tuneconsole-881-original-after-different-save.png', full_page=True)
+        assert not errors
+    finally:
+        Path('/tmp/tuneconsole-881-different-save-diagnostics.json').write_text(json.dumps({
+            'posts': [request.post_data for request in posts],
+            'created': provider.created, 'frames': frames,
+            'windows': page.evaluate('''() => [...generationWindows.values()].map(record => ({
+              token: record.token, key: record.key, sent: record.sent, uncertain: record.uncertain,
+              connected: record.node.isConnected, tabClosed: record.tab?.closed,
+              currentTab: window.__ytTab === record.tab
+            }))'''),
+            'popups': [{'url': popup.url, 'closed': popup.is_closed()} for popup in popups],
+            'errors': errors,
+        }, indent=2))
+        page.unroute_all(behavior='ignoreErrors')
+        for popup in popups:
+            if not popup.is_closed():
+                popup.close()
+
+
 @pytest.mark.parametrize('generation_app', ['board'], indirect=True)
-@pytest.mark.parametrize('refresh', ['cards', 'sync'])
+@pytest.mark.parametrize('refresh', ['cards', 'sync', 'recovery'])
 def test_background_refresh_does_not_replace_a_saving_mix(generation_app, page, refresh):
     base, provider, bridge, frames = generation_app
     pending, errors = {}, []
@@ -182,7 +403,13 @@ def test_background_refresh_does_not_replace_a_saving_mix(generation_app, page, 
     url = base + ('/home/cards?prepare_attempt=1' if refresh == 'cards' else '/')
     page.route(url, hold_refresh)
     # The refresh is already in flight when the user selects and plays a mix.
-    page.evaluate("""({url, refresh}) => { htmx.ajax('GET', url, {
+    page.evaluate("""({url, refresh}) => {
+      if (refresh === 'recovery') {
+        window.dispatchEvent(Object.assign(new Event('app-request-failed'),
+          {detail: {url: '/home/generate', method: 'POST', reconcile: true}}));
+        return;
+      }
+      htmx.ajax('GET', url, {
         target: refresh === 'cards' ? '#home-mode-cards' : '#home',
         select: refresh === 'cards' ? '#home-mode-cards' : '#home', swap: 'outerHTML',
         headers: {'X-Home-Refresh': 'sync'} }); }""", {'url': url, 'refresh': refresh})
@@ -209,13 +436,17 @@ def test_background_refresh_does_not_replace_a_saving_mix(generation_app, page, 
     expect(card.locator('.gen-play')).to_be_disabled()
     pending['save'].fulfill(response=pending['save_response'])
     page.wait_for_url(re.compile(r'/playlist/\d+$'))
+    expect(page.locator('.pl-headmain')).to_be_visible()
+    if not opened.value.is_closed():
+        opened.value.wait_for_event('close', timeout=10000)
     assert opened.value.is_closed()
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(page.locator('[data-generated-playback]')).to_have_count(0)
     assert len(provider.created) == len(frames) == 1
     assert not errors
 
 
-@pytest.mark.parametrize('previous_key_format', [False, True])
-def test_lost_save_response_is_terminal_and_does_not_create_again(generation_app, page, previous_key_format):
+def test_lost_save_response_is_terminal_and_does_not_create_again(generation_app, page):
     base, provider, bridge, frames = generation_app
     requests = []
 
@@ -241,28 +472,87 @@ def test_lost_save_response_is_terminal_and_does_not_create_again(generation_app
     play.evaluate("el => htmx.trigger(el, 'click')")
     original_order = [row.get_attribute('data-vid') for row in page.locator('.starter-mix [data-vid]').all()]
     assert len(original_order) == 2
-    if previous_key_format:
-        # Simulate the browser retaining a save from before the key stopped
-        # depending on sampler order. Updating the UI cannot authorize a retry.
-        page.evaluate("""() => {
-            const key = Object.keys(sessionStorage).find(key => key.startsWith('tc-generation:'));
-            const prefix = key.slice(0, key.indexOf('['));
-            const videos = JSON.parse(key.slice(prefix.length)).sort().reverse();
-            const token = sessionStorage.getItem(key);
-            sessionStorage.removeItem(key);
-            sessionStorage.setItem(prefix + JSON.stringify(videos), token);
-        }""")
+    # Simulate the browser retaining a save from before the key stopped
+    # depending on sampler order. Updating the UI cannot authorize a retry.
+    page.evaluate("""() => {
+        const key = Object.keys(sessionStorage).find(key => key.startsWith('tc-generation:'));
+        const prefix = key.slice(0, key.indexOf('['));
+        const videos = JSON.parse(key.slice(prefix.length)).sort().reverse();
+        const token = sessionStorage.getItem(key);
+        sessionStorage.removeItem(key);
+        sessionStorage.setItem(prefix + JSON.stringify(videos), token);
+    }""")
     for _ in range(16):
         page.reload()
         current_order = [row.get_attribute('data-vid') for row in page.locator('.starter-mix [data-vid]').all()]
         if current_order != original_order:
             break
     assert current_order != original_order, 'Exercise the real sampler changing order on reload'
-    play.click()
     expect(play).to_be_disabled()
+    play.evaluate("button => htmx.trigger(button, 'click')")
     assert len(provider.created) == len(requests) == 1
     page.screenshot(path='/tmp/tuneconsole-634-save-unknown.png', full_page=True)
     popup.screenshot(path='/tmp/tuneconsole-634-popup-failure.png')
+
+
+def test_uncertain_save_survives_quiet_recovery_before_popup_return(
+        generation_app, page, stalled_routes, save_deadline):
+    base, provider, bridge, frames = generation_app
+    posts, errors = [], []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    selected = page.locator('.starter-mix').evaluate('node => generationContext(node)')
+
+    def lose_receipt(route):
+        posts.append(route.request)
+        assert route.fetch().status == 200
+        # Keep the committed response silent until the real browser deadline.
+        stalled_routes.append(route)
+
+    page.route('**/home/generate', lose_receipt)
+    page.evaluate("""() => {
+        window.saveTimeouts = [];
+        document.addEventListener('htmx:beforeSend', event => {
+            if (event.detail.requestConfig.path === '/home/generate')
+                saveTimeouts.push(event.detail.requestConfig.timeout);
+        });
+    }""")
+    try:
+        with page.expect_popup() as opened:
+            page.get_by_role('button', name='Save and play this mix').click()
+        popup = opened.value
+        save_deadline(popup)
+        expect(popup.get_by_role('alert')).to_contain_text('couldn’t confirm playback', timeout=30000)
+        expect(page.locator('#toasts [role="alert"]')).to_have_count(0)
+        assert page.evaluate('saveTimeouts') == [20000]
+        assert len(posts) == len(provider.created) == len(frames) == 1
+        with page.expect_response(lambda response: response.request.method == 'GET' and response.url == base + '/'):
+            pass
+        expect(page.locator('#connection-error')).to_have_count(0)
+        play = page.get_by_role('button', name='Save and play this mix')
+        expect(play).to_be_visible()
+        # Change preview order without using Back to this mix. The unresolved
+        # identity belongs to the selected videos, not their sampled order.
+        page.locator('.starter-tracks').evaluate('list => list.replaceChildren(...[...list.children].reverse())')
+        if not play.is_disabled():
+            play.click()
+        expect(play).to_be_disabled()
+        expect(page.locator('[data-generation-error]')).to_contain_text('may already be')
+        assert len(posts) == len(provider.created) == len(frames) == 1
+        play.evaluate("button => htmx.trigger(button, 'click')")
+        expect(play).to_be_disabled()
+        expect(page.locator('[data-generation-error]')).to_contain_text('may already be')
+        assert len(posts) == len(provider.created) == len(frames) == 1
+        # The original popup still owns the attempted order and choices.
+        popup.get_by_role('button', name='Back to this mix').click()
+        restored = page.locator('.starter-mix')
+        expect(restored.locator('.gen-row')).to_have_count(len(selected['tracks']))
+        assert restored.evaluate('node => generationContext(node).tracks') == selected['tracks']
+        expect(restored.get_by_role('button', name='Save and play this mix')).to_be_disabled()
+        page.screenshot(path='/tmp/tuneconsole-881-reconnect.png', full_page=True)
+        assert len(posts) == len(provider.created) == len(frames) == 1
+        assert not errors
+    finally:
+        page.unroute_all(behavior='ignoreErrors')
 
 
 @pytest.mark.parametrize('generation_app', ['board'], indirect=True)
@@ -392,7 +682,7 @@ def test_paused_storage_can_open_saved_mix_without_a_local_playlist(generation_a
         expect(page.locator('.playlist-play')).to_be_visible()
         expect(page.locator('.gen-done')).to_have_count(0)
         expect(page.locator('#storage-maintenance')).to_have_text(
-            'Performing database maintenance - this should take just a few minutes.')
+            'Optimizing app storage; some recommendations are temporarily unavailable.')
         deadline = time.monotonic() + 5
         while not opened.value.is_closed() and time.monotonic() < deadline:
             page.wait_for_timeout(50)
@@ -423,9 +713,14 @@ def test_playback_timeout_retries_the_saved_playlist(generation_app, page, monke
     navigate = bridge.send_control
     # The first command is accepted but never reaches the native player.
     monkeypatch.setattr(bridge, 'send_control', lambda *args, **kwargs: True)
-    with page.expect_popup():
+    with page.expect_popup() as opened:
         page.get_by_role('button', name='Save and play this mix').click()
     page.wait_for_url(re.compile(r'/playlist/\d+$'))
+    expect(page.locator('.pl-headmain')).to_be_visible()
+    if not opened.value.is_closed():
+        opened.value.wait_for_event('close', timeout=10000)
+    assert opened.value.is_closed()
+    page.wait_for_function('sessionStorage.getItem("tc-generated-playback") !== null')
     page.clock.install()
     page.evaluate('window.playbackStatus.refresh()')
     note = page.locator('[data-generated-playback]')
@@ -450,9 +745,9 @@ def test_interstitial_without_a_response_exits_loading(generation_app, page):
     expect(page.locator('.gen-loader')).to_be_hidden()
 
 
-def test_popup_has_feedback_before_the_backend_answers(generation_app, page):
+def test_popup_has_feedback_before_the_backend_answers(generation_app, page, stalled_routes):
     base, provider, *_ = generation_app
-    requests = []
+    requests = stalled_routes
     page.context.route('**/home/generating?*', lambda route: requests.append(route))
     page.route('**/home/generate', lambda route: requests.append(route))
     page.clock.install()
@@ -586,13 +881,13 @@ def test_unknown_mix_keeps_its_identity_and_returns_to_the_same_selection(genera
 
 
 @pytest.mark.parametrize('generation_app', ['starter', 'board'], indirect=True)
-def test_popup_deadline_survives_reloading_its_opener(generation_app, page, request):
+def test_popup_deadline_survives_reloading_its_opener(generation_app, page, request, stalled_routes):
     base, provider, *_ = generation_app
     page.unroute('https://i.ytimg.com/**')
     page.context.route('https://i.ytimg.com/**', lambda route: route.fulfill(
         content_type='image/svg+xml', body='<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300">'
         '<path fill="#503b69" d="M0 0h300v300H0z"/><circle cx="150" cy="150" r="90" fill="#a9cbbd"/></svg>'))
-    receipts = []
+    receipts = stalled_routes
     kind = request.node.callspec.params['generation_app']
     card = page.locator('#gen-wheelhouse' if kind == 'board' else '#gen-onboard_library')
     if kind == 'board':
@@ -695,6 +990,7 @@ def test_edited_mix_recovery_survives_losing_its_opener(generation_app, page, op
     returned.wait_for_url(base + '/#gen-wheelhouse')
     restored = returned.locator('#gen-wheelhouse')
     expect(restored.locator('.gen-row')).to_have_count(len(selected['tracks']))
+    expect(restored).to_have_class(re.compile('is-focused'))
     actual = restored.evaluate('node => generationContext(node).tracks')
     assert sorted(actual, key=lambda row: row['video_id']) == sorted(
         selected['tracks'], key=lambda row: row['video_id'])

@@ -16,7 +16,7 @@ from threadpoolctl import threadpool_limits
 from yt_playlist.core import sample_files
 from yt_playlist.core.store import Store
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_model as shared
-from yt_playlist.rec import audio_vibe_preview as preview, home_vibe, musical_character
+from yt_playlist.rec import audio_vibe_prediction as predictor, home_vibe, musical_character
 from yt_playlist.rec import musical_preparation, progressive, vibe_preparation
 from .cruise_export import captures
 from .external_experiment import digest, save, stamp
@@ -60,11 +60,11 @@ def replay(directory, seconds):
         for rows in grouped.values():
             for chosen in (rows[:1], rows):
                 original = deepcopy(chosen)
-                baseline = preview.predict(chosen, require_complete=False)
+                baseline = predictor.predict(chosen, require_complete=False)
                 patch.setenv(cruise.MODE_KEY, 'active')
-                active = preview.predict(chosen, require_complete=False)
+                active = predictor.predict(chosen, require_complete=False)
                 patch.setenv(cruise.MODE_KEY, 'shadow')
-                shadow = preview.predict(chosen, require_complete=False)
+                shadow = predictor.predict(chosen, require_complete=False)
                 patch.setenv(cruise.MODE_KEY, 'off')
                 scores = {row['vibe']: row['score'] for row in baseline['ranking']}
                 if shadow['suitability'] != scores or {k: v for k, v in active.items()
@@ -135,7 +135,7 @@ def replay(directory, seconds):
                     raise ValueError('Preparation changed a non-Cruise fit')
                 if old['cruise']['source'] == 'audio_measurement':
                     captured = store.vibe_predictions.inputs([key])[key]
-                    expected = preview.predict(captured['samples'])['suitability']['cruise']
+                    expected = predictor.predict(captured['samples'])['suitability']['cruise']
                     if abs(new['cruise']['score'] - expected) > 1e-12:
                         raise ValueError('Published recording fit differs from production inference')
                     measured += 1

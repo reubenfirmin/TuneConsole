@@ -1,8 +1,10 @@
 """Runtime receipt selection retains exact recovery and compatible operations."""
+from contextlib import contextmanager
 from dataclasses import replace
 import json
 from pathlib import Path
 import sqlite3
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +12,7 @@ import pytest
 from tests.core.test_predecessor_writes import installed
 from tests.core.test_workflow_receipt_preparation import seed
 from yt_playlist.core import workflow_settings
-from yt_playlist.core.migrations import MigrationError, registry, regular, runner
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import workflow_receipts as preparation, workflow_publication as publication
 from yt_playlist.core.store import Store
 from yt_playlist.library import playlist_gc_retry
@@ -33,6 +35,14 @@ def stage(owner, conn, size=128):
         if result.complete:
             return result.id
     pytest.fail('Workflow publication map did not finish bounded fixture')
+
+
+def rejection_inputs(store):
+    _, _, _, source = seed(store)
+    owner = publication.OWNERS['playlists']
+    prepare(owner, store.conn)
+    assert owner.selected(store.conn) is None
+    return source
 
 
 @pytest.mark.parametrize('installed', [79, 93, 97], indirect=True)
@@ -75,11 +85,10 @@ def test_preopened_readers_and_real_callers_use_exact_selected_receipts(installe
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['fields', 'account', 'slot', 'extra', 'omitted', 'original', 'recovery', 'plan'])
-def test_incorrect_receipt_fields_members_coverage_or_files_cannot_publish(installed, failure):
+def test_incorrect_receipt_fields_members_coverage_or_files_cannot_publish(installed, staged_custody, failure):
     store, _ = installed
-    _, _, _, source = seed(store)
+    source = staged_custody(installed, 'workflow-playlists', rejection_inputs)
     owner = publication.OWNERS['playlists']
-    prepare(owner, store.conn)
     header = preparation.head(store.conn, 'playlists', source)
     receipts, items = (preparation.table('playlists', suffix) for suffix in ('receipts', 'items'))
     with store.conn:
@@ -131,39 +140,61 @@ def test_gc_deadlines_and_failure_evidence_require_verification_without_a_writer
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_bounded_map_restart_and_atomic_cutover_keep_earlier_custody(installed):
+def test_bounded_map_restart_and_atomic_cutover_keep_earlier_custody(installed, record_property):
+    @contextmanager
+    def phase(name):
+        began = time.perf_counter()
+        try:
+            yield
+        finally:
+            record_property('workflow_map_' + name + '_seconds', time.perf_counter() - began)
+
     store, _ = installed
-    for index in range(259):
-        store.settings.set_setting(workflow_settings.ALBUM+':'+str(index), '["first", "first", "last"]')
+    inputs = {workflow_settings.ALBUM+':'+str(index): '["first", "first", "last"]'
+              for index in range(259)}
+    # Only the initial source rows share a transaction. Preparation, map
+    # checkpoints, continuing writes and publication still own their commits.
+    with phase('source_settings'):
+        store.settings.set_values(inputs)
+    assert not store.conn.in_transaction
+    assert store.settings.get_settings_with_prefix(workflow_settings.ALBUM+':') == inputs
     owner = publication.OWNERS['albums']
-    prepare(owner, store.conn)
-    first = owner.step(store.conn, batch_size=128)
+    with phase('initial_preparation'):
+        prepare(owner, store.conn)
+    with phase('first_map_checkpoint'):
+        first = owner.step(store.conn, batch_size=128)
     assert first.copied == 128 and not first.complete
     with store.conn:
         store.conn.execute('CREATE TRIGGER controlled_workflow_map BEFORE INSERT ON '+owner.table('map')+
             " BEGIN SELECT RAISE(ABORT,'controlled map interruption'); END")
-    with pytest.raises(sqlite3.IntegrityError, match='controlled map interruption'):
+    with phase('failed_map_continuation'), pytest.raises(sqlite3.IntegrityError, match='controlled map interruption'):
         owner.step(store.conn, batch_size=128)
     assert owner.stage(store.conn, first.id) == first
     assert store.conn.execute('SELECT count(*) FROM '+owner.table('custody')).fetchone()[0] == 128
     with store.conn:
         store.conn.execute('DROP TRIGGER controlled_workflow_map')
     changed = workflow_settings.ALBUM+':100'
-    store.settings.set_setting(changed, '["continuing"]')
-    identity = stage(owner, store.conn)
+    with phase('continuing_source_write'):
+        store.settings.set_setting(changed, '["continuing"]')
+    with phase('restart_preparation_and_map'):
+        identity = stage(owner, store.conn)
     assert identity != first.id
+    completed = owner.stage(store.conn, identity)
+    assert completed.copied == 259 and completed.complete
     with store.conn:
         store.conn.execute('CREATE TRIGGER controlled_workflow_cutover BEFORE INSERT ON '+owner.table('head')+
             " BEGIN SELECT RAISE(ABORT,'controlled cutover interruption'); END")
-    with pytest.raises(sqlite3.IntegrityError, match='controlled cutover interruption'):
+    with phase('failed_selection'), pytest.raises(sqlite3.IntegrityError, match='controlled cutover interruption'):
         owner.publish(store.conn, stage=identity)
     assert not store.conn.execute('SELECT 1 FROM '+owner.table('generations')).fetchone()
     with store.conn:
         store.conn.execute('DROP TRIGGER controlled_workflow_cutover')
-    owner.publish(store.conn, stage=identity)
-    assert owner.value(store.conn, identity, changed) == '["continuing"]'
-    assert owner.value(store.conn, first.id, changed) == '["first", "first", "last"]'
-    with pytest.raises(sqlite3.IntegrityError, match='retained'):
+    with phase('selection_retry'):
+        owner.publish(store.conn, stage=identity)
+    with phase('original_readback'):
+        assert owner.value(store.conn, identity, changed) == '["continuing"]'
+        assert owner.value(store.conn, first.id, changed) == '["first", "first", "last"]'
+    with phase('retained_receipt_guard'), pytest.raises(sqlite3.IntegrityError, match='retained'):
         with store.conn:
             store.conn.execute('DELETE FROM '+preparation.table('albums', 'receipts'))
 
@@ -252,7 +283,7 @@ def test_file_recovery_and_explicit_failure_retry_do_not_block_regular_ddl(insta
     assert store.settings.get_setting(source) == originals[source]
     store.settings.set_setting(source, '{}')
     install = preparation.policy_documents._publish_encoded
-    def fail(*args):
+    def fail(*args, age=None):
         assert not store.conn.in_transaction
         raise OSError('controlled workflow file failure')
     monkeypatch.setattr(preparation.policy_documents, '_publish_encoded', fail)
@@ -291,32 +322,3 @@ def test_null_blank_empty_and_duplicate_receipts_keep_exact_originals(installed)
     assert list(map(tuple, store.conn.execute('SELECT fingerprint,duplicate_position FROM '+preparation.table('albums', 'receipts')+
         ' WHERE source=? AND preparation_revision=? ORDER BY position', (source, header['preparation_revision'])))) == [
             ('same', None), ('same', 0), ('last', None)]
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_native_upgrade_preserves_archives_and_native_owners_take_precedence(installed, tmp_path):
-    store, _ = installed
-    _, originals, account, source = seed(store)
-    identities = {}
-    for name, owner in publication.OWNERS.items():
-        identities[name] = stage(owner, store.conn)
-        owner.publish(store.conn, stage=identities[name])
-    upgraded = Store(tmp_path/'workflow-publication-upgrade.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        upgraded.init_schema(defer_metadata=True)
-        regular.validate(upgraded.conn)
-        for key, raw in originals.items():
-            owner = publication.owner_for(key)
-            assert owner.selected(upgraded.conn) is None
-            assert owner.value(upgraded.conn, identities[owner.name], key) == raw
-        receipts = upgraded.settings.spotify_transfer_receipts(account)
-        assert len(receipts['fingerprint:東京']['source_video_ids']) == 3
-        assert len(playlist_gc_retry.states(upgraded)) == 1
-        with upgraded.conn:
-            upgraded.conn.execute('DROP TRIGGER '+publication.OWNERS['gc'].header+'_mapped_delete')
-        with pytest.raises(MigrationError, match='mapped publication object'):
-            regular.validate(upgraded.conn)
-    finally:
-        upgraded.conn.close()

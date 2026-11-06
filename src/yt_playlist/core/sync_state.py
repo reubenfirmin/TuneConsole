@@ -52,7 +52,11 @@ def read(conn):
         if row['collection']=='account':
             item = account
         elif row['collection']=='playlist':
-            item = account.setdefault('resources',{}).setdefault('playlists',{}).setdefault('items',{}).setdefault(row['provider_playlist_id'],{})
+            # The published attempt defines membership. Durable scopes and
+            # cursors also retain deleted playlists for curation/reappearance.
+            item = account.get('resources',{}).get('playlists',{}).get('items',{}).get(row['provider_playlist_id'])
+            if item is None:
+                continue
         else:
             item = account.setdefault('resources',{}).setdefault(row['collection'],{})
         for column,target in (('phase','status'),('updated_at','last_attempt_at'),('last_success_at','last_success_at'),

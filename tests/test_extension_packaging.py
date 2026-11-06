@@ -1,4 +1,4 @@
-"""The store ZIP must execute the same worker graph without adding permissions."""
+"""The store ZIP executes the same worker graph with narrowly scoped permissions."""
 import json
 from pathlib import Path
 import shutil
@@ -48,6 +48,18 @@ def test_store_package_loads_worker_modules_and_saved_playlist_radio(tmp_path, b
         manifest = json.loads(package.read("manifest.json"))
         assert manifest == {key: value for key, value in source.items() if key != "key"}
         assert "README.md" not in package.namelist()
+        assert 'audio_probe.js' not in package.namelist()
+        capture_files = {'audio_capture.js', 'worker/audio_capture.js',
+                         'worker/audio_sampler.js', 'worker/audio_collection.js',
+                         'audio_capture_frame.html', 'audio_capture_frame.js'}
+        assert capture_files <= set(package.namelist())
+        assert not {'audio_preview_capture.js', 'worker/audio_preview.js',
+                    'audio_preview_frame.html', 'audio_preview_frame.js'} & set(package.namelist())
+        for name in capture_files:
+            assert package.read(name) == (ROOT / 'extension' / name).read_bytes()
+        assert any('audio_capture.js' in script['js'] for script in manifest['content_scripts'])
+        assert any('audio_capture_frame.html' in resource['resources']
+                   for resource in manifest['web_accessible_resources'])
         assert not {'tabs', 'history'} & set(manifest['permissions'])
         assert 'audio_model/unused-research.bin' not in package.namelist()
         for name in SCRIPTS:
@@ -65,7 +77,9 @@ const root = process.argv[1];
 const calls = [], events = [];
 const event = () => ({addListener(fn) { events.push(fn); }});
 const chrome = {
+  storage: {local: {get:async()=>({}),set:async()=>{}}},
   runtime: {onMessage:event(), onStartup:event(), onInstalled:event(),
+    getManifest: () => JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8')),
     getURL: name => pathToFileURL(path.join(root, name)).href},
   tabs: {query:async () => [{id:7,url:'https://music.youtube.com/'}],
          sendMessage:async () => ({ok:true,receiverRevision:10,mainVersion:4,mainRevision:10,mainAgeMs:0}),
@@ -77,8 +91,8 @@ const chrome = {
   }},
 };
 class Socket { static OPEN = 1; static CLOSED = 3; constructor() { this.readyState=0; } }
-const {radio, sensors, audioPreview} = require('./tests/extension_worker.cjs').loadWorker({chrome, WebSocket:Socket,
-  URL, console, setTimeout() {}, clearTimeout() {}, fetch: async url => ({
+const {radio, sensors, audioCapture, audioCollection} = require('./tests/extension_worker.cjs').loadWorker({chrome, WebSocket:Socket,
+  URL, console, structuredClone, setTimeout() {}, clearTimeout() {}, fetch: async url => ({
     ok: true, json: async () => JSON.parse(fs.readFileSync(new URL(url), 'utf8')),
   })}, root);
 (async () => {
@@ -96,12 +110,19 @@ const {radio, sensors, audioPreview} = require('./tests/extension_worker.cjs').l
     'the packaged bootstrap must accept its own sensor revisions');
   assert.equal((await sensors.ping(7,true,{nativeRating:true})).ok,true);
   const replies = [];
-  audioPreview.connect({name:'tc-audio-collection',
+  await audioCollection.loaded;
+  assert.equal(audioCollection.connect({name:'tc-audio-collection',
     sender:{url:'http://127.0.0.1:8765/',frameId:0},
     onMessage:event(),onDisconnect:event(),postMessage:data=>replies.push(data),
-    disconnect(){throw Error('The production collection port must be accepted');}});
+    disconnect(){throw Error('The production collection port must be accepted');}}),true);
   await new Promise(resolve=>setImmediate(resolve));
   assert.equal(replies[0]?.type,'ready','packaged models must enable automatic sampling');
+  assert.equal(replies[0].protocol,1,'collection ports observe the extension-owned scheduler');
+  assert.equal(replies[0].extension_version,
+    JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8')).version);
+  assert.notEqual(replies[0].extension_version,'0.1.23',
+    'the legacy preview and extension-owned collection must have distinct store versions');
+  assert.equal(await audioCapture.hasCollectionModel(),true);
 })().catch(error => { console.error(error); process.exitCode=1; });
 """
     result = subprocess.run([node, "-e", script, str(tmp_path / "unpacked")], cwd=ROOT,

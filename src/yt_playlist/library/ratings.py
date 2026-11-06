@@ -1,6 +1,7 @@
 """Explicit song ratings, confirmed by YouTube before updating local state."""
 import logging
 from yt_playlist.core import playback_feedback
+from yt_playlist.core.action_errors import ActionInputError
 
 from yt_playlist.library import rating_projection
 from yt_playlist.library.rating_projection import record_confirmed, reconcile_recordings
@@ -23,7 +24,7 @@ def record_observations(store, account_id, statuses, *, source, now):
         # A stale/incomplete remote snapshot must not overtake locally retained
         # confirmations. Retry the sync after the bounded playback prefix drains.
         playback_feedback.drain(store)
-        if playback_feedback.inbox(store).pending():
+        if store.playback_feedback.pending():
             raise RuntimeError('Playback feedback is awaiting local replay; retry this sync')
     rating_projection.record_observations(store, account_id, statuses, source=source, now=now)
 
@@ -73,9 +74,9 @@ def reconcile_pending(store, account_id, client):
 def set_rating(store, account_id, video_id, status, client, now, *, after_confirmed=None, now_fn=None,
                acquisition=None):
     if not isinstance(video_id, str) or not video_id.strip():
-        raise ValueError("A video ID is required")
+        raise ActionInputError('song_required')
     if status not in STATUSES:
-        raise ValueError("Invalid rating state")
+        raise ActionInputError('rating_invalid')
     with ordered(store, account_id, video_id):
         # Resolve the retained clock before sending a remote mutation. Once
         # YouTube confirms, local capture must not depend on the main handle
@@ -83,7 +84,7 @@ def set_rating(store, account_id, video_id, status, client, now, *, after_confir
         retained = main_item_rating(store, account_id, video_id)
         result = with_retry(lambda: client.rate_song(video_id, status))
         if isinstance(result, dict) and result.get("status", "STATUS_SUCCEEDED") != "STATUS_SUCCEEDED":
-            raise ValueError("YouTube wouldn’t update this song’s rating.")
+            raise ActionInputError('rating_rejected')
         # Capture the exact confirmed result before acknowledging it. This
         # independent inbox never waits for maintenance's serving connection.
         errors = []
@@ -122,5 +123,5 @@ def main_item_rating(store, identity, video):
     # The current player thumb may lag an API write. Read retained SQL without
     # waiting for its writer; confirmed queued changes are shown immediately.
     result = store.tracks.item_rating(identity, video)
-    queued = playback_feedback.inbox(store).rating(identity, video)
+    queued = store.playback_feedback.queued_rating(identity, video)
     return queued if queued is not None and (result is None or queued['observed_at'] >= result['observed_at']) else result

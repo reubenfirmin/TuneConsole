@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
-from tests.conftest import FakeClient
+from tests.conftest import FakeClient, _track
 
 
 def _client(store):
@@ -74,30 +74,48 @@ def test_expand_empty_without_model(store):
     assert ring == []
 
 
-def _save_client(store):
+def _save_client(store, *, catalog=None):
     iid = store.accounts.upsert_account("main", "cred", None, True)
-    fc = FakeClient()
+    fc = FakeClient(catalog=catalog)
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), fc
 
 
-def test_save_resolves_keys_to_tracks(store):
-    c, fc = _save_client(store)
+def test_save_resolves_keys_to_tracks(store, caplog):
+    c, fc = _save_client(store, catalog={
+        'va': _track('va', 'Ta', 'Art', set_video_id='set-va'),
+        'vb': _track('vb', 'Tb', 'Art', set_video_id='set-vb')})
     store.tracks.upsert_track("va", "Ta", "Art", None, None)
     store.tracks.upsert_track("vb", "Tb", "Art", None, None)
     keep = [identity_key("Ta", "Art"), identity_key("Tb", "Art")]
     r = c.post("/clusters/save", data={"name": "My Cluster", "keep_keys": json.dumps(keep),
                                        "central_keys": "[]"})
-    assert r.status_code == 200 and "Saved" in r.text
+    assert r.status_code == 200
+    assert len(fc.created) == 1
+    ytm, title, _ = fc.created[0]
+    playlist, = store.playlists.get_playlists()
+    assert f'data-generated-playlist="{ytm}"' in r.text
+    assert f'window.location.assign("/playlist/{playlist.id}")' in r.text
+    assert r.headers['HX-Trigger'] == 'cluster-saved'
     # a cluster now saves with its own 'cluster' recipe (#15), so the title is versioned like any
     # generated mix ("My Cluster #1") and its recipe is persisted.
-    assert fc.created[0][1].startswith("My Cluster")
-    assert sorted(fc.added[0][1]) == ["va", "vb"]
-    assert store.playlist_recipes.get_recipe(fc.created[0][0])["model"] == "cluster"
+    assert title == "My Cluster #1"
+    assert len(fc.added) == 1 and fc.added[0][0] == ytm
+    videos = fc.added[0][1]
+    assert sorted(videos) == ["va", "vb"]
+    assert [track['videoId'] for track in fc.get_playlist(ytm)['tracks']] == videos
+    assert playlist.track_count == 2
+    assert [(track[0], track[1]) for track in store.playlists.get_playlist_tracks_with_meta(
+        playlist.id)] == [(identity_key('Ta' if video == 'va' else 'Tb', 'Art'), video)
+                         for video in videos]
+    assert store.playlist_recipes.get_recipe(ytm)["model"] == "cluster"
+    assert 'verify_written_sequence' not in caplog.text
 
 
 def test_save_always_folds_in_central_tracks(store):
-    c, fc = _save_client(store)
+    c, fc = _save_client(store, catalog={
+        'va': _track('va', 'Ta', 'Art', set_video_id='set-va'),
+        'vc': _track('vc', 'Tc', 'Central', set_video_id='set-vc')})
     store.tracks.upsert_track("va", "Ta", "Art", None, None)
     store.tracks.upsert_track("vc", "Tc", "Central", None, None)
     keep = json.dumps([identity_key("Ta", "Art")])
@@ -114,17 +132,31 @@ def test_save_rejects_empty(store):
     assert r.status_code == 200 and "Couldn't save" in r.text
 
 
-def test_save_persists_canvas_for_reopen(store):
+def test_save_persists_canvas_for_reopen(store, caplog):
     """#48: a successful save stashes the full canvas keyed by the new playlist's ytm, and
     /clusters/state/<ytm> returns it verbatim so the cluster can be reopened and regrown."""
-    c, fc = _save_client(store)
+    c, fc = _save_client(store, catalog={
+        'va': _track('va', 'Ta', 'Art', set_video_id='set-va')})
     store.tracks.upsert_track("va", "Ta", "Art", None, None)
     keep = json.dumps([identity_key("Ta", "Art")])
     state = json.dumps({"v": 1, "rootId": 1, "nodes": [{"id": 1, "kind": "central"}], "trunk": []})
     r = c.post("/clusters/save", data={"name": "Reopenable", "keep_keys": keep,
                                        "central_keys": "[]", "state": state})
-    assert r.status_code == 200 and "Saved" in r.text
+    assert r.status_code == 200
+    assert len(fc.created) == 1
     ytm = fc.created[0][0]
+    playlist, = store.playlists.get_playlists()
+    assert f'data-generated-playlist="{ytm}"' in r.text
+    assert f'window.location.assign("/playlist/{playlist.id}")' in r.text
+    assert r.headers['HX-Trigger'] == 'cluster-saved'
+    assert fc.created[0][1] == 'Reopenable #1'
+    assert fc.added == [(ytm, ['va'])]
+    assert [track['videoId'] for track in fc.get_playlist(ytm)['tracks']] == ['va']
+    assert playlist.track_count == 1
+    assert [(track[0], track[1]) for track in store.playlists.get_playlist_tracks_with_meta(
+        playlist.id)] == [(identity_key('Ta', 'Art'), 'va')]
+    assert store.playlist_recipes.get_recipe(ytm)['model'] == 'cluster'
+    assert 'verify_written_sequence' not in caplog.text
     got = c.get(f"/clusters/state/{ytm}")
     assert got.status_code == 200 and got.json() == json.loads(state)
 
@@ -136,7 +168,8 @@ def test_state_404_when_no_canvas(store):
 
 def test_save_without_state_stores_no_canvas(store):
     """Older clients (or a save with no state field) don't create a canvas row, so reopen 404s."""
-    c, fc = _save_client(store)
+    c, fc = _save_client(store, catalog={
+        'va': _track('va', 'Ta', 'Art', set_video_id='set-va')})
     store.tracks.upsert_track("va", "Ta", "Art", None, None)
     keep = json.dumps([identity_key("Ta", "Art")])
     c.post("/clusters/save", data={"name": "NoCanvas", "keep_keys": keep, "central_keys": "[]"})

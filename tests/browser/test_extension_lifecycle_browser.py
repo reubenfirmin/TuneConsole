@@ -5,13 +5,13 @@ fixtures; extension APIs, world isolation, media, and backend ingestion run for 
 """
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 import io
 import json
 from pathlib import Path
 import shutil
 import socket
 import subprocess
-import threading
 import time
 from types import SimpleNamespace
 import wave
@@ -23,6 +23,7 @@ import uvicorn
 
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.web.routes.bridge import build
+from tests.live_server import LiveServer
 
 
 EXT = Path(__file__).resolve().parents[2] / "extension"
@@ -39,17 +40,14 @@ def installed_bridge(playwright, browser_type_launch_args, tmp_path, store, requ
     ctx = SimpleNamespace(bridge=bridge, store=store, now_fn=time.time)
     app = FastAPI()
     app.include_router(build(ctx))
+    owners = ExitStack()
+    request.addfinalizer(owners.close)
     # Bind before starting the server so another test/process cannot take the chosen port.
-    listener = socket.socket()
+    listener = owners.enter_context(socket.socket())
     listener.bind(("127.0.0.1", 0))
     port = listener.getsockname()[1]
     server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
-    thread = threading.Thread(target=lambda: server.run(sockets=[listener]), daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 5
-    while not server.started and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert server.started, "fixture bridge failed to start"
+    owners.enter_context(LiveServer(server, sockets=[listener], startup_timeout=5))
 
     # Change only the local test endpoint/permission in a copy; the source manifest and
     # production endpoint remain untouched. Retain the real unpacked extension identity.
@@ -94,17 +92,12 @@ def installed_bridge(playwright, browser_type_launch_args, tmp_path, store, requ
     def fixture_page(path: str):
         return HTMLResponse(HTML.read_text())
 
-    tls_listener = socket.socket()
+    tls_listener = owners.enter_context(socket.socket())
     tls_listener.bind(("127.0.0.1", 0))
     tls_port = tls_listener.getsockname()[1]
     tls_server = uvicorn.Server(uvicorn.Config(app, log_level="warning",
                                               ssl_keyfile=str(key), ssl_certfile=str(certificate)))
-    tls_thread = threading.Thread(target=lambda: tls_server.run(sockets=[tls_listener]), daemon=True)
-    tls_thread.start()
-    deadline = time.monotonic() + 5
-    while not tls_server.started and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert tls_server.started, "fixture Music origin failed to start"
+    owners.enter_context(LiveServer(tls_server, sockets=[tls_listener], startup_timeout=5))
     context = None
     try:
         context = playwright.chromium.launch_persistent_context(
@@ -144,12 +137,6 @@ def installed_bridge(playwright, browser_type_launch_args, tmp_path, store, requ
     finally:
         if context is not None:
             context.close()
-        server.should_exit = True
-        tls_server.should_exit = True
-        thread.join(timeout=5)
-        tls_thread.join(timeout=5)
-        listener.close()
-        tls_listener.close()
 
 
 def _music(h, query="?playing=true"):

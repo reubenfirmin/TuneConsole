@@ -4,6 +4,7 @@ This complements the populated actual-library experiment. It does not replace
 its slow-phase, file-preservation or controlled Radio/provider checks.
 """
 import asyncio
+from tests.enrichment_support import choose_field
 from functools import partial
 import json
 import os
@@ -105,7 +106,7 @@ async def case(root, version):
                         await probe('selected')
                         # A real compatible writer withdraws the selection in
                         # its transaction and continues serving installed owners.
-                        await asyncio.to_thread(store.enrichment.set_track_field,
+                        await asyncio.to_thread(choose_field, store,
                             store.tracks.track_ids_for_videos(['matrix-0'])['matrix-0'],'genre','Jazz')
                         with store._lock:
                             assert destination.selected(store.conn) is None

@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core import entity_names, genre_identity, playlist_scopes
+from yt_playlist.core import entity_names, genre_identity, playlist_scopes, schema_transforms
 from yt_playlist.core.migrations import current, registry, migrate, Migration, MigrationError
 from yt_playlist.core.migrations import v103_entity_names
 from yt_playlist.core.migrations.v103_entity_names import COLUMNS, transform
@@ -71,11 +71,28 @@ def test_installed_names_upgrade_preserves_all_rows_ids_and_matches_fresh(tmp_pa
         store.conn.close()
 
 
-@pytest.mark.parametrize('transform', [transform, entity_names.predecessor_definition])
+@pytest.mark.parametrize('transform', [transform, entity_names.predecessor_definition,
+                                     schema_transforms.entity_names])
 def test_name_transform_keeps_literal_payloads_and_unrelated_provider_ids(transform):
-    assert transform("SELECT 'identity_id',identity_id FROM identities")=="SELECT 'identity_id',account_id FROM accounts"
+    assert transform("CREATE VIEW names AS SELECT 'identity_id''s',identity_id FROM identities -- identity_id\n")==(
+        "CREATE VIEW names AS SELECT 'identity_id''s',account_id FROM accounts -- identity_id\n")
+    assert transform('CREATE TABLE "playlist_scopes" ([ref] TEXT,`provider_id` TEXT,"IDENTITY_ID" INTEGER)')==(
+        'CREATE TABLE "playlist_scopes" ([id] TEXT,`provider_playlist_id` TEXT,"account_id" INTEGER)')
+    assert transform('CREATE INDEX ix_playlist_scope ON playlists(scope_ref,ytm_playlist_id)')==(
+        'CREATE INDEX ix_playlist_scope_account ON playlists(playlist_scope_id,provider_playlist_id)')
+    assert transform('CREATE TABLE ignored_merge_members(playlist_ref TEXT)')==(
+        'CREATE TABLE ignored_merge_members(playlist_scope_id TEXT)')
+    for table in ('cleanup_ignored','quarantined_playlists'):
+        assert transform(f'CREATE TABLE {table}(ytm TEXT)')==f'CREATE TABLE {table}(playlist_scope_id TEXT)'
+    for table in ('suppressed_overlaps','overlap_kept'):
+        assert transform(f'CREATE TABLE {table}(a TEXT,b TEXT)')==(
+            f'CREATE TABLE {table}(first_playlist_scope_id TEXT,second_playlist_scope_id TEXT)')
+    assert transform('CREATE TABLE rec_mode_picks(playlist_id INTEGER)')==(
+        'CREATE TABLE rec_mode_picks(membership_ref_id INTEGER)')
     assert transform('CREATE TABLE artist_provider_ids(provider_id TEXT)')=='CREATE TABLE artist_provider_ids(provider_id TEXT)'
     assert transform('CREATE TABLE playlist_items(playlist_id INTEGER REFERENCES playlists(id))')=='CREATE TABLE playlist_items(playlist_id INTEGER REFERENCES playlists(id))'
+    assert transform("CREATE TABLE providers(provider_id TEXT DEFAULT 'playlist_scopes') /* playlist_scopes */")==(
+        "CREATE TABLE providers(provider_id TEXT DEFAULT 'playlist_scopes') /* playlist_scopes */")
 
 
 def test_pretyped_album_context_keeps_historical_document_and_current_account_field():

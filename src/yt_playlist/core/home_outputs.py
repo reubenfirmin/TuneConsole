@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 
-from . import group_evidence, json_cache, recommendation_outputs as files
+from . import bounded_json, group_evidence, json_cache, recommendation_outputs as files
 from .activity import check_cancellable_work
 
 SURFACES = frozenset({'home_prepared', 'home_tuned', 'home_choice', 'album_prepared', 'adaptive_group_preview',
@@ -12,6 +12,10 @@ SURFACES = frozenset({'home_prepared', 'home_tuned', 'home_choice', 'album_prepa
 MAX_BYTES = 8 * 1024 * 1024
 MAX_DECODED_BYTES = 16 * 1024 * 1024
 PART_CHARACTERS = 64 * 1024
+# An explicit four-card selection is small enough for a larger bounded part.
+# Avoid publishing several separately synced files for one compressed menu.
+SELECTION_PART_CHARACTERS = 128 * 1024
+ASCII_SELECTION_PART_CHARACTERS = 256 * 1024
 CONTEXTS = ('context', 'choice_context', 'album_choice_context')
 
 
@@ -34,7 +38,12 @@ def prepare(surface, raw, at):
     if at is not None and (type(at) not in (int, float) or not math.isfinite(at)):
         raise ValueError('Invalid Home display observation time')
     value = files.decode_json(raw)
-    if isinstance(value, dict) and value.get(json_cache.MARKER) in (json_cache.FORMAT, json_cache.LEGACY_FORMAT):
+    if isinstance(value, dict) and value.get(json_cache.MARKER) == json_cache.LEGACY_FORMAT:
+        # Validate numbers as the bounded decoder reads them. Explicit menus
+        # carry complete profiles; walking every scalar again adds foreground
+        # work without establishing any additional publication invariant.
+        value = bounded_json.loads(json_cache.unpack(value.get('json'), max_bytes=MAX_DECODED_BYTES), finite=True)
+    elif isinstance(value, dict) and value.get(json_cache.MARKER) == json_cache.FORMAT:
         value = json_cache.decode(raw, max_bytes=MAX_DECODED_BYTES)
         _validate_numbers(value)
     metadata = value if isinstance(value, dict) else {}
@@ -47,20 +56,31 @@ def prepare(surface, raw, at):
     if not isinstance(menus, dict):
         raise ValueError('Invalid adaptive mix regions')
     regions = sum(len(menus.get(lane, [])) for lane in ('wheelhouse', 'explore', 'comfort', 'temporal'))
-    parts = tuple(files.encode(surface, str(position), raw[start:start + PART_CHARACTERS])
-                  for position, start in enumerate(range(0, len(raw), PART_CHARACTERS)))
+    part_characters = SELECTION_PART_CHARACTERS if surface in ('home_tuned', 'home_choice') else PART_CHARACTERS
+    if surface in ('home_tuned', 'home_choice') and raw.isascii():
+        # Compressed selections are ASCII. JSON quoting can at most double
+        # these characters, leaving the encoded part below its 1 MiB limit.
+        part_characters = ASCII_SELECTION_PART_CHARACTERS
+    parts = tuple(files.encode(surface, str(position), raw[start:start + part_characters])
+                  for position, start in enumerate(range(0, len(raw), part_characters)))
     if len(parts) > 128:
         raise ValueError('Home display exceeds its part count')
     return Prepared(surface, raw, value, hashlib.sha256(raw.encode()).hexdigest(), parts, at, schema, generation, regions)
 
 
 def _validate_numbers(value):
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError('Non-finite number in prepared output')
-    if isinstance(value, (dict, list)):
-        check_cancellable_work()
-        for item in value.values() if isinstance(value, dict) else value:
-            _validate_numbers(item)
+    pending, visited = [value], 0
+    while pending:
+        item = pending.pop()
+        if isinstance(item, float) and not math.isfinite(item):
+            raise ValueError('Non-finite number in prepared output')
+        if isinstance(item, dict):
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+        visited += 1
+        if visited % 128 == 0:
+            check_cancellable_work()
 
 
 def policy_references(value):

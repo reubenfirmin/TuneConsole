@@ -1,5 +1,6 @@
 """Real old metadata writers continue while typed staging is interrupted."""
 from dataclasses import replace
+from tests.enrichment_support import choose_field
 import json
 
 import pytest
@@ -29,7 +30,7 @@ def test_durable_metadata_copy_preserves_choices_and_reconciles_composite_keys(p
     job.step(store.conn, batch_size=2)
     # These edits occur behind the already-copied cursor. SQLite's writer
     # journals durable logical keys, including composite keys without row IDs.
-    store.enrichment.set_track_field(entry, 'genre', 'Blues')
+    choose_field(store, entry, 'genre', 'Blues')
     with store.conn:
         catalog.choose_field(store.conn, entry, 'bpm', '', 'user')
     regular.migrate(store.conn)
@@ -73,7 +74,7 @@ def test_metadata_failure_is_durable_and_does_not_block_live_writers(predecessor
         finish(store.conn)
     failed = job.progress(store.conn)
     assert failed.status == 'failed' and failed.processed > 0
-    store.enrichment.set_track_field(entry, 'bpm', 123)
+    choose_field(store, entry, 'bpm', 123)
     assert job.progress(store.conn).status == 'failed'
     with pytest.raises(MigrationError, match='retry explicitly'):
         job.step(store.conn)
@@ -160,7 +161,7 @@ def test_operational_fields_keep_recorded_subjects_and_all_observed_source_revis
         'WHERE owner=? AND source_key=? AND source_digest=?', ('provider_attempts', key, before)).fetchone()[0] > 0
     assert json.loads(store.conn.execute(f'SELECT source_snapshot FROM {preparation.ORIGINALS} '
         'WHERE owner=? AND source_key=? AND digest=?', ('provider_attempts', key, before)).fetchone()[0]) == dict(original)
-    store.enrichment.set_track_field(entry, 'bpm', 124)
+    choose_field(store, entry, 'bpm', 124)
     assert store.conn.execute('SELECT bpm FROM catalog_tracks WHERE id=?', (entry,)).fetchone()[0] == 124
 
 

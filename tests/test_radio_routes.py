@@ -16,7 +16,7 @@ def test_tune_route_rejects_invalid_controls_without_changing_session(poc, value
     app = FastAPI()
     app.include_router(radio_routes.build(c.ctx))
     with TestClient(app) as client:
-        assert client.post("/radio/tune", json=values).json() == {"ok": False}
+        assert client.post("/radio/tune", json=values).json() == {"ok": False, "tune_reason": "invalid_controls"}
     assert remote.ids == ["v1", "v2", "v3"]
 
 

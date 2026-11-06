@@ -1,5 +1,7 @@
 """Taste overview, playlist influence, recommendation comparison and feedback."""
 import json
+from tests.derived_rating_support import seed_dislike, seed_like
+from tests.retained_rating_support import observe_rating
 from urllib.parse import urlsplit
 
 import numpy as np
@@ -158,11 +160,11 @@ def test_populated_overview_leads_with_changes_and_keeps_feedback_compact(store,
     }], retired_ids=[], now=1.0)
     store.history.record_history_plays(iid, 1.0, ['song|artist'], source_timezone='UTC')
     for i in range(47):
-        store.rec_model.record_like(f'action-{i}|artist', 1.0, provenance='action')
+        seed_like(store, f'action-{i}|artist', 1.0, provenance='action')
     for i in range(85):
-        store.rec_model.record_like(f'sync-{i}|artist', 1.0, provenance='sync')
+        seed_like(store, f'sync-{i}|artist', 1.0, provenance='sync')
     for i in range(3):
-        store.rec_model.record_dislike(f'disliked-{i}|artist', until=None, now=1.0)
+        seed_dislike(store, f'disliked-{i}|artist', until=None, now=1.0)
     for axis in ('genre:latin', 'era:2010', 'artist:Hermanos Gutiérrez'):
         store.rec_signals.log_graduation(axis, 'like', 2, 1.1, 1.1, 1.0)
 
@@ -272,10 +274,10 @@ def test_feedback_uses_track_table_with_artwork_sorting_and_unban(live_app, stor
                        thumbnail="/static/nag/intro.png")
     store.tracks.upsert_track("feedback-zeta", "Zeta Song", "Another Artist", "Last Album", None,
                        thumbnail="/static/nag/trends.png")
-    store.rec_model.record_dislike(key, until=2_000_000_000, now=2.0)
-    store.rec_model.record_dislike("zeta song|another artist", until=None, now=3.0)
-    store.rec_model.record_dislike("removed song|former artist", until=None, now=1.0)
-    store.rec_model.record_like("liked|artist", now=1.0)
+    observe_rating(store, key, 'DISLIKE', now=2.0)
+    seed_dislike(store, "zeta song|another artist", until=None, now=3.0)
+    seed_dislike(store, "removed song|former artist", until=None, now=1.0)
+    seed_like(store, "liked|artist", now=1.0)
     store.rec_model.mark_graduated_once("liked|artist", "like_grad", now=1.0)
     for kind in ("dismiss", "not_now", "more", "less", "mute"):
         store.rec_model.record_feedback("for_you", kind + "|artist", kind, now=1.0)
@@ -300,9 +302,11 @@ def test_feedback_uses_track_table_with_artwork_sorting_and_unban(live_app, stor
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     page.screenshot(path=str(tmp_path / f"taste-feedback-{width}.png"), full_page=True)
     page.get_by_role("button", name=f"Unban {title}", exact=True).click()
-    page.get_by_role("dialog").get_by_role("button", name="Confirm", exact=True).click()
-    expect(table.locator("tbody tr.srow")).to_have_count(2)
+    with page.expect_response('**/taste/unban') as unban:
+        page.get_by_role("dialog").get_by_role("button", name="Confirm", exact=True).click()
+    assert unban.value.status == 200, unban.value.text()
     assert key not in store.rec_model.disliked_identity_keys()
+    expect(table.locator("tbody tr.srow")).to_have_count(2)
     expect(page.get_by_role("tab", name="Feedback", exact=True)).to_have_attribute("aria-selected", "true")
     page.get_by_role("button", name="Clear feedback and recommendation history", exact=True).click()
     page.get_by_role("dialog").get_by_role("button", name="Confirm", exact=True).click()

@@ -9,7 +9,7 @@ from tests.test_audio_vibe_model import excerpts
 from tests.rec.test_vibe_prediction import drain, fits, track
 from yt_playlist.core import audio_embedding, features
 from yt_playlist.rec import audio_vibe_external as external
-from yt_playlist.rec import audio_vibe_model as model, audio_vibe_preview as preview
+from yt_playlist.rec import audio_vibe_model as model, audio_vibe_prediction as predictor
 from yt_playlist.rec import vibe_preparation
 
 
@@ -43,8 +43,8 @@ def test_two_stages_clip_before_normalization_and_preserve_raw_evidence(tmp_path
     original = deepcopy(samples)
     value = controlled(samples)
     enable(value, tmp_path, monkeypatch)
-    baseline = preview.predict(samples, use_model=False)
-    prediction = preview.predict(samples, metadata={'genre': 'Unknown', 'bpm': 300})
+    baseline = predictor.predict(samples, use_model=False)
+    prediction = predictor.predict(samples, metadata={'genre': 'Unknown', 'bpm': 300})
     expected = dict(zip(external.LABELS, (1., .2, .3, .4, 1e-8, 1.), strict=True))
     total = sum(expected.values())
     assert {r['vibe']: r['score'] for r in prediction['ranking']} == pytest.approx(
@@ -57,7 +57,7 @@ def test_two_stages_clip_before_normalization_and_preserve_raw_evidence(tmp_path
     assert prediction['dimensions'] == baseline['dimensions']
     assert prediction['calibrated'] is False
     assert samples == original
-    assert preview.predict(samples, metadata={}) == prediction
+    assert predictor.predict(samples, metadata={}) == prediction
     assert {r['score_source'] for r in prediction['ranking']} == {'external_emotion_model'}
 
 
@@ -99,7 +99,7 @@ def test_malformed_external_artifact_falls_back(tmp_path, monkeypatch, mutation)
     else:
         value['native']['scale'][0] = 1e-320
     enable(value, tmp_path, monkeypatch)
-    assert preview.predict(samples) == preview.predict(samples, use_model=False)
+    assert predictor.predict(samples) == predictor.predict(samples, use_model=False)
 
 
 @pytest.mark.parametrize('mutation', ['missing', 'hash', 'version', 'length'])
@@ -114,7 +114,7 @@ def test_incompatible_capture_falls_back_without_losing_raw_arc(tmp_path, monkey
         samples[0]['model_version'] = 'future'
     else:
         samples[0]['embedding']['values'].pop()
-    assert preview.predict(samples) == preview.predict(samples, use_model=False)
+    assert predictor.predict(samples) == predictor.predict(samples, use_model=False)
 
 
 def test_model_change_replaces_one_measurement_vote_and_preserves_feedback(store, tmp_path, monkeypatch):
@@ -131,7 +131,7 @@ def test_model_change_replaces_one_measurement_vote_and_preserves_feedback(store
     drain(store)
     assert fits(store, measured)['relax']['source'] == 'heuristic'
     store.audio_vibes.save_sample(samples[2], 3)
-    store.audio_vibes.save_feedback(samples[0]['run_id'], [], ['cruise'], preview.TAXONOMY_VERSION, None, 4)
+    store.audio_vibes.save_feedback(samples[0]['run_id'], [], ['cruise'], predictor.TAXONOMY_VERSION, None, 4)
     feedback = store.audio_vibes.feedback(samples[0]['run_id'])
     drain(store)
     before = fits(store, measured)['relax']['score']

@@ -51,6 +51,12 @@ def test_background_shadow_is_coalesced_and_does_not_replace_live_modes(store):
     assert not worker.step(1100)
     assert not worker.due(1160)
     assert store.taste_groups.head()['generation'] == head['generation']
+    worker.policy = replace(worker.policy, broad_edge=.61)
+    assert not worker.due(1159)
+    assert worker.due(1160) and worker.step(1160)
+    current = store.taste_groups.head()
+    assert current['generation'] != head['generation']
+    assert current['policy'] == musical_profiles.canonical(worker.policy.manifest())
 
 
 def test_group_preparation_never_loads_or_reimports_retired_mode_definitions(store, monkeypatch):
@@ -62,8 +68,8 @@ def test_group_preparation_never_loads_or_reimports_retired_mode_definitions(sto
     worker = group_preparation.Preparation(store)
     assert worker.step(1000)
     assert all(not group.get('legacy') for group in store.taste_groups.head()['groups'])
-    worker.request_rebuild()
-    assert worker.step(1100)
+    seed(store, recordings([('House', 13, .2)]))
+    assert worker.due(1100) and worker.step(1100)
 
 
 def test_stale_and_budget_deferred_work_preserve_complete_last_good_generation(store, monkeypatch):
@@ -72,6 +78,7 @@ def test_stale_and_budget_deferred_work_preserve_complete_last_good_generation(s
     worker = group_preparation.Preparation(store)
     assert worker.step(1000)
     first = store.taste_groups.head()
+    seed(store, [replace(tracks[0], values=(.95,) * len(tracks[0].values))])
     original = group_discovery.discover
 
     def race(*args, **kwargs):
@@ -81,13 +88,11 @@ def test_stale_and_budget_deferred_work_preserve_complete_last_good_generation(s
         return result
 
     monkeypatch.setattr(group_discovery, 'discover', race)
-    worker.request_rebuild()
-    assert not worker.step(1100)
+    assert worker.due(1100) and not worker.step(1100)
     assert store.taste_groups.head()['generation'] == first['generation']
     monkeypatch.setattr(group_discovery, 'discover', original)
     deferred = group_preparation.Preparation(store, budget=group_preparation.Budget(seconds=0))
-    deferred.request_rebuild()
-    assert not deferred.step(1200)
+    assert deferred.due(1200) and not deferred.step(1200)
     assert store.taste_groups.head()['generation'] == first['generation']
 
 

@@ -8,6 +8,7 @@ import struct
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.comparison_support import legacy_projection
 from yt_playlist.core import fao, library_pool_state, model_projections, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import ranked_state as preparation
@@ -24,12 +25,16 @@ def finish(job, conn, size=128):
     pytest.fail('Ranked preparation did not finish bounded fixture')
 
 
-def seed(store, count=4):
+def seed(store, count=4, *, lane_counts=None):
     store.tracks.upsert_track('known-video', 'Known', 'Artist', None, 100)
     store.rec_ledger.record_serving_policy('ranked-policy', {'algorithm': 'captured'}, 1)
     run_id = store.model_selection.start_selection(1, {'kind': 'product'})
-    items = [{'key': 'known|artist' if index == 0 else f'missing:{index}', 'score': 1 / (index + 1),
-              'pool_policy': 'ranked-policy', 'reason': '東京' if index == 0 else 'historical'} for index in range(count)]
+    def candidates(amount):
+        return [{'key': 'known|artist' if index == 0 else f'missing:{index}', 'score': 1 / (index + 1),
+                 'pool_policy': 'ranked-policy', 'reason': '東京' if index == 0 else 'historical'}
+                for index in range(amount)]
+
+    items = candidates(count)
     keys = [item['key'] for item in items]
     radio = {'policy_version': 'ranked-policy', 'encoding_model': None,
         'modes': [{'mode_id': 12345, 'space': '', 'centroid': [1., -0., .25], 'label': 'Original mode'}],
@@ -41,11 +46,12 @@ def seed(store, count=4):
         for format in ('mixes', 'albums', 'radio'):
             value = radio if format == 'radio' else {'items': [], 'context': {}, 'caption': '東京'}
             surface = f'model_pair:{run_id}:{arm}:{format}'
-            values[surface] = (comparison_storage.encode(run_id, value) if arm == 'challenger'
+            values[surface] = (json.dumps(legacy_projection(run_id, value)) if arm == 'challenger'
                                else json.dumps({'run_id': run_id, 'data': value}, ensure_ascii=False, indent=2))
     for lane in library_pool_state.LANES:
+        lane_items = candidates(lane_counts[lane]) if lane_counts and lane in lane_counts else items
         values['home_pool:' + lane] = json.dumps({'parameters': {'lane': lane, 'epoch': 0,
-            'include_genres': ['rock', 'other:Unregistered style'], 'avoid_genres': []}, 'tracks': items}, indent=2)
+            'include_genres': ['rock', 'other:Unregistered style'], 'avoid_genres': []}, 'tracks': lane_items}, indent=2)
     with store.conn:
         store.conn.execute("INSERT INTO genre_family(key,name) VALUES ('rock','Rock') ON CONFLICT DO NOTHING")
         store.conn.executemany('INSERT INTO rec_proposals VALUES (?,?,?)', [(surface, raw, None) for surface, raw in values.items()])
@@ -209,12 +215,16 @@ def test_interrupt_failure_retry_and_independent_regular_ddl(installed, monkeypa
     for job in (pairs, clicked):
         job.install(store.conn)
     checkpoint = pairs.step(store.conn, batch_size=1)
-    def interrupt(*args):
-        preparation.copy(*args)
+    tables = [name for name, sql in pairs.definition.destinations if sql.startswith('CREATE TABLE')]
+    retained = {name: list(map(tuple, store.conn.execute('SELECT * FROM ' + name))) for name in tables}
+    def interrupt(conn, row, revision, selected):
+        preparation.copy_batch(conn, row, revision, selected)
         raise KeyboardInterrupt('controlled ranked interruption')
     with pytest.raises(KeyboardInterrupt):
-        replace(pairs, copy=interrupt).step(store.conn, batch_size=1)
+        replace(pairs, copy_batch=interrupt).step(store.conn, batch_size=128)
     assert pairs.progress(store.conn) == checkpoint
+    assert {name: list(map(tuple, store.conn.execute('SELECT * FROM ' + name))) for name in tables} == retained
+    assert not store.conn.in_transaction
     def failure(*args):
         assert not store.conn.in_transaction
         raise OSError('controlled ranked disk failure')

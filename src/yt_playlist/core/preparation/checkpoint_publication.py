@@ -9,7 +9,7 @@ import json
 import sqlite3
 import time
 
-from .. import content_preparation_state as content
+from ..checkpoint_reads import progress_row, selected
 from ..schema_contract import MigrationError
 from . import collection_controls, model_checkpoints as preparation
 from .selection import invalidators
@@ -69,20 +69,6 @@ def validate(conn):
             continue
         if row is None or _tokens(row[0]) != _tokens(sql):
             raise MigrationError('Incompatible checkpoint publication object: ' + name)
-
-
-def installed(conn, name):
-    return (conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?', (HEAD,)).fetchone() is not None
-            and conn.execute(f'SELECT 1 FROM {HEAD} WHERE name=?', (name,)).fetchone() is not None)
-
-
-def selected(conn, name):
-    if conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?', (NATIVE[name],)).fetchone():
-        return None
-    if not conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?', (HEAD,)).fetchone():
-        return None
-    row = conn.execute(f'SELECT revision FROM {HEAD} WHERE name=? AND active=1', (name,)).fetchone()
-    return row[0] if row else None
 
 
 def validate_installed(conn):
@@ -168,53 +154,6 @@ def publish(conn, name, *, revision, clock=time.time):
     except BaseException:
         conn.rollback()
         raise
-
-
-def progress_row(conn, name, revision):
-    for table in (PROGRESS_V2, LEGACY_PROGRESS):
-        if conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?', (table,)).fetchone():
-            row = conn.execute(f'SELECT * FROM {table} WHERE name=? AND revision=? AND source=?',
-                               (name, revision, preparation.GROUP[0])).fetchone()
-            if row is not None:
-                return row
-    return None
-
-
-def read(conn, name, revision, key, default):
-    row = (progress_row(conn, name, revision) if key == preparation.GROUP[0] else conn.execute(
-        f'SELECT * FROM {TABLES[key]} WHERE name=? AND revision=? AND source=?', (name, revision, key)).fetchone())
-    if row is None:
-        return default
-    if key == 'rec_mode_fit_inputs':
-        return row['fit_fingerprint'] if row['source_kind'] == 'recorded' else '' if row['source_kind'] == 'blank' else default
-    if key in preparation.CANDIDATES:
-        if key == 'rec_candidate_preferences' and row['source_kind'] == 'blank':
-            return ''
-        field = 'expires_at' if key == 'rec_candidates_expire_at' else 'preferences_fingerprint'
-        return str(row[field]) if row[field] is not None else default
-    if row['source_kind'] != 'recorded':
-        return default
-    if key in preparation.CONTENT:
-        value = {field: row[field] for field in content.FIELDS[key] if row[field] is not None}
-        if key == 'rec_preparation_full':
-            value['at'] = row['at']
-            if row['has_config']:
-                value['config'] = [row[field] for field in content.CONFIG]
-        else:
-            if row['has_phases']:
-                value['phase_bytes'] = {phase: row['bytes_' + phase] for phase in content.PHASES if row['bytes_' + phase] is not None}
-            if key == 'rec_preparation_basis' and row['has_modes']:
-                value['modes'] = [row[field] for field in content.MODES]
-        return json.dumps(value)
-    if key == 'rec_group_shadow_progress':
-        return json.dumps({'phase': row['phase'], 'at': row['reported_at'], 'reason': row['reason']}) if row['phase'] else default
-    return json.dumps({'generation': row['recorded_generation'], 'serial': row['input_serial'],
-                       'at': row['checkpoint_at']}) if row['checkpoint_at'] is not None else default
-
-
-def fallback(conn, key, default):
-    row = conn.execute('SELECT value FROM main.settings WHERE key=?', (key,)).fetchone()
-    return row[0] if row else default
 
 
 def main(argv=None):

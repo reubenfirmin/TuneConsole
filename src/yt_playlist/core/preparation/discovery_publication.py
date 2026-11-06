@@ -430,14 +430,6 @@ class ReadOwners:
             return discovery_artist_publication.relation(self.conn)
         return name if name in ('discovered_tracks', 'discovered_albums') else 'main.'+name
 
-    def origin(self, token):
-        from .. import discovery_provenance
-        if self.revision is None:
-            return discovery_provenance.origin(self.conn, token, create=False) if self.native else token
-        identity = origin_key(discovery_provenance.origin_fields(self.conn, token))
-        return identity if self.conn.execute('SELECT 1 FROM '+self.relation('discovery_origins')+
-            ' WHERE id=?', (identity,)).fetchone() else None
-
     def installed_artist_ids(self, canonical_ids):
         """Resolve deletion targets before the first write withdraws the head."""
         if self.revision is None:
@@ -445,13 +437,6 @@ class ReadOwners:
         return {row[0] for aid in canonical_ids for row in self.conn.execute(
             'SELECT captured_artist_id FROM '+self.publication.table('input_artists')+
             ' WHERE stage=? AND artist_id=? AND captured_artist_id IS NOT NULL', (self.revision, aid))}
-
-    def installed_source_tokens(self, recording_id, origin):
-        if self.revision is None:
-            return {origin}
-        return {row[0] for row in self.conn.execute(
-            "SELECT json_extract(source_snapshot,'$.source_token') FROM "+self.publication.table('input_sources')+
-            ' WHERE stage=? AND recording_id=? AND origin_key=?', (self.revision, recording_id, origin))}
 
 
 def read_owners(conn):

@@ -238,6 +238,10 @@ class SettingsRepo(Repo):
             entity_names.external_account_document(entity_names.account_document(job)),sort_keys=True))
 
     @lookup_read
+    def has_transfer_receipts(self):
+        return workflow_settings.available(self.conn)
+
+    @lookup_read
     def spotify_transfer_receipts(self,account_id):
         return workflow_settings.receipts(self.conn,'playlist',account_id,token=True)
 

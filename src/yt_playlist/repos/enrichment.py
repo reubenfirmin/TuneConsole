@@ -156,11 +156,6 @@ class EnrichmentRepo(Repo):
         return catalog.choose_field(self.conn,track_id,col,v,'conflict_resolution',now=now)
 
     @synchronized
-    def set_track_field(self, track_id, field, value) -> None:
-        with self.conn:
-            self._choose_track_field(track_id,field,value)
-
-    @synchronized
     def resolve_conflict(self, track_id, field, value, now=None) -> None:
         """Write the user's choice and mark the conflict resolved in one transaction."""
         track_id = catalog.resolve_entry(self.conn, track_id)

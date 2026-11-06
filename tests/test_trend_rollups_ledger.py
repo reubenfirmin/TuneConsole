@@ -10,7 +10,6 @@ import datetime as dt
 
 import pytest
 
-from yt_playlist.core.store import Store
 from yt_playlist.rec import trend_rollups as tr
 from yt_playlist.rec import trend_payload, trend_statistics as stats
 
@@ -18,12 +17,10 @@ DAY = 86400
 
 
 @pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    s.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (1,'me','c.json',1)")
-    s.conn.commit()
-    return s
+def store(store):
+    store.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (1,'me','c.json',1)")
+    store.conn.commit()
+    return store
 
 
 def _ev(store, key, when, playlist=None):

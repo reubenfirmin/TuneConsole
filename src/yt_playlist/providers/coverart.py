@@ -34,10 +34,6 @@ def tripped() -> bool:
     return not _iao.availability().ready(_iao.now())
 
 
-def reset() -> None:
-    """Batch starts cannot bypass archive cooldowns or discard useful responses."""
-
-
 def _get_json(url):
     prefix = API + '/release/'
     if not url.startswith(prefix):

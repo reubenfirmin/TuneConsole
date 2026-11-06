@@ -46,7 +46,7 @@ def test_neutral_sibling_is_not_an_unlike_of_the_rated_upload(store, status, rev
     assert store.tracks.item_rating(owner, 'b')['status'] == 'INDIFFERENT'
     theme = store.rec_signals.get_theme('artist:Artist')
     if status == 'LIKE':
-        assert theme == rec_params.SOURCE_W_LIKE_SYNCED
+        assert theme == rec_params.get_param(store, "source_w_like_synced")
     else:
         assert theme is None
     first_feedback = store.rec_model.disliked_with_ts() if status == 'DISLIKE' else [
@@ -108,13 +108,13 @@ def test_explicit_conflicts_use_dislike_then_like_until_all_contributions_are_cl
     disliked_owner, disliked_video, _ = next(c for c in contributions if c[2] == 'DISLIKE')
     sync.sync_identity(store, disliked_owner, _client([(disliked_video, 'INDIFFERENT')]), now=30)
     _assert_feedback(store, key, 'LIKE')
-    assert store.rec_signals.get_theme('artist:Artist') == rec_params.SOURCE_W_LIKE_SYNCED
+    assert store.rec_signals.get_theme('artist:Artist') == rec_params.get_param(store, "source_w_like_synced")
     liked_owner, liked_video, _ = next(c for c in contributions if c[2] == 'LIKE')
     sync.sync_identity(store, liked_owner, _client([(liked_video, 'INDIFFERENT')]), now=40)
     _assert_feedback(store, key, 'INDIFFERENT')
     # Reliking still cannot replay a previously graduated recording.
     sync.sync_identity(store, liked_owner, _client([(liked_video, 'LIKE')]), now=50)
-    assert store.rec_signals.get_theme('artist:Artist') == rec_params.SOURCE_W_LIKE_SYNCED
+    assert store.rec_signals.get_theme('artist:Artist') == rec_params.get_param(store, "source_w_like_synced")
 
 
 @pytest.mark.parametrize('status', ['LIKE', 'DISLIKE'])
@@ -247,7 +247,7 @@ def test_sync_confirmation_keeps_pending_live_action_timestamp_and_provenance(st
     sync.sync_identity(store, owner, _client([('a', 'LIKE')]), now=20)
     key = store.tracks.identity_key_for_video('a')
     assert store.rec_model.recent_liked_with_ts() == [(key, 10)]
-    assert store.rec_signals.get_theme('artist:Artist') == rec_params.SOURCE_W_LIKE
+    assert store.rec_signals.get_theme('artist:Artist') == rec_params.get_param(store, "source_w_like")
     assert store.tracks.item_rating(owner, 'a') == {
         'status': 'LIKE', 'source': 'api', 'observed_at': 10}
 

@@ -16,7 +16,7 @@ from yt_playlist.web.radio_persistence import RadioPersistence
 def test_page_snapshot_does_not_adopt_a_newer_checkpoint_write_token(file_backed_store):
     store = file_backed_store
     _, _, _, state = seed(store, 107, append=True)
-    persistence = RadioPersistence(store.settings)
+    persistence = RadioPersistence(store.radio_checkpoints)
     original_token = persistence.revision
     newer = {**state, 'error': 'Another worker owns this checkpoint'}
     with store.conn:

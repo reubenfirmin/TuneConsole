@@ -2,6 +2,8 @@
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse
 
+from yt_playlist.web.context import refresh_playlist_view
+
 
 def build(ctx) -> APIRouter:
     router = APIRouter()
@@ -51,38 +53,30 @@ def build(ctx) -> APIRouter:
             "flash": request.query_params.get("flash"),
         })
 
-    def _refresh_deleted_source(ytm_id):
-        # #95: a move deletes the source playlist on YouTube; a YTM tab sitting on it should show
-        # it's gone, not a stale tracklist. Best-effort only (no extension connected raises), and
-        # never affects the route's own response. The copy destination is a brand-new playlist no
-        # tab can already be viewing, so only the deleted source warrants a refresh.
-        try:
-            if ytm_id:
-                ctx.bridge.send_control({"type": "refresh-view", "playlist": ytm_id})
-        except Exception:  # noqa: BLE001
-            logger.debug("refresh-view control not sent for %s", ytm_id, exc_info=True)
-
     def _transfer(playlist, target_identity, copy_only):
         src = store.playlists.get_playlist(playlist)
         result = {"title": src.title if src else "Unavailable playlist", "warning": False}
+        if src is not None and src.account_id == target_identity:
+            return {**result, "state": "error", "message": "The source and target identity are the same.",
+                    "warning": True}
         try:
             res = ctx.ops().move(playlist, target_identity, copy_only=bool(copy_only))
-        except ValueError as e:
-            return {**result, "state": "error", "message": str(e), "warning": True}
         except Exception:  # noqa: BLE001
             logger.exception("move/copy failed")
-            return {**result, "state": "error", "message": "YouTube returned an unexpected response.",
+            return {**result, "state": "error", "message": "Transfer not confirmed. Review Actions before trying again.",
                     "warning": True}
         tracks = f"{res['added']} track{'s' if res['added'] != 1 else ''}"
         if res["deleted"]:
-            _refresh_deleted_source(src.provider_playlist_id)
+            # Only the deleted source could already be open in a tab. Its ID
+            # comes from the row captured before the move removed it.
+            refresh_playlist_view(ctx, src.provider_playlist_id)
             return {**result, "state": "moved", "message": f"Moved {tracks}."}
         extra = f"; {res['unresolved']} couldn’t be matched" if res["unresolved"] else ""
         if res.get("skipped"):
             extra += f"; {res['skipped']} couldn’t be added"
         msg = f"Copied {tracks}{extra}."
         if res.get("delete_error"):
-            msg = f"Copy created. Source kept: {res['delete_error']}"
+            msg = "Copy created. Source deletion needs review in Actions."
         elif not copy_only:  # move requested but some tracks couldn't be recreated -> kept the source
             msg += " Source kept because some tracks couldn’t be recreated."
         return {**result, "state": "copied", "message": msg,

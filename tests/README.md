@@ -4,11 +4,34 @@ The [#534 runtime disposition ledger](runtime-review.md) records
 consolidated coverage, retained integrations, benchmark ownership and targeted
 verification gaps.
 
+Calculation and policy checks should consume detached values or repository doubles.
+Examples include `rec/test_listening_calculation.py`, `rec/test_selection_policy.py`,
+`rec/test_readiness_policy.py`, `test_sync_policy.py`, and
+`test_taste_modes_discover.py`; they do not create a Store or SQLite fixture.
+Keep SQL behavior, installed-format compatibility, atomic publication and resource
+cleanup in repository integration checks. Real workflow tests remain appropriate
+for concurrency, restart and component handoff contracts; do not replace those
+with mocks merely to reduce runtime.
+
 Test fixtures are disposable. `tmp_path` and `tmp_path_factory` data is removed
 after passing and failing runs; an explicit `--basetemp` is also removed after
 the session. Put reports that must survive in a separate output directory, not
 inside the temporary tree. Collection-only runs leave an unused `--basetemp`
 untouched.
+
+Browser launches use a short private alias to that same fixture volume for
+`TMPDIR`, keeping Chromium's Unix singleton socket within its path limit. The
+alias is removed at session teardown; profiles and temporary data remain owned
+by pytest. After a killed run, its `/tmp/tuneconsole-browser-workspace-*` alias
+directory can be inspected and removed with `scripts/test-artifacts-cleanup.py`.
+
+Live ASGI fixtures use `tests.live_server.LiveServer` inside their Store and
+temporary-directory lifetime. It closes request admission and waits for the
+server's request, background-task and application shutdown before returning.
+Do not replace that boundary with a timed thread join: reaching a timeout does
+not make it safe to close the Store or remove native evidence. Release any
+deliberately held test work before closing its server. Register the owner for
+cleanup immediately when fixture setup starts more than one server.
 
 Historical comparisons, provider pilots and manual saved-library reports live in
 `experiments/investigations/`. Run one explicitly through the research runner,
@@ -59,6 +82,123 @@ Focused checks use `uv run pytest <paths>` directly and stay serial; they do not
 acquire or wait for that lock. Global workers join their coordinator's ownership
 and keep a lifetime lock until they finish, including after coordinator failure.
 
+For live progress and per-test Python line coverage, run:
+
+```sh
+uv run pytest -m '' -n 4 --test-lock-wait=60 \
+  --test-runtime-target=900 \
+  --test-progress=/tmp/tuneconsole-diagnostics/progress.jsonl \
+  --cov --cov-context=test --cov-report= \
+  --junitxml=/tmp/tuneconsole-diagnostics/junit.xml \
+  --durations=30 -o faulthandler_timeout=30
+```
+
+This includes desktop/TV browser cases and explicitly selects four local workers.
+With coverage enabled, omitting `-n` stays serial because pytest-cov selects its
+controller before the repository's automatic worker selection runs.
+Use explicit paths for a focused diagnostic. `--test-progress` flushes timestamped
+starts and setup/call/teardown outcomes to the console and JSONL, including xdist
+worker identities. Test output stays captured for failure diagnostics. Each CI
+shard also retains these live receipts in its evidence artifact. For serial
+debugging, `--capture=tee-sys` additionally passes Python prints through live;
+xdist does not forward arbitrary worker stdout live.
+
+Every concurrent coverage run needs a disjoint data basename. For example,
+`coverage.sqlite3` conflicts with `coverage.sqlite3.focused` in the same
+directory because coverage erases and merges dotted suffix files. Use separate
+report directories or sibling names such as `coverage-focused.sqlite3`.
+The early `pytest_coverage_guard` plugin reserves the resolved `[run] data_file` before
+pytest-cov can erase it, including its parallel suffix files. A conflicting run
+fails immediately with the destination and owner PID; disjoint destinations
+remain independent of each other and of the global-suite lock. The owner's
+local xdist workers share its reservation and retain protection if their
+coordinator dies. Locks release on process exit; never delete their stable files
+under `/tmp/tuneconsole-coverage-<uid>/`. `--cov-append` still requires ownership.
+`--no-cov` does not reserve a destination. When replacing `addopts` or using an
+alternate pytest configuration, load the early plugin with `-p pytest_coverage_guard` too.
+
+For example, create a separate report directory and coverage configuration for a
+focused run while another run is active:
+
+```sh
+mkdir -p /tmp/tuneconsole-focused-coverage
+cat > /tmp/tuneconsole-focused-coverage/coverage.ini <<'EOF'
+[run]
+core = ctrace
+relative_files = true
+data_file = /tmp/tuneconsole-focused-coverage/coverage.sqlite3
+EOF
+uv run pytest tests/providers/test_descriptive_tags.py \
+  --cov=yt_playlist --cov-context=test --cov-report= \
+  --cov-config=/tmp/tuneconsole-focused-coverage/coverage.ini \
+  --test-progress=/tmp/tuneconsole-focused-coverage/progress.jsonl \
+  --junitxml=/tmp/tuneconsole-focused-coverage/junit.xml
+```
+
+Choose a different directory for each concurrent run. Reusing it after its owner
+and workers exit starts a fresh coverage recording; add `--cov-append` only when
+intentionally continuing that recording.
+
+`--test-runtime-target=900` compares elapsed wall time with the completed fraction
+of all selected tests against the 15-minute target. It allows 10% of that target
+(90 seconds) of lag for startup and uneven test costs. The allowance moves forward
+as tests finish; a healthy run continues beyond its initial allowance. Override
+the permitted lag with `--test-runtime-slack=SECONDS`. When progress falls behind
+the line by more than that allowance, the coordinator records the active test
+names/phases and ten slowest observed cases in a `pace_stop` receipt and the
+console. Its own workers then interrupt themselves from its private stop flag.
+No terminal input is needed. Collection also consumes the startup allowance.
+
+Focused diagnostic sessions can instead use `--test-time-limit=SECONDS` for a
+fixed wall-clock bound. The two modes are mutually exclusive and disabled when
+omitted. Both require POSIX interval timers and refuse an existing timer. Pytest
+finishes teardown and saves reports after interruption; cleanup can extend
+beyond the stopping point.
+When Playwright is dispatching a synchronous call or waiting for an event, the
+monitor cancels its awaitable through the browser event loop. It raises the stop
+only after Playwright returns control to the synchronous caller. The stop log
+retains the operation, suspended caller and running thread stacks. Driver
+startup/shutdown and fixture finalization finish before a pending stop is
+reported, preserving tracing, admitted requests and native publication.
+The maintained real-TV interruption regression has a separate process-group
+owner with a 35-second fallback and retained diagnostics; a forced termination
+fails that regression. This fallback belongs to that regression's supervisor,
+not to every monitored pytest invocation.
+Collection receipts record the selected test and file counts once per session.
+Diagnostic workers also checkpoint coverage after each completed test;
+the active test can still lose unsaved coverage during shutdown. A forced kill
+can lose unsaved coverage. Partial runs remain partial;
+neither coverage nor progress receipts make their unstarted tail a passing run.
+Diagnostic finalization also saves contexts when `--maxfail` stops at a failure.
+Native SQLite callbacks can translate interruption into a database exception;
+the runtime monitor retains its stop reason and reports that run as interrupted.
+Coverage instrumentation adds cost, so use an uninstrumented complete hosted run
+for the 15-minute CI acceptance target.
+
+After completion or a graceful interruption, inspect the retained `.coverage`:
+
+```sh
+.venv/bin/python -m coverage html -d /tmp/tuneconsole-diagnostics/html
+.venv/bin/python scripts/test-coverage-overlap.py .coverage \
+  --progress=/tmp/tuneconsole-diagnostics/progress.jsonl \
+  --output=/tmp/tuneconsole-diagnostics/overlap.json
+```
+
+The HTML line annotations list the exact tests and execution phases. The overlap
+summary gives every observed test's phase durations, outcomes, shared/exclusive
+source-line counts and groups with identical covered lines. It defaults to test
+bodies (`run`); choose `--phase=setup`, `teardown` or `all` to inspect fixture work.
+Rows are ordered by the selected phase's time and also show the whole test's time.
+It reads the coverage database directly to avoid the large repeated context lists
+in JSON exports; existing `coverage json --show-contexts` exports also work.
+Counts are relative to the observed contexts, including failed or interrupted
+work. Module/session fixture construction is attributed to the first test that
+requests it; lines exclusive to that setup context need not be unique behavior
+of that test. They measure Python lines, not assertion equivalence, JavaScript execution
+or uninstrumented subprocesses. Review retained behavior before consolidating
+cases with matching lines. The configured C tracer is intentional: Python 3.14's
+default sysmon coverage core does not record dynamic per-test contexts.
+
 The former large feature modules retain their main topic. Related behavior now
 has explicit owners, so selecting only the old file no longer selects every
 test for that feature:
@@ -99,6 +239,15 @@ Failures add server/UI state and a screenshot, and print the diagnostic path.
 
 Shared setup is explicit:
 
+- `conftest.py` builds read-only, empty historical SQL templates lazily per
+  version and worker for `core/test_predecessor_writes.py`'s installed-layout
+  consumers. Every consumer still reopens and admits its own file database,
+  keeps private file namespaces, validates its unchanged migration history and
+  closes its audit reader. Templates continue genuine historical migrations
+  from the closest available older layout; they reject retained file coordinates.
+  Populated upgrades, bootstrap and migration fault injection use their own
+  builders. `test_installed_fixture.py` checks parity and isolation against
+  independent genuine replay, including a lower-version request after a higher one.
 - `radio_session_support.py` owns the function-scoped `poc` fixture and playback
   helper. Controller, route and browser consumers import them directly.
 - `browser/radio_ui_support.py` owns the function-scoped strict fake Radio API.

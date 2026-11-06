@@ -11,11 +11,13 @@ import uvicorn
 from websockets.sync.client import connect
 
 from tests.browser_fixtures import _free_port
+from tests.live_server import LiveServer
 from tests.conftest import FakeClient
 from tests.onboarding_support import publish_personal_mix
-from tests.test_storage_maintenance import current_vacuum_store
-from yt_playlist.core import account_auth_state, db_space, playback_feedback, policy_upgrade
-from yt_playlist.core.storage_maintenance import LOW_SPACE_MESSAGE
+from tests.test_storage_maintenance import current_copy_store
+from yt_playlist.core import account_auth_state, db_space, playback_feedback
+from yt_playlist.core.db_rebuild import build
+from yt_playlist.core.storage_maintenance import COPY_LOW_SPACE_MESSAGE
 from yt_playlist.web import app as web_app
 from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
 
@@ -70,10 +72,10 @@ def _radio_diagnostics(page, ctx, tmp_path):
 
 @pytest.mark.parametrize('enough_space', [True, False])
 @pytest.mark.parametrize('height', [520, 720])
-def test_start_radio_during_repair_has_no_error_banner(current_vacuum_store, page, tmp_path, monkeypatch,
+def test_start_radio_during_copy_has_no_error_banner(current_copy_store, page, tmp_path, monkeypatch,
                                                      enough_space, height):
     page.set_viewport_size({'width': 1280, 'height': height})
-    store = current_vacuum_store
+    store = current_copy_store
     iid = store.accounts.upsert_account('Main', 'bridge', None, True)
     pool = [{'videoId': f'radio-{i}', 'title': f'Radio song {i}',
              'artists': [{'name': f'Artist {i}'}], 'duration_seconds': 180,
@@ -108,57 +110,42 @@ def test_start_radio_during_repair_has_no_error_banner(current_vacuum_store, pag
                                'playback_synced': True, 'native': {'available': True}})
     monkeypatch.setattr(ctx.bridge, 'request_control', confirm_handoff)
     entered, release = threading.Event(), threading.Event()
-    compact = policy_upgrade._compact
+    compact = build.build
 
-    def hold_vacuum(conn, directory):
+    def hold_copy(source, target, **kwargs):
+        entered.set()
+        while not release.wait(.01) and not ctx.storage_maintenance._stop.is_set():
+            pass
         if not enough_space:
-            entered.set()
-            while not release.wait(.01) and not ctx.storage_maintenance._stop.is_set():
-                pass
             raise db_space.LowDiskSpace('injected insufficient compaction space')
-        def progress():
-            entered.set()
-            while not release.wait(.01) and not ctx.storage_maintenance._stop.is_set():
-                pass
-            return int(ctx.storage_maintenance._stop.is_set())
-        conn.set_trace_callback(lambda sql: conn.set_progress_handler(progress, 1000)
-                                if sql.startswith('VACUUM INTO') else None)
-        try:
-            compact(conn, directory)
-        finally:
-            conn.set_trace_callback(None)
-            conn.set_progress_handler(None, 0)
+        return compact(source, target, **kwargs)
 
-    monkeypatch.setattr(policy_upgrade, '_compact', hold_vacuum)
+    monkeypatch.setattr(build, 'build', hold_copy)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=port, log_level='warning'))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
+    owner = LiveServer(server)
     try:
-        deadline = time.monotonic() + 10
-        while not server.started:
-            assert thread.is_alive() and time.monotonic() < deadline
-            time.sleep(.01)
         assert page.request.get(f'http://127.0.0.1:{port}/radio/seeds').json()['tracks']
         assert page.request.get(f'http://127.0.0.1:{port}/home/growth').json()['ready_areas']['radio']
-        ctx.storage_maintenance.start()
+        ctx.storage_maintenance.start_compaction()
         assert entered.wait(10)
         with connect(f'ws://127.0.0.1:{port}/bridge/ws', origin=EXTENSION_ORIGIN, open_timeout=5) as extension, \
                 _radio_diagnostics(page, ctx, tmp_path) as diagnostics:
             page.goto(f'http://127.0.0.1:{port}/#radio')
-            expect(page.locator('#storage-maintenance')).to_have_text('Updating library storage; browsing and playback remain available.')
+            expect(page.locator('#storage-maintenance')).to_have_text(
+                'Optimizing app storage; some recommendations are temporarily unavailable.')
             expect(page.locator('html')).to_have_attribute('data-storage-compacting', 'true')
             expect(page.locator('.authbar')).to_be_hidden()
             start = page.get_by_role('button', name='Start radio with ').first
             expect(start).to_be_visible()
             start.hover(position={'x': 16, 'y': 16})
             expect(page.locator('.radio-seed-info').first).to_have_css('opacity', '1')
-            # The tile also contains a song link, which overlaps its center in
-            # short windows. Click the start button's artwork outside that link.
+            # Use the visible play control; its hit area must stay separate
+            # from the song link even when notices leave shallow cover tiles.
             deadline = time.monotonic() + 5
             with page.expect_response(lambda response: urlsplit(response.url).path == '/radio/start'
                                       and response.request.method == 'POST', timeout=5000) as launch:
-                start.click(position={'x': 16, 'y': 16}, timeout=5000)
+                start.locator('.radio-seed-play').click(timeout=5000)
             response = launch.value
             diagnostics['start_response'] = {'status': response.status, 'body': response.json()}
             assert response.status == 200 and diagnostics['start_response']['body']['ok'], diagnostics
@@ -187,33 +174,24 @@ def test_start_radio_during_repair_has_no_error_banner(current_vacuum_store, pag
             assert ctx.storage_maintenance.ready.wait(10)
             playback_feedback.drain(store)
             banner = page.locator('#storage-maintenance')
-            if enough_space:
-                expect(banner).to_be_hidden()
-            else:
-                expect(banner).to_have_text('Free disk space to finish.')
+            expect(banner).to_be_hidden()
             expect(page.locator('html')).to_have_attribute('data-storage-compacting', 'false')
             expect(page.locator('.authbar')).to_be_hidden()
             status = ctx.storage_maintenance.status()
             assert not status['active'] and status['recording']
             assert status['phase'] == ('done' if enough_space else 'deferred')
-            assert status['message'] == ('' if enough_space else LOW_SPACE_MESSAGE)
+            assert status['message'] == ('' if enough_space else COPY_LOW_SPACE_MESSAGE)
             assert status['warning'] == (not enough_space)
             assert store.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
             assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
             store.settings.set_setting('after-compaction', 'writes resumed')
             assert store.settings.get_setting('after-compaction') == 'writes resumed'
             page.screenshot(path=f'/tmp/tuneconsole-728-result-{height}-{enough_space}.png')
-            # The server renders the same warning even when polling is unavailable.
+            # Diagnostics also stay quiet when polling is unavailable.
             page.route('**/static/storage-maintenance.js*', lambda route: route.abort())
             page.reload()
-            if enough_space:
-                expect(banner).to_be_hidden()
-            else:
-                expect(banner).to_be_visible()
-                expect(banner).to_have_text('Free disk space to finish.')
+            expect(banner).to_be_hidden()
             page.screenshot(path=f'/tmp/tuneconsole-728-reloaded-{height}-{enough_space}.png')
     finally:
         release.set()
-        server.should_exit = True
-        thread.join(10)
-        assert not thread.is_alive()
+        owner.close()

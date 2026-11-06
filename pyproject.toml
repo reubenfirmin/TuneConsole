@@ -31,7 +31,7 @@ dependencies = [
 yt-playlist = "yt_playlist.__main__:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-xdist>=3.8,<4", "httpx>=0.27", "watchfiles>=0.21", "pytest-playwright>=0.5"]  # watchfiles powers `yt-playlist --reload`
+dev = ["pytest>=8", "pytest-xdist>=3.8,<4", "pytest-cov>=7,<8", "httpx>=0.27", "watchfiles>=0.21", "pytest-playwright>=0.5"]  # watchfiles powers `yt-playlist --reload`
 build = ["hatchling==1.29.0", "hatch-vcs==0.5.0", "packaging==26.2"]
 macos = [
     "pyinstaller==6.22.3; sys_platform == 'darwin'",
@@ -52,11 +52,22 @@ source = "vcs"
 packages = ["src/yt_playlist"]
 
 [tool.pytest.ini_options]
-addopts = "-q -m 'not browser'"
+# Select SQLite storage and reserve coverage before pytest-cov starts; conftest is too late.
+addopts = "-p pytest_coverage_guard -q -m 'not browser'"
 testpaths = ["tests"]
 pythonpath = ["."]
 # A nonzero count enables pytest's active-directory lock across concurrent runs.
-# conftest removes each completed session's workspace on both pass and failure.
+# conftest removes function workspaces after their reports, including failures;
+# shared factory workspaces remain until session teardown and report writers end.
 tmp_path_retention_count = 1
 tmp_path_retention_policy = "all"
 markers = ["browser: live-browser tests via Playwright (run with -m browser)"]
+
+[tool.coverage.run]
+source = ["yt_playlist"]
+relative_files = true
+# Python 3.14's default sysmon core does not support per-test dynamic contexts.
+core = "ctrace"
+
+[tool.coverage.html]
+show_contexts = true

@@ -7,10 +7,12 @@ dependency capture invalidate that plan before a completed head can change.
 from dataclasses import astuple, replace
 import hashlib
 import json
+from itertools import groupby
 from pathlib import Path
 
 from .. import genre_identity, library_pool_state, model_projections, recommendation_outputs as files, recommendation_pools
 from ..evidence_ledger import canonical
+from ..activity import check_cancellable_work
 from ..schema_contract import MigrationError
 from .ordered_rows import OrderedJob
 from .rows import Job, main as run
@@ -225,6 +227,20 @@ def copy(conn, row, revision, position, unit):
                  (row['surface'], revision, *values))
 
 
+def copy_batch(conn, row, revision, selected):
+    # Adjacent kinds preserve parent/member ordering and FK checks. The worker
+    # materialized at most its existing 512-unit bound before reserving writes.
+    for kind, group in groupby(selected, key=lambda pair: pair[1][0]):
+        rows = []
+        for _, (_, values) in group:
+            check_cancellable_work()
+            if kind == 'mode':
+                values = [*values[:-1], bytes.fromhex(values[-1])]
+            rows.append((row['surface'], revision, *values))
+        conn.executemany(f'INSERT INTO {table(row["surface"],RELATIONS[kind])} '
+                         f'VALUES ({",".join("?" for _ in rows[0])})', rows)
+
+
 def complete(conn, row, revision, plan):
     conn.execute(f'INSERT INTO {table(row["surface"],"heads")} VALUES (?,?) ON CONFLICT(surface) '
                  'DO UPDATE SET preparation_revision=excluded.preparation_revision', (row['surface'], revision))
@@ -268,7 +284,8 @@ def resume_read(conn, owner, key):
 
 
 JOBS = {name: OrderedJob(definition(name, owner, predicate, clicked=name == 'clicked'),
-    prepare, begin, copy, complete, delete, revision_aware=True, resume_read=resume_read) for name, owner, predicate in (
+    prepare, begin, copy, complete, delete, revision_aware=True, resume_read=resume_read,
+    copy_batch=copy_batch) for name, owner, predicate in (
         ('pairs', 'prepared_model_pairs', "{prefix}surface GLOB 'model_pair:*'"),
         ('clicked', 'prepared_clicked_pools', '{prefix}surface IN (' + ','.join(repr(surface) for surface in library_pool_state.SURFACES) + ')'))}
 

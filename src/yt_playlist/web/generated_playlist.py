@@ -8,7 +8,7 @@ from yt_playlist.library.playlist_snapshot import validate_playlist
 from yt_playlist.rec import onboarding
 from yt_playlist.util.matching import track_album, track_artist
 from yt_playlist.util.thumbnails import best_thumb
-from yt_playlist.web.playlist_heading import generated_heading
+from yt_playlist.web.playlist_heading import generated_title_context
 
 
 def build(ctx):
@@ -46,11 +46,12 @@ def build(ctx):
                                        (t['thumbnail'] for t in tracks if t['thumbnail']), None))
         return ctx.templates.TemplateResponse(request, 'playlist.html', {
             'pl': playlist, 'tracks': tracks, 'is_generated': True,
-            'generated_heading': generated_heading(playlist.title, is_generated=True),
+            **generated_title_context(store, playlist, is_generated=True,
+                                      recipe=saved.get('recipe'), tracks=tracks),
             'recipe': saved.get('recipe'), 'is_video': False,
             'show_playlist_radio': not onboarding.initial_setup_pending(store, ctx.now_fn()),
             'total_plays': sum(t['plays'] or 0 for t in tracks), 'genres': [],
-            'facets': None, 'mood_states': {}, 'lastfm_configured': False,
+            'facets': None, 'mood_states': {},
             'conflict_count': 0, 'position_pending': 0,
         })
 

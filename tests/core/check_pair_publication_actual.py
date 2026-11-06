@@ -11,7 +11,7 @@ from yt_playlist.core import group_evidence, recommendation_custody
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import pair_publication as publication, ranked_state as preparation
 from yt_playlist.core.store import Store
-from yt_playlist.rec import comparison_storage
+from tests.comparison_support import legacy_projection
 
 
 def fingerprint(conn, table, order, *, roots=False):
@@ -101,7 +101,7 @@ def check(path, report_path):
         raw = {}
         for source in sources:
             value = radio if source.endswith(':radio') else {'items':[], 'context':{}, 'caption':'Controlled 東京'}
-            raw[source] = (comparison_storage.encode(run, value) if ':challenger:' in source
+            raw[source] = (json.dumps(legacy_projection(run, value)) if ':challenger:' in source
                 else json.dumps({'run_id':run, 'data':value}, ensure_ascii=False, indent=2))
         report['controlled_bytes'] = {source:len(value.encode()) for source, value in raw.items()}
         reference = conn.execute('SELECT g.external_key,x.external_version,t.external_key FROM generation_groups x '

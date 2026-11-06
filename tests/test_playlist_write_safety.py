@@ -1,5 +1,6 @@
 """Deleting a merge/move source requires fresh evidence of complete remote delivery."""
 import json
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,7 +8,7 @@ import pytest
 
 from tests.conftest import FakeClient, _track
 from yt_playlist.core import fao
-from yt_playlist.library import executor
+from yt_playlist.library import executor, undo_capture
 from yt_playlist.library.playlist_writes import PlaylistAddUncertain
 
 
@@ -16,6 +17,10 @@ def transfer(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     # Keep failing-read scenarios focused on the deletion decision, without retry delays.
     monkeypatch.setattr(executor, "with_retry", lambda fn: fn())
+    capture_delays = []
+    capture = partial(undo_capture.capture_post, sleep=capture_delays.append)
+    monkeypatch.setattr(undo_capture, 'capture_post', capture)
+    monkeypatch.setattr(executor, '_capture_post', capture)
     source_identity = store.accounts.upsert_account("Source", "bridge", None, True)
     target_identity = store.accounts.upsert_account("Target", "bridge", None, False)
     tracks = [_track("v1", "One", "Artist"), _track("v2", "Two", "Artist")]
@@ -29,6 +34,7 @@ def transfer(store, monkeypatch, tmp_path):
     return SimpleNamespace(store=store, source=source, keeper=keeper, source_identity=source_identity,
                            target_identity=target_identity, source_client=source_client,
                            target_client=target_client, tracks=tracks, tids=tids,
+                           capture_delays=capture_delays,
                            clients={source_identity: source_client, target_identity: target_client})
 
 
@@ -137,6 +143,7 @@ def test_uncertain_destination_never_authorizes_deletion(transfer, monkeypatch, 
             _run(t, operation)
     assert not t.source_client.deleted
     assert t.store.playlists.get_playlist(t.source) is not None
+    assert t.capture_delays == ([0.5, 1.0] if operation in ('merge', 'move') else [])
 
 
 @pytest.mark.parametrize("operation", ["merge", "move", "delete_duplicate"])
@@ -160,6 +167,9 @@ def test_uncertain_source_does_not_fall_back_to_cached_contents(transfer, monkey
 
 @pytest.mark.parametrize("operation", ["merge", "move"])
 def test_unseen_remote_uploads_must_survive_too(transfer, operation):
+    from fastapi.testclient import TestClient
+    from yt_playlist.web.app import create_app
+
     t = transfer
     t.source_client._tracks["SOURCE"].append(_track("new-upload", "New", "Artist"))
     if operation == "move":
@@ -169,6 +179,12 @@ def test_unseen_remote_uploads_must_survive_too(transfer, operation):
         with pytest.raises(ValueError, match="missing 1 required"):
             _run(t, operation)
     assert not t.source_client.deleted
+    action = next(a for a in t.store.actions.get_actions() if a.kind in ('apply_merge', 'move_identity'))
+    assert json.loads(action.params_json)['missing_required'] == 1
+    with TestClient(create_app(t.store, lambda: t.clients), base_url='http://127.0.0.1') as client:
+        log = client.get('/actions').text
+    assert 'missing 1 required' in log
+    assert 'The source was kept.' in log
 
 
 @pytest.mark.parametrize("selected", [["v1"], []])
@@ -244,6 +260,7 @@ def test_failed_merge_route_preserves_draft_and_reports_partial_action(transfer,
     action = next(a for a in t.store.actions.get_actions() if a.kind == "apply_merge")
     params = json.loads(action.params_json)
     assert params["partial"] and params["skipped"] == 1
+    assert params["missing_required"] == 1
     assert "missing 1 required" in params["error"]
     assert t.store.playlists.get_playlist(t.source) is not None
     assert not t.source_client.deleted
@@ -251,3 +268,33 @@ def test_failed_merge_route_preserves_draft_and_reports_partial_action(transfer,
     assert "partial merge into" in log
     assert "missing 1 required" in log
     assert f'/undo/{action.id}' in log
+
+
+@pytest.mark.parametrize('operation', ['merge', 'move'])
+def test_partial_action_summary_keeps_delete_diagnostic_out_of_the_page(transfer, monkeypatch, operation):
+    from fastapi.testclient import TestClient
+    from yt_playlist.web.app import create_app
+
+    t = transfer
+    diagnostic = 'sqlite3.OperationalError: deletion lease corrupt [review-879-summary]'
+
+    def fail_delete(_playlist):
+        raise TimeoutError(diagnostic)
+
+    monkeypatch.setattr(t.source_client, 'delete_playlist', fail_delete)
+    if operation == 'merge':
+        with pytest.raises(TimeoutError, match='review-879-summary'):
+            _run(t, operation)
+    else:
+        result = _run(t, operation)
+        assert not result['deleted'] and diagnostic in result['delete_error']
+    action = next(a for a in t.store.actions.get_actions() if a.kind in ('apply_merge', 'move_identity'))
+    params = json.loads(action.params_json)
+    assert diagnostic in params['error' if operation == 'merge' else 'delete_error']
+    assert t.store.playlists.get_playlist(t.source) is not None
+    with TestClient(create_app(t.store, lambda: t.clients), base_url='http://127.0.0.1') as client:
+        for _ in range(2):
+            page = client.get('/actions').text
+            assert diagnostic not in page
+            assert 'partial merge into' in page if operation == 'merge' else 'source deletion unconfirmed' in page
+    assert json.loads(t.store.actions.get_action(action.id).params_json) == params

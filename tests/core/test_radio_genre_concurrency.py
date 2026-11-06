@@ -21,23 +21,26 @@ def test_radio_selection_owns_genre_reads_while_sync_owns_writer(installed, monk
     store, _ = installed
     store.genres.rename_genre('synth pop', 'Renamed Synth')
     store.genres.set_genre_family('synth pop', 'jazz')
-    original = genre_identity.resolve
+    original = genre_identity.feature_axes
     reads = []
+    locked, release = threading.Event(), threading.Event()
 
-    def owned_read(conn, label):
+    def owned_read(conn, labels):
         # Assert before SQLite: a real GIL/connection-mutex deadlock would also
         # freeze pytest's own timeout handling.
         assert conn is not store.conn or store._lock.held_by_current_thread, 'Radio genre read borrowed the serving connection'
-        reads.append(label)
-        return original(conn, label)
+        assert locked.is_set() and not release.is_set() and not writer.done()
+        labels = list(labels)
+        reads.append((conn, labels))
+        return original(conn, labels)
 
-    monkeypatch.setattr(genre_identity, 'resolve', owned_read)
+    monkeypatch.setattr(genre_identity, 'feature_axes', owned_read)
     track = {'key': 'one', 'video_id': 'v1', 'genre': 'Renamed Synth'}
     other = {'key': 'two', 'video_id': 'v2', 'genre': 'Synth Pop'}
-    locked, release = threading.Event(), threading.Event()
 
     def sync():
-        with store._lock:
+        with store._lock, store.conn:
+            store.conn.execute("INSERT INTO settings VALUES ('radio-sync', 'pending')")
             locked.set()
             assert release.wait(10)
 
@@ -45,6 +48,10 @@ def test_radio_selection_owns_genre_reads_while_sync_owns_writer(installed, monk
         writer = pool.submit(sync)
         assert locked.wait(2)
         try:
+            # Prove the guard rejects an unsafe borrow without entering SQLite.
+            with pytest.raises(AssertionError, match='borrowed the serving connection'):
+                genre_identity.feature_axes(store.conn, ['Renamed Synth'])
+            assert not reads
             if consumer == 'policy':
                 policy = GenrePolicy(1, [track], store=store)
                 assert policy.allows(other)
@@ -71,7 +78,8 @@ def test_radio_selection_owns_genre_reads_while_sync_owns_writer(installed, monk
         finally:
             release.set()
         writer.result(2)
-    assert reads
+    assert reads and all(conn is not store.conn and labels for conn, labels in reads)
+    assert store.settings.get_setting('radio-sync') == 'pending'
 
 
 @pytest.mark.parametrize('installed', [93, 107], indirect=True)
@@ -84,12 +92,15 @@ def test_radio_checkpoint_schema_probes_own_the_connection(installed, monkeypatc
     probes = []
 
     def available(conn):
-        assert conn is not store.conn or store._lock.held_by_current_thread
+        assert conn is not store.conn or store._lock.held_by_current_thread, 'Unowned checkpoint schema probe'
         probes.append(conn)
         return original(conn)
 
     monkeypatch.setattr(radio_storage, 'available', available)
-    persistence = RadioPersistence(store.settings)
+    with pytest.raises(AssertionError, match='Unowned checkpoint schema probe'):
+        radio_storage.available(store.conn)
+    assert not probes
+    persistence = RadioPersistence(store.radio_checkpoints)
     session = Session(None, SimpleNamespace(fingerprint='probe', tuning={}), account, 'Radio',
                       phase=Phase.STOPPED, playlist='PROBE', local_id=1)
     persistence.save(session)
@@ -102,12 +113,19 @@ def test_home_album_readiness_owns_genre_reads(installed, monkeypatch):
     from yt_playlist.rec import album_choices
 
     store, _ = installed
-    original = genre_identity.resolve
+    original = genre_identity.feature_axes
+    reads = []
 
-    def resolve(conn, label):
-        assert conn is not store.conn or store._lock.held_by_current_thread
-        return original(conn, label)
+    def owned_read(conn, labels):
+        assert conn is not store.conn or store._lock.held_by_current_thread, 'Unowned album genre read'
+        labels = list(labels)
+        reads.append(labels)
+        return original(conn, labels)
 
-    monkeypatch.setattr(genre_identity, 'resolve', resolve)
+    monkeypatch.setattr(genre_identity, 'feature_axes', owned_read)
+    with pytest.raises(AssertionError, match='Unowned album genre read'):
+        genre_identity.feature_axes(store.conn, ['Synth Pop'])
+    assert not reads
     album = {'browse_id': 'owned-read', 'genre': 'Synth Pop'}
     assert album_choices.eligible(store, [album], now=1)[0]['browse_id'] == album['browse_id']
+    assert reads == [['Synth Pop']]

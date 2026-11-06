@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from yt_playlist.rec import home_prepared, home_vibe, mix_tuning, rec_params
 from yt_playlist.rec.home_cards import _epoch
 from yt_playlist.web.context import form_float, request_form
-from yt_playlist.web.routes.home_access import guard
+from yt_playlist.web.routes.home_access import guard, vibe_selection
 
 
 def build(ctx, views):
@@ -53,18 +53,19 @@ def build(ctx, views):
         ctx.rec_worker.trigger_candidate_refresh()
         return views.cards_safe(request, now)
 
-    @router.post("/home/vibe", dependencies=[Depends(guard(ctx, 'vibes'))])
+    @router.post("/home/vibe")
     def home_vibe_change(request: Request, form=Depends(request_form)):
-        vibe = form.get("vibe", "")
-        if vibe and vibe not in home_vibe.PRESETS:
-            return Response(status_code=400)
-        now = now_fn()
-        with mix_tuning.adjusting_vibe(store, now):
-            if vibe:
-                store.settings.set_setting(home_vibe.SETTING, vibe)
-            else:
-                store.settings.delete_setting(home_vibe.SETTING)
-        return views.cards_safe(request, now)
+        with vibe_selection(ctx, request) as now:
+            vibe = form.get("vibe", "")
+            if vibe and vibe not in home_vibe.PRESETS:
+                return Response(status_code=400)
+            with mix_tuning.adjusting_vibe(store, now):
+                if vibe:
+                    store.settings.set_setting(home_vibe.SETTING, vibe)
+                else:
+                    store.settings.delete_setting(home_vibe.SETTING)
+            with home_vibe.authorized(store, vibe):
+                return views.cards_safe(request, now)
 
     @router.post("/home/breadth")
     def home_breadth(request: Request, form=Depends(request_form)):
@@ -159,7 +160,10 @@ def build(ctx, views):
         options = [{"name": f, "kind": "family"} for f in fams]
         options += [{"name": row['key'], "label": row['name'], "kind": "genre"}
                     for row in taxonomy['genres'] if row['key'] not in seen]
-        prepared = views.prepared(now_fn()) or {}
+        # This picker only needs play totals for ordering. Resolving the active
+        # complete menu here repeats journey/Vibe admission while the browser
+        # is already sending its explicit selection.
+        prepared = store.rec_proposals.proposal_fields(home_prepared.SURFACE, ('fingerprint',)) or {}
         plays = {g.lower(): count for g, count in
                  (prepared.get("fingerprint") or {}).get("genre_plays", {}).items()}
         family_plays = {}

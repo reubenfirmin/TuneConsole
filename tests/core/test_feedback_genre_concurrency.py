@@ -23,7 +23,7 @@ def test_feedback_ignores_a_concurrent_rolled_back_family(installed, monkeypatch
     key = identity_key('Feedback song', 'Artist')
     assert _feedback_axis(store, {}, 'vibe', key) == 'genre:pop'
     begin, locked, resolved = (threading.Event() for _ in range(3))
-    metadata, family = RecQueryRepo.track_genres, genre_identity.family
+    metadata, feature_axes = RecQueryRepo.track_genres, genre_identity.feature_axes
     observed = []
 
     def pause_after_metadata(repo, keys):
@@ -33,10 +33,12 @@ def test_feedback_ignores_a_concurrent_rolled_back_family(installed, monkeypatch
             assert locked.wait(5)
         return result
 
-    def observe_family(conn, label):
-        value = family(conn, label)
+    def observe_family(conn, labels):
+        assert conn is not store.conn or store._lock.held_by_current_thread
+        value = feature_axes(conn, labels)
         if locked.is_set():
-            observed.append(value)
+            assert conn is not store.conn
+            observed.extend(family for family, _ in value.values())
             resolved.set()
         return value
 
@@ -54,7 +56,7 @@ def test_feedback_ignores_a_concurrent_rolled_back_family(installed, monkeypatch
     app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
     with TestClient(app, base_url='http://127.0.0.1') as client:
         monkeypatch.setattr(RecQueryRepo, 'track_genres', pause_after_metadata)
-        monkeypatch.setattr(genre_identity, 'family', observe_family)
+        monkeypatch.setattr(genre_identity, 'feature_axes', observe_family)
         with ThreadPoolExecutor(max_workers=1) as pool:
             work = pool.submit(writer)
             try:
@@ -68,7 +70,7 @@ def test_feedback_ignores_a_concurrent_rolled_back_family(installed, monkeypatch
                 resolved.set()
             work.result(5)
     monkeypatch.setattr(RecQueryRepo, 'track_genres', metadata)
-    monkeypatch.setattr(genre_identity, 'family', family)
+    monkeypatch.setattr(genre_identity, 'feature_axes', feature_axes)
     assert observed == ['pop']
     assert _feedback_axis(store, {}, 'vibe', key) == 'genre:pop'
     if http:

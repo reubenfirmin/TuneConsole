@@ -215,10 +215,9 @@ input[type="range"].fp-slider, input[type="range"].fp-breadth-slider {
 
 /* The launcher stays on the board. A native modal makes the rest of the page inert. */
 .page-home .dash-directions .home-mix-board { display: grid; grid-template-columns: minmax(0, 1fr); margin-bottom: 1.375rem; }
-.page-home .dash-directions .home-mix-board > .mix-preference-note { grid-area: 1 / 1; }
-.page-home .dash-directions .home-mix-board > .gen-lanes { grid-area: 2 / 1; min-width: 0; margin-bottom: 0; }
+.page-home .dash-directions .home-mix-board > .gen-lanes { grid-area: 1 / 1; min-width: 0; margin-bottom: 0; }
 .page-home .dash-directions .fingerprint {
-  grid-area: 2 / 1;
+  grid-area: 1 / 1;
   place-self: center;
   position: relative;
   z-index: 8;

@@ -14,7 +14,6 @@ from yt_playlist.core.activity import WorkClosing
 from yt_playlist.core import policy_config
 from yt_playlist.repos import policy_storage
 from yt_playlist.repos.base import synchronized
-from yt_playlist.util import genre_map
 from yt_playlist.util.matching import normalize
 
 log = logging.getLogger(__name__)
@@ -219,7 +218,7 @@ class CapturedOffer:
             try:
                 version, config, rows = _prepare_impressions(
                     self.snapshot.store, items, self.now, configuration=configuration, **options)
-                pools, bases = policy_storage.captured(self.snapshot.store.conn,
+                pools, bases = self.snapshot.store.recommendations.captured_policies(
                     (row['provenance'].get('pool_policy') for row in rows))
                 policy, base = policy_config.pack(config, self.now, version=version)
                 self.store.rec_ledger.record_served_impressions(request_id, self.surface, rows,
@@ -255,17 +254,20 @@ def _prepare_impressions(store, items, now, *, lane="", mode_id=None, ranker="la
     discovered = store.discovery.discovered_tracks_by_keys(offered)
     content = store.rec_query.content_inputs_by_keys(offered)
     last_plays = store.history.last_plays_for(offered)
+    resolved = [{**(meta.get(key) or {}), **(discovered.get(key) or {}), **item}
+                for key, item in zip(keys, items)]
+    genre_axes = store.genres.feature_axes(
+        details.get('genre') or content.get(key, {}).get('genre') for key, details in zip(keys, resolved) if key)
     rows = []
-    for rank, (key, item) in enumerate(zip(keys, items), 1):
+    for rank, (key, item, details) in enumerate(zip(keys, items, resolved), 1):
         if not key:
             continue
-        details = {**(meta.get(key) or {}), **(discovered.get(key) or {}), **item}
         inputs = content.get(key, {})
         genre = details.get("genre") or inputs.get("genre")
         year = details.get("year") or inputs.get("year")
         candidate = {
             "artist": normalize(details.get("artist") or ""),
-            "genre": genre_map.family(genre,conn=store.conn) if genre else None,
+            "genre": genre_axes[genre][0] if genre else None,
             "coverage": {"genre": bool(genre), "year": bool(year),
                          "audio": bool(details.get("audio") or inputs.get("audio") or
                                        any(details.get(c) not in (None, "") for c in store.rec_query.AUDIO_COLS))},
@@ -309,13 +311,12 @@ def maintain_storage(store, now, *, progress=False):
     Read the large prepared/session JSON off the serving connection. Publication
     checks those roots for changes, and rechecks impression references at delete.
     """
-    from yt_playlist.core.preparation import policy_history
-    history = policy_history.maintain(store,now)
+    history = store.rec_ledger.maintain_policy_history(now)
     store.rec_ledger.maintain_impressions(now)
     with store.read_snapshot() as snapshot:
-        versions, cursor = policy_storage.retention_candidates(snapshot.store.conn, now)
+        versions, cursor = snapshot.store.rec_ledger.policy_retention_candidates(now)
         stats = {}
-        published = snapshot.publish(lambda: stats.update(policy_storage.prune(store.conn, versions, cursor)))
+        published = snapshot.publish(lambda: stats.update(store.rec_ledger.prune_policies(versions, cursor)))
     if published and (stats['policies_deleted'] or stats['bodies_deleted']):
         log.info('Recommendation policy retention: policies_deleted=%d bodies_deleted=%d more=%s',
                  stats['policies_deleted'], stats['bodies_deleted'], cursor is not None)
@@ -334,10 +335,9 @@ def record_action(store, kind, now, *, keys=(), video_id=None, playlist_id=None,
     try:
         keys = set(keys)
         if video_id:
-            row = store.conn.execute("SELECT identity_key FROM tracks WHERE video_id=? LIMIT 1",
-                                     (video_id,)).fetchone()
-            if row:
-                keys.add(row["identity_key"])
+            key = store.tracks.library_identity_key_for_video(video_id)
+            if key:
+                keys.add(key)
             else:
                 keys.update(store.discovery.identity_keys_for_video(video_id))
         if playlist_id is not None:

@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 import sqlite3
 import threading
+import time
 
 import pytest
 
@@ -269,12 +270,20 @@ def test_slow_file_verification_leaves_writer_and_regular_schema_usable(installe
         with ThreadPoolExecutor(max_workers=1) as pool:
             publisher = pool.submit(publication.OWNER.publish, store.conn, stage=stage)
             assert blocked.wait(2)
+            phases = [('foreground_write', time.perf_counter())]
             try:
                 other.rec_proposals.put_proposals('home_prepared', {'new': 'while files are slow'}, 3000)
+                phases.append(('regular_schema', time.perf_counter()))
                 regular.migrate(other.conn)
+                phases.append(('foreground_readback', time.perf_counter()))
                 assert other.rec_proposals.get_proposals('home_prepared') == {'new': 'while files are slow'}
             finally:
+                finished = time.perf_counter()
                 release.set()
+                timings = {name: ended - started for (name, started), (_, ended)
+                           in zip(phases, phases[1:] + [('released', finished)])}
+                timings['blocked_reader_progress'] = finished - phases[0][1]
+                print(json.dumps({'home_publication_concurrency_seconds': timings}, sort_keys=True))
             with pytest.raises(MigrationError):
                 publisher.result(2)
         assert publication.OWNER.selected(other.conn) is None

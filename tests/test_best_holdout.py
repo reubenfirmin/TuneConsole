@@ -1,27 +1,23 @@
 """#83 adaptive holdout: a 6-day library gets a 2-day holdout instead of a silent None at 30."""
-from yt_playlist.core.store import Store
+from tests.repository_mock_support import no_database, repository_store
 from yt_playlist.rec.eval_recs import best_holdout
 
 DAY = 86400.0
 
 
-def _store_with_span(days):
-    s = Store(":memory:"); s.init_schema()
-    s.accounts.upsert_account("main", "bridge", None, True)
-    s.history.record_history_plays(1, 100 * DAY + 50000, ["a|x"])
-    if days:
-        s.history.record_history_plays(1, (100 + days) * DAY + 50000, ["b|y"])
-    return s
+def test_thin_history_gets_small_holdout(no_database):
+    store = repository_store(rec_evidence={
+        'evaluation_history_bounds': (100 * DAY + 50000, 106 * DAY + 50000)})
+    assert best_holdout(store) == 2
+    store.rec_evidence.evaluation_history_bounds.assert_called_once_with()
 
 
-def test_thin_history_gets_small_holdout():
-    assert best_holdout(_store_with_span(6)) == 2
+def test_deep_history_caps_at_30(no_database):
+    store = repository_store(rec_evidence={
+        'evaluation_history_bounds': (100 * DAY + 50000, 465 * DAY + 50000)})
+    assert best_holdout(store) == 30
 
 
-def test_deep_history_caps_at_30():
-    assert best_holdout(_store_with_span(365)) == 30
-
-
-def test_empty_history_floors_at_1():
-    s = Store(":memory:"); s.init_schema()
-    assert best_holdout(s) == 1
+def test_empty_history_floors_at_1(no_database):
+    store = repository_store(rec_evidence={'evaluation_history_bounds': (None, None)})
+    assert best_holdout(store) == 1

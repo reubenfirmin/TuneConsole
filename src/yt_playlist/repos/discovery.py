@@ -22,11 +22,27 @@ from yt_playlist.core.preparation.discovery_publication import read_owners
 _DTRACK_AUDIO = ("bpm", "energy", "danceability", "mood_happy", "mood_sad", "mood_relaxed",
                  "mood_acoustic", "instrumental", "loudness", "dynamic_complexity",
                  "music_key", "music_scale")
+_DTRACK_FIELDS = ("id", "recording_id", "identity_key", "video_id", "title", "artist", "album", "thumbnail",
+                  "genre", "year", "source_browse_id", "found_at", "first_shown", "last_shown",
+                  "offered_count", "last_enriched")
+_DTRACK_PROJECTION = ','.join((*_DTRACK_FIELDS, *_DTRACK_AUDIO))
 
 _GENERATED_PL = "(SELECT playlist_scope_id FROM quarantined_playlists)"
 
 
 class DiscoveryRepo(Repo):
+
+    @lookup_read
+    def fetched_albums(self, browse_ids):
+        """Detach retained fetch checkpoints without borrowing another writer's transaction."""
+        from yt_playlist.core import discovery_checkpoints
+        return {browse for browse in browse_ids if discovery_checkpoints.fetched(self.conn, browse)}
+
+    @synchronized
+    def remember_album_fetch(self, browse):
+        from yt_playlist.core import discovery_checkpoints
+        with self.conn:
+            discovery_checkpoints.remember(self.conn, browse)
 
     @property
     def _artist_relation(self):
@@ -437,46 +453,6 @@ class DiscoveryRepo(Repo):
             + (" WHERE t.kind=?" if source_type else ""),
             (source_type,) if source_type else ())}
 
-    def remove_discovery_source(self, key, source_token, held_keys=()) -> bool:
-        """Remove one contribution; only the last source can remove a candidate."""
-        with (database_operation('DiscoveryRepo.remove_discovery_source'), work_budget(20),
-              self._cleanup_snapshot() as snapshot):
-            reader = snapshot.store
-            owners = read_owners(reader.conn)
-            source_column = 'origin_id' if owners.typed else 'source_token'
-            origin_id = owners.origin(source_token)
-            sources = owners.relation('discovery_sources')
-            held = set(held_keys) | reader.rec_eligibility.generated_track_keys()
-            row = reader.conn.execute(
-                f"SELECT d.recording_id FROM {owners.relation('discovery_memberships')} d JOIN recordings r ON r.id=d.recording_id "
-                f"WHERE r.identity_key=? AND EXISTS(SELECT 1 FROM {sources} s "
-                f'WHERE s.recording_id=d.recording_id AND s.{source_column}=?) '
-                f"AND NOT EXISTS(SELECT 1 FROM {sources} s "
-                f'WHERE s.recording_id=d.recording_id AND s.{source_column} IS NOT ?)', (key, origin_id,origin_id)).fetchone()
-            recording = reader.conn.execute('SELECT id FROM recordings WHERE identity_key=?', (key,)).fetchone()
-            installed_sources = owners.installed_source_tokens(recording[0], origin_id) if recording else set()
-            installed_column = 'origin_id' if owners.native else 'source_token'
-            remove = row is not None and key not in held
-            rows = proposal_cache.logical_rows(reader.conn, store=reader) if remove else []
-            snapshot.release_reader()
-            prepared = discovery_cache.prepare(rows, {key}) if remove else []
-            prepared = discovery_cache.stage(self._store.rec_proposals, prepared)
-
-            def publish():
-                # ReadSnapshot owns the transaction and already holds this reentrant
-                # lock. Keep shared connection ownership explicit at the SQL boundary.
-                with self._lock:
-                    self.conn.executemany(
-                        f'DELETE FROM main.discovery_sources WHERE {installed_column}=? AND recording_id='
-                        "(SELECT id FROM recordings WHERE identity_key=?)", [(token, key) for token in installed_sources])
-                    if remove:
-                        self.conn.execute("DELETE FROM discovery_memberships WHERE recording_id=?", (row[0],))
-                        discovery_cache.publish(self.conn, prepared)
-
-            if not snapshot.publish(publish):
-                raise WorkBudgetExceeded('Discovery source removal inputs changed; retry cleanup')
-            return remove
-
     @contextmanager
     def _cleanup_snapshot(self):
         if self._lock.held_by_current_thread:
@@ -499,24 +475,9 @@ class DiscoveryRepo(Repo):
                     raise WorkBudgetExceeded('Recommendation head inventory exceeds its read budget')
             yield snapshot
 
-    def _prune_cached_tracks(self, gone_keys):
-        """Prune caches independently; deletion callers prepare in their own snapshot."""
-        with (database_operation('DiscoveryRepo._prune_cached_tracks'), work_budget(20),
-              self._cleanup_snapshot() as snapshot):
-            reader = snapshot.store
-            rows = proposal_cache.logical_rows(reader.conn, store=reader)
-            reader.conn.execute('SELECT 1 FROM library_memberships LIMIT 1').fetchone()
-            reader.conn.execute('SELECT 1 FROM recordings LIMIT 1').fetchone()
-            snapshot.release_reader()
-            prepared = discovery_cache.prepare(rows, set(gone_keys))
-            prepared = discovery_cache.stage(self._store.rec_proposals, prepared)
-            return snapshot.publish(lambda: discovery_cache.publish(self.conn, prepared))
-
     @staticmethod
     def _dtrack_row(r) -> dict:
-        d = {k: r[k] for k in ("id", "recording_id", "identity_key", "video_id", "title", "artist", "album", "thumbnail",
-                               "genre", "year", "source_browse_id", "found_at",
-                               "first_shown", "last_shown", "offered_count", "last_enriched")}
+        d = {k: r[k] for k in _DTRACK_FIELDS}
         d["audio"] = {c: r[c] for c in _DTRACK_AUDIO if r[c] is not None}
         return d
 
@@ -536,7 +497,24 @@ class DiscoveryRepo(Repo):
 
     @snapshot_read
     def get_discovered_tracks(self) -> list:
-        return [self._dtrack_row(r) for r in self.conn.execute("SELECT * FROM "+read_owners(self.conn).relation('discovered_tracks'))]
+        """Complete ranking inputs, detached and reusable against this reader's inputs."""
+        def prepare():
+            relation = read_owners(self.conn).relation('discovered_tracks')
+            cursor = self.conn.execute(f'SELECT {_DTRACK_PROJECTION} FROM {relation}')
+            rows = []
+            while page := cursor.fetchmany(512):
+                rows.extend(self._dtrack_row(row) for row in page)
+            return rows
+        return self._store.memoized_read('discovered-tracks', prepare)
+
+    @snapshot_read
+    def discovered_track_keys(self) -> set[str]:
+        """Canonical pool membership without catalog metadata, audio or provenance."""
+        relation = read_owners(self.conn).relation('discovery_memberships')
+        return {row[0] for row in self.conn.execute(
+            f'SELECT r.identity_key FROM {relation} d '
+            'JOIN catalog_entries e ON e.id=d.entry_id AND e.recording_id=d.recording_id '
+            'JOIN recordings r ON r.id=e.recording_id').fetchall()}
 
     @snapshot_read
     def identity_keys_for_video(self, video_id) -> list[str]:
@@ -554,46 +532,27 @@ class DiscoveryRepo(Repo):
         qs = ",".join("?" * len(keys))
         available = " AND available IS NOT 0" if available_only else ""
         return {r["identity_key"]: self._dtrack_row(r) for r in self.conn.execute(
-            f"SELECT * FROM {read_owners(self.conn).relation('discovered_tracks')} WHERE identity_key IN ({qs})" + available, keys)}
+            f"SELECT {_DTRACK_PROJECTION} FROM {read_owners(self.conn).relation('discovered_tracks')} "
+            f"WHERE identity_key IN ({qs})" + available, keys)}
 
-    # --- Discovery persistence used by the shared enrichment worker. ----------------------------
-    @synchronized
-    def set_discovered_enrichment(self, identity_key, genre, year) -> None:
-        """Select supplied genre/year; a None argument leaves the existing value."""
-        row = self.conn.execute('SELECT id FROM discovered_tracks WHERE identity_key=?',(identity_key,)).fetchone()
-        if row is not None:
-            with self.conn:
-                for field,value in (('genre',genre),('mb_year',year)):
-                    if value is not None:
-                        metadata.select(self.conn,row['id'],field,value,'discovery_enrichment')
+    @snapshot_read
+    def candidate_tracks_by_keys(self, keys) -> dict:
+        """Current playable candidate metadata without audio or offer history.
 
-    @synchronized
-    def set_discovered_audio(self, identity_key, **audio) -> None:
-        """Write the audio columns this table holds; ignore any extra provider fields (e.g. popularity,
-        gain, label) that have no discovered_tracks column."""
-        cols = [c for c in _DTRACK_AUDIO if c in audio]
-        if not cols:
-            return
-        row = self.conn.execute('SELECT id FROM discovered_tracks WHERE identity_key=?',(identity_key,)).fetchone()
-        if row is not None:
-            with self.conn:
-                for field in cols:
-                    metadata.select(self.conn,row['id'],field,audio[field],'discovery_audio')
-
-    @synchronized
-    def mark_discovered_enriched(self, identity_keys, now) -> None:
-        """Stamp last_enriched so a probed row leaves the queue (probe-once for v1)."""
-        keys = list(identity_keys)
-        if not keys:
-            return
-        qs = ",".join("?" * len(keys))
-        if not self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='catalog_entries'").fetchone():
-            # This is the physical predecessor table, used before its one-time upgrade.
-            self.conn.execute(f"UPDATE discovered_tracks SET last_enriched=? WHERE identity_key IN ({qs})",[now]+keys)
-        else:
-            self.conn.execute(f"UPDATE recordings SET first_enriched_at=COALESCE(first_enriched_at,?),last_enriched_at=? "
-                f"WHERE identity_key IN ({qs}) AND id IN (SELECT recording_id FROM discovery_memberships)", [now,now]+keys)
-        self.conn.commit()
+        Musical evidence has its own prepared profile owner. Selecting every
+        discovery field here also evaluates unused metadata and provenance
+        subqueries for each recording in a Vibe's overlapping rank pages.
+        """
+        keys = list(dict.fromkeys(keys))
+        result = {}
+        relation = read_owners(self.conn).relation('discovered_tracks')
+        for offset in range(0, len(keys), 500):
+            page = keys[offset:offset + 500]
+            marks = ','.join('?' for _ in page)
+            result.update({row['identity_key']: dict(row) for row in self.conn.execute(
+                'SELECT identity_key,recording_id,video_id,title,artist,album,thumbnail,genre,year '
+                f'FROM {relation} WHERE identity_key IN ({marks}) AND available IS NOT 0', page).fetchall()})
+        return result
 
     @synchronized
     def prune_discovered_tracks(self, library_keys, held_keys=()) -> None:
@@ -620,7 +579,7 @@ class DiscoveryRepo(Repo):
         """Discovered tracks with play count (history), library-playlist membership count, offered
         count, saved metadata, and expiry (using found_at until shown). Newest first."""
         rows = self.conn.execute(
-            "WITH plays AS MATERIALIZED (SELECT identity_key,COUNT(*) n FROM listening_days "
+            "WITH plays AS MATERIALIZED (SELECT CAST(identity_key AS TEXT) identity_key,COUNT(*) n FROM listening_days "
             "                            GROUP BY identity_key), "
             "     memberships AS MATERIALIZED (SELECT t.identity_key,COUNT(DISTINCT pt.playlist_id) n "
             "         FROM tracks t JOIN playlist_tracks pt ON pt.track_id=t.id GROUP BY t.identity_key) "

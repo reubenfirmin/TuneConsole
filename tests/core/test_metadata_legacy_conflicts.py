@@ -4,7 +4,6 @@ import json
 import pytest
 
 from yt_playlist.core import metadata_deliveries, metadata_legacy, metadata_native
-from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations import (
     v074_artist_credits, v075_metadata_deliveries, v080_metadata_evidence,
 )
@@ -13,11 +12,11 @@ from yt_playlist.core.store import Store
 
 
 @pytest.fixture
-def legacy_store(tmp_path):
+def legacy_store(tmp_path, _pristine_installed_schema):
     """Retain the deliberate predecessor even after the draft is registered."""
     store = Store(tmp_path / 'legacy-conflicts.db')
     try:
-        migrate(store.conn, registry=registry.MIGRATIONS[:69])
+        _pristine_installed_schema(69).backup(store.conn)
         with store.conn:
             store.conn.execute('BEGIN IMMEDIATE')
             for module in (v074_artist_credits, v075_metadata_deliveries):

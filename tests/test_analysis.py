@@ -1,4 +1,26 @@
+import pytest
+
+from tests.repository_mock_support import no_database, repository_store
 from yt_playlist.library.analysis import jaccard, find_dupes, find_overlaps
+from yt_playlist.repos.models import Playlist, PlaylistMemberships, CleanupPreferences
+
+
+@pytest.fixture
+def analysis_store(no_database):
+    return repository_store(
+        playlists={'cleanup_memberships': None},
+        overlaps={'cleanup_preferences': CleanupPreferences({}, [], set(), set(), [])},
+        values={'_read_only': True},
+    )
+
+
+def _memberships(store, rows):
+    """Detached playlist/membership DTOs, without emulating repository writes."""
+    playlists = [Playlist(i, 1, remote, title, len(keys), 'h', 1., 1., 1.)
+                 for i, (remote, title, keys) in enumerate(rows, 1)]
+    store.playlists.cleanup_memberships.return_value = PlaylistMemberships(
+        playlists, {p.id: frozenset(keys) for p, (_, _, keys) in zip(playlists, rows)}, {}, set())
+    return [p.id for p in playlists]
 
 def _seed_two_playlists(store, keys_a, keys_b):
     iid = store.accounts.upsert_account("main", "cred", None, True)
@@ -22,8 +44,10 @@ def test_jaccard():
     assert jaccard({"a", "b"}, {"a"}) == 0.5
     assert jaccard(set(), set()) == 0.0
 
-def test_find_dupes_above_threshold(store):
-    _seed_two_playlists(store, ["a", "b", "c", "d"], ["a", "b", "c", "x"])  # 3/5 = 0.6
+def test_find_dupes_above_threshold(analysis_store):
+    store = analysis_store
+    _memberships(store, [('PLA', 'A', {'a', 'b', 'c', 'd'}),
+                         ('PLB', 'B', {'a', 'b', 'c', 'x'})])  # 3/5 = 0.6
     assert find_dupes(store, threshold=0.7) == []
     assert len(find_dupes(store, threshold=0.5)) == 1
 
@@ -33,9 +57,10 @@ def test_find_overlaps_below_dupe_threshold(store):
     assert len(ov) == 1
     assert ov[0].shared == {"a|x"}
 
-def test_dupe_at_exact_threshold_boundary(store):
+def test_dupe_at_exact_threshold_boundary(analysis_store):
     # A={"k1","k2","k3"}, B={"k1","k2","k4"}: shared=2, union=4, jaccard=0.5
-    _seed_two_playlists(store, ["k1", "k2", "k3"], ["k1", "k2", "k4"])
+    store = analysis_store
+    _memberships(store, [('PLA', 'A', {'k1', 'k2', 'k3'}), ('PLB', 'B', {'k1', 'k2', 'k4'})])
     threshold = 0.5
     dupes = find_dupes(store, threshold=threshold)
     assert len(dupes) == 1
@@ -44,51 +69,41 @@ def test_dupe_at_exact_threshold_boundary(store):
     assert overlaps == []
 
 
-def test_find_overlaps_excludes_dupe_playlists(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    a = store.playlists.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
-    b = store.playlists.upsert_playlist(iid, "PLB", "B", 1, "h", 1.0)
-    c = store.playlists.upsert_playlist(iid, "PLC", "C", 1, "h", 1.0)
-    t1 = store.tracks.upsert_track("v1", "S1", "X", None, 1)
-    t2 = store.tracks.upsert_track("v2", "S2", "X", None, 1)
-    store.playlists.set_playlist_tracks(a, [t1]); store.playlists.set_playlist_tracks(b, [t1])       # A,B identical -> dupe
-    store.playlists.set_playlist_tracks(c, [t1, t2])                                       # C overlaps A and B
+def test_find_overlaps_excludes_dupe_playlists(analysis_store):
+    store = analysis_store
+    a, b, c = _memberships(store, [('PLA', 'A', {'s1|x'}), ('PLB', 'B', {'s1|x'}),
+                                 ('PLC', 'C', {'s1|x', 's2|x'})])
     ov_all = find_overlaps(store)
     assert any({o.playlist_a.id, o.playlist_b.id} & {a, b} for o in ov_all)      # without exclusion, A/B show
     ov = find_overlaps(store, exclude_playlist_ids={a, b})
     assert all(a not in (o.playlist_a.id, o.playlist_b.id) and b not in (o.playlist_a.id, o.playlist_b.id) for o in ov)
 
 
-def test_find_overlaps_honors_suppressed_pairs(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    fav = store.playlists.upsert_playlist(iid, "PLFAV", "Favorites", 2, "h", 1.0)
-    sml = store.playlists.upsert_playlist(iid, "PLSML", "Small", 1, "h", 1.0)
-    t1 = store.tracks.upsert_track("v1", "A", "X", None, 1); t2 = store.tracks.upsert_track("v2", "B", "X", None, 1)
-    store.playlists.set_playlist_tracks(fav, [t1, t2]); store.playlists.set_playlist_tracks(sml, [t1])
+def test_find_overlaps_honors_suppressed_pairs(analysis_store):
+    store = analysis_store
+    _memberships(store, [('PLFAV', 'Favorites', {'a|x', 'b|x'}), ('PLSML', 'Small', {'a|x'})])
     assert find_overlaps(store)
     assert find_overlaps(store, suppressed={frozenset(("PLFAV", "PLSML"))}) == []
 
 
-def test_empty_playlists_not_grouped_and_listed(store):
+def test_empty_playlists_not_grouped_and_listed(analysis_store):
     from yt_playlist.library.analysis import find_identical_groups, find_empty_playlists
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    e1 = store.playlists.upsert_playlist(iid, "PLe1", "jazz 2", 0, "h", 1.0)            # empty
-    e2 = store.playlists.upsert_playlist(iid, "PLe2", "old stuff", 0, "h", 1.0)         # empty
-    sys = store.playlists.upsert_playlist(iid, "SE", "Episodes for Later", 0, "h", 1.0) # system, excluded
+    store = analysis_store
+    _memberships(store, [('PLe1', 'jazz 2', set()), ('PLe2', 'old stuff', set()),
+                         ('SE', 'Episodes for Later', set())])
     assert find_identical_groups(store) == []                                 # empties not clustered
     titles = [p.title for p in find_empty_playlists(store)]
     assert titles == ["jazz 2", "old stuff"]                                  # sorted, no system playlist
 
 
-def test_find_near_duplicate_groups_clusters_and_honor_merge_ignore(store):
+def test_find_near_duplicate_groups_clusters_and_honor_merge_ignore(analysis_store):
     from yt_playlist.library.analysis import find_near_duplicate_groups, merge_signature
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    store = analysis_store
     # 3 "Monkey Juice" playlists each sharing 7 of 8 tracks (pairwise ~0.78 ≥ 0.70, not identical)
-    t = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, 1) for i in range(10)]
-    base = [t[0], t[1], t[2], t[3], t[4], t[5], t[6]]
-    x = store.playlists.upsert_playlist(iid, "PLx", "Monkey Juice", 8, "h", 1.0); store.playlists.set_playlist_tracks(x, base + [t[7]])
-    y = store.playlists.upsert_playlist(iid, "PLy", "Monkey Juice", 8, "h", 1.0); store.playlists.set_playlist_tracks(y, base + [t[8]])
-    z = store.playlists.upsert_playlist(iid, "PLz", "Monkey Juice", 8, "h", 1.0); store.playlists.set_playlist_tracks(z, base + [t[9]])
+    base = {f's{i}|x' for i in range(7)}
+    _memberships(store, [('PLx', 'Monkey Juice', base | {'s7|x'}),
+                         ('PLy', 'Monkey Juice', base | {'s8|x'}),
+                         ('PLz', 'Monkey Juice', base | {'s9|x'})])
     groups = find_near_duplicate_groups(store)
     assert len(groups) == 1                      # one cluster, not 3 pairwise rows
     assert {p.provider_playlist_id for p in groups[0].playlists} == {"PLx", "PLy", "PLz"}
@@ -96,14 +111,12 @@ def test_find_near_duplicate_groups_clusters_and_honor_merge_ignore(store):
     assert find_near_duplicate_groups(store, ignored_sigs={sig}) == []
 
 
-def test_near_duplicate_pairs_only_include_similar_edges(store):
+def test_near_duplicate_pairs_only_include_similar_edges(analysis_store):
     from yt_playlist.library.analysis import find_near_duplicate_groups, near_duplicate_pairs
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    tracks = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, 1) for i in range(10)]
+    store = analysis_store
+    tracks = [f's{i}|x' for i in range(10)]
     # A-B and B-C are 80% similar; A-C is only 60%, despite sharing a connected group.
-    for ytm, members in (("PLA", tracks[:8]), ("PLB", tracks), ("PLC", tracks[2:])):
-        pid = store.playlists.upsert_playlist(iid, ytm, ytm, len(members), "h", 1.0)
-        store.playlists.set_playlist_tracks(pid, members)
+    _memberships(store, [('PLA', 'PLA', tracks[:8]), ('PLB', 'PLB', tracks), ('PLC', 'PLC', tracks[2:])])
     groups = find_near_duplicate_groups(store)
     assert len(groups) == 1
     pairs = near_duplicate_pairs(store, groups)
@@ -111,15 +124,12 @@ def test_near_duplicate_pairs_only_include_similar_edges(store):
             for p in pairs} == {frozenset(("PLA", "PLB")), frozenset(("PLB", "PLC"))}
 
 
-def test_find_overlaps_kept_pair_survives_ignore(store):
+def test_find_overlaps_kept_pair_survives_ignore(analysis_store):
     from yt_playlist.library.analysis import find_overlaps
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    fav = store.playlists.upsert_playlist(iid, "PLFAV", "Favorite Songs", 3, "h", 1.0)
-    other = store.playlists.upsert_playlist(iid, "PLB", "Favorite Songs 2", 2, "h", 1.0)
-    noise = store.playlists.upsert_playlist(iid, "PLn", "Little Mix", 1, "h", 1.0)
-    t = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, 1) for i in range(3)]
-    store.playlists.set_playlist_tracks(fav, [t[0], t[1], t[2]]); store.playlists.set_playlist_tracks(other, [t[0], t[1]])
-    store.playlists.set_playlist_tracks(noise, [t[0]])
+    store = analysis_store
+    _memberships(store, [('PLFAV', 'Favorite Songs', {'s0|x', 's1|x', 's2|x'}),
+                         ('PLB', 'Favorite Songs 2', {'s0|x', 's1|x'}),
+                         ('PLn', 'Little Mix', {'s0|x'})])
     # ignore PLFAV everywhere, but keep the PLFAV–PLB pair
     ignored = {"PLFAV"}
     kept = {frozenset(("PLFAV", "PLB"))}
@@ -129,29 +139,21 @@ def test_find_overlaps_kept_pair_survives_ignore(store):
     assert frozenset(("PLFAV", "PLn")) not in pairs       # the noise pair is muted
 
 
-def test_find_tiny_playlists(store):
+def test_find_tiny_playlists(analysis_store):
     from yt_playlist.library.analysis import find_tiny_playlists
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    big = store.playlists.upsert_playlist(iid, "PLBIG", "Big", 5, "h", 1.0)
-    one = store.playlists.upsert_playlist(iid, "PL1", "Lonely", 1, "h", 1.0)
-    three = store.playlists.upsert_playlist(iid, "PL3", "Trio", 3, "h", 1.0)
-    empty = store.playlists.upsert_playlist(iid, "PL0", "Empty", 0, "h", 1.0)
-    lm = store.playlists.upsert_playlist(iid, "LM", "Liked Music", 2, "h", 1.0)   # system, excluded
-    tracks = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(5)]
-    store.playlists.set_playlist_tracks(big, tracks)
-    store.playlists.set_playlist_tracks(one, tracks[:1])
-    store.playlists.set_playlist_tracks(three, tracks[:3])
-    store.playlists.set_playlist_tracks(lm, tracks[:2])
+    store = analysis_store
+    tracks = [f's{i}|x' for i in range(5)]
+    _memberships(store, [('PLBIG', 'Big', tracks), ('PL1', 'Lonely', tracks[:1]),
+                         ('PL3', 'Trio', tracks[:3]), ('PL0', 'Empty', []),
+                         ('LM', 'Liked Music', tracks[:2])])
     got = [p.provider_playlist_id for p in find_tiny_playlists(store)]
     assert got == ["PL1", "PL3"]   # 1 then 3 tracks; excludes big, empty, system
 
 
-def test_empty_and_tiny_honor_category_ignore(store):
+def test_empty_and_tiny_honor_category_ignore(analysis_store):
     from yt_playlist.library.analysis import find_empty_playlists, find_tiny_playlists
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    e = store.playlists.upsert_playlist(iid, "PLe", "empty one", 0, "h", 1.0)
-    one = store.playlists.upsert_playlist(iid, "PL1", "lonely", 1, "h", 1.0)
-    store.playlists.set_playlist_tracks(one, [store.tracks.upsert_track("v0", "S0", "X", None, 1)])
+    store = analysis_store
+    _memberships(store, [('PLe', 'empty one', set()), ('PL1', 'lonely', {'s0|x'})])
     assert [p.provider_playlist_id for p in find_empty_playlists(store, ignored={"PLe"})] == []
     assert [p.provider_playlist_id for p in find_tiny_playlists(store, ignored={"PL1"})] == []
     # category-scoped: ignoring as 'empty' must NOT suppress it from the tiny list (and vice-versa)

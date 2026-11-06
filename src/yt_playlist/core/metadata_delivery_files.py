@@ -49,28 +49,15 @@ def _digest(value):
 
 def publish_encoded(root, records, *, age=None):
     """Yield (filename, record digest, byte size, offset), retaining one pack."""
-    header = policy_documents.pack_header(PACK_HEADER, age)
-    pending, size = [], len(header)
+    def validated_records():
+        for record in records:
+            check_cancellable_work()
+            if not isinstance(record, bytes) or not 0 < len(record) <= MAX_BYTES:
+                raise ValueError('Invalid encoded metadata delivery')
+            yield record
 
-    def seal():
-        packed = header + b''.join(pending)
-        filename = policy_documents._publish_encoded(root, packed, hashlib.sha256(packed).hexdigest(), age=age)
-        offset = len(header)
-        for record in pending:
-            yield filename, hashlib.sha256(record).hexdigest(), len(record), offset
-            offset += len(record)
-
-    for record in records:
-        check_cancellable_work()
-        if not isinstance(record, bytes) or not 0 < len(record) <= MAX_BYTES:
-            raise ValueError('Invalid encoded metadata delivery')
-        if pending and size + len(record) > PACK_BYTES:
-            yield from seal()
-            pending, size = [], len(header)
-        pending.append(record)
-        size += len(record)
-    if pending:
-        yield from seal()
+    yield from policy_documents.pack_encoded(root, validated_records(),
+        header=PACK_HEADER, pack_bytes=PACK_BYTES, age=age)
 
 
 def _range(path, digest, byte_size, offset):
@@ -137,6 +124,15 @@ def references(conn):
         return iter(())
     return conn.execute('SELECT id,raw_filename,raw_digest,raw_byte_size,raw_offset '
                         'FROM metadata_deliveries WHERE raw_filename IS NOT NULL ORDER BY id')
+
+
+def owns_file(conn, filename):
+    """Check one collector candidate against the admitted metadata format."""
+    from . import metadata_locator_contract as metadata_locators
+    if metadata_locators.retired(conn):
+        return False
+    return conn.execute('SELECT 1 FROM metadata_deliveries WHERE raw_filename=? LIMIT 1',
+                        (str(filename),)).fetchone() is not None
 
 
 def _document(root, value, kind):
@@ -340,8 +336,7 @@ def collect_orphans(conn):
                 removed = 0
                 for path in chain(root.glob('*/*.json'), root.glob('*/.pending-*')):
                     check_cancellable_work()
-                    if not conn.execute('SELECT 1 FROM metadata_deliveries WHERE raw_filename=? LIMIT 1',
-                                        (str(path),)).fetchone():
+                    if not owns_file(conn, path):
                         removed += fao.delete(path, missing_ok=True)
                 return removed
             finally:

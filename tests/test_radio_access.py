@@ -1,5 +1,7 @@
 """Radio access keeps journey prerequisites without preparing later destinations."""
 import pytest
+from tests.derived_rating_support import seed_dislike
+from tests.enrichment_support import complete_entries, complete_discovered
 
 from tests.conftest import seed_catalog_track
 from tests.onboarding_support import publish_personal_mix
@@ -24,8 +26,8 @@ def test_radio_access_matches_journey_and_preserves_earned_access(store, monkeyp
             seed_catalog_track(store, key, f'Start {i}', 'Artist', video_id=video)
             radio['seeds'].append({'key': key, 'video_id': video})
         if case != 'incomplete_coverage' and case != 'prior_radio':
-            store.enrichment_queue.mark_enriched([row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1)
-            store.discovery.mark_discovered_enriched([row[0] for row in store.conn.execute(
+            complete_entries(store, [row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1)
+            complete_discovered(store, [row[0] for row in store.conn.execute(
                 'SELECT identity_key FROM discovered_tracks')], 1)
         if case == 'missing_foundation':
             store.settings.set_setting('rec_content_generation', 'unprepared-replacement')
@@ -34,7 +36,7 @@ def test_radio_access_matches_journey_and_preserves_earned_access(store, monkeyp
         elif case == 'missing_discover':
             store.rec_proposals.put_proposals(home_prepared.DISCOVERY_SURFACE, {}, 1000)
         elif case == 'missing_mixes':
-            store.rec_model.record_dislike(mixes[0]['key'], until=None, now=1000)
+            seed_dislike(store, mixes[0]['key'], until=None, now=1000)
         elif case == 'missing_seeds':
             radio['seeds'] = []
         elif case == 'prior_radio':
@@ -47,7 +49,7 @@ def test_radio_access_matches_journey_and_preserves_earned_access(store, monkeyp
             store.settings.set_setting('tv_draw', '1')
         elif case == 'excluded_seed':
             # Bootstrap has already applied current exclusions to its offer.
-            store.rec_model.record_dislike(radio['seeds'][0]['key'], until=None, now=1000)
+            seed_dislike(store, radio['seeds'][0]['key'], until=None, now=1000)
             radio['seeds'] = radio['seeds'][1:]
     full = account_growth.view(store, 1000, radio=radio)
     assert full['ready_areas']['radio'] is expected

@@ -1,5 +1,6 @@
 """A skip is a temporary recording break, including on cached Radio plans."""
 from types import SimpleNamespace
+from tests.derived_rating_support import seed_like
 
 import pytest
 
@@ -27,7 +28,7 @@ def exit_event(store, listener, track, at, *, kind='track_exit', position=20, du
 
 def test_first_skip_blocks_for_24_hours_without_clearing_a_heart(store, listener):
     track, _ = catalog_track(store, 'skipped')
-    store.rec_model.record_like(track['key'], 99)
+    seed_like(store, track['key'], 99)
     feedback = [tuple(row) for row in store.conn.execute('SELECT * FROM rec_feedback')]
     exit_event(store, listener, track, 100)
     assert store.player_events.skip_blackouts(100) == {track['key']: 100 + DAY}
@@ -143,10 +144,9 @@ def test_uploads_share_a_recording_break_and_unknown_uploads_can_be_resolved_lat
     assert store.player_events.skip_blackouts(102, keys=[track['key']]) == {track['key']: 100 + DAY}
 
 
-def test_a_file_backed_restart_retains_the_break(tmp_path):
+def test_a_file_backed_restart_retains_the_break(tmp_path, consumer_store):
     path = tmp_path / 'library.db'
-    store = Store(path)
-    store.init_schema()
+    store = consumer_store(path)
     iid = store.accounts.upsert_account('Main', 'credential', None, True)
     track, _ = catalog_track(store, 'restart')
     exit_event(store, iid, track, 100)

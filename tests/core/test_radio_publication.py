@@ -5,8 +5,8 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_legacy_radio_upgrade import installed_radio
 from tests.core.test_radio_preparation import finish, header
+from tests.core.test_legacy_radio_upgrade import seed_installed_radio
 from yt_playlist.core import catalog, radio_reads, radio_storage
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import radio_publication as publication, radio_session as preparation
@@ -19,13 +19,20 @@ def prepare(conn):
     return finish(conn).prepared_revision
 
 
-def test_preopened_readers_and_compatible_writer_keep_exact_checkpoint(tmp_path, monkeypatch):
+def rejection_inputs(store):
+    seed_installed_radio(store)
+    revision = prepare(store.conn)
+    assert publication.selected(store.conn) is None
+    return revision
+
+
+def test_preopened_readers_and_compatible_writer_keep_exact_checkpoint(tmp_path, monkeypatch, installed_radio):
     store, state, raw = installed_radio(tmp_path / 'radio.db')
     other = Store(store._db_path)
     try:
         store.init_schema(defer_metadata=True)
         other.init_schema(defer_metadata=True)
-        persistence = RadioPersistence(other.settings)
+        persistence = RadioPersistence(other.radio_checkpoints)
         assert persistence.load()['episode_id'] == state['episode_id']
         history = list(map(tuple,store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
         revision = prepare(store.conn)
@@ -69,10 +76,11 @@ def test_preopened_readers_and_compatible_writer_keep_exact_checkpoint(tmp_path,
 
 
 @pytest.mark.parametrize('failure',['header','queue','corrupt-file','missing-file'])
-def test_invalid_preparation_does_not_replace_installed_checkpoint(tmp_path,failure):
+def test_invalid_preparation_does_not_replace_installed_checkpoint(
+        tmp_path, installed_radio, staged_custody, failure):
     store, state, raw = installed_radio(tmp_path / 'invalid.db')
     try:
-        revision = prepare(store.conn)
+        revision = staged_custody((store, 93), 'radio-session', rejection_inputs, admit=False)
         row = header(store.conn)
         if failure == 'header':
             with store.conn:
@@ -96,7 +104,7 @@ def test_invalid_preparation_does_not_replace_installed_checkpoint(tmp_path,fail
 
 @pytest.mark.parametrize('when,mutation',[('file','source'),('file','queue'),('file','header'),
                                          ('verified','source'),('verified','queue')])
-def test_changes_during_verification_cannot_select_a_stale_generation(tmp_path,monkeypatch,when,mutation):
+def test_changes_during_verification_cannot_select_a_stale_generation(tmp_path,monkeypatch,installed_radio,when,mutation):
     store, state, _ = installed_radio(tmp_path / 'racing.db')
     second = sqlite3.connect(store._db_path)
     try:
@@ -135,7 +143,7 @@ def test_changes_during_verification_cannot_select_a_stale_generation(tmp_path,m
         store.conn.close()
 
 
-def test_selected_custody_is_immutable_and_missing_file_has_explicit_recovery(tmp_path):
+def test_selected_custody_is_immutable_and_missing_file_has_explicit_recovery(tmp_path, installed_radio):
     store, state, raw = installed_radio(tmp_path / 'recovery.db')
     try:
         revision = prepare(store.conn)
@@ -163,7 +171,7 @@ def test_selected_custody_is_immutable_and_missing_file_has_explicit_recovery(tm
         store.conn.close()
 
 
-def test_interrupted_publication_retains_previous_generation_and_retry_is_atomic(tmp_path):
+def test_interrupted_publication_retains_previous_generation_and_retry_is_atomic(tmp_path, installed_radio):
     store, state, raw = installed_radio(tmp_path / 'interrupted.db')
     try:
         first = prepare(store.conn)
@@ -195,7 +203,7 @@ def test_interrupted_publication_retains_previous_generation_and_retry_is_atomic
 
 
 @pytest.mark.parametrize('present,raw',[(False,None),(True,None),(True,'null'),(True,'')])
-def test_absent_null_and_blank_sources_keep_original_setting_semantics(tmp_path,present,raw):
+def test_absent_null_and_blank_sources_keep_original_setting_semantics(tmp_path,installed_radio,present,raw):
     store, _, _ = installed_radio(tmp_path / 'empty.db')
     try:
         store.init_schema(defer_metadata=True)
@@ -211,7 +219,7 @@ def test_absent_null_and_blank_sources_keep_original_setting_semantics(tmp_path,
         store.conn.close()
 
 
-def test_unresolved_subjects_and_frozen_native_upgrade_retain_custody(tmp_path):
+def test_unresolved_subjects_and_frozen_native_upgrade_retain_custody(tmp_path, installed_radio):
     store, state, _ = installed_radio(tmp_path / 'native.db')
     try:
         state.pop('episode_id')

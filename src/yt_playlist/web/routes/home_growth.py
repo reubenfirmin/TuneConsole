@@ -1,7 +1,8 @@
 """Local account-growth projection and the deferred, explicit Home choice."""
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, Response
 
 from yt_playlist.rec import account_growth, home_preferences
+from yt_playlist.web.context import request_form
 
 
 def build(ctx):
@@ -12,8 +13,8 @@ def build(ctx):
         return account_growth.view(ctx.store, ctx.now_fn(), radio=ctx.radio.bootstrap())
 
     @router.post('/home/growth/format')
-    async def choose_format(request: Request):
-        choice = (await request.form()).get('format')
+    def choose_format(form=Depends(request_form)):
+        choice = form.get('format')
         if choice not in home_preferences.PANELS:
             return Response('Choose Long play, Mix tapes or On air.', status_code=422)
         state = account_growth.view(ctx.store, ctx.now_fn(), radio=ctx.radio.bootstrap())

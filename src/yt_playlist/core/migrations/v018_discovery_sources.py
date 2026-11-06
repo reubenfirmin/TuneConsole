@@ -1,5 +1,6 @@
 """Give retained discovery evidence a type and a rediscovery clock."""
 import sqlite3
+from contextlib import closing
 from functools import lru_cache
 
 from . import v008_recordings, v010_play_event_subjects
@@ -26,7 +27,7 @@ def apply(conn, context):
 
 @lru_cache(maxsize=1)
 def expected_schema():
-    with sqlite3.connect(':memory:') as reference:
+    with closing(sqlite3.connect(':memory:')) as reference:
         original = next(sql for name, _, sql in v010_play_event_subjects.expected_schema()
                         if name == 'discovery_sources')
         reference.execute(original)

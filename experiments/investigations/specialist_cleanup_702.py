@@ -15,7 +15,7 @@ from yt_playlist.core import features
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release
 from yt_playlist.rec import audio_vibe_relax as relax, audio_vibe_uplift as uplift
 from yt_playlist.rec import audio_vibe_energize as energize, audio_vibe_focus as focus
-from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_preview as preview
+from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_prediction as predictor
 
 MODULES = (cruise, release, relax, uplift, energize, focus)
 DIRECTORY = Path(__file__).resolve().parents[1] / 'audio_lab/local/specialist-cleanup-702-20261101'
@@ -40,7 +40,7 @@ def observe(monkeypatch, tmp_path):
             rows = samples[:count]
             cases.append({'video_id': metadata['video_id'], 'count': count,
                           'samples_sha256': hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest(),
-                          'prediction': preview.predict(rows, require_complete=False)})
+                          'prediction': predictor.predict(rows, require_complete=False)})
             routes.append([routing.route_samples(group, rows, specialist_path=cruise.DEFAULT_PATH, mode=mode)
                            for mode in ('off', 'shadow', 'active')])
     rows = recordings[0][1]
@@ -52,10 +52,10 @@ def observe(monkeypatch, tmp_path):
                     isolated.setenv(module.MODE_KEY, 'off')
                 else:
                     isolated.setenv(module.ENVIRONMENT_KEY, str(tmp_path / 'missing.json'))
-                failures[module.VERSION + '/' + failure] = preview.predict(rows, require_complete=False)
+                failures[module.VERSION + '/' + failure] = predictor.predict(rows, require_complete=False)
     with monkeypatch.context() as isolated:
         isolated.setenv(cruise.MODE_KEY, 'shadow')
-        failures['cruise/shadow'] = preview.predict(rows, require_complete=False)
+        failures['cruise/shadow'] = predictor.predict(rows, require_complete=False)
     return {'artifacts': {m.DEFAULT_PATH.name: digest(m.DEFAULT_PATH) for m in (*MODULES, shared)},
             'identities': [m.identity() for m in MODULES], 'recordings': len(recordings),
             'partial_recordings': sum(len(rows) < 3 for _, rows in recordings),

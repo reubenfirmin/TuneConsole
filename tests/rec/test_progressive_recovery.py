@@ -10,6 +10,7 @@ import pytest
 from tests.rec.test_progressive import catalog, drain
 from yt_playlist.rec import content_model, embedding_vectors, progressive, taste_modes
 from yt_playlist.core.activity import WorkBudgetExceeded
+from yt_playlist.core import activity
 from yt_playlist.core.store import Store
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.repos.prepared_content import PreparedContentRepo
@@ -58,41 +59,108 @@ def test_matrix_reuse_preserves_exact_modes_without_decoding_again(store, monkey
     assert serialized(actual) == serialized(expected)
 
 
-def test_periodic_audit_repairs_a_lost_queue_in_bounded_batches(store):
+def test_periodic_audit_repairs_a_lost_queue_in_bounded_batches(store, monkeypatch, record_property):
+    # This case establishes queue/model semantics, independently of scheduler
+    # delays. Keep real budget contexts and snapshot publication; only their
+    # monotonic clock is controlled. Deadline expiry is checked separately.
+    monkeypatch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: 0.0))
+    record_property('work_budget_clock', 'controlled; production budget values unchanged')
     catalog(store, 19)
     with store.conn:
         store.conn.execute('DELETE FROM rec_content_pending')
     p = progressive.Preparation(store, budget=replace(progressive.Budget(), batch=3))
+    expected = [row[0] for row in store.conn.execute('SELECT identity_key FROM recordings ORDER BY identity_key')]
     assert p.due(1000)
-    assert p.repair(1000)
+    assert p.repair(1000), repair_diagnostics(p)
     assert len(store.prepared_content.pending(100)) == 3
     first = store.prepared_content.pending(100)
+    assert [row[0] for row in first] == expected[:3]
     # Existing queue revisions and positions survive subsequent repair slices.
     assert p.repair(1001)
     assert store.prepared_content.pending(100)[:3] == first
+    assert [row[0] for row in store.prepared_content.pending(100)] == expected[:6]
+    # Lose earlier work after the cursor has passed it. Completing this scan
+    # must not stop the next periodic audit finding that earlier identity.
+    with store.conn:
+        store.conn.execute('DELETE FROM rec_content_pending WHERE identity_key=?', (expected[0],))
     for _ in range(10):
         if not p._repair_needed:
             break
         p.repair(1002)
     else:
         pytest.fail('Bounded queue repair did not finish')
-    assert len(store.prepared_content.pending(100)) == 19
-    drain(p)
-    assert p.fit(1060)
+    assert [row[0] for row in store.prepared_content.pending(100)] == expected[1:]
+    assert p._repair_after is None
+    assert not p.repair(1100)
+    assert p.repair(2000)
+    assert [row[0] for row in store.prepared_content.pending(100)] == expected[1:] + expected[:1]
+    drain(p, 2000)
+    assert p.fit(2060)
     before = store.rec_model.content_generation()
     key = before['library'][0][0]
     with store.conn:
         store.conn.execute('DELETE FROM prepared_recording_inputs WHERE recording_id='
                            '(SELECT id FROM recordings WHERE identity_key=?)', (key,))
-    assert not p.due(1100)
+    assert not p.due(2100)
     # Nothing else is written to wake preparation. The periodic audit finds it.
-    assert p.due(2000)
-    assert p.repair(2000)
+    assert p.due(3000)
+    assert p.repair(3000)
     assert store.prepared_content.pending(1)[0][0] == key
     assert store.rec_model.content_generation() == before
-    drain(p, 2000)
-    assert p.fit(2060)
+    drain(p, 3000)
+    assert p.fit(3060)
     assert store.rec_model.content_generation()['library'] == before['library']
+
+
+def repair_diagnostics(preparation):
+    diagnostic = preparation.store.maintenance_diagnostics
+    return {'phases': dict(diagnostic.phases), 'reasons': dict(diagnostic.reasons),
+            'repair_needed': preparation._repair_needed,
+            'next_maintenance_at': preparation.next_maintenance_at}
+
+
+@pytest.mark.parametrize('expiration', ['audit', 'repair'])
+def test_lost_queue_deadline_defers_without_losing_work_and_retries(store, monkeypatch, expiration):
+    clock = [0.0]
+    monkeypatch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    catalog(store, 6)
+    with store.conn:
+        store.conn.execute('DELETE FROM rec_content_pending')
+    p = progressive.Preparation(store, budget=replace(progressive.Budget(), batch=3))
+    assert p.budget.capture_seconds == 2  # Preserve the actual default allowance.
+    if expiration == 'repair':
+        assert p.due(1000)
+        assert p._repair_needed
+    original = PreparedContentRepo.missing_unqueued
+
+    def expired(repo, limit=32, *, after=None):
+        clock[0] += p.budget.capture_seconds + .01
+        # Let the real cooperative budget check reject the repository read.
+        return original(repo, limit, after=after)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(PreparedContentRepo, 'missing_unqueued', expired)
+        assert not p.repair(1000)
+    reason = 'input-audit-budget' if expiration == 'audit' else 'input-repair-budget'
+    diagnostic = store.maintenance_diagnostics
+    assert diagnostic.reasons[progressive.INPUT_PHASE, reason] == 1
+    assert not store.conn.in_transaction
+    assert not store.prepared_content.pending(10)
+    assert activity._DEADLINE.get() is None
+    if expiration == 'audit':
+        assert p.next_maintenance_at == 1060 and not p._repair_needed
+        assert not p.repair(1059)
+        retry_at = 1060
+    else:
+        assert p._repair_needed
+        retry_at = 1001
+    assert p.repair(retry_at), repair_diagnostics(p)
+    first = store.prepared_content.pending(10)
+    expected = [row[0] for row in store.conn.execute('SELECT identity_key FROM recordings ORDER BY identity_key')]
+    assert [row[0] for row in first] == expected[:3]
+    assert p.repair(retry_at + 1)
+    assert store.prepared_content.pending(10)[:3] == first
+    assert [row[0] for row in store.prepared_content.pending(10)] == expected
 
 
 def test_audit_does_not_overwrite_a_newer_arrival(store, monkeypatch):
@@ -104,8 +172,8 @@ def test_audit_does_not_overwrite_a_newer_arrival(store, monkeypatch):
     original = PreparedContentRepo.missing_unqueued
     callbacks = []
 
-    def changed(repo, limit=32):
-        keys = original(repo, limit)
+    def changed(repo, limit=32, *, after=None):
+        keys = original(repo, limit, after=after)
         if limit > 1:
             store.tracks.set_track_genre(ids[0], 'Folk')
             callbacks.append(store.prepared_content.pending(10))
@@ -167,8 +235,8 @@ def test_repair_fences_each_read_owner_and_ignores_independent_owners(store, mon
     missing, enqueue = PreparedContentRepo.missing_unqueued, PreparedContentRepo.enqueue_missing
     mutations, publications, queue_after_mutation = [], [], []
 
-    def change_after_read(repo, limit=32):
-        keys = missing(repo, limit)
+    def change_after_read(repo, limit=32, *, after=None):
+        keys = missing(repo, limit, after=after)
         if limit == 1:
             return keys  # The preliminary due check does not publish work.
         if owner == 'recording_embedding_files':

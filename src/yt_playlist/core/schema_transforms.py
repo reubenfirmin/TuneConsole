@@ -1,10 +1,12 @@
 """Finite installed DDL contracts, independent of historical upgrade execution."""
 from pathlib import Path
+from functools import lru_cache
 import re
 import sqlite3
 
 from .domain_contracts import CONTRACTS
-from .schema_contract import MigrationError, TOKEN
+from .entity_names import predecessor_definition
+from .schema_contract import MigrationError
 
 
 COLLECTION_DEFINITIONS = ('schema_collection_state.sql','schema_session_state.sql','schema_sync_state.sql','schema_model_state.sql')
@@ -103,29 +105,9 @@ def catalog_writes(sql):
     return '' if match and match[1] in CATALOG_RETIRED else sql
 
 
+@lru_cache(maxsize=2048)
 def entity_names(sql):
-    identifiers = {match.group().strip('"`[]').lower() for match in TOKEN.finditer(sql)
-                   if not match.group().startswith(("'",'--','/*'))}
-    names = {'identities':'accounts','identity_id':'account_id','scope_ref':'playlist_scope_id',
-             'ytm_playlist_id':'provider_playlist_id','playlist_ref':'playlist_scope_id',
-             'ix_playlist_scope':'ix_playlist_scope_account'}
-    if 'playlist_scopes' in identifiers:
-        names.update(ref='id',provider_id='provider_playlist_id')
-    if identifiers & {'cleanup_ignored','quarantined_playlists'}:
-        names['ytm'] = 'playlist_scope_id'
-    if identifiers & {'suppressed_overlaps','overlap_kept'}:
-        names.update(a='first_playlist_scope_id',b='second_playlist_scope_id')
-    if 'rec_mode_picks' in identifiers:
-        names['playlist_id'] = 'membership_ref_id'
-    def replace(match):
-        token = match.group()
-        if token.startswith(("'",'--','/*')):
-            return token
-        quoted = token.startswith(('"','`','['))
-        key = token[1:-1] if quoted else token
-        value = names.get(key.lower())
-        return token if value is None else token[0]+value+token[-1] if quoted else value
-    return TOKEN.sub(replace,sql)
+    return predecessor_definition(sql)
 
 
 def domain_contracts(sql):
@@ -259,45 +241,8 @@ def discovery_fences():
 
 
 def model_control_statements():
-    number = "REAL CHECK({0} IS NULL OR (typeof({0}) IN ('integer','real') AND abs({0})<=1.7976931348623157e308))"
-    integer = "INTEGER CHECK({0} IS NULL OR (typeof({0})='integer' AND {0}>=0))"
-    text = "TEXT CHECK({0} IS NULL OR (length({0}) BETWEEN 1 AND 4096))"
-    flag = "INTEGER CHECK({0} IS NULL OR (typeof({0})='integer' AND {0} IN (0,1)))"
-    policy = [('mask',integer),('version',text),('horizon_days',integer),('followup_hours',number),
-        ('min_days',integer),('min_observed',integer),('min_coverage',number),('useful_effect',number),
-        ('format_margin',number),('min_format_days',integer),('retry_days',integer),('family_alpha',number)]
-    setup = [('mask',integer),('method',text),('dim',integer)]
-    plan = [('phase',"TEXT CHECK(phase IS NULL OR phase IN ('preparing','observing','failed','applied','retained'))"),
-        ('attempt',integer),('seed',text),('alpha',number),('constraints',text),('run_id',integer),
-        ('started_at',number),('exposure_until',number),('decision_at',number),('vectors',text),
-        ('generation',text),('prepared_at',number),('last_prepare_attempt',number),
-        ('runtime_seconds',number),('retry_at',number),('reason',text),('ended_at',number)]
-    plan += [('policy_'+name,kind) for name,kind in policy]
-    plan += [(prefix+'_'+name,kind) for prefix in ('previous','challenger') for name,kind in setup]
-    monitor = [('run_id',integer),('generation',text),('started_at',number),('exposure_until',number),
-        ('next_at',number),('baseline_present',flag),('declining_weeks',integer),('complete',flag)]
-    monitor += [('policy_'+name,kind) for name,kind in policy]+[('setup_'+name,kind) for name,kind in setup]
-    assignment = [('epoch',"CHECK(epoch IS NULL OR typeof(epoch) IN ('integer','text'))"),('comparison_mask',integer),
-        ('comparison_run_id',integer),('comparison_arm',"TEXT CHECK(comparison_arm IS NULL OR comparison_arm IN ('incumbent','challenger'))"),
-        ('comparison_probability',"REAL CHECK(comparison_probability IS NULL OR comparison_probability BETWEEN 0 AND 1)"),
-        ('comparison_unit',text),('comparison_format',"TEXT CHECK(comparison_format IS NULL OR comparison_format IN ('mixes','albums','radio'))"),
-        ('comparison_window',text),('comparison_policy',text),('comparison_generation',text),
-        ('comparison_at',number),('comparison_controlled',flag)]
-    for table,fields,maximum,raw_run in (
-        ('model_comparison_plan',plan,1048575,'run_id'),('model_listening_monitor',monitor,1023,'run_id'),
-        ('model_album_assignment',assignment,3,'comparison_run_id')):
-        columns = ['id INTEGER PRIMARY KEY NOT NULL CHECK(id=1)',
-            "field_mask INTEGER NOT NULL CHECK(typeof(field_mask)='integer' AND field_mask BETWEEN 0 AND "+str(maximum)+')',
-            'run_ref INTEGER REFERENCES rec_model_selection_runs(id)','run_resolution TEXT','built_at '+number.format('built_at')]
-        columns.extend('"'+name+'" '+kind.format('"'+name+'"') for name,kind in fields)
-        columns.append(f'CHECK(({raw_run} IS NULL AND run_ref IS NULL AND run_resolution IS NULL) OR '
-            f'({raw_run} IS NOT NULL AND ((run_ref IS NOT NULL AND run_ref={raw_run} AND run_resolution IS NULL) OR '
-            "(run_ref IS NULL AND run_resolution IS NOT NULL AND run_resolution='missing_run'))))")
-        yield 'CREATE TABLE '+table+' ('+','.join(columns)+')'
-    yield ("CREATE TABLE model_monitor_baseline (monitor_id INTEGER NOT NULL REFERENCES model_listening_monitor(id),"
-           "position INTEGER NOT NULL CHECK(typeof(position)='integer' AND position BETWEEN 0 AND 4095),"
-           "value REAL NOT NULL CHECK(typeof(value) IN ('integer','real') AND value BETWEEN 0 AND 1),"
-           'PRIMARY KEY(monitor_id,position)) WITHOUT ROWID')
+    from .model_comparison_state import statements
+    yield from statements()
 
 
 def album_fences():

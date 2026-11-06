@@ -37,7 +37,6 @@ def test_first_play_combines_precision_without_fabricating_exact_time(listener):
     s.trends.refresh_first_play()
     assert s.trends.first_play_map('track')=={'k1':1,'k2':5,'k3':2,'k4':8}
     assert names(s)=={'A1':1,'A2':2,'A3':8}
-    assert s.trends.first_play_floor_day()==1
     coarse_only = s.conn.execute('SELECT first_exact_play_at,first_observed_day FROM recording_listening_summary '
         'WHERE recording_id=(SELECT id FROM recordings WHERE identity_key=?)',('k2',)).fetchone()
     assert tuple(coarse_only)==(None,'1970-01-06')
@@ -87,7 +86,6 @@ def test_old_checkpoint_cannot_hide_earlier_observations(listener):
     observe(s,2,['k1','k2'])
     observe(s,5,['k3'])
     s.settings.set_setting('trend_first_play_watermark','999')
-    assert s.trends.history_track_first()['k3']==(5,5*86400+43200)
     observe(s,1,['k1'])
     s.trends.refresh_first_play()
     assert s.trends.first_play_map('track')=={'k1':1,'k2':2,'k3':5}

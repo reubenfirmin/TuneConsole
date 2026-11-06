@@ -1,11 +1,11 @@
 """Typed catalog evidence and retained choices preserve exact lineage."""
+from contextlib import closing
 import sqlite3
 
 import pytest
 
 from yt_playlist.core import metadata_deliveries as deliveries, metadata_evidence as evidence
 from yt_playlist.core import catalog as catalog_owner, metadata
-from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations import (v074_artist_credits as credits, v075_metadata_deliveries as delivery_schema,
                                         v080_metadata_evidence as migration)
 from yt_playlist.core.migrations.runner import Context
@@ -13,17 +13,17 @@ from yt_playlist.core.store import Store
 
 
 @pytest.fixture
-def additive_catalog(tmp_path):
+def additive_catalog(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path / 'evidence.db')
-    migrate(store.conn, registry=registry.MIGRATIONS[:69])
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        for module in (credits, delivery_schema, migration):
-            module.apply(store.conn, Context(4))
-    migration.validate(store.conn)
-    store._bind_repositories()
-    yield store
-    store.conn.close()
+    with closing(store.conn):
+        _pristine_installed_schema(69).backup(store.conn)
+        with store.conn:
+            store.conn.execute('BEGIN IMMEDIATE')
+            for module in (credits, delivery_schema, migration):
+                module.apply(store.conn, Context(4))
+        migration.validate(store.conn)
+        store._bind_repositories()
+        yield store
 
 
 @pytest.fixture

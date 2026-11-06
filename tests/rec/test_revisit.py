@@ -1,6 +1,5 @@
 """Revisit is remembered music, with hard listening rests and per-visit variety."""
 from tests.conftest import seed_catalog_track
-from tests.rec.test_home_prepared import seed
 from tests.test_recommend import _seed_album
 from yt_playlist.library import ratings
 from yt_playlist.rec import home_prepared, surfaces
@@ -63,9 +62,8 @@ def test_calendar_imports_count_once_per_account_day_without_recounting_exact_ev
     assert rows[0]['last_played'] == day+3.5*DAY
 
 
-def test_current_rating_availability_and_new_play_revalidate_prepared_song_pool(store):
+def test_current_rating_availability_and_new_play_revalidate_prepared_song_pool(store, home_seed_inputs):
     iid = store.accounts.upsert_account('Main', 'cred', None, True)
-    seed(store)
     keys = [song(store, iid, f'song{i}', plays=2, age=60) for i in range(20)]
     prepared = home_prepared.prepare(store, NOW)
     assert prepared and len(prepared['rediscover_tracks']) == 20

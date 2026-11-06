@@ -2,7 +2,7 @@
 // Factories register no listeners and perform no work until called here.
 importScripts("worker/config.js", "worker/music_tabs.js", "worker/sensors.js", "worker/ratings.js",
   "worker/playback.js", "worker/requests.js", "worker/radio.js", "worker/site.js", "worker/setup.js", "worker/transport.js",
-  "worker/audio_preview.js");
+  "worker/audio_capture.js", "worker/audio_sampler.js", "worker/audio_collection.js");
 
 const tuneConsole = (() => {
   const warn = createBridgeWarnings();
@@ -12,13 +12,14 @@ const tuneConsole = (() => {
     revision: TC_CONFIG.sensorRevision, receiverRevision: TC_CONFIG.receiverRevision, warn,
     send: frame => transport.send(frame), suppressBeforeUnload: tabs.suppressBeforeUnload});
   const playback = createPlayback({origin: TC_CONFIG.musicOrigin, appOrigin: TC_CONFIG.appOrigin,
-    musicTabs: tabs, sensors, send: frame => transport.send(frame), warn});
+    musicTabs: tabs, sensors, send: frame => { audioCollection.observe(frame); return transport.send(frame); }, warn});
   const requests = createRequestForwarder({origin: TC_CONFIG.musicOrigin, tabs, sensors});
   const radio = createRadioSession({pickTab: playback.pickTab});
   const site = createSiteIntegration({appOrigin: TC_CONFIG.appOrigin, connected: () => transport.connected});
   const setup = createSetupIntegration({musicOrigin: TC_CONFIG.musicOrigin,
     connected: () => transport.connected, openPlayer: site.openPlayer});
-  const audioPreview = createAudioPreview({appOrigin: TC_CONFIG.appOrigin, pickTab: playback.pickTab});
+  const audioCapture = createAudioCapture({appOrigin: TC_CONFIG.appOrigin, pickTab: playback.pickTab});
+  const audioCollection = createAudioCollection({appOrigin: TC_CONFIG.appOrigin, capture: audioCapture});
 
   async function dispatch(frame) {
     if (frame && frame.type === "navigate") { playback.navigate(frame.url); return; }
@@ -48,13 +49,15 @@ const tuneConsole = (() => {
   chrome.runtime.onMessage.addListener(site.receive);
   chrome.runtime.onMessage.addListener(setup.receive);
   chrome.runtime.onMessage.addListener(playback.receive);
-  chrome.runtime.onConnectExternal?.addListener(audioPreview.connect);
+  chrome.runtime.onConnectExternal?.addListener(port => {
+    if (!audioCollection.connect(port)) audioCapture.connect(port);
+  });
   chrome.tabs.onRemoved.addListener(id => { playback.removed(id); sensors.removed(id); });
   chrome.tabs.onUpdated.addListener((id, info, tab) => {
     if (info.status === "complete" && tab.url?.startsWith(TC_CONFIG.musicOrigin + "/")) sensors.probe();
   });
   chrome.alarms.create("bridge-keepalive", {periodInMinutes: 0.4});
-  chrome.alarms.onAlarm.addListener(() => { transport.connect(); sensors.probe(); });
+  chrome.alarms.onAlarm.addListener(() => { transport.connect(); sensors.probe(); audioCollection.tick(); });
   chrome.runtime.onStartup.addListener(transport.connect);
   chrome.runtime.onInstalled.addListener(transport.connect);
   chrome.runtime.onInstalled.addListener(sensors.injectAll);
@@ -64,5 +67,5 @@ const tuneConsole = (() => {
   chrome.runtime.onStartup.addListener(site.publish);
   setup.install();
   transport.connect();
-  return {tabs, sensors, playback, requests, radio, site, setup, transport, audioPreview};
+  return {tabs, sensors, playback, requests, radio, site, setup, transport, audioCapture, audioCollection};
 })();

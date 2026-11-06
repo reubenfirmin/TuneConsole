@@ -35,7 +35,7 @@ class PlaylistRecipesRepo(Repo):
             row = self.conn.execute("SELECT recipe FROM rec_recipes WHERE playlist_ytm=?",
                                     (playlist_ytm,)).fetchone()
             raw = row['recipe'] if row else None
-        from yt_playlist.core.preparation.append_publication import apply_tv
+        from yt_playlist.core.append_reads import apply_tv
         return apply_tv(self.conn, playlist_ytm, json.loads(raw) if raw is not None else None)
 
     @snapshot_read

@@ -5,7 +5,9 @@ do not supply track-level taste evidence until explicit adoption; membership
 must never suppress a track that remains eligible for recommendations.
 """
 import json
+from tests.enrichment_support import seed_audio
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -81,13 +83,15 @@ def test_generate_endpoint_creates_and_groups(store):
 
     r = c.post("/home/generate", data={"name": "More in your wheelhouse - June 21 2026", "tracks": tracks})
 
-    assert r.status_code == 200 and "Saved" in r.text
+    assert r.status_code == 200
     assert fc.created and fc.created[0][1] == "More in your wheelhouse - June 21 2026"
     assert fc.added and fc.added[0][1] == ["v1", "v2"]
     new_ytm = fc.created[0][0]
     assert store.playlists.get_playlist_groups().get(new_ytm) == "Generated"   # auto-grouped
     # optimistically materialized so it shows in the Playlists tab right away (no sync needed)
     saved = next(p for p in store.playlists.get_playlists() if p.provider_playlist_id == new_ytm)
+    assert f'data-generated-playlist="{new_ytm}"' in r.text
+    assert f'window.location.assign("/playlist/{saved.id}")' in r.text
     assert saved.title == "More in your wheelhouse - June 21 2026" and saved.track_count == 2
     assert saved.created_at == 1.0
     assert saved.thumbnail == "https://example.com/second-song.jpg"
@@ -127,28 +131,86 @@ def test_fresh_creation_starts_enrichment_and_page_rejoins(store, monkeypatch, r
         return "Rock", "1998", None, [], []
 
     monkeypatch.setattr(musicbrainz, "enrich_full", enrich)
-    c = _client(store, lambda: {iid: FakeClient(catalog=remote_catalog([
-        {'video_id': 'fresh1', 'title': 'New Song', 'artist': 'Artist'}]))})
-    try:
-        response = c.post("/home/generate", data={
-            "name": "Fresh songs", "recipe": json.dumps(recipe),
-            "tracks": json.dumps([{"video_id": "fresh1", "title": "New Song", "artist": "Artist"}])})
+    with _client(store, lambda: {iid: FakeClient(catalog=remote_catalog([
+            {'video_id': 'fresh1', 'title': 'New Song', 'artist': 'Artist'}]))}) as c:
+        try:
+            response = c.post("/home/generate", data={
+                "name": "Fresh songs", "recipe": json.dumps(recipe),
+                "tracks": json.dumps([{"video_id": "fresh1", "title": "New Song", "artist": "Artist"}])})
 
-        assert response.status_code == 200 and "Saved" in response.text
-        assert started.wait(timeout=2)  # No visit to the playlist page or manual enrich click needed.
-        playlist = store.playlists.get_playlists()[0]
-        job = c.app.state.ctx.jobs.find_active(playlist.id)
-        assert job is not None
-        page = c.get(f"/playlist/{playlist.id}").text
-        assert f"enrichPanel({playlist.id}, false, {job.id}, 'waterfall'" in page
-        assert c.post(f"/playlist/{playlist.id}/enrich").json()["job_id"] == job.id
-    finally:
-        release.set()
+            assert response.status_code == 200
+            assert started.wait(timeout=2)  # No visit to the playlist page or manual enrich click needed.
+            playlist = store.playlists.get_playlists()[0]
+            assert f'data-generated-playlist="{playlist.provider_playlist_id}"' in response.text
+            assert f'window.location.assign("/playlist/{playlist.id}")' in response.text
+            job = c.app.state.ctx.jobs.find_active(playlist.id)
+            assert job is not None
+            page = c.get(f"/playlist/{playlist.id}").text
+            assert f"enrichPanel({playlist.id}, {job.id}, 'waterfall'" in page
+            assert c.post(f"/playlist/{playlist.id}/enrich").json()["job_id"] == job.id
+        finally:
+            release.set()
 
-    events = c.get(f"/playlist/enrich/events/{job.id}").text
-    assert '"row_html"' in events and '"error": null' in events
-    track = store.charts.playlist_tracks_detail(playlist.id)[0]
-    assert track["genre"] == "Rock" and track["year"] == "1998"
+        events = c.get(f"/playlist/enrich/events/{job.id}").text
+        delivered = [json.loads(line[6:]) for line in events.splitlines() if line.startswith('data: ')]
+        assert any(event.get('row_html') for event in delivered)
+        assert delivered[-1] == {'type': 'end', 'error': False}
+        track = store.charts.playlist_tracks_detail(playlist.id)[0]
+        assert track["genre"] == "Rock" and track["year"] == "1998"
+
+
+@pytest.mark.parametrize('recipe', [{'model': 'fresh'},
+                                  {'model': 'mode', 'lane': 'fresh', 'mode_id': 1}])
+def test_fresh_acceptance_drains_enrichment_on_early_failure(store, monkeypatch, recipe):
+    from yt_playlist.providers import waterfall
+
+    entered, release, draining = threading.Event(), threading.Event(), threading.Event()
+    contexts = []
+    make_client, run_waterfall = _client, waterfall.run_waterfall
+
+    def held_waterfall(*args, **kwargs):
+        entered.set()
+        assert release.wait(30), 'Controlled enrichment was not released'
+        return run_waterfall(*args, **kwargs)
+
+    def observed_client(*args, **kwargs):
+        client = make_client(*args, **kwargs)
+        ctx = client.app.state.ctx
+        contexts.append(ctx)
+        post, wait = client.post, ctx.work.wait
+
+        def fail_after_generation(url, *args, **kwargs):
+            response = post(url, *args, **kwargs)
+            if url == '/home/generate':
+                assert response.status_code == 200 and entered.wait(5)
+                raise AssertionError('Controlled assertion after generation')
+            return response
+
+        def observed_wait(timeout):
+            draining.set()
+            return wait(timeout)
+
+        monkeypatch.setattr(client, 'post', fail_after_generation)
+        monkeypatch.setattr(ctx.work, 'wait', observed_wait)
+        return client
+
+    monkeypatch.setattr(waterfall, 'run_waterfall', held_waterfall)
+    monkeypatch.setattr(f'{__name__}._client', observed_client)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        acceptance = executor.submit(test_fresh_creation_starts_enrichment_and_page_rejoins,
+                                     store, monkeypatch, recipe)
+        try:
+            assert entered.wait(10)
+            assert draining.wait(10), 'The original test did not enter application shutdown'
+            assert not acceptance.done()
+            assert 'run' in contexts[0].work.active
+        finally:
+            release.set()
+        with pytest.raises(AssertionError, match='Controlled assertion after generation'):
+            acceptance.result(timeout=20)
+    assert not contexts[0].work.active
+    store.settings.set_setting('after generated app shutdown', 'usable')
+    assert store.settings.get_setting('after generated app shutdown') == 'usable'
 
 
 def test_non_fresh_creation_does_not_start_playlist_enrichment(store):
@@ -158,7 +220,10 @@ def test_non_fresh_creation_does_not_start_playlist_enrichment(store):
     response = c.post("/home/generate", data={
         "name": "Wheelhouse", "recipe": json.dumps({"model": "mode", "lane": "wheelhouse"}),
         "tracks": json.dumps([{"video_id": "v1", "title": "Song", "artist": "Artist"}])})
-    assert response.status_code == 200 and "Saved" in response.text
+    assert response.status_code == 200
+    playlist = store.playlists.get_playlists()[0]
+    assert f'data-generated-playlist="{playlist.provider_playlist_id}"' in response.text
+    assert f'window.location.assign("/playlist/{playlist.id}")' in response.text
     assert not c.app.state.ctx.jobs.has_active()
 
 
@@ -429,7 +494,7 @@ def test_carded_orders_by_recipe_journey(store, monkeypatch):
     for i, (genre, artist) in enumerate(spec):
         tid = store.tracks.upsert_track(f"v{i}", f"S{i}", artist, "", None, 1)
         store.tracks.set_track_genre(tid, genre)
-        store.tracks.set_track_audio(tid, energy=0 if artist == "Calm" else 1)
+        seed_audio(store, tid, energy=0 if artist == "Calm" else 1)
         items.append(ForYouItem(f"S{i}", artist, "", f"v{i}", None, 1, "r",
                                 identity_key(f"S{i}", artist), "comfort"))
     prepare_profiles(store)

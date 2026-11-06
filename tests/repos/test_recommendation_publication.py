@@ -1,4 +1,5 @@
 """Repository ownership retains the model publisher's atomic transaction."""
+from dataclasses import replace
 import sqlite3
 import struct
 
@@ -6,6 +7,12 @@ import pytest
 
 from yt_playlist.rec import embed, embedding_vectors as vectors, model_refresh
 from yt_playlist.repos.rec_model import VectorChanges
+
+
+def assert_prepared_changes(changes, expected):
+    assert {name: replace(delta, publication=None) for name, delta in changes.items()} == expected
+    assert all(delta.publication is not None and delta.publication.name == name
+               for name, delta in changes.items())
 
 
 @pytest.fixture(autouse=True)
@@ -68,7 +75,8 @@ def test_vector_changes_preserve_unchanged_rows_and_omit_unrequested_spaces(stor
     with store.read_snapshot() as snapshot:
         changes = snapshot.store.rec_model.prepare_training_changes({
             'rec_vectors': [('same', old), ('update', new), ('added', new)]})
-        assert changes == {'rec_vectors': VectorChanges((('update', new), ('added', new)), ('removed',))}
+        assert_prepared_changes(changes, {
+            'rec_vectors': VectorChanges((('update', new), ('added', new)), ('removed',))})
         assert snapshot.publish(lambda: store.rec_model.publish_training_generation(changes))
     assert dict(store.rec_model.get_rec_vectors()) == {'same': old, 'update': new, 'added': new}
     assert store.rec_model.get_rec_artist_vectors() == [('@artist:1', old)]
@@ -92,7 +100,7 @@ def test_empty_target_removes_a_space_and_invalidates_its_readers(store):
     with store.read_snapshot() as previous, store.read_snapshot() as snapshot:
         previous.store.rec_model.get_rec_vectors()
         changes = snapshot.store.rec_model.prepare_training_changes({'rec_vectors': []})
-        assert changes == {'rec_vectors': VectorChanges((), ('song',))}
+        assert_prepared_changes(changes, {'rec_vectors': VectorChanges((), ('song',))})
         assert snapshot.publish(lambda: store.rec_model.publish_training_generation(changes))
         assert not previous.publish(lambda: pytest.fail('missed changed vector space'))
     assert store.rec_model.get_rec_vectors() == []
@@ -148,7 +156,8 @@ def test_discovery_order_only_change_preserves_the_encoder_order(store):
     target = [('a', blob), ('b', blob)]
     with store.read_snapshot() as snapshot:
         changes = snapshot.store.rec_model.prepare_training_changes({'rec_discovered_content_vectors': target})
-        assert changes == {'rec_discovered_content_vectors': VectorChanges(tuple(target), (), replace=True)}
+        assert_prepared_changes(changes, {
+            'rec_discovered_content_vectors': VectorChanges(tuple(target), (), replace=True)})
         assert snapshot.publish(lambda: store.rec_model.publish_training_generation(changes))
     assert store.rec_model.get_rec_discovered_content_vectors() == target
 
@@ -159,6 +168,7 @@ def test_discovery_updates_and_appends_do_not_require_replacement(store):
     target = [('b', new), ('a', old), ('c', new)]
     with store.read_snapshot() as snapshot:
         changes = snapshot.store.rec_model.prepare_training_changes({'rec_discovered_content_vectors': target})
-        assert changes == {'rec_discovered_content_vectors': VectorChanges((('b', new), ('c', new)), ())}
+        assert_prepared_changes(changes, {
+            'rec_discovered_content_vectors': VectorChanges((('b', new), ('c', new)), ())})
         assert snapshot.publish(lambda: store.rec_model.publish_training_generation(changes))
     assert store.rec_model.get_rec_discovered_content_vectors() == target

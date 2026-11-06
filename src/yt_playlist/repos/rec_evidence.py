@@ -6,7 +6,7 @@ membership queries, including calls into the shared eligibility owner.
 """
 from yt_playlist.repos.base import GENERATED_GROUP, Repo, synchronized, snapshot_read
 from yt_playlist.repos.rec_eligibility import exclude_ids
-from yt_playlist.util import genre_map
+from yt_playlist.core import genre_identity
 from yt_playlist.util.years import decade
 
 _ARTIST_BASKET_CAP = 50
@@ -15,17 +15,6 @@ _CONTENT_BASKET_CAP = 80
 
 class RecEvidenceRepo(Repo):
     @synchronized
-    def generated_only_play_days(self, group=GENERATED_GROUP) -> set[tuple[int, str]]:
-        """Day/key pairs with generated events and no account's independent evidence."""
-        rows = self.conn.execute(
-            "SELECT pe.identity_key k,CAST(julianday(c.day)-julianday('1970-01-01') AS INTEGER) day,"
-            "SUM(CASE WHEN pe.is_generated=1 THEN 0 ELSE 1 END) non_generated "
-            "FROM play_event_subjects pe JOIN play_event_calendar c ON c.event_id=pe.id "
-            "GROUP BY pe.identity_key,c.day HAVING NOT EXISTS "
-            "(SELECT 1 FROM listening_days d WHERE d.identity_key=pe.identity_key AND d.day=c.day)").fetchall()
-        return {(r["day"], r["k"]) for r in rows if r["non_generated"] == 0}
-
-    @synchronized
     def evaluation_history_bounds(self) -> tuple:
         """Include generated events in the clock, so exclusions cannot move holdout."""
         row = self.conn.execute(
@@ -33,41 +22,17 @@ class RecEvidenceRepo(Repo):
             "UNION ALL SELECT played_at FROM play_events WHERE is_generated=1)").fetchone()
         return tuple(row)
 
-    @synchronized
-    def generated_only_keys_since(self, since_ts, group=GENERATED_GROUP) -> set[str]:
-        """Keys with only generated event provenance at/after the inclusive cutoff.
-
-        Day-model observations have no generated provenance and conservatively
-        prevent exclusion. Keys with no events in the window are likewise kept.
-        """
-        rows = self.conn.execute(
-            "SELECT pe.identity_key k,SUM(CASE WHEN pe.is_generated=1 THEN 0 ELSE 1 END) non_generated "
-            "FROM play_event_subjects pe WHERE pe.played_at>=? GROUP BY pe.identity_key HAVING NOT EXISTS "
-            "(SELECT 1 FROM listening_days d WHERE d.identity_key=pe.identity_key AND d.day_ts>=?)",
-            (since_ts,since_ts)).fetchall()
-        return {r["k"] for r in rows if r["non_generated"] == 0}
-
-    @synchronized
+    @snapshot_read
     def generated_only_keys_between(self, start_ts, end_ts, group=GENERATED_GROUP) -> set[str]:
         """Generated-only provenance for causal evaluation's [start, end) interval."""
         rows = self.conn.execute(
+            "WITH independent_keys AS MATERIALIZED (SELECT DISTINCT CAST(identity_key AS TEXT) identity_key "
+            "FROM listening_days WHERE day_ts>=? AND day_ts<?) "
             "SELECT pe.identity_key k,SUM(CASE WHEN pe.is_generated=1 THEN 0 ELSE 1 END) non_generated "
             "FROM play_event_subjects pe WHERE pe.played_at>=? AND pe.played_at<? GROUP BY pe.identity_key "
-            "HAVING NOT EXISTS (SELECT 1 FROM listening_days d WHERE d.identity_key=pe.identity_key "
-            "AND d.day_ts>=? AND d.day_ts<?)",(start_ts,end_ts,start_ts,end_ts)).fetchall()
+            "HAVING NOT EXISTS (SELECT 1 FROM independent_keys d WHERE d.identity_key=pe.identity_key)",
+            (start_ts,end_ts,start_ts,end_ts)).fetchall()
         return {r["k"] for r in rows if r["non_generated"] == 0}
-
-    @synchronized
-    def plays_by_list_ids_since(self, ytm_ids, since_ts) -> set[str]:
-        """Radio-session freshness by exact playlist ID, independently of quarantine."""
-        ids = {y for y in ytm_ids if y}
-        if not ids:
-            return set()
-        qs = ",".join("?" * len(ids))
-        rows = self.conn.execute(
-            f"SELECT DISTINCT identity_key k FROM play_event_subjects WHERE playlist_ytm_id IN ({qs}) "
-            "AND played_at >= ?", list(ids) + [since_ts]).fetchall()
-        return {r["k"] for r in rows}
 
     @snapshot_read
     def rec_baskets(self, max_album=30, max_session=120) -> list[list[str]]:
@@ -112,7 +77,7 @@ class RecEvidenceRepo(Repo):
             if r["k"] not in good:
                 continue
             if r["genre"]:
-                fam.setdefault(genre_map.family(r["genre"],conn=self.conn), set()).add(r["k"])
+                fam.setdefault(genre_identity.family(self.conn, r['genre']), set()).add(r['k'])
             dec = decade(r["mb_year"])
             if dec is not None:
                 yr.setdefault(dec, set()).add(r["k"])

@@ -141,9 +141,9 @@ def test_story_cooldown_only_counts_visible_headings_and_ignores_fragment_polls(
     page.goto(live_app + '/')
     # Home loads this panel on demand. Exercise an already loaded but hidden
     # fragment before opening the tab, as happens after navigating away from it.
-    fragment = page.locator('[data-dash="recent"] > div')
-    fragment.evaluate("el => htmx.trigger(el, 'home-area-open')")
-    expect(fragment).to_have_attribute('data-loaded', '1')
+    fragment = page.locator('[data-dash="recent"]')
+    fragment.evaluate("""el => htmx.ajax('GET', '/home/into-recently',
+        {target: el, swap: 'innerHTML'})""")
     headings = page.locator('[data-story-subject]')
     expect(headings).to_have_count(3)
     expect(headings.first).to_be_hidden()
@@ -157,7 +157,7 @@ def test_story_cooldown_only_counts_visible_headings_and_ignores_fragment_polls(
     assert views['artist:Band 0']['views'] == 1
     assert 'artist:Band 2' not in views
     page.evaluate("""async () => htmx.ajax('GET', '/home/into-recently', {
-        target: '[data-dash="recent"] > div', swap: 'innerHTML'})""")
+        target: '[data-dash="recent"]', swap: 'innerHTML'})""")
     headings.first.scroll_into_view_if_needed()
     discovery_interval(page, headings.first)
     assert store.rec_ledger.story_views()['artist:Band 0']['views'] == 1

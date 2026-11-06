@@ -1,4 +1,4 @@
-import {AudioPreviewSession} from './audio-preview-session.js';
+const {AudioCaptureSession} = await import('./audio-capture-session.js' + new URL(import.meta.url).search);
 
 let mountedRoot = null, cleanup = () => {};
 function mountAudioPreview() {
@@ -34,7 +34,7 @@ function mountAudioPreview() {
   }
 
   let session;
-  session = new AudioPreviewSession({playback: playing,
+  session = new AudioCaptureSession({playback: playing,
     extensionIds: root.dataset.modelAvailable === 'true' ? root.dataset.extensionIds.split(',') : [],
     changed(state) {
       if (!start || !session) return;
@@ -73,7 +73,6 @@ function mountAudioPreview() {
     snapshot = data;
     receivedAt = Date.now();
     update();
-    if (session.current) session.check(session.current);
     session.tryAutomatic();
   }
   const playbackChanged = event => apply(window.playbackStatus?.audioSnapshot || event.detail);

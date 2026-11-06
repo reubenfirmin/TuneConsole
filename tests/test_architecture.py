@@ -37,40 +37,53 @@ def _imports(tree, module=None):
 def _flat_repository_references(tree, methods):
     # Known fixture/context names remain useful, but constructor assignments and
     # aliases must also work for reader/writer/repaired and fixture dictionaries.
-    stores = {"store", "db", "reopened", "store2", "ctx.store", "self.store", "self.ctx.store"}
+    stores = {"store", "db", "store2", "ctx.store", "self.store", "self.ctx.store"}
     constructors = {"Store", "yt_playlist.core.store.Store"}
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "yt_playlist.core.store":
             constructors.update(a.asname or a.name for a in node.names if a.name == "Store")
 
-    def is_store(node):
+    def is_store(node, stores):
         return (ast.unparse(node) in stores
                 or (isinstance(node, ast.Call) and ast.unparse(node.func) in constructors)
                 or (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant)
                     and node.slice.value == "store"))
 
-    assignments = [node for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign))]
-    while True:
-        before = len(stores)
-        for node in assignments:
-            if node.value is not None and is_store(node.value):
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                stores.update(ast.unparse(t) for t in targets if isinstance(t, (ast.Name, ast.Attribute)))
-        if len(stores) == before:
-            break
+    def scope_references(scope, inherited):
+        local, nested, pending = [], [], list(ast.iter_child_nodes(scope))
+        while pending:
+            node = pending.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                nested.append(node)
+            else:
+                local.append(node)
+                pending.extend(ast.iter_child_nodes(node))
+        aliases = set(inherited)
+        assignments = [node for node in local if isinstance(node, (ast.Assign, ast.AnnAssign))]
+        while True:
+            before = len(aliases)
+            for node in assignments:
+                if node.value is not None and is_store(node.value, aliases):
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    aliases.update(ast.unparse(t) for t in targets if isinstance(t, (ast.Name, ast.Attribute)))
+            if len(aliases) == before:
+                break
+        for node in local:
+            if isinstance(node, ast.Attribute) and node.attr in methods - {"get"} and is_store(node.value, aliases):
+                yield node.lineno, ast.unparse(node)
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "setattr" and len(node.args) > 1
+                    and isinstance(node.args[1], ast.Constant) and node.args[1].value in methods):
+                target = node.args[0]
+                if (isinstance(target, ast.Call) and isinstance(target.func, ast.Name)
+                        and target.func.id == "type" and len(target.args) == 1):
+                    target = target.args[0]
+                if is_store(target, aliases):
+                    yield node.lineno, "patch repository directly"
+        for child in nested:
+            yield from scope_references(child, aliases)
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and node.attr in methods - {"get"} and is_store(node.value):
-            yield node.lineno, ast.unparse(node)
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "setattr" and len(node.args) > 1
-                and isinstance(node.args[1], ast.Constant) and node.args[1].value in methods):
-            target = node.args[0]
-            if (isinstance(target, ast.Call) and isinstance(target.func, ast.Name)
-                    and target.func.id == "type" and len(target.args) == 1):
-                target = target.args[0]
-            if is_store(target):
-                yield node.lineno, "patch repository directly"
+    yield from scope_references(tree, stores)
 
 
 def test_repository_guard_finds_store_aliases_and_fixture_lookups():
@@ -99,6 +112,19 @@ def test_repository_guard_distinguishes_short_store_aliases_from_domain_state():
         assert list(_flat_repository_references(tree, {"pending"})) == [(2, "s.pending")]
     tree = ast.parse('s = Session()\nqueue = s.pending')
     assert not list(_flat_repository_references(tree, {"pending"}))
+    tree = ast.parse('''
+def fixture(store):
+    s = store
+    s.pending()
+def socket_helper():
+    s = socket.socket()
+    s.close()
+def runtime_helper(store):
+    reopened = Runtime(store)
+    reopened.load()
+''')
+    assert [(line, reference) for line, reference in _flat_repository_references(
+        tree, {'pending', 'close', 'load'})] == [(4, 's.pending')]
 
 
 def test_application_import_graph_is_acyclic_including_local_imports():
@@ -280,12 +306,30 @@ def _unguarded_connection_access(method):
         return False
 
     def unguarded(node, locked=False):
+        if isinstance(node, ast.FunctionDef):
+            previous = None
+            for statement in node.body:
+                admitted = (isinstance(previous, ast.If) and not previous.orelse
+                    and ast.unparse(previous.test) == 'not self._lock.acquire(blocking=False)'
+                    and len(previous.body) == 1 and isinstance(previous.body[0], ast.Return)
+                    and isinstance(statement, ast.Try)
+                    and len(statement.finalbody) == 1
+                    and ast.unparse(statement.finalbody[0]) == 'self._lock.release()')
+                if unguarded(statement, locked or admitted):
+                    return True
+                previous = statement
+            return False
         if isinstance(node, ast.With):
             # A lock elsewhere in the method does not protect SQL outside its body.
             if any(unguarded(item.context_expr, locked) for item in node.items):
                 return True
-            locked = locked or any(ast.unparse(item.context_expr) == "self._lock"
-                                   for item in node.items)
+            locked = locked or any(
+                ast.unparse(item.context_expr) == "self._lock" or (
+                    isinstance(item.context_expr, ast.Call)
+                    and ast.unparse(item.context_expr.func) in {'atomic_write', 'reserved_write'}
+                    and len(item.context_expr.args) == 1
+                    and ast.unparse(item.context_expr.args[0]) == 'self._store')
+                for item in node.items)
             return any(unguarded(statement, locked) for statement in node.body)
         if isinstance(node, ast.Attribute) and ast.unparse(node) == "self.conn":
             return not locked
@@ -315,11 +359,27 @@ def reconciled(self):
             self.conn.execute("RELEASE setup_identities")
 ''').body[0]
     assert not _unguarded_connection_access(protected)
+    for guard in ('atomic_write', 'reserved_write'):
+        method = ast.parse(f'def query(self):\n    with {guard}(self._store, wait_seconds=0):\n        self.conn.execute("SELECT 1")').body[0]
+        assert not _unguarded_connection_access(method), guard
+    nonblocking = ast.parse('''
+def query(self):
+    if not self._lock.acquire(blocking=False):
+        return []
+    try:
+        return self.conn.execute("SELECT 1").fetchall()
+    finally:
+        self._lock.release()
+''').body[0]
+    assert not _unguarded_connection_access(nonblocking)
     for source in (
         'def query(self):\n    self.conn.execute("SELECT 1")',
         'def query(self):\n    with self._lock:\n        pass\n    self.conn.execute("SELECT 1")',
         'def query(self):\n    self.conn.execute("SELECT 1")\n    with self._lock:\n        pass',
         'def query(self):\n    with self.other_lock:\n        self.conn.execute("SELECT 1")',
+        'def query(self):\n    with atomic_write(other):\n        self.conn.execute("SELECT 1")',
+        'def query(self):\n    with unrelated_write(self._store):\n        self.conn.execute("SELECT 1")',
+        'def query(self):\n    if not self._lock.acquire(blocking=False):\n        pass\n    self.conn.execute("SELECT 1")',
     ):
         assert _unguarded_connection_access(ast.parse(source).body[0]), source
 

@@ -1,6 +1,9 @@
 """Legacy conflict preparation retains ordered evidence and independent choices."""
+from contextlib import contextmanager
 import json
+from tests.enrichment_support import choose_field
 from pathlib import Path
+import time
 
 import pytest
 
@@ -10,8 +13,9 @@ from yt_playlist.core.preparation import metadata_conflicts as preparation
 from yt_playlist.core.store import Store
 
 
-def seed(store, candidates=None, *, resolved=1, selected='130', field='bpm'):
-    entry = store.tracks.upsert_track('video', 'Song', 'Artist', None, 200)
+def seed(store, candidates=None, *, resolved=1, selected='130', field='bpm', snapshot=True,
+         video_id='video', title='Song'):
+    entry = store.tracks.upsert_track(video_id, title, 'Artist', None, 200)
     recording = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (entry,)).fetchone()[0]
     if candidates is None:
         candidates = [{'provider': 'a', 'value': 120}, {'provider': 'b', 'value': 130},
@@ -22,8 +26,23 @@ def seed(store, candidates=None, *, resolved=1, selected='130', field='bpm'):
     with store.conn:
         identity = store.conn.execute('INSERT INTO enrichment_conflict '
             '(track_id,field,candidates,resolved,resolved_value,updated_at,recording_id,input_video_id,field_scope) '
-            "VALUES (?,?,?,?,?,10,?,'video','recording')", (entry, field, raw, resolved, selected, recording)).lastrowid
-    return identity, dict(store.conn.execute('SELECT * FROM enrichment_conflict WHERE id=?', (identity,)).fetchone())
+            "VALUES (?,?,?,?,?,10,?,?,'recording')", (entry, field, raw, resolved, selected, recording, video_id)).lastrowid
+    original = (dict(store.conn.execute('SELECT * FROM enrichment_conflict WHERE id=?', (identity,)).fetchone())
+                if snapshot else None)
+    return identity, original
+
+
+@pytest.fixture
+def phase(record_property):
+    """Attribute the real operations without replacing their I/O or durability."""
+    @contextmanager
+    def measured(name):
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            record_property('metadata_conflict_' + name + '_seconds', time.perf_counter() - started)
+    return measured
 
 
 def finish(conn, size=2):
@@ -39,16 +58,21 @@ def head(conn, identity):
                         'USING(conflict_id,generation) WHERE conflict_id=?', (identity,)).fetchone()
 
 
-def test_ordered_candidates_null_blank_and_resolution_keep_separate_identity(predecessor):
+def test_ordered_candidates_null_blank_and_resolution_keep_separate_identity(predecessor, phase):
     store = predecessor
     conn = store.conn
-    identity, original = seed(store)
+    with phase('source_insertion'):
+        identity, original = seed(store)
     history = list(map(tuple, conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
-    preparation.JOB.install(conn)
-    first = preparation.JOB.step(conn, batch_size=2)
+    with phase('job_installation'):
+        preparation.JOB.install(conn)
+    with phase('first_checkpoint'):
+        first = preparation.JOB.step(conn, batch_size=2)
     assert first.processed == 2 and head(conn, identity) is None
-    regular.migrate(conn)
-    finish(conn)
+    with phase('regular_migration'):
+        regular.migrate(conn)
+    with phase('completion'):
+        finish(conn)
     captured = head(conn, identity)
     assert captured['candidates_count'] == 8 and captured['body_kind'] == 'list'
     assert captured['field_scope'] == 'recording' and captured['status'] == 'user_resolved'
@@ -67,7 +91,7 @@ def test_ordered_candidates_null_blank_and_resolution_keep_separate_identity(pre
     assert dict(conn.execute('SELECT * FROM enrichment_conflict WHERE id=?', (identity,)).fetchone()) == original
     assert list(map(tuple, conn.execute('SELECT * FROM schema_migrations ORDER BY version'))) == history
     assert not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='metadata_conflicts'").fetchone()
-    store.enrichment.set_track_field(original['track_id'], 'bpm', 140)
+    choose_field(store, original['track_id'], 'bpm', 140)
     assert conn.execute('SELECT bpm FROM catalog_tracks WHERE id=?', (original['track_id'],)).fetchone()[0] == 140
 
 
@@ -167,17 +191,20 @@ def test_file_io_does_not_hold_transaction_and_rejects_a_stale_source(predecesso
         second.conn.close()
 
 
-def test_interruption_and_failure_preserve_committed_candidates_and_need_explicit_retry(predecessor, monkeypatch):
+def test_interruption_and_failure_preserve_committed_candidates_and_need_explicit_retry(predecessor, monkeypatch, phase):
     conn = predecessor.conn
-    identity, _ = seed(predecessor)
-    preparation.JOB.install(conn)
-    checkpoint = preparation.JOB.step(conn, batch_size=2)
+    with phase('source_insertion'):
+        identity, _ = seed(predecessor, snapshot=False)
+    with phase('job_installation'):
+        preparation.JOB.install(conn)
+    with phase('first_checkpoint'):
+        checkpoint = preparation.JOB.step(conn, batch_size=2)
     copy = preparation._candidate
     def interrupted(*args):
         copy(*args)
         raise KeyboardInterrupt('controlled candidate interruption')
     monkeypatch.setattr(preparation, '_candidate', interrupted)
-    with pytest.raises(KeyboardInterrupt):
+    with phase('interruption'), pytest.raises(KeyboardInterrupt):
         preparation.JOB.step(conn, batch_size=2)
     assert preparation.JOB.progress(conn) == checkpoint
     assert conn.execute(f'SELECT count(*) FROM {preparation.CANDIDATES}').fetchone()[0] == 2
@@ -185,34 +212,43 @@ def test_interruption_and_failure_preserve_committed_candidates_and_need_explici
         copy(*args)
         raise OSError('controlled candidate failure')
     monkeypatch.setattr(preparation, '_candidate', failed)
-    with pytest.raises(OSError, match='controlled candidate failure'):
+    with phase('failure'), pytest.raises(OSError, match='controlled candidate failure'):
         preparation.JOB.step(conn, batch_size=2)
     assert preparation.JOB.progress(conn).status == 'failed'
     assert conn.execute(f'SELECT count(*) FROM {preparation.CANDIDATES}').fetchone()[0] == 2
-    regular.migrate(conn)
+    with phase('regular_migration'):
+        regular.migrate(conn)
     with pytest.raises(MigrationError, match='retry explicitly'):
         preparation.JOB.step(conn)
     monkeypatch.setattr(preparation, '_candidate', copy)
-    reopened = Store(predecessor._db_path)
-    try:
-        preparation.JOB.step(reopened.conn, batch_size=2, retry=True)
-        finish(reopened.conn)
-        assert head(reopened.conn, identity)['candidates_count'] == 8
-    finally:
-        reopened.conn.close()
+    with phase('reopened_retry'):
+        reopened = Store(predecessor._db_path)
+        try:
+            preparation.JOB.step(reopened.conn, batch_size=2, retry=True)
+            finish(reopened.conn)
+            assert head(reopened.conn, identity)['candidates_count'] == 8
+        finally:
+            reopened.conn.close()
 
 
-def test_oversized_source_fails_before_file_io_and_retains_source(predecessor, monkeypatch):
-    raw = '[]' + ' ' * preparation.MAX_BYTES
-    identity, _ = seed(predecessor, raw)
+def test_oversized_source_fails_before_file_io_and_retains_source(predecessor, monkeypatch, phase):
+    with phase('source_insertion'):
+        raw = '[]' + ' ' * preparation.MAX_BYTES
+        # The later exact-byte assertion is the required readback; avoid an
+        # additional full SELECT of the >8 MiB row whose result was discarded.
+        identity, _ = seed(predecessor, raw, snapshot=False)
     conn = predecessor.conn
-    preparation.JOB.install(conn)
+    with phase('job_installation'):
+        preparation.JOB.install(conn)
     monkeypatch.setattr(preparation, '_publish_encoded', lambda *args: pytest.fail('Oversized source reached file I/O'))
-    with pytest.raises(MigrationError, match='byte budget'):
+    with phase('rejection'), pytest.raises(MigrationError, match='byte budget'):
         preparation.JOB.step(conn)
-    assert preparation.JOB.progress(conn).status == 'failed'
-    assert conn.execute('SELECT candidates FROM enrichment_conflict WHERE id=?', (identity,)).fetchone()[0] == raw
-    regular.migrate(conn)
+    with phase('failure_progress'):
+        assert preparation.JOB.progress(conn).status == 'failed'
+    with phase('source_verification'):
+        assert conn.execute('SELECT candidates FROM enrichment_conflict WHERE id=?', (identity,)).fetchone()[0] == raw
+    with phase('regular_migration'):
+        regular.migrate(conn)
 
 
 def test_missing_recorded_association_stays_entry_local(predecessor):
@@ -246,13 +282,17 @@ def test_interruption_after_candidate_and_current_head_writes_rolls_back_both(pr
     assert head(conn, identity)['candidates_count'] == 8
 
 
-def test_invalid_resolution_status_is_a_durable_failure(predecessor):
+def test_invalid_resolution_status_is_a_durable_failure(predecessor, phase):
     conn = predecessor.conn
-    identity, original = seed(predecessor, resolved=3)
-    preparation.JOB.install(conn)
-    with pytest.raises(MigrationError, match='Unsupported legacy conflict status'):
+    with phase('source_insertion'):
+        identity, original = seed(predecessor, resolved=3)
+    with phase('job_installation'):
+        preparation.JOB.install(conn)
+    with phase('rejection'), pytest.raises(MigrationError, match='Unsupported legacy conflict status'):
         preparation.JOB.step(conn)
-    assert preparation.JOB.progress(conn).status == 'failed'
+    with phase('failure_progress'):
+        assert preparation.JOB.progress(conn).status == 'failed'
     assert head(conn, identity) is None
     assert dict(conn.execute('SELECT * FROM enrichment_conflict WHERE id=?', (identity,)).fetchone()) == original
-    regular.migrate(conn)
+    with phase('regular_migration'):
+        regular.migrate(conn)

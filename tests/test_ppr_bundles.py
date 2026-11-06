@@ -1,6 +1,4 @@
 import numpy as np
-import pytest
-from yt_playlist.core.store import Store
 from yt_playlist.rec import embedding_vectors as embed, surfaces, ppr, mode_surfaces as ms
 from tests.conftest import seed_catalog_track
 
@@ -8,13 +6,6 @@ from tests.conftest import seed_catalog_track
 def seed_items(store, keys):
     for key in keys:
         seed_catalog_track(store, key, 'T' + key, 'A' + key, video_id='v' + key, genre='House')
-
-
-@pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    return s
 
 
 class _Item:

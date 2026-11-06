@@ -37,7 +37,7 @@
 {% endif %}
 <div id="home" x-data="homeStatus()" @bridge-status.window="applyBridgeStatus($event.detail)">
 <div class="home-growth" x-data='accountGrowth({{ growth|tojson }})' @hashchange.window="growthPanel = location.hash.slice(1)">
-  {% if not onboarding %}{% include '_partials/account_health.html' %}{% endif %}
+  {% if not onboarding %}{% include '_partials/growth_notifications.html' %}{% endif %}
   {% include '_partials/growth_destination.html' %}
   {# Extension state from the shared document poller (~3s): a first-run hero until the extension connects,
      then a compact live strip with what's playing and library freshness. #}
@@ -65,34 +65,25 @@
     </section>
     {% endif %}
 
-    {# The global layout owns Now Playing; only surface a sensor failure when there is a YTM tab
-       that should be responding. Having no YTM tab open is normal and needs no warning. #}
-    <section class="notice warning banner"
-             x-show="connected && sensorHealth && !sensorHealth.healthy && sensorHealth.ytm_tabs > 0"
-             x-cloak>
-      <span class="banner-body">
-        <span x-show="sensorHealth && sensorHealth.recovering">Reloading the YouTube Music tab to reconnect it…</span>
-        <span x-show="sensorHealth && !sensorHealth.recovering">YouTube Music did not reconnect automatically. Reload the tab to try again.</span>
-      </span>
-    </section>
-
   </div>
 
   {% if not onboarding %}
   {% set spotify_result_waiting = spotify_library_job and spotify_library_job.status in ('done', 'error', 'preview') %}
-  {% set dash_default = 'notices' if spotify_result_waiting else ('start' if onboarding else home_default_panel|default('directions')) %}
+  {% set dash_default = 'notices' if spotify_result_waiting else home_default_panel|default('directions') %}
   {% set has_notices = show_takeout_nag or actions or show_intro or show_lastfm_nudge or
       show_identities_nudge or show_backend_update or recap or spotify_library_job %}
   <div class="home-dashboard"
        :class="{'is-radio': panel === 'radio', 'is-unlocks': panel === 'unlocks'}"
        x-data="{ panel: homePanel(location.hash.slice(1)) || '{{ dash_default }}', albumTuningReady: false,
                  go(p) { if (!areaAccessible(p)) p = 'unlocks'; this.panel = p; history.replaceState(null, '', '#' + p); window.dispatchEvent(new Event('hashchange')); fetch('/home/format', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: new URLSearchParams({panel:p})}).catch(() => {}); },
-                 moveFocus(event, step) { const tabs = [...event.currentTarget.querySelectorAll('[role=tab]')].filter(tab => tab.getClientRects().length); tabs[(tabs.indexOf(event.target) + step + tabs.length) % tabs.length]?.focus(); } }"
-       @hashchange.window="panel = areaAccessible(homePanel(location.hash.slice(1))) ? homePanel(location.hash.slice(1)) : 'unlocks'"
+                 moveFocus(event, step) { const tabs = [...event.currentTarget.querySelectorAll('[role=tab]')].filter(tab => tab.getClientRects().length); tabs[(tabs.indexOf(event.target) + step + tabs.length) % tabs.length]?.focus({preventScroll: true}); },
+                 revealTab(event) { const nav = event.currentTarget, tab = event.target.getBoundingClientRect(), view = nav.getBoundingClientRect(), padding = parseFloat(getComputedStyle(nav).scrollPaddingInlineStart) || 0; nav.scrollLeft += Math.min(0, tab.left - view.left - padding) + Math.max(0, tab.right - view.right + padding); } }"
+       @hashchange.window="const destination = homePanel(location.hash.slice(1)) || panel; panel = areaAccessible(destination) ? destination : 'unlocks'"
        @album-tuning-ready.window="albumTuningReady = true"
        x-init='$nextTick(() => { if (!areaAccessible(panel) || !$el.querySelector(`[data-dash="${panel}"]`)) go("unlocks") })'>
     <div class="dash-navigation">
     <nav class="dash-nav" aria-label="Home areas" role="tablist"
+         @focusin="revealTab($event)"
          @keydown.right.prevent="moveFocus($event, 1)"
          @keydown.left.prevent="moveFocus($event, -1)">
       <button type="button" role="tab" class="growth-tab" aria-label="Your unlocks" title="Your unlocks"
@@ -100,13 +91,8 @@
               :aria-description="newNodes.length ? 'New unlocks to see' : null" @click="go('unlocks')">
         {% include '_partials/growth_star.html' %}
       </button>
-      {% if onboarding %}
-      <button type="button" role="tab" :class="{ on: panel === 'start' }" :aria-selected="panel === 'start'"
-              @click="go('start')">Start here</button>
-      {% else %}
       <button type="button" role="tab" x-show="areaAccessible('directions')" :class="{ on: panel === 'directions' }" :aria-selected="panel === 'directions'"
               @click="go('directions')">Mix tapes</button>
-      {% endif %}
       <button type="button" role="tab" x-show="areaAccessible('radio')" :class="{ on: panel === 'radio' }" :aria-selected="panel === 'radio'"
               :aria-description="radioPlaybackState ? 'Radio ' + radioPlaybackState : null"
               @click="go('radio')">On air <span class="dash-on-air-dot" x-show="radioPlaybackState" x-cloak
@@ -117,18 +103,12 @@
       <button type="button" role="tab" x-show="areaAccessible('tv')" :class="{ on: panel === 'tv' }" :aria-selected="panel === 'tv'"
               :aria-description="tvPlaying && panel !== 'tv' ? 'TV is playing' : null"
               @click="go('tv')">TV<span class="dash-tv-dot" x-show="tvPlaying && panel !== 'tv'" x-cloak aria-hidden="true"></span></button>
-      {% if not onboarding %}
       <button type="button" role="tab" x-show="areaAccessible('discover')" :class="{ on: panel === 'discover' }" :aria-selected="panel === 'discover'"
               @click="go('discover')">Discover</button>
-      {% endif %}
-      {% if not onboarding %}
       <button type="button" role="tab" x-show="areaAccessible('rediscover')" :class="{ on: panel === 'rediscover' }" :aria-selected="panel === 'rediscover'"
               @click="go('rediscover')">Revisit</button>
-      {% endif %}
-      {% if not onboarding %}
       <button type="button" role="tab" x-show="areaAccessible('recent')" :class="{ on: panel === 'recent' }" :aria-selected="panel === 'recent'"
               @click="go('recent')">Into recently</button>
-      {% endif %}
       {% if has_notices %}
       <button type="button" role="tab" :class="{ on: panel === 'notices' }" :aria-selected="panel === 'notices'"
               @click="go('notices')">Needs attention <span class="dash-attention-dot" aria-hidden="true"></span></button>
@@ -154,19 +134,23 @@
       {% include "_partials/radio.html" %}
     </section>
     <section class="dash-panel" data-dash="album-choices" role="tabpanel" x-show="panel === 'album-choices'" x-cloak>
+      {% if album_board %}
+      {% with albums=album_board.albums, opportunity_id=album_board.opportunity_id,
+              preparing=album_board.preparing, filtered=album_board.filtered,
+              tuning=album_board.tuning, tuning_axes=album_board.tuning_axes,
+              tuning_defaults=album_board.tuning_defaults, genres=album_board.genres %}
+      {% include '_partials/album_choices.html' %}
+      {% endwith %}
+      {% else %}
       <div hx-get="/home/album-choices" hx-trigger="home-area-open" hx-swap="innerHTML"
            x-effect="if (panel === 'album-choices' && areaAccessible('album-choices') && !$el.dataset.loaded) $nextTick(() => loadHomeArea($el))"
            @htmx:after-request.camel="$el.dataset.loaded = $event.detail.successful ? '1' : ''"></div>
+      {% endif %}
     </section>
     <section class="dash-panel dash-tv" data-dash="tv" role="tabpanel" x-show="panel === 'tv'" x-cloak>
       <div class="tv-slot"></div>
     </section>
 
-    {% if onboarding %}
-    <section class="dash-panel dash-onboarding" data-dash="start" role="tabpanel" x-show="panel === 'start'" x-cloak>
-      {% include "_partials/onboarding_feed.html" %}
-    </section>
-    {% else %}
     <section class="dash-panel dash-directions" data-dash="directions" role="tabpanel" x-show="panel === 'directions'" x-cloak>
       {% include "_partials/home_feed.html" %}
     </section>
@@ -180,9 +164,16 @@
       {% endif %}
     </section>
     <section class="dash-panel dash-async" data-dash="recent" role="tabpanel" x-show="panel === 'recent'" x-cloak>
+      {% if story_board %}
+      {% with cards=story_board.cards, groups=story_board.groups,
+              spreads=story_board.spreads, preparing=story_board.preparing %}
+      {% include '_partials/into_recently.html' %}
+      {% endwith %}
+      {% else %}
       <div hx-get="/home/into-recently" hx-trigger="home-area-open" hx-swap="innerHTML"
            x-effect="if (panel === 'recent' && areaAccessible('recent') && !$el.dataset.loaded) $nextTick(() => loadHomeArea($el))"
            @htmx:after-request.camel="$el.dataset.loaded = $event.detail.successful ? '1' : ''"></div>
+      {% endif %}
     </section>
     <section class="dash-panel dash-async" data-dash="discover" role="tabpanel" x-show="panel === 'discover'" x-cloak>
       {% if growth.ready_areas.discover %}
@@ -197,7 +188,6 @@
     <p class="section-note muted-note" x-show="panel === 'directions'" x-cloak>
       Hiding {{ muted_count }} muted artist{{ 's' if muted_count != 1 }} based on your feedback -
       <a href="/taste">manage on the Taste Model page</a>.</p>
-    {% endif %}
     {% endif %}
 
     {% if has_notices %}

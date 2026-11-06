@@ -83,11 +83,12 @@ class RecQueryRepo(Repo):
             f"SELECT identity_key, MAX(popularity) p FROM tracks "
             f"WHERE identity_key IN ({qs}) AND popularity IS NOT NULL GROUP BY identity_key", keys)}
 
-    @synchronized
+    @snapshot_read
     def era_play_distribution(self) -> dict:
         """{decade: Σ(1 + play_count)} over dated tracks, deduped per song (mirrors genre version)."""
         rows = self.conn.execute(
-            "WITH tp AS (SELECT identity_key, plays c FROM listening_day_counts), "
+            "WITH tp AS MATERIALIZED (SELECT CAST(identity_key AS TEXT) identity_key, plays c "
+            "FROM listening_day_counts), "
             "     songs AS (SELECT DISTINCT identity_key, mb_year FROM tracks WHERE mb_year<>'') "
             "SELECT s.mb_year y, SUM(1 + COALESCE(tp.c, 0)) w FROM songs s "
             "LEFT JOIN tp ON tp.identity_key = s.identity_key GROUP BY s.identity_key, s.mb_year").fetchall()
@@ -265,7 +266,7 @@ class RecQueryRepo(Repo):
                 'FROM tracks t WHERE t.id IN ('
                 'SELECT MIN(e.id) FROM recordings r JOIN catalog_entries e ON e.recording_id=r.id '
                 'JOIN library_memberships m ON m.entry_id=e.id JOIN youtube_items y ON y.video_id=e.video_id '
-                f'WHERE r.identity_key IN ({qs}) AND COALESCE(y.available,1)<>0 GROUP BY r.id)', batch)
+                f'WHERE r.identity_key IN ({qs}) AND COALESCE(y.available,1)<>0 GROUP BY r.id)', batch).fetchall()
             result.update({row['identity_key']: dict(row) for row in rows})
         return result
 
@@ -282,17 +283,6 @@ class RecQueryRepo(Repo):
             fams[fam] = fams.get(fam, 0) + r["n"]
         return [{"family": f, "n": n} for f, n in
                 sorted(fams.items(), key=lambda kv: (-kv[1], kv[0]))]
-
-    @synchronized
-    def keys_in_families(self, families) -> set:
-        """Identity_keys whose genre maps into one of `families` (#29 whitelist). Untagged tracks are
-        never included. A track with no genre can't be vouched into a restricted cluster."""
-        fams = set(families)
-        if not fams:
-            return set()
-        return {r["k"] for r in self.conn.execute(
-            "SELECT DISTINCT identity_key k, genre FROM tracks WHERE genre IS NOT NULL AND genre<>''")
-            if genre_identity.family(self.conn,r["genre"]) in fams}
 
     @synchronized
     def library_genres(self) -> list[dict]:
@@ -337,7 +327,7 @@ class RecQueryRepo(Repo):
         never been played (count 0), the primary signal for the Catalog card (your under-played
         catalog)."""
         return {r["identity_key"]: r["c"] for r in self.conn.execute(
-            "SELECT identity_key, plays c FROM listening_day_counts")}
+            "SELECT identity_key, plays c FROM listening_day_counts").fetchall()}
 
     @synchronized
     def play_weighted_facets(self, plays) -> dict:
@@ -361,6 +351,19 @@ class RecQueryRepo(Repo):
             if decade is not None:
                 era_plays[decade] = era_plays.get(decade, 0) + 1 + plays.get(key, 0)
         return {'genres': genre_plays, 'eras': era_plays}
+
+    @snapshot_read
+    def recipe_facet_keys(self):
+        """Positive-support facet keys, when only a recipe's RNG draws matter."""
+        # Genres and years have independent support; one catalog pass can
+        # collect both without requiring either value on the same recording.
+        rows = self.conn.execute(
+            "SELECT DISTINCT genre,mb_year FROM tracks WHERE genre<>'' OR mb_year<>''").fetchall()
+        genres = list(dict.fromkeys(row[0] for row in rows if row[0] is not None and row[0] != ''))
+        years = list(dict.fromkeys(row[1] for row in rows if row[1] is not None and row[1] != ''))
+        axes = self._store.genres.feature_axes(genres)
+        return (dict.fromkeys((axes.get(genre, ('', None))[0] for genre in genres), 1),
+                dict.fromkeys((decade for year in years if (decade := _decade(year, as_str=True)) is not None), 1))
 
     @synchronized
     def library_songs(self) -> list[dict]:
@@ -441,7 +444,7 @@ class RecQueryRepo(Repo):
         return {r["genre"]: r["c"] for r in self.conn.execute(
             "SELECT genre, COUNT(*) c FROM tracks WHERE genre<>'' GROUP BY genre")}
 
-    @synchronized
+    @snapshot_read
     def genre_play_distribution(self) -> dict:
         """{genre: Σ (1 + play_count)} over tagged tracks, play-weighted so a barely-played
         context counts toward breadth far less than one you actually listen to (the +1 keeps
@@ -450,7 +453,8 @@ class RecQueryRepo(Repo):
         # (same identity_key, different video_id uploads). Without the DISTINCT, the LEFT JOIN below
         # would add (1 + plays) once per upload, multiplying a song's weight by its duplicate count.
         rows = self.conn.execute(
-            "WITH tp AS (SELECT identity_key, plays c FROM listening_day_counts), "
+            "WITH tp AS MATERIALIZED (SELECT CAST(identity_key AS TEXT) identity_key, plays c "
+            "FROM listening_day_counts), "
             "     songs AS (SELECT DISTINCT identity_key, genre FROM tracks WHERE genre <> '') "
             "SELECT s.genre g, SUM(1 + COALESCE(tp.c, 0)) w FROM songs s "
             "LEFT JOIN tp ON tp.identity_key = s.identity_key GROUP BY s.genre").fetchall()

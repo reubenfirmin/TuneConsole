@@ -4,13 +4,13 @@ File evidence publication and its root retirement share one domain lock. SQL
 roots commit before a file is acknowledged; an interrupted write can leave a
 conservative root, never a recorded offer whose group history was collected.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import threading
 import uuid
 import sqlite3
 
 from yt_playlist.core import group_documents, group_evidence, policy_documents
-from yt_playlist.core.prepared_references import FIELDS, PREPARED, context, replace_prepared
+from yt_playlist.core.prepared_references import FIELDS, PREPARED, context
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.db_space import StorageCompacting
 from yt_playlist.core.evidence_ledger import _mkdir
@@ -29,26 +29,21 @@ def retain(store, kind, identity, captured, at, *, strict=None, ledger=None):
     recommendations = recommendation_roots.references(value) if recommendation_roots.enabled(store) else []
     if generation is None and not versions and not recommendations:
         return False
-    with writer(store) as conn:
-        changed = group_evidence.retain(conn, kind, identity, value, at,
-                                        strict=generation is not None if strict is None else strict)
-        if recommendations:
-            recommendation_roots.retain(conn, kind, identity, recommendations)
-        return changed
+    return source(store).group_evidence.retain(kind, identity, value, at,
+        strict=generation is not None if strict is None else strict, recommendations=recommendations)
 
 
 def release(store, kind, identity):
     if enabled(store):
-        with writer(store) as conn:
-            group_evidence.release(conn, kind, identity)
-            if recommendation_roots.enabled(store):
-                from yt_playlist.repos import recommendation_publication
-                recommendation_publication.release(conn, kind, identity)
+        source(store).group_evidence.release(kind, identity)
 
 
 def pending(store, captured, at):
     """A unique root belongs to one admitted capture, including cancelled jobs."""
-    return _pending(store, lambda: captured, at)[1]
+    if isinstance(captured, dict) and not captured:
+        return None
+    sql_only = set(captured) == {'recommendation_generations'}
+    return _pending(store, lambda: captured, at, sql_only=sql_only)[1]
 
 
 def pending_head(store, surfaces, at):
@@ -76,10 +71,9 @@ def pending_head(store, surfaces, at):
 
     def resolve():
         for surface in surfaces:
-            row = store.conn.execute('SELECT generation_id FROM recommendation_heads WHERE surface=?',
-                                      (surface,)).fetchone()
+            row = store.recommendations.head(surface)
             if row is not None:
-                return {'recommendation_generations': [row[0]]}
+                return {'recommendation_generations': [row['id']]}
         return {}
 
     # A fallback reader has no publication to retain. In particular it must
@@ -89,12 +83,15 @@ def pending_head(store, surfaces, at):
     with store._lock:
         if not resolve():
             return None, None
-    captured, close = _pending(store, resolve, at)
+    # This resolver and its root reference SQL publications only. Their atomic
+    # writer already serializes with SQL retirement; no evidence file is read.
+    # Do not wait for an unrelated historical evidence inventory to finish.
+    captured, close = _pending(store, resolve, at, sql_only=True)
     generations = captured.get('recommendation_generations', [])
     return generations[0] if generations else None, close
 
 
-def _pending(store, resolve, at):
+def _pending(store, resolve, at, *, sql_only=False):
     if not enabled(store):
         return {}, None
     store = source(store)
@@ -108,7 +105,7 @@ def _pending(store, resolve, at):
         stream.close()
         raise WorkBudgetExceeded('Musical group capture lifetime could not be reserved')
     try:
-        with admission(store, blocking=False):
+        with (nullcontext() if sql_only else admission(store, blocking=False)):
             with writer(store):
                 captured = resolve()
                 retained = retain(store, 'pending', identity, captured, at)
@@ -166,10 +163,7 @@ def reap_pending(store):
     from yt_playlist.repos.group_publication import BATCH_ROWS
     with admission(store):
         after = getattr(store, '_group_pending_after', '')
-        with store._lock:
-            identities = [row[0] for row in store.conn.execute(
-                "SELECT external_key FROM group_evidence_owners WHERE kind='pending' AND external_key>? "
-                'ORDER BY external_key LIMIT ?', (after, BATCH_ROWS))]
+        identities = store.group_evidence.identities('pending', after, BATCH_ROWS)
         directory = group_documents.root_for_database(store._db_path, store._evidence_key) / '.pending'
         for identity in identities:
             if len(identity) != 32 or any(c not in '0123456789abcdef' for c in identity):
@@ -197,19 +191,10 @@ def retired(store, offers, checkpoints):
     if not enabled(store):
         return
     from yt_playlist.repos.group_publication import BATCH_ROWS
-    from yt_playlist.core import mix_choices
     for kind, identities in (('offer', offers), ('checkpoint', checkpoints)):
         for offset in range(0, len(identities), BATCH_ROWS):
-            with writer(store) as conn:
-                if kind == 'offer':
-                    mix_choices.retire(conn, identities[offset:offset + BATCH_ROWS])
-                for identity in identities[offset:offset + BATCH_ROWS]:
-                    group_evidence.release(conn, kind, identity)
-                    if recommendation_roots.enabled(store):
-                        from yt_playlist.repos import recommendation_publication
-                        recommendation_publication.release(conn, kind, identity)
-    with writer(store) as conn:
-        mix_choices.collect_dictionary(conn)
+            source(store).group_evidence.retire(kind, identities[offset:offset + BATCH_ROWS])
+    source(store).group_evidence.collect_mix_dictionary()
 
 
 def maintain_retention(store):
@@ -225,8 +210,6 @@ def maintain_retention(store):
     if not enabled(store):
         return result
     from yt_playlist.core.activity import work_budget
-    from yt_playlist.core.db_checkpoint import checkpoint_wal
-    from yt_playlist.core import group_documents, recommendation_outputs
     from yt_playlist.repos import compact_group_publication, group_retention, recommendation_publication
 
     def sql_turn(callback):
@@ -238,12 +221,10 @@ def maintain_retention(store):
                 result['generations'] += progress.generations
                 result['pools'] += progress.pools
         finally:
-            if store._db_path is not None:
-                checkpoint_wal(store._db_path)
+            store.recommendations.checkpoint_retirement()
 
     def group_cleanup():
-        from yt_playlist.core import mix_choices
-        mix_choices.collect_unpublished(store)
+        store.group_evidence.collect_unpublished_mixes()
         reap_pending(store)
         while compact_group_publication.cleanup(store.taste_groups):
             result['group_steps'] += 1
@@ -256,15 +237,10 @@ def maintain_retention(store):
         attribute = '_group_output_collector' if groups else '_recommendation_output_collector'
         collector = getattr(store, attribute, None)
         if collector is None:
-            with store._lock:
-                directory = (group_documents if groups else recommendation_outputs).directory(store.conn)
-            owners = tuple((table, prefix + '_filename') for table, _keys, prefix, _kind
-                           in group_documents.OWNERS) if groups else None
-            collector = recommendation_outputs.OrphanCollector(directory, owners=owners)
+            collector = store.group_evidence.output_collector(groups=groups)
             setattr(store, attribute, collector)
         while True:
-            with store._lock:
-                progress = collector.step(store.conn)
+            progress = store.group_evidence.collect_output_files(collector)
             prefix = 'group_' if groups else ''
             for name, value in (('output_files', progress.files), ('output_bytes', progress.byte_size),
                                 ('checked_files', progress.checked)):

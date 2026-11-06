@@ -1,5 +1,5 @@
 """Small committed heads, bounded rank pages and directly owned opaque chunks."""
-from yt_playlist.core import recommendation_outputs, recommendation_pools
+from yt_playlist.core import recommendation_outputs, recommendation_pools, recommendation_revalidations
 from yt_playlist.core.activity import WorkBudgetExceeded
 from .base import LIKED_EXISTS, Repo, lookup_read, snapshot_read, synchronized
 from . import recommendation_publication as publication
@@ -18,18 +18,53 @@ def decode_display(chunks, ranks, surface):
 
 
 class RecommendationPublicationsRepo(Repo):
+    @snapshot_read
+    def prepare_clicked_pool(self, surface, value, at, **options):
+        from yt_playlist.core import library_pool_state
+        return library_pool_state.prepare(self.conn, surface, value, at, **options)
+
+    @synchronized
+    def remember_clicked_pool_parameters(self, generation, parameters, at):
+        from yt_playlist.core import library_pool_state
+        with self.conn.atomic():
+            library_pool_state.parameters(self.conn, generation, parameters, at)
+
+    def prepare_bundles(self, bundle, fresh, *, previous, **options):
+        """Resolve canonical owners on the pinned ranking and prior-output views."""
+        from . import bundle_storage
+        if not self._store._read_only or not previous._store._read_only:
+            raise ValueError('Bundle preparation requires private readers')
+        with self._lock, previous._lock:
+            return bundle_storage.prepare(self.conn, bundle, fresh, reuse_existing=True,
+                                          reuse_conn=previous.conn, **options)
+
+    @snapshot_read
+    def captured_policies(self, versions):
+        from . import policy_storage
+        return policy_storage.captured(self.conn, versions)
+
     def claim(self, plan, *, owner=None, policies=(), bases=()):
         return publication.claim(self, plan, owner=owner, policies=policies, bases=bases)
 
-    def stage(self, plan, build):
-        return publication.stage(self, plan, build)
+    def stage(self, plan, build, *, still_current=None):
+        return publication.stage(self, plan, build, still_current=still_current)
 
     @synchronized
-    def publish(self, build, at):
-        return publication.finish(self.conn, build, at)
+    def publish(self, build, at, *, retire_surfaces=()):
+        result = publication.finish(self.conn, build, at)
+        if retire_surfaces:
+            self.conn.execute('DELETE FROM recommendation_heads WHERE surface IN (' +
+                              ','.join('?' for _ in retire_surfaces) + ')', tuple(retire_surfaces))
+        return result
 
     def cleanup(self):
         return publication.cleanup(self)
+
+    def checkpoint_retirement(self):
+        """Best-effort WAL copy after a bounded turn has released its writer."""
+        from yt_playlist.core.db_checkpoint import checkpoint_wal
+        if self._store._db_path is not None:
+            checkpoint_wal(self._store._db_path)
 
     @lookup_read
     def head(self, surface):
@@ -59,10 +94,27 @@ class RecommendationPublicationsRepo(Repo):
         generation = self._generation(surface, generation)
         if generation is None:
             return None
-        row = self.conn.execute('SELECT p.* FROM recommendation_surface_pools m '
-            'JOIN recommendation_pools p ON p.id=m.pool_id WHERE m.generation_id=? AND m.surface=? '
+        revalidated = getattr(self._store, '_recommendation_revalidations', False)
+        if not revalidated:
+            # The regular-schema worker can add this owner after the Store binds
+            # its repositories. Adopt it on the first subsequent read as well.
+            revalidated = recommendation_revalidations.available(self.conn)
+            if revalidated:
+                self._store._recommendation_revalidations = True
+        projection = ',v.policy_version AS revalidated_policy' if revalidated else ''
+        joining = ('LEFT JOIN recommendation_pool_revalidations v ON v.generation_id=m.generation_id '
+                   'AND v.surface=m.surface AND v.mode_key=m.mode_key AND v.purpose=m.purpose AND v.pool_id=m.pool_id '
+                   if revalidated else '')
+        row = self.conn.execute('SELECT p.*' + projection + ' FROM recommendation_surface_pools m '
+            'JOIN recommendation_pools p ON p.id=m.pool_id ' + joining + 'WHERE m.generation_id=? AND m.surface=? '
             'AND m.mode_key=? AND m.purpose=?', (generation, surface, mode_key, purpose)).fetchone()
-        return dict(row) if row else None
+        if row is None:
+            return None
+        result = dict(row)
+        if result.get('revalidated_policy') is not None:
+            result['source_policy_version'] = result['policy_version']
+            result['policy_version'] = result['revalidated_policy']
+        return result
 
     @snapshot_read
     def page(self, surface, mode_key, purpose, *, generation=None, after=-1, limit=128, band=None, genres=None,
@@ -229,21 +281,37 @@ class RecommendationPublicationsRepo(Repo):
         resolve at read time. The cursor advances past unavailable candidates so
         callers can request another bounded page without losing ranked coverage.
         """
+        return self.candidate_pages(surface, [(mode_key, purpose, after)], generation=generation,
+            limit=limit, band=band, genres=genres, group_version=group_version,
+            include_display=include_display)[0]
+
+    @snapshot_read
+    def candidate_pages(self, surface, selections, *, generation=None, limit=128,
+                        band=None, genres=None, group_version=None, include_display=True):
+        """Hydrate bounded rank pages against one shared, current catalog read."""
+        if len(selections) > 16:
+            raise ValueError('Candidate batch exceeds 16 pages')
         generation = self._generation(surface, generation)
-        pool = self.pool(surface, mode_key, purpose, generation=generation) if generation is not None else None
-        if pool is None:
-            return {'generation': generation, 'after': after, 'exhausted': True, 'tracks': []}
-        rows = self.page(surface, mode_key, purpose, generation=generation, after=after,
-                         limit=limit, band=band, genres=genres, group_version=group_version)
-        cursor = rows[-1]['rank'] if rows else after
-        result = {'generation': generation, 'after': cursor,
-                  'exhausted': len(rows) < limit or cursor >= pool['eligible_count'] - 1, 'tracks': []}
-        if not rows:
-            return result
+        pages = []
+        for mode_key, purpose, after in selections:
+            pool = self.pool(surface, mode_key, purpose, generation=generation) if generation is not None else None
+            rows = (self.page(surface, mode_key, purpose, generation=generation, after=after,
+                             limit=limit, band=band, genres=genres, group_version=group_version)
+                    if pool else [])
+            cursor = rows[-1]['rank'] if rows else after
+            result = {'generation': generation, 'after': cursor,
+                'exhausted': not pool or len(rows) < limit or cursor >= pool['eligible_count'] - 1, 'tracks': []}
+            pages.append((mode_key, purpose, pool, rows, result))
+        self._hydrate_pages(surface, generation, pages, include_display)
+        return [page[-1] for page in pages]
+
+    def _hydrate_pages(self, surface, generation, pages, include_display):
+        keys = list(dict.fromkeys(row['key'] for _, _, _, rows, _ in pages for row in rows))
+        if not keys:
+            return
         store = self._store
-        keys = [row['key'] for row in rows]
         owned = store.rec_query.group_candidates(keys)
-        discovered = store.discovery.discovered_tracks_by_keys(keys, available_only=True)
+        discovered = store.discovery.candidate_tracks_by_keys(keys)
         videos = list(dict.fromkeys(current['video_id'] for key in keys
                       if (current := owned.get(key) or discovered.get(key)) and current.get('video_id')))
         details = {}
@@ -255,28 +323,48 @@ class RecommendationPublicationsRepo(Repo):
         years = store.modes.years_for(keys)
         marks = ','.join('?' for _ in keys)
         plays = dict(self.conn.execute(f'SELECT identity_key,plays FROM listening_day_counts WHERE identity_key IN ({marks})', keys))
-        display = (self.display(surface, mode_key, purpose, [row['rank'] for row in rows], generation=generation)
-                   if include_display else {})
-        for row in rows:
-            key = row['key']
-            current = owned.get(key) or discovered.get(key)
-            if not current or not current.get('video_id'):
-                continue
-            explanation = display.get(row['rank'], {})
-            year = years.get(key) if key in owned else current.get('year')
-            if isinstance(year, str):
-                year = int(year[:4]) if len(year) >= 4 and year[:4].isascii() and year[:4].isdigit() else None
-            track = {name: current.get(name) for name in ('title', 'artist', 'album', 'video_id', 'thumbnail', 'genre')}
-            track.update(details.get(current['video_id'], {}))
-            track.update(key=key, recording_id=row['recording_id'], pool_rank=row['rank'], score=row['score'],
-                pool_policy=row['pool_policy'], year=year,
-                plays=plays.get(key, 0),
-                reason=explanation.get('reason', ''), lane=explanation.get('lane', purpose),
-                _radio_fresh=key not in owned,
-                serving_context={'recommendation_generation_id': generation, 'recommendation_pool_id': pool['id'],
-                                 'recommendation_pool_rank': row['rank']})
-            result['tracks'].append(track)
-        return result
+        for mode_key, purpose, pool, rows, result in pages:
+            display = (self.display(surface, mode_key, purpose, [row['rank'] for row in rows], generation=generation)
+                       if include_display else {})
+            for row in rows:
+                key = row['key']
+                current = owned.get(key) or discovered.get(key)
+                if not current or not current.get('video_id'):
+                    continue
+                explanation = display.get(row['rank'], {})
+                year = years.get(key) if key in owned else current.get('year')
+                if isinstance(year, str):
+                    year = int(year[:4]) if len(year) >= 4 and year[:4].isascii() and year[:4].isdigit() else None
+                track = {name: current.get(name) for name in ('title', 'artist', 'album', 'video_id', 'thumbnail', 'genre')}
+                track.update(details.get(current['video_id'], {}))
+                track.update(key=key, recording_id=row['recording_id'], pool_rank=row['rank'], score=row['score'],
+                    pool_policy=row['pool_policy'], year=year,
+                    plays=plays.get(key, 0),
+                    reason=explanation.get('reason', ''), lane=explanation.get('lane', purpose),
+                    _radio_fresh=key not in owned,
+                    serving_context={'recommendation_generation_id': generation, 'recommendation_pool_id': pool['id'],
+                                     'recommendation_pool_rank': row['rank']})
+                result['tracks'].append(track)
+
+    @snapshot_read
+    def selected_candidates(self, surface, selections, *, generation=None):
+        """Hydrate exact bounded selections from the same committed rank pools."""
+        if len(selections) > 16 or any(len(keys) > 512 for _, _, keys in selections):
+            raise ValueError('Candidate selection exceeds its read budget')
+        generation = self._generation(surface, generation)
+        pages = []
+        for mode, purpose, keys in selections:
+            pool = self.pool(surface, mode, purpose, generation=generation) if generation is not None else None
+            rows = []
+            if pool and keys:
+                marks = ','.join('?' for _ in keys)
+                rows = [dict(row, pool_policy=pool['policy_version']) for row in self.conn.execute(
+                    'SELECT r.identity_key AS key,c.recording_id,c.rank,c.score FROM recommendation_candidates c '
+                    'JOIN recordings r ON r.id=c.recording_id '
+                    f'WHERE c.pool_id=? AND r.identity_key IN ({marks}) ORDER BY c.rank', (pool['id'], *keys))]
+            pages.append((mode, purpose, pool, rows, {'tracks': []}))
+        self._hydrate_pages(surface, generation, pages, True)
+        return [page[-1]['tracks'] for page in pages]
 
     @synchronized
     def retain(self, kind, external_key, generation_id):

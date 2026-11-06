@@ -10,6 +10,7 @@ SETTING = "home_mix_vibe"
 VERSION = 'musical-vibes-5'
 FIT_STEP = .04
 _NATURAL = ContextVar('onboarding_natural_mix', default=False)
+_AUTHORIZED = ContextVar('authorized_vibe_request', default=None)
 _access = None
 
 
@@ -32,6 +33,18 @@ def natural():
         yield
     finally:
         _NATURAL.reset(token)
+
+
+@contextmanager
+def authorized(store, preset=None):
+    """Reuse this operation's completed journey guard while rendering its result."""
+    if preset is not None and preset != '' and preset not in PRESETS:
+        raise ValueError('Unknown authorized Vibe')
+    token = _AUTHORIZED.set((getattr(store, '_evidence_source', store), preset))
+    try:
+        yield
+    finally:
+        _AUTHORIZED.reset(token)
 
 # Listening purposes, with provisional cross-genre sound preferences. The full
 # descriptions also define the internal model-development labeling task; those
@@ -85,10 +98,16 @@ def axis_fit(preset, name, value):
 def current(store, now):
     if _NATURAL.get():
         return ''
+    authorized = _AUTHORIZED.get()
+    same_operation = authorized is not None and authorized[0] is getattr(store, '_evidence_source', store)
+    if same_operation and authorized[1] is not None:
+        return authorized[1]
     mix_tuning.expire(store, now)
     value = store.settings.get_setting(SETTING)
     if value not in PRESETS:
         return ''
+    if same_operation:
+        return value
     if _access is None:
         raise RuntimeError('Vibe access policy has not been configured')
     return value if _access(store, now) else ''

@@ -82,7 +82,8 @@ def test_inline_dupe_delete_refuses_survivor(store, monkeypatch, tmp_path):
     client = FakeClient(tracks={"SURV": [_track("v1", "Song", "X")]})
     c = _client(store, lambda: {iid: client})
     r = c.post("/dupe/delete", data={"source": survivor, "target": gone})  # delete survivor, "keep" the gone one
-    assert r.status_code == 200 and r.json()["ok"] is False
+    assert r.status_code == 422 and r.json()["ok"] is False
+    assert 'Refusing to delete' in r.json()['error']
     assert client.deleted == [] and store.playlists.get_playlist(survivor) is not None  # survivor untouched
 
 
@@ -147,11 +148,12 @@ def test_delete_empty_refuses_if_not_empty(store, monkeypatch, tmp_path):
     client = FakeClient(tracks={"PLfull": [_track("v1", "S", "X")]})          # has a track remotely
     c = _client(store, lambda: {iid: client})
     r = c.post("/playlist/delete-empty", data={"playlist": pl})
-    assert r.status_code == 422 and client.deleted == []          # refused -> error toast, nothing deleted
+    assert r.status_code == 422 and client.deleted == []
+    assert f'id="empty-outcome-{pl}"' in r.text and 'toast-err' not in r.text
 
 
 @pytest.mark.parametrize("failure", [TimeoutError("timed out"), KeyError("musicPlaylistShelfRenderer")])
-def test_delete_empty_failed_read_keeps_row_and_cleanup_summary(store, monkeypatch, tmp_path, failure):
+def test_delete_empty_failed_read_keeps_row_and_cleanup_summary(store, monkeypatch, tmp_path, failure, caplog):
     from yt_playlist.library import executor
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     monkeypatch.setattr(executor, "with_retry", lambda fn: fn())
@@ -167,8 +169,8 @@ def test_delete_empty_failed_read_keeps_row_and_cleanup_summary(store, monkeypat
     summary = store.rec_proposals.get_proposals(CLEANUP_SURFACE)
     c = _client(store, lambda: {iid: client})
     r = c.post("/playlist/delete-empty", data={"playlist": empty})
-    assert r.status_code == 422 and r.headers["hx-reswap"] == "none"
-    assert "empty on YouTube" in r.text and "Nothing was changed" in r.text
+    assert r.status_code == 503 and r.headers["hx-reswap"] == "none" and r.content == b''
+    assert str(failure) in caplog.text
     assert client.deleted == [] and store.playlists.get_playlist(empty) is not None
     assert store.rec_proposals.get_proposals(CLEANUP_SURFACE) == summary
     assert store.actions.get_actions() == []

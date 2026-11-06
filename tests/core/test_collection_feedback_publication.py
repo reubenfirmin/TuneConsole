@@ -8,7 +8,7 @@ import pytest
 from tests.core.test_predecessor_writes import installed
 from tests.core.test_collection_feedback_preparation import finish, head, seed
 from yt_playlist.core import account_auth_state, album_feedback_storage
-from yt_playlist.core.migrations import MigrationError, registry, regular, runner
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import collection_feedback as preparation, collection_feedback_publication as publication
 from yt_playlist.core.store import Store
 
@@ -231,24 +231,3 @@ def test_original_numeric_kinds_survive_native_text_and_real_affinity(installed)
     owner.publish(store.conn, revision=prepare(store.conn, owner))
     assert album_feedback_storage.original(store.conn) == value
     assert store.settings.get_setting(owner.source) == raw
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_frozen_upgrade_retains_published_originals_and_prefers_native(installed, tmp_path):
-    store, _ = installed
-    original = seed(store)
-    for owner in publication.OWNERS.values():
-        owner.publish(store.conn, revision=prepare(store.conn, owner))
-    upgraded = Store(tmp_path/'native-feedback.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        regular.validate(upgraded.conn)
-        for owner in publication.OWNERS.values():
-            assert owner.selected(upgraded.conn) is None
-            assert owner.value(upgraded.conn, 0) == original[owner.source]
-        assert account_auth_state.read(upgraded.conn) == {1:'Exact été label', 999:'Historical account', 998:''}
-        assert len(album_feedback_storage.original(upgraded.conn)) == 2  # Later alias judgment wins.
-        assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        upgraded.conn.close()

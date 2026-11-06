@@ -52,7 +52,7 @@ def export(conn, target):
     root = directory(conn)
     source = evidence_ledger.EvidenceLedger(root, 2**63 - 1)
     output = evidence_ledger.EvidenceLedger(target, 2**63 - 1)
-    pages, entries = [], []
+    pages, entries, retirement = [], [], None
 
     def page():
         encoded = evidence_ledger.canonical(entries)
@@ -84,18 +84,40 @@ def export(conn, target):
                     page()
         if entries:
             page()
+        # A snapshot can follow a partial unlink. Preserve the intent needed to
+        # finish its orphan events and SQL reconciliation after restoration.
+        from .evidence_retirement import Retirements
+        pending = Retirements(root)
+        if pending.offers or pending.checkpoints:
+            encoded, age = _read(pending.path, with_age=True)
+            output._publish(target / pending.path.name, encoded, 'retirement', 'intent', age=age)
+            retirement = [len(encoded), hashlib.sha256(encoded).hexdigest()]
     manifest = target / 'manifest.json'
-    output._publish(manifest, evidence_ledger.canonical({'format': 'choice-evidence-1', 'pages': pages}), 'manifest', 'index')
+    index = {'format': 'choice-evidence-1', 'pages': pages}
+    if retirement is not None:
+        index['retirements'] = retirement
+    output._publish(manifest, evidence_ledger.canonical(index), 'manifest', 'index')
     return str(manifest)
 
 
 def restore(conn, manifest):
     manifest = Path(manifest)
     index = json.loads(_read(manifest))
-    if set(index) != {'format', 'pages'} or index['format'] != 'choice-evidence-1':
+    if (set(index) not in ({'format', 'pages'}, {'format', 'pages', 'retirements'})
+            or index['format'] != 'choice-evidence-1'):
         raise ValueError('Unsupported listening evidence backup')
     output = evidence_ledger.EvidenceLedger(directory(conn), 2**63 - 1)
     with output._budget() as (_used, save):
+        if 'retirements' in index:
+            from .evidence_retirement import Retirements
+            data = _read(manifest.parent / '.retention-retirements')
+            if [len(data), hashlib.sha256(data).hexdigest()] != index['retirements']:
+                raise ValueError('Listening evidence retirement intent failed verification')
+            source = Retirements(manifest.parent)
+            pending = Retirements(output.directory)
+            pending.offers.update(source.offers)
+            pending.checkpoints.update(source.checkpoints)
+            pending.save()
         for number, (count, digest) in enumerate(index['pages']):
             encoded = _read(manifest.parent / ('page-' + str(number) + '.json'))
             entries = json.loads(encoded)

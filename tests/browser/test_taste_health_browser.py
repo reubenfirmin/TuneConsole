@@ -166,16 +166,23 @@ def test_model_health_groups_results_and_explains_tuning(live_app, store, page, 
 def test_model_health_checks_can_retry_without_reloading_the_tab(live_app, store, page):
     from yt_playlist.rec import model_health
     assert model_health.prepare(store, 1_792_512_000) is not None
+    page.clock.install()
     page.route("**/taste/recall", lambda route: route.fulfill(status=503, body="Unavailable"))
     page.goto(live_app + "/taste#health")
     expect(page.get_by_text("No track similarity model has been built yet.", exact=False)).to_be_visible()
-    page.locator("#model-health-checks").scroll_into_view_if_needed()
-    expect(page.get_by_role("status").filter(has_text="Could not load the model checks.")).to_be_visible()
+    with page.expect_response("**/taste/recall") as failed:
+        page.locator("#model-health-checks").scroll_into_view_if_needed()
+    assert failed.value.status == 503
+    page.evaluate("window.healthRecoveryDocument = document")
+    expect(page.locator("[role=alert]:visible, .toast-err, #navigation-error")).to_have_count(0)
     page.unroute("**/taste/recall")
-    page.get_by_role("button", name="Try checks again", exact=True).click()
+    with page.expect_response("**/taste/recall") as retried:
+        page.clock.run_for(2100)
+    assert retried.value.status == 200
     expect(page.get_by_text("Not enough history", exact=True)).to_be_visible()
     expect(page.get_by_text("Not enough playlist data", exact=True)).to_be_visible()
     expect(page.get_by_text("No recommendations tracked yet", exact=True)).to_be_visible()
+    assert page.evaluate("document === window.healthRecoveryDocument")
 
 
 def test_model_health_remembers_running_selection_after_reload(live_app, store, page):

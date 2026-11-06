@@ -9,7 +9,6 @@ import json
 
 import numpy as np
 
-from yt_playlist.library.listen_derive import classify_exit
 from yt_playlist.core import entity_names, mode_retention
 from yt_playlist.repos.base import Repo, synchronized, lookup_read, snapshot_read
 
@@ -200,55 +199,13 @@ class ModesRepo(Repo):
         sql += " GROUP BY mode_id"
         return {r["mode_id"]: r["c"] for r in self.conn.execute(sql, args).fetchall()}
 
-    @synchronized
-    def pick_rows(self, since=None, *, before=None) -> list:
-        sql = "SELECT membership_ref_id, mode_id FROM rec_mode_picks WHERE mode_id IS NOT NULL"
-        args = []
-        if since is not None:
-            sql += " AND created_at >= ?"
-            args.append(float(since))
-        if before is not None:
-            sql += " AND created_at < ?"
-            args.append(float(before))
-        return [(r["membership_ref_id"], r["mode_id"]) for r in self.conn.execute(sql, args).fetchall()]
-
     @snapshot_read
     def pick_counts(self, since=None, *, before=None) -> dict:
-        """Compact effective choice evidence; playlist handles are needed only for engagement."""
+        """Compact choice counts for the chart, sampler and measurement snapshots."""
         return {r["mode_id"]: r["n"] for r in self.conn.execute(
             "SELECT mode_id,COUNT(*) n FROM rec_mode_picks WHERE mode_id IS NOT NULL "
             "AND (? IS NULL OR created_at>=?) AND (? IS NULL OR created_at<?) GROUP BY mode_id",
             (since, since, before, before))}
-
-    @synchronized
-    def playlist_engagement(self, since=None) -> dict:
-        """Engagement with picked playlists, attributed by playlist AND account, after the pick.
-
-        `since` selects the same pick cohort as pick_rows. Organic plays and sync-history
-        appearances have no playlist provenance and cannot measure engagement with a mode.
-        Exits remain raw; skips/completions are classified at read time with the shared rules.
-        Plays and exits are queried separately so joining them cannot multiply either count.
-        """
-        cohort = "FROM rec_mode_picks mp JOIN playlist_membership_refs m ON m.id=mp.membership_ref_id JOIN playlist_scopes s ON s.id=m.playlist_scope_id "
-        bounds = "(:since IS NULL OR mp.created_at>=:since)"
-        args = {"since": since}
-        rows = self.conn.execute(
-            "SELECT mp.membership_ref_id id, COUNT(pe.id) plays, MAX(pe.played_at) last_play " + cohort +
-            "LEFT JOIN play_events pe ON pe.playlist_ytm_id=s.provider_playlist_id "
-            "AND pe.account_id=m.account_id AND pe.played_at>=mp.created_at "
-            f"WHERE {bounds} GROUP BY mp.membership_ref_id", args).fetchall()
-        stats = {r["id"]: {"plays": r["plays"], "last_play": r["last_play"],
-                            "skips": 0, "completions": 0} for r in rows}
-        exits = self.conn.execute(
-            "SELECT mp.membership_ref_id id, pe.position, pe.duration " + cohort +
-            "JOIN player_events pe ON pe.playlist_ytm_id=s.provider_playlist_id "
-            "AND pe.account_id=m.account_id AND pe.at>=mp.created_at "
-            f"WHERE {bounds} AND pe.kind IN ('track_exit', 'bye')", args).fetchall()
-        for event in exits:
-            verdict = classify_exit(event["position"], event["duration"])
-            if verdict in ("skip", "completion"):
-                stats[event["id"]]["skips" if verdict == "skip" else "completions"] += 1
-        return stats
 
     @synchronized
     def choice_learning_rows(self) -> list[dict]:

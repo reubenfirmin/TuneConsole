@@ -21,8 +21,8 @@ def finish(job, conn, size=128):
     pytest.fail('Workflow preparation did not finish bounded fixture')
 
 
-def seed(store, count=3):
-    account = store.accounts.upsert_account('Workflow', 'workflow.json', None, True)
+def seed(store, count=3, *, master=True):
+    account = store.accounts.upsert_account('Workflow', 'workflow.json', None, master)
     store.playlists.upsert_playlist(account, 'PLAYLIST', 'Playlist', 0, '', 1)
     gc_key = workflow_settings.GC + json.dumps([account, 'PLAYLIST'], separators=(',', ':'))
     playlist_key = workflow_settings.PLAYLIST + ':' + str(account)
@@ -154,7 +154,7 @@ def test_failure_retry_and_independent_regular_ddl_preserve_recovery_sources(ins
     job = preparation.JOBS['playlists']
     job.install(store.conn)
     publish = policy_documents._publish_encoded
-    def fail(*args):
+    def fail(*args, age=None):
         assert not store.conn.in_transaction
         raise OSError('controlled workflow file failure')
     monkeypatch.setattr(policy_documents, '_publish_encoded', fail)

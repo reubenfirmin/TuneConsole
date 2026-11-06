@@ -52,7 +52,7 @@ The unchanged owners therefore include all of the following:
 ## Explicit row filters
 
 1. **Recommendation generations and pools.** Use the existing
-   `retained_copy.plan` domain rules: preserve current heads, explicit references,
+   `core.db_rebuild.build.plan` domain rules: preserve current heads, explicit references,
    live builds and any additional FK owner. Copy the dependent outputs,
    candidate rows, surfaces, bands and framing for those roots. Do not truncate
    candidate pools or remove low-volume eligible genres.
@@ -125,11 +125,11 @@ configuration copied into it. Only `startup` should be opened by the application
 From this checkout, the commands used to prepare it are:
 
 ```sh
-.venv/bin/python experiments/retained_copy/run.py backup backups/658-restore-experiment-20261031 --source /home/rfirmin/.local/share/yt-playlist/state.db
-.venv/bin/python experiments/retained_copy/run.py plan backups/658-restore-experiment-20261031
-.venv/bin/python experiments/retained_copy/run.py build backups/658-restore-experiment-20261031
-.venv/bin/python experiments/retained_copy/run.py baseline backups/658-restore-experiment-20261031
-.venv/bin/python experiments/retained_copy/run.py stage backups/658-restore-experiment-20261031 --config /home/rfirmin/.config/yt-playlist/config.toml
+.venv/bin/python -m experiments.retained_copy.run backup backups/658-restore-experiment-20261031 --source /home/rfirmin/.local/share/yt-playlist/state.db
+.venv/bin/python -m experiments.retained_copy.run plan backups/658-restore-experiment-20261031
+.venv/bin/python -m experiments.retained_copy.run build backups/658-restore-experiment-20261031
+.venv/bin/python -m experiments.retained_copy.run baseline backups/658-restore-experiment-20261031
+.venv/bin/python -m experiments.retained_copy.run stage backups/658-restore-experiment-20261031 --config /home/rfirmin/.config/yt-playlist/config.toml
 ```
 
 These destinations already exist; do not repeat creation commands over them.

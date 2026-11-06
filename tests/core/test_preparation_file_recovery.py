@@ -7,7 +7,8 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import installed
-from yt_playlist.core import fao, policy_recovery, preparation_files as recovery
+from tests import file_custody_support as fixture_files
+from yt_playlist.core import fao, preparation_files as recovery
 from yt_playlist.core.preparation import document_plan
 from yt_playlist.core.store import Store
 
@@ -83,12 +84,7 @@ def sql_custody(conn):
 
 
 def assert_sql_custody(conn, expected, *, original):
-    expected = dict(expected)
-    if not original:
-        # Compact recovery admits the additive mix-choice extension. Historical
-        # verified backups retain their original schema. The new owner must be
-        # present and empty; every existing owner and row still compares exactly.
-        expected.setdefault('prepared_choice_interest_mix_descriptors', [])
+    # Both fixture images retain the exact installed schema and domain rows.
     assert sql_custody(conn) == expected
 
 
@@ -137,32 +133,59 @@ def test_preparation_relocation_preserves_file_age(installed, tmp_path, compress
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
-@pytest.mark.parametrize('kind', ['home', 'listening', 'documents', 'models', 'reports'])
-@pytest.mark.parametrize('original', [False, True], ids=['compact', 'verified-backup'])
-def test_selected_files_read_exactly_without_producer(installed, tmp_path, kind, original):
+@pytest.mark.parametrize('restore_kind', ['restored', 'snapshot', 'template'])
+def test_selected_files_read_exactly_without_producer(installed, tmp_path, restore_kind):
     producer, _ = installed
-    root, read, selected = selected_owner(producer, kind)
-    expected, selection = read(producer), selected(producer.conn)
+    original = restore_kind == 'snapshot'
+    # One real recovery must carry every compatible file owner together. Only
+    # the generic export/copy/admission repeats for each distinct restore path.
+    owners = {kind: selected_owner(producer, kind)
+              for kind in ('home', 'listening', 'documents', 'models', 'reports')}
+    roots = {directory.parent for directory, _read, _selected in owners.values()}
+    assert len(roots) == 1
+    root = roots.pop()
+    expected = {kind: read(producer) for kind, (_root, read, _selected) in owners.items()}
+    selection = {kind: selected(producer.conn) for kind, (_root, _read, selected) in owners.items()}
+    assert all(selection.values())
+    assert all(selection['documents'].values())
     before, before_files, custody = list(producer.conn.iterdump()), hashes(root), sql_custody(producer.conn)
-    report = policy_recovery.recover(producer._db_path, tmp_path / 'recovered', now=10000, progress=lambda _: None)
+    if restore_kind == 'template':
+        from tests.prepared_fixture_support import capture_template
+        template = capture_template(producer, None)
+        path = tmp_path / 'template' / 'library.db'
+        path.parent.mkdir()
+    else:
+        report = fixture_files.snapshot_library(producer._db_path, tmp_path / 'recovered',
+                                               restore=not original)
+        assert 'preparation' in report['manifests']
+        with closing(sqlite3.connect(Path(report['snapshot']).as_uri() + '?mode=ro', uri=True)) as backup:
+            assert list(backup.iterdump()) == before
+            path = tmp_path / 'restored.db' if original else Path(report['restored'])
+            if original:
+                with closing(sqlite3.connect(path)) as destination:
+                    backup.backup(destination)
     assert list(producer.conn.iterdump()) == before and hashes(root) == before_files
-    assert 'preparation' in report['verified_backup_file_manifests']
-    assert not (tmp_path / 'recovered' / 'working.db.preparation').exists()
-    with closing(sqlite3.connect(Path(report['verified_backup']).as_uri() + '?mode=ro', uri=True)) as backup:
-        assert list(backup.iterdump()) == before
-        path = tmp_path / 'restored.db' if original else Path(report['compact_database'])
-        if original:
-            with closing(sqlite3.connect(path)) as destination:
-                backup.backup(destination)
     candidate = Store(path)
     hidden = root.with_name(root.name + '-unavailable')
-    root.rename(hidden)
     try:
+        if restore_kind == 'template':
+            template.restore(candidate)
+            source_references = {recovery._identity(owner): owner['reference']
+                                 for owner in recovery.references(producer.conn)}
+            for owner in recovery.references(candidate.conn):
+                source = Path(source_references[recovery._identity(owner)][0])
+                copied = Path(owner['reference'][0])
+                assert source != copied
+                assert (source.stat().st_dev, source.stat().st_ino) != (
+                    copied.stat().st_dev, copied.stat().st_ino)
+                if owner['columns'][0] != 'plan_filename':
+                    assert fao.read_bytes(source) == fao.read_bytes(copied)
+        root.rename(hidden)
         if original:
-            policy_recovery._restore_files(candidate.conn, report['verified_backup_file_manifests'])
+            fixture_files.restore_files(candidate.conn, report['manifests'])
         candidate.init_schema(defer_metadata=True)
-        assert read(candidate) == expected
-        assert selected(candidate.conn) == selection
+        assert {kind: read(candidate) for kind, (_root, read, _selected) in owners.items()} == expected
+        assert {kind: selected(candidate.conn) for kind, (_root, _read, selected) in owners.items()} == selection
         assert_sql_custody(candidate.conn, custody, original=original)
         assert not candidate.conn.execute('PRAGMA foreign_key_check').fetchone()
         # Selected readers can conceal missing plans. Open every retained plan,
@@ -174,9 +197,18 @@ def test_selected_files_read_exactly_without_producer(installed, tmp_path, kind,
                 surface = row['source'] if 'source' in row.keys() else row['surface']
                 plan = document_plan.load(surface, owner['reference'])
                 assert plan.units[len(plan.units) - 1]
+        if restore_kind == 'template':
+            candidate.settings.set_setting('private_template_mutation', 'isolated')
+            # Keep the old corruption probe for every domain, after reading
+            # all plans; no candidate mutation may affect any producer file.
+            for directory, _read, _selected in owners.values():
+                retained = next(owner for owner in recovery.references(candidate.conn)
+                                if Path(source_references[recovery._identity(owner)][0]).is_relative_to(directory))
+                Path(retained['reference'][0]).write_bytes(b'private file corruption')
     finally:
         candidate.conn.close()
-        hidden.rename(root)
+        if hidden.exists():
+            hidden.rename(root)
     assert list(producer.conn.iterdump()) == before and hashes(root) == before_files
 
 
@@ -208,7 +240,7 @@ def test_interrupted_coordinate_relocation_restores_guards_heads_and_epochs(inst
 
 
 @pytest.mark.parametrize('installed', [97], indirect=True)
-@pytest.mark.parametrize('original', [False, True], ids=['compact', 'verified-backup'])
+@pytest.mark.parametrize('original', [False, True], ids=['restored', 'snapshot'])
 def test_native_operation_captures_survive_owner_rename_and_recovery(installed, tmp_path, original):
     from tests.core.test_append_operation_preparation import seed
     from yt_playlist.core.migrations import registry, runner
@@ -228,10 +260,11 @@ def test_native_operation_captures_survive_owner_rename_and_recovery(installed, 
         producer.conn.backup(upgraded.conn)
         runner.migrate(upgraded.conn, registry=registry.MIGRATIONS[:107])
         before = sql_custody(upgraded.conn)
-        report = policy_recovery.recover(upgraded._db_path, tmp_path / 'recovered', now=10000, progress=lambda _: None)
-        path = tmp_path / 'restored.db' if original else Path(report['compact_database'])
+        report = fixture_files.snapshot_library(upgraded._db_path, tmp_path / 'recovered',
+                                               restore=not original)
+        path = tmp_path / 'restored.db' if original else Path(report['restored'])
         if original:
-            with closing(sqlite3.connect(report['verified_backup'])) as source:
+            with closing(sqlite3.connect(report['snapshot'])) as source:
                 with closing(sqlite3.connect(path)) as destination:
                     source.backup(destination)
         candidate = Store(path)
@@ -239,7 +272,7 @@ def test_native_operation_captures_survive_owner_rename_and_recovery(installed, 
         root.rename(hidden)
         try:
             if original:
-                policy_recovery._restore_files(candidate.conn, report['verified_backup_file_manifests'])
+                fixture_files.restore_files(candidate.conn, report['manifests'])
             candidate.init_schema(defer_metadata=True)
             assert_sql_custody(candidate.conn, before, original=original)
             assert candidate.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 107
@@ -288,8 +321,8 @@ def test_missing_plan_only_unit_cannot_report_success(installed, tmp_path):
     filename.rename(hidden)
     try:
         with pytest.raises(FileNotFoundError):
-            policy_recovery.recover(store._db_path, tmp_path / 'failed', progress=lambda _: None)
-        assert not (tmp_path / 'failed' / 'report.json').exists()
+            fixture_files.snapshot_library(store._db_path, tmp_path / 'failed')
+        assert not (tmp_path / 'failed' / 'restored.db').exists()
         assert list(store.conn.iterdump()) == before
     finally:
         hidden.rename(filename)
@@ -299,7 +332,7 @@ def test_missing_plan_only_unit_cannot_report_success(installed, tmp_path):
 @pytest.mark.parametrize('kind', ['taste', 'workflow', 'actions', 'ranked', 'notes',
                                   'genres', 'conflicts', 'recipes', 'library', 'playback', 'origins', 'learning', 'feedback',
                                   'drafts', 'shares', 'discovery', 'tv', 'append', 'radio'])
-@pytest.mark.parametrize('original', [False, True], ids=['compact', 'verified-backup'])
+@pytest.mark.parametrize('original', [False, True], ids=['restored', 'snapshot'])
 def test_unfinished_nested_plans_and_backups_resume_without_producer(installed, tmp_path, kind, original):
     store, _ = installed
     if kind == 'taste':
@@ -397,10 +430,11 @@ def test_unfinished_nested_plans_and_backups_resume_without_producer(installed, 
     # A whole preparation tree is unavailable, including pages not yet in SQL.
     root = store._db_path.with_name(store._db_path.name + '.preparation')
     custody, before, before_files = sql_custody(store.conn), list(store.conn.iterdump()), hashes(root)
-    report = policy_recovery.recover(store._db_path, tmp_path / 'recovered', now=10000, progress=lambda _: None)
-    path = tmp_path / 'restored.db' if original else Path(report['compact_database'])
+    report = fixture_files.snapshot_library(store._db_path, tmp_path / 'recovered',
+                                            restore=not original)
+    path = tmp_path / 'restored.db' if original else Path(report['restored'])
     if original:
-        with closing(sqlite3.connect(report['verified_backup'])) as source:
+        with closing(sqlite3.connect(report['snapshot'])) as source:
             with closing(sqlite3.connect(path)) as target:
                 source.backup(target)
     candidate = Store(path)
@@ -408,7 +442,7 @@ def test_unfinished_nested_plans_and_backups_resume_without_producer(installed, 
     root.rename(hidden)
     try:
         if original:
-            policy_recovery._restore_files(candidate.conn, report['verified_backup_file_manifests'])
+            fixture_files.restore_files(candidate.conn, report['manifests'])
         candidate.init_schema(defer_metadata=True)
         assert_sql_custody(candidate.conn, custody, original=original)
         for owner in recovery.references(candidate.conn):

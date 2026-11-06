@@ -1,11 +1,11 @@
 """#61 upload route: happy path report, idempotent re-post, HTML-export hint."""
 import json
 
+import pytest
 from fastapi import FastAPI
 from fastapi.templating import Jinja2Templates
 from starlette.testclient import TestClient
 
-from yt_playlist.core.store import Store
 from yt_playlist.web.routes.setup import build as build_setup_route
 
 _TEMPLATES_DIR = "src/yt_playlist/web/templates"
@@ -25,9 +25,8 @@ def _entry(title, artist, vid, iso):
             "subtitles": [{"name": f"{artist} - Topic"}], "time": iso}
 
 
-def _client():
-    store = Store(":memory:")
-    store.init_schema()
+@pytest.fixture
+def takeout_app(store):
     store.accounts.upsert_account("main", "bridge", None, True)
     store.tracks.upsert_track("vidA", "Suave", "Danny Wabbit", "", 200)
     rec_worker = _FakeRecWorker()
@@ -38,11 +37,12 @@ def _client():
     })()
     app = FastAPI()
     app.include_router(build_setup_route(ctx))
-    return TestClient(app), store, rec_worker
+    with TestClient(app) as client:
+        yield client, store, rec_worker
 
 
-def test_upload_reports_and_triggers_rebuild():
-    client, store, rec_worker = _client()
+def test_upload_reports_and_triggers_rebuild(takeout_app):
+    client, store, rec_worker = takeout_app
     entries = [_entry("Suave", "Danny Wabbit", "vidA", "2024-01-01T10:00:00Z"),
                _entry("Ghost Song", "Nobody", "NOVID9", "2024-01-02T10:00:00Z")]
     payload = json.dumps(entries).encode()
@@ -69,10 +69,10 @@ def test_upload_reports_and_triggers_rebuild():
     assert rec_worker.calls == 1
 
 
-def test_genuinely_unreadable_upload_gets_json_hint():
+def test_genuinely_unreadable_upload_gets_json_hint(takeout_app):
     # Neither JSON nor HTML (doesn't start with "<" and isn't valid JSON): the dispatcher can't
     # place it at all, so this is the one case that still raises TakeoutFormatError.
-    client, store, rec_worker = _client()
+    client, store, rec_worker = takeout_app
     resp = client.post("/import/takeout",
                        files={"file": ("watch-history.txt", b"not json and not html",
                                        "text/plain")})
@@ -96,10 +96,10 @@ def _html_row(title, video_id, artist, iso_date_text):
     )
 
 
-def test_html_export_now_parses_and_reports_unreadable_dates():
+def test_html_export_now_parses_and_reports_unreadable_dates(takeout_app):
     # Owner decision (#61 option B): the default HTML export is parsed too, honestly reporting
     # any entries whose date text didn't parse rather than silently dropping them.
-    client, store, rec_worker = _client()
+    client, store, rec_worker = takeout_app
     doc = ('<html><body><div class="mdl-grid">' +
            _html_row("Suave", "vidA", "Danny Wabbit", "Jan 1, 2024, 10:00:00 AM UTC") +
            _html_row("Ghost Song", "NOVID9", "Nobody", "not a real date at all") +
@@ -121,10 +121,10 @@ def _unmatched_payload():
     return json.dumps(entries).encode()
 
 
-def test_seeding_is_automatic_above_threshold():
+def test_seeding_is_automatic_above_threshold(takeout_app):
     # Owner decision (2026-07-03): no opt-in checkbox; unmatched artists clearing the min-plays
     # gate always seed discovery.
-    client, store, rec_worker = _client()
+    client, store, rec_worker = takeout_app
     resp = client.post("/import/takeout",
                        files={"file": ("watch-history.json", _unmatched_payload(), "application/json")})
     assert resp.status_code == 200
@@ -134,8 +134,8 @@ def test_seeding_is_automatic_above_threshold():
     assert pool[0]["artist"] == "Nobody"
 
 
-def test_below_threshold_does_not_seed():
-    client, store, rec_worker = _client()
+def test_below_threshold_does_not_seed(takeout_app):
+    client, store, rec_worker = takeout_app
     entries = [_entry("Ghost Song", "Nobody", f"NOVID{i}", f"2024-01-0{i}T10:00:00Z")
                for i in (1, 2)]                          # only 2 plays: under min_plays=3
     resp = client.post("/import/takeout",
@@ -146,10 +146,10 @@ def test_below_threshold_does_not_seed():
     assert store.discovery.get_discovered_artists() == []
 
 
-def test_zero_match_import_snoozes_the_nag():
+def test_zero_match_import_snoozes_the_nag(takeout_app):
     # A zero-match import (typically pre-sync) must not re-nag on the next Home render: the route
     # stamps the 90-day snooze instead of the terminal takeout_imported_at.
-    client, store, rec_worker = _client()
+    client, store, rec_worker = takeout_app
     entries = [_entry("Ghost Song", "Nobody", "NOVID1", "2024-01-01T10:00:00Z")]
     resp = client.post("/import/takeout",
                        files={"file": ("watch-history.json", json.dumps(entries).encode(),
@@ -159,8 +159,8 @@ def test_zero_match_import_snoozes_the_nag():
     assert store.settings.get_setting("takeout_nag_dismissed_at") == "1700000000.0"
 
 
-def test_upload_does_not_purge_uncorroborated_history_between_events():
-    client, store, _ = _client()
+def test_upload_does_not_purge_uncorroborated_history_between_events(takeout_app):
+    client, store, _ = takeout_app
     store.history.record_history_plays(1, 1704672000.0, [('phone-play', 'Today')], source_timezone='UTC')
     entries = [_entry('Suave', 'Danny Wabbit', 'vidA', '2024-01-01T10:00:00Z'),
                _entry('Suave', 'Danny Wabbit', 'vidA', '2024-01-20T10:00:00Z')]

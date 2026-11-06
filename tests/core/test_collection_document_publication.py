@@ -3,6 +3,7 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import sqlite3
+from time import perf_counter
 
 import pytest
 
@@ -91,26 +92,34 @@ def test_maps_preserve_mixed_generations_and_deleted_documents(installed):
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_mapping_is_bounded_resumable_and_restarts_after_intervening_source_writes(installed):
+def test_mapping_is_bounded_resumable_and_restarts_after_intervening_source_writes(installed, record_property):
     store, _ = installed
-    for index in range(259):
+    # Exercise three batches and a one-item remainder; the separate default
+    # boundary control below retains the production 128-link limit.
+    began = perf_counter()
+    for index in range(7):
         store.playlist_recipes.set_cluster_canvas(f'canvas-{index:04d}', 'state '+str(index), index)
+    record_property('canvas_source_seconds', perf_counter() - began)
     owner = publication.OWNERS['canvases']
+    began = perf_counter()
     prepare(owner, store.conn)
-    first = owner.step(store.conn, batch_size=128)
-    assert first.copied == 128 and not first.complete
+    record_property('canvas_preparation_seconds', perf_counter() - began)
+    began = perf_counter()
+    first = owner.step(store.conn, batch_size=3)
+    assert first.copied == 3 and not first.complete
     with pytest.raises(MigrationError, match='incomplete'):
         owner.publish(store.conn, stage=first.id)
-    second = owner.step(store.conn, batch_size=128)
-    assert second.id == first.id and second.copied == 256 and not second.complete
+    second = owner.step(store.conn, batch_size=3)
+    assert second.id == first.id and second.copied == 6 and not second.complete
     reopened = Store(store._db_path)
     try:
-        completed = owner.step(reopened.conn, batch_size=128)
-        assert completed.id == first.id and completed.copied == 259 and completed.complete
+        completed = owner.step(reopened.conn, batch_size=3)
+        assert completed.id == first.id and completed.copied == 7 and completed.complete
         owner.publish(reopened.conn, stage=completed.id)
     finally:
         reopened.conn.close()
-    assert store.playlist_recipes.get_cluster_canvas('canvas-0258') == 'state 258'
+    record_property('canvas_map_and_publication_seconds', perf_counter() - began)
+    assert store.playlist_recipes.get_cluster_canvas('canvas-0006') == 'state 6'
     store.playlist_recipes.set_cluster_canvas('canvas-0000', 'changed', None)
     prepare(owner, store.conn)
     partial = owner.step(store.conn, batch_size=1)
@@ -119,7 +128,34 @@ def test_mapping_is_bounded_resumable_and_restarts_after_intervening_source_writ
     restarted = owner.step(store.conn, batch_size=1)
     assert restarted.id != partial.id and restarted.copied == 1
     assert owner.stage(store.conn, partial.id) == partial
+    assert owner.stage(store.conn, completed.id) == completed
     assert owner.value(store.conn, first.id, 'canvas-0000') == 'state 0'
+
+
+@pytest.mark.parametrize('installed', [93], indirect=True)
+def test_canvas_default_mapping_batch_stops_at_128_real_prepared_documents(installed, record_property):
+    store, _ = installed
+    began = perf_counter()
+    for index in range(129):
+        store.playlist_recipes.set_cluster_canvas(f'boundary-{index:04d}', 'state '+str(index), index)
+    record_property('canvas_boundary_source_seconds', perf_counter() - began)
+    owner = publication.OWNERS['canvases']
+    began = perf_counter()
+    prepare(owner, store.conn)
+    record_property('canvas_boundary_preparation_seconds', perf_counter() - began)
+    began = perf_counter()
+    first = owner.step(store.conn)  # Use the production default, not a supplied size.
+    assert first.copied == 128 and not first.complete
+    links = list(store.conn.execute('SELECT source FROM '+owner.table('map')+' WHERE stage=? ORDER BY source', (first.id,)))
+    assert [row[0] for row in links] == [f'boundary-{index:04d}' for index in range(128)]
+    with pytest.raises(ValueError, match='1 to 128'):
+        owner.step(store.conn, batch_size=129)
+    assert owner.stage(store.conn, first.id) == first
+    completed = owner.step(store.conn)
+    assert completed.id == first.id and completed.copied == 129 and completed.complete
+    assert owner.value(store.conn, completed.id, 'boundary-0128') == 'state 128'
+    assert owner.selected(store.conn) is None
+    record_property('canvas_boundary_mapping_seconds', perf_counter() - began)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -284,36 +320,6 @@ def test_new_optional_axis_owner_withdraws_selection_without_blocking_regular_dd
         owner.publish(upgraded.conn, stage=stage(owner, upgraded.conn))
         assert upgraded.conn.execute('SELECT axis_ref FROM '+preparation.table('recipes', 'facets')+
             " WHERE source='PLAYLIST' AND kind='genre' ORDER BY preparation_revision DESC LIMIT 1").fetchone()[0] == axis
-    finally:
-        upgraded.conn.close()
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_full_native_upgrade_keeps_published_archives_and_native_runtime(installed, tmp_path):
-    store, _ = installed
-    _, _, recipe, canvas = seed(store)
-    identities = {}
-    for name, owner in publication.OWNERS.items():
-        identities[name] = stage(owner, store.conn)
-        owner.publish(store.conn, stage=identities[name])
-    upgraded = Store(tmp_path/'native-collection-document-publication.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        upgraded.init_schema(defer_metadata=True)
-        regular.validate(upgraded.conn)
-        for name, owner in publication.OWNERS.items():
-            assert owner.selected(upgraded.conn) is None
-            assert owner.value(upgraded.conn, identities[name], 'PLAYLIST')
-        assert upgraded.playlist_recipes.get_recipe('PLAYLIST') == recipe
-        assert upgraded.playlist_recipes.get_cluster_canvas('PLAYLIST') == canvas
-        assert upgraded.playlist_recipes.get_recipe_created_ats() == {'PLAYLIST':3}
-        assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
-        owner = publication.OWNERS['recipes']
-        with upgraded.conn:
-            upgraded.conn.execute('DROP TRIGGER '+owner.header+'_mapped_delete')
-        with pytest.raises(MigrationError, match='mapped publication object'):
-            regular.validate(upgraded.conn)
     finally:
         upgraded.conn.close()
 

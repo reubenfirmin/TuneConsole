@@ -61,15 +61,3 @@ def replace(conn, value, built_at):
     conn.execute('INSERT INTO home_offer_dedup VALUES (1,?,?) ON CONFLICT(id) '
                  'DO UPDATE SET epoch=excluded.epoch,built_at=excluded.built_at', (epoch, built_at))
     conn.executemany('INSERT INTO home_offer_signatures VALUES (1,?)', [(item,) for item in signatures])
-
-
-def claim(conn, epoch, signatures, now):
-    """The caller holds the writer reservation across read, comparison and replacement."""
-    requested = sorted(set(signatures))
-    parse({'epoch': epoch, 'signatures': requested}, now)
-    previous = read(conn) or {}
-    shown = set(previous.get('signatures', [])) if previous.get('epoch') == epoch else set()
-    unseen = set(requested) - shown
-    if unseen:
-        replace(conn, {'epoch': epoch, 'signatures': sorted(shown | unseen)[-MAX_SIGNATURES:]}, now)
-    return unseen

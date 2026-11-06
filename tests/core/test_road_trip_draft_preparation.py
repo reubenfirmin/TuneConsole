@@ -1,6 +1,7 @@
 """Draft preparation preserves decisions while the installed draft keeps serving."""
 from dataclasses import replace
 import json
+import sqlite3
 
 import pytest
 
@@ -110,9 +111,24 @@ def test_long_draft_checkpoints_individual_repeated_selections(installed):
     value = {'picks': ['repeated'] * 600, 'banned': ['repeated'] * 600}
     store.road_trip.save_road_trip_draft(identity, value, 1)
     preparation.JOB.install(store.conn)
-    prior = 0
-    for _ in range(15):
-        progress = preparation.JOB.step(store.conn, batch_size=128)
+    checkpoint = preparation.JOB.step(store.conn, batch_size=128)
+    prior = checkpoint.processed
+    retained = list(map(tuple, store.conn.execute(f'SELECT * FROM {preparation.ITEMS} ORDER BY selection_state,position')))
+    with store.conn:
+        store.conn.execute(f'CREATE TRIGGER controlled_draft_batch_failure BEFORE INSERT ON {preparation.ITEMS} '
+            "WHEN NEW.selection_state='picked' AND NEW.position=128 "
+            "BEGIN SELECT RAISE(ABORT,'controlled draft batch failure'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='controlled draft batch failure'):
+        preparation.JOB.step(store.conn, batch_size=128)
+    failed = preparation.JOB.progress(store.conn)
+    assert failed.status == 'failed' and failed.processed == prior
+    assert list(map(tuple, store.conn.execute(f'SELECT * FROM {preparation.ITEMS} ORDER BY selection_state,position'))) == retained
+    assert head(store.conn, identity) is None
+    assert not store.conn.in_transaction
+    with store.conn:
+        store.conn.execute('DROP TRIGGER controlled_draft_batch_failure')
+    for attempt in range(15):
+        progress = preparation.JOB.step(store.conn, batch_size=128, retry=attempt == 0)
         assert 0 <= progress.processed - prior <= 128
         prior = progress.processed
         if progress.status == 'prepared':
@@ -187,12 +203,11 @@ def test_interruption_and_disk_failure_keep_prior_checkpoint_for_explicit_retry(
     identity, raw = seed(store)
     preparation.JOB.install(conn)
     checkpoint = preparation.JOB.step(conn, batch_size=2)
-    copy = preparation.copy
-    def interrupted(*args):
-        copy(*args)
+    def interrupted(conn, row, generation, selected):
+        preparation.copy_batch(conn, row, generation, selected)
         raise KeyboardInterrupt('controlled draft member interruption')
     with pytest.raises(KeyboardInterrupt):
-        replace(preparation.JOB, copy=interrupted).step(conn, batch_size=1)
+        replace(preparation.JOB, copy_batch=interrupted).step(conn, batch_size=1)
     assert preparation.JOB.progress(conn) == checkpoint
     assert conn.execute(f'SELECT count(*) FROM {preparation.ITEMS}').fetchone()[0] == 1
     publish = files.publish

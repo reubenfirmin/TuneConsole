@@ -1,5 +1,6 @@
 """Prepared-region upgrades and metadata enrichment during playback."""
 from types import SimpleNamespace
+from tests.enrichment_support import seed_enrichment
 import threading
 
 import pytest
@@ -79,7 +80,7 @@ def prepare_radio_styles(controller, pool, monkeypatch):
     bundles, modes = {}, []
     genres = ("Ambient", "Techno", "Jazz", "Rock")
     for index, track in enumerate(pool):
-        store.tracks.set_track_enrichment(ids[track["video_id"]], genres[index // 8], "2001")
+        seed_enrichment(store, ids[track["video_id"]], genres[index // 8], "2001")
     build_content_model(store)
     keys = [pool[index * 8]["key"] for index in range(4)]
     vectors = store.rec_model.content_vectors_by_keys(keys)
@@ -236,7 +237,7 @@ def test_radio_refreshes_metadata_for_current_and_played_table_rows(poc, monkeyp
     ids = c.ctx.store.tracks.track_ids_for_videos([t["video_id"] for t in s.tracks[:2]])
     for track in s.tracks[:2]:
         tid = ids[track["video_id"]]
-        c.ctx.store.tracks.set_track_enrichment(tid, "Techno", "2001")
+        seed_enrichment(c.ctx.store, tid, "Techno", "2001")
     # Use the production catalog refresh against the fixture's deterministic sampler.
     s.candidates.store = c.ctx.store
     s.candidates.affinities = {}

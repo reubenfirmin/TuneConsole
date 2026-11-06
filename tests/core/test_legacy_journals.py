@@ -22,7 +22,7 @@ def test_insert_once_rollback_snapshots_expiry_and_independent_restore(store, tm
     with store.read_view() as snapshot:
         before = owner.head(snapshot.conn,'catalog')
         for _ in range(40):
-            legacy_journals.maintain(store,10**10)
+            store.retention.expire_legacy_diagnostics(10**10)
         assert owner.head(snapshot.conn,'catalog') == before
         assert legacy_evidence.original(snapshot.conn,'catalog','library','128') == ' {"old": 128} '
         assert owner.collect(store.conn,10**10) == 0

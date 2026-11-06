@@ -1,8 +1,11 @@
 """AccountRepo: the YouTube Music accounts the app manages."""
+import json
+
 from yt_playlist.repos.base import Repo, synchronized, lookup_read
 from yt_playlist.repos.models import Account
 from yt_playlist.core.config import account_flag, validate_accounts
-from yt_playlist.core import entity_names
+from yt_playlist.core import account_auth_state, entity_names
+from yt_playlist.core.db_writes import atomic_write
 from contextlib import contextmanager
 from uuid import uuid4
 
@@ -45,6 +48,47 @@ def _select(configs, existing):
 
 
 class AccountRepo(Repo):
+    @lookup_read
+    def auth_expirations(self):
+        """Load durable authentication failures in the installed storage format."""
+        if account_auth_state.available(self.conn):
+            return account_auth_state.read(self.conn)
+        raw = self._store.settings.get_setting('auth_expired_identities')
+        return account_auth_state.legacy_map(json.loads(raw)) if raw else {}
+
+    def update_auth_expiration(self, *, account_id=None, label=None, clear_all=False):
+        """Merge one confirmation with current state after reserving the writer."""
+        if self._store.activity_paused:
+            return None
+        invalid = False
+        with atomic_write(self._store):
+            if self._store.activity_paused:
+                return None
+            if account_auth_state.available(self.conn):
+                if clear_all:
+                    account_auth_state.clear(self.conn)
+                elif label is not None:
+                    account_auth_state.flag(self.conn, account_id, label)
+                else:
+                    account_auth_state.clear(self.conn, account_id)
+                current = account_auth_state.read(self.conn)
+            else:
+                try:
+                    current = self.auth_expirations()
+                except (ValueError, TypeError):
+                    current, invalid = {}, True
+                if clear_all:
+                    current.clear()
+                elif label is not None:
+                    current[account_id] = label
+                else:
+                    current.pop(account_id, None)
+                if current:
+                    self._store.settings.set_setting('auth_expired_identities', json.dumps(current))
+                else:
+                    self._store.settings.delete_setting('auth_expired_identities')
+        return current, invalid
+
     @lookup_read
     def configured_ids(self, configs):
         """Load existing account bindings during maintenance without reconciliation."""

@@ -457,17 +457,27 @@ def test_public_verification_downloads_bytes_and_checks_signed_architectures(can
         return io.BytesIO((candidate / "flatpak-repo" / url.rsplit("/", 1)[1]).read_bytes())
 
     commands = []
+    verification_roots = set()
 
     def run(args, **kwargs):
         commands.append(args)
         if args[0] == "docker":
             assert kwargs["env"]["DOCKER_CONFIG"] != str(Path.home() / ".docker")
+            docker_root = Path(kwargs['env']['DOCKER_CONFIG'])
+            assert docker_root.name.startswith('release-public-') and docker_root.is_dir()
+            verification_roots.add(docker_root)
             data = {"manifests": [
                 {"platform": {"os": "linux", "architecture": arch}, "digest": digest.split("@")[1]}
                 for arch, digest in zip(("amd64", "arm64"), digests)]}
             return subprocess.CompletedProcess(args, 0, stdout=json.dumps(data))
         assert "--user" in args and "--no-gpg-verify" not in args
-        assert kwargs["env"]["XDG_DATA_HOME"].startswith("/tmp/")
+        data_home = Path(kwargs['env']['XDG_DATA_HOME'])
+        verification_root = data_home.parent
+        verification_roots.add(verification_root)
+        assert verification_root.name.startswith('release-public-')
+        assert data_home == verification_root / 'data' and verification_root.is_dir()
+        assert Path(kwargs['env']['XDG_CONFIG_HOME']) == verification_root / 'config'
+        assert Path(kwargs['env']['XDG_CACHE_HOME']) == verification_root / 'cache'
         if args[1] == "update":
             arch = next(arg.removeprefix("--arch=") for arg in args if arg.startswith("--arch="))
             if arch == bad_arch and failure == "signature":
@@ -490,11 +500,13 @@ def test_public_verification_downloads_bytes_and_checks_signed_architectures(can
     if bad_arch:
         with pytest.raises((ValueError, subprocess.CalledProcessError)):
             release_services.verify_public(candidate, "v1.2.3", backend)
+        assert verification_roots and not any(root.exists() for root in verification_roots)
         return
     release_services.verify_public(candidate, "v1.2.3", backend)
     assert len([url for url in urls if url.startswith(base)]) == len(manifest["sha256"]) + 1
     assert {args[-1].split(":")[-1] for args in commands if args[0] == "docker"} == {"1.2.3", "v1.2.3", "latest"}
     assert {arg for args in commands for arg in args if arg.startswith("--arch=")} == {"--arch=x86_64", "--arch=aarch64"}
+    assert verification_roots and not any(root.exists() for root in verification_roots)
 
 
 def test_public_download_checksum_failure_is_visible(monkeypatch):

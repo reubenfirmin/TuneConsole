@@ -422,19 +422,43 @@ class CollectionRepo(Repo):
         return owners
 
     @snapshot_read
-    def saved_albums_recency(self, *, include_generated=False) -> dict:
+    def saved_albums_recency(self, *, include_generated=False, browse_ids=None) -> dict:
         """{browse_id: newest play ts across the album's tracks | None}. Plays come from history (a
         track's identity_key in a snapshot). LEFT JOINs throughout, so an album whose tracks aren't in
         the library (or were never played) comes back None, i.e. as cold as possible."""
         activity = ('SELECT identity_key,played_at at FROM play_event_subjects UNION ALL '
                     'SELECT identity_key,day_ts+86400 FROM listening_days'
                     if include_generated else 'SELECT identity_key,at FROM listening_activity')
+        if browse_ids is not None:
+            # Home asks about a small prepared reserve. Limit both membership
+            # and listening aggregation to those releases and their recordings.
+            requested = list(dict.fromkeys(browse_ids))
+            def read():
+                result = {}
+                for offset in range(0, len(requested), 500):
+                    page = requested[offset:offset + 500]
+                    qs = ','.join('?' for _ in page)
+                    rows = self.conn.execute(
+                        'WITH selected AS (SELECT sa.browse_id,t.identity_key FROM saved_albums sa '
+                        f'LEFT JOIN {self.album_track_links_table} a ON a.browse_id=sa.browse_id '
+                        'LEFT JOIN tracks t ON t.id=a.entry_id '
+                        f'WHERE sa.browse_id IN ({qs})), '
+                        'recent AS (SELECT identity_key,MAX(at) at FROM (' + activity + ') '
+                        'WHERE identity_key IN (SELECT identity_key FROM selected) GROUP BY identity_key) '
+                        'SELECT s.browse_id,MAX(r.at) FROM selected s '
+                        'LEFT JOIN recent r ON r.identity_key=s.identity_key GROUP BY s.browse_id', page)
+                    result.update(rows)
+                return result
+            return self._store.memoized_read(('saved-albums-recency', include_generated, tuple(requested)), read)
+        # Only the newest observation matters. Aggregate once, with a typed
+        # key SQLite can index, rather than scan the activity view per track.
         rows = self.conn.execute(
             "SELECT sa.browse_id AS browse,MAX(hi.at) AS last "
             "FROM saved_albums sa "
             f"LEFT JOIN {self.album_track_links_table} a ON a.browse_id=sa.browse_id "
             "LEFT JOIN tracks t ON t.id=a.entry_id "
-            f"LEFT JOIN ({activity}) hi ON hi.identity_key=t.identity_key "
+            f"LEFT JOIN (SELECT CAST(identity_key AS TEXT) identity_key,MAX(at) at "
+            f"FROM ({activity}) GROUP BY identity_key) hi ON hi.identity_key=t.identity_key "
             "GROUP BY sa.browse_id").fetchall()
         return {r["browse"]: r["last"] for r in rows}
 
@@ -467,12 +491,15 @@ class CollectionRepo(Repo):
             f"WHERE p.provider='youtube' AND p.provider_id IN ({placeholders}) "
             "AND (coalesce(f.complete,0)=0 OR at.is_full=1)"
             "), requested AS MATERIALIZED (SELECT DISTINCT key FROM membership WHERE key IS NOT NULL),"
+            "exact_days AS MATERIALIZED (SELECT CAST(pe.identity_key AS TEXT) identity_key,pe.account_id,c.day "
+            "FROM play_event_subjects pe JOIN play_event_calendar c ON c.event_id=pe.id "
+            "WHERE pe.identity_key IN (SELECT key FROM requested)),"
             "exact AS (SELECT pe.identity_key,COUNT(*) n FROM play_event_subjects pe "
             "WHERE pe.identity_key IN (SELECT key FROM requested) GROUP BY pe.identity_key),"
             "fallback AS (SELECT d.identity_key,COUNT(*) n FROM listening_days d "
             "WHERE d.identity_key IN (SELECT key FROM requested) "
-            "AND NOT EXISTS(SELECT 1 FROM play_event_subjects pe JOIN play_event_calendar c ON c.event_id=pe.id "
-            "WHERE pe.identity_key=d.identity_key AND pe.account_id=d.account_id AND c.day=d.day) "
+            "AND NOT EXISTS(SELECT 1 FROM exact_days pe "
+            "WHERE pe.identity_key=d.identity_key AND pe.account_id=d.account_id AND pe.day=d.day) "
             "GROUP BY d.identity_key) "
             "SELECT m.browse,COUNT(m.key) tracks,MAX(m.complete) complete,"
             "SUM(COALESCE(e.n,0)+COALESCE(d.n,0)) plays FROM membership m "
@@ -518,13 +545,22 @@ class CollectionRepo(Repo):
         """Artists across playlists and saved albums, including albums not yet materialized."""
         plays = self._play_counts()
         rows = self.conn.execute(
+            # Flattening the metadata-backed tracks view into this aggregate
+            # can make SQLite scan recordings once for every artist credit.
+            # Project the four required fields once before joining membership.
+            # The occurrence view's computed entry key has no type affinity.
+            # Give the materialized projection an integer key so SQLite can
+            # index this join instead of scanning all album entries per track.
+            f"WITH album_entries AS MATERIALIZED (SELECT CAST(entry_id AS INTEGER) entry_id,album_id "
+            f"FROM {self.album_tracks_table} WHERE entry_id IS NOT NULL), "
+            "library_tracks AS MATERIALIZED (SELECT id,artist,identity_key,thumbnail FROM tracks) "
             f"SELECT CASE WHEN (SELECT COUNT(*) FROM {self.entry_artists_table} x WHERE x.entry_id=t.id)=1 "
             "THEN t.artist ELSE ta.credit END artist,ta.artist_id,t.identity_key key,a.id album_id,ap.provider_id browse, "
             "       p.provider_id album_browse,MIN(NULLIF(t.thumbnail,'')) thumb, "
             "       GROUP_CONCAT(DISTINCT pt.playlist_id) pls "
-            f"FROM tracks t JOIN {self.entry_artists_table} ta ON ta.entry_id=t.id LEFT JOIN artist_provider_ids ap "
+            f"FROM library_tracks t JOIN {self.entry_artists_table} ta ON ta.entry_id=t.id LEFT JOIN artist_provider_ids ap "
             "ON ap.artist_id=ta.artist_id AND ap.provider='youtube' "
-            f"LEFT JOIN {self.album_tracks_table} at ON at.entry_id=t.id LEFT JOIN albums a ON a.id=at.album_id "
+            "LEFT JOIN album_entries at ON at.entry_id=t.id LEFT JOIN albums a ON a.id=at.album_id "
             "LEFT JOIN album_primary_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
             "LEFT JOIN playlist_tracks pt ON pt.track_id=t.id "
             "WHERE t.artist<>'' AND (pt.track_id IS NOT NULL OR "
@@ -594,8 +630,10 @@ class CollectionRepo(Repo):
             collection[None] = dict(id=None,album='Singles / no album',year=None,thumb=None,
                                     browse=None,saved=False,songs=0,plays=0,_pls=set())
         for row in self.conn.execute(
+                f"WITH album_entries AS MATERIALIZED (SELECT CAST(entry_id AS INTEGER) entry_id,album_id "
+                f"FROM {self.album_tracks_table} WHERE entry_id IS NOT NULL) "
                 "SELECT at.album_id,t.identity_key,MIN(NULLIF(t.thumbnail,'')) thumb, "
-                f"GROUP_CONCAT(DISTINCT pt.playlist_id) pls FROM tracks t LEFT JOIN {self.album_tracks_table} at ON at.entry_id=t.id "
+                "GROUP_CONCAT(DISTINCT pt.playlist_id) pls FROM tracks t LEFT JOIN album_entries at ON at.entry_id=t.id "
                 f"JOIN {self.entry_artists_table} ta ON ta.entry_id=t.id LEFT JOIN playlist_tracks pt ON pt.track_id=t.id "
                 "WHERE ta.artist_id=? AND (at.album_id IS NOT NULL OR NULLIF(TRIM(t.album),'') IS NULL) "
                 "GROUP BY at.album_id,t.identity_key", (aid,)):

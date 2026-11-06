@@ -11,6 +11,7 @@ from threading import RLock
 from types import SimpleNamespace
 
 from experiments.audio_lab_tools.provider_pilot import connect, digest, save
+from yt_playlist.core import profile_files, vibe_versions
 
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / 'experiments/audio_lab/local/evidence-586'
@@ -43,7 +44,7 @@ def snapshot(db, output):
         overlay = VibePredictionsRepo(SimpleNamespace(conn=conn, _lock=RLock()))
         for row in conn.execute('''SELECT p.identity_key,p.payload,r.title,r.artist
                 FROM rec_musical_profiles p JOIN recordings r ON r.identity_key=p.identity_key ORDER BY r.id'''):
-            profile = json.loads(row['payload'])
+            profile = json.loads(profile_files.read(conn, 'recording', row['identity_key']))
             overlay.overlay({row['identity_key']: profile})
             counts['profiles'] += 1
             versions[profile['version']] += 1
@@ -60,19 +61,21 @@ def snapshot(db, output):
                 sources, missing = [], False
                 expected = set(profile.get('source_versions', []))
                 found = set()
-                for source in conn.execute('''SELECT p.payload,p.digest FROM rec_musical_source_profiles p
+                for source in conn.execute('''SELECT p.source_key,p.digest FROM rec_musical_source_profiles p
                         JOIN rec_musical_links l ON l.source_key=p.source_key
                         JOIN recordings r ON r.id=l.recording_id WHERE r.identity_key=? ORDER BY p.source_key''',
                         (row['identity_key'],)):
                     if source['digest'] in expected:
-                        sources.append(json.loads(source['payload']))
+                        sources.append(json.loads(profile_files.read(conn, 'source', source['source_key'])))
                         found.add(source['digest'])
                 missing = expected != found
                 cases[flag] = {'key': row['identity_key'], 'title': row['title'], 'artist': row['artist'],
                                'profile': profile, 'sources': sources, 'truncated': missing}
         for case in cases.values():
-            case['current_vibes'] = [dict(row) for row in conn.execute('''
-                SELECT v.*,m.model_version,m.input_digest,p.policy_version,p.lineage_complete
+            case['current_vibes'] = [dict(row) for row in conn.execute(f'''
+                SELECT {vibe_versions.projection(conn, 'recording_vibes', 'v')},
+                       {vibe_versions.expression(conn, 'measurements', 'm')} AS model_version,m.input_digest,
+                       {vibe_versions.expression(conn, 'predictions', 'p')} AS policy_version,p.lineage_complete
                 FROM recording_vibes v JOIN recordings r ON r.id=v.recording_id
                 LEFT JOIN measurements m ON m.id=v.measurement_id
                 LEFT JOIN predictions p ON p.id=v.prediction_id WHERE r.identity_key=? ORDER BY v.vibe''', (case['key'],))]
@@ -80,18 +83,20 @@ def snapshot(db, output):
                 fit['sample_ids'] = [row[0] for row in conn.execute(
                     'SELECT sample_id FROM measurement_samples WHERE measurement_id=? ORDER BY sample_id',
                     (fit['measurement_id'],))]
-                fit['contributors'] = [dict(row) for row in conn.execute('''
-                    SELECT m.id,m.recording_id,m.source,m.model_version,m.input_digest
+                fit['contributors'] = [dict(row) for row in conn.execute(f'''
+                    SELECT m.id,m.recording_id,m.source,
+                           {vibe_versions.expression(conn, 'measurements', 'm')} AS model_version,m.input_digest
                     FROM prediction_inputs i JOIN measurements m ON m.id=i.measurement_id
                     WHERE i.prediction_id=? ORDER BY m.recording_id LIMIT 32''', (fit['prediction_id'],))]
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         lineage = {name: conn.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
                    for name in ('recording_vibes', 'measurements', 'measurement_samples', 'predictions', 'prediction_inputs',
                                 'play_events', 'play_event_sources', 'listening_observations') if name in tables}
-        lineage_examples = [dict(row) for row in conn.execute('''
-            SELECT p.id AS prediction_id,p.recording_id,p.vibe,p.kind,p.policy_version,p.lineage_complete,
+        lineage_examples = [dict(row) for row in conn.execute(f'''
+            SELECT p.id AS prediction_id,p.recording_id,p.vibe,p.kind,
+                   {vibe_versions.expression(conn, 'predictions', 'p')} AS policy_version,p.lineage_complete,
                    m.id AS measurement_id,m.recording_id AS contributor_recording_id,
-                   m.source,m.model_version,m.input_digest,
+                   m.source,{vibe_versions.expression(conn, 'measurements', 'm')} AS model_version,m.input_digest,
                    (SELECT COUNT(*) FROM measurement_samples s WHERE s.measurement_id=m.id) AS sample_count
             FROM predictions p JOIN prediction_inputs i ON i.prediction_id=p.id
             JOIN measurements m ON m.id=i.measurement_id

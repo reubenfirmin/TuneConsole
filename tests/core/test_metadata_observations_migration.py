@@ -1,5 +1,6 @@
 """Add scoped observations without rewriting existing selections or source history."""
 import pytest
+from tests.metadata_provenance_support import metadata_provenance
 
 from yt_playlist.core.migrations import Migration, MigrationError, migrate
 from yt_playlist.core.migrations.registry import MIGRATIONS
@@ -17,7 +18,7 @@ def test_populated_upgrade_preserves_legacy_evidence_and_rolls_back_interruption
         store.enrichment_state.record_enrichment_attempt('song|artist', 'source', {'bpm': 125}, now=10)
         legacy = tuple(store.conn.execute('SELECT * FROM metadata_findings').fetchone())
         attempts = [tuple(r) for r in store.conn.execute('SELECT * FROM provider_attempts')]
-        selected = store.enrichment_reports.metadata_provenance(tid)
+        selected = metadata_provenance(store, tid)
 
         def interrupted(conn, context):
             MIGRATIONS[48].apply(conn, context)
@@ -34,7 +35,7 @@ def test_populated_upgrade_preserves_legacy_evidence_and_rolls_back_interruption
         upgraded = tuple(store.conn.execute('SELECT * FROM metadata_findings').fetchone())
         assert upgraded == (*legacy, None, None)
         assert [tuple(r) for r in store.conn.execute('SELECT * FROM provider_attempts')] == attempts
-        assert store.enrichment_reports.metadata_provenance(tid) == selected
+        assert metadata_provenance(store, tid) == selected
         assert store.enrichment_state.metadata_observations('song|artist') == []
         store.enrichment_state.record_metadata_observations(tid, 'new', [
             MetadataObservation('mood_party', 0.8, 'recording', 'mbid', 'prediction')], run_id='upgrade', now=20)

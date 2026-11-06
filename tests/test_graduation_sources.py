@@ -1,39 +1,22 @@
 import pytest
 
-from yt_playlist.rec import rec_params
-
-
-def test_source_weights_seeded():
-    assert rec_params.SOURCE_W_VIBE == 1.0
-    assert rec_params.SOURCE_W_LIKE == 1.0
-    assert "source_w_dislike" not in rec_params.PARAMS_BY_NAME
-    assert rec_params.SOURCE_W_SLIDER == 0.5
-    assert rec_params.SOURCE_W_PLAY == 0.08
-    assert rec_params.PLAY_GRAD_SESSION_CAP == 0.4
-
-
-from yt_playlist.core.store import Store
 from yt_playlist.core import radio_provenance
 from yt_playlist.rec import graduation, scoring, rec_params
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
 
 
-def _store_with_genre(keys_genre):
-    s = Store(":memory:")
-    s.init_schema()
+def _store_with_genre(s, keys_genre):
     for key, (vid, title, artist, genre) in keys_genre.items():
         tid = s.tracks.upsert_track(vid, title, artist, None, None)
         s.tracks.set_track_genre(tid, genre)
     return s
 
 
-def _store_with_play_history(genre="Techno", n=10, now=1000.0, w_play=0.5):
-    """A fresh store whose recent history is n distinct tracks of one genre (a dominant family), with
-    source_w_play raised so a handful of daily exposures crosses THEME_THRESHOLD (the 0.08 default
+def _store_with_play_history(s, genre="Techno", n=10, now=1000.0, w_play=0.5):
+    """Seed the private store with n recent tracks of one genre (a dominant family), with
+    source_w_play raised so a handful of daily exposures crosses theme_threshold (the 0.08 default
     would need ~18 days, too slow for a unit test). Returns (store, now, axis)."""
-    s = Store(":memory:")
-    s.init_schema()
     iid = s.accounts.upsert_account("me", "cred", None, True)
     keys = []
     for i in range(n):
@@ -45,31 +28,33 @@ def _store_with_play_history(genre="Techno", n=10, now=1000.0, w_play=0.5):
     return s, now, f"genre:{genre_map.family(genre)}"
 
 
-def test_vibe_graduation_unchanged_regression():
+def test_vibe_graduation_unchanged_regression(store):
     # One key in genre 'Techno'; a strong "a lot" vibe (signed=2) at source 1.0 crosses
-    # THEME_THRESHOLD (1.2) in a single event, exactly as today.
-    s = _store_with_genre({"song|band": ("v1", "song", "band", "Techno")})
-    graduation.graduate_moods(s, ["song|band"], 2.0, 1000.0, source=rec_params.SOURCE_W_VIBE)
+    # theme_threshold (1.2) in a single event.
+    s = _store_with_genre(store, {"song|band": ("v1", "song", "band", "Techno")})
+    graduation.graduate_moods(s, ["song|band"], 2.0, 1000.0,
+                             source=rec_params.get_param(s, "source_w_vibe"))
     fam = genre_map.family("Techno")
-    # #85 GRADUATE_UP itself is > 1.0 (no more flat post-nudge shrink); read at the same `now` as the
+    # #85 graduate_up itself is > 1.0 (no more flat post-nudge shrink); read at the same `now` as the
     # nudge so time-proportional reversion doesn't erode it before the assertion runs.
     assert s.rec_model.get_weights(now=1000.0)[f"genre:{fam}"] > 1.0   # nudged once, from prior 1.0
 
 
-def test_play_source_is_weak():
+def test_play_source_is_weak(store):
     # A single weak play (source 0.08, signed +1) does NOT cross the threshold.
-    s = _store_with_genre({"song|band": ("v1", "song", "band", "Techno")})
-    graduation.graduate_moods(s, ["song|band"], 1.0, 1000.0, source=rec_params.SOURCE_W_PLAY)
+    s = _store_with_genre(store, {"song|band": ("v1", "song", "band", "Techno")})
+    graduation.graduate_moods(s, ["song|band"], 1.0, 1000.0,
+                             source=rec_params.get_param(s, "source_w_play"))
     fam = genre_map.family("Techno")
     assert f"genre:{fam}" not in s.rec_model.get_weights()   # below threshold -> no permanent nudge yet
-    assert abs(s.rec_signals.get_theme(f"genre:{fam}")) == rec_params.SOURCE_W_PLAY   # but ledger accumulated
+    assert abs(s.rec_signals.get_theme(f"genre:{fam}")) == rec_params.get_param(s, "source_w_play")
 
 
 @pytest.mark.parametrize("legacy_pause", [False, True])
-def test_play_exposure_graduates_over_several_days(legacy_pause):
+def test_play_exposure_graduates_over_several_days(store, legacy_pause):
     # Sustained recent listening graduates the permanent weight up via daily exposure (mirrors the
     # held-slider mechanic). Plays feed only the transient; this is the single funnel into permanent.
-    s, now, axis = _store_with_play_history("Techno", n=10)
+    s, now, axis = _store_with_play_history(store, "Techno", n=10)
     if legacy_pause:
         s.settings.set_setting("rec_param:graduation_enabled", "0")
     day = 86400
@@ -82,8 +67,8 @@ def test_play_exposure_graduates_over_several_days(legacy_pause):
 
 
 @pytest.mark.parametrize("source", ["mood", "slider", "play"])
-def test_explicit_genre_mute_survives_every_graduation_source(source):
-    s, now, axis = _store_with_play_history()
+def test_explicit_genre_mute_survives_every_graduation_source(store, source):
+    s, now, axis = _store_with_play_history(store)
     s.rec_model.set_weight(axis, 0.0, lo=0.0, hi=2.0, now=now)
     s.rec_model.set_lean(axis, 2.0, now)
     for day in range(1, 9):
@@ -100,9 +85,9 @@ def test_explicit_genre_mute_survives_every_graduation_source(source):
     assert any(row["axis"] == axis and row["source"] == source for row in s.rec_signals.graduation_audit_rows())
 
 
-def test_play_exposure_idempotent_within_a_day():
+def test_play_exposure_idempotent_within_a_day(store):
     # Re-running the same fast sync the same UTC day must NOT re-count (the #46 regression guard).
-    s, now, axis = _store_with_play_history("Techno", n=10)
+    s, now, axis = _store_with_play_history(store, "Techno", n=10)
     graduation.graduate_play_exposure(s, now)
     score_after_first = s.rec_signals.get_theme(axis)
     graduation.graduate_play_exposure(s, now)
@@ -110,23 +95,22 @@ def test_play_exposure_idempotent_within_a_day():
     assert s.rec_signals.get_theme(axis) == score_after_first, "same-day re-runs must not re-count"
 
 
-def test_play_exposure_stops_without_recent_plays():
+def test_play_exposure_stops_without_recent_plays(store):
     # No recent plays -> play_facet_leans empty -> exposure is a no-op (the funnel's off-switch).
-    s = _store_with_genre({"s|band": ("v", "s", "band", "Techno")})
+    s = _store_with_genre(store, {"s|band": ("v", "s", "band", "Techno")})
     axis = f"genre:{genre_map.family('Techno')}"
     before = s.rec_model.get_weights().get(axis, 1.0)
     graduation.graduate_play_exposure(s, 1000.0 + 86400)
     assert s.rec_model.get_weights().get(axis, 1.0) == before, "no recent plays -> no graduation"
 
 
-def test_radio_only_listening_day_graduates_nothing():
+def test_radio_only_listening_day_graduates_nothing(store):
     # #93v2: a day of purely radio-queued listening (every play carrying the radio playlist's
     # provenance, plus the provenance-free history_items shadows the next YTM sync writes for those
     # same plays) must accrue NO ledger score and NO permanent weight for the played genre. Without
     # the exclusion, radio's own picks would graduate transient leans into standing taste day after
     # day - the slow-burn arm of the feedback loop.
-    s = Store(":memory:")
-    s.init_schema()
+    s = store
     iid = s.accounts.upsert_account("me", "cred", None, True)
     with s.conn:
         radio_provenance.remember(s.conn,'PLRADIO',iid)
@@ -150,8 +134,8 @@ def test_radio_only_listening_day_graduates_nothing():
         "radio-only listening must not graduate a permanent weight"
 
 
-def test_play_graduated_day_roundtrip():
-    s = _store_with_genre({"song|band": ("v1", "song", "band", "Techno")})
+def test_play_graduated_day_roundtrip(store):
+    s = _store_with_genre(store, {"song|band": ("v1", "song", "band", "Techno")})
     assert s.rec_signals.get_play_graduated_day("genre:techno") is None
     s.rec_signals.set_play_graduated_day("genre:techno", "2026-06-25")
     assert s.rec_signals.get_play_graduated_day("genre:techno") == "2026-06-25"
@@ -159,8 +143,8 @@ def test_play_graduated_day_roundtrip():
     assert s.rec_signals.get_play_graduated_day("genre:techno") == "2026-06-26"
 
 
-def test_axis_weights_fold_standing_lean():
-    s = _store_with_genre({"s|band": ("v", "s", "band", "Techno")})
+def test_axis_weights_fold_standing_lean(store):
+    s = _store_with_genre(store, {"s|band": ("v", "s", "band", "Techno")})
     s.rec_model.set_lean("genre:" + genre_map.family("Techno"), 1.5, 1000.0)
     mult = scoring._axis_weights_for(s, ["s|band"], now=1000.0)
     assert mult is not None

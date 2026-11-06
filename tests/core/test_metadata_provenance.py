@@ -4,6 +4,7 @@ import json
 import pytest
 
 from tests.core.test_metadata_owner_cutover import predecessor, seed, convert
+from tests.metadata_provenance_support import metadata_provenance
 from tests.test_audio_vibes import sample
 from yt_playlist.core import catalog, metadata_deliveries, metadata_evidence
 from yt_playlist.core.db_revisions import Revisions
@@ -14,7 +15,7 @@ def test_legacy_explanation_keeps_unknown_attribution_and_original_candidate_del
     store = predecessor
     entry, _, _ = seed(store)
     convert(store)
-    report = store.enrichment_reports.metadata_provenance(entry)
+    report = metadata_provenance(store, entry)
     assert report['fields']['bpm']['value'] is None and report['fields']['bpm']['override']
     assert report['fields']['genre']['value'] == '' and report['fields']['genre']['override']
     selected = report['lineage']['genre']
@@ -44,7 +45,7 @@ def test_new_selection_and_withdrawal_explain_the_exact_delivery_and_retained_de
                         for delivery in (first, second)]
         metadata_evidence.select(store.conn, entry, 'genre', observations[1], now=32)
         withdrawal = catalog.withdraw_choice(store.conn, entry, 'genre', now=33)
-    report = store.enrichment_reports.metadata_provenance(entry)
+    report = metadata_provenance(store, entry)
     assert report['fields']['genre'] == {'value': 'Rock', 'override': False, 'source': 'provider'}
     lineage = report['lineage']['genre']
     assert lineage['selection']['attribution_status'] == 'evidenced'

@@ -9,6 +9,11 @@ from yt_playlist.core import action_work
 
 
 class ActionRepo(Repo):
+    @synchronized
+    def has_durable_targets(self):
+        """Whether action targets retain claims and backups across a restart."""
+        return action_work.available(self.conn)
+
     def _legacy_action(self, row):
         from yt_playlist.core.preparation.action_publication import legacy_undo
         return Action(row['id'], row['kind'], row['params_json'], row['plan_json'], legacy_undo(self.conn, row),
@@ -188,33 +193,24 @@ class ActionRepo(Repo):
         The partial index excludes completed history before inspecting intent JSON.
         Query afresh for every admission so a collection sweep sees intervening writes.
         """
-        if action_work.available(self.conn):
-            return self._deletion_owner(account_id,provider_playlist_id,'delete_pending')
-        rows = self._prepared_deletion(account_id, provider_playlist_id, 'delete_pending')
-        if rows is not None:
-            return rows[0] if rows else None
-        row = self.conn.execute(
-            "SELECT a.* FROM actions a WHERE a.status='delete_pending' AND EXISTS ("
-            "SELECT 1 FROM json_each(a.undo_json,'$.deletions') d "
-            "WHERE json_extract(d.value,'$.identity')=? AND json_extract(d.value,'$.ytm')=?) "
-            "ORDER BY a.id DESC LIMIT 1", (account_id, provider_playlist_id)).fetchone()
-        if row is None:
-            return None
-        return self._legacy_action(row)
+        return self._get_deletion(account_id, provider_playlist_id, 'delete_pending')
 
     @synchronized
     def get_failed_deletion(self, account_id, provider_playlist_id) -> Action | None:
         """Find a failed owner for GC recovery without changing manual retry admission."""
+        return self._get_deletion(account_id, provider_playlist_id, 'delete_failed')
+
+    def _get_deletion(self, account_id, provider_playlist_id, status):
         if action_work.available(self.conn):
-            return self._deletion_owner(account_id,provider_playlist_id,'delete_failed')
-        rows = self._prepared_deletion(account_id, provider_playlist_id, 'delete_failed')
+            return self._deletion_owner(account_id, provider_playlist_id, status)
+        rows = self._prepared_deletion(account_id, provider_playlist_id, status)
         if rows is not None:
             return rows[0] if rows else None
         row = self.conn.execute(
-            "SELECT a.* FROM actions a WHERE a.status='delete_failed' AND EXISTS ("
+            "SELECT a.* FROM actions a WHERE a.status=? AND EXISTS ("
             "SELECT 1 FROM json_each(a.undo_json,'$.deletions') d "
             "WHERE json_extract(d.value,'$.identity')=? AND json_extract(d.value,'$.ytm')=?) "
-            "ORDER BY a.id DESC LIMIT 1", (account_id, provider_playlist_id)).fetchone()
+            "ORDER BY a.id DESC LIMIT 1", (status, account_id, provider_playlist_id)).fetchone()
         if row is None:
             return None
         return self._legacy_action(row)

@@ -49,25 +49,46 @@ def test_regeneration_sends_the_held_recipe_after_each_animated_swap(live_app, s
     card.screenshot(path='/tmp/tuneconsole-held-recipe-after-swaps.png')
 
 
-@pytest.mark.parametrize("failure", ["network", "http", "unprocessable", "missing", "invalid", "empty"])
-def test_mix_regeneration_recovers_from_failure(live_app, store, page, failure):
-    publish_menu(store, 1)
+@pytest.mark.parametrize('failure,modeled', [
+    pytest.param('network', False, id='network'),
+    pytest.param('http', False, id='http'),
+    pytest.param('unprocessable', False, id='unprocessable'),
+    pytest.param('missing', False, id='missing'),
+    pytest.param('invalid', False, id='invalid'),
+    pytest.param('empty', False, id='empty'),
+    pytest.param('invalid', True, id='modeled-invalid'),
+])
+def test_mix_regeneration_recovers_from_failure(live_app, store, page, failure, modeled):
+    publish_menu(store, 1, modeled=modeled)
     returning_listener(store, 'mixes', now=1)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
+    # Keep the real Animation objects: a hover CSSTransition may still be
+    # running after failure, independently of regeneration's looping motion.
+    page.add_init_script("""(() => {
+        window.regenerationAnimations = [];
+        const animate = Element.prototype.animate;
+        Element.prototype.animate = function (frames, options) {
+            const animation = animate.call(this, frames, options);
+            if (this.matches('#gen-wheelhouse .gen-focus .gen-row')
+                    && options?.iterations === Infinity)
+                window.regenerationAnimations.push(animation);
+            return animation;
+        };
+    })();""")
     page.goto(f"{live_app}/")
     card = page.locator("#gen-wheelhouse")
     expect(card).to_be_visible()
     card.locator(".gen-poster").click()
     body = card.locator(".gen-card-body")
     button = card.get_by_role("button", name="Regenerate this mix", exact=True)
-    # Both template variants use this handler. Their actual endpoint/target
-    # attributes are checked separately in test_mix_regeneration_markup.py.
+    # Exercise failure/retry on both actual template endpoint variants. The
+    # modeled success path also has the repeated held-recipe integration above.
     endpoint = button.get_attribute('hx-post')
-    assert endpoint == '/home/refresh-card/wheelhouse'
+    assert endpoint == ('/home/refresh-cards' if modeled else '/home/refresh-card/wheelhouse')
     before = body.locator(".gen-row").evaluate_all("rows => rows.map(row => row.outerHTML)")
     replacement = body.evaluate("""body => {
         const next = body.cloneNode(true);
@@ -106,8 +127,14 @@ def test_mix_regeneration_recovers_from_failure(live_app, store, page, failure):
     expect(card).not_to_have_class("is-regenerating")
     assert len(requests) == 1
     assert body.locator(".gen-row").evaluate_all("rows => rows.map(row => row.outerHTML)") == before
-    assert body.locator(".gen-row").evaluate_all(
-        "rows => rows.flatMap(row => row.getAnimations()).length") == 0
+    assert page.evaluate("regenerationAnimations.map(animation => animation.playState)") == [
+        'idle'] * len(before)
+    # CSS hover transitions may finish or be superseded by another transition.
+    body.locator('.gen-focus .gen-row').evaluate_all('''rows => Promise.allSettled(
+        rows.flatMap(row => row.getAnimations()).map(animation => animation.finished))''')
+    for title in body.locator('.gen-title').all():
+        title.scroll_into_view_if_needed()
+        expect(title).to_be_in_viewport()
 
     # The same button can retry successfully without a page reload.
     button.click()
@@ -117,4 +144,12 @@ def test_mix_regeneration_recovers_from_failure(live_app, store, page, failure):
     expect(card).not_to_have_class("is-regenerating")
     expect(card.locator(".gen-refresh")).not_to_have_attribute("data-regenerating", "1")
     assert len(requests) == 2
+    assert page.evaluate("regenerationAnimations.map(animation => animation.playState)") == [
+        'idle'] * (2 * len(before))
+    # The replacement's finite entrance is intentional and finishes naturally.
+    body.locator('.gen-focus .gen-row').evaluate_all('''rows => Promise.allSettled(
+        rows.flatMap(row => row.getAnimations()).map(animation => animation.finished))''')
+    for title in body.locator('.gen-title').all():
+        title.scroll_into_view_if_needed()
+        expect(title).to_be_in_viewport()
     assert not errors

@@ -270,43 +270,9 @@ def validate_installed(conn):
 
 
 def main(argv=None):
-    import argparse
-    from contextlib import closing
-    from dataclasses import asdict
-    import json
-    from pathlib import Path
-    import sqlite3
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('database', type=Path)
-    action = parser.add_mutually_exclusive_group()
-    action.add_argument('--publish-stage', type=int)
-    action.add_argument('--repair-surface')
-    parser.add_argument('--batches', type=int, default=1)
-    parser.add_argument('--batch-size', type=int, default=8)
-    args = parser.parse_args(argv)
-    if not 1 <= args.batches <= 128:
-        parser.error('--batches requires 1 to 128 batches')
-    try:
-        from ..db_handles import connect
-        with closing(connect(args.database.resolve().as_uri()+'?mode=rw', uri=True, timeout=.1)) as conn:
-            conn.row_factory = sqlite3.Row
-            conn.execute('PRAGMA foreign_keys=ON')
-            if args.publish_stage is not None:
-                OWNER.publish(conn, stage=args.publish_stage)
-                result = {'selected':OWNER.selected(conn)}
-            elif args.repair_surface is not None:
-                repair(conn, args.repair_surface)
-                result = {'repaired':args.repair_surface}
-            else:
-                for _ in range(args.batches):
-                    stage = OWNER.step(conn, batch_size=args.batch_size)
-                    if stage.complete:
-                        break
-                result = asdict(stage)
-            print(json.dumps(result))
-    except (MigrationError, sqlite3.Error, ValueError, OSError) as exc:
-        parser.exit(1, f'Comparison publication failed: {exc}\n')
-    return 0
+    from .publication_cli import main as run
+    return run(OWNER, __doc__, argv, label='Comparison', repair=repair, batch_size=8,
+               repair_flag='--repair-surface')
 
 
 if __name__ == '__main__':

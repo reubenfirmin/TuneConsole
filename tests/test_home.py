@@ -271,7 +271,6 @@ def test_presync_shows_recs_placeholder_not_feed(store):
     assert 'id="arrival-title"' in html
     assert 'Welcome to TuneConsole' in html
     assert 'class="festival-map"' in html
-    assert c.post('/home/onboard/format', data={'format': 'mixes'}).status_code == 409
     assert store.settings.get_setting('home_format') is None
     assert "More in your wheelhouse" not in html                           # feed hidden pre-sync
 

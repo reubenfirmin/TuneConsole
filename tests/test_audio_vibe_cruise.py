@@ -18,7 +18,7 @@ from yt_playlist.rec import audio_vibe_relax as relax
 from yt_playlist.rec import audio_vibe_uplift as uplift
 from yt_playlist.rec import audio_vibe_energize as energize
 from yt_playlist.rec import audio_vibe_focus as focus
-from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_preview as preview
+from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_prediction as predictor
 from yt_playlist.rec import home_vibe, musical_character, vibe_preparation
 
 
@@ -50,7 +50,7 @@ def samples(video='observed_song'):
 def baseline(rows, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setenv(cruise.MODE_KEY, 'off')
-        return preview.predict(rows, require_complete=False)
+        return predictor.predict(rows, require_complete=False)
 
 
 def controlled(tmp_path, rows, valence=.8):
@@ -75,7 +75,7 @@ def test_bundled_model_changes_only_cruise_suitability(count, monkeypatch):
     rows = samples()[:count]
     original = deepcopy(rows)
     before = baseline(rows, monkeypatch)
-    after = preview.predict(rows, require_complete=False)
+    after = predictor.predict(rows, require_complete=False)
     assert {k: v for k, v in after.items() if k not in ('suitability', 'individual_models')} == before
     assert after['individual_models']['cruise']['sha256'] == '3927a3294ad7a1670ef7f81d5c6119943991a699de60a7d5a60022851ba304eb'
     candidate = cruise.score(cruise.load(cruise.DEFAULT_PATH), [row['embedding']['values'] for row in rows])
@@ -93,7 +93,7 @@ def test_shadow_reports_candidate_but_preparation_uses_shared_scores(monkeypatch
     rows = samples()
     before = baseline(rows, monkeypatch)
     monkeypatch.setenv(cruise.MODE_KEY, 'shadow')
-    after = preview.predict(rows)
+    after = predictor.predict(rows)
     assert after['suitability'] == {r['vibe']: r['score'] for r in before['ranking']}
     assert after['individual_models']['cruise']['mode'] == 'shadow'
     measured = vibe_preparation.measured({'samples': rows, 'metadata': {}}, [], {}, {})
@@ -130,21 +130,21 @@ def test_unavailable_or_invalid_optional_model_preserves_shared_prediction(failu
         path.write_text(json.dumps(value))
     if failure != 'empty':
         monkeypatch.setenv(cruise.ENVIRONMENT_KEY, str(path))
-    assert preview.predict(rows) == before
+    assert predictor.predict(rows) == before
 
 
 def test_missing_or_mixed_capture_provenance_does_not_apply_cruise(monkeypatch):
     rows = samples()
     rows[-1]['artifact_hashes']['musicnn/model.json'] = 'f' * 64
-    assert preview.predict(rows) == preview.predict(rows, use_model=False)
+    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
     rows[-1].pop('embedding')
-    assert preview.predict(rows) == preview.predict(rows, use_model=False)
+    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
 
 
 def test_shared_model_disable_also_disables_individual_model(monkeypatch):
     monkeypatch.setenv(shared.ENVIRONMENT_KEY, '')
     rows = samples()
-    assert preview.predict(rows) == preview.predict(rows, use_model=False)
+    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
 
 
 def test_default_configuration_and_local_rollback(monkeypatch):
@@ -175,7 +175,7 @@ def test_background_rollout_replaces_one_vote_updates_consumers_and_rolls_back(s
     drain(store, batch=1)
     assert fits(store, own)['cruise']['source'] == 'heuristic'
     store.audio_vibes.save_sample(rows[2], 3)
-    store.audio_vibes.save_feedback(rows[0]['run_id'], [], ['release'], preview.TAXONOMY_VERSION, None, 4)
+    store.audio_vibes.save_feedback(rows[0]['run_id'], [], ['release'], predictor.TAXONOMY_VERSION, None, 4)
     feedback = store.audio_vibes.feedback(rows[0]['run_id'])
     drain(store, batch=1)
     before, neighbour_before = fits(store, own), fits(store, neighbour)
@@ -228,6 +228,6 @@ def test_missing_metadata_does_not_block_audio_model_or_require_labels(store):
     for now, row in enumerate(samples('bare'), 1):
         store.audio_vibes.save_sample(row, now)
     drain(store, batch=1)
-    expected = preview.predict(samples('bare'))['suitability']['cruise']
+    expected = predictor.predict(samples('bare'))['suitability']['cruise']
     assert fits(store, key)['cruise']['score'] == expected
     assert fits(store, key)['cruise']['source'] == 'audio_measurement'

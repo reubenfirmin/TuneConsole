@@ -1,13 +1,12 @@
+import pytest
+
 from yt_playlist.rec import actions, rec_params, transient
-from yt_playlist.core.store import Store
 from yt_playlist.util.matching import identity_key
 
 
-def _store_with_play_history(genre="Techno", n=10, now=1000.0):
+def _store_with_play_history(s, genre="Techno", n=10, now=1000.0):
     """A fresh store whose recent history is n distinct tracks of one genre (a dominant family).
     History dedupes by key, so distinctness (not repeats) is what builds a facet's play lean."""
-    s = Store(":memory:")
-    s.init_schema()
     iid = s.accounts.upsert_account("me", "cred", None, True)
     keys = []
     for i in range(n):
@@ -18,33 +17,23 @@ def _store_with_play_history(genre="Techno", n=10, now=1000.0):
     return s, now
 
 
-def test_transient_constants_present():
-    # #85: MOOD_RECENCY_ALPHA and STALE_DECAY_HALFLIFE_D are gone with rank decay and the staleness
-    # relax (Task 2); the still-live scalar constants are asserted below.
-    assert rec_params.PLAY_TRANSIENT_W == 0.30
-    assert rec_params.DISLIKE_TRANSIENT_W == 1.50
-    assert rec_params.RECENT_PLAY_LIMIT == 50
-    assert rec_params.FACET_GAIN == 0.35
-    assert rec_params.FACET_MULT_MIN == 0.35 and rec_params.FACET_MULT_MAX == 2.5
-    assert rec_params.DISLIKE_SUPPRESS_DAYS == 365
-    assert rec_params.THEME_THRESHOLD == 1.2
-    assert rec_params.GRADUATE_UP == 1.05 and rec_params.GRADUATE_DOWN == 0.95
+def test_sync_status_uses_shared_stale_duration():
     assert rec_params.SYNC_STALE_S == 24 * 3600
     assert actions.SYNC_STALE_S == rec_params.SYNC_STALE_S      # status and parameter registry use the same duration
 
 
-def test_play_facet_leans_isolates_plays():
+def test_play_facet_leans_isolates_plays(store):
     # Recent history dominated by one genre -> that family carries the largest play lean.
-    s, now = _store_with_play_history("Techno", n=10)
+    s, now = _store_with_play_history(store, "Techno", n=10)
     leans = transient.play_facet_leans(s, now)
     assert leans, "expected at least one played facet"
     assert all(v > 0 for v in leans.values()), "plays only ever push positive"
     top = max(leans, key=leans.get)
     assert top.startswith("genre:")
-
-
-def test_play_facet_leans_empty_without_history():
-    # No history snapshot -> no recent plays -> no play leans (the exposure funnel's off-switch).
-    s = Store(":memory:")
-    s.init_schema()
-    assert transient.play_facet_leans(s, 1000.0) == {}
+    assert leans[top] == pytest.approx(3.0)
+    rec_params.set_param(s, "play_transient_w", .8)
+    rec_params.set_param(s, "recent_play_limit", 5)
+    assert transient.play_facet_leans(s, now)[top] == pytest.approx(4.0)
+    rec_params.reset_param(s, "play_transient_w")
+    rec_params.reset_param(s, "recent_play_limit")
+    assert transient.play_facet_leans(s, now) == leans

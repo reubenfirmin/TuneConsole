@@ -3,9 +3,11 @@ from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
+from itertools import groupby
 from pathlib import Path
 
 from .. import recommendation_outputs as files
+from ..activity import check_cancellable_work
 from ..schema_contract import MigrationError
 from .ordered_rows import OrderedJob
 from .rows import Job, main as run
@@ -143,6 +145,28 @@ def copy(conn, row, generation, position, unit):
              entry[1] if entry else None, None if entry else 'unadmitted_video'))
 
 
+def copy_batch(conn, row, generation, selected):
+    """Keep all ordered occurrences while resolving repeated uploads once per slice."""
+    entries = {}
+    for kind, group in groupby(selected, key=lambda pair: pair[1][0]):
+        values = []
+        for _, unit in group:
+            check_cancellable_work()
+            if kind == 'file':
+                values.append((row['recipe_id'], generation, unit[1], *unit[2]))
+            else:
+                _, selection, rank, video = unit
+                if video not in entries:
+                    entries[video] = conn.execute(
+                        'SELECT id,recording_id FROM catalog_entries WHERE video_id=?', (video,)).fetchone()
+                entry = entries[video]
+                values.append((row['recipe_id'], generation, selection, rank, video,
+                    entry[0] if entry else None, entry[1] if entry else None,
+                    None if entry else 'unadmitted_video'))
+        table, width = (PARTS, 6) if kind == 'file' else (ITEMS, 8)
+        conn.executemany(f'INSERT INTO {table} VALUES ({",".join("?" for _ in range(width))})', values)
+
+
 def complete(conn, row, generation, plan):
     conn.execute(f'INSERT INTO {CURRENT} VALUES (?,?) ON CONFLICT(recipe_id) DO UPDATE SET generation=excluded.generation',
                  (row['recipe_id'], generation))
@@ -152,7 +176,7 @@ def delete(conn, owner, key):
     conn.execute(f'DELETE FROM {CURRENT} WHERE recipe_id=?', (json.loads(key)[0],))
 
 
-JOB = OrderedJob(DEFINITION, prepare, begin, copy, complete, delete)
+JOB = OrderedJob(DEFINITION, prepare, begin, copy, complete, delete, copy_batch=copy_batch)
 
 
 def main(argv=None):

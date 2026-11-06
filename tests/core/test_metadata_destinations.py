@@ -1,4 +1,5 @@
 """Metadata delivery custody and lineage never infer equal-value selection."""
+from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
@@ -7,6 +8,7 @@ import pytest
 
 from tests.core.test_metadata_owner_cutover import predecessor, seed
 from tests.core.test_metadata_preparation import finish
+from tests.metadata_provenance_support import metadata_provenance
 from tests.core.test_metadata_publication import publish as read_publication
 from yt_playlist.core import catalog
 from yt_playlist.core.migrations import MigrationError, regular, migrate, registry
@@ -56,7 +58,7 @@ def test_files_typed_observations_and_explicit_unresolved_selection_preserve_cho
         details = [row[3] for row in conn.execute('EXPLAIN QUERY PLAN '+query)]
         assert any(publication.table('native_source') in detail and all(key+'=?' in detail
             for key in ('stage','source_key','field')) for detail in details),details
-    lineage = store.enrichment_reports.metadata_provenance(entry)['lineage']
+    lineage = metadata_provenance(store, entry)['lineage']
     assert lineage['bpm']['selection']['attribution_status']=='legacy_unresolved'
     assert lineage['bpm']['selection']['observation_id'] is None
     assert lineage['bpm']['evidence'] is None
@@ -78,7 +80,7 @@ def test_files_typed_observations_and_explicit_unresolved_selection_preserve_cho
     assert publication.selected(conn) is None
     successor = stage(conn)
     publication.publish(conn,identity=successor)
-    assert store.enrichment_reports.metadata_provenance(entry)['lineage']['genre']['choice']['observation']['value_kind']=='null'
+    assert metadata_provenance(store, entry)['lineage']['genre']['choice']['observation']['value_kind']=='null'
     assert successor!=identity
     assert conn.execute('SELECT 1 FROM '+publication.table('choices')+' WHERE stage=?',(identity,)).fetchone()
     regular.migrate(conn)
@@ -185,7 +187,7 @@ def test_native_upgrade_and_restart_keep_selected_files_and_prefer_native_owners
     files = [row[0] for row in conn.execute('SELECT DISTINCT filename FROM '+publication.table('deliveries'))]
     # Frozen upgrades use an unbound connection, as the genuine migration runner
     # does, without a serving Store's temporary facade definitions.
-    with sqlite3.connect(predecessor._db_path) as upgrade:
+    with closing(sqlite3.connect(predecessor._db_path)) as upgrade:
         upgrade.row_factory = sqlite3.Row
         upgrade.execute('PRAGMA foreign_keys=ON')
         migrate(upgrade,registry=registry.MIGRATIONS)
@@ -193,7 +195,7 @@ def test_native_upgrade_and_restart_keep_selected_files_and_prefer_native_owners
     try:
         reopened.init_schema()
         assert publication.selected(reopened.conn) is None
-        assert reopened.enrichment_reports.metadata_provenance(entry)['lineage']['genre']['choice']['delivery']
+        assert metadata_provenance(reopened, entry)['lineage']['genre']['choice']['delivery']
         assert reopened.enrichment_state.metadata_observations(key)
         regular.migrate(reopened.conn)
         assert all(Path(path).is_file() for path in files)

@@ -32,6 +32,11 @@ def preferences(store, now):
             and not store._lock.held_by_current_thread):
         with store.read_view() as reader:
             return preferences(reader, now)
+    return store.memoized_read(('candidate-preferences', now, home_vibe.VERSION,
+                                musical_character.VERSION, PRECISION), lambda: _preferences(store, now))
+
+
+def _preferences(store, now):
     ranking = ranking_configuration(store)
     records = ranking['records']
     # Decay has no source-row mutation. Refresh at most hourly while there is
@@ -39,11 +44,8 @@ def preferences(store, now):
     decaying = any(row['weight'] != 1 and row['updated_at'] is not None
                    and not (axis.startswith('genre:') and row['weight'] == 0)
                    for axis, row in records.items())
-    choices = store.rec_proposals.get_proposals('choice_interests') or {}
-    bandit = store.rec_proposals.get_proposals('choice_bandit') or {}
-    contexts = choice_learning.contexts(store, now)
-    choice_decay = any(sum(row['layer_weights'][layer] for layer in ('now', 'session', 'recent')) >= .001
-                       for row in contexts)
+    choices, bandit = store.rec_proposals.choice_refresh_inputs()
+    choice_decay = choice_learning.transient_active(store, choices, now)
     configuration = {**ranking,
                      'choices': choices.get('interest_version'),
                      'bandit': bandit.get('state_version'),

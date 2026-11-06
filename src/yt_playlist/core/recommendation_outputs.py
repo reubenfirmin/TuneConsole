@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
 import tempfile
+from collections import OrderedDict
+from threading import Lock
 
 from . import policy_documents, fao
 from .activity import check_cancellable_work
@@ -17,6 +19,16 @@ MAX_BYTES = 1024 * 1024
 MANIFEST_BYTES = 8 * 1024 * 1024
 OUTPUT_OWNERS = ('prepared_outputs', 'album_note_outputs', 'listening_output_files', 'home_display_files',
                  'recommendation_report_files', 'model_pair_files', 'radio_seed_output', 'model_autotune_output')
+_HOME_SURFACES = frozenset({'home_prepared', 'home_tuned', 'home_choice'})
+_HOME_CACHE_BYTES = 16 * 1024 * 1024
+_home_parts = OrderedDict()
+_home_parts_lock = Lock()
+
+
+def _file_identity(filename):
+    observed = Path(filename).stat()
+    return (observed.st_dev, observed.st_ino, observed.st_size,
+            observed.st_mtime_ns, observed.st_ctime_ns)
 
 
 def decode_json(raw):
@@ -71,7 +83,7 @@ def _decode(encoded, surface=None, chunk_key=None):
     return document
 
 
-def _read(filename, digest, size, *, surface=None, chunk_key=None, with_age=False):
+def _read(filename, digest, size, *, surface=None, chunk_key=None, with_age=False, validate_document=True):
     if type(size) is not int or not 0 < size <= MAX_BYTES:
         raise ValueError('Invalid prepared output byte range')
     path = Path(filename)
@@ -80,12 +92,39 @@ def _read(filename, digest, size, *, surface=None, chunk_key=None, with_age=Fals
         encoded = stream.read(size + 1)
     if path.stem != digest or len(encoded) != size or hashlib.sha256(encoded).hexdigest() != digest:
         raise ValueError('Prepared output does not match its digest')
-    _decode(encoded, surface, chunk_key)
+    if validate_document:
+        _decode(encoded, surface, chunk_key)
     return (encoded, age) if with_age else encoded
 
 
+def _read_output(filename, digest, size, *, surface, chunk_key):
+    encoded = _read(filename, digest, size, surface=surface, chunk_key=chunk_key, validate_document=False)
+    return _decode(encoded, surface, chunk_key)['output']
+
+
 def read(filename, digest, size, *, surface, chunk_key):
-    return _decode(_read(filename, digest, size, surface=surface, chunk_key=chunk_key))['output']
+    # Home parts are immutable strings, revisited by readiness and rendering.
+    # Retain validated bytes only while the physical file and exact SQL owner
+    # still match. Never retain a live readiness or eligibility decision.
+    if type(size) is not int or not 0 < size <= MAX_BYTES:
+        raise ValueError('Invalid prepared output byte range')
+    if surface not in _HOME_SURFACES:
+        return _read_output(filename, digest, size, surface=surface, chunk_key=chunk_key)
+    identity = _file_identity(filename)
+    key = (str(filename), digest, size, surface, chunk_key, identity)
+    with _home_parts_lock:
+        cached = _home_parts.get(key)
+        if cached is not None:
+            _home_parts.move_to_end(key)
+            return cached[0]
+    value = _read_output(filename, digest, size, surface=surface, chunk_key=chunk_key)
+    if isinstance(value, str) and _file_identity(filename) == identity:
+        with _home_parts_lock:
+            _home_parts[key] = (value, len(value.encode()))
+            while (len(_home_parts) > 128
+                    or sum(item[1] for item in _home_parts.values()) > _HOME_CACHE_BYTES):
+                _home_parts.popitem(last=False)
+    return value
 
 
 def references(conn):

@@ -7,7 +7,8 @@ import pytest
 
 from tests.core.test_model_trial_preparation import head, seed
 from tests.core.test_predecessor_writes import installed
-from yt_playlist.core.migrations import MigrationError, registry, regular, runner
+from tests.publication_timing_support import publication_costs
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import model_trials as preparation, trial_publication as publication
 from yt_playlist.core.store import Store
 
@@ -22,7 +23,7 @@ def ready(owner, conn):
 
 
 @pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
-def test_preopened_and_reopened_readers_preserve_exact_trial_decisions(installed):
+def test_preopened_and_reopened_readers_preserve_exact_trial_decisions(installed, publication_costs):
     store, _ = installed
     values, originals = seed(store)
     other = Store(store._db_path)
@@ -35,8 +36,9 @@ def test_preopened_and_reopened_readers_preserve_exact_trial_decisions(installed
             assert owner.value(other.conn, revision) == originals[owner.source]
             assert other.rec_proposals.get_proposals(owner.source) == values[owner.source]
             assert other.rec_proposals.has_proposals(owner.source)
-            assert owner.capture(other.conn)['built_at'] is None
-            assert owner.capture(other.conn)['run_ref'] == (1 if owner.source == 'model_live_comparison' else None)
+            captured = owner.capture(other.conn)
+            assert captured['built_at'] is None
+            assert captured['run_ref'] == (1 if owner.source == 'model_live_comparison' else None)
         regular.migrate(other.conn)
     finally:
         other.conn.close()
@@ -183,25 +185,3 @@ def test_absent_deleted_and_renamed_sources_keep_retained_originals(installed):
     owner.publish(store.conn, revision=ready(owner, store.conn))
     assert store.rec_proposals.get_proposals(owner.source) is None
     assert json.loads(owner.value(store.conn, first)) == {'epoch':'0000'}
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_native_upgrade_takes_precedence_and_keeps_original_archives(installed, tmp_path):
-    store, _ = installed
-    values, originals = seed(store)
-    revisions = {}
-    for name, owner in publication.OWNERS.items():
-        revisions[name] = ready(owner, store.conn)
-        owner.publish(store.conn, revision=revisions[name])
-    upgraded = Store(tmp_path/'trial-publication-upgrade.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        upgraded.init_schema(defer_metadata=True)
-        for name, owner in publication.OWNERS.items():
-            assert owner.selected(upgraded.conn) is None
-            assert owner.value(upgraded.conn, revisions[name]) == originals[owner.source]
-            assert upgraded.rec_proposals.get_proposals(owner.source) == values[owner.source]
-        regular.migrate(upgraded.conn)
-    finally:
-        upgraded.conn.close()

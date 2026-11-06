@@ -53,6 +53,13 @@ def test_saved_albums_recency_newest_play_per_album(store):
     assert rec["HOT"] == 300.0       # newest play across the album's tracks
     assert rec["COLD"] == 50.0
     assert rec["NEVER"] is None      # never played -> coldest
+    store.collection.add_saved_album(_album('TRACKLESS'))
+    for include_generated in (False, True):
+        complete = store.collection.saved_albums_recency(include_generated=include_generated)
+        selected = store.collection.saved_albums_recency(include_generated=include_generated,
+            browse_ids=['HOT', 'NEVER', 'TRACKLESS', 'MISSING', 'HOT'])
+        assert selected == {key: complete[key] for key in ('HOT', 'NEVER', 'TRACKLESS')}
+        assert store.collection.saved_albums_recency(include_generated=include_generated, browse_ids=[]) == {}
 
 
 def test_replace_saved_albums_is_wholesale(store):
@@ -117,6 +124,49 @@ def test_collection_artists_includes_saved_album_tracks_without_playlists(store)
     assert store.collection.collection_artists() == [{
         "artist": "Artist", "artist_id":store.artists.resolve('Artist'), "browse": None, "songs": 1, "plays": 1,
         "n_albums": 1, "n_pls": 0, "thumbnail": "/cover.png"}]
+
+
+def test_collection_artists_does_not_cross_scan_recordings_and_credits(store):
+    from yt_playlist.core.albums import observe
+    from yt_playlist.core.activity import interrupt_query
+    from yt_playlist.core.artists import ensure
+
+    account = store.accounts.upsert_account('main', 'cred', None, True)
+    playlist = store.playlists.upsert_playlist(account, 'PL', 'Library', 0, 'h', 0)
+    entries = list(range(1, 601))
+    with store.conn:
+        artist = ensure(store.conn, 'Artist')
+        store.conn.executemany('INSERT INTO recordings(id,identity_key,title,artist) VALUES (?,?,?,?)',
+            [(entry, f'song {entry}|artist', f'Song {entry}', 'Artist') for entry in entries])
+        store.conn.executemany('INSERT INTO youtube_items(video_id,recording_id,title,artist) VALUES (?,?,?,?)',
+            [(f'v{entry}', entry, f'Song {entry}', 'Artist') for entry in entries])
+        store.conn.executemany('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
+            [(entry, entry, f'v{entry}') for entry in entries])
+        store.conn.executemany("INSERT INTO library_memberships(entry_id,origin) VALUES (?,'fixture')",
+            [(entry,) for entry in entries])
+        store.conn.executemany("INSERT INTO entry_artists VALUES (?,0,?,'Artist','fixture')",
+            [(entry, artist) for entry in entries])
+        album = observe(store.conn, 'B', title='Library album', artist='Artist', rank=1)
+        store.conn.executemany("INSERT INTO album_item_observations(album_id,entry_id,provider) VALUES (?,?,'youtube')",
+            [(album, entry) for entry in entries])
+    store.playlists.set_playlist_tracks(playlist, entries)
+    steps = 0
+
+    def bounded_work():
+        nonlocal steps
+        steps += 1000
+        return int(steps > 1_000_000)
+
+    # Bound SQLite work instead of wall time: busy machines must not make the
+    # regression flaky, and a quadratic join must not wait for a request timeout.
+    with store._lock:
+        store.conn.set_progress_handler(bounded_work, 1000)
+        try:
+            result, = store.collection.collection_artists()
+        finally:
+            store.conn.set_progress_handler(interrupt_query, 1000)
+    assert result['artist_id'] == artist
+    assert (result['songs'], result['n_pls'], result['n_albums'], result['plays']) == (600, 1, 1, 0)
 
 
 def test_collection_artists_merges_saved_albums_without_double_counting_songs(store):

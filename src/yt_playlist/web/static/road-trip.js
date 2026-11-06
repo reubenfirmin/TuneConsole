@@ -37,9 +37,7 @@ function roadTripBalance(rows) {
     requestFailed(event) {
       this.shares = [...this.savedShares];
       this.dragBase = null;
-      this.error = event.detail.xhr.status === 404
-        ? 'Restart TuneConsole to load the updated mix controls.'
-        : 'The balance could not be saved. Please try again.';
+      this.error = 'The balance could not be confirmed. Check your route before trying again.';
     },
     rebalance(index, value) {
       if (!this.dragBase) this.dragBase = [...this.shares];
@@ -69,6 +67,18 @@ function roadTripScreen() {
     lookups: 0,
     error: '',
     get loading() { return this.lookups > 0 || this.requests.length > 0; },
+    saveRecovery(event) {
+      if (event.detail?.state) event.detail.state.roadTripScreen = {
+        error: this.error,
+        drawer: Alpine.$data(this.$el.querySelector('#road-trip-body')).activeDrawer,
+      };
+    },
+    restoreRecovery(event) {
+      const state = event.detail?.state?.roadTripScreen;
+      if (!state) return;
+      this.error = state.error;
+      Alpine.$data(this.$el.querySelector('#road-trip-body')).activeDrawer = state.drawer;
+    },
     get loadingMessage() {
       return this.requests.at(-1)?.message || 'Finding music for your passenger…';
     },
@@ -76,6 +86,9 @@ function roadTripScreen() {
       const detail = event.detail;
       if (detail.target?.id !== 'road-trip-body') return;
       if (detail.requestConfig?.verb === 'get') {
+        // A background poll must not supersede an explicit route selection.
+        // Cancel beforeSend, where the shared recovery owner advances freshness.
+        if (this.loading) { event.preventDefault(); return; }
         this.progressRequests.set(detail.xhr, this.revision);
         return;
       }
@@ -150,6 +163,9 @@ function roadTripForm(initial, context) {
     editorScreen: null,
     editorOwner: null,
     savedValues: '',
+    recoveryFields: ['name', 'renaming', 'ownPct', 'familiarity', 'hours', 'minutes',
+      'artists', 'genres', 'artistGenres', 'blendPct', 'blacklist', 'artistQuery',
+      'genreQuery', 'blacklistQuery', 'ownGenreQuery', 'savedValues'],
     valuesSignature() {
       return JSON.stringify([this.name, this.ownPct, this.familiarity, this.hours, this.minutes,
         this.artists, this.genres, this.blacklist]);
@@ -169,6 +185,8 @@ function roadTripForm(initial, context) {
       this.disposed = true;
       clearTimeout(this.artistTimer); clearTimeout(this.steerTimer);
       this.reportEditor(null);
+      window.removeEventListener('app-page-leaving', this._saveRecovery);
+      window.removeEventListener('app-page-changed', this._restoreRecovery);
       this.editorScreen = null;
       this.formElement = null;
     },
@@ -179,6 +197,16 @@ function roadTripForm(initial, context) {
       this.editorOwner = this.$el;
       this.savedValues = this.valuesSignature();
       this.editorScreen = this.$el.closest('[data-road-trip-screen]');
+      this._saveRecovery = event => {
+        if (event.detail?.state) event.detail.state.roadTripEditor = {id: this.id,
+          values: JSON.parse(JSON.stringify(Object.fromEntries(this.recoveryFields.map(key => [key, this[key]]))))};
+      };
+      this._restoreRecovery = event => {
+        const draft = event.detail?.state?.roadTripEditor;
+        if (draft && draft.id === this.id) Object.assign(this, draft.values);
+      };
+      window.addEventListener('app-page-leaving', this._saveRecovery);
+      window.addEventListener('app-page-changed', this._restoreRecovery);
       this.reportEditor(() => this.pendingEdits());
       this.artists.filter(name => !this.artistGenres[name]).forEach(name => this.loadArtistGenre(name));
     },

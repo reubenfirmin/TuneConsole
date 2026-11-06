@@ -1,11 +1,11 @@
 """Earned destinations stay navigable while their outputs are being replaced."""
 import threading
-import time
 
 from playwright.sync_api import expect
 import uvicorn
 
 from tests.browser_fixtures import _free_port
+from tests.live_server import LiveServer
 from tests.conftest import FakeClient
 from tests.test_deferred_playback_feedback import library
 from yt_playlist.core.db_rebuild import build
@@ -30,17 +30,12 @@ def test_missing_outputs_do_not_remove_earned_home_during_maintenance(library, p
     monkeypatch.setattr(build, 'build', interrupted)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=port, log_level='warning'))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
     page.route('**/bridge/status', lambda route: route.fulfill(json={'connected': True}))
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.set_viewport_size({'width': 1440, 'height': 1100})
+    owner = LiveServer(server)
     try:
-        deadline = time.monotonic()+15
-        while not server.started:
-            assert thread.is_alive() and time.monotonic() < deadline
-            time.sleep(.02)
         url = f'http://127.0.0.1:{port}'
         page.goto(url)
         mixes = page.get_by_role('tab', name='Mix tapes', exact=True)
@@ -75,6 +70,4 @@ def test_missing_outputs_do_not_remove_earned_home_during_maintenance(library, p
         assert not errors
     finally:
         release.set()
-        server.should_exit = True
-        thread.join(15)
-        assert not thread.is_alive()
+        owner.close()

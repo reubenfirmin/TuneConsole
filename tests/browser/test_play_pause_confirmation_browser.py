@@ -95,10 +95,12 @@ def test_failed_native_control_keeps_actual_state_and_can_be_retried(playback_br
         music.evaluate("document.querySelector('#play-pause-button button').disabled = true")
     else:
         app.route("**/now-playing/toggle?*", lambda route: route.fulfill(status=503, json={"ok": False}))
-    player.get_by_role("button", name="Pause", exact=True).click()
+    with app.expect_response("**/now-playing/toggle?*") as rejected:
+        player.get_by_role("button", name="Pause", exact=True).click()
+    assert rejected.value.status >= 400 or rejected.value.json()["ok"] is False
     error = app.locator("#playback-error")
-    expect(error).to_be_visible()
-    expect(error).to_have_attribute("role", "alert")
+    expect(error).to_have_count(0)
+    expect(app.locator("[role=alert]:visible, .toast-err")).to_have_count(0)
     expect(player.get_by_role("button", name="Pause", exact=True)).to_be_enabled()
     assert music.evaluate("document.querySelector('video').paused") is False
     assert music.evaluate("fixture.clicks") == []
@@ -133,8 +135,10 @@ def test_blocked_autoplay_is_reported_and_music_activation_recovers(playback_bri
     app = _card(h)
     player = app.locator(".global-now-playing")
     assert inspect("navigator.userActivation.hasBeenActive") is False
-    player.get_by_role("button", name="Play", exact=True).click()
-    expect(app.locator("#playback-error")).to_contain_text("Click Play in YouTube Music")
+    with app.expect_response("**/now-playing/toggle?*") as rejected:
+        player.get_by_role("button", name="Play", exact=True).click()
+    assert rejected.value.json()["ok"] is False
+    expect(app.locator("#playback-error, [role=alert]:visible, .toast-err")).to_have_count(0)
     assert inspect("document.querySelector('video').paused") is True
     assert inspect("navigator.userActivation.hasBeenActive") is False
     expect(player.get_by_role("button", name="Play", exact=True)).to_be_enabled()

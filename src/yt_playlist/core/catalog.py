@@ -14,6 +14,7 @@ from yt_playlist.core.catalog_state import rekey_state as rekey_serialized_state
 from yt_playlist.core.discovery_sources import prepare_reassociation, finish_reassociation
 from yt_playlist.core import metadata, metadata_deliveries, metadata_evidence, metadata_values, metadata_hints, metadata_runtime, artists, albums, mood
 from yt_playlist.core import rating_feedback, listening_summaries
+from yt_playlist.core import provider_queries
 from yt_playlist.util.thumbnails import is_placeholder_art
 
 
@@ -26,6 +27,7 @@ def choose_field(conn, entry_id, field, value, source='user', *, now=None):
     entry_id = resolve_entry(conn,entry_id)
     if field not in (*ITEM_FIELDS,*RECORDING_FIELDS):
         raise ValueError(f'Unknown metadata field: {field}')
+    previous = provider_queries.identity(conn, entry_id, field)
     observation = metadata.record_choice(conn,entry_id,field,value,source,now=now)
     if field == 'artist' and value:
         from .artist_credits import projection_table
@@ -37,11 +39,19 @@ def choose_field(conn, entry_id, field, value, source='user', *, now=None):
             artists.observe(conn,entry_id,value,source='user_correction',now=now)
     if not metadata_evidence.available(conn) and not metadata_runtime.active(conn):
         conn.execute('INSERT INTO entry_field_choices VALUES (?,?,?,?) ON CONFLICT(entry_id,field) DO UPDATE SET value_json=excluded.value_json,source=excluded.source', (entry_id,field,json.dumps(value),source))
+    provider_queries.resume_changed(conn, entry_id, field, previous)
     return observation
 
 
 def withdraw_choice(conn, entry_id, field, *, now=None):
     entry_id = resolve_entry(conn, entry_id)
+    previous = provider_queries.identity(conn, entry_id, field)
+    result = _withdraw_choice(conn, entry_id, field, now=now)
+    provider_queries.resume_changed(conn, entry_id, field, previous)
+    return result
+
+
+def _withdraw_choice(conn, entry_id, field, *, now=None):
     if metadata_runtime.active(conn):
         return metadata_runtime.choose(conn, entry_id, field, withdraw=True, now=now)
     if metadata_evidence.available(conn):

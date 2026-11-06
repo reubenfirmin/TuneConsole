@@ -10,6 +10,7 @@ from yt_playlist.core.store import Store
 from yt_playlist.providers.waterfall import TrackSink, run_waterfall
 from tests.test_waterfall import FakeProv
 from tests.historical_support import upgrade_fixture
+from tests.metadata_provenance_support import metadata_provenance
 
 
 @pytest.mark.parametrize('values', [('Rock','Pop'),('Rock','')])
@@ -36,9 +37,9 @@ def test_duplicate_legacy_decisions_reconcile_without_arbitrary_winner(legacy_st
     choices = s.conn.execute('SELECT value_json,chosen_at FROM metadata_decisions '
                              'WHERE legacy_ref IS NOT NULL ORDER BY chosen_at').fetchall()
     assert [(json.loads(r[0]),r[1]) for r in choices] == [(values[0],10),(values[1],20)]
-    before = s.enrichment_reports.metadata_provenance(3)
+    before = metadata_provenance(s, 3)
     s.init_schema()
-    assert s.enrichment_reports.metadata_provenance(3) == before
+    assert metadata_provenance(s, 3) == before
     s.enrichment.resolve_conflict(7,'genre',values[1],now=30)
     assert s.tracks.get_track_enrichment(3)[0] == values[1]
     assert tuple(s.conn.execute('SELECT resolved,resolved_value FROM enrichment_conflict').fetchone()) == (1,values[1])
@@ -67,7 +68,7 @@ def test_provider_refresh_selection_and_blank_override_with_worker_sink(store):
         catalog.choose_field(store.conn,track,'bpm',None)
     a._by_title['Song'] = {'genre':'House','bpm':128}
     run()
-    fields = store.enrichment_reports.metadata_provenance(track)['fields']
+    fields = metadata_provenance(store, track)['fields']
     assert fields['genre'] == {'value':'','override':True,'source':'user'}
     assert fields['bpm'] == {'value':None,'override':True,'source':'user'}
     from yt_playlist.core import genre_classifications
@@ -78,7 +79,7 @@ def test_provider_refresh_selection_and_blank_override_with_worker_sink(store):
     with store.conn:
         catalog.withdraw_choice(store.conn, track, 'genre')
         catalog.withdraw_choice(store.conn, track, 'bpm')
-    fields = store.enrichment_reports.metadata_provenance(track)['fields']
+    fields = metadata_provenance(store, track)['fields']
     assert fields['genre'] == {'value':'House','override':False,'source':'musicbrainz'}
     assert store.conn.execute("SELECT COUNT(*) FROM metadata_observations o JOIN metadata_deliveries d "
                               "ON d.id=o.delivery_id WHERE d.provider IN ('musicbrainz','discogs') "
@@ -103,13 +104,13 @@ def test_populated_upgrade_does_not_invent_user_intent_and_rolls_back(tmp_path):
     assert not s.conn.execute("SELECT 1 FROM sqlite_master WHERE name='metadata_decisions'").fetchone()
     assert s.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 19
     upgrade_fixture(s)
-    fields = s.enrichment_reports.metadata_provenance(1)['fields']
+    fields = metadata_provenance(s, 1)['fields']
     assert fields['genre'] == {'value':'Rock','override':False,'source':'legacy_unknown'}
     assert fields['title'] == {'value':'Edited','override':True,'source':'user'}
     assert fields['orig_title']['value'] == 'Original'
-    before = s.enrichment_reports.metadata_provenance(1)
+    before = metadata_provenance(s, 1)
     s.init_schema()
-    assert s.enrichment_reports.metadata_provenance(1) == before
+    assert metadata_provenance(s, 1) == before
     assert not (tmp_path / 'backups').exists()
     assert s.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
 

@@ -36,12 +36,16 @@ def seed_bundle_subjects(store, bundle, *, fresh=()):
                 item.get('album'), item.get('thumbnail'), item.get('genre'), item.get('year'), None, 1)
 
 
-def publish_bundles(store, bundle, now=1000, *, fresh=(), vibes=False):
+def publish_bundles(store, bundle, now=1000, *, fresh=(), vibes=False, retain_vibe_readiness=True):
     with store.read_snapshot() as snapshot:
         policies = measurement.PoolPolicies(snapshot.store, now)
         if vibes:
             from yt_playlist.rec import vibe_pools
             vibe_pools.prepare(snapshot.store, bundle, now, policies)
+        if not retain_vibe_readiness:
+            # Publish genuine prepared candidates without the optional summary
+            # in one transition; callers still exercise real typed publication.
+            bundle.get('_meta', {}).pop('vibe_readiness', None)
         prepared = {key: value if key.startswith('_') else {
             lane: policies.stamp(items, lane) for lane, items in value.items()}
             for key, value in bundle.items()}

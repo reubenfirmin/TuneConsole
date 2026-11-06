@@ -3,6 +3,7 @@ sitting on that playlist. Covers the per-playlist detail routes (remove-track/ad
 reorder/rename); a disconnected extension (send_control raises) must never affect the route's own
 response, and a FAILED op must not fire the control at all."""
 from fastapi.testclient import TestClient
+import pytest
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
@@ -69,19 +70,31 @@ def test_failed_op_does_not_fire_refresh_view(store):
     assert bridge.calls == []
 
 
-def test_add_tracks_posts_refresh_view(store):
+@pytest.mark.parametrize('song_menu', [False, True], ids=['playlist', 'song-menu'])
+@pytest.mark.parametrize('disconnected', [False, True], ids=['connected', 'disconnected'])
+def test_add_tracks_posts_refresh_view(store, song_menu, disconnected, caplog):
     import json
     iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "My Mix", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)])
-    bridge = _StubBridge()
+    bridge = _StubBridge(raises=disconnected)
     c = _client(store, lambda: {iid: FakeClient()}, bridge)
 
-    track = json.dumps({"videoId": "v1", "title": "Song A (Live)", "artist": "Artist X", "duration": 250})
-    r = c.post(f"/playlist/{a}/add-tracks", data={"track": track})
+    with caplog.at_level('DEBUG', logger='yt_playlist.web'):
+        if song_menu:
+            r = c.post('/songs/add-to-playlist', json={'playlist_id': a, 'song': {
+                'video_id': 'v1', 'title': 'Song A (Live)', 'artist': 'Artist X', 'duration': 250}})
+            assert r.json()['message'] == 'Song added.'
+        else:
+            track = json.dumps({"videoId": "v1", "title": "Song A (Live)", "artist": "Artist X", "duration": 250})
+            r = c.post(f"/playlist/{a}/add-tracks", data={"track": track})
+            assert r.headers.get("hx-refresh") == "true"
 
-    assert r.headers.get("hx-refresh") == "true"
-    assert bridge.calls == [{"type": "refresh-view", "playlist": "PL1"}]
+    assert r.status_code == 200
+    assert [t['video_id'] for t in store.charts.playlist_tracks_detail(a)] == ['v0', 'v1']
+    assert bridge.calls == ([] if disconnected else [{"type": "refresh-view", "playlist": "PL1"}])
+    if disconnected:
+        assert 'refresh-view control not sent for PL1' in caplog.text
 
 
 def test_rename_posts_refresh_view(store):
@@ -108,19 +121,24 @@ def test_reorder_posts_refresh_view(store):
     assert bridge.calls == [{"type": "refresh-view", "playlist": "PL1"}]
 
 
-def test_delete_posts_refresh_view_for_removed_playlist(store, monkeypatch, tmp_path):
+@pytest.mark.parametrize('disconnected', [False, True], ids=['connected', 'disconnected'])
+def test_delete_posts_refresh_view_for_removed_playlist(store, monkeypatch, tmp_path, disconnected, caplog):
     # A YTM tab sitting on the deleted playlist should show it's gone, not a stale tracklist. The
     # local row is removed by the delete, so the control must carry the YTM id captured beforehand.
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     iid, a, fc = _seed_three(store)
-    bridge = _StubBridge()
+    bridge = _StubBridge(raises=disconnected)
     c = _client(store, lambda: {iid: fc}, bridge)
 
-    r = c.post("/playlists/delete", data={"ids": str(a)})
+    with caplog.at_level('DEBUG', logger='yt_playlist.web'):
+        r = c.post("/playlists/delete", data={"ids": str(a)})
 
+    assert r.status_code == 200 and r.json()['status'] == 'complete'
     assert r.headers.get("hx-redirect", "").startswith("/playlists?result=")
     assert store.playlists.get_playlist(a) is None
-    assert bridge.calls == [{"type": "refresh-view", "playlist": "PL1"}]
+    assert bridge.calls == ([] if disconnected else [{"type": "refresh-view", "playlist": "PL1"}])
+    if disconnected:
+        assert 'refresh-view control not sent for PL1' in caplog.text
 
 
 def test_delete_of_system_playlist_hides_only_and_does_not_fire(store, monkeypatch, tmp_path):
@@ -147,20 +165,25 @@ def _two_identity_move(store):
     return i1, i2, pid
 
 
-def test_move_that_deletes_source_posts_refresh_view(store,monkeypatch,tmp_path):
+@pytest.mark.parametrize('disconnected', [False, True], ids=['connected', 'disconnected'])
+def test_move_that_deletes_source_posts_refresh_view(store,monkeypatch,tmp_path,disconnected,caplog):
     monkeypatch.setenv('YT_PLAYLIST_HOME',str(tmp_path))
     # A cross-identity MOVE deletes the source playlist on YouTube; a tab sitting on it should
     # reload to show that. The copy destination is brand new, so no refresh fires for it.
     i1, i2, pid = _two_identity_move(store)
-    bridge = _StubBridge()
+    bridge = _StubBridge(raises=disconnected)
     source = FakeClient(tracks={"PL1": [_track("v1", "S", "X")]})
     target = FakeClient(catalog={"v1": _track("v1", "S", "X")})
     c = _client(store, lambda: {i1: source, i2: target}, bridge)
 
-    r = c.post("/move/run", data={"playlist": pid, "target_identity": i2})
+    with caplog.at_level('DEBUG', logger='yt_playlist.web'):
+        r = c.post("/move/run", data={"playlist": pid, "target_identity": i2})
 
     assert r.status_code == 200 and r.text.strip() == ""
-    assert bridge.calls == [{"type": "refresh-view", "playlist": "PL1"}]
+    assert store.playlists.get_playlist(pid) is None
+    assert bridge.calls == ([] if disconnected else [{"type": "refresh-view", "playlist": "PL1"}])
+    if disconnected:
+        assert 'refresh-view control not sent for PL1' in caplog.text
 
 
 def test_copy_only_move_does_not_fire_refresh_view(store):

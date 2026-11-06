@@ -1,12 +1,6 @@
 import numpy as np
-import pytest
-from yt_playlist.core.store import Store
+from tests.retained_rating_support import observe_rating
 from yt_playlist.rec import onboarding
-
-
-@pytest.fixture
-def store():
-    s = Store(":memory:"); s.init_schema(); return s
 
 
 def _synced_thin(store):
@@ -34,11 +28,14 @@ def test_inactive_when_dismissed(store):
     assert onboarding.onboarding_active(store, now=10.0) is False
 
 
-def test_feedback_alone_does_not_graduate_without_usable_offers(store, monkeypatch):
+def test_feedback_alone_does_not_graduate_without_usable_offers(store):
     _synced_thin(store)
-    monkeypatch.setattr(onboarding, "feedback_count", lambda s: 2)
-    assert onboarding.onboarding_active(store, now=10.0) is True
-    monkeypatch.setattr(onboarding, "feedback_count", lambda s: 3)
+    observe_rating(store, 'liked|artist', 'LIKE', 2, provenance='action')
+    observe_rating(store, 'disliked|artist', 'DISLIKE', 3, provenance='action')
+    assert store.rec_model.recent_liked_keys() == ['liked|artist']
+    assert [row['item_key'] for row in store.rec_model.list_dislikes()] == ['disliked|artist']
+    assert not onboarding.setup_completed(store)
+    assert onboarding.initial_setup_pending(store, now=10.0)
     assert onboarding.onboarding_active(store, now=10.0) is True
 
 

@@ -23,14 +23,6 @@
   display: none;
 }
 .page-home .home-mixes:has(.gen-row) > .mix-preparation-note { display: none; }
-.mix-preference-note {
-  margin: 0 0 .9rem;
-  padding: .8rem 1rem;
-  border-radius: 4px;
-  background: var(--surface-card);
-  color: var(--text);
-  line-height: 1.5;
-}
 .page-home .dash-directions .gen-lanes {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   grid-template-rows: repeat(2, minmax(0, 1fr));
@@ -316,6 +308,15 @@
 .page-home .dash-directions .gen-lanes:not(.has-focus) > .gen-card:nth-child(2) { --mix-order: 1; --mix-x: 1.1rem; --mix-y: -1.1rem; }
 .page-home .dash-directions .gen-lanes:not(.has-focus) > .gen-card:nth-child(3) { --mix-order: 2; --mix-x: -1.1rem; --mix-y: 1.1rem; }
 .page-home .dash-directions .gen-lanes:not(.has-focus) > .gen-card:nth-child(4) { --mix-order: 3; --mix-x: 1.1rem; --mix-y: 1.1rem; }
+/* A selected Vibe replaces all four offers together. Keep them visible from
+   the first painted frame while the board gives the change a brief downbeat. */
+.page-home .dash-directions .gen-lanes[data-vibe]:not([data-vibe=""]):not(.has-focus) > .gen-card {
+  animation: mix-vibe-in .18s ease-out both;
+}
+@keyframes mix-vibe-in {
+  from { transform: scale(.99); }
+  to { transform: none; }
+}
 .page-home .dash-directions .gen-card::after {
   content: "";
   position: absolute;
@@ -480,6 +481,8 @@
   .page-home .dash-directions .gen-card.is-focused .gen-refresh:hover { color: var(--text); background: var(--surface-raised); }
   .page-home .dash-directions .gen-card.is-focused .gen-refresh-label { display: inline; font-size: .72rem; font-weight: 650; }
   .page-home .dash-directions .gen-card.is-focused .gen-focus { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; overflow: hidden; padding: .75rem 1rem 1rem; }
+  /* The retained error notice adds a row before the track-count header. */
+  .page-home .dash-directions .gen-card.is-focused .gen-focus:has(> .gen-refresh-error) { grid-template-rows: auto auto minmax(0, 1fr); }
   .page-home .dash-directions .gen-card.is-focused .gen-focus .gen-sheet-head { padding-bottom: .35rem; }
   .page-home .dash-directions .gen-card.is-focused .gen-flow { margin-bottom: .45rem; }
   .page-home .dash-directions .gen-card.is-focused .gen-list { grid-template-rows: repeat(3, minmax(0, 1fr)); gap: .65rem; min-height: 0; }

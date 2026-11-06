@@ -13,7 +13,7 @@ from statistics import median
 import numpy as np
 from threadpoolctl import threadpool_limits
 
-from yt_playlist.core import audio_embedding, audio_vibe_metadata, sample_files
+from yt_playlist.core import audio_embedding, audio_vibe_metadata, sample_files, vibe_versions
 from yt_playlist.rec import audio_vibe_external, audio_vibe_model, home_vibe, musical_profiles
 
 from .external_experiment import OUT, digest, normalize, save, stamp
@@ -236,8 +236,9 @@ def summarize(db):
             any_shared += any(present)
         counts = conn.execute('SELECT source,COUNT(DISTINCT recording_id) n FROM recording_vibes '
                               'WHERE recording_id IN (SELECT recording_id FROM tracks) GROUP BY source').fetchall()
-        version_counts = conn.execute('SELECT source,COUNT(DISTINCT recording_id) n FROM recording_vibes '
-            'WHERE recording_id IN (SELECT recording_id FROM tracks) AND inputs_version LIKE ? GROUP BY source',
+        version = vibe_versions.expression(conn, 'recording_vibes', 'v')
+        version_counts = conn.execute('SELECT source,COUNT(DISTINCT recording_id) n FROM recording_vibes v '
+            'WHERE recording_id IN (SELECT recording_id FROM tracks) AND '+version+' LIKE ? GROUP BY source',
             ('%/' + model_hash,)).fetchall()
         runs = conn.execute('WITH complete AS (SELECT recording_id,video_id,run_id,MAX(captured_at) captured '
             'FROM sample_attributes GROUP BY recording_id,video_id,run_id HAVING COUNT(*)=3), ranked AS ('
@@ -254,9 +255,12 @@ def summarize(db):
                 invalid += 1
                 continue
             compatible += 1
-            current = conn.execute('SELECT vibe,score,source,inputs_version FROM recording_vibes WHERE recording_id=?',
+            current = conn.execute('SELECT vibe,score,source,'+version+' AS inputs_version '
+                                   'FROM recording_vibes v WHERE recording_id=?',
                                    (run['recording_id'],)).fetchall()
-            if len(current) == 6 and all(row['source'] == 'audio_measurement' and row['inputs_version'].endswith('/' + model_hash)
+            current = [row for row in current if row['vibe'] in model['labels']]
+            if {row['vibe'] for row in current} == set(model['labels']) and all(
+                                         row['source'] == 'audio_measurement' and row['inputs_version'].endswith('/' + model_hash)
                                          for row in current):
                 error = max(abs(row['score'] - expected[row['vibe']]) for row in current)
                 maximum_error = max(maximum_error, error)

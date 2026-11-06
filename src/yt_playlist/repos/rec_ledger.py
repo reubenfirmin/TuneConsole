@@ -4,9 +4,8 @@ Reports load a coherent set of detached inputs on a private snapshot. Recommenda
 services own statistical interpretation; this repository owns persistence and retention.
 """
 import json
-from contextlib import nullcontext
 
-from yt_playlist.core import entity_names, home_offers, playback_bindings, served_facts
+from yt_playlist.core import album_playback_context, entity_names, playback_bindings, served_facts
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
 from yt_playlist.repos.scorecard_attribution import Attribution
 from yt_playlist.repos import policy_storage
@@ -17,6 +16,56 @@ POLICY_RETENTION_CURSOR = 'rec_policy_retention_cursor'
 
 
 class RecLedgerRepo(Repo):
+    def maintain_policy_history(self, now):
+        """Convert and expire retained policies with bounded writer admission."""
+        from yt_playlist.core.preparation import policy_history
+        return policy_history.maintain(self._store, now)
+
+    @synchronized
+    def publish_mix_menu(self, record, context):
+        from yt_playlist.core import mix_choices
+        if mix_choices.available(self.conn):
+            with self.conn:
+                return mix_choices.publish_menu(self.conn, record, context)
+        return record
+
+    @snapshot_read
+    def expand_mix_options(self, options):
+        from yt_playlist.core import mix_choices
+        return [mix_choices.expand(self.conn, option) for option in options]
+
+    @snapshot_read
+    def policy_retention_candidates(self, now):
+        return policy_storage.retention_candidates(self.conn, now)
+
+    @synchronized
+    def prune_policies(self, versions, cursor):
+        return policy_storage.prune(self.conn, versions, cursor)
+
+    @snapshot_read
+    def mix_descriptor(self, descriptor_id):
+        from yt_playlist.core import mix_choices
+        return mix_choices.read_descriptor(self.conn, descriptor_id)
+
+    @snapshot_read
+    def album_playback_context(self):
+        return album_playback_context.load(self.conn)
+
+    @synchronized
+    def remember_album_playback_context(self, value):
+        with self.conn:
+            album_playback_context.put(self.conn, value)
+
+    @synchronized
+    def bind_album_playback_context(self, pending, account_id):
+        with self.conn:
+            album_playback_context.bind(self.conn, pending, account_id)
+
+    @lookup_read
+    def has_served_request(self, request_id):
+        return self.conn.execute('SELECT 1 FROM rec_served_impressions WHERE request_id=? LIMIT 1',
+                                 (request_id,)).fetchone() is not None
+
     @synchronized
     def bind_choice_playback(self, account_id, playlist, video, opportunity, option, now, window_s):
         """Small exact-context index for delayed player observations; raw evidence stays in JSON.
@@ -148,33 +197,6 @@ class RecLedgerRepo(Repo):
             f"AND {kind}='counterfactual' GROUP BY ranker",
             (start, end)).fetchall()
         return inputs, [dict(r) for r in shadows]
-
-    @synchronized
-    def claim_home_offers(self, epoch, signatures, now):
-        """Claim the current window's signatures before counting actual offers."""
-        if getattr(self._store, 'activity_paused', False):
-            return set(signatures)
-        if home_offers.available(self.conn):
-            unit = nullcontext() if self.conn.in_transaction else self.conn.atomic()
-            with unit:
-                return home_offers.claim(self.conn, epoch, signatures, now)
-        row = self.conn.execute("SELECT payload FROM rec_proposals WHERE surface='home_shown'").fetchone()
-        try:
-            previous = json.loads(row[0]) if row else {}
-        except (ValueError, TypeError):
-            previous = {}
-        if not isinstance(previous, dict):
-            previous = {}
-        shown = set(previous.get("signatures", [])) if previous.get("epoch") == epoch else set()
-        unseen = set(signatures) - shown
-        if unseen:
-            # Only the current window is retained; a new window is a new actual opportunity.
-            self.conn.execute(
-                "INSERT INTO rec_proposals(surface,payload,built_at) VALUES ('home_shown',?,?) "
-                "ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload,built_at=excluded.built_at",
-                (json.dumps({"epoch": epoch, "signatures": sorted(shown | unseen)[-100:]}), now))
-            self.conn.commit()
-        return unseen
 
     # --- #113 served recommendation -> observed outcome ledger -------------------------------
     @synchronized

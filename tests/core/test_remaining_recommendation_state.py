@@ -1,5 +1,7 @@
 """Typed fallback ranks and trial controls retain their separate lifecycles."""
 import sqlite3
+from contextlib import contextmanager
+import time
 
 import pytest
 
@@ -9,22 +11,41 @@ from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.rec import library_pool, product_comparison
 
 
-def test_clicked_pool_keeps_complete_ranks_parameters_unknowns_and_observation_time(store):
+@contextmanager
+def measured(record_property, phase):
+    wall, cpu = time.perf_counter(), time.thread_time()
+    try:
+        yield
+    finally:
+        record_property(phase + '_wall_s', time.perf_counter() - wall)
+        record_property(phase + '_thread_cpu_s', time.thread_time() - cpu)
+
+
+def test_clicked_pool_keeps_complete_ranks_parameters_unknowns_and_observation_time(store, record_property):
     store.rec_ledger.record_serving_policy('original-pool', {'algorithm': 'retained'}, 1)
     items = []
-    for index in range(515):
-        store.tracks.upsert_track(f'video{index}', f'Song {index}', 'Artist', None, 100)
-        items.append({'key': f'song {index}|artist', 'score': 1 / (index + 1), 'pool_policy': 'original-pool',
-                      'reason': 'Original explanation'})
+    with measured(record_property, 'catalog_admission'), store._lock, store.conn.atomic():
+        for index in range(515):
+            store.tracks.upsert_track(f'video{index}', f'Song {index}', 'Artist', None, 100)
+            items.append({'key': f'song {index}|artist', 'score': 1 / (index + 1), 'pool_policy': 'original-pool',
+                          'reason': 'Original explanation'})
+    assert not store.conn.in_transaction
+    assert store.conn.execute('SELECT COUNT(*) FROM catalog_entries').fetchone()[0] == 515
+    assert store.conn.execute('SELECT COUNT(*) FROM metadata_deliveries').fetchone()[0] == 515
     items.append({'key': 'unknown|artist', 'pool_policy': 'original-pool', 'score': .1})
     parameters = {'lane': 'wheelhouse', 'epoch': 4, 'include_genres': ['unknown-historical-genre'], 'avoid_genres': []}
     surface = 'home_pool:wheelhouse'
-    store.rec_proposals.put_proposals(surface, {'parameters': parameters, 'tracks': items}, None)
-    cutover(store)
-    result = store.rec_proposals.get_proposals(surface)
+    with measured(record_property, 'proposal_serialization'):
+        store.rec_proposals.put_proposals(surface, {'parameters': parameters, 'tracks': items}, None)
+    with measured(record_property, 'cutover'):
+        cutover(store)
+    with measured(record_property, 'complete_readback'):
+        result = store.rec_proposals.get_proposals(surface)
     assert result['parameters'] == parameters
     assert [track['key'] for track in result['tracks']] == [track['key'] for track in items[:-1]]
     assert [track['score'] for track in result['tracks']] == [track['score'] for track in items[:-1]]
+    assert len(result['tracks']) == 515
+    assert all(track['pool_policy'] == 'original-pool' for track in result['tracks'])
     assert all(track['reason'] == 'Original explanation' for track in result['tracks'])
     assert store.conn.execute('SELECT built_at FROM clicked_library_pools').fetchone()[0] is None
     assert tuple(store.conn.execute('SELECT genre_key,resolution_reason FROM clicked_library_genres').fetchone()) == (None, 'unknown_genre')

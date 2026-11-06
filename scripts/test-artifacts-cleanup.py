@@ -10,6 +10,11 @@ Registration lets cleanup distinguish a stopped owner from unrelated test jobs.
 Unregistered legacy workspaces require all test/experiment jobs to be idle.
 Private review source snapshots directly under build/ can be removed once no
 process references them; their fixtures and process temporary files are inside.
+Default pytest bases under build/pytest include their owning PID and are eligible
+after that owner stops and no process references the directory.
+For workspaces with a recorded owner, unrelated unreadable desktop processes do
+not veto cleanup. Live owners, observed references and unreadable test jobs still
+block. Unregistered legacy directories retain the conservative process check.
 Reports should live beside a disposable workspace, never inside it. This command
 does not kill processes, acquire the suite lock, or delete shared lock files.
 """
@@ -29,12 +34,17 @@ MEMORY_ROOTS = frozenset('tuneconsole-' + name for name in (
     'served', 'groups', 'metadata', 'metadata-runtime', 'archives', 'policies',
     'recommendations', 'collections'))
 UUID = re.compile(r'[0-9a-f]{32}\Z')
-BUILD_PREFIXES = ('review748-', 'review-browser-fixes4-', '686-focused-', '686-http-',
+BUILD_PREFIXES = ('review748-', 'review573-', 'review-browser-fixes4-', '686-focused-', '686-http-',
                   '686-runtime-qualification-')
 
 
 def private_build_workspace(path):
     return path.parent == REPOSITORY / 'build' and path.name.startswith(BUILD_PREFIXES)
+
+
+def private_fixture_workspace(path):
+    return (path.parent == REPOSITORY / 'build' / 'pytest'
+            and re.fullmatch(r'run-(?:sqlite-)?[1-9][0-9]*-[0-9a-f]{32}', path.name) is not None)
 
 
 @dataclass
@@ -51,11 +61,12 @@ def process_start(path):
     return (path / 'stat').read_text().rsplit(')', 1)[1].split()[19]
 
 
-def processes():
+def processes(root=Path('/proc')):
     result = []
-    for entry in Path('/proc').iterdir():
+    for entry in root.iterdir():
         if not entry.name.isdecimal():
             continue
+        start, command, references = '', (), []
         try:
             if entry.stat().st_uid != os.getuid():
                 continue
@@ -76,7 +87,9 @@ def processes():
         except (FileNotFoundError, ProcessLookupError):
             continue
         except PermissionError:
-            result.append(Process(int(entry.name), '', (), (), unreadable=True))
+            # A denied read must not erase an owner identity or a reference we
+            # already observed before that read.
+            result.append(Process(int(entry.name), start, command, tuple(references), unreadable=True))
     return result
 
 
@@ -85,7 +98,7 @@ def validate_path(value, *, registering=False):
     if path == Path('/tmp') or path == REPOSITORY / '.pytest_cache':
         raise ValueError('shared parent directory')
     if not (path.is_relative_to('/tmp') or path.is_relative_to(REPOSITORY / '.pytest_cache')
-            or private_build_workspace(path)):
+            or private_build_workspace(path) or private_fixture_workspace(path)):
         raise ValueError('outside supported temporary workspace locations')
     for component in (path, *path.parents):
         if component.is_symlink():
@@ -106,7 +119,7 @@ def validate_path(value, *, registering=False):
     workspace = (path.name.startswith(('runtime-', 'negative-runtime-', 'fixtures'))
                  and any(p.name.startswith('tuneconsole-review') for p in path.parents))
     workspace |= path.parent == Path('/tmp') and path.name.startswith('tuneconsole-') and 'workspace' in path.name
-    workspace |= private_build_workspace(path)
+    workspace |= private_build_workspace(path) or private_fixture_workspace(path)
     pytest_run = path.parent.name.startswith('pytest-of-') and bool(re.fullmatch(r'pytest-\d+', path.name))
     new_workspace = registering and (path.is_relative_to(REPOSITORY / '.pytest_cache')
         or any(p.name.startswith('tuneconsole-') for p in (path, *path.parents) if p.parent == Path('/tmp')))
@@ -143,15 +156,16 @@ def test_job(process):
 
 def blocker(path, running):
     saved = receipt(path)
+    owned = saved is not None or private_fixture_workspace(path)
     boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
     needle = str(path)
     for process in running:
         if process.pid == os.getpid():
             continue
-        if process.unreadable:
-            return f'cannot inspect process {process.pid}'
+        if private_fixture_workspace(path) and process.pid == int(path.name.rsplit('-', 2)[1]):
+            return f'owner process {process.pid} is still running'
         if (saved and saved['boot'] == boot and process.pid == saved['pid']
-                and process.start == saved['start']):
+                and (not process.start or process.start == saved['start'])):
             return f'owner process {process.pid} is still running'
         if any(ref.removesuffix(' (deleted)') == needle or ref.startswith(needle + '/')
                for ref in process.references):
@@ -162,7 +176,12 @@ def blocker(path, running):
             # a workspace owner, but a pytest/experiment command must still block.
             if test_job(process):
                 return f'test process {process.pid} names this workspace'
-        if saved is None and test_job(process) and not private_build_workspace(path):
+        if process.unreadable:
+            if not owned or test_job(process):
+                return f'cannot inspect process {process.pid}'
+            continue
+        if (saved is None and test_job(process)
+                and not (private_build_workspace(path) or private_fixture_workspace(path))):
             return f'unregistered workspace while test/experiment process {process.pid} is running'
     return None
 

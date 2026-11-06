@@ -1,9 +1,10 @@
 import json
+import sqlite3
 
 import pytest
 
+from tests.prepared_fixture_support import prepared_template, roots
 from yt_playlist.rec import experiments, measurement, mode_surfaces, rec_params, scorecard
-from yt_playlist.rec.home_cards import _record_served_cards
 from tests.test_ppr_assemble import _seed_one_mode
 from tests.recommendation_support import publish_bundles
 from tests.test_taste_health import _client
@@ -37,10 +38,6 @@ def test_pair_replay_and_actual_assignment_propensity(store):
     assert card["tracks"][0]["key"] == "w5"
     assert card["counterfactual"]["tracks"][0]["key"] == "w0"
     assert not store.conn.execute("SELECT 1 FROM rec_served_impressions").fetchone()
-    _record_served_cards(store, [card], 10)
-    rows = [dict(r) for r in store.conn.execute("SELECT * FROM rec_served_impressions ORDER BY id")]
-    # #688: displaying a Mix theme does not expose its individual songs.
-    assert rows == []
     assert scorecard.recommendation_scorecard(store, 0, 20)["impressions"] == 0
     assert store.rec_ledger.lane_impression_counts() == {}
     assert card['experiment']['state'] == 'retained'
@@ -97,7 +94,6 @@ def test_shadow_default_has_no_live_ppr_outcomes(store):
     rec_params.set_param(store, "ppr_ab_share", 0)
     card = mode_surfaces.assemble_cards(store, 10, 0)[0]
     assert card["experiment"]["state"] == "shadow"
-    _record_served_cards(store, [card], 10)
     assert scorecard.recommendation_scorecard(store, 0, 20)["by_ranker"] == {}
     assert card['ranker'] == 'cosine' and card['counterfactual']['ranker'] == 'ppr'
 
@@ -141,16 +137,30 @@ def test_experiment_endpoints_validate_decisions(store):
 
 
 @pytest.fixture
-def mature_live_arms(store):
-    return _seed_mature_live_arms(store)
+def mature_live_arms(store, mature_live_arms_template):
+    return _mature_live_arms(store, mature_live_arms_template)
 
 
-def _seed_mature_live_arms(store, **first_assignment):
+@pytest.fixture(scope='module')
+def mature_live_arms_template(_pristine_current_schema):
+    def seed(store):
+        return _seed_mature_live_arms(store, episodes=range(1, 100))
+    with prepared_template(_pristine_current_schema, seed) as template:
+        yield template
+
+
+def _mature_live_arms(store, template, **first_assignment):
+    base = template.restore(store)
+    assert _seed_mature_live_arms(store, episodes=range(1), **first_assignment) == base
+    return base
+
+
+def _seed_mature_live_arms(store, *, episodes=range(100), **first_assignment):
     base = 100 * 86400
     iid = store.accounts.upsert_account("main", "cred", None, True)
     store.playlists.set_playlist_group("PLGEN", "Generated")
     store.playlists.mark_generated_playlist('PLGEN')
-    for i in range(100):
+    for i in episodes:
         for arm in ("ppr", "cosine"):
             key, at = f"{arm}{i}|band", base + 100 + i * 10
             store.tracks.upsert_track(key, f"{arm}{i}", "band", None, 200)
@@ -167,8 +177,66 @@ def _seed_mature_live_arms(store, **first_assignment):
     return base
 
 
-def test_generated_responses_stay_quarantined_and_support_explicit_live_decision(store, mature_live_arms):
-    base = mature_live_arms
+def test_generated_responses_stay_quarantined_and_support_explicit_live_decision(
+        store, mature_live_arms_template, file_backed_store, _pristine_current_schema):
+    template = mature_live_arms_template
+    base = template.restore(store)
+    assert template.restore(file_backed_store) == base
+    now = base + 100000
+    prefix = scorecard.experiment_report(template.source, now - 90 * 86400, now, now)
+    assert all(arm['clusters'] == arm['impressions'] == 99 and not arm['powered']
+               for arm in prefix['live'].values())
+    for current in (store, file_backed_store):
+        assert scorecard.experiment_report(current, now - 90 * 86400, now, now) == prefix
+        with pytest.raises(ValueError, match='100 mature'):
+            experiments.decide(current, 'promote', 'c1', 'The last episode is still missing', now)
+        assert not experiments.decisions(current)
+    assert len({template.source._evidence_key, store._evidence_key, file_backed_store._evidence_key}) == 3
+    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    with pytest.raises(sqlite3.OperationalError, match='readonly'):
+        with template.source.conn:
+            template.source.conn.execute("INSERT INTO settings VALUES ('private','forbidden')")
+    destinations = [roots(target.conn) for target in (store, file_backed_store)]
+    copied = 0
+    for name, directory in template.files.items():
+        assert len({directory, *(owned[name] for owned in destinations)}) == 3
+        for source in directory.rglob('*'):
+            if source.is_file():
+                paths = [source, *(owned[name] / source.relative_to(directory) for owned in destinations)]
+                assert all(path.read_bytes() == source.read_bytes() for path in paths)
+                assert len({(path.stat().st_dev, path.stat().st_ino) for path in paths}) == 3
+                copied += 1
+    assert copied
+    # Add the varied episode through the real APIs; never edit retained receipts.
+    assert _seed_mature_live_arms(store, episodes=range(1)) == base
+    assert _seed_mature_live_arms(file_backed_store, episodes=range(1), controlled=False) == base
+    file_backed_store.settings.set_setting('private_experiment', 'sibling')
+    file_backed_store._fixture_bundle_payload['private'] = ['sibling']
+    sibling = scorecard.experiment_report(file_backed_store, now - 90 * 86400, now, now)
+    assert sibling['live']['c1:ppr']['assignment_provenance'] == {
+        'controlled': 99, 'uncontrolled': 1, 'legacy_cache': 0}
+    assert scorecard.experiment_report(template.source, now - 90 * 86400, now, now) == prefix
+    assert store.settings.get_setting('private_experiment') is None
+    assert template.source.settings.get_setting('private_experiment') is None
+    assert store._fixture_bundle_payload == template.bundles == {}
+    with prepared_template(_pristine_current_schema, _seed_mature_live_arms) as fresh:
+        producer = fresh.source
+        assert fresh.result == base
+        assert scorecard.recommendation_scorecard(store, base + 90, base + 1200) == (
+            scorecard.recommendation_scorecard(producer, base + 90, base + 1200))
+        report = scorecard.experiment_report(store, now - 90 * 86400, now, now)
+        assert report == scorecard.experiment_report(producer, now - 90 * 86400, now, now)
+        assert set(report['live']) == {'c1:ppr', 'c1:cosine'}
+        assert all(arm['clusters'] == arm['impressions'] == 100 and arm['powered']
+                   for arm in report['live'].values())
+        for current in (store, producer):
+            assert current.player_events.player_events_since(0) == producer.player_events.player_events_since(0)
+            assert list(map(tuple, current.conn.execute(
+                'SELECT request_id,surface,lane,mode_id,identity_key,rank,score,model_version,provenance,served_at '
+                'FROM rec_served_impressions ORDER BY request_id'))) == list(map(tuple, producer.conn.execute(
+                'SELECT request_id,surface,lane,mode_id,identity_key,rank,score,model_version,provenance,served_at '
+                'FROM rec_served_impressions ORDER BY request_id')))
+            assert current.conn.execute('PRAGMA foreign_key_check').fetchall() == []
     score = scorecard.recommendation_scorecard(store, base + 90, base + 1200)
     assert score["generated"] == 100 and score["organic"] == 0
     result = experiments.decide(store, "promote", "c1", "Mature live evidence meets guardrails", base + 100000)
@@ -179,8 +247,8 @@ def test_generated_responses_stay_quarantined_and_support_explicit_live_decision
 @pytest.mark.parametrize('controlled', [_MISSING, None, False, 1, 'true'],
                          ids=['missing', 'null', 'false', 'integer', 'string'])
 def test_powered_outcomes_cannot_promote_with_unknown_or_observational_assignment(
-        store, controlled):
-    base = _seed_mature_live_arms(store, controlled=controlled)
+        store, controlled, mature_live_arms_template):
+    base = _mature_live_arms(store, mature_live_arms_template, controlled=controlled)
     now = base + 100000
     report = scorecard.experiment_report(store, now - 90 * 86400, now, now)
     assert all(report['live']['c1:' + arm]['powered'] for arm in ('ppr', 'cosine'))
@@ -194,8 +262,8 @@ def test_powered_outcomes_cannot_promote_with_unknown_or_observational_assignmen
 
 @pytest.mark.parametrize('probability', [None, 0, 1, -.1, 1.1, True, '.5'])
 def test_control_marker_without_valid_randomized_probability_cannot_promote(
-        store, probability):
-    base = _seed_mature_live_arms(store, propensity=probability)
+        store, probability, mature_live_arms_template):
+    base = _mature_live_arms(store, mature_live_arms_template, propensity=probability)
     with pytest.raises(ValueError, match='valid assignment probabilities'):
         experiments.decide(store, 'promote', 'c1', 'Invalid assignment probability', base + 100000)
 
@@ -214,7 +282,7 @@ def test_decision_provenance_uses_only_actual_mature_report_arms(store, mature_l
         'controlled': 100, 'uncontrolled': 0, 'legacy_cache': 0}
 
 
-def test_mature_legacy_cache_in_analyzed_arms_cannot_promote(store):
-    base = _seed_mature_live_arms(store, ppr_policy={'algorithm': 'unknown-legacy-cache'})
+def test_mature_legacy_cache_in_analyzed_arms_cannot_promote(store, mature_live_arms_template):
+    base = _mature_live_arms(store, mature_live_arms_template, ppr_policy={'algorithm': 'unknown-legacy-cache'})
     with pytest.raises(ValueError, match='Rebuild the legacy ranking cache'):
         experiments.decide(store, 'promote', 'c1', 'Unknown ranker policy', base + 100000)

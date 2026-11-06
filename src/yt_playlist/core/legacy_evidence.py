@@ -75,28 +75,15 @@ def _encode(domain, payload, *, kind='original'):
 
 
 def _publish(root, domain, encoded, *, age=None):
-    header = policy_documents.pack_header(_header(domain), age)
-    pending, size = [], len(header)
+    def validated_records():
+        for record in encoded:
+            check_cancellable_work()
+            if not isinstance(record, bytes) or not 0 < len(record) <= MAX_BYTES:
+                raise ValueError('Invalid encoded retained original')
+            yield record
 
-    def seal():
-        packed = header + b''.join(pending)
-        filename = policy_documents._publish_encoded(root, packed, hashlib.sha256(packed).hexdigest(), age=age)
-        offset = len(header)
-        for record in pending:
-            yield filename, hashlib.sha256(record).hexdigest(), len(record), offset
-            offset += len(record)
-
-    for record in encoded:
-        check_cancellable_work()
-        if not isinstance(record, bytes) or not 0 < len(record) <= MAX_BYTES:
-            raise ValueError('Invalid encoded retained original')
-        if pending and size + len(record) > PACK_BYTES:
-            yield from seal()
-            pending, size = [], len(header)
-        pending.append(record)
-        size += len(record)
-    if pending:
-        yield from seal()
+    yield from policy_documents.pack_encoded(root, validated_records(),
+        header=_header(domain), pack_bytes=PACK_BYTES, age=age)
 
 
 def retain_many(conn, domain, rows):

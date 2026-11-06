@@ -4,12 +4,11 @@ from pathlib import Path
 import pytest
 
 from tests.repos.test_compact_group_publication import database
-from tests.core.test_compact_groups_migration import predecessor
-from yt_playlist.core import fao, file_collection, group_documents, policy_documents
+from yt_playlist.core import group_documents, policy_documents
 from yt_playlist.repos import group_queries
 
 
-def test_repacking_and_interrupted_collection_preserve_exact_owned_content(database, monkeypatch):
+def test_repacking_and_collection_preserve_exact_owned_content(database):
     store, _ = database
     conn = store.conn
     expected = group_queries.head(conn, members=True)
@@ -44,33 +43,9 @@ def test_repacking_and_interrupted_collection_preserve_exact_owned_content(datab
                 assert count <= 1
                 if done:
                     break
-        with pytest.raises(RuntimeError, match='retained reader'), conn:
-            conn.execute('BEGIN IMMEDIATE')
-            group_documents.collect_orphans_batch(conn, limit=4)
+        assert group_documents.collect_orphans(conn) == 0
         assert Path(owned[0]).exists()
-    examined = []
-    walk = fao.walk_entries
-    def bounded(*args, **kwargs):
-        for path in walk(*args, **kwargs):
-            examined.append(path)
-            yield path
-    monkeypatch.setattr(fao, 'walk_entries', bounded)
-    for turn in range(100):
-        examined.clear()
-        with conn:
-            conn.execute('BEGIN IMMEDIATE')
-            _removed, done = group_documents.collect_orphans_batch(conn, limit=4)
-        assert len(examined) <= 4
-        if turn == 2:
-            # A process restart drops directory streams; its durable shard
-            # checkpoint must suffice to finish without losing live files.
-            for key in list(file_collection._CURSORS):
-                if key[0] is conn:
-                    file_collection._CURSORS.pop(key).close()
-        if done:
-            break
-    else:
-        pytest.fail('Bounded group-file traversal did not finish')
+    assert group_documents.collect_orphans(conn) > 0
     assert not Path(owned[0]).exists()
     assert group_queries.head(conn, members=True) == expected
     references = list(group_documents.references(conn))

@@ -1,13 +1,24 @@
 import copy
+from tests.enrichment_support import seed_audio
 
 import pytest
 
-from tests.test_home_other_genres import offered, seed_genres
-from tests.test_home_tuning import client_at
+from tests.conftest import seed_catalog_track
+from tests.test_home_other_genres import genre_bundles, offered
+from tests.test_home_tuning import home_clients, prepare_tuning_home
 from tests.musical_support import prepare_profiles, prepare_vibes
 from tests.recommendation_support import publish_bundles
 from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import home_vibe, mix_tuning, mode_surfaces, musical_character, musical_profiles, rec_params
+
+
+@pytest.fixture
+def prepared_client(store, home_clients):
+    def open_client(clock):
+        prepare_tuning_home(store, clock[0])
+        return home_clients(clock)
+
+    return open_client
 
 
 @pytest.fixture(autouse=True)
@@ -17,6 +28,7 @@ def established_vibe_access(monkeypatch):
     # exercised without readiness overrides in test_growth_readiness and
     # test_growth_journey.
     from yt_playlist.rec import account_growth
+    monkeypatch.setattr(account_growth, 'vibe_access', lambda *_args, **_kwargs: True)
 
     monkeypatch.setattr(account_growth, 'view', lambda *_args, **_kwargs: {
         'vibes_ready': True, 'ready_areas': {'directions': True},
@@ -88,7 +100,7 @@ def test_library_audio_takes_precedence_and_keeps_extra_discovery_features(store
     store.discovery.upsert_discovered_track(key, "v", "Song", "Artist", "", None, None, None, None, 1,
                                  audio={"energy": .9, "mood_relaxed": .8})
     tid = store.tracks.upsert_track("v", "Song", "Artist", None, None)
-    store.tracks.set_track_audio(tid, energy=.1)
+    seed_audio(store, tid, energy=.1)
     prepare_profiles(store)
     profile = musical_character.load(store, [key])[key]
     assert profile['dimensions']['intensity']['value'] < .5
@@ -99,7 +111,7 @@ def test_mix_journey_uses_profiles_and_keeps_visible_choice_after_preparation_ch
     from yt_playlist.rec import choice_evidence, home_cards, home_prepared
 
     tid = store.tracks.upsert_track('measured', 'Measured', 'Artist', '', 180)
-    store.tracks.set_track_audio(tid, energy=.9)
+    seed_audio(store, tid, energy=.9)
     key = store.tracks.identity_key_for_video('measured')
     prepare_profiles(store)
     profile = musical_character.load(store, [key])[key]
@@ -123,7 +135,7 @@ def test_mix_journey_uses_profiles_and_keeps_visible_choice_after_preparation_ch
         'recipe': {'vibe': None, 'vibe_policy': home_vibe.VERSION,
                    'musical_version': musical_character.VERSION}}], 1000, context={})
     captured = store.rec_ledger.evidence().get('opportunity', oid)
-    store.tracks.set_track_audio(tid, energy=.2)
+    seed_audio(store, tid, energy=.2)
     prepare_profiles(store, 1001)
     prior_menu_key = home_prepared.tuning_key(store, 1002)
     monkeypatch.setattr(home_vibe, 'VERSION', 'next-policy')
@@ -139,19 +151,27 @@ def test_mix_journey_uses_profiles_and_keeps_visible_choice_after_preparation_ch
     assert 'tracks' not in option and 'recipe' not in option
 
 
-def test_vibe_changes_offered_styles_as_well_as_track_order(store):
+def test_vibe_changes_offered_styles_as_well_as_track_order(store, prepared_client):
     seed_sounds(store, by_mode=True)
-    client = client_at(store, [1000.0])
-    client.post("/home/vibe", data={"vibe": "relax"})
+    client = prepared_client([1000.0])
+    assert client.post("/home/vibe", data={"vibe": "relax"}).status_code == 200
     gentle = mode_surfaces.assemble_cards(store, 1000, 0)
-    client.post("/home/vibe", data={"vibe": "energize"})
+    assert client.post("/home/vibe", data={"vibe": "energize"}).status_code == 200
     boost = mode_surfaces.assemble_cards(store, 1000, 0)
+    for menu in (gentle, boost):
+        assert {card['lane'] for card in menu} == set(mode_surfaces.CARD_SURFACES)
+        assert len(menu) == 4
+        assert all(len(card['tracks']) == 12 for card in menu)
     assert {t['genre'] for c in gentle for t in c['tracks']} != {t['genre'] for c in boost for t in c['tracks']}
     assert all(c['mode_id'] is None for c in [*gentle, *boost])
 
 
 def seed_sounds(store, *, by_mode=False):
-    bundles = seed_genres(store)
+    # Both sound patterns ingest final uploads and audio before their first
+    # publication. The by-mode consumer still has six genres, four lanes and
+    # twenty tracks per lane, without a discarded ordinary generation or
+    # unused first Fresh recordings.
+    bundles = genre_bundles(store)
     for mid in range(6):
         for lane, items in bundles[str(mid)].items():
             for i, item in enumerate(items):
@@ -164,14 +184,8 @@ def seed_sounds(store, *, by_mode=False):
                     item['key'] = store.discovery.upsert_discovered_track(item['key'], item['video_id'], item['title'], item['artist'],
                         '', None, item['genre'], None, None, 1, audio=audio)
                 else:
-                    # seed_genres already owns these exact catalog subjects.
-                    # Add measured sound to them rather than inserting duplicates.
-                    with store.conn:
-                        from yt_playlist.core import metadata
-                        entry = store.conn.execute('SELECT id FROM catalog_tracks WHERE identity_key=?',
-                                                   (item['key'],)).fetchone()[0]
-                        for field,value in audio.items():
-                            metadata.select(store.conn,entry,field,value,'fixture')
+                    seed_catalog_track(store, item['key'], item['title'], item['artist'],
+                        video_id=item['video_id'], album='', genre=item['genre'], **audio)
     bundles['all'] = {lane: [item for mid in range(6) for item in bundles[str(mid)][lane]]
                       for lane in mode_surfaces.CARD_SURFACES}
     prepare_profiles(store)
@@ -179,15 +193,15 @@ def seed_sounds(store, *, by_mode=False):
     publish_bundles(store, bundles, 1, fresh=bundles['all']['fresh'], vibes=True)
 
 
-def test_vibe_changes_rendered_tracks_persists_and_expires_without_learning(store, monkeypatch):
+def test_vibe_changes_rendered_tracks_persists_and_expires_without_learning(
+        store, measured_home_store, monkeypatch, home_clients):
     import html
     import json
     import re
     from yt_playlist.rec import choice_evidence
 
-    seed_sounds(store)
     clock = [1000.0]
-    client = client_at(store, clock)
+    client = home_clients(clock)
     before = store.recommendations.head('home')
     learned = store.rec_model.get_weights()
     response = client.post("/home/vibe", data={"vibe": "relax"})
@@ -235,9 +249,8 @@ def test_vibe_changes_rendered_tracks_persists_and_expires_without_learning(stor
     assert store.rec_ledger.evidence().get('opportunity', offered['id']) == offered
 
 
-def test_genre_requests_restrict_vibes_and_survive_clear(store):
-    seed_sounds(store)
-    client = client_at(store, [1000.0])
+def test_genre_requests_restrict_vibes_and_survive_clear(store, measured_home_store, home_clients):
+    client = home_clients([1000.0])
     client.post("/home/mix-genres", data={"genres": "jazz"})
     client.post("/home/steer", data={"axis": "genre:jazz", "weight": "1.5"})
     response = client.post("/home/steer", data={"axis": "genre:techno", "weight": "2"})
@@ -263,9 +276,9 @@ def test_genre_requests_restrict_vibes_and_survive_clear(store):
     assert store.settings.get_setting(home_vibe.SETTING) is None
 
 
-def test_clearing_the_only_vibe_clears_tuning_indicator_and_deadline(store):
-    seed_sounds(store)
-    client = client_at(store, [1000.0])
+def test_clearing_the_only_vibe_clears_tuning_indicator_and_deadline(
+        store, measured_home_store, home_clients):
+    client = home_clients([1000.0])
     client.post('/home/vibe', data={'vibe': 'relax'})
     response = client.post('/home/vibe', data={'vibe': ''})
     assert response.status_code == 200
@@ -274,17 +287,17 @@ def test_clearing_the_only_vibe_clears_tuning_indicator_and_deadline(store):
     assert 'data-tuning-active="false"' in client.get('/home/fingerprint').text
 
 
-def test_invalid_vibe_does_not_change_controls_or_deadline(store):
-    client = client_at(store, [1000.0])
+def test_invalid_vibe_does_not_change_controls_or_deadline(store, prepared_client):
+    client = prepared_client([1000.0])
     assert client.post("/home/vibe", data={"vibe": "unknown"}).status_code == 400
     assert store.settings.get_setting(home_vibe.SETTING) is None
     assert mix_tuning.remaining(store, 1000) == 0
 
 
-def test_vibe_render_failure_returns_error_instead_of_replacing_ready_cards(store, monkeypatch):
+def test_vibe_render_failure_returns_error_instead_of_replacing_ready_cards(store, monkeypatch, prepared_client):
     from yt_playlist.web.routes.home_views import HomeViews
 
-    client = client_at(store, [1000.0])
+    client = prepared_client([1000.0])
 
     def fail(*args, **kwargs):
         raise RuntimeError('controlled rendering failure')
@@ -298,8 +311,8 @@ def test_vibe_render_failure_returns_error_instead_of_replacing_ready_cards(stor
 
 
 @pytest.mark.parametrize('removed', ['focus', 'bright', 'unwind', 'gentle', 'boost', 'intense', 'move'])
-def test_removed_presets_are_not_reinterpreted(store, removed):
-    client = client_at(store, [1000.0])
+def test_removed_presets_are_not_reinterpreted(store, removed, prepared_client):
+    client = prepared_client([1000.0])
     assert client.post('/home/vibe', data={'vibe': removed}).status_code == 400
     store.settings.set_setting(home_vibe.SETTING, removed)
     assert home_vibe.current(store, 1000) == ''

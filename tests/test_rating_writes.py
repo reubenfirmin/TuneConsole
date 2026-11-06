@@ -117,6 +117,48 @@ def test_failed_player_mirror_cannot_report_a_confirmed_rating_as_rejected(store
     assert store.tracks.item_rating(owner, "song")["status"] == "LIKE"
 
 
+@pytest.mark.parametrize('failed_at', ['provider', 'player'])
+def test_rating_http_boundary_keeps_diagnostics_in_logs_and_reports_confirmation(store, monkeypatch, caplog, failed_at):
+    owner = store.accounts.upsert_account('Main', 'bridge', None, True)
+    diagnostic = 'internal-diagnostic-879: provider/native response lost'
+    remote, commands = FakeClient(), []
+    if failed_at == 'provider':
+        def fail(video, status):
+            raise ValueError(diagnostic)
+        monkeypatch.setattr(remote, 'rate_song', fail)
+        # One controlled provider failure; transport retry policy is covered by
+        # the ordered-intent tests above, independently of this HTTP wording.
+        monkeypatch.setattr(ratings, 'with_retry', lambda fn: fn())
+
+    async def control(frame, timeout=10):
+        commands.append(frame)
+        raise ValueError(diagnostic)
+
+    bridge = SimpleNamespace(connected=True, now_playing={'video_id': 'song'}, request_control=control)
+    ctx = SimpleNamespace(store=store, bridge=bridge,
+        ops=lambda: PlaylistOps(store, lambda: {owner: remote}, lambda: 100))
+    app = FastAPI()
+    app.include_router(build(ctx))
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+            response = await client.post('/now-playing/rate', json={
+                'videoId': 'song', 'action': 'like', 'likeStatus': 'LIKE'})
+            assert response.status_code == 200
+            assert diagnostic not in response.text
+            assert response.json() == ({'ok': True, 'error': '', 'player_error':
+                'Rating saved. Some updates are not confirmed; check it in YouTube Music.'}
+                if failed_at == 'player' else {'ok': False, 'error':
+                'Rating not confirmed. Check it in YouTube Music before trying again.'})
+
+    asyncio.run(scenario())
+    assert diagnostic in caplog.text
+    assert remote.rated == ([('song', 'LIKE')] if failed_at == 'player' else [])
+    assert len(commands) == (1 if failed_at == 'player' else 0)
+    retained = store.tracks.item_rating(owner, 'song')
+    assert (retained['status'] if retained else None) == ('LIKE' if failed_at == 'player' else None)
+
+
 def test_cancelled_http_waiter_keeps_native_work_owned_and_next_intent_ordered(store):
     owner = store.accounts.upsert_account("Main", "bridge", None, True)
     remote = FakeClient()

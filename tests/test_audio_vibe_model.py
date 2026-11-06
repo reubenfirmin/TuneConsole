@@ -1,5 +1,6 @@
 """Local fitting must not leak songs between folds or rewrite observed evidence."""
 from copy import deepcopy
+from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
@@ -15,7 +16,7 @@ from yt_playlist.core import catalog
 from yt_playlist.core import features
 from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import audio_vibe_model as model
-from yt_playlist.rec import audio_vibe_preview as heuristic
+from yt_playlist.rec import audio_vibe_prediction as heuristic
 from yt_playlist.core import audio_vibe_metadata
 from yt_playlist.web.app import create_app
 
@@ -99,7 +100,7 @@ def test_readonly_loader_joins_early_answer_without_changing_snapshot_and_dedupl
         store.audio_vibes.save_feedback(samples[0]['run_id'], [s['id'] for s in samples[:answered_count]],
                                         labels, heuristic.TAXONOMY_VERSION, None, now)
     path = tmp_path / 'snapshot.db'
-    with sqlite3.connect(path) as destination:
+    with closing(sqlite3.connect(path)) as destination:
         store.conn.backup(destination)
     before = path.read_bytes()
     records, skipped = trainer.examples_from_db(path)
@@ -137,7 +138,7 @@ def test_track_feedback_joins_samples_from_independent_playbacks(store, tmp_path
         leave_feedback()
     frozen = store.audio_vibes.feedback(answer['run_id'])
     database = tmp_path / 'track-join.db'
-    with sqlite3.connect(database) as destination:
+    with closing(sqlite3.connect(database)) as destination:
         store.conn.backup(destination)
     before = database.read_bytes()
     rows, skipped = trainer.examples_from_db(database)
@@ -173,7 +174,7 @@ def test_replay_replaces_old_measurements_without_requiring_another_answer(store
     unrelated['video_id'] = 'another-track-with-the-same-title'
     store.audio_vibes.save_sample(unrelated, 11)
     database = tmp_path / 'replay.db'
-    with sqlite3.connect(database) as destination:
+    with closing(sqlite3.connect(database)) as destination:
         store.conn.backup(destination)
     rows, skipped = trainer.examples_from_db(database)
     assert skipped == {} and len(rows) == 1
@@ -197,7 +198,7 @@ def test_latest_track_answer_wins_even_when_its_playback_has_no_samples(store, t
     store.audio_vibes.save_playback(latest['run_id'], latest['video_id'], 'Song', 'Artist', 3)
     store.audio_vibes.save_feedback(latest['run_id'], [], latest_labels, heuristic.TAXONOMY_VERSION, None, 4)
     database = tmp_path / 'latest-answer.db'
-    with sqlite3.connect(database) as destination:
+    with closing(sqlite3.connect(database)) as destination:
         store.conn.backup(destination)
     rows, skipped = trainer.examples_from_db(database)
     assert skipped['earlier_answer_for_same_song'] == 1
@@ -319,7 +320,7 @@ def test_cli_trains_while_pytest_holds_the_shared_machine_lock(store, tmp_path):
         store.audio_vibes.save_feedback(samples[0]['run_id'], [row['id'] for row in samples], [label],
                                         heuristic.TAXONOMY_VERSION, None, index + 1)
     database = tmp_path / 'training.db'
-    with sqlite3.connect(database) as destination:
+    with closing(sqlite3.connect(database)) as destination:
         store.conn.backup(destination)
     before = database.read_bytes()
     output, report = tmp_path / 'model.json', tmp_path / 'report.json'
@@ -405,7 +406,7 @@ def test_exact_catalog_metadata_joins_readonly_training_and_runtime_and_freezes_
     store.audio_vibes.save_feedback(samples[0]['run_id'], [s['id'] for s in samples], ['energize'],
                                     heuristic.TAXONOMY_VERSION, None, 3)
     database = tmp_path / 'snapshot.db'
-    with sqlite3.connect(database) as destination:
+    with closing(sqlite3.connect(database)) as destination:
         store.conn.backup(destination)
     before = database.read_bytes()
     rows, _ = trainer.examples_from_db(database)

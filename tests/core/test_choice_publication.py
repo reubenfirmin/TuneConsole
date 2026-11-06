@@ -7,6 +7,7 @@ import pytest
 
 from tests.core.test_predecessor_writes import installed
 from tests.core.test_choice_learning_preparation import seed,finish,head
+from tests.publication_timing_support import publication_costs
 from yt_playlist.core import group_evidence
 from yt_playlist.core.migrations import regular,registry,runner,MigrationError
 from yt_playlist.core.preparation import choice_learning as preparation,choice_publication as publication
@@ -23,14 +24,14 @@ def publish(conn,size=16):
 
 
 @pytest.mark.parametrize('installed',[79,92],indirect=True)
-def test_exact_selected_values_no_original_reads_and_genuine_upgrade(installed,tmp_path):
+def test_exact_selected_values_no_original_reads_and_genuine_upgrade(installed,tmp_path,publication_costs):
     store,version = installed
     conn = store.conn
     original = seed(store)
     history = list(map(tuple,conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
     preparation.JOB.install(conn)
     finish(conn)
-    publish(conn,size=1)
+    publish(conn)
     denied = {'rec_proposals','prepared_choice_learning_original_parts'}
     def authorize(action,owner,column,*rest):
         if action==sqlite3.SQLITE_READ and owner in denied and (owner!='rec_proposals' or column=='payload'):

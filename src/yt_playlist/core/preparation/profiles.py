@@ -16,10 +16,7 @@ def prepare(store, *, limit=128):
 
 
 def maintain(store, now):
-    if not owner.available(store.conn):
-        return 0
-    with store._lock:
-        return owner.collect(store.conn, now)
+    return store.retention.collect_musical_profiles(now)
 
 
 def main():

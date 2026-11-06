@@ -3,13 +3,14 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import sqlite3
 from functools import wraps
+from itertools import islice
 
 from .evidence_ledger import canonical
 from .policy_documents import _publish_encoded
 from . import policy_documents, fao
-from .activity import check_cancellable_work
-from .evidence_ledger import _sync_directory
+from .activity import check_cancellable_work, work_budget, WorkBudgetExceeded
 
 FORMAT = 'collection-recovery-1'
 KINDS = frozenset({'road-trip-draft','radio-session','library-sync','taste-settings',
@@ -190,32 +191,153 @@ def restore(conn,manifest):
         raise
 
 
+class OrphanCollector:
+    """Resume a finite directory batch; never materialize the retained owner set."""
+    LIMIT = 32
+    BUDGET_S = .05
+    OWNER_PAGE = 2048
+
+    def __init__(self, root):
+        self.root = Path(root)
+        self.paths = fao.walk_entries(root, max_depth=2)
+        self.batch = None
+        self.complete = False
+        self.removed = 0
+        self._reset_scan()
+
+    def _reset_scan(self):
+        self._epoch = None
+        self._tables = ()
+        self._table_index = 0
+        self._after = None
+        self._owned = set()
+
+    def _ownership_epoch(self, conn):
+        schema = conn.execute('PRAGMA main.schema_version').fetchone()[0]
+        if (conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='collection_recovery_epoch'").fetchone()
+                and conn.execute("SELECT 1 FROM main.schema_changes WHERE name='collection_recovery_scan_keys'").fetchone()):
+            # Persisted filename-change triggers participate in every writer's
+            # transaction, including independent Store and raw SQL connections.
+            # Seek-key changes must be covered before pages can be reused.
+            # Unrelated external commits must not discard completed pages.
+            revision = conn.execute('SELECT revision FROM main.collection_recovery_epoch WHERE id=1').fetchone()
+            if revision is None:
+                raise ValueError('Missing collection recovery ownership revision')
+            return id(conn), schema, revision[0]
+        # Readable installed layouts can defer regular DDL. Remain conservative
+        # until their ownership epoch is installed; do not ignore external writes.
+        tables = (*OWNERS, 'action_backups')
+        external = conn.execute('PRAGMA main.data_version').fetchone()[0]
+        if conn.execute("SELECT 1 FROM sqlite_temp_schema WHERE name='snapshot_revisions'").fetchone():
+            marks = ','.join('?' for _ in tables)
+            revisions = tuple(tuple(row) for row in conn.execute(
+                'SELECT table_name,revision FROM temp.snapshot_revisions '
+                f"WHERE record_key='' AND table_name IN ({marks}) ORDER BY table_name", tables))
+        else:
+            revisions = conn.total_changes
+        return id(conn), schema, external, revisions
+
+    def _start_scan(self, conn, epoch):
+        tables = []
+        for table, filename in [*((table, 'recovery_filename') for table in OWNERS),
+                                ('action_backups', 'retained_filename')]:
+            columns = list(conn.execute(f'PRAGMA table_info({table})'))
+            if not any(row[1] == filename for row in columns):
+                continue
+            keys = tuple(row[1] for row in sorted(columns, key=lambda row: row[5]) if row[5])
+            if not keys:
+                raise ValueError('Collection owner requires a primary key: ' + table)
+            tables.append((table, filename, keys))
+        self._reset_scan()
+        self._tables, self._epoch = tables, epoch
+
+    def _scan_owners(self, conn, names):
+        epoch = self._ownership_epoch(conn)
+        if epoch != self._epoch:
+            self._start_scan(conn, epoch)
+        marks = ','.join('?' for _ in names)
+        while self._table_index < len(self._tables):
+            check_cancellable_work()
+            table, filename, keys = self._tables[self._table_index]
+            fields = ','.join(keys)
+            ordered = ','.join(key + ' DESC' for key in keys)
+            seek = (f'WHERE ({fields}) > ({",".join("?" for _ in keys)}) '
+                    if self._after is not None else '')
+            # Materialize one primary-key page, not the complete filename scan.
+            # The final row carries its seek position even when no names match.
+            rows = conn.execute(
+                f'WITH page AS MATERIALIZED (SELECT {fields},{filename} FROM {table} '
+                f'{seek}ORDER BY {fields} LIMIT ?) '
+                f'SELECT {fields},{filename},0 AS marker FROM page WHERE {filename} IN ({marks}) '
+                f'UNION ALL SELECT {fields},NULL,1 AS marker FROM '
+                f'(SELECT {fields} FROM page ORDER BY {ordered} LIMIT 1) ORDER BY marker',
+                (*(self._after or ()), self.OWNER_PAGE, *names)).fetchall()
+            # Publish only complete pages. An interrupted query retries this
+            # finite page while retaining progress through earlier pages.
+            if not rows:
+                self._table_index += 1
+                self._after = None
+            else:
+                self._owned.update(row[-2] for row in rows[:-1])
+                self._after = tuple(rows[-1][:-2])
+
+    def prepare(self):
+        # Directory entries count too, including empty directories. Inventory
+        # happens before the Store's serving protection is acquired.
+        if self.batch is None and not self.complete:
+            entries = list(islice(self.paths, self.LIMIT))
+            self.complete = len(entries) < self.LIMIT
+            self.batch = [path for path in entries if path is not None and path.suffix == '.json']
+            self._reset_scan()
+
+    def step(self, conn):
+        if conn.in_transaction:
+            raise ValueError('Collection cleanup requires an idle connection')
+        self.prepare()
+        if not self.batch:
+            self.batch = None
+            return 0
+        conn.execute('BEGIN IMMEDIATE')
+        try:
+            with (self.root / '.readers.lock').open('a+b') as stream:
+                unlock = policy_documents._try_file_lock(stream, exclusive=True)
+                if unlock is None:
+                    return 0
+                try:
+                    names = [str(path) for path in self.batch]
+                    self._scan_owners(conn, names)
+                    removed = 0
+                    for path in self.batch:
+                        check_cancellable_work()
+                        if str(path) not in self._owned:
+                            deleted = fao.delete(path, missing_ok=True)
+                            removed += deleted
+                            self.removed += deleted
+                    self.batch = None
+                    return removed
+                finally:
+                    unlock()
+        finally:
+            conn.rollback()
+
+    def close(self):
+        self.paths.close()
+        self.batch = None
+        self.complete = True
+        self._reset_scan()
+
+
 def collect_orphans(conn):
-    if conn.in_transaction:
-        raise ValueError('Collection cleanup requires an idle connection')
-    root = directory(conn)
-    if not root.exists():
-        return 0
-    conn.execute('BEGIN IMMEDIATE')
-    removed = 0
+    """Explicit cleanup, retaining the historical all-complete return contract."""
+    collector = OrphanCollector(directory(conn))
     try:
-        with (root/'.readers.lock').open('a+b') as stream:
-            unlock = policy_documents._try_file_lock(stream,exclusive=True)
-            if unlock is None:
-                return 0
-            try:
-                owned = {row[3] for row in references(conn)}
-                if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='action_backups'").fetchone():
-                    owned.update(row[0] for row in conn.execute('SELECT retained_filename FROM action_backups WHERE retained_filename IS NOT NULL'))
-                for path in root.glob('*/*.json'):
-                    check_cancellable_work()
-                    if str(path) not in owned:
-                        removed += fao.delete(path, missing_ok=True)
-            finally:
-                unlock()
-        return removed
+        while not collector.complete or collector.batch is not None:
+            collector.step(conn)
+            if collector.batch is not None:  # An older reader still owns this batch.
+                break
+        return collector.removed
     finally:
-        conn.rollback()
+        collector.close()
 
 
 def maintain(store):
@@ -224,4 +346,40 @@ def maintain(store):
         if store.activity_paused or not any(row[1]=='recovery_filename'
                 for row in store.conn.execute('PRAGMA table_info(road_trip_drafts)')):
             return 0
-        return collect_orphans(store.conn)
+        collector = getattr(store, '_collection_orphans', None)
+        if collector is None:
+            collector = store._collection_orphans = OrphanCollector(directory(store.conn))
+    collector.prepare()
+    before = collector.removed
+    # Writer admission never sleeps under serving protection. SQL scans have
+    # a deadline as well as a finite candidate count; a deadline keeps the batch.
+    try:
+        with work_budget(collector.BUDGET_S), store._lock:
+            previous = store.conn.execute('PRAGMA busy_timeout').fetchone()[0]
+            store.conn.execute('PRAGMA busy_timeout=0')
+            try:
+                if store.activity_paused:
+                    return 0
+                return collector.step(store.conn)
+            finally:
+                store.conn.execute(f'PRAGMA busy_timeout={previous}')
+    except WorkBudgetExceeded:
+        return collector.removed - before
+    except sqlite3.OperationalError as error:
+        if getattr(error, 'sqlite_errorcode', 0) & 255 not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            raise
+        return collector.removed - before
+    finally:
+        if collector.complete and collector.batch is None:
+            close(store)
+
+
+def pending(store):
+    return getattr(store, '_collection_orphans', None) is not None
+
+
+def close(store):
+    collector = getattr(store, '_collection_orphans', None)
+    if collector is not None:
+        collector.close()
+        del store._collection_orphans

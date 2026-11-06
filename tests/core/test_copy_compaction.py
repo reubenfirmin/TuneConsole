@@ -5,12 +5,13 @@ from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
 import threading
+from types import SimpleNamespace
 
 import pytest
 
 from tests.core.test_predecessor_writes import installed
 from yt_playlist.core import db_handles
-from yt_playlist.core.db_rebuild import install, job as copy_compaction
+from yt_playlist.core.db_rebuild import install, job
 from yt_playlist.core.db_space import StorageCompacting
 from yt_playlist.core.store import Store
 
@@ -18,6 +19,8 @@ from yt_playlist.core.store import Store
 @pytest.mark.parametrize('installed',[79,93,107],indirect=True)
 def test_closed_file_install_preserves_format_and_continuing_writes(installed,tmp_path):
     store,version = installed
+    store.init_schema()
+    assert store._recommendation_revalidations
     store.settings.set_setting('personal','exact retained value')
     old = store.conn
     observations = []
@@ -30,7 +33,7 @@ def test_closed_file_install_preserves_format_and_continuing_writes(installed,tm
             with pytest.raises(sqlite3.ProgrammingError,match='closed'):
                 old.execute('SELECT 1')
         observations.append(phase)
-    report = copy_compaction.run(store,progress=progress)
+    report = job.run(store,progress=progress)
     assert report['phase']=='complete'
     assert report['copy']['installed_version']==version
     assert Path(report['original']).exists()
@@ -53,7 +56,7 @@ def test_failure_restores_service_and_original_writes(installed,phase):
         if current==phase:
             raise RuntimeError('controlled '+phase+' failure')
     with pytest.raises(RuntimeError,match='controlled'):
-        copy_compaction.run(store,progress=fail)
+        job.run(store,progress=fail)
     assert db_handles.state(store._db_path)['phase']=='failed'
     assert not store.activity_paused
     assert store.settings.get_setting('personal')=='retained'
@@ -76,7 +79,7 @@ def test_initial_state_failure_restores_write_admission(installed,monkeypatch,af
         return save(database,state)
     monkeypatch.setattr(install,'save',interrupted)
     with pytest.raises(OSError,match='controlled initial state'):
-        copy_compaction.run(store)
+        job.run(store)
     assert not store.activity_paused
     assert db_handles.state(store._db_path)['phase']=='failed'
     store.settings.set_setting('after initialization failure','accepted')
@@ -96,7 +99,7 @@ def test_unpersistable_failure_keeps_maintenance_until_recovery(installed,monkey
     with monkeypatch.context() as patch:
         patch.setattr(install,'save',unavailable)
         with pytest.raises(OSError,match='state filesystem unavailable'):
-            copy_compaction.run(store)
+            job.run(store)
     assert store.activity_paused
     assert db_handles.state(store._db_path)['phase']=='building'
     with pytest.raises(StorageCompacting):
@@ -109,13 +112,25 @@ def test_unpersistable_failure_keeps_maintenance_until_recovery(installed,monkey
 
 
 @pytest.mark.parametrize('installed',[79],indirect=True)
-def test_pinned_handle_blocks_replacement_and_same_file_reopens(installed):
+def test_pinned_handle_blocks_replacement_and_same_file_reopens(installed, monkeypatch):
     store,_ = installed
     before = store._db_path.stat().st_ino
     with closing(db_handles.connect(store._db_path)) as pinned:
         cursor = pinned.execute('SELECT name FROM sqlite_schema')
-        with pytest.raises(TimeoutError,match='handles are still open'):
-            copy_compaction.run(store)
+        elapsed, waits = 0.0, []
+        def sleep(delay):
+            nonlocal elapsed
+            waits.append(delay)
+            elapsed += delay
+        # Exercise the real conflicting file lock and timeout loop without
+        # spending fifteen wall-clock seconds waiting for this retained handle.
+        with monkeypatch.context() as patch:
+            patch.setattr(db_handles, 'time', SimpleNamespace(
+                monotonic=lambda: elapsed, sleep=sleep))
+            with pytest.raises(TimeoutError,match='handles are still open'):
+                job.run(store)
+        assert elapsed >= 15
+        assert waits and set(waits) == {.025}
         assert store._db_path.stat().st_ino==before
         assert cursor.fetchone() is not None
         assert not store.activity_paused
@@ -135,7 +150,7 @@ def test_restart_selects_original_or_verified_install(installed,phase):
         if current==phase:
             raise ProcessDied()
     with pytest.raises(ProcessDied):
-        copy_compaction.run(store,progress=die)
+        job.run(store,progress=die)
     store.conn.close()
     # Simulate a fresh process entering Store before opening any SQLite handle.
     recovered = Store(store._db_path)
@@ -198,7 +213,7 @@ def test_admitted_readonly_snapshot_finishes_before_closed_file_replacement(inst
                 yield
         monkeypatch.setattr(db_handles,'lease',lease)
         try:
-            result = copy_compaction.run(store)
+            result = job.run(store)
         finally:
             closing_handles.set()
         assert future.result(timeout=5)=='exact retained value'
@@ -207,7 +222,7 @@ def test_admitted_readonly_snapshot_finishes_before_closed_file_replacement(inst
 
 @pytest.mark.parametrize('installed',[79],indirect=True)
 @pytest.mark.parametrize('kind',['home','listening','documents','models','reports'])
-def test_installed_preparation_reuses_fenced_file_custody(installed,kind,monkeypatch):
+def test_installed_preparation_reuses_fenced_file_custody(installed,kind):
     from tests.core.test_preparation_file_recovery import selected_owner,hashes,sql_custody
     from yt_playlist.core import policy_documents, preparation_files
     store,_ = installed
@@ -215,16 +230,13 @@ def test_installed_preparation_reuses_fenced_file_custody(installed,kind,monkeyp
     expected,selection,custody = read(store),selected(store.conn),sql_custody(store.conn)
     before_files = hashes(root)
     before_references = list(preparation_files.references(store.conn))
-    def unexpected_restore(*args,**kwargs):
-        pytest.fail('In-place SQL replacement must not relocate installed files')
-    monkeypatch.setattr(copy_compaction.policy_recovery,'_restore_files',unexpected_restore)
     observed = []
     def progress(phase,detail):
         if phase in {'copy','staging','original_moved'}:
             with (root/'.readers.lock').open('a+b') as lock:
                 assert policy_documents._try_file_lock(lock,exclusive=True) is None
             observed.append(phase)
-    report = copy_compaction.run(store,progress=progress)
+    report = job.run(store,progress=progress)
     assert 'backup' not in report
     assert {'copy','staging','original_moved'}<=set(observed)
     assert read(store)==expected
@@ -243,16 +255,16 @@ def test_cross_filesystem_stages_a_verified_sibling_before_rename(installed,tmp_
     store,_ = installed
     scratch = tmp_path/'scratch'
     scratch.mkdir()
-    monkeypatch.setattr(copy_compaction,'_same_filesystem',lambda left,right:False)
+    monkeypatch.setattr(job,'_same_filesystem',lambda left,right:False)
     copied = []
-    original = copy_compaction.shutil.copyfile
+    original = job.shutil.copyfile
     def copy(source,target):
         assert Path(target).parent.parent==store._db_path.parent
         copied.append((source,target))
         return original(source,target)
-    monkeypatch.setattr(copy_compaction.shutil,'copyfile',copy)
+    monkeypatch.setattr(job.shutil,'copyfile',copy)
     # Force the branch independently of this fixture's real mount topology.
-    report = copy_compaction.run(store,scratch=scratch)
+    report = job.run(store,scratch=scratch)
     assert len(copied)==1
     assert not report['capacity']['same_filesystem']
     assert Path(report['work']).parent==scratch
@@ -271,7 +283,7 @@ def test_different_mount_scratch_keeps_installed_custody_on_destination(installe
         producer,read,_ = selected_owner(store,'home')
         expected = read(store)
         store.settings.set_setting('cross mount','retained')
-        report = copy_compaction.run(store,scratch=scratch)
+        report = job.run(store,scratch=scratch)
         assert report['phase']=='complete'
         assert not report['capacity']['same_filesystem']
         assert Path(report['work']).is_relative_to(scratch)
@@ -294,7 +306,7 @@ def test_capacity_failure_restores_admission_without_allocating_a_copy(installed
         raise db_space.LowDiskSpace('controlled destination capacity shortage')
     monkeypatch.setattr(db_space,'require_space',full)
     with pytest.raises(db_space.LowDiskSpace):
-        copy_compaction.run(store)
+        job.run(store)
     report = db_handles.state(store._db_path)
     assert report['phase']=='failed'
     assert not Path(report['destination']).exists()
@@ -309,7 +321,7 @@ def test_existing_external_writer_rejects_copy_and_preserves_its_commit(installe
         writer.execute('BEGIN IMMEDIATE')
         writer.execute("INSERT INTO settings VALUES('external accepted','retained')")
         with pytest.raises(sqlite3.OperationalError,match='locked'):
-            copy_compaction.run(store)
+            job.run(store)
         writer.commit()
     assert store.settings.get_setting('external accepted')=='retained'
     store.settings.set_setting('resumed','accepted')
@@ -321,7 +333,7 @@ def test_released_pre_swap_snapshot_cannot_publish_against_reopened_database(ins
     with store.read_snapshot() as snapshot:
         snapshot.store.settings.get_setting('input')
         snapshot.release_reader()
-        copy_compaction.run(store)
+        job.run(store)
         assert not snapshot.publish(lambda:pytest.fail('old snapshot published after database replacement'))
 
 
@@ -341,7 +353,7 @@ def test_failed_internal_reopen_rolls_back_before_any_writer_is_admitted(install
         original()
     monkeypatch.setattr(store,'_bind_repositories',bind)
     with pytest.raises(RuntimeError,match='controlled repository reopen'):
-        copy_compaction.run(store)
+        job.run(store)
     assert attempts==2
     assert not store.activity_paused
     assert db_handles.state(store._db_path)['phase']=='failed'

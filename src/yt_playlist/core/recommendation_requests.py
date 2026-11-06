@@ -84,6 +84,19 @@ def write(conn, surface, value, at):
                               reason if reason else None))
 
 
+def present(conn, surface):
+    if surface.startswith('choice_window:'):
+        return conn.execute('SELECT 1 FROM listening_choice_windows WHERE format=?',
+                            (surface.split(':', 1)[1],)).fetchone() is not None
+    if surface == 'album_menu_refresh':
+        return conn.execute('SELECT 1 FROM album_menu_refresh_state WHERE id=1 AND epoch IS NOT NULL').fetchone() is not None
+    if surface != 'home_genre_request':
+        raise ValueError('Unknown recommendation demand owner')
+    return conn.execute('SELECT 1 FROM home_genre_requests WHERE id=1 AND '
+        '(epoch IS NOT NULL OR has_includes OR has_avoids OR held_by_vibe IS NOT NULL '
+        'OR suspended_by_vibe IS NOT NULL)').fetchone() is not None
+
+
 def read(conn, surface):
     if surface.startswith('choice_window:'):
         row = conn.execute('SELECT opportunity_key,window_text FROM listening_choice_windows WHERE format=?',

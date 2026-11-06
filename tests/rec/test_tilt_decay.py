@@ -1,5 +1,6 @@
 """Ranking contributions retain wall-clock decay in every vector space (#85, #45, #88)."""
 import numpy as np
+from tests.repository_mock_support import no_database, transient_store
 import pytest
 
 from yt_playlist.rec import rec_params, scoring, transient
@@ -9,24 +10,27 @@ DAY = 86400.0
 
 @pytest.mark.parametrize("space", ["collaborative", "acoustic"])
 @pytest.mark.parametrize("source", ["mood", "play", "like", "skip"])
-def test_ranking_contribution_fades_by_source_half_life(store, space, source):
+def test_ranking_contribution_fades_by_source_half_life(transient_store, space, source):
+    store = transient_store
     now = 1000 * DAY
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    store.tracks.upsert_track("v", "Song", "Artist", None, 200)
-    store.tracks.upsert_track("other", "Other", "Artist", None, 200)
     key = "song|artist"
     keys, vectors = [key, "other|artist"], np.eye(2, dtype=np.float32)
-    store.rec_model.replace_rec_content_vectors([(k, v.tobytes()) for k, v in zip(keys, vectors)])
-    rec_params.set_param(store, "session_alpha", 0)
-    rec_params.set_param(store, "audio_transient_w", 0.3 if space == "acoustic" else 0)
+    rows = [(k, v.tobytes()) for k, v in zip(keys, vectors)]
+    store.rec_model.content_generation.return_value = {'model': None, 'library': rows}
+    store.rec_model.get_rec_content_vectors.return_value = rows
+    store.settings.get_setting.side_effect = {
+        rec_params.SETTING_PREFIX + 'session_alpha': '0',
+        rec_params.SETTING_PREFIX + 'audio_transient_w': '0.3' if space == 'acoustic' else '0',
+    }.get
     if source == "mood":
-        store.rec_signals.record_mood([key], 1, now=now)
+        store.rec_signals.recent_mood_events.return_value = [(now, 1, [key])]
     elif source == "play":
-        store.history.record_play_event(iid, key, "v", now)
+        store.history.recent_plays_with_ts.return_value = [(key, now)]
+        store.history.play_events_since.return_value = [{'identity_key': key, 'played_at': now}]
     elif source == "like":
-        store.rec_model.record_like(key, now, provenance="action")
+        store.rec_model.recent_liked_with_ts.return_value = [(key, now)]
     else:
-        store.player_events.record_player_event(iid, "track_exit", "v", 20, 200, None, None, now)
+        store.player_events.recent_skips_with_ts.return_value = [(key, now)]
 
     # With acoustic scoring, zero collaborative rows isolate the real content-space producer.
     V = np.zeros_like(vectors) if space == "acoustic" else vectors
@@ -43,17 +47,22 @@ def test_ranking_contribution_fades_by_source_half_life(store, space, source):
     assert sign * fresh[component][0] > 0
     np.testing.assert_allclose(half[component], fresh[component] / 2)
     np.testing.assert_allclose(old[component], fresh[component] / 8)
+    if source == 'mood' and space == 'collaborative':
+        # Retained #85 QA oracle: the ordinary default fades by at least eight
+        # times within twenty-one days, even if a future default changes.
+        assert components(21)['transient'][0] <= fresh['transient'][0] / 8 + 1e-9
     # With no new evidence, durable taste regains the lead instead of staying overridden forever.
     assert fresh["combined"].argmax() == (0 if sign > 0 else 1)
     assert old["combined"].argmax() == (1 if sign > 0 else 0)
 
 
-def test_missing_and_zero_vectors_do_not_dilute_bounded_tilt(store):
+def test_missing_and_zero_vectors_do_not_dilute_bounded_tilt(transient_store):
+    store = transient_store
     now = 1000 * DAY
     V = np.array([[1, 0], [0, 1], [0, 0]], dtype=np.float32)
     idx = {"a|x": 0, "b|y": 1, "zero|z": 2}
-    for key in ("a|x", "b|y", "missing|m", "zero|z"):
-        store.rec_signals.record_mood([key], 1, now=now)
+    store.rec_signals.recent_mood_events.return_value = [
+        (now, 1, [key]) for key in ("a|x", "b|y", "missing|m", "zero|z")]
     fresh = transient.centroid_tilt(store, now, V, idx)
     np.testing.assert_allclose(fresh, [0.5, 0.5])
     assert np.linalg.norm(fresh) < 1  # disagreeing directions have less confidence
@@ -62,11 +71,11 @@ def test_missing_and_zero_vectors_do_not_dilute_bounded_tilt(store):
                                fresh / 2)
 
 
-def test_disabled_play_source_cannot_dilute_mood_signal(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    rec_params.set_param(store, "play_transient_w", 0)
-    store.rec_signals.record_mood(["a|x"], 1, now=1000)
-    store.history.record_play_event(iid, "b|y", "v", 1000)
+def test_disabled_play_source_cannot_dilute_mood_signal(transient_store):
+    store = transient_store
+    store.settings.get_setting.side_effect = {rec_params.SETTING_PREFIX + 'play_transient_w': '0'}.get
+    store.rec_signals.recent_mood_events.return_value = [(1000, 1, ['a|x'])]
+    store.history.recent_plays_with_ts.return_value = [('b|y', 1000)]
     np.testing.assert_allclose(transient.centroid_tilt(
         store, 1000, np.eye(2), {"a|x": 0, "b|y": 1}), [1, 0])
 

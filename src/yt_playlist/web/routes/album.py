@@ -5,6 +5,7 @@ import re
 import uuid
 from yt_playlist.core.activity import activity_for
 from yt_playlist.core.accounts import catalog_client,main_client
+from yt_playlist.core.action_errors import ActionInputError
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
@@ -12,7 +13,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from yt_playlist.library.album_fetch import fetch_album, is_upload_album, shareable_album_tracks
 from yt_playlist.library.album_catalog import remember_album
-from yt_playlist.providers import enrichment, lastfm, waterfall
+from yt_playlist.providers import enrichment, waterfall
 from yt_playlist.rec import album_choices, album_notes, choice_evidence
 from yt_playlist.util.duration import parse_duration
 from yt_playlist.util.thumbnails import best_thumb, is_placeholder_art
@@ -187,7 +188,7 @@ def build(ctx) -> APIRouter:
             "library_track_count": len({t["track_id"] for t in library_tracks if t.get('track_id') is not None}),
             "cover": cover, "mosaic": mosaic,
             "genres": sorted(set(store.genres.get_genre_whitelist()) | set(store.genres.all_genres()), key=str.lower),
-            "lastfm_configured": lastfm.api_key(store) is not None,
+            "active_job": ctx.jobs.find_active_album(browse_id),
             "conflict_count": store.enrichment_reports.conflict_count_for_album(browse_id)}
 
     @router.post("/album/feedback")
@@ -196,8 +197,11 @@ def build(ctx) -> APIRouter:
         try:
             album_choices.set_feedback(store, (form.get("browse_id") or "").strip(),
                 form.get("kind"), ctx.now_fn(), form.get("opportunity_id"))
-        except ValueError as exc:
+        except ActionInputError as exc:
             return _toast(request, str(exc))
+        except Exception:
+            ctx.logger.exception("Album feedback failed")
+            return Response(status_code=503, headers={"HX-Reswap": "none"})
         if ctx.rec_worker:
             ctx.rec_worker.trigger_home_refresh()
         return Response(status_code=204)
@@ -232,21 +236,17 @@ def build(ctx) -> APIRouter:
                              "tracks": [{"video_id": track['videoId'],
                                          'key': store.tracks.identity_key_for_video(track['videoId'])}
                                         for track in tracks if track.get('videoId')]})
-                from yt_playlist.core import album_playback_context
-                with store._lock,store.conn:
-                    album_playback_context.put(store.conn,{"opportunity_id":opportunity,
-                        "browse":browse,"playlist":playlist,"at":ctx.now_fn(),'action_id':action_id,
-                        'videos':[track['videoId'] for track in tracks if track.get('videoId')]})
+                store.rec_ledger.remember_album_playback_context({"opportunity_id":opportunity,
+                    "browse":browse,"playlist":playlist,"at":ctx.now_fn(),'action_id':action_id,
+                    'videos':[track['videoId'] for track in tracks if track.get('videoId')]})
             ctx.bridge.send_control({"type": "navigate", "url":
                 "https://music.youtube.com/watch?v=" + quote(video, safe="") + "&list=" + quote(playlist, safe="")},
                 intent=intent)
         try:
             await activity_for(ctx).to_thread(start)
-        except ValueError as exc:
-            return _toast(request, str(exc))
         except Exception:
             ctx.logger.exception("Album playback failed: %s", browse)
-            return _toast(request, "Couldn’t start the album. Check the extension connection and try again.")
+            return Response(status_code=503, headers={"HX-Reswap": "none"})
         return Response(status_code=204)
 
     @router.get("/album/{browse}/share.txt")
@@ -267,10 +267,10 @@ def build(ctx) -> APIRouter:
                 vids = [track["videoId"] for track in tracks]
                 if not getattr(store, 'activity_paused', False):
                     remember_album(store, browse, a)
-            except ValueError as exc:
+            except ActionInputError as exc:
                 problem = str(exc)
             except Exception:
-                ctx.logger.info("album share fetch failed for %r (non-fatal)", browse)
+                ctx.logger.info("album share fetch failed for %r (non-fatal)", browse, exc_info=True)
             if not vids:
                 raise HTTPException(status_code=503, detail=problem)
         lines = [f"https://music.youtube.com/watch?v={v}" for v in vids]
@@ -321,34 +321,41 @@ def build(ctx) -> APIRouter:
             return _toast(request, "No album to create from.")
         try:
             res = await activity_for(ctx).to_thread(ctx.ops().create_playlist_from_album, browse_id, name)
-        except ValueError as e:
+        except ActionInputError as e:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001
             ctx.logger.exception("create playlist from album %r failed", browse_id)
-            return _toast(request, "Couldn't create the playlist. See the log.")
+            return Response(status_code=503, headers={"HX-Reswap": "none"})
         return Response(status_code=200, headers={"HX-Redirect": f"/playlist/{res['db_pid']}"})
 
     @router.post("/album/{browse}/enrich")
     def album_enrich(browse: str):
         """Run the enrichment waterfall over a saved album's folded-in tracks, same harness and SSE
         stream as playlist enrichment, scoped by album_browse instead of a playlist."""
-        job = ctx.jobs.create()
-        job.album_browse = browse
-        job.source = "waterfall"
-        pending = store.tracks.album_tracks_for_waterfall(browse)
+        job, created = ctx.jobs.create_or_rejoin_album(browse)
+        if not created:
+            return JSONResponse({"job_id": job.id})
 
         def run():
             try:
+                from yt_playlist.web.jobs import record_enrichment_progress
+                pending = store.tracks.album_tracks_for_waterfall(browse)
                 waterfall.run_waterfall(store, pending, enrichment.load_config(store),
-                                        on_progress=job.events.append)
+                                        on_progress=lambda event: record_enrichment_progress(ctx, job, event))
             except Exception as e:  # noqa: BLE001
+                ctx.logger.exception("Album enrichment job %s failed", job.id)
                 detail = str(e) or type(e).__name__
                 job.error = detail
                 job.events.append({"type": "err", "text": f"enrichment failed: {detail}"})
             finally:
                 job.done = True
 
-        activity_for(ctx).start_thread(run)
+        try:
+            activity_for(ctx).start_thread(run)
+        except BaseException as exc:
+            job.error = str(exc) or type(exc).__name__
+            job.done = True
+            raise
         return JSONResponse({"job_id": job.id})
 
     @router.get("/album/{browse}/conflicts")

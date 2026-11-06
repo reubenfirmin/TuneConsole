@@ -1,20 +1,21 @@
 """Continuing writes through real installed layouts and their TEMP read views."""
+from contextlib import closing
 import sqlite3
 
 import pytest
 
 from yt_playlist.core import entity_names
 from yt_playlist.core.config import AccountConfig
-from yt_playlist.core.migrations import registry, runner
+from yt_playlist.core.migrations import runner
 from yt_playlist.core.store import Store
 
 
 @pytest.fixture(params=[79, 93, 102, 107])
-def installed(request, tmp_path):
+def installed(request, tmp_path, _pristine_installed_schema):
     path = tmp_path / 'installed.db'
     setup = Store(path)
     try:
-        runner.migrate(setup.conn, registry=registry.MIGRATIONS[:request.param])
+        _pristine_installed_schema(request.param).backup(setup.conn)
         setup.conn.execute('PRAGMA journal_mode=WAL')
     finally:
         setup.conn.close()
@@ -24,7 +25,7 @@ def installed(request, tmp_path):
         history = [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')]
         yield store, request.param
         assert [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')] == history
-        with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True) as reader:
+        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as reader:
             reader.row_factory = sqlite3.Row
             runner.validate_version(reader, request.param)
     finally:

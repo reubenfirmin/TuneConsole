@@ -1,15 +1,6 @@
 import numpy as np
-import pytest
-from yt_playlist.core.store import Store
 from yt_playlist.rec import rec_params, mode_surfaces as ms
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
-
-
-@pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    return s
 
 
 def _seed_one_mode(store):

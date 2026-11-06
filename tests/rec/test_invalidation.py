@@ -1,5 +1,6 @@
 """Completed track spaces can serve through a refresh; retired artist vocabularies cannot."""
 import pytest
+from tests.derived_rating_support import seed_dislike
 
 from yt_playlist.core import embeddings
 from yt_playlist.core.migrations import migrate
@@ -31,7 +32,7 @@ def test_refresh_retains_playable_menus_usage_and_tv_until_replacement(store, ch
     assert tv.cached(store) == previous_tv
     assert onboarding.prepared_mixes_ready(store, 1001)
     key = previous_mix['menus'][0]['protos'][0]['tracks'][0]['key']
-    store.rec_model.record_dislike(key, until=None, now=1002)
+    seed_dislike(store, key, until=None, now=1002)
     assert not onboarding.prepared_mixes_ready(store, 1002)
     # Removing evidence explicitly still clears the completed outputs.
     with store.conn.atomic():
@@ -44,12 +45,10 @@ def test_refresh_retains_playable_menus_usage_and_tv_until_replacement(store, ch
 
 @pytest.mark.parametrize('current', [False, True])
 @pytest.mark.parametrize('change', ['catalog', 'artist'])
-def test_identity_invalidation_policy_preserves_eligible_spaces_and_rollback_evidence(current, change):
-    store = Store(':memory:')
+def test_identity_invalidation_policy_preserves_eligible_spaces_and_rollback_evidence(current, change, consumer_store):
+    store = consumer_store() if current else Store(':memory:')
     try:
-        if current:
-            store.init_schema()
-        else:
+        if not current:
             migrate(store.conn, registry=MIGRATIONS[:33])
         track_tables = ('rec_vectors','rec_content_vectors','rec_discovered_content_vectors')
         artist_tables = ('rec_artist_vectors','rec_artist_content_vectors')

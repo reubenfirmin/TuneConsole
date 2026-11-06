@@ -1,27 +1,34 @@
 """roll_recipe: preference-weighted sampling of a per-playlist theme (genre/era) from your taste."""
 from collections import Counter
 
+import pytest
+
+from tests.repository_mock_support import no_database, transient_repository_store
 from yt_playlist.rec import recipes, surfaces
+from yt_playlist.rec import transient
+from yt_playlist.rec.taste_analysis import era_distribution, taste_breadth
 from yt_playlist.util.matching import identity_key
 
 
-def _seed_two_genres(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    # lots of techno, a little folk, all played so they have mass in the distributions
-    tech = [store.tracks.upsert_track(f"t{i}", f"T{i}", "TB", None, None) for i in range(8)]
-    folk = [store.tracks.upsert_track(f"f{i}", f"F{i}", "FB", None, None) for i in range(2)]
-    for t in tech:
-        store.tracks.set_track_genre(t, "Techno"); store.tracks.set_track_year(t, "2015")
-    for f in folk:
-        store.tracks.set_track_genre(f, "Folk"); store.tracks.set_track_year(f, "1972")
-    # play techno heavily so it dominates the preference-weighted roll (genre mass = 1 + plays/song)
-    for _ in range(6):
-        store.history.record_history_plays(iid, 1.0, ["t0|tb"], source_timezone="UTC")
-    return iid
+@pytest.fixture
+def recipe_store(no_database):
+    # Eight Techno tracks plus six plays, versus two Folk tracks.
+    return transient_repository_store(
+        rec_query={'genre_play_distribution': {'Techno': 14, 'Folk': 2},
+                   'era_play_distribution': {'2010': 14, '1970': 2}},
+        genres={'feature_axes': {'Techno': ('techno', None), 'Folk': ('folk-country', None),
+                                 'deep house': ('house', 'house-deep'), 'jazz': ('jazz', None),
+                                 'House': ('house', None)}},
+    )
 
 
-def test_roll_recipe_shapes_and_facets(store):
-    _seed_two_genres(store)
+def _recipe_inputs(store, *, now=None):
+    return {'dists': (taste_breadth(store)['families'], dict(era_distribution(store))),
+            'leans': transient.facet_leans(store, now) if now is not None else {}}
+
+
+def test_roll_recipe_shapes_and_facets(recipe_store):
+    store = recipe_store
     r = recipes.roll_recipe(store, "fresh", seed=1)
     assert r["model"] == "fresh"
     assert "genres" in r["facets"] and "eras" in r["facets"]      # fresh rolls genre + era
@@ -29,66 +36,94 @@ def test_roll_recipe_shapes_and_facets(store):
     assert "seed" in r["dj"]
 
 
-def test_roll_recipe_is_preference_weighted(store):
-    _seed_two_genres(store)
+def test_roll_recipe_is_preference_weighted(recipe_store):
+    store = recipe_store
     from yt_playlist.util import genre_map
     techno_fam = genre_map.family("Techno")
-    picks = Counter(recipes.roll_recipe(store, "fresh", seed=s)["facets"]["genres"][0] for s in range(60))
+    inputs = _recipe_inputs(store)
+    assert recipes.roll_recipe(store, 'fresh', seed=0) == recipes.roll_recipe(store, 'fresh', seed=0, **inputs)
+    picks = Counter(recipes.roll_recipe(store, "fresh", seed=s, **inputs)["facets"]["genres"][0] for s in range(60))
     # techno is played far more, so it should be rolled far more often than folk
     assert picks[techno_fam] > picks.get(genre_map.family("Folk"), 0)
 
 
-def test_roll_recipe_respects_muted_genre(store):
-    _seed_two_genres(store)
+def test_roll_recipe_respects_muted_genre(recipe_store):
+    store = recipe_store
     from yt_playlist.util import genre_map
     folk_fam = genre_map.family("Folk")
-    store.rec_model.set_weight(f"genre:{folk_fam}", 0.0, lo=0.0, hi=2.0)    # mute folk
-    picks = Counter(recipes.roll_recipe(store, "fresh", seed=s)["facets"]["genres"][0] for s in range(40))
+    store.rec_model.get_weights.return_value = {f'genre:{folk_fam}': 0.}
+    inputs = _recipe_inputs(store)
+    assert recipes.roll_recipe(store, 'fresh', seed=0) == recipes.roll_recipe(store, 'fresh', seed=0, **inputs)
+    picks = Counter(recipes.roll_recipe(store, "fresh", seed=s, **inputs)["facets"]["genres"][0] for s in range(40))
     assert folk_fam not in picks                                  # a muted genre is never rolled
 
 
-def test_roll_recipe_transient_suppresses_disfavored_genre(store):
-    # two genres equally present in the library
-    iid = store.accounts.upsert_account("main", "cred2", None, True)
-    for i in range(5):
-        h = store.tracks.upsert_track(f"h{i}", f"H{i}", f"DJ{i}", None, None, 1); store.tracks.set_track_genre(h, "deep house")
-        j = store.tracks.upsert_track(f"j{i}", f"J{i}", f"Sx{i}", None, None, 1); store.tracks.set_track_genre(j, "jazz")
-    # seed plays so both genres appear in the play distribution
+def test_roll_recipe_transient_suppresses_disfavored_genre(recipe_store):
+    store = recipe_store
+    store.rec_query.genre_play_distribution.return_value = {'deep house': 10, 'jazz': 10}
+    store.rec_query.era_play_distribution.return_value = {}
     house_keys = [identity_key(f"H{i}", f"DJ{i}") for i in range(5)]
     jazz_keys = [identity_key(f"J{i}", f"Sx{i}") for i in range(5)]
-    store.history.record_history_plays(iid, 1.0, house_keys + jazz_keys, source_timezone="UTC")
+    store.rec_query.track_genres.return_value = {
+        **dict.fromkeys(house_keys, 'deep house'), **dict.fromkeys(jazz_keys, 'jazz')}
+    store.rec_query.track_artists.return_value = {
+        **{key: f'DJ{i}' for i, key in enumerate(house_keys)},
+        **{key: f'Sx{i}' for i, key in enumerate(jazz_keys)}}
+    store.history.recent_plays_with_ts.return_value = [(key, 1.) for key in house_keys + jazz_keys]
+    previous_inputs = _recipe_inputs(store, now=10.0)
     # hammer "less house" so the transient lean is strongly negative
-    for i in range(5):
-        store.rec_signals.record_mood([identity_key(f"H{i}", f"DJ{i}")], -2, now=10.0)
+    store.rec_signals.recent_mood_events.return_value = [(10., -2, [key]) for key in house_keys]
     # roll many recipes; house should be picked far less than jazz
-    genres = [recipes.roll_recipe(store, "wheelhouse", seed=s, now=10.0)["facets"].get("genres", [])
+    inputs = _recipe_inputs(store, now=10.0)
+    genres = [recipes.roll_recipe(store, "wheelhouse", seed=s, now=10.0, **inputs)["facets"].get("genres", [])
               for s in range(200)]
     house = sum("house" in str(sample).lower() for sample in genres)
     jazz = sum(sample == ["jazz"] for sample in genres)
     assert house < jazz                                          # transient "less house" steers generation
+    # Find a seed whose actual recipe changes because of the new mood. The
+    # default path must capture that new signal rather than reusing old leans.
+    changed = next(s for s, genre in enumerate(genres) if recipes.roll_recipe(
+        store, 'wheelhouse', seed=s, now=10.0, **previous_inputs)['facets'].get('genres', []) != genre)
+    assert recipes.roll_recipe(store, 'wheelhouse', seed=changed, now=10.0) == recipes.roll_recipe(
+        store, 'wheelhouse', seed=changed, now=10.0, **inputs)
 
 
-def test_roll_recipe_fresh_is_always_shuffle(store):
+def test_roll_recipe_fresh_is_always_shuffle(recipe_store):
     # Fresh playlists are unowned proposals with no plays/recency, so data-dependent journeys
     # (rediscovery, deep dive…) must never be rolled. Every seed yields a straight shuffle (#32).
-    _seed_two_genres(store)
-    journeys = {recipes.roll_recipe(store, "fresh", seed=s)["journey"] for s in range(60)}
+    store = recipe_store
+    inputs = _recipe_inputs(store)
+    journeys = {recipes.roll_recipe(store, "fresh", seed=s, **inputs)["journey"] for s in range(60)}
     assert journeys == {"shuffle"}
 
 
-def test_roll_recipe_owned_lanes_can_roll_other_journeys(store):
+def test_roll_recipe_owned_lanes_can_roll_other_journeys(recipe_store):
     # Non-fresh lanes still roll varied journeys (so the fresh gate is the only thing pinned).
-    _seed_two_genres(store)
-    journeys = {recipes.roll_recipe(store, "wheelhouse", seed=s)["journey"] for s in range(60)}
+    store = recipe_store
+    inputs = _recipe_inputs(store)
+    journeys = {recipes.roll_recipe(store, "wheelhouse", seed=s, **inputs)["journey"] for s in range(60)}
     assert journeys - {"shuffle"}                                  # at least one non-shuffle journey
 
 
-def test_theme_filter_puts_matching_genre_first(store):
+def test_default_recipe_inputs_notice_changed_permanent_weights(recipe_store):
     from yt_playlist.util import genre_map
-    from yt_playlist.rec import surfaces
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    h = store.tracks.upsert_track("v1", "H", "HArt", None, None); store.tracks.set_track_genre(h, "House")
-    f = store.tracks.upsert_track("v2", "F", "FArt", None, None); store.tracks.set_track_genre(f, "Folk")
+    store = recipe_store
+    techno, folk = genre_map.family('Techno'), genre_map.family('Folk')
+    inputs = _recipe_inputs(store)
+    store.rec_model.get_weights.return_value = {f'genre:{techno}': 0.}
+    before = recipes.roll_recipe(store, 'fresh', seed=1)
+    assert before['facets']['genres'] == [folk]
+    assert before == recipes.roll_recipe(store, 'fresh', seed=1, **inputs)
+    store.rec_model.get_weights.return_value = {f'genre:{techno}': 1., f'genre:{folk}': 0.}
+    after = recipes.roll_recipe(store, 'fresh', seed=1)
+    assert after['facets']['genres'] == [techno]
+    assert after == recipes.roll_recipe(store, 'fresh', seed=1, **inputs)
+
+
+def test_theme_filter_puts_matching_genre_first(recipe_store):
+    from yt_playlist.util import genre_map
+    store = recipe_store
+    store.rec_query.track_genres.return_value = {'h|hart': 'House', 'folk|fart': 'Folk'}
     items = [surfaces.ForYouItem("F", "FArt", "", "v2", None, 0, "", "folk|fart"),
              surfaces.ForYouItem("H", "HArt", "", "v1", None, 0, "", "h|hart")]
     facets = {"genres": [genre_map.family("House")]}

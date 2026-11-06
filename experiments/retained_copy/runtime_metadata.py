@@ -15,7 +15,8 @@ import tempfile
 import threading
 import time
 
-from yt_playlist.core import metadata_native, metadata_runtime_files, retained_copy
+from yt_playlist.core import metadata_native, metadata_runtime_files
+from yt_playlist.core.db_rebuild import build
 from yt_playlist.core.preparation import metadata_runtime as preparation
 from yt_playlist.core.store import Store
 from yt_playlist.core.work_diagnostics import MaintenanceDiagnostics
@@ -26,7 +27,7 @@ RETIRED = frozenset(('metadata_deliveries','metadata_observations','metadata_leg
     'provider_state_fields','native_metadata_observations','musical_source_observations'))
 NULLS = {'artist_credit_observations': {'metadata_delivery_id'},
          'recording_identifiers': {'delivery_id','observation_id'}}
-Q = retained_copy.quote
+Q = build.quote
 
 
 def reader(path):
@@ -73,7 +74,7 @@ def baseline(path, now):
 
 def compact(source, target):
     with closing(sqlite3.connect(source.as_uri()+'?mode=ro',uri=True)) as conn:
-        retained_copy._configure(conn)
+        build._configure(conn)
         schema = conn.execute("SELECT type,name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'").fetchall()
         tables = [name for kind,name,_ in schema if kind=='table']
         with closing(sqlite3.connect(target)) as destination:
@@ -86,7 +87,7 @@ def compact(source, target):
         for table in tables:
             if table in RETIRED:
                 continue
-            fields, _ = retained_copy._fields(conn, table)
+            fields, _ = build._fields(conn, table)
             columns = ','.join(map(Q,fields))
             expressions = ','.join('NULL' if field in NULLS.get(table, ()) else Q(field) for field in fields)
             conn.execute('INSERT INTO compacted.'+Q(table)+'('+columns+') SELECT '+expressions+' FROM main.'+Q(table))
@@ -99,10 +100,10 @@ def compact(source, target):
         # links retain every value, SQLite type, hidden rowid and primary key.
         for table in tables:
             if table not in RETIRED and table not in NULLS:
-                retained_copy._equal_rows(conn, table, '1')
+                build._equal_rows(conn, table, '1')
         conn.execute('DETACH DATABASE compacted')
     with closing(sqlite3.connect(target)) as conn:
-        retained_copy._configure(conn)
+        build._configure(conn)
         for kind in ('index','view','trigger'):
             for actual,name,sql in schema:
                 if actual==kind:

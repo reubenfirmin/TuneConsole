@@ -241,7 +241,8 @@ def test_worker_retries_retirement_promptly_without_entering_storage_recovery(sc
     now[0] = 105
     worker._poll_retention()
     targets.pop()()
-    assert len(calls) == 2 and worker.jobs.retry[Job.RETENTION].retry_at == 405
+    # Healthy owners keep the original idle deadline while this owner retries.
+    assert len(calls) == 2 and worker.jobs.retry[Job.RETENTION].retry_at == 400
     assert not worker.busy and not worker.jobs
 
 

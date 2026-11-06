@@ -1,5 +1,49 @@
 # Audio lab (#406)
 
+## Shared prediction pooling candidate (#819)
+
+`./experiments/run.py vibe-pooling` implements a prospective evaluation; it has
+not been run or accepted. Respect the current test/experiment hold before using
+these commands. `freeze --db ISOLATED_SNAPSHOT --plan PLAN.json` opens the source
+read-only through `repos/vibe_models.py`, without Store initialization or
+migration. Optional `--human-labels LABELS.json` takes explicit held-out
+`recording`, `vibe`, `score` targets. Report unmatched human targets as a gap.
+
+Freeze records exact source rows, masked musical-profile inputs, SQL owner sizes, code/config hashes and five
+deterministic recording/connected-artist folds. All measurements of a target
+recording, across providers/uploads/channels, are masked. Known-artist and
+wholly unseen-artist results remain separate; missing artist metadata is not
+unseen-artist evidence. Human targets are excluded from every fit. The paired
+incumbent uses its existing cohort resolver and the production profile preparation
+and heuristic. Both policies retain the same artist/release descriptions and
+categorical genre choices, while all recording-source observations and numeric
+selected/override fields are removed. The candidate retains the incumbent result
+where its runtime model cannot predict. A target with no production profile after
+masking is an explicit unscored gap. Format-1 genre-only plans are rejected; freeze
+a separate format-2 plan with the renewed code identity before scoring.
+
+Run one bounded task with `run --plan PLAN.json --stratum known --fold 0
+--vibe relax --output RESULT.json`; repeat for both strata, five folds and all
+six vibes. Each fit admits ten seconds and 128 MiB accounted data and refuses
+oversized corpora rather than sampling. Outputs are exclusive-create files and
+can be resumed by skipping completed tasks. A fit failure is a deferred result.
+`summarize --plan PLAN.json --result RESULT.json ... --output REPORT.json`
+requires all sixty matching tasks for a complete result. It reports per-vibe,
+stratum and source MAE/ranking, ninety-percent interval coverage/width, artist
+diversity and cluster-bootstrap intervals. Human results remain separate.
+
+The pre-selection #819 comment defines gain/regression, lifecycle and resource
+gates. An explicit adequacy floor requires twenty scored recordings and five
+connected artist clusters per vibe/stratum, with intervals for every target;
+these counts alone do not establish a reliable gain. NDCG/coverage checks apply
+to every vibe/stratum. No result selects the candidate automatically. Shared
+classifier bias, unidentifiable measurement noise and conditional fitted-variance
+uncertainty require review. Actual production lifecycle, bytes/write
+amplification, paired foreground latency and time to useful output remain
+separate required evidence. Production qualification stays empty until all gates
+pass; the existing policy remains active. Storage details are in
+[FAO owners](../retained_copy/FAO-OWNERS.md#shared-vibe-model-candidate-819).
+
 The [matched encoder comparison](ENCODER_COMPARISON_RESULTS.md) completes #708:
 288 recordings, 576 matched intervals, 24 native targets and 72 mapped cases.
 Retain all six incumbents; Focus/Cruise point gains fail uncertainty or domain
@@ -167,9 +211,30 @@ banner combines the native tags and mood models into experimental predictions an
 collects the same vibe choices as Mix Tapes. Samples and judgments persist as
 metadata separately from production track profiles and recommendation learning.
 
-For the separate popup-free access investigation, `audio_probe.js` is retained for
-explicit developer injection into the bridge's isolated YouTube Music world and
-for browser tests. Normal startup no longer installs this access-only diagnostic.
+For the separate popup-free access investigation, `experiments/audio_lab/audio_probe.js`
+is retained for explicit developer injection into the bridge's isolated YouTube
+Music world and for browser tests. Production extension sources and ZIPs omit it.
+Stage a disposable unpacked development copy from the repository root:
+
+```sh
+probe_extension=$(mktemp -d /tmp/tuneconsole-audio-probe.XXXXXX)
+cp -a extension/. "$probe_extension/"
+cp experiments/audio_lab/audio_probe.js "$probe_extension/audio_probe.js"
+```
+
+Load that directory as an unpacked extension, reload the Music tab, then use its
+service worker console to inject into the intended Music tab:
+
+```js
+const tabs = await chrome.tabs.query({url: 'https://music.youtube.com/*'});
+// Choose the tab you intend to investigate if more than one is open.
+await chrome.scripting.executeScript({target: {tabId: tabs[0].id}, files: ['audio_probe.js']});
+```
+
+Remove the development extension from Chromium when finished, then remove its
+disposable copy with `rm -rf -- "$probe_extension"`. Browser fixtures perform this
+staging and cleanup inside their own temporary directories. Normal startup never
+installs the access-only diagnostic.
 Its **TuneConsole audio access check** banner tries three seconds and reports DRM,
 cross-origin restrictions, nonzero audio, or an inconclusive silent signal.
 **Copy report** exports diagnostics only. This access-only diagnostic does not run

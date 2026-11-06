@@ -4,6 +4,7 @@ This controlled current-layout fixture proves orchestration and rollback. It is
 not the production-schema importer or optimized destination acceptance.
 """
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 import sqlite3
 import threading
 
@@ -11,7 +12,8 @@ import pytest
 
 from tests.core.test_predecessor_writes import installed
 from tests.core.test_db_rebuild_destination import development93, production64
-from yt_playlist.core import db_handles
+from yt_playlist.core import db_handles, group_admission
+from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.db_rebuild import build, install, job
 from yt_playlist.core.migrations import current, registry
 from yt_playlist.core.storage_maintenance import StorageCompacting, StorageMaintenance
@@ -58,24 +60,90 @@ def test_install_reopens_original_after_close_callback_failure(installed):
 
 
 @pytest.mark.parametrize('blocker', ['transaction', 'maintenance', 'evidence', 'compaction'])
-def test_pending_evidence_retry_does_not_bypass_live_write_owners(development93, blocker):
+def test_pending_evidence_retry_does_not_bypass_live_write_owners(development93, blocker, monkeypatch):
     from yt_playlist.core.store import Store
+    from yt_playlist.rec import choice_evidence
 
     store = Store(development93)
     try:
         store.init_schema(defer_metadata=True)
+        store.settings.set_setting(choice_evidence.STORAGE_PENDING, '1')
         store._evidence_recovery_pending = True
+        original_inode = development93.stat().st_ino
+
+        def unexpected_copy(phase, detail):
+            raise AssertionError('Rebuild entered copy while evidence owned publication')
+
+        def rejected(error, match):
+            before = list(store.conn.iterdump())
+            with pytest.raises(error, match=match):
+                job.run(store, rebuild=True, progress=unexpected_copy)
+            assert list(store.conn.iterdump()) == before
+            assert development93.stat().st_ino == original_inode
+            assert db_handles.state(development93) is None
+            assert not list(development93.parent.glob('.development93.db.compaction-*'))
+            assert store._evidence_recovery_pending
+            assert store.settings.get_setting(choice_evidence.STORAGE_PENDING) == '1'
+
         if blocker == 'transaction':
             store.conn.execute('BEGIN IMMEDIATE')
+            rejected(RuntimeError, 'idle write admission')
         elif blocker == 'maintenance':
             store.activity_paused = True
+            rejected(RuntimeError, 'idle write admission')
         elif blocker == 'evidence':
-            store._evidence_maintenance = 1
-        with pytest.raises(RuntimeError, match='idle write admission'):
-            job.run(store, rebuild=blocker != 'compaction')
+            # Exercise both real owners under their existing domain admission,
+            # rather than assigning an otherwise unobserved maintenance count.
+            for operation in ('publication', 'collection'):
+                entered, release = threading.Event(), threading.Event()
+                attribute = '_issue_record' if operation == 'publication' else '_maintain_storage'
+                original = getattr(choice_evidence, attribute)
+
+                def held(*args, **kwargs):
+                    entered.set()
+                    assert release.wait(10)
+                    return original(*args, **kwargs)
+
+                with monkeypatch.context() as patch, ThreadPoolExecutor(1) as executor:
+                    patch.setattr(choice_evidence, attribute, held)
+                    if operation == 'publication':
+                        future = executor.submit(choice_evidence.issue, store, 'albums',
+                            [{'id': 'one'}], 1000, context={}, opportunity_id='rebuild-admission')
+                    else:
+                        future = executor.submit(choice_evidence.maintain_storage, store, 1001)
+                    try:
+                        assert entered.wait(5)
+                        assert not future.done() and not store.activity_paused
+                        store.settings.set_setting('during-evidence-' + operation, 'accepted')
+                        rejected(WorkBudgetExceeded, 'using publication')
+                    finally:
+                        release.set()
+                    result = future.result(10)
+                    if operation == 'publication':
+                        assert result == 'rebuild-admission'
+                    else:
+                        assert isinstance(result, dict)
+            opportunity = store.rec_ledger.evidence().get('opportunity', 'rebuild-admission')
+            assert opportunity and opportunity['options'] == [{'id': 'one'}]
+            report = job.run(store)
+            assert report['phase'] == 'complete'
+            assert store.rec_ledger.evidence().get('opportunity', 'rebuild-admission') == opportunity
+            assert store.settings.get_setting('during-evidence-publication') == 'accepted'
+            assert store.settings.get_setting('during-evidence-collection') == 'accepted'
+            assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
+        else:
+            # Saved routine cleanup intent is safe during installed-format
+            # compaction and must survive the real replacement/reopen.
+            before = sorted(store.conn.iterdump())
+            report = job.run(store)
+            assert report['phase'] == 'complete' and report['operation'] == 'compaction'
+            assert development93.stat().st_ino != original_inode
+            assert sorted(store.conn.iterdump()) == before
+            assert store._evidence_recovery_pending
+            assert store.settings.get_setting(choice_evidence.STORAGE_PENDING) == '1'
+            store.settings.set_setting('after-pending-compaction', 'accepted')
+            assert store.settings.get_setting('after-pending-compaction') == 'accepted'
         assert store.conn.in_transaction == (blocker == 'transaction')
-        assert db_handles.state(development93) is None
-        assert store._evidence_recovery_pending
     finally:
         store.conn.rollback()
         store.conn.close()
@@ -256,6 +324,9 @@ def test_background_destination_keeps_serving_and_can_resume_committed_copy(inst
         assert status['message'].startswith('Updating library storage.')
         assert status['capturing_feedback']
         assert store.settings.get_setting('personal') == 'Mixed case'
+        with pytest.raises(WorkBudgetExceeded, match='using publication'):
+            with group_admission.admission(store, blocking=False):
+                pytest.fail('Evidence publication entered during database replacement')
         with pytest.raises(StorageCompacting):
             maintenance.start_compaction()
         if interrupt:

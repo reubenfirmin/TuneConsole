@@ -9,7 +9,6 @@ import pytest
 
 from yt_playlist.core.activity import cancellable_work, check_cancellable_work, WorkClosing
 from yt_playlist.core import provider_frontiers
-from yt_playlist.core.store import Store
 from yt_playlist.rec import group_roots
 
 
@@ -20,12 +19,9 @@ OPERATIONS = ['provider-unchanged', 'provider-changed', 'recommendation-empty',
 
 
 @pytest.fixture
-def database(tmp_path):
-    store = Store(tmp_path / 'background.db')
-    store.init_schema()
-    store.enrichment_state.reconcile_provider_configuration(ORIGINAL)
-    yield store
-    store.conn.close()
+def database(file_backed_store):
+    file_backed_store.enrichment_state.reconcile_provider_configuration(ORIGINAL)
+    return file_backed_store
 
 
 def operation(store, kind, stack):

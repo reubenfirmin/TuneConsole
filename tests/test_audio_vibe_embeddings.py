@@ -11,7 +11,7 @@ from experiments.audio_lab_tools import robust_vibes, train_vibes as trainer
 from tests.test_audio_vibe_model import examples, excerpts
 from tests.test_audio_vibes import sample
 from yt_playlist.core import audio_embedding, sample_files
-from yt_playlist.rec import audio_vibe_model as model, audio_vibe_preview as heuristic
+from yt_playlist.rec import audio_vibe_model as model, audio_vibe_prediction as heuristic
 from yt_playlist.web.app import create_app
 from yt_playlist.web.routes.audio_vibes import Sample
 

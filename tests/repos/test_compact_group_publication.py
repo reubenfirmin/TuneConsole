@@ -1,14 +1,16 @@
 """Exercise leased compact builds, interruption and shared-content ownership."""
-from contextlib import contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Event
 
 import pytest
 
-from tests.core.test_compact_groups_migration import predecessor, apply
+from tests.core.test_compact_groups_migration import historical_groups, apply
+from tests.prepared_fixture_support import capture_template, roots
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.core import group_documents
 from yt_playlist.core.db_revisions import Revisions
@@ -18,9 +20,7 @@ from yt_playlist.repos import compact_group_publication as compact, group_public
 from yt_playlist.repos.compact_taste_groups import CompactTasteGroupsRepo
 
 
-@pytest.fixture
-def database(predecessor):
-    conn = predecessor
+def third_generation(conn):
     prepared = migration._prepared(conn, conn.execute(
         "SELECT * FROM rec_group_generations WHERE generation='second'").fetchone())
     prepared.update(generation='third', at=3, serial=3, _stage_parent='second')
@@ -32,14 +32,51 @@ def database(predecessor):
         group['version'] = group['version'].replace('second-', 'third-')
         if group['parent_version']:
             group['parent_version'] = group['parent_version'].replace('second-', 'third-')
-    apply(conn)
-    path = conn.execute('PRAGMA database_list').fetchone()[2]
-    store = Store(path)
+    return prepared
+
+
+def bind_compact_store(store):
     store._bind_repositories()
     store.conn.execute('PRAGMA journal_mode=WAL')
     store._snapshot_revisions = Revisions(store.conn)
-    yield store, prepared
-    store.conn.close()
+
+
+@contextmanager
+def compacted_groups(pristine, path):
+    with ExitStack() as resources:
+        home = resources.enter_context(TemporaryDirectory(prefix='tuneconsole-compact-template-'))
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv('YT_PLAYLIST_HOME', home)
+            patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+            patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+            patch.delenv('DEEPSEEK_API_KEY', raising=False)
+            with historical_groups(path, pristine) as conn:
+                prepared = third_generation(conn)
+                apply(conn)
+            # Close the predecessor before retaining the immutable source. Do
+            # not admit this historical schema through current-schema startup.
+            source = Store(path)
+            resources.callback(source.conn.close)
+            bind_compact_store(source)
+            template = capture_template(source, prepared)
+        yield template
+
+
+@contextmanager
+def restored_groups(template, path):
+    store = Store(path)
+    try:
+        prepared = template.restore(store)
+        bind_compact_store(store)
+        yield store, prepared
+    finally:
+        store.conn.close()
+
+
+@pytest.fixture
+def database(tmp_path, compact_group_template):
+    with restored_groups(compact_group_template, tmp_path / 'groups.db') as result:
+        yield result
 
 
 def changed(prepared):
@@ -224,7 +261,7 @@ def test_hidden_append_preserves_the_original_publication_guard(database, change
                 store.conn.execute("UPDATE recordings SET title='changed input' WHERE identity_key='one'")
         elif change == 'external':
             import sqlite3
-            with sqlite3.connect(store._db_path) as external:
+            with closing(sqlite3.connect(store._db_path)) as external, external:
                 external.execute("INSERT INTO settings VALUES ('external-change','1')")
         elif change == 'head':
             with store.conn:
@@ -292,57 +329,81 @@ def test_foreground_can_read_and_write_between_compact_member_batches(database, 
     assert store.settings.get_setting('foreground-during-build') == 'responsive'
 
 
-def test_store_retains_group_files_until_the_last_old_snapshot_read(database, tmp_path):
-    store, _prepared = database
-    # Give one owner a pack with an unowned record. Restoring an already compact
-    # pack can reuse its path, so it would not exercise retirement of old files.
-    table, key, kind, filename, digest, size, offset = next(group_documents.references(store.conn))
-    assert table == 'group_versions'
-    value, age = group_documents.read(filename, digest, size, offset, kind, with_age=True)
-    replacement = next(group_documents.publish_many(group_documents.directory(store.conn),
-        [(kind, value), ('definition', {'unowned': True})], age=age))
-    with store.conn:
-        store.conn.execute('UPDATE group_versions SET definition_filename=?,definition_offset=? WHERE id=?',
-                           (replacement[0], replacement[3], key[0]))
-    group_documents.collect_orphans(store.conn)
-    with store.read_view() as view:
-        original = list(group_documents.references(view.conn))
-        manifest = group_documents.export(view.conn, tmp_path / 'pinned-backup')
-        group_documents.restore(store.conn, manifest)
-        # Restore repacks all owned records. The pinned WAL reader still sees
-        # the previous files, which are now absent from current SQL owners.
-        current = {row[3] for row in group_documents.references(store.conn)}
-        old_files = {row[3] for row in original} - current
-        assert old_files
-        assert group_documents.collect_orphans(store.conn) == 0
-        for _table, _key, kind, filename, digest, size, offset in original:
-            group_documents.read(filename, digest, size, offset, kind)
-    assert group_documents.collect_orphans(store.conn) == len(old_files)
-    assert not any(Path(filename).exists() for filename in old_files)
+def test_store_retains_group_files_until_the_last_old_snapshot_read(database, tmp_path, compact_group_template):
+    store, prepared = database
+    template = compact_group_template
+    with restored_groups(template, tmp_path / 'independent.db') as (peer, peer_plan):
+        assert prepared == peer_plan == template.result
+        assert len({id(store.conn), id(peer.conn), id(template.source.conn)}) == 3
+        assert len({store._evidence_key, peer._evidence_key, template.source._evidence_key}) == 3
+        assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+        source_sql = list(template.source.conn.iterdump())
+        destinations = [roots(target.conn) for target in (store, peer)]
+        referenced = {Path(row[3]) for row in group_documents.references(template.source.conn)}
+        retained = []
+        for name, directory in template.files.items():
+            for source in directory.rglob('*'):
+                if not source.is_file():
+                    continue
+                paths = [source, *(owned[name] / source.relative_to(directory) for owned in destinations)]
+                exact = source.read_bytes()
+                assert all(path.read_bytes() == exact for path in paths)
+                assert len({(path.stat().st_dev, path.stat().st_ino) for path in paths}) == 3
+                if exact and source in referenced:
+                    retained.append((paths, exact))
+        assert retained
+        # The publication and reader operations below must leave both other
+        # owners usable, including the immutable source for subsequent tests.
+        prepared['groups'][0]['members'][0] = ('one', .1, .2)
+        store.settings.set_setting('private-compact-fixture', 'first clone')
+        expected = group_queries.head(peer.conn, members=True)
+        # Give one owner a pack with an unowned record. Restoring an already compact
+        # pack can reuse its path, so it would not exercise retirement of old files.
+        table, key, kind, filename, digest, size, offset = next(group_documents.references(store.conn))
+        assert table == 'group_versions'
+        value, age = group_documents.read(filename, digest, size, offset, kind, with_age=True)
+        replacement = next(group_documents.publish_many(group_documents.directory(store.conn),
+            [(kind, value), ('definition', {'unowned': True})], age=age))
+        with store.conn:
+            store.conn.execute('UPDATE group_versions SET definition_filename=?,definition_offset=? WHERE id=?',
+                               (replacement[0], replacement[3], key[0]))
+        group_documents.collect_orphans(store.conn)
+        with store.read_view() as view:
+            original = list(group_documents.references(view.conn))
+            manifest = group_documents.export(view.conn, tmp_path / 'pinned-backup')
+            group_documents.restore(store.conn, manifest)
+            # Restore repacks all owned records. The pinned WAL reader still sees
+            # the previous files, which are now absent from current SQL owners.
+            current = {row[3] for row in group_documents.references(store.conn)}
+            old_files = {row[3] for row in original} - current
+            assert old_files
+            assert group_documents.collect_orphans(store.conn) == 0
+            for _table, _key, kind, filename, digest, size, offset in original:
+                group_documents.read(filename, digest, size, offset, kind)
+        assert group_documents.collect_orphans(store.conn) == len(old_files)
+        assert not any(Path(filename).exists() for filename in old_files)
+        assert list(template.source.conn.iterdump()) == source_sql
+        assert peer_plan == template.result
+        assert group_queries.head(peer.conn, members=True) == expected
+        assert group_queries.head(store.conn, members=True) == expected
+        assert peer.settings.get_setting('private-compact-fixture') is None
+        assert template.source.settings.get_setting('private-compact-fixture') is None
+        paths, exact = retained[0]
+        paths[2].write_bytes(b'Private peer file corruption')
+        assert paths[0].read_bytes() == exact
+        assert group_queries.head(store.conn, members=True) == expected
 
 
-def test_compact_repository_atomic_import_and_assignment_owner_checks(database):
+def test_compact_repository_atomic_import_preserves_membership_and_representatives(database):
     store, prepared = database
     repo = CompactTasteGroupsRepo(store)
     with store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
         repo.publish(prepared)
-        repo.publish_assignments([
-            ('two', 'third', 'third-leaf', .7, .6, 'known-profile', 4),
-            ('unknown-new-key', 'third', None, 0, 0, None, 4)])
     assert repo.head_generation() == 'third'
     assert repo.head_checkpoint()['generation'] == 'third'
     assert repo.head(members=True)['groups'][1]['members'] == {'one': (.9, .8)}
-    assert repo.assignment_head()['groups'] == [{'version': 'third-leaf', 'rep_keys': ['one']}]
-    assert repo.assignment('two') == {'identity_key': 'two', 'generation': 'third', 'version': 'third-leaf',
-        'similarity': .7, 'support': .6, 'profile_digest': 'known-profile', 'prepared_at': 4}
-    assert repo.assignment('unknown-new-key')['version'] is None
-    assert store.conn.execute("SELECT resolution_reason FROM unresolved_group_assignments "
-                               "WHERE raw_key='unknown-new-key'").fetchone()[0] == 'missing_recording'
-    with pytest.raises(ValueError, match='invalid generation or selected version'), store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        repo.publish_assignments([('two', 'third', 'second-leaf', .7, .6, 'wrong-alias', 5)])
-    assert repo.assignment('two')['profile_digest'] == 'known-profile'
+    assert repo.head(members=True)['groups'][1]['rep_keys'] == ['one']
     assert not repo.expired_builds()
     assert repo.resumable_build('input-fingerprint', 3, prepared['policy'], 'second') is None
 

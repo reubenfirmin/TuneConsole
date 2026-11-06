@@ -8,24 +8,25 @@ The bias in [-1, +1] reshapes how much each genre family contributes to the feed
 These first tests pin the pure math kernel `_breadth_factors`; later tests wire it into
 `_axis_weights_for` and the route/UI.
 """
+import pytest
+
+from tests.repository_mock_support import no_database, transient_repository_store
 from yt_playlist.rec import scoring, rec_params
 from yt_playlist.util.matching import identity_key
 
 
-def _stock(store):
-    """A library dominated by Techno (8 tracks) with a rare Jazz tail (2). Returns the two candidate
-    keys (one of each family) plus the identity so callers can steer breadth."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    kt = kj = None
-    for i in range(8):
-        t = store.tracks.upsert_track(f"t{i}", f"T{i}", "DJ", None, None)
-        store.tracks.set_track_genre(t, "Techno")
-        kt = identity_key("T0", "DJ")
-    for i in range(2):
-        j = store.tracks.upsert_track(f"j{i}", f"J{i}", "Sax", None, None)
-        store.tracks.set_track_genre(j, "Jazz")
-        kj = identity_key("J0", "Sax")
-    return iid, kt, kj
+@pytest.fixture
+def breadth_store(no_database):
+    """An 8:2 listening distribution and one candidate from each genre family."""
+    kt, kj = identity_key('T0', 'DJ'), identity_key('J0', 'Sax')
+    store = transient_repository_store(
+        rec_query={'genre_play_distribution': {'Techno': 8, 'Jazz': 2},
+                   'track_genres': {kt: 'Techno', kj: 'Jazz'},
+                   'track_decades': {}, 'track_artists': {kt: 'DJ', kj: 'Sax'},
+                   'track_popularity': {}},
+        genres={'feature_axes': {'Techno': ('techno', None), 'Jazz': ('jazz', None)}},
+    )
+    return store, kt, kj
 
 
 def test_neutral_bias_produces_no_tilt():
@@ -64,25 +65,28 @@ def test_factors_are_clamped_to_a_sane_range():
 # --- wiring into the live re-rank path (_axis_weights_for) -------------------------------------
 
 
-def test_eclectic_bias_ranks_rare_family_above_dominant(store):
-    """End-to-end through the real re-rank hook: eclectic lifts a Jazz track over a Techno track."""
-    _iid, kt, kj = _stock(store)
+def test_eclectic_bias_ranks_rare_family_above_dominant(breadth_store):
+    """Through the real re-rank hook: eclectic lifts Jazz over Techno."""
+    store, kt, kj = breadth_store
     # No genre sliders are active: breadth must defeat the neutral early return.
     assert scoring._axis_weights_for(store, [kt, kj], now=10.0) is None
-    rec_params.set_param(store, "breadth_bias", 1.0)
+    store.settings.get_setting.side_effect = {
+        rec_params.SETTING_PREFIX + 'breadth_bias': '1.0'}.get
     mult = scoring._axis_weights_for(store, [kt, kj], now=10.0)
     assert mult is not None and mult[kj] > mult[kt]
 
 
-def test_focused_bias_ranks_dominant_family_above_rare(store):
+def test_focused_bias_ranks_dominant_family_above_rare(breadth_store):
     """The mirror: focused lifts Techno (dominant) over Jazz (rare)."""
-    _iid, kt, kj = _stock(store)
-    rec_params.set_param(store, "breadth_bias", -1.0)
+    store, kt, kj = breadth_store
+    store.settings.get_setting.side_effect = {
+        rec_params.SETTING_PREFIX + 'breadth_bias': '-1.0'}.get
     mult = scoring._axis_weights_for(store, [kt, kj], now=10.0)
     assert mult is not None and mult[kt] > mult[kj]
 
 
-def test_neutral_breadth_bias_changes_nothing(store):
+def test_neutral_breadth_bias_changes_nothing(breadth_store):
     """Default (0) bias keeps today's behavior: no weights/leans -> still None (no needless work)."""
-    _iid, kt, kj = _stock(store)
+    store, kt, kj = breadth_store
     assert scoring._axis_weights_for(store, [kt, kj], now=10.0) is None
+    store.rec_query.genre_play_distribution.assert_not_called()

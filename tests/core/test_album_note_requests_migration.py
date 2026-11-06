@@ -1,4 +1,5 @@
 """Release-note demand survives output expiry and fences superseded workers."""
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 import json
 import sqlite3
@@ -16,12 +17,12 @@ ALBUM = {'browse_id': 'release-one', 'artist': 'Artist', 'title': 'Release',
 
 
 @pytest.fixture
-def predecessor(tmp_path):
+def predecessor(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path / 'notes.db')
-    migrate(store.conn, registry=registry.MIGRATIONS[:83])
-    store._bind_repositories()
-    yield store
-    store.conn.close()
+    with closing(store.conn):
+        _pristine_installed_schema(83).backup(store.conn)
+        store._bind_repositories()
+        yield store
 
 
 def seed(store, value):

@@ -27,6 +27,14 @@ class PolicyStorageFull(RuntimeError):
     pass
 
 
+class PolicyCapacityFull(PolicyStorageFull):
+    """A valid batch can be retried after unused-policy maintenance makes room."""
+    def __init__(self, count, byte_size, added_count, added_bytes):
+        super().__init__(f'Unused recommendation policies reached their storage budget: '
+            f'{count} variants, {byte_size} bytes; batch adds {added_count} variants and '
+            f'{added_bytes} bytes. Retaining published pools until maintenance frees space')
+
+
 def typed(conn):
     return conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='recommendation_policies'").fetchone() is not None
 
@@ -36,7 +44,7 @@ def operational_protection(conn):
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
     owners = ('album_description_requests', 'group_generations', 'group_versions',
               'recommendation_generations', 'recommendation_pools', 'home_display_policies', 'model_pair_policies',
-              'radio_session_policies', 'radio_seed_policies')
+              'radio_session_policies', 'radio_seed_policies', 'recommendation_pool_revalidations')
     return ' AND '.join([
         f'NOT EXISTS(SELECT 1 FROM {table} r WHERE r.policy_version=p.version)'
         for table in owners if table in tables])
@@ -84,7 +92,7 @@ def _publish_typed(conn, rows, bases, enforce_budget):
         bodies = conn.execute('SELECT COALESCE(sum(byte_size),0) FROM recommendation_policy_bodies '
                               'WHERE served=0').fetchone()[0]
         if count + len(new_rows) > MAX_UNUSED_VARIANTS or bodies + variants + size > MAX_UNUSED_BYTES:
-            raise PolicyStorageFull('Unused recommendation policies reached their storage budget; retaining published pools')
+            raise PolicyCapacityFull(count, bodies + variants, len(new_rows), size)
     # Match the original storage boundary: publication opens a transaction when
     # necessary, while its caller owns commit/rollback with the associated work.
     policy_documents.install(conn, rows, bases)
@@ -147,10 +155,7 @@ def publish(conn, rows, bases=(), *, enforce_budget=False):
         body_bytes = conn.execute(
             'SELECT COALESCE(sum(byte_size),0) FROM rec_policy_bases WHERE served=0').fetchone()[0]
         if unused + len(new_rows) > MAX_UNUSED_VARIANTS or body_bytes + variant_bytes + size > MAX_UNUSED_BYTES:
-            raise PolicyStorageFull(f'Unused recommendation policies reached their storage budget: '
-                f'{unused} variants, {body_bytes + variant_bytes} bytes; '
-                f'batch adds {len(new_rows)} variants and {size} bytes. '
-                'Retaining published pools until maintenance frees space')
+            raise PolicyCapacityFull(unused, body_bytes + variant_bytes, len(new_rows), size)
     conn.executemany('INSERT OR IGNORE INTO rec_policy_bases(base_version,configuration,byte_size,created_at) '
                      'VALUES (?,?,?,?)', bases)
     conn.executemany('INSERT OR IGNORE INTO rec_serving_policies VALUES (?,?,?)', rows)

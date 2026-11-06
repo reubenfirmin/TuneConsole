@@ -271,6 +271,21 @@ def selected(conn):
     return row[0] if row else None
 
 
+def present(conn, surface, identity):
+    if surface.startswith('choice_window:'):
+        owner, predicate, parameters = 'listening_choice_windows', 'format=?', (surface.split(':', 1)[1],)
+    elif surface == 'album_menu_refresh':
+        owner, predicate, parameters = 'album_menu_refresh', 'epoch IS NOT NULL', ()
+    elif surface == 'home_genre_request':
+        owner, predicate, parameters = 'home_genre_requests', (
+            '(epoch IS NOT NULL OR has_includes OR has_avoids OR held_by_vibe IS NOT NULL '
+            'OR suspended_by_vibe IS NOT NULL)'), ()
+    else:
+        raise ValueError('Unknown recommendation demand owner')
+    return conn.execute('SELECT 1 FROM '+table(owner)+' WHERE stage=? AND '+predicate+' LIMIT 1',
+                        (identity, *parameters)).fetchone() is not None
+
+
 def read(conn, surface, identity):
     """Read only immutable typed members of a pinned request generation."""
     if surface not in preparation.SURFACES:

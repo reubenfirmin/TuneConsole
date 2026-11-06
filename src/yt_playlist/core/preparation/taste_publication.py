@@ -257,59 +257,6 @@ def selected(conn):
     return row[0] if row else None
 
 
-def projection(conn,owner,columns,*,token_name='axis'):
-    identity = selected(conn)
-    if identity is None or owner not in preparation.KEYS:
-        return None
-    token = ("CASE kind WHEN 'genre' THEN 'genre:'||genre_key WHEN 'family' THEN 'genre:'||family_key "
-             "WHEN 'unresolved_genre' THEN 'genre:'||axis_value ELSE axis_value END AS "+token_name)
-    fields = {'rec_weights':'weight,updated_at','rec_lean':'value,updated_at,last_graduated_day',
-        'home_hidden_facet':'','rec_theme':'sum(score) AS score,max(updated_at) AS updated_at',
-        'rec_play_grad':'max(last_graduated_day) AS last_graduated_day',
-        'rec_grad_log':"json_extract(source_key,'$[0]') AS id,source,score,factor,new_weight,created_at"}[owner]
-    folded = 'SELECT '+token+(','+fields if fields else '')+' FROM main.'+table('rows')
-    folded += ' WHERE stage='+str(identity)+' AND owner='+repr(owner)
-    if owner in ('rec_theme','rec_play_grad','home_hidden_facet'):
-        folded += ' GROUP BY axis_key'
-    return 'SELECT '+columns+' FROM ('+folded+') t'
-
-
-def live_projection(owner,columns,*,token_name='axis'):
-    """Keep canonical API folds coherent while installed sources are authoritative.
-
-    A continuing write withdraws immutable selection. Readers then resolve the
-    current physical rows, including aliases introduced after preparation. They
-    must not expose separate theme contributions as separate graduation targets.
-    Configured collisions retain both raw keys so neither value disappears.
-    """
-    legacy = 'facet' if owner=='rec_theme' else 'axis'
-    fields = {'rec_weights':'weight,updated_at','rec_lean':'value,updated_at,last_graduated_day',
-        'home_hidden_facet':'','rec_theme':'score,updated_at','rec_play_grad':'last_graduated_day',
-        'rec_grad_log':'id,source,score,factor,new_weight,created_at'}[owner]
-    source = ('SELECT '+legacy+' AS raw_token,'+taste_axes.legacy_token(legacy)+' AS canonical_token,'
-        +taste_axes.legacy_kind(legacy)+' AS axis_kind'+(','+fields if fields else '')+' FROM main.'+owner)
-    folded = 'SELECT canonical_token,axis_kind,'
-    if owner in ('rec_theme','rec_play_grad','home_hidden_facet'):
-        folded += 'min(raw_token) AS raw_token'
-    else:
-        folded += 'raw_token'
-    if owner=='rec_theme':
-        folded += ',sum(score) AS score,max(updated_at) AS updated_at'
-    elif owner=='rec_play_grad':
-        folded += ',max(last_graduated_day) AS last_graduated_day'
-    elif fields:
-        folded += ','+fields
-    folded += ' FROM ('+source+')'
-    if owner in ('rec_theme','rec_play_grad','home_hidden_facet'):
-        folded += ' GROUP BY axis_kind,canonical_token'
-    unique = 'min(axis_kind) OVER (PARTITION BY canonical_token)=max(axis_kind) OVER (PARTITION BY canonical_token)'
-    if owner in ('rec_weights','rec_lean'):
-        unique += ' AND count(*) OVER (PARTITION BY canonical_token)=1'
-    token = 'CASE WHEN '+unique+' THEN canonical_token ELSE raw_token END'
-    visible = 'SELECT '+token+' AS '+token_name+(','+fields if fields else '')+' FROM ('+folded+')'
-    return 'SELECT '+columns+' FROM ('+visible+') t'
-
-
 def main(argv=None):
     import argparse
     from contextlib import closing

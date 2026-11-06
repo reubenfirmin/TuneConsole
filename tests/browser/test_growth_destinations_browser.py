@@ -18,9 +18,9 @@ def test_destinations_appear_with_real_content_and_keep_the_player(live_app, sto
     store.settings.set_setting('last_sync_at', '1')
     # A remembered adjustment cannot reveal the Vibes controls on its own.
     store.settings.set_setting('home_mix_vibe', 'relax')
-    page.route('**/bridge/status', lambda route: route.fulfill(json={
-        'connected': True, 'now_playing': {'video_id': 'playing', 'title': 'Still playing',
-                                        'artist': 'Artist', 'paused': False}}))
+    bridge = {'connected': True, 'now_playing': {
+        'video_id': 'playing', 'title': 'Still playing', 'artist': 'Artist', 'paused': False}}
+    page.route('**/bridge/status', lambda route: route.fulfill(json=bridge))
     page.route('https://i.ytimg.com/**', lambda route: route.fulfill(status=404))
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
@@ -49,6 +49,63 @@ def test_destinations_appear_with_real_content_and_keep_the_player(live_app, sto
     page.evaluate('() => Alpine.$data(document.querySelector(".home-growth")).refresh()')
     for label in ('TV', 'Discover', 'Revisit', 'Into recently'):
         expect(page.get_by_role('tab', name=label, exact=True)).to_be_visible()
+    notice = page.locator('.growth-unlock-notice')
+    # Earned notices need their own space beside the real Mix and persistent TV
+    # surfaces. Sample every text line, including both edges of the heading;
+    # a box or center-only check misses the partially covered TV reproduction.
+    for connected in (False, True):
+        bridge['connected'] = connected
+        page.evaluate('window.playbackStatus.refresh()')
+        for label, panel in (('Mix tapes', 'directions'), ('TV', 'tv')):
+            page.get_by_role('tab', name=label, exact=True).click()
+            expect(page.locator(f'[data-dash="{panel}"]')).to_be_visible()
+            page.wait_for_function("connected => Alpine.$data(document.querySelector('#home')).connected === connected", arg=connected)
+            if connected:
+                expect(page.locator('.onboard-card')).to_be_hidden()
+            else:
+                expect(page.locator('.onboard-card')).to_be_visible()
+            expect(notice).to_be_visible()
+            page.evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+            page.locator('main').evaluate('''el => Promise.all(el.getAnimations({subtree:true})
+                .filter(a => a.effect.getComputedTiming().iterations !== Infinity)
+                .map(a => a.finished.catch(() => {})))''')
+            if panel == 'directions':
+                page.wait_for_function('''() => [...document.querySelectorAll('#home-mode-cards .gen-poster')]
+                    .every(el => { for (let parent = el; parent; parent = parent.parentElement) {
+                        if (getComputedStyle(parent).opacity !== '1') return false;
+                    } return el.checkVisibility({checkOpacity:true}); })''')
+            composition = notice.evaluate('''notice => {
+                const n = notice.getBoundingClientRect();
+                const walker = document.createTreeWalker(notice, NodeFilter.SHOW_TEXT);
+                const obscured = [];
+                while (walker.nextNode()) {
+                    const node = walker.currentNode;
+                    if (!node.textContent.trim()) continue;
+                    const range = document.createRange();
+                    range.selectNodeContents(node);
+                    for (const r of range.getClientRects()) {
+                        if (!r.width || !r.height) continue;
+                        for (const x of [r.left + 1, (r.left + r.right) / 2, r.right - 1]) {
+                            const top = document.elementFromPoint(x, (r.top + r.bottom) / 2);
+                            if (!top || !notice.contains(top)) obscured.push(node.textContent.trim());
+                        }
+                    }
+                }
+                const protectedContent = [...document.querySelectorAll(
+                    '[data-dash="directions"] .gen-poster, [data-dash="directions"] .gen-theme, .tv-session')]
+                    .filter(el => el.getClientRects().length)
+                    .map(el => { const r = el.getBoundingClientRect();
+                        return {element: el.className, overlap:
+                            Math.max(0, Math.min(n.right,r.right)-Math.max(n.left,r.left)) *
+                            Math.max(0, Math.min(n.bottom,r.bottom)-Math.max(n.top,r.top))}; });
+                return {obscured, protectedContent, noticeTop: n.top, noticeBottom: n.bottom,
+                    pageScroll: scrollY, viewportHeight: innerHeight};
+            }''')
+            page.screenshot(path=f'/tmp/tuneconsole-985-notice-{connected}-{panel}-{width}.png', full_page=True)
+            assert composition['obscured'] == [], composition
+            assert composition['protectedContent'], composition
+            assert all(item['overlap'] == 0 for item in composition['protectedContent']), composition
+    page.get_by_role('tab', name='Mix tapes', exact=True).click()
     # Preparation changes lighting and access; the illustrated route stays fixed.
     expect(recent_route).to_have_attribute('data-parent', 'vibes')
     new_route = recent_route.locator('path').last.get_attribute('d')

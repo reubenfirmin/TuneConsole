@@ -102,35 +102,13 @@ def matches(conn, owner, token, *, create=False):
     _, (kind,genre,family,value,_) = taste_reads.axis(conn,token)
     if kind=='other':
         return legacy+'=?', (value,)
-    prefixed,label,candidates = _legacy_parts(legacy)
+    prefixed,label,candidates = taste_reads.legacy_parts(legacy)
     if kind=='family':
         return prefixed+' AND ('+label+')=?', (family,)
     if kind=='unresolved_genre':
         return prefixed+' AND ('+label+')=?', (value,)
     return (prefixed+f' AND NOT EXISTS(SELECT 1 FROM genre_family WHERE key=({label})) '
         'AND (SELECT count(*)=1 AND min(identity_key)=? FROM ('+candidates+'))', (genre,))
-
-
-def _legacy_parts(column):
-    prefixed = f"(substr({column},1,6)='genre:' OR substr({column},1,7)='family:')"
-    label = f"CASE WHEN substr({column},1,7)='family:' THEN substr({column},8) ELSE substr({column},7) END"
-    candidates = (f'SELECT key AS identity_key FROM genre_catalog WHERE key=({label}) OR name=({label}) COLLATE NOCASE '
-        f'UNION SELECT genre_key FROM genre_alias WHERE label_key=tastenorm({label}) OR label=({label}) COLLATE NOCASE')
-    return prefixed,label,candidates
-
-
-def legacy_token(column):
-    """Current canonical token for a physical row; no publication map is assumed."""
-    prefixed,label,candidates = _legacy_parts(column)
-    return ('CASE WHEN '+prefixed+' THEN CASE WHEN EXISTS(SELECT 1 FROM genre_family WHERE key=('+label+')) '
-        "THEN 'genre:'||("+label+") ELSE coalesce((SELECT CASE WHEN count(*)=1 THEN 'genre:'||min(identity_key) END FROM ("+
-        candidates+")),'genre:'||("+label+')) END ELSE '+column+' END')
-
-
-def legacy_kind(column):
-    prefixed,label,candidates = _legacy_parts(column)
-    return ('CASE WHEN '+prefixed+' THEN CASE WHEN EXISTS(SELECT 1 FROM genre_family WHERE key=('+label+')) '
-        "THEN 'family' WHEN (SELECT count(*) FROM ("+candidates+"))=1 THEN 'genre' ELSE 'unresolved_genre' END ELSE 'other' END")
 
 
 def reference(conn, owner, token, *, create=False):

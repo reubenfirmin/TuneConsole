@@ -5,7 +5,9 @@ one prepared payload per request and supplies the same response metadata to the
 board and tuning routes.
 """
 from fastapi import Response
+from contextlib import nullcontext
 
+from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.rec import artist_start, choice_evidence, home_cards, home_prepared, home_vibe, mix_tuning, onboarding, rec_params
 from yt_playlist.rec.home_cards import _epoch
 from yt_playlist.web.jobs import start_fresh_pool, start_library_pool
@@ -26,11 +28,13 @@ class PoolJobs:
 
 
 class HomeViews:
-    def __init__(self, ctx, *, store=None):
+    def __init__(self, ctx, *, store=None, writer=None, display_only=False):
         self.ctx = ctx
         self.store = ctx.store if store is None else store
+        self.writer = self.store if writer is None else writer
+        self.display_only = display_only
         self.templates = ctx.templates
-        self.recommendations = home_cards.HomeCards(self.store, PoolJobs(ctx), ctx.logger)
+        self.recommendations = home_cards.HomeCards(self.writer, PoolJobs(ctx), ctx.logger)
 
     def schedule(self):
         if self.ctx.rec_worker:
@@ -39,30 +43,40 @@ class HomeViews:
     def prepared(self, now, request=None):
         if request is not None and hasattr(request.state, "prepared_home"):
             return request.state.prepared_home
-        payload = home_prepared.load(self.store, now, self.schedule)
+        payload = home_prepared.load(self.store, now, self.schedule, display_only=self.display_only)
         if request is not None:
             request.state.prepared_home = payload
         return payload
 
     def card_context(self, request, now, *, live=False, **options):
         store = self.store
-        payload = self.prepared(now, request)
         record = False
         if live:
             mix_tuning.expire(store, now)
-            with store.read_view() as reader:
-                calculation = home_cards.HomeCards(reader, self.recommendations.jobs, self.ctx.logger)
+            selection_reader = getattr(request.state, 'vibe_reader', None)
+            with (nullcontext(selection_reader) if selection_reader is not None else store.read_view()) as reader:
+                # An explicit selection replaces every offer below. Reuse its
+                # context and controls without restoring the previous offers'
+                # musical evidence; the newly selected tracks keep full inputs.
+                payload = (home_prepared.selection_context(reader, now, self.schedule)
+                           if selection_reader is not None
+                           else home_prepared.peek(reader, now, self.schedule))
+                request.state.prepared_home = payload
+                calculation = home_cards.HomeCards(reader, self.recommendations.jobs, self.ctx.logger,
+                    genre_options=(payload or {}).get('genre_options'))
                 result = calculation.cards(home_cards.CardsRequest(now, record=False, **options))
-            home_prepared.remember(store, payload, result, now)
+                tuning = home_prepared.tuning_key(reader, now)
+            home_prepared.remember(store, payload, result, now, tuning=tuning)
             self.schedule()
         else:
+            payload = self.prepared(now, request)
             record = (request.url.path in ("/", "/home/cards", "/home/refresh-cards")
-                      and not getattr(store, 'activity_paused', False)
-                      and not getattr(store, '_read_only', False))
+                      and not getattr(self.writer, 'activity_paused', False)
+                      and not getattr(self.writer, '_read_only', False))
             if record and request.url.path == "/":
                 record = growth_state(self.ctx, request)['ready_formats']['mixes']
             result = home_prepared.cards(store, payload, now, self.recommendations, self.schedule,
-                                        record=record)
+                                        record=record, writer=self.writer)
         if not result.protos and not home_vibe.current(store, now):
             first = artist_start.first_set(store, now)
             if first:
@@ -82,8 +96,8 @@ class HomeViews:
                         "genres": list(p.get('genres', [])),
                         "assignment": p.get("assignment")} for i, p in enumerate(result.protos)]
             try:
-                oid = choice_evidence.present(store, "mixes", options, now,
-                    context=frozen_context, window=result.epoch)
+                oid = choice_evidence.present(self.writer, "mixes", options, now,
+                    context=frozen_context, window=result.epoch, vibe=result.vibe or None)
                 for proto in result.protos:
                     proto["recipe"] = {**proto.get("recipe", {}), "opportunity_id": oid,
                                        "option_id": proto["experiment_id"]}
@@ -101,7 +115,7 @@ class HomeViews:
         context["prepare_interval"] = min(30, 3 * 2 ** min(attempt, 4))
         context["genre_options"] = [option | {"tint": genre_tint(option["family"])}
                                     for option in result.genre_options]
-        self.recommendations.audit(result.protos, now, request.url.path)
+        self.recommendations.audit(result.protos, now, request.url.path, reader=store)
         return context
 
     def tuning_active(self):
@@ -125,7 +139,7 @@ class HomeViews:
                 "tuning_active": self.tuning_active(),
                 "vibe_presets": home_vibe.PRESETS,
                 "vibes_ready": growth['vibes_ready'], "vibe": home_vibe.current(store, now),
-                "has_modes": bool(store.modes.list_modes(active_only=True)),
+                "has_modes": bool(store.modes.list_summaries(active_only=True)),
                 **self.card_context(request, now)}
 
     def discovery_context(self, now, request=None):
@@ -155,6 +169,9 @@ class HomeViews:
     def cards_safe(self, request, now, *, swap_oob=False):
         try:
             return self.cards_fragment(request, now, swap_oob=swap_oob)
+        except (WorkBudgetExceeded, WorkClosing):
+            # The app's read-recovery response preserves the mounted cards.
+            raise
         except Exception:  # noqa: BLE001 - don't strand a fragment on a spinner
             self.ctx.logger.exception("home cards render failed")
             if request.method == 'POST' and request.url.path == '/home/vibe':

@@ -1,8 +1,7 @@
 """Offer publication preserves deduplication across readers and continuing writes."""
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import json
 import sqlite3
-from threading import Barrier
 
 import pytest
 
@@ -35,49 +34,33 @@ def test_publication_and_continuing_writes_share_one_owner(installed):
         store.conn.execute('UPDATE prepared_home_offer_dedup SET epoch=13')
         assert store.rec_proposals.get_proposals('home_shown')['epoch'] == 13
         store.conn.rollback()
-    assert store.rec_ledger.claim_home_offers(12, ['first', 'third'], 101) == {'third'}
+    continued = {'epoch': 12, 'signatures': ['first', 'second', 'third']}
+    store.rec_proposals.put_proposals('home_shown', continued, 101)
     reopened = Store(store._db_path)
     try:
         reopened.init_schema()
-        assert reopened.rec_ledger.claim_home_offers(12, ['third'], 102) == set()
-        assert reopened.rec_ledger.claim_home_offers(13, ['first'], 103) == {'first'}
+        assert reopened.rec_proposals.get_proposals('home_shown') == continued
+        reopened.rec_proposals.put_proposals('home_shown', {'epoch': 13, 'signatures': ['first']}, 103)
     finally:
         reopened.conn.close()
     assert store.rec_proposals.get_proposals('home_shown') == {'epoch': 13, 'signatures': ['first']}
-    with sqlite3.connect(store._db_path) as old_writer:
+    with closing(sqlite3.connect(store._db_path)) as old_writer, old_writer:
         old_writer.execute("UPDATE rec_proposals SET payload=?,built_at=200 WHERE surface='home_shown'",
                            (json.dumps({'epoch': 13, 'signatures': ['old-writer']}),))
-    assert store.rec_ledger.claim_home_offers(13, ['old-writer'], 201) == set()
+    assert store.rec_proposals.get_proposals('home_shown') == {'epoch': 13, 'signatures': ['old-writer']}
     # A rename may replace the unrelated document body with non-JSON text.
     with store.conn:
         store.conn.execute("UPDATE rec_proposals SET surface='unrelated',payload='opaque {text' WHERE surface='home_shown'")
     assert not store.rec_proposals.has_proposals('home_shown')
     store.rec_proposals.put_proposals('home_shown', {}, 202)
     assert store.rec_proposals.get_proposals('home_shown') is None
-    assert store.rec_ledger.claim_home_offers(14, ['fresh'], 203) == {'fresh'}
+    store.rec_proposals.put_proposals('home_shown', {'epoch': 14, 'signatures': ['fresh']}, 203)
+    assert store.rec_proposals.get_proposals('home_shown') == {'epoch': 14, 'signatures': ['fresh']}
     assert tuple(store.conn.execute('SELECT * FROM published_offers_originals').fetchone()) == original
     with pytest.raises(sqlite3.IntegrityError, match='future cleanup'):
         with store.conn:
             store.conn.execute('DELETE FROM published_offers_originals')
     regular.validate(store.conn)
-
-
-@pytest.mark.parametrize('installed', [82], indirect=True)
-def test_atomic_claims_admit_one_winner_across_connections(installed):
-    store, _ = installed
-    offer_publication.publish(store.conn, revision=prepare(store))
-    second = Store(store._db_path)
-    try:
-        second.init_schema()
-        barrier = Barrier(2)
-        def claim(index):
-            barrier.wait()
-            return (store if index == 0 else second).rec_ledger.claim_home_offers(12, ['racing'], 300)
-        with ThreadPoolExecutor(2) as pool:
-            claims = list(pool.map(claim, range(2)))
-        assert claims.count({'racing'}) == 1 and claims.count(set()) == 1
-    finally:
-        second.conn.close()
 
 
 @pytest.mark.parametrize('installed', [82], indirect=True)
@@ -113,9 +96,9 @@ def test_retained_source_supports_the_explicit_frozen_upgrade(tmp_path):
         store.init_schema()
         offer_publication.publish(store.conn, revision=prepare(store))
         store.rec_proposals.put_proposals('home_shown', {'epoch': 14, 'signatures': ['new']}, 200)
-        store.rec_ledger.claim_home_offers(14, ['last'], 300)
+        store.rec_proposals.put_proposals('home_shown', {'epoch': 14, 'signatures': ['last', 'new']}, 300)
         # The compatible current source still feeds the actual frozen upgrade.
-        with sqlite3.connect(store._db_path) as converter:
+        with closing(sqlite3.connect(store._db_path)) as converter, converter:
             converter.row_factory = sqlite3.Row
             converter.execute('PRAGMA foreign_keys=ON')
             migrate(converter, registry=registry.MIGRATIONS[:83])

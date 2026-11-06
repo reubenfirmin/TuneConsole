@@ -1,5 +1,9 @@
+import numpy as np
+import pytest
+
 from yt_playlist.rec import embedding_vectors as embed, scoring
 from tests import model_support
+from tests.repository_mock_support import no_database, repository_store
 
 
 def test_playlist_taste_weights_by_play_and_scores(store):
@@ -18,14 +22,21 @@ def test_playlist_taste_weights_by_play_and_scores(store):
     pt_model = scoring.playlist_taste(store)
     assert pt_model                                       # non-empty
     keys, V, idx = embed.load_vectors(store)
-    s_techno, because = pt_model.score(V[idx["t1|technoband"]])
-    s_folk, _ = pt_model.score(V[idx["f1|folkband"]])
+    scores, _ = scoring.score_with_traces(store, pt_model, keys, V, idx, now=1.)
+    assert scores["t1|technoband"] > scores["f1|folkband"]
+    contributions = pt_model.context_contributions(V[idx["t1|technoband"]])
+    assert pt_model.titles[contributions.argmax()] == "Techno Nights"
 
-    assert s_techno > s_folk                              # techno candidate beats the low-play folk one
-    assert because[0][0] == "Techno Nights"               # explained by the playlist you actually play
 
-
-def test_playlist_taste_empty_without_vectors(store):
-    store.accounts.upsert_account("main", "cred", None, True)
+def test_playlist_taste_empty_without_vectors(no_database):
+    store = repository_store(rec_model={'get_rec_vectors': []})
     pt = scoring.playlist_taste(store)
-    assert not pt and pt.score([1.0]) == (0.0, [])
+    store.rec_model.get_rec_vectors.assert_called_once_with()
+    assert not pt
+    assert pt.context_contributions(np.ones(2)).size == 0
+    assert pt.allocated_scores(np.eye(2)) == pytest.approx([0., 0.])
+    assert pt.allocated_scores(np.empty((0, 2))).size == 0
+    single = scoring.PlaylistTaste(["Only"], np.array([[1., 0.]]), np.array([.2]))
+    candidates = np.array([[1., 0.], [0., 1.], [-1., 0.], [2., 0.]])
+    assert single.allocated_scores(candidates) == pytest.approx([1., 0., -1., 1.])
+    assert single.allocated_scores(np.empty((0, 2))).size == 0

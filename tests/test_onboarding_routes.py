@@ -1,20 +1,11 @@
 import json
+from tests.derived_rating_support import seed_dislike, seed_like
 
 import pytest
 from fastapi.testclient import TestClient
 from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
-
-
-@pytest.fixture
-def store():
-    s = Store(":memory:")
-    try:
-        s.init_schema()
-        yield s
-    finally:
-        s.conn.close()
 
 
 def _client(store):
@@ -118,14 +109,15 @@ def test_generated_starter_hides_radio_until_setup_is_complete(store):
         'name': 'Something to listen to - January 1 1970',
         'tracks': json.dumps([{'video_id': 'v1', 'title': 'T', 'artist': 'A'}]),
     })
-    assert response.status_code == 200 and 'Saved' in response.text
+    assert response.status_code == 200
     playlist = next(p for p in store.playlists.get_playlists() if p.provider_playlist_id == fake.created[0][0])
+    assert f'data-generated-playlist="{playlist.provider_playlist_id}"' in response.text
+    assert f'window.location.assign("/playlist/{playlist.id}")' in response.text
     html = client.get(f'/playlist/{playlist.id}').text
     assert 'Play on YouTube Music' in html
     assert 'Start radio from this playlist' not in html
 
     store.settings.set_setting(SETUP_COMPLETE, '1')
-    store.settings.set_setting('onboard_format_pending', '1')
     html = client.get(f'/playlist/{playlist.id}').text
     assert f'href="/?radio_playlist={playlist.id}#radio"' in html
     assert store.settings.get_setting('home_format') is None
@@ -158,42 +150,11 @@ def test_home_shows_onboarding_when_thin(store):
     assert '<h1 id="arrival-title">Welcome to TuneConsole</h1>' in html
     assert html.count('class="festival-map"') == 1
     assert 'festival-grounds-v4.png' in html
-    assert 'onboarding-arrival.png' not in html
     assert 'class="account-health"' not in html
     assert 'hx-get="/home/onboard/start"' in html          # imported music is immediately playable
     assert "onboard-progress" not in html
     assert 'hx-get="/home/cards"' not in html
     assert 'id="home-feed"' not in html
-
-
-def test_first_format_welcome_rejects_invalid_input(store):
-    _, client = _client(store)
-    html = client.get('/').text
-    assert 'id="arrival-title"' in html
-    assert 'id="listening-format-title"' not in html
-    assert store.settings.get_setting('onboard_format_pending') is None
-    assert client.post('/home/onboard/format', data={'format': 'invalid'}).status_code == 422
-    assert store.settings.get_setting('onboard_listening_format') is None
-
-
-@pytest.mark.parametrize('format,panel', [('albums', 'album-choices'), ('mixes', 'directions'), ('radio', 'radio')])
-def test_first_format_choice_persists_and_finishes_after_offers_arrive(store, format, panel):
-    from tests.test_growth_destinations import publish_full_journey
-
-    _, client = _client(store)
-    assert client.post('/home/onboard/format', data={'format': format}).status_code == 409
-    _synced_thin(store)
-    publish_full_journey(store)
-    response = client.post('/home/onboard/format', data={'format': format}, follow_redirects=False)
-    assert response.status_code == 303 and response.headers['location'] == '/'
-    assert store.settings.get_setting('home_format') == format
-    assert store.settings.get_setting('onboard_listening_format') is None
-    status = client.get('/home/onboard/status').json()['setup']
-    assert status['complete'] and status['albums_ready']
-    assert status['listening_format'] == format
-    html = client.get('/').text
-    assert 'id="onboarding-feed"' not in html
-    assert f"homePanel(location.hash.slice(1)) || '{panel}'" in html
 
 
 def test_prepared_albums_cannot_skip_the_foundation_when_choosing_a_format(store):
@@ -210,25 +171,10 @@ def test_prepared_albums_cannot_skip_the_foundation_when_choosing_a_format(store
     assert not growth['foundation_ready']
     assert not growth['ready_formats']['albums']
     assert client.get('/home/album-choices').status_code == 409
-    response = client.post('/home/onboard/format', data={'format': 'albums'})
+    response = client.post('/home/format', data={'format': 'albums'})
     assert response.status_code == 409
     assert store.settings.get_setting('home_format') is None
     assert not onboarding.setup_completed(store)
-
-
-def test_legacy_pending_format_does_not_block_listening_and_settings_override_is_preserved(store):
-    from tests.test_growth_destinations import publish_full_journey
-
-    _, client = _client(store)
-    store.settings.set_setting('onboard_format_pending', '1')
-    client.get('/')
-    store.settings.set_setting('last_sync_at', '1000')
-    publish_full_journey(store)
-    assert client.get('/home/onboard/status').json()['setup']['complete']
-    assert 'id="welcome-title"' not in client.get('/').text
-    assert 'id="listening-format-title"' not in client.get('/').text
-    assert client.post('/home/format', data={'format': 'albums'}).status_code == 204
-    assert 'id="onboarding-feed"' not in client.get('/').text
 
 
 def test_onboard_radio_fragment_ok(store):
@@ -537,14 +483,14 @@ def test_existing_actual_home_offers_backfill_setup_completion(store, surface, p
     ('choice_window:albums', {'opportunity_id': None}),
     ('choice_window:mixes', {'opportunity_id': ''}),
 ])
-def test_empty_or_invalid_historical_offers_do_not_complete_setup(tmp_path, surface, payload):
-    from yt_playlist.core.migrations import migrate, registry
+def test_empty_or_invalid_historical_offers_do_not_complete_setup(
+        tmp_path, _pristine_installed_schema, surface, payload):
     from yt_playlist.rec import onboarding
 
     # These malformed rows predate the typed offer owner; current writers reject them.
     store = Store(tmp_path / 'historical-offers.db')
     try:
-        migrate(store.conn, registry=registry.MIGRATIONS[:82])
+        _pristine_installed_schema(82).backup(store.conn)
         store.init_schema(defer_metadata=True)
         _synced_thin(store)
         store.rec_proposals.put_proposals(surface, payload, 999)
@@ -594,7 +540,7 @@ def test_imported_likes_and_dismissal_cannot_open_an_empty_home(store):
     for i in range(30):
         key = f"song {i}|artist"
         seed_catalog_track(store, key, f"Song {i}", "Artist", video_id=f"v{i}")
-        store.rec_model.record_like(key, now=1000)
+        seed_like(store, key, now=1000)
     for _ in range(2):
         html = client.get("/").text
         assert 'id="onboarding-feed"' in html
@@ -616,7 +562,7 @@ def test_unusable_prepared_offers_do_not_end_setup(store, with_mode):
             "centroid": np.array([1.0]), "size": 5, "rep_keys": []}], [], 1000)
     tracks = publish_personal_mix(store)
     assert onboarding.prepared_mixes_ready(store, 1000)
-    store.rec_model.record_dislike(tracks[0]["key"], until=None, now=1000)
+    seed_dislike(store, tracks[0]["key"], until=None, now=1000)
     assert not onboarding.prepared_mixes_ready(store, 1000)
     assert onboarding.initial_setup_pending(store, 1000)
     assert not client.get("/home/onboard/status").json()["setup"]["complete"]

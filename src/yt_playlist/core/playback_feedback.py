@@ -36,35 +36,21 @@ def _apply(store, row):
 
 def drain(store, *, limit=32):
     """Replay a bounded prefix without waiting for the serving writer or another replay."""
-    queue = inbox(store)
-    if store.activity_paused or not queue.replaying.acquire(blocking=False):
-        return 0
-    completed = 0
-    try:
+    repository = store.playback_feedback
+    with repository.replaying() as admitted:
+        if not admitted:
+            return 0
+        completed = 0
         for _ in range(limit):
             if store.activity_paused:
                 break
-            row = queue.next()
-            if row is None or not store._lock.acquire(blocking=False):
+            row = repository.next_observation()
+            if row is None or not repository.apply_observation(row, _apply):
                 break
-            try:
-                if store.activity_paused:
-                    break
-                with store.conn.atomic():
-                    receipt = store.conn.execute('SELECT 1 FROM playback_feedback_receipts WHERE capture_id=?',
-                                                 (row['capture_id'],)).fetchone()
-                    if receipt is None:
-                        result = _apply(store, row)
-                        store.conn.execute('INSERT INTO playback_feedback_receipts VALUES (?,?,?,?,?)',
-                            (row['capture_id'], row['account_id'], row['kind'], row['observed_at'], bool(result)))
-            finally:
-                store._lock.release()
             # A retained receipt makes a failed acknowledgement safe to retry.
-            queue.acknowledge(row['capture_id'])
+            repository.acknowledge_observation(row['capture_id'])
             completed += 1
         return completed
-    finally:
-        queue.replaying.release()
 
 
 def try_drain(store):

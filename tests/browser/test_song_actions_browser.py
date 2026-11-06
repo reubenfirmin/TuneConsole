@@ -1,7 +1,6 @@
 """The same song menu works across views; playlist writes and modal focus stay predictable."""
 import socket
-import threading
-import time
+from tests.enrichment_support import seed_enrichment
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -9,6 +8,8 @@ import uvicorn
 from playwright.sync_api import expect
 
 from tests.test_song_actions import SONG, seed_song_actions
+from tests.live_server import LiveServer
+from tests.browser.quiet_action_support import action_evidence, assert_quiet_action
 
 
 @pytest.fixture
@@ -18,25 +19,23 @@ def song_app(store):
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     server = uvicorn.Server(uvicorn.Config(data["app"], host="127.0.0.1", port=port, log_level="warning"))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 10
-    while not server.started:
-        assert thread.is_alive() and time.monotonic() < deadline
-        time.sleep(.02)
-    yield {**data, "base": f"http://127.0.0.1:{port}"}
-    server.should_exit = True
-    thread.join(timeout=5)
+    with LiveServer(server):
+        yield {**data, "base": f"http://127.0.0.1:{port}"}
 
 
 def test_readonly_song_menu_disables_writes_and_recovers_without_reload(song_app, page):
     store = song_app['store']
     store._evidence_recovery_pending = True
+    maintenance = song_app['app'].state.ctx.storage_maintenance
     page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
     page.get_by_role('button', name='More actions for Owned Song').click()
     menu = page.get_by_role('menu', name='Song actions')
     actions = [menu.get_by_role('menuitem', name=name, exact=True) for name in (
         'Add song to playlist', 'Create playlist from song', 'Edit Metadata')]
+    # Routine resumable evidence cleanup leaves writes available (#866).
+    for action in actions:
+        expect(action).to_be_enabled()
+    maintenance.active = True
     for action in actions:
         expect(action).to_be_disabled()
     play = menu.get_by_role('menuitem', name='Play on YouTube Music', exact=True)
@@ -49,10 +48,10 @@ def test_readonly_song_menu_disables_writes_and_recovers_without_reload(song_app
     page.keyboard.press('ArrowDown')
     expect(details).to_be_focused()
     page.screenshot(path='/tmp/tuneconsole-686-readonly-song-menu.png')
-    store._evidence_recovery_pending = False
+    maintenance.active = False
     for action in actions:
         expect(action).to_be_enabled()
-    store._evidence_recovery_pending = True
+    maintenance.active = True
     for action in actions:
         expect(action).to_be_disabled()
     assert menu.is_visible()
@@ -110,7 +109,7 @@ def test_create_from_album_with_readable_input_and_modal_focus(song_app, page, w
     assert not errors
 
 
-def test_add_search_error_retry_and_duplicate_state(song_app, page, tmp_path):
+def test_add_search_error_retry_and_duplicate_state(song_app, page, tmp_path, action_evidence):
     page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
     trigger = page.get_by_role("button", name="More actions for Owned Song")
     trigger.click()
@@ -128,16 +127,25 @@ def test_add_search_error_retry_and_duplicate_state(song_app, page, tmp_path):
         page.set_viewport_size({"width": width, "height": 850})
         expect(dialog.get_by_role("button", name="Add song", exact=True)).to_be_in_viewport()
         page.screenshot(path=tmp_path / f"song-destination-{width}.png", animations="disabled")
+    posts = []
+    page.on('request', lambda request: posts.append(request.post_data_json)
+            if request.url.endswith('/songs/add-to-playlist') and request.method == 'POST' else None)
     page.route("**/songs/add-to-playlist", lambda route: route.fulfill(
-        status=502, json={"detail": "Couldn't add the song. Please try again."}))
+        status=502, json={"detail": "internal-diagnostic-879: provider lease corrupt"}))
     dialog.get_by_role("button", name="Add song", exact=True).click()
-    expect(dialog.get_by_role("alert")).to_have_text("Couldn't add the song. Please try again.")
+    expect(dialog.get_by_role("status")).to_have_text(
+        'This change was not confirmed. Review it before trying again.')
     expect(dialog.get_by_role("radio", name="Evening mix Other account")).to_be_checked()
+    expect(dialog.get_by_role('button', name='Add song', exact=True)).to_be_enabled()
+    assert_quiet_action(page, unconfirmed_song_action=True)
+    assert len(posts) == 1 and not song_app['other'].added
+    page.screenshot(path=action_evidence + '-add-unconfirmed.png')
     page.unroute("**/songs/add-to-playlist")
     dialog.get_by_role("button", name="Add song", exact=True).click()
     expect(dialog.get_by_text("Song added.", exact=True)).to_be_visible()
     page.screenshot(path=tmp_path / "song-added-1280.png", animations="disabled")
     assert song_app["other"].added == [("DEST", ["owned-song"])]
+    assert len(posts) == 2 and posts[0] == posts[1]
     assert not song_app["main"].added
     dialog.get_by_role("button", name="Done").click()
     expect(trigger).to_be_focused()
@@ -253,7 +261,7 @@ def test_playlist_play_starts_selected_track_in_playlist(song_app, page, control
     response = page.request.post(f"{song_app['base']}/playlist/{source}/track-year",
                                  form={"video_id": "second", "year": "2019"})
     assert response.ok
-    page.evaluate("html => enrichPanel(1, false).applyRow({video_id: 'second', row_html: html})",
+    page.evaluate("html => enrichPanel(1).applyRow({video_id: 'second', row_html: html})",
                   response.text())
     expect(row.get_by_text("2019", exact=True)).to_be_visible()
     play()
@@ -267,12 +275,12 @@ def test_track_alignment_centers_single_lines_and_anchors_wrapped_lines(song_app
             "Revenge Of The Wankers (Kora Remix) (feat. Scarlett De La Torre)")]:
         track = store.tracks.upsert_track(video_id, title, "Artist", "Album", 270,
                                          album_browse_id="MPRE_alignment", thumbnail="/static/road-trip-hero.png")
-        store.tracks.set_track_enrichment(track, "House", "2019")
+        seed_enrichment(store, track, "House", "2019")
         tracks.append(track)
     store.playlists.set_playlist_tracks(source, tracks)
     store.collection.add_saved_album({"browse": "MPRE_alignment", "title": "Album", "artist": "Artist"})
     if surface == "radio":
-        monkeypatch.setattr(song_app["app"].state.ctx.radio, "status", lambda: {
+        monkeypatch.setattr(song_app["app"].state.ctx.radio, "state", lambda **kwargs: {
             "local_id": source, "playlist_id": "SOURCE", "history_count": 2, "title": "Radio Session",
             "history": [{"video_id": video_id} for video_id in ("single-line", "wrapped-line")]})
     path = "/album?browse=MPRE_alignment" if surface == "album" else f"/playlist/{source}"
@@ -532,11 +540,10 @@ def test_generated_playlist_keeps_contextual_mood_actions(song_app, page):
     assert trigger.bounding_box()["width"] == initial_width
 
 
-def test_mix_track_menu_stays_above_card_and_opens_playlist_dialog(live_app, store, page, tmp_path):
+def test_mix_track_menu_stays_above_card_and_opens_playlist_dialog(
+        store, genre_candidates, live_app, page, tmp_path):
     from tests.home_fixture_support import returning_listener
-    from tests.test_home_other_genres import seed_genres
     from tests.test_mode_cards_route import prepare_home
-    seed_genres(store)
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
     prepare_home(store, 1)
@@ -568,7 +575,7 @@ def test_metadata_dialog_edits_all_fields_and_restores_originals(song_app, page,
                                    album_browse_id='MPRE_owned')
     store.collection.add_saved_album({'browse': 'MPRE_owned', 'title': 'Album', 'artist': 'Artist & Friends',
                                       'year': '2000', 'thumbnail': ''})
-    store.tracks.set_track_enrichment(tid, 'Electronic', '1995')
+    seed_enrichment(store, tid, 'Electronic', '1995')
     store.enrichment_state.log_enrichment(tid, 'run', 'discogs', 'genre', 'Art Pop', now=1)
     path = f"/playlist/{song_app['source']}" if surface == 'playlist' else '/album?browse=MPRE_owned'
     errors = []
@@ -652,12 +659,21 @@ def test_metadata_save_failure_preserves_edits_for_retry(song_app, page):
     title.fill('Retry this title')
     page.route('**/songs/metadata', lambda route: route.fulfill(status=503, json={'detail': 'Try again later.'}))
     dialog.get_by_role('button', name='Save changes').click()
-    expect(dialog.get_by_role('alert')).to_have_text('Try again later.')
+    expect(dialog).not_to_be_visible()
+    expect(page.locator('.song-edit-status').first).to_have_text('Edit not confirmed')
+    expect(page.locator('#toasts [role="alert"]')).to_have_count(0)
+    page.get_by_role('button', name='More actions for Owned Song').click()
+    expect(page.get_by_role('menuitem', name='Edit Metadata')).to_contain_text('Edit not confirmed')
+    page.screenshot(path='/tmp/tuneconsole-879-metadata-unconfirmed.png')
+    page.get_by_role('menuitem', name='Edit Metadata').click()
+    expect(dialog.get_by_role('status')).to_have_text(
+        'This edit was not confirmed. Review your changes before saving again.')
     expect(title).to_have_value('Retry this title')
     assert song_app['store'].tracks.metadata_for_video('owned-song')['title'] == 'Owned Song'
     page.unroute('**/songs/metadata')
     dialog.get_by_role('button', name='Save changes').click()
     expect(page.locator('tr.srow .ptitle')).to_have_text('Retry this title')
+    expect(page.locator('.song-edit-status')).to_have_count(0)
 
 
 def test_genre_lookup_keeps_unsaved_metadata(song_app, page, monkeypatch):
@@ -686,6 +702,312 @@ def test_genre_lookup_keeps_unsaved_metadata(song_app, page, monkeypatch):
     expect(page.locator('tr.srow .ydisplay')).to_have_text('2022')
     track = song_app['store'].tracks.metadata_for_video('owned-song')
     assert track['title'] == 'Still editing' and track['genre'] == 'Ambient' and track['year'] == '2022'
+
+
+def test_genre_lookup_failure_keeps_draft_and_hides_provider_diagnostic(song_app, page, monkeypatch):
+    diagnostic = 'sqlite3.OperationalError: provider lease corrupt [review-879-genre]'
+    attempts = []
+
+    def lookup_failed(_store, _tracks, _config, _progress):
+        attempts.append('failed')
+        raise RuntimeError(diagnostic)
+
+    monkeypatch.setattr('yt_playlist.web.routes.enrich.waterfall.run_waterfall', lookup_failed)
+    page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
+    page.get_by_role('button', name='More actions for Owned Song').click()
+    page.get_by_role('menuitem', name='Edit Metadata').click()
+    dialog = page.get_by_role('dialog', name='Edit Metadata')
+    title = dialog.get_by_label('Title', exact=True)
+    expect(title).to_have_value('Owned Song')
+    expect(dialog.get_by_role('button', name='Save changes')).to_be_enabled()
+    title.fill('Keep this unsaved title')
+    lookup_button = dialog.get_by_role('button', name='Look up genres')
+    with page.expect_response(lambda response: response.url.endswith('/genre-lookup')
+                              and response.request.method == 'POST') as started:
+        lookup_button.click()
+    assert started.value.status == 200
+    # The control is disabled until the real job's terminal SSE event is consumed.
+    expect(lookup_button).to_be_enabled()
+    assert attempts == ['failed']
+    status = dialog.locator('[x-text="lookupStatus"]')
+    expect(status).to_be_visible()
+    expect(status).not_to_have_text('Looking up genres…')
+    expect(dialog).not_to_contain_text(diagnostic)
+    expect(page.locator('#toasts').get_by_role('alert')).to_have_count(0)
+    expect(title).to_have_value('Keep this unsaved title')
+    assert song_app['store'].tracks.metadata_for_video('owned-song')['title'] == 'Owned Song'
+
+    def lookup_recovered(store, tracks, _config, _progress):
+        attempts.append('recovered')
+        store.enrichment_state.log_enrichment(
+            tracks[0]['id'], 'lookup', 'discogs', 'genre', 'Ambient', now=2)
+
+    monkeypatch.setattr('yt_playlist.web.routes.enrich.waterfall.run_waterfall', lookup_recovered)
+    lookup_button.click()
+    suggestion = dialog.get_by_role('button', name='Ambient discogs')
+    expect(suggestion).to_be_visible()
+    assert attempts == ['failed', 'recovered']
+    expect(title).to_have_value('Keep this unsaved title')
+    suggestion.click()
+    dialog.get_by_role('button', name='Save changes').click()
+    expect(page.locator('tr.srow .ptitle')).to_have_text('Keep this unsaved title')
+    track = song_app['store'].tracks.metadata_for_video('owned-song')
+    assert track['title'] == 'Keep this unsaved title' and track['genre'] == 'Ambient'
+
+
+@pytest.mark.parametrize('picker', ['metadata', 'legacy'])
+def test_genre_warning_keeps_each_picker_draft_until_explicit_save(
+        song_app, page, monkeypatch, picker, action_evidence, caplog):
+    import threading
+
+    diagnostic = 'sqlite3.OperationalError: artwork lease corrupt [review-879-genre-warning]'
+    release = threading.Event()
+    calls = []
+
+    def lookup(store, tracks, _config, progress):
+        calls.append(tracks[0]['id'])
+        progress({'type': 'info', 'warning': True, 'text': 'Cover art lookup failed: ' + diagnostic})
+        assert release.wait(10)
+        store.enrichment_state.log_enrichment(
+            tracks[0]['id'], 'lookup', 'discogs', 'genre', 'Ambient', now=2)
+
+    monkeypatch.setattr('yt_playlist.web.routes.enrich.waterfall.run_waterfall', lookup)
+    page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
+    original = song_app['store'].tracks.metadata_for_video('owned-song')
+    if picker == 'metadata':
+        page.get_by_role('button', name='More actions for Owned Song').click()
+        page.get_by_role('menuitem', name='Edit Metadata').click()
+        dialog = page.get_by_role('dialog', name='Edit Metadata')
+        expect(dialog.get_by_label('Title', exact=True)).to_have_value('Owned Song')
+        dialog.get_by_label('Title', exact=True).fill('Keep my title')
+        genre = dialog.get_by_label('Genre', exact=True)
+        genre.fill('Keep my genre')
+        lookup_button = dialog.get_by_role('button', name='Look up genres')
+    else:
+        page.evaluate('''tid => htmx.ajax('GET', `/track/${tid}/genre-candidates`,
+          {target: '#genre-candidates-modal', swap: 'innerHTML'})''', original['track_id'])
+        dialog = page.locator('.genre-candidates')
+        dialog.get_by_role('button', name='Override', exact=True).click()
+        genre = dialog.get_by_label('Custom genre')
+        genre.fill('Keep my genre')
+        lookup_button = dialog.get_by_role('button', name='Look up genre metadata')
+    try:
+        lookup_button.click()
+        expect(dialog.locator('[x-text="lookupStatus"]')).to_have_text(
+            'Some suggestions are not available yet. Checking the rest…')
+        expect(genre).to_have_value('Keep my genre')
+        assert_quiet_action(page)
+        page.screenshot(path=action_evidence + '-genre-warning.png')
+    finally:
+        release.set()
+    if picker == 'metadata':
+        expect(dialog.get_by_role('button', name='Ambient discogs')).to_be_visible()
+        expect(dialog.get_by_label('Title', exact=True)).to_have_value('Keep my title')
+    else:
+        expect(dialog.get_by_role('radio', name='Ambient discogs')).to_be_visible()
+    expect(genre).to_have_value('Keep my genre')
+    assert calls == [original['track_id']] and diagnostic in caplog.text
+    assert song_app['store'].tracks.metadata_for_video('owned-song')['genre'] == original['genre']
+    assert_quiet_action(page)
+    page.screenshot(path=action_evidence + '-genre-suggestions.png')
+    if picker == 'metadata':
+        dialog.get_by_role('button', name='Save changes').click()
+        expect(page.locator('tr.srow .ptitle')).to_have_text('Keep my title')
+    else:
+        dialog.get_by_role('button', name='Apply genre').click()
+        expect(dialog).not_to_be_visible()
+    assert song_app['store'].tracks.metadata_for_video('owned-song')['genre'] == 'Keep my genre'
+
+
+def test_legacy_genre_failure_keeps_choice_then_retries_through_real_publication(
+        song_app, page, monkeypatch, action_evidence):
+    diagnostic = 'sqlite3.OperationalError: genre lease corrupt [review-879-legacy]'
+    calls = []
+
+    def lookup(store, tracks, _config, _progress):
+        calls.append(tracks[0]['id'])
+        if len(calls) == 1:
+            raise RuntimeError(diagnostic)
+        store.enrichment_state.log_enrichment(
+            tracks[0]['id'], 'lookup', 'discogs', 'genre', 'Ambient', now=2)
+
+    monkeypatch.setattr('yt_playlist.web.routes.enrich.waterfall.run_waterfall', lookup)
+    page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
+    original = song_app['store'].tracks.metadata_for_video('owned-song')
+    page.evaluate('''tid => htmx.ajax('GET', `/track/${tid}/genre-candidates`,
+      {target: '#genre-candidates-modal', swap: 'innerHTML'})''', original['track_id'])
+    dialog = page.locator('.genre-candidates')
+    dialog.get_by_role('button', name='Override', exact=True).click()
+    genre = dialog.get_by_label('Custom genre')
+    genre.fill('Keep this choice')
+    lookup_button = dialog.get_by_role('button', name='Look up genre metadata')
+    lookup_button.click()
+    expect(dialog.locator('[x-text="lookupStatus"]')).to_have_text(
+        'Genre lookup did not finish. Your changes are kept.')
+    expect(lookup_button).to_be_enabled()
+    expect(genre).to_have_value('Keep this choice')
+    expect(dialog).not_to_contain_text(diagnostic)
+    assert_quiet_action(page)
+    assert len(calls) == 1
+    page.screenshot(path=action_evidence + '-legacy-genre-failed.png')
+    lookup_button.click()
+    suggestion = dialog.get_by_role('radio', name='Ambient discogs')
+    expect(suggestion).to_be_visible()
+    expect(genre).to_have_value('Keep this choice')
+    assert len(calls) == 2
+    suggestion.check()
+    dialog.get_by_role('button', name='Apply genre').click()
+    expect(dialog).not_to_be_visible()
+    assert song_app['store'].tracks.metadata_for_video('owned-song')['genre'] == 'Ambient'
+
+
+@pytest.mark.parametrize('failure', ['http', 'lost_receipt'])
+def test_legacy_genre_unconfirmed_apply_keeps_choice_and_requires_explicit_retry(
+        song_app, page, monkeypatch, action_evidence, failure):
+    store = song_app['store']
+    original = store.tracks.metadata_for_video('owned-song')
+    writes, posts = [], []
+    save = store.tracks.set_track_genre
+
+    def record_save(track, genre):
+        writes.append((track, genre))
+        return save(track, genre)
+
+    monkeypatch.setattr(store.tracks, 'set_track_genre', record_save)
+    page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
+    page.evaluate('window.genreDocument = true; window.genrePlayer = document.querySelector(".global-now-playing")')
+    page.evaluate('''tid => htmx.ajax('GET', `/track/${tid}/genre-candidates`,
+      {target: '#genre-candidates-modal', swap: 'innerHTML'})''', original['track_id'])
+    dialog = page.locator('.genre-candidates')
+    dialog.get_by_role('button', name='Override', exact=True).click()
+    genre = dialog.get_by_label('Custom genre')
+    genre.fill('Keep this custom genre')
+
+    def interrupt(route):
+        if route.request.method != 'POST':
+            route.continue_()
+            return
+        posts.append(route.request.post_data)
+        if failure == 'lost_receipt':
+            response = route.fetch()
+            assert response.status == 204
+            route.abort()
+        else:
+            route.fulfill(status=503, body='internal-diagnostic-879')
+
+    page.route('**/genre-candidates', interrupt)
+    apply = dialog.get_by_role('button', name='Apply genre')
+    apply.click()
+    expect(dialog.get_by_role('status')).to_have_text(
+        'This genre change was not confirmed. Review your choice before trying again.')
+    expect(apply).to_be_enabled()
+    expect(genre).to_have_value('Keep this custom genre')
+    assert_quiet_action(page)
+    page.screenshot(path=action_evidence + '-genre-unconfirmed.png')
+    expected = [(original['track_id'], 'Keep this custom genre')] if failure == 'lost_receipt' else []
+    assert writes == expected and len(posts) == 1
+    page.unroute('**/genre-candidates', interrupt)
+    with page.expect_response(lambda response: response.url.endswith('/genre-candidates')
+                              and response.request.method == 'POST') as receipt:
+        apply.click()
+    assert receipt.value.status == 204
+    expect(dialog).not_to_be_visible()
+    expect(page.locator('tr.srow .gtag-label')).to_have_text('Keep this custom genre')
+    assert writes == expected + [(original['track_id'], 'Keep this custom genre')]
+    assert store.tracks.metadata_for_video('owned-song')['genre'] == 'Keep this custom genre'
+    assert page.evaluate('window.genreDocument')
+    assert page.evaluate('window.genrePlayer !== null && window.genrePlayer === document.querySelector(".global-now-playing")')
+    assert_quiet_action(page)
+    page.screenshot(path=action_evidence + '-genre-confirmed.png')
+
+
+@pytest.mark.parametrize('confirmed', [True, False])
+def test_legacy_genre_late_apply_cannot_retire_reopened_picker(
+        song_app, page, action_evidence, confirmed):
+    original = song_app['store'].tracks.metadata_for_video('owned-song')
+    page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
+    page.evaluate('window.genreDocument = true')
+    open_picker = '''tid => htmx.ajax('GET', `/track/${tid}/genre-candidates`,
+      {target: '#genre-candidates-modal', swap: 'innerHTML'})'''
+    page.evaluate(open_picker, original['track_id'])
+    dialog = page.locator('.genre-candidates')
+    dialog.get_by_role('button', name='Override', exact=True).click()
+    dialog.get_by_label('Custom genre').fill('Earlier choice')
+    pending = []
+
+    def hold(route):
+        if route.request.method == 'POST':
+            pending.append(route)
+        else:
+            route.continue_()
+
+    page.route('**/genre-candidates', hold)
+    with page.expect_request(lambda request: request.url.endswith('/genre-candidates')
+                             and request.method == 'POST'):
+        dialog.get_by_role('button', name='Apply genre').click()
+    dialog.get_by_role('button', name='Cancel', exact=True).click()
+    expect(dialog).not_to_be_visible()
+    page.evaluate(open_picker, original['track_id'])
+    dialog.get_by_role('button', name='Override', exact=True).click()
+    choice = dialog.get_by_label('Custom genre')
+    choice.fill('Newer unsaved choice')
+    dialog.get_by_role('button', name='Apply genre').click()
+    expect(dialog.get_by_role('status')).to_have_text(
+        'An earlier genre change is still being checked. Your choice is kept.')
+    assert len(pending) == 1
+    if confirmed:
+        response = pending[0].fetch()
+        assert response.status == 204
+        pending[0].fulfill(response=response)
+    else:
+        pending[0].fulfill(status=503, body='internal-diagnostic-879')
+    page.wait_for_function('tid => !genreSaves.has(tid)', arg=original['track_id'])
+    expect(dialog).to_be_visible()
+    expect(dialog.get_by_role('button', name='Apply genre')).to_be_enabled()
+    expect(dialog.get_by_role('status')).to_have_text('Review your choice before applying it.')
+    expect(choice).to_have_value('Newer unsaved choice')
+    assert song_app['store'].tracks.metadata_for_video('owned-song')['genre'] == (
+        'Earlier choice' if confirmed else original['genre'])
+    assert page.evaluate('window.genreDocument')
+    assert_quiet_action(page)
+    page.screenshot(path=action_evidence + '-genre-new-owner.png')
+
+
+def test_legacy_genre_navigation_disposes_active_lookup(song_app, page, monkeypatch, action_evidence):
+    import threading
+
+    release = threading.Event()
+
+    def lookup(_store, _tracks, _config, progress):
+        progress({'type': 'info', 'text': 'Checking'})
+        assert release.wait(10)
+
+    monkeypatch.setattr('yt_playlist.web.routes.enrich.waterfall.run_waterfall', lookup)
+    original = song_app['store'].tracks.metadata_for_video('owned-song')
+    page.goto(f"{song_app['base']}/playlist/{song_app['source']}")
+    page.evaluate('''() => {
+      window.genreDocument = true;
+      window.genreStreams = [];
+      const Native = window.EventSource;
+      window.EventSource = class extends Native {
+        constructor(...args) { super(...args); window.genreStreams.push(this); }
+      };
+    }''')
+    page.evaluate('''tid => htmx.ajax('GET', `/track/${tid}/genre-candidates`,
+      {target: '#genre-candidates-modal', swap: 'innerHTML'})''', original['track_id'])
+    dialog = page.locator('.genre-candidates')
+    try:
+        dialog.get_by_role('button', name='Look up genre metadata').click()
+        page.wait_for_function('genreStreams.length === 1 && genreStreams[0].readyState === 1')
+        page.evaluate('url => navigation.navigate(url)', song_app['base'] + '/playlists')
+        expect(page).to_have_url(song_app['base'] + '/playlists')
+        expect(dialog).not_to_be_visible()
+        assert page.evaluate('genreStreams[0].readyState === EventSource.CLOSED')
+        assert page.evaluate('window.genreDocument')
+        assert_quiet_action(page)
+        page.screenshot(path=action_evidence + '-genre-navigation.png')
+    finally:
+        release.set()
 
 
 @pytest.mark.parametrize('succeeds', [True, False])
@@ -717,20 +1039,24 @@ def test_metadata_save_closes_immediately_and_keeps_later_dialog(song_app, page,
         expect(page.locator('tr.srow .ptitle').first).to_have_text('Saved in background')
     else:
         pending[0].fulfill(status=503, json={'detail': 'Try again later.'})
-        expect(page.locator('#toasts').get_by_role('alert')).to_contain_text('Try again later.')
+        expect(page.locator('.song-edit-status').first).to_have_text('Edit not confirmed')
+        expect(page.locator('#toasts').get_by_role('alert')).to_have_count(0)
         assert store.tracks.metadata_for_video('owned-song')['title'] == 'Owned Song'
     expect(dialog).to_be_visible()
     expect(dialog.get_by_label('Title', exact=True)).to_have_value('Second Song')
     expect(dialog.get_by_label('Artist', exact=True)).to_have_value('Still editing this artist')
     assert page.evaluate('window.metadataPageMarker')
+    if not succeeds:
+        page.screenshot(path='/tmp/tuneconsole-879-metadata-owner.png')
     dialog.get_by_role('button', name='Cancel', exact=True).click()
     if not succeeds:
         page.unroute('**/songs/metadata')
-        page.get_by_role('button', name='Retry edit').click()
+        page.get_by_role('button', name='More actions for Owned Song').click()
+        page.get_by_role('menuitem', name='Edit Metadata').click()
         expect(dialog.get_by_label('Title', exact=True)).to_have_value('Saved in background')
         dialog.get_by_role('button', name='Save changes').click()
         expect(page.locator('tr.srow .ptitle').first).to_have_text('Saved in background')
-        expect(page.get_by_role('button', name='Retry edit')).to_have_count(0)
+        expect(page.locator('.song-edit-status')).to_have_count(0)
 
 
 def test_metadata_save_updates_player_and_suggestion_without_reload(song_app, page):

@@ -1,45 +1,73 @@
 """Direct source imports use a fresh schema and preserve installed evidence."""
 from contextlib import closing
+from dataclasses import replace
+from functools import wraps
 import hashlib
 import json
+from pathlib import Path
 import sqlite3
 import struct
+import time
 
 import pytest
+from tests.metadata_provenance_support import metadata_provenance
 
 from tests.db_rebuild_support import production64
 from yt_playlist.core.db_rebuild import build, destination, source
-from yt_playlist.core import genre_identity, vibe_versions
-from yt_playlist.core.migrations import current, registry, runner
+from yt_playlist.core import vibe_versions
+from yt_playlist.core.migrations import registry, runner
 from yt_playlist.core.store import Store
 
 
 @pytest.fixture
-def development93(production64,tmp_path):
+def development93(development93_template, tmp_path, record_property):
     # The numbered definition supplies this explicit second source. Replaying
     # every earlier bulk conversion would conceal a dependency on that chain.
-    path = tmp_path/'development93.db'
-    with closing(sqlite3.connect(path)) as conn, closing(sqlite3.connect(production64)) as released:
-        conn.row_factory = sqlite3.Row
-        build._configure(conn)
-        for sql in current.statements(version=93):
-            conn.execute(sql)
-        genre_identity.seed_catalog(conn)
-        conn.executemany('INSERT INTO settings VALUES (?,?)',current.SEED_SETTINGS.items())
-        conn.executemany('INSERT INTO schema_migrations VALUES (?,?,?)',
-                         [(m.version,m.name,2000.) for m in registry.MIGRATIONS[:93]])
-        conn.execute('INSERT INTO group_retention_state VALUES (1,0)')
-        for table in ('identities','recordings','youtube_items','catalog_entries','library_memberships',
-                      'playlist_scopes','playlists','playlist_items','item_ratings','play_events','play_event_sources',
-                      'rec_change_queue','rec_preparation','rec_group_clock','rec_vibe_pending'):
-            fields = source.columns(released,table)
-            mapped = ['unresolved_genre' if field=='genre' else field for field in fields]
-            conn.execute('DELETE FROM '+table)
-            conn.executemany('INSERT INTO '+table+'('+','.join(mapped)+') VALUES ('+
-                ','.join('?' for _ in fields)+')',released.execute('SELECT '+','.join(fields)+' FROM '+table))
-        conn.commit()
-        runner.validate_version(conn,93)
+    template, seconds = development93_template
+    path = tmp_path / 'development93.db'
+    started = time.perf_counter()
+    with closing(sqlite3.connect(path)) as conn:
+        template.backup(conn)
+    record_property('development93_prefix_seconds', seconds)
+    record_property('development93_clone_seconds', time.perf_counter() - started)
     return path
+
+
+@pytest.fixture(autouse=True)
+def destination_phase_costs(monkeypatch, record_property):
+    """Keep actual conversions and verifiers; report inclusive phase costs."""
+    costs = {}
+
+    def timed(name, operation):
+        @wraps(operation)
+        def call(*args, **kwargs):
+            wall, cpu = time.perf_counter(), time.thread_time()
+            try:
+                return operation(*args, **kwargs)
+            finally:
+                value = costs.setdefault(name, [0, 0., 0.])
+                value[0] += 1
+                value[1] += time.perf_counter() - wall
+                value[2] += time.thread_time() - cpu
+        return call
+
+    select = destination.for_source
+
+    @wraps(select)
+    def contract(*args, **kwargs):
+        result = timed('definition', select)(*args, **kwargs)
+        return replace(result, initialize=timed('schema', result.initialize),
+                       verify=timed('verification', result.verify),
+                       stages=tuple(replace(stage, copy=timed('stage:' + stage.name, stage.copy))
+                                    for stage in result.stages))
+
+    monkeypatch.setattr(destination, 'for_source', contract)
+    for name in ('construct', 'build'):
+        monkeypatch.setattr(build, name, timed(name, getattr(build, name)))
+    try:
+        yield
+    finally:
+        record_property('destination_inclusive_phase_costs', json.dumps(costs, sort_keys=True))
 
 
 def test_release_admission_performs_no_writes(production64):
@@ -52,48 +80,18 @@ def test_release_admission_performs_no_writes(production64):
             conn.execute('DELETE FROM schema_migrations')
 
 
-@pytest.mark.parametrize('preexisting_dictionary', (False, True))
-def test_direct_development_import_keeps_source_and_history(development93,tmp_path,preexisting_dictionary):
-    with closing(sqlite3.connect(development93)) as conn:
-        conn.row_factory = sqlite3.Row
-        if preexisting_dictionary:
-            # Isolate this additive owner's copy order. Full-prefix journal
-            # preparation/verification has separate acceptance checks in #697.
-            vibe_versions.install(conn)
-            conn.execute("INSERT INTO vibe_versions VALUES (23,'retained-unused-version')")
-        conn.execute('INSERT INTO measurements(id,recording_id,vibe,score,support,source,model_version,input_digest,measured_at) '
-                     "VALUES (401,8,'relax',.6,.9,'provider_measurement','exact-model-version','original-inputs',17)")
-        conn.execute('INSERT INTO recording_vibes(recording_id,vibe,score,support,source,measurement_id,inputs_version) '
-                     "VALUES (8,'relax',.6,.9,'provider_measurement',401,'exact-current-version')")
-        conn.commit()
-    before = development93.read_bytes()
-    contract = destination.for_source(development93)
-    output = tmp_path/'rebuilt.db'
-    report = build.construct(development93,output,contract,batch_size=128)
-    assert report['destination']==contract.version
-    assert development93.read_bytes()==before
-    store = Store(output)
-    try:
-        store.init_schema()
-        assert runner.history(store.conn,registry.MIGRATIONS)==107
-        assert store.conn.execute('SELECT max(version) FROM database_rebuild_source_history').fetchone()[0]==93
-        assert [tuple(row) for row in store.conn.execute('SELECT id,label FROM accounts ORDER BY id')]==[
-            (11,'Main'),(29,'Other account')]
-        assert [tuple(row) for row in store.conn.execute('SELECT id,account_id,recording_id,membership_ref_id FROM play_events')]==[
-            (91,11,8,None)]
-        assert [row[0] for row in store.conn.execute('SELECT video_id FROM playlist_items WHERE playlist_id=41 ORDER BY position')]==[
-            'video-19','video-3','video-8']
-        store.settings.set_setting('post_rebuild_write','works')
-        assert store.settings.get_setting('post_rebuild_write')=='works'
-        assert tuple(store.conn.execute('SELECT m.score,m.support,v.value FROM measurements m '
-            'JOIN vibe_versions v ON v.id=m.model_version_id WHERE m.id=401').fetchone())==(.6,.9,'exact-model-version')
-        assert store.conn.execute('SELECT d.value FROM recording_vibes v JOIN vibe_versions d '
-            "ON d.id=v.inputs_version_id WHERE v.recording_id=8 AND v.vibe='relax'").fetchone()[0]=='exact-current-version'
-        if preexisting_dictionary:
-            assert store.conn.execute('SELECT value FROM vibe_versions WHERE id=23').fetchone()[0]=='retained-unused-version'
-        assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-    finally:
-        store.conn.close()
+def seed_versioned_scores(conn):
+    conn.execute('INSERT INTO measurements(id,recording_id,vibe,score,support,source,model_version,input_digest,measured_at) '
+                 "VALUES (401,8,'relax',.6,.9,'provider_measurement','exact-model-version','original-inputs',17)")
+    conn.execute('INSERT INTO recording_vibes(recording_id,vibe,score,support,source,measurement_id,inputs_version) '
+                 "VALUES (8,'relax',.6,.9,'provider_measurement',401,'exact-current-version')")
+
+
+def assert_versioned_scores(conn):
+    assert tuple(conn.execute('SELECT m.score,m.support,v.value FROM measurements m '
+        'JOIN vibe_versions v ON v.id=m.model_version_id WHERE m.id=401').fetchone())==(.6,.9,'exact-model-version')
+    assert conn.execute('SELECT d.value FROM recording_vibes v JOIN vibe_versions d '
+        "ON d.id=v.inputs_version_id WHERE v.recording_id=8 AND v.vibe='relax'").fetchone()[0]=='exact-current-version'
 
 
 @pytest.mark.parametrize('source_fixture', ['production64', 'development93'])
@@ -110,8 +108,21 @@ def test_rebuild_verifies_legacy_progress_in_an_empty_additive_owner(request,sou
         if progress is not None:
             conn.execute('INSERT INTO settings VALUES (?,?)', ('rec_group_shadow_progress', json.dumps(progress)))
         conn.commit()
+    original = path.read_bytes()
+    contract = destination.for_source(path)
+    if not progress:
+        # The populated case keeps a complete rebuild for each admitted format.
+        # Absent/empty progress needs the real registered settings converter,
+        # destination DDL and verifier, without every unrelated domain import
+        # and the final whole-database compaction.
+        settings = tuple(stage for stage in contract.stages if stage.name == 'settings')
+        assert len(settings) == 1
+        contract = replace(contract, stages=settings, verify=verification._group_progress, compact=False)
     output = tmp_path/'progress.db'
-    build.construct(path,output,destination.for_source(path))
+    report = build.construct(path,output,contract)
+    assert path.read_bytes() == original
+    if not progress:
+        assert set(report['rows']) == {'settings'}
     with closing(sqlite3.connect(path)) as reader, closing(sqlite3.connect(output)) as target:
         actual = list(target.execute('SELECT singleton,phase,reported_at,reason FROM group_preparation_progress'))
         expected = [] if progress is None else [(1,progress.get('phase'),progress.get('at'),progress.get('reason'))]
@@ -132,7 +143,7 @@ def test_import_refuses_an_unclassified_owner(development93):
         destination.for_source(development93)
 
 
-def test_rebuild_converts_metadata_and_served_facts_with_one_checkpoint(development93,tmp_path):
+def seed_development_metadata(path):
     import time
     from yt_playlist.core import artist_credits, artists, catalog, credit_retention
     from yt_playlist.core import metadata, metadata_attempts, metadata_legacy, metadata_native
@@ -143,10 +154,11 @@ def test_rebuild_converts_metadata_and_served_facts_with_one_checkpoint(developm
     fields = {'genre': 'Jazz', 'bpm': 120}
     trace = {'policy_kind': 'prepared', 'ranker': 'captured', 'candidate': {
         'video_id': 'video-8', 'genre': 'Jazz', 'coverage': {'genre': True}, 'last_played': None}}
-    with closing(sqlite3.connect(development93)) as conn:
+    with closing(sqlite3.connect(path)) as conn:
         conn.row_factory = sqlite3.Row
         build._configure(conn)
         conn.execute('BEGIN IMMEDIATE')
+        seed_versioned_scores(conn)
         delivery, _ = metadata_attempts.capture_result(conn,108,'provider',fields,run_id='captured',now=at)
         artists.observe(conn, 108, 'Supplied artist', [{'name': 'Supplied artist', 'id': 'supplied'}],
                         source='provider', now=at, metadata_delivery_id=delivery)
@@ -160,31 +172,34 @@ def test_rebuild_converts_metadata_and_served_facts_with_one_checkpoint(developm
         metadata_native.record(conn,108,'native',[MetadataObservation('mood_party',.8,'recording',
             'native-id','prediction',unit='classifier_probability')],run_id='native-run',now=at,recording_id=8)
         conn.execute('INSERT INTO rec_served_impressions(id,request_id,surface,lane,identity_key,'
-            'rank,model_version,provenance,served_at) VALUES (501,\'captured\',\'home\',\'\','
+            'rank,model_version,provenance,served_at) VALUES (503,\'captured\',\'home\',\'\','
             '\'song 8|artist\',1,\'missing-policy\',?,?)',(json.dumps(trace),at))
         native_key = conn.execute('SELECT source_key FROM rec_musical_sources').fetchone()[0]
         expected_native = metadata_native.source_values(conn,native_key)
         conn.commit()
-    original = development93.read_bytes()
-    output = tmp_path/'optimized.db'
-    contract = destination.for_source(development93)
-    def interrupted(phase,detail):
-        if detail.get('stage') == 'metadata:choices':
-            raise InterruptedError('committed metadata conversion')
-    with pytest.raises(InterruptedError,match='committed metadata conversion'):
-        build.construct(development93,output,contract,progress=interrupted)
-    build.construct(development93,output,contract)
-    assert development93.read_bytes() == original
-    store = Store(output)
-    try:
-        store.init_schema()
+    def verify(store):
+        assert_versioned_scores(store.conn)
         assert metadata_runtime.active(store.conn) and served_facts.active(store.conn)
         from yt_playlist.core.metadata_retention import RETIRED
         assert all(store.conn.execute('SELECT count(*) FROM '+table).fetchone()[0] == 0 for table in RETIRED)
-        assert store.conn.execute('SELECT provenance FROM rec_served_impressions WHERE id=501').fetchone()[0] == '{}'
+        assert store.conn.execute('SELECT provenance FROM rec_served_impressions WHERE id=503').fetchone()[0] == '{}'
         receipt = store.conn.execute('SELECT * FROM artist_credit_replays WHERE delivery_key=?',
                                      ('metadata-delivery:'+str(delivery),)).fetchone()
         assert receipt['metadata_bound'] == 1
+        assert store.conn.execute('SELECT bpm FROM catalog_tracks WHERE id=108').fetchone()[0] == 130
+        decisions = metadata_provenance(store, 108)['decisions']
+        assert len(decisions) == 3
+        assert any(row['source']=='unknown-clock' and row['chosen_at'] is None
+                   and row['value_json']=='null' for row in decisions)
+        assert metadata_native.source_values(store.conn,native_key) == expected_native
+        assert store.enrichment_state.enrichment_provider_state(8,include_previous=True)['provider']['fields'] == fields
+        row = store.conn.execute('SELECT i.id,i.served_at,f.* FROM rec_served_impressions i '
+            'JOIN served_facts f ON f.impression_id=i.id WHERE i.id=503').fetchone()
+        assert served_facts.diagnostic(store.conn,row) == trace
+        assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
+    def continuing_writes(store):
+        receipt = store.conn.execute('SELECT * FROM artist_credit_replays WHERE delivery_key=?',
+                                     ('metadata-delivery:'+str(delivery),)).fetchone()
         with store.conn:
             store.conn.execute('BEGIN IMMEDIATE')
             assert artist_credits.capture(store.conn, 108, receipt['credit_id'], 'provider', at+4,
@@ -193,16 +208,6 @@ def test_rebuild_converts_metadata_and_served_facts_with_one_checkpoint(developm
                 pass
         assert store.conn.execute('SELECT metadata_bound FROM artist_credit_replays WHERE delivery_key=?',
                                   (receipt['delivery_key'],)).fetchone()[0] == 1
-        assert store.conn.execute('SELECT bpm FROM catalog_tracks WHERE id=108').fetchone()[0] == 130
-        decisions = store.enrichment_reports.metadata_provenance(108)['decisions']
-        assert len(decisions) == 3
-        assert any(row['source']=='unknown-clock' and row['chosen_at'] is None
-                   and row['value_json']=='null' for row in decisions)
-        assert metadata_native.source_values(store.conn,native_key) == expected_native
-        assert store.enrichment_state.enrichment_provider_state(8,include_previous=True)['provider']['fields'] == fields
-        row = store.conn.execute('SELECT i.id,i.served_at,f.* FROM rec_served_impressions i '
-            'JOIN served_facts f ON f.impression_id=i.id WHERE i.id=501').fetchone()
-        assert served_facts.diagnostic(store.conn,row) == trace
         before = store.conn.execute('SELECT count(*) FROM metadata_observations').fetchone()[0]
         with store.conn:
             catalog.choose_field(store.conn,108,'bpm','',now=at+3)
@@ -211,19 +216,16 @@ def test_rebuild_converts_metadata_and_served_facts_with_one_checkpoint(developm
         choice = store.conn.execute('SELECT id,revision FROM metadata_runtime_choices WHERE entry_id=108').fetchone()
         assert metadata_runtime_files.read(store.conn,'choices',(choice['id'],),choice['revision'])['value'] == ''
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-    finally:
-        store.conn.close()
+    return verify, continuing_writes
 
 
-@pytest.mark.parametrize('active', [False, True])
-def test_rebuild_reconciles_existing_metadata_preparation(development93, tmp_path, active):
-    from yt_playlist.core import catalog, metadata_runtime, served_facts
+def seed_metadata_preparation(path, *, active):
+    from yt_playlist.core import metadata_runtime, served_facts
     from yt_playlist.core.preparation import metadata_runtime as preparation
-    with closing(sqlite3.connect(development93)) as conn:
+    with closing(sqlite3.connect(path)) as conn:
         conn.row_factory = sqlite3.Row
         build._configure(conn)
         with conn:
-            catalog.choose_field(conn, 108, 'bpm', 130, now=17)
             metadata_runtime.install(conn)
             served_facts.install(conn)
             # One old converted trace and one unconverted trace must converge
@@ -252,6 +254,20 @@ def test_rebuild_reconciles_existing_metadata_preparation(development93, tmp_pat
             with conn:
                 conn.execute("INSERT INTO metadata_runtime_providers VALUES (999,'stale-provider')")
                 conn.execute('INSERT INTO metadata_runtime_choices VALUES (999,108,2,999,1,4,NULL,999,NULL)')
+
+
+def test_rebuild_reconciles_existing_metadata_preparation(development93, tmp_path):
+    from yt_playlist.core import catalog
+
+    with closing(sqlite3.connect(development93)) as conn:
+        conn.row_factory = sqlite3.Row
+        build._configure(conn)
+        with conn:
+            catalog.choose_field(conn, 108, 'bpm', 130, now=17)
+            seed_versioned_scores(conn)
+        assert not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='vibe_versions'").fetchone()
+    seed_metadata_preparation(development93, active=True)
     output = tmp_path/'reconciled.db'
     build.construct(development93, output, destination.for_source(development93))
     store = Store(output)
@@ -260,6 +276,7 @@ def test_rebuild_reconciles_existing_metadata_preparation(development93, tmp_pat
         assert store.conn.execute('SELECT bpm FROM catalog_tracks WHERE id=108').fetchone()[0] == 130
         assert not store.conn.execute('SELECT 1 FROM metadata_runtime_choices WHERE id=999').fetchone()
         assert store.conn.execute('SELECT count(*) FROM served_facts').fetchone()[0] == 2
+        assert_versioned_scores(store.conn)
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
     finally:
         store.conn.close()
@@ -511,12 +528,12 @@ def test_retained_embedding_verification_checks_logical_values_and_exact_bytes(s
             verification.retained(reader,store.conn,table,table,{})
 
 
-def test_direct_import_preserves_journal_originals_and_historical_policy_attribution(development93,tmp_path):
+def seed_journal_policy(path):
     from yt_playlist.core import legacy_evidence, legacy_journals, policy_documents, policy_history
 
     original = '\n {"recording_id": 8, "paid": true, "original": "é"} '
     configuration = {'weights': {'rock': 1.23456789}, 'captured': ['exact', True]}
-    with closing(sqlite3.connect(development93)) as conn:
+    with closing(sqlite3.connect(path)) as conn:
         conn.row_factory = sqlite3.Row
         build._configure(conn)
         conn.execute('BEGIN IMMEDIATE')
@@ -528,13 +545,7 @@ def test_direct_import_preserves_journal_originals_and_historical_policy_attribu
                 (501,'known','historical','{"pool_policy":"historical"}'),
                 (502,'unknown','missing-policy','{}')])
         conn.commit()
-    before = development93.read_bytes()
-    contract = destination.for_source(development93)
-    output = tmp_path/'journal-history.db'
-    build.construct(development93,output,contract,batch_size=128)
-    assert development93.read_bytes()==before
-    with closing(sqlite3.connect(output)) as conn:
-        conn.row_factory = sqlite3.Row
+    def verify(conn):
         assert legacy_evidence.original(conn,'recommendation','rec_feedback','decision')==original
         captured = legacy_journals.read(conn,'recommendation','rec_feedback','decision')
         assert captured['resolution_status']=='resolved' and captured['subjects']=={'recording_id':8}
@@ -544,8 +555,9 @@ def test_direct_import_preserves_journal_originals_and_historical_policy_attribu
             'historical_impression_policies ORDER BY kind')))==[
                 (501,'pool','historical'),(501,'primary','historical')]
         assert tuple(conn.execute('SELECT impression_id,raw_version,policy_version,resolution_reason '
-            'FROM recommendation_impression_policies').fetchone())==(502,'missing-policy',None,'missing_policy')
+            'FROM recommendation_impression_policies WHERE impression_id=502').fetchone())==(502,'missing-policy',None,'missing_policy')
         assert not conn.execute('PRAGMA foreign_key_check').fetchall()
+    return verify
 
 
 def test_retained_journal_verification_compares_contents_when_publication_changes(store,tmp_path):
@@ -574,50 +586,48 @@ def test_retained_journal_verification_compares_contents_when_publication_change
             verification.retained(reader,store.conn,'legacy_archive_heads','legacy_archive_heads',{})
 
 
-def test_direct_released_import_keeps_playlists_and_source_history(production64,tmp_path):
-    before = production64.read_bytes()
-    output = tmp_path/'released-rebuilt.db'
-    build.construct(production64,output,destination.for_source(production64),batch_size=2)
-    assert production64.read_bytes()==before
-    with closing(sqlite3.connect(output)) as conn:
-        assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0]==107
-        assert conn.execute('SELECT max(version) FROM database_rebuild_source_history').fetchone()[0]==64
-        assert list(conn.execute('SELECT id,account_id FROM playlists ORDER BY id'))==[(41,11),(73,29)]
-        assert list(conn.execute('SELECT id,account_id,recording_id,membership_ref_id FROM play_events'))==[(91,11,8,None)]
-        assert not conn.execute('PRAGMA foreign_key_check').fetchall()
-
-
-@pytest.mark.parametrize('source_fixture',['production64','development93'])
-def test_discovery_conversion_preserves_offers_separately_from_visibility(request,source_fixture,tmp_path):
-    path = request.getfixturevalue(source_fixture)
+def seed_discovery_visibility(path):
     with closing(sqlite3.connect(path)) as conn:
-        conn.execute("INSERT INTO albums(id,title,metadata_rank) VALUES (25,'Discovery',0)")
-        conn.execute("INSERT INTO album_provider_ids(provider,provider_id,album_id,is_primary) VALUES ('youtube','RELEASE',25,1)")
+        conn.execute("INSERT INTO albums(id,title,metadata_rank) VALUES (26,'Discovery',0)")
+        conn.execute("INSERT INTO album_provider_ids(provider,provider_id,album_id,is_primary) VALUES ('youtube','DISCOVERY',26,1)")
         conn.execute('INSERT INTO discovery_memberships(recording_id,entry_id,found_at,offered_count,first_shown,last_shown) '
                      'VALUES (8,108,10,5,11,17)')
-        conn.execute('INSERT INTO album_discovery_memberships VALUES (25,10,17,11,4,3,8,9)')
+        conn.execute('INSERT INTO album_discovery_memberships VALUES (26,10,17,11,4,3,8,9)')
         conn.executemany('INSERT INTO discovery_visible_impressions VALUES (?,?,?,?)',[
             ('first','track','song 8|artist',12),('second','track','song 8|artist',14),
-            ('first','album','RELEASE',13)])
+            ('first','album','DISCOVERY',13)])
         conn.commit()
-    contract = destination.for_source(path)
-    output = tmp_path/'discovery.db'
-    build.construct(path,output,contract,batch_size=2)
-    with closing(sqlite3.connect(output)) as conn, closing(sqlite3.connect(path)) as reader:
-        conn.row_factory = reader.row_factory = sqlite3.Row
+    def verify(conn):
         assert tuple(conn.execute('SELECT offered_count,first_shown,last_shown FROM discovery_memberships').fetchone())==(2,12.,14.)
         assert tuple(conn.execute('SELECT offered_count,first_shown,last_shown,legacy_offered_count,'
-            'legacy_first_shown,legacy_last_shown FROM album_discovery_memberships').fetchone())==(1,13.,13.,6,8.,17.)
+            'legacy_first_shown,legacy_last_shown FROM album_discovery_memberships WHERE album_id=26').fetchone())==(1,13.,13.,6,8.,17.)
         assert tuple(conn.execute('SELECT offered_count,first_shown,last_shown FROM discovery_legacy_offers '
             'WHERE recording_id=8').fetchone())==(3,11.,17.)
-        conn.execute('UPDATE discovery_legacy_offers SET offered_count=0 WHERE recording_id=8')
-        with pytest.raises(ValueError,match='changed legacy discovery offers'):
-            contract.verify(reader,conn)
+    return verify
+
+
+def source_contents(path):
+    """Capture committed SQL bytes and all retained bodies of this private source."""
+    from tests.prepared_fixture_support import coordinates
+
+    files = {path}
+    for root in path.parent.glob(path.name+'.*'):
+        if root.is_dir():
+            files.update(value for value in root.rglob('*') if value.is_file())
+        elif root.is_file():
+            files.add(root)
+    with closing(sqlite3.connect(path.as_uri()+'?mode=ro',uri=True)) as reader:
+        for _, _, filename in coordinates(reader):
+            if Path(filename).is_absolute():
+                files.add(Path(filename))
+    return {str(value):hashlib.sha256(value.read_bytes()).hexdigest() for value in files}
 
 
 @pytest.mark.parametrize('source_fixture',['production64','development93'])
-def test_rebuild_preserves_decisions_unknown_evidence_and_album_occurrences(request,source_fixture,tmp_path):
+def test_populated_import_preserves_catalog_decisions_and_evidence(request,source_fixture,tmp_path,record_property):
+    started = time.perf_counter()
     path = request.getfixturevalue(source_fixture)
+    record_property('installed_source_seconds', time.perf_counter() - started)
     draft = {'revision':'held','picks':['selected','selected','video-8'],'banned':['excluded'],
              'seed':17,'building':True,'opaque':{'edited':True}}
     radio = {'version':2,'episode_id':'held-episode','identity':11,'phase':'appending','playlist':'RADIO',
@@ -650,21 +660,76 @@ def test_rebuild_preserves_decisions_unknown_evidence_and_album_occurrences(requ
             (410,25,None,3,None,9,2,1,1,'youtube'),(417,25,108,None,None,None,None,None,0,'library')])
         conn.execute('INSERT INTO album_fetch_state VALUES (25,17,1,3)')
         conn.commit()
-    before = path.read_bytes()
+    discovery_checks = seed_discovery_visibility(path)
+    if source_fixture == 'development93':
+        with closing(sqlite3.connect(path)) as conn:
+            conn.row_factory = sqlite3.Row
+            vibe_versions.install(conn)
+            conn.execute("INSERT INTO vibe_versions VALUES (23,'retained-unused-version')")
+            conn.commit()
+        metadata_checks, continuing_metadata_writes = seed_development_metadata(path)
+        seed_metadata_preparation(path, active=False)
+        journal_checks = seed_journal_policy(path)
+    else:
+        released_checks = seed_released_evidence(path)
+    before = source_contents(path)
     contract = destination.for_source(path)
+    if source_fixture == 'development93':
+        assert [stage.name for stage in contract.stages
+                if stage.name in {'copy:vibe_versions', 'copy:measurements', 'copy:recording_vibes'}] == [
+                    'copy:vibe_versions', 'copy:measurements', 'copy:recording_vibes']
     output = tmp_path/'decisions.db'
     # Interruption after a committed conversion batch must not duplicate files,
     # decisions or occurrence rows when this same candidate resumes.
-    def interrupt(phase,detail):
-        if detail.get('stage')=='road_trip_drafts':
-            raise InterruptedError('controlled committed draft batch')
-    with pytest.raises(InterruptedError,match='controlled committed'):
-        build.construct(path,output,contract,batch_size=2,progress=interrupt)
-    build.construct(path,output,contract,batch_size=2)
-    assert path.read_bytes()==before
+    checkpoints = ['road_trip_drafts'] + (['metadata:choices'] if source_fixture == 'development93' else [])
+    for checkpoint in checkpoints:
+        def interrupt(phase,detail):
+            if detail.get('stage')==checkpoint:
+                raise InterruptedError('controlled committed '+checkpoint+' batch')
+        with pytest.raises(InterruptedError,match='controlled committed'):
+            build.construct(path,output,contract,batch_size=2,progress=interrupt)
+    checked_discovery = []
+    def challenge_discovery(phase,detail):
+        if phase != 'verify' or detail.get('destination') != contract.version:
+            return
+        # The registered import verifier owns the construction before final
+        # retained-copy compaction transforms its historical artist captures.
+        with closing(sqlite3.connect(output,uri=True)) as candidate, closing(
+                sqlite3.connect(path.as_uri()+'?mode=ro',uri=True)) as reader:
+            candidate.row_factory = reader.row_factory = sqlite3.Row
+            candidate.execute('ATTACH DATABASE ? AS rebuild_source',(path.as_uri()+'?mode=ro',))
+            discovery_checks(candidate)
+            candidate.execute('BEGIN IMMEDIATE')
+            try:
+                candidate.execute('UPDATE discovery_legacy_offers SET offered_count=0 WHERE recording_id=8')
+                with pytest.raises(ValueError,match='changed legacy discovery offers'):
+                    contract.verify(reader,candidate)
+            finally:
+                candidate.rollback()
+            discovery_checks(candidate)
+        checked_discovery.append(True)
+    report = build.construct(path,output,contract,batch_size=2,progress=challenge_discovery)
+    assert checked_discovery == [True]
+    assert report['destination']==contract.version
+    # Read leases and compatibility materialization can create new cache/lock
+    # files. Every SQL/body file captured before conversion must remain exact.
+    after = source_contents(path)
+    assert {name:after.get(name) for name in before}==before
     from yt_playlist.core import playlist_recipe_state, radio_storage, road_trip_draft_storage
-    with closing(sqlite3.connect(output)) as conn:
-        conn.row_factory = sqlite3.Row
+    store = Store(output)
+    try:
+        store.init_schema()
+        conn = store.conn
+        assert runner.history(conn,registry.MIGRATIONS)==registry.MIGRATIONS[-1].version
+        assert conn.execute('SELECT max(version) FROM database_rebuild_source_history').fetchone()[0] == (
+            64 if source_fixture == 'production64' else 93)
+        assert [tuple(row) for row in conn.execute('SELECT id,label FROM accounts ORDER BY id')] == [
+            (11,'Main'),(29,'Other account')]
+        assert [tuple(row) for row in conn.execute('SELECT id,account_id FROM playlists ORDER BY id')] == [(41,11),(73,29)]
+        assert tuple(conn.execute('SELECT id,account_id,recording_id,membership_ref_id FROM play_events '
+                                  'WHERE id=91').fetchone()) == (91,11,8,None)
+        assert [row[0] for row in conn.execute('SELECT video_id FROM playlist_items '
+            'WHERE playlist_id=41 ORDER BY position')] == ['video-19','video-3','video-8']
         assert road_trip_draft_storage.get(conn,7)==draft
         assert radio_storage.load_published(conn)[0]==radio
         assert playlist_recipe_state.load(conn,'@account:11:LM')['opaque']==recipe['opaque']
@@ -678,15 +743,31 @@ def test_rebuild_preserves_decisions_unknown_evidence_and_album_occurrences(requ
         assert conn.execute('SELECT status FROM album_tracklists').fetchone()[0]=='partial'
         assert conn.execute('SELECT current_tracklist_id FROM albums WHERE id=25').fetchone()[0] is None
         assert conn.execute('SELECT count(*) FROM metadata_observations').fetchone()[0]==0
+        discovery_checks(conn)
+        if source_fixture == 'development93':
+            metadata_checks(store)
+            assert conn.execute('SELECT value FROM vibe_versions WHERE id=23').fetchone()[0] == 'retained-unused-version'
+            assert not conn.execute('SELECT 1 FROM metadata_runtime_choices WHERE id=999').fetchone()
+            assert {row[0] for row in conn.execute('SELECT impression_id FROM served_facts')} == {
+                41, 42, 501, 502, 503}
+            journal_checks(conn)
+        else:
+            released_checks(conn)
+        store.settings.set_setting('post_rebuild_write','works')
+        assert store.settings.get_setting('post_rebuild_write')=='works'
+        if source_fixture == 'development93':
+            continuing_metadata_writes(store)
         assert not conn.execute('PRAGMA foreign_key_check').fetchall()
+    finally:
+        store.conn.close()
 
 
-def test_released_learned_metadata_and_paid_evidence_are_imported_directly(production64,tmp_path):
+def seed_released_evidence(path):
     raw_input = json.dumps({'library':{'genre':'Synth Pop','year':'2001','audio':{'bpm':123.5}},'discovered':None})
     paid = json.dumps({'status':'ready','description':'Preserved paid prose. é','model':'deepseek-flash',
                       'at':86405,'usage':{'total_tokens':18},'opaque':['retained',1]},ensure_ascii=False,indent=2)
     vector = struct.pack('=ff',.25,.75)
-    with closing(sqlite3.connect(production64)) as conn:
+    with closing(sqlite3.connect(path)) as conn:
         build._configure(conn)
         conn.execute("UPDATE recordings SET genre='Synth Pop' WHERE id=8")
         conn.execute("INSERT INTO rec_weights VALUES ('genre:Synth Pop',1.25,10)")
@@ -720,11 +801,8 @@ def test_released_learned_metadata_and_paid_evidence_are_imported_directly(produ
         conn.executemany('INSERT INTO rec_group_publications VALUES (?)',[('first',),('second',)])
         conn.execute("INSERT INTO rec_group_head VALUES (1,'second')")
         conn.commit()
-    output = tmp_path/'learned.db'
-    build.construct(production64,output,destination.for_source(production64),batch_size=2)
     from yt_playlist.core import album_description_files, embedding_files
-    with closing(sqlite3.connect(output)) as conn:
-        conn.row_factory = sqlite3.Row
+    def verify(conn):
         assert tuple(conn.execute('SELECT id,created_at,direction FROM mood_events').fetchone())==(31,11,1)
         assert tuple(conn.execute('SELECT recording_id,position FROM mood_event_recordings').fetchone())==(8,0)
         assert tuple(conn.execute('SELECT legacy_key,position FROM mood_event_unresolved_seeds').fetchone())==('missing captured key',2)
@@ -748,6 +826,7 @@ def test_released_learned_metadata_and_paid_evidence_are_imported_directly(produ
         # No operational owner needs the first generation or its lineage.
         assert not conn.execute('SELECT 1 FROM group_lineage').fetchall()
         assert not conn.execute('PRAGMA foreign_key_check').fetchall()
+    return verify
 
 
 @pytest.mark.parametrize('source_fixture',['production64','development93'])

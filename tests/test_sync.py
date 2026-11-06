@@ -123,7 +123,7 @@ def test_sync_identity_populates_store(store):
     pls = store.playlists.get_playlists()
     assert len(pls) == 1
     assert store.playlists.get_playlist_track_keys(pls[0].id) == {"song a|artist", "song b|artist"}
-    assert store.history.get_recent_history_keys(0.0) == {"song a|artist"}
+    assert store.history.listening_day_counts(iid) == {"song a|artist": 1}
     assert pls[0].content_hash == content_hash(["song a|artist", "song b|artist"])
 
 
@@ -138,10 +138,10 @@ def test_history_sync_uses_browser_timezone_across_utc_and_local_midnight(store)
     sync_identity(store, iid, client, now=first + 3600)
     client._history[0]["played"] = "Yesterday"
     sync_identity(store, iid, client, now=first + 7 * 3600)
-    assert store.history.recent_play_counts(100) == {"song|artist": 1}
+    assert store.history.listening_day_counts(iid) == {"song|artist": 1}
     client._history[0]["played"] = "Today"
     sync_identity(store, iid, client, now=first + 7 * 3600)
-    assert store.history.recent_play_counts(100) == {"song|artist": 2}
+    assert store.history.listening_day_counts(iid) == {"song|artist": 2}
 
 def test_sync_identity_no_truncation_beyond_defaults(store):
     """Regression: sync_identity must pass limit=None so >25 playlists and >100 tracks are

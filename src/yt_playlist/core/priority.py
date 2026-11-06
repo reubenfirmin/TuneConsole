@@ -9,6 +9,8 @@ from contextvars import ContextVar
 import threading
 import time
 
+from yt_playlist.core.work_errors import WorkBudgetExceeded
+
 from yt_playlist.core.lock_diagnostics import (
     LockWaitDiagnostics, cooperative_lock_yield, database_lock_wait,
 )
@@ -22,6 +24,11 @@ class RequestPriority:
         self._condition = threading.Condition()
         self._foreground = 0
         self._held = threading.local()
+
+    @property
+    def is_background(self):
+        background = _BACKGROUND.get()
+        return background is not None and background[0] is self
 
     def enter(self):
         with self._condition:
@@ -41,6 +48,15 @@ class RequestPriority:
     def checkpoint(self, should_stop):
         if getattr(self._held, "depth", 0):
             return
+        cpu = time.thread_time()
+        resume = getattr(self._held, 'resume_cpu_until', 0)
+        if self._foreground:
+            # A previously quiet worker may still have most of its longer
+            # slice. New traffic gets the shorter allowance immediately.
+            resume = min(resume, cpu + 0.005)
+            self._held.resume_cpu_until = resume
+        if cpu < resume:
+            return
         # A request can itself await a model/source mutation. Yield a bounded timeslice rather
         # than waiting for that response indefinitely (which would introduce a dependency cycle).
         deadline = time.monotonic() + 0.1
@@ -48,9 +64,19 @@ class RequestPriority:
             while self._foreground and not should_stop():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    return
+                    break
                 with cooperative_lock_yield():
                     self._condition.wait(min(0.025, remaining))
+            # Progress callbacks run every 1,000 VM instructions. Yielding on
+            # each callback starves even short queries under continuing traffic.
+            # Under interactive load, several workers sharing a 50 ms interval
+            # can consume most of a response's CPU budget. Keep their progress
+            # bounded to a shorter interval while a request is active, and
+            # restore the normal interval immediately after traffic clears.
+            # Descheduling and other threads' work must not consume this
+            # worker's allowance and force another pause before useful work.
+            # Cancellation and the enclosing work budget still use wall time.
+            self._held.resume_cpu_until = time.thread_time() + (0.005 if self._foreground else 0.05)
 
     @contextmanager
     def background(self, checkpoint):
@@ -80,7 +106,24 @@ class ServingLock:
     def held_by_current_thread(self):
         return bool(getattr(self._local, 'releases', ()))
 
+    @contextmanager
+    def nonblocking_admission(self):
+        """Require each acquisition in this thread's scope to succeed immediately.
+
+        This sets admission policy only; it does not hold the connection across
+        work between acquisitions, such as durable evidence-file publication.
+        Nested repository/context-manager entries inherit the same policy.
+        """
+        previous = getattr(self._local, 'nonblocking_depth', 0)
+        self._local.nonblocking_depth = previous + 1
+        try:
+            yield
+        finally:
+            self._local.nonblocking_depth = previous
+
     def acquire(self, blocking=True, timeout=-1):
+        if getattr(self._local, 'nonblocking_depth', 0):
+            blocking, timeout = False, -1
         background = _BACKGROUND.get()
         return database_lock_wait(self._acquire, blocking, timeout,
             background=background is not None and background[0] is self._priority,
@@ -137,7 +180,8 @@ class ServingLock:
             release()
 
     def __enter__(self):
-        self.acquire()
+        if not self.acquire():
+            raise WorkBudgetExceeded('Serving connection is busy')
         return self
 
     def __exit__(self, *_):

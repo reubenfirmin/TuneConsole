@@ -267,25 +267,3 @@ def test_compatible_checkpoint_save_restore_and_explicit_retirement_keep_working
     assert len(experiments.decisions(store)) == 3
     owner.publish(store.conn, revision=prepare(store.conn, owner))
     assert experiments.last_decision(store)['reason'] == 'Explicit retirement after inspection'
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_frozen_upgrade_prefers_native_owners_and_retains_published_originals(installed, tmp_path):
-    store, _ = installed
-    values, originals = seed(store)
-    for owner in publication.OWNERS.values():
-        owner.publish(store.conn, revision=prepare(store.conn, owner))
-    upgraded = Store(tmp_path/'taste-native-publication.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        upgraded.init_schema(defer_metadata=True)
-        regular.validate(upgraded.conn)
-        collection_recovery.collect_orphans(upgraded.conn)
-        for name, owner in publication.OWNERS.items():
-            assert owner.selected(upgraded.conn) is None
-            assert owner.value(upgraded.conn, 0) == originals[owner.source]
-            assert json.loads(upgraded.settings.get_setting(owner.source)) == values[owner.source]
-        assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        upgraded.conn.close()

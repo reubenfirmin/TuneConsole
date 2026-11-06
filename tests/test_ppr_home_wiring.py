@@ -3,16 +3,20 @@ import html
 import json
 import re
 
-from tests.rec.test_home_prepared import prepared
+from fastapi.testclient import TestClient
+
+from tests.rec.test_home_prepared import prepared, store
 
 
 def test_home_keeps_assignment_and_visible_options_without_hidden_ranker_recipes(
         store, prepared, unlocked_home_controls):
-    from tests.test_mode_cards_route import _client
     from yt_playlist.rec import choice_evidence
     from yt_playlist.core import mix_choices
+    from yt_playlist.web.app import create_app
 
-    response = _client(store).get('/home/cards')
+    app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
+    with TestClient(app, base_url='http://127.0.0.1') as client:
+        response = client.get('/home/cards')
     assert response.status_code == 200
     match = re.search(r"hx-vals='([^']*opportunity_id[^']*)'", response.text)
     assert match, 'The rendered menu must identify its actual choice opportunity'

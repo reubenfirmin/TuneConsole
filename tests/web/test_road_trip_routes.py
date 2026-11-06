@@ -16,7 +16,7 @@ from yt_playlist.web.routes import road_trip as road_trip_route
 from yt_playlist.repos.base import GENERATED_GROUP
 from yt_playlist.web.app import create_app
 from yt_playlist.util.matching import identity_key
-from tests.conftest import FakeClient
+from tests.conftest import FakeClient, _track
 
 
 def _app(store, client=None, monkeypatch=None):
@@ -56,11 +56,25 @@ def _stub_pools(monkeypatch, store=None, own_count=20, other_count=20):
 
 
 def _recipe(store, **kw):
-    store.road_trip.save_road_trip_recipe(None, kw.get("name", "Beach Run"), kw.get("own_pct", 50),
+    return store.road_trip.save_road_trip_recipe(None, kw.get("name", "Beach Run"), kw.get("own_pct", 50),
                                 kw.get("artists", ["Tame Impala"]), kw.get("genres", []),
                                 kw.get("target_minutes", 30),
                                 1000.0, familiarity_pct=kw.get("familiarity_pct", 50))
-    return store.road_trip.list_road_trip_recipes()[0]["id"]
+
+
+def _editor_recipe_id(html):
+    initial = re.search(r'roadTripForm\((\{[^\n]*?\}),', html)
+    assert initial, 'The response contains the recipe editor'
+    return json.loads(initial.group(1))['id']
+
+
+def _recipe_form(store, recipe_id, **changes):
+    """Submit the same complete saved recipe fields as the shipped editor."""
+    recipe = {**store.road_trip.get_road_trip_recipe(recipe_id), **changes}
+    return {key: json.dumps(recipe.get(key) or []) if key in ('artists', 'genres', 'blacklist_genres')
+            else str(recipe[key]) for key in (
+                'id', 'name', 'own_pct', 'familiarity_pct', 'target_minutes',
+                'artists', 'genres', 'blacklist_genres')}
 
 
 def test_road_trip_page_renders(store):
@@ -101,7 +115,8 @@ def test_reopening_and_saving_repairs_passenger_genre_membership(store):
     c, _ = _app(store, client)
     rid = _recipe(store, own_pct=0, artists=seeds, target_minutes=15)
     state = road_trip_rec.start_draft(store, store.road_trip.get_road_trip_recipe(rid), 1000, seed=7)
-    state.update(revision=uuid4().hex, building=False, pending=[], artist_contexts={})
+    state.update(revision=uuid4().hex, building=False, pending=[], done_inputs=list(seeds),
+                 artist_contexts={})
     for name, genre in zip(seeds, ["Alternative Rock", "Indie Rock", "Alternative Rock"]):
         state["artist_contexts"][name] = {"genre": genre, "year": None, "related": []}
         candidate = candidates._candidate(name, name, name, "", None, 300, "theirs", genre, None)
@@ -134,7 +149,7 @@ def test_reopening_and_saving_repairs_passenger_genre_membership(store):
     assert client.added == [(saved["saved_playlist_id"], saved["picks"])]
     reopened = c.get("/road_trip")
     assert reopened.status_code == 200 and "Old singer song" not in reopened.text
-    steered = c.post(f"/road_trip/draft/{rid}/mix", data={"their_pct": "100", "familiarity_pct": "75"})
+    steered = c.post('/road_trip/recipes', data=_recipe_form(store, rid, own_pct=0, familiarity_pct=75))
     assert steered.status_code == 200 and "Old singer song" not in steered.text
     current = store.road_trip.get_road_trip_draft(rid)
     assert set(current["picks"]) == set(seeds)
@@ -275,30 +290,37 @@ def test_mix_slider_repicks_without_rebuilding(store, monkeypatch):
     rid = _recipe(store)
     c.post(f"/road_trip/recipes/{rid}/build")
 
-    r = c.post(f"/road_trip/draft/{rid}/mix", data={"own_pct": "100"})
+    before = store.road_trip.get_road_trip_draft(rid)
+    r = c.post('/road_trip/recipes', data=_recipe_form(store, rid, own_pct=100, familiarity_pct=75))
 
     assert r.status_code == 200
     state = store.road_trip.get_road_trip_draft(rid)
     assert state["own_pct"] == 100
     assert state["stats"]["their_count"] == 0
-    assert store.road_trip.get_road_trip_recipe(rid)["own_pct"] == 50    # the saved recipe is left alone
+    recipe = store.road_trip.get_road_trip_recipe(rid)
+    assert recipe['own_pct'] == 100 and recipe['familiarity_pct'] == state['familiarity_pct'] == 75
+    assert state['seed'] == before['seed'] and state['pool'] == before['pool']
+    selection = state['picks']
+    c.post('/road_trip/recipes', data=_recipe_form(store, rid))
+    assert store.road_trip.get_road_trip_draft(rid)['picks'] == selection
 
 
-def test_mix_slider_drags_toward_mine_on_the_left(store, monkeypatch):
-    """The bar's left label is "Mine", so it carries THEIR share: 0 = all mine."""
+def test_recipe_balance_updates_saved_recipe_and_draft_at_both_extremes(store, monkeypatch):
     _stub_pools(monkeypatch, store)
     c, _ = _app(store, monkeypatch=monkeypatch)
     rid = _recipe(store)
     c.post(f"/road_trip/recipes/{rid}/build")
 
-    c.post(f"/road_trip/draft/{rid}/mix", data={"their_pct": "0"})
+    c.post('/road_trip/recipes', data=_recipe_form(store, rid, own_pct=100))
 
     state = store.road_trip.get_road_trip_draft(rid)
     assert state["own_pct"] == 100
     assert state["stats"]["their_count"] == 0
 
-    c.post(f"/road_trip/draft/{rid}/mix", data={"their_pct": "100"})
+    assert store.road_trip.get_road_trip_recipe(rid)['own_pct'] == 100
+    c.post('/road_trip/recipes', data=_recipe_form(store, rid, own_pct=0))
     assert store.road_trip.get_road_trip_draft(rid)["stats"]["own_count"] == 0
+    assert store.road_trip.get_road_trip_recipe(rid)['own_pct'] == 0
 
 
 def test_editing_the_recipe_steers_the_draft_in_place(store, monkeypatch):
@@ -420,6 +442,49 @@ def test_edit_loads_a_recipe_into_the_form(store):
     assert "Editing" in r.text or "roadTripForm" in r.text
 
 
+@pytest.mark.parametrize('selection', ['unbuilt', 'discarded', 'newly_saved'])
+def test_explicit_recipe_without_draft_never_shows_another_draft(store, monkeypatch, selection):
+    _stub_pools(monkeypatch, store)
+    client, _ = _app(store, monkeypatch=monkeypatch)
+    first = _recipe(store, name='First route')
+    client.post(f'/road_trip/recipes/{first}/build')
+    if selection == 'newly_saved':
+        response = client.post('/road_trip/recipes', data={
+            'name': 'Second route', 'artists': '[]', 'genres': '[]', 'target_minutes': '30'})
+        second = next(r['id'] for r in store.road_trip.list_road_trip_recipes() if r['name'] == 'Second route')
+    else:
+        second = _recipe(store, name='Second route')
+        if selection == 'discarded':
+            client.post(f'/road_trip/recipes/{second}/build')
+            client.delete(f'/road_trip/draft/{second}')
+        response = client.post(f'/road_trip/recipes/{second}/edit')
+    assert response.status_code == 200
+    assert _editor_recipe_id(response.text) == second
+    assert 'rt-draft-' not in response.text
+    assert 'class="rt-row' not in response.text
+    assert f'/road_trip/draft/{first}/' not in response.text
+    assert store.road_trip.get_road_trip_draft(first) is not None
+    assert store.road_trip.get_road_trip_draft(second) is None
+    # Only an unqualified initial page may restore the latest existing draft.
+    initial = client.get('/road_trip')
+    assert f'id="rt-draft-{first}"' in initial.text
+    assert _editor_recipe_id(initial.text) == first
+
+
+def test_explicit_recipe_switch_preserves_each_existing_draft(store, monkeypatch):
+    _stub_pools(monkeypatch, store)
+    client, _ = _app(store, monkeypatch=monkeypatch)
+    first = _recipe(store, name='First route')
+    second = _recipe(store, name='Second route')
+    for recipe in (first, second):
+        assert client.post(f'/road_trip/recipes/{recipe}/build').status_code == 200
+    for selected, other in ((first, second), (second, first), (first, second)):
+        response = client.post(f'/road_trip/recipes/{selected}/edit')
+        assert f'id="rt-draft-{selected}"' in response.text
+        assert _editor_recipe_id(response.text) == selected
+        assert f'/road_trip/draft/{other}/' not in response.text
+
+
 def test_tilting_a_genre_to_zero_drops_it_from_the_playlist(store, monkeypatch):
     _stub_pools(monkeypatch, store)
     c, _ = _app(store, monkeypatch=monkeypatch)
@@ -503,9 +568,12 @@ def test_saving_the_draft_creates_the_generated_playlist(store, monkeypatch):
     c, _ = _app(store, client, monkeypatch)
     rid = _recipe(store)
     c.post(f"/road_trip/recipes/{rid}/build")
-    picks = store.road_trip.get_road_trip_draft(rid)["picks"]
+    draft = store.road_trip.get_road_trip_draft(rid)
+    picks = draft["picks"]
+    client._catalog.update({t['video_id']: _track(t['video_id'], t['title'], t['artist'], t['duration'])
+                            for t in road_trip_rec.draft_tracks(draft)})
 
-    r = c.post(f"/road_trip/draft/{rid}/save")
+    r = c.post(f"/road_trip/draft/{rid}/save", data={"launch_id": "road-trip-success"})
 
     assert r.status_code == 200
     recipe = store.road_trip.get_road_trip_recipe(rid)
@@ -516,8 +584,10 @@ def test_saving_the_draft_creates_the_generated_playlist(store, monkeypatch):
     assert store.road_trip.get_road_trip_draft(rid)["saved_playlist_id"] == recipe["last_playlist_id"]
     playlist = next(p for p in store.playlists.get_playlists() if p.provider_playlist_id == recipe["last_playlist_id"])
     assert f'window.location.assign("/playlist/{playlist.id}")' in r.text
-    assert "music.youtube.com/watch?list=" + recipe["last_playlist_id"] in r.text
-    assert f'genComplete("", "{recipe["last_playlist_id"]}", false, false, true)' in r.text
+    assert f'data-generated-playlist="{recipe["last_playlist_id"]}"' in r.text
+    assert [t['video_id'] for t in store.charts.playlist_tracks_detail(playlist.id)] == picks
+    assert [t['videoId'] for t in client.get_playlist(recipe['last_playlist_id'])['tracks']] == picks
+    assert f'genComplete("road-trip-success", "{recipe["last_playlist_id"]}", false, false, true)' in r.text
 
 
 def test_saving_plays_in_the_connected_youtube_tab_when_ready(store, monkeypatch):
@@ -556,11 +626,11 @@ def test_save_failures_use_the_standard_feedback_and_leave_no_saved_link(store, 
     else:
         store.road_trip.delete_road_trip_draft(rid)
 
-    response = c.post(f"/road_trip/draft/{rid}/save")
+    response = c.post(f"/road_trip/draft/{rid}/save", data={"launch_id": "road-trip-failure"})
 
     assert response.status_code == 200
     assert "Couldn't save" in response.text
-    assert 'genComplete("", null, true, false)' in response.text
+    assert 'genComplete("road-trip-failure", null, true, false)' in response.text
     assert "private provider details" not in response.text
     assert "window.location.assign" not in response.text
     assert store.road_trip.get_road_trip_recipe(rid)["last_playlist_id"] is None

@@ -26,8 +26,8 @@ def build(ctx) -> APIRouter:
         if job:
             return {"events": [event for _, event in job.events.since(0)[1]],
                     "outcome": job.outcome}
-        from yt_playlist.core import sync_state
-        result = sync_state.state(ctx.store)
+        with ctx.store.read_view() as reader:
+            result = reader.sync.state()
         if not result:
             return {"events": [], "outcome": None}
         events = []

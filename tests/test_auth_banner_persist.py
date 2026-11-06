@@ -5,7 +5,6 @@ import sqlite3
 import pytest
 
 from yt_playlist.core import account_auth_state
-from yt_playlist.core.store import Store
 from yt_playlist.web.context import Ctx, AUTH_EXPIRED_KEY
 
 
@@ -13,16 +12,14 @@ def _ctx(store):
     return Ctx(store=store, client_provider=lambda: {}, now_fn=lambda: 1.0, templates=None, jobs=None)
 
 
-def _store():
-    s = Store(":memory:")
-    s.init_schema()
+def _store(s):
     for number in range(1,8):
         s.accounts.upsert_account(str(number),f'{number}.json',None,number==1)
     return s
 
 
-def test_flag_persists_and_reseeds_across_restart():
-    store = _store()
+def test_flag_persists_and_reseeds_across_restart(store):
+    store = _store(store)
     ctx = _ctx(store)
     ctx.flag_auth_expired(7, "flavor8100")
     assert ctx.auth_expired == {7: "flavor8100"}
@@ -32,15 +29,15 @@ def test_flag_persists_and_reseeds_across_restart():
     assert fresh.auth_expired == {7: "flavor8100"}            # int key, so on_auth_ok's pop(iid) matches
 
 
-def test_flag_defaults_label_to_id():
-    store = _store()
+def test_flag_defaults_label_to_id(store):
+    store = _store(store)
     ctx = _ctx(store)
     ctx.flag_auth_expired(3, None)
     assert ctx.auth_expired == {3: "3"}
 
 
-def test_clear_one_removes_and_persists():
-    store = _store()
+def test_clear_one_removes_and_persists(store):
+    store = _store(store)
     ctx = _ctx(store)
     ctx.flag_auth_expired(1, "a")
     ctx.flag_auth_expired(2, "b")
@@ -53,8 +50,8 @@ def test_clear_one_removes_and_persists():
     assert account_auth_state.read(store.conn)=={}
 
 
-def test_clear_all_wipes_banner():
-    store = _store()
+def test_clear_all_wipes_banner(store):
+    store = _store(store)
     ctx = _ctx(store)
     ctx.flag_auth_expired(1, "a")
     ctx.flag_auth_expired(2, "b")
@@ -63,8 +60,8 @@ def test_clear_all_wipes_banner():
     assert _ctx(store).auth_expired == {}                      # re-auth/sign-out clears it durably
 
 
-def test_healthy_extension_clears_warning_in_memory_during_repair_then_on_disk():
-    store = _store()
+def test_healthy_extension_clears_warning_in_memory_during_repair_then_on_disk(store):
+    store = _store(store)
     ctx = _ctx(store)
     ctx.flag_auth_expired(1, 'Main')
     store.activity_paused = True
@@ -81,8 +78,8 @@ def test_healthy_extension_clears_warning_in_memory_during_repair_then_on_disk()
     assert account_auth_state.read(store.conn)=={}
 
 
-def test_retired_auth_map_cannot_replace_owned_account_state():
-    store = _store()
+def test_retired_auth_map_cannot_replace_owned_account_state(store):
+    store = _store(store)
     with pytest.raises(sqlite3.IntegrityError,match='domain owner'):
         store.settings.set_setting(AUTH_EXPIRED_KEY, "not json{")
     store.conn.rollback()

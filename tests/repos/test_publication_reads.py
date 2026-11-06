@@ -9,24 +9,33 @@ import pytest
 from yt_playlist.core.store import Store
 from yt_playlist.core import json_cache
 from yt_playlist.core.db_revisions import Revisions
-from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.rec import content_model, radio_candidates
 from yt_playlist.repos.rec_proposals import encode_proposals
 from tests.recommendation_support import publish_bundles
 
 
+@pytest.fixture
+def historical_publication_store(tmp_path, _pristine_installed_schema):
+    store = Store(tmp_path / 'publication.db')
+    try:
+        # Keep the genuine hidden-row owner, including its historical guards.
+        _pristine_installed_schema(69).backup(store.conn)
+        store.conn.execute('PRAGMA journal_mode=WAL')
+        store._bind_repositories()
+        store._snapshot_revisions = Revisions(store.conn)
+        yield store
+    finally:
+        store.conn.close()
+
+
 @pytest.mark.parametrize('commit', [True, False])
 @pytest.mark.parametrize('staged', [False, True])
 def test_foreground_reads_see_last_good_while_publication_holds_writer(
-        tmp_path, monkeypatch, commit, staged):
-    store = Store(tmp_path / 'publication.db')
+        historical_publication_store, monkeypatch, commit, staged):
+    store = historical_publication_store
+    assert store.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
     # Exercise the retained predecessor cache protocol. Current typed head
     # publication and its foreground readers are checked independently.
-    migrate(store.conn, registry=registry.MIGRATIONS[:69])
-    store._bind_repositories()
-    # Keep the frozen v69 owner while initializing the revision tracker that
-    # normal init_schema supplies. Calling init_schema here advances the owner.
-    store._snapshot_revisions = Revisions(store.conn)
     old = {'all': {'fresh': [{'key': 'old'}]}, '_meta': {'full_pools': True}}
     new = {'all': {'fresh': [{'key': 'new'}]}, '_meta': {'full_pools': True}}
     store.rec_proposals.put_proposals('mode_bundles', old, 1)
@@ -96,9 +105,8 @@ def test_foreground_reads_see_last_good_while_publication_holds_writer(
 
 @pytest.mark.parametrize('file_backed', [True, False])
 def test_settings_lookup_reuses_available_connection_and_owned_transaction(
-        tmp_path, monkeypatch, file_backed):
-    store = Store(tmp_path / 'lookup.db' if file_backed else ':memory:')
-    store.init_schema()
+        tmp_path, monkeypatch, file_backed, consumer_store):
+    store = consumer_store(tmp_path / 'lookup.db' if file_backed else ':memory:')
     store.settings.set_setting('config_input', 'old')
 
     def no_reader():
@@ -124,10 +132,9 @@ def test_settings_lookup_reuses_available_connection_and_owned_transaction(
         store.conn.close()
 
 
-def test_radio_inputs_are_coherent_and_reader_closes_before_decode(tmp_path, monkeypatch):
+def test_radio_inputs_are_coherent_and_reader_closes_before_decode(tmp_path, monkeypatch, consumer_store):
     from yt_playlist.core import recommendation_outputs
-    store = Store(tmp_path / 'radio.db')
-    store.init_schema()
+    store = consumer_store(tmp_path / 'radio.db')
     store.tracks.upsert_track('video', 'Song', 'Artist', None, 200)
     old_model = json.dumps({'cat': {'old': 0}})
     new_model = json.dumps({'cat': {'new': 0}})

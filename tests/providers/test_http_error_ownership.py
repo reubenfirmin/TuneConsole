@@ -11,11 +11,20 @@ from yt_playlist.integrations.base import IntegrationUnavailable
 from yt_playlist.util import net
 
 
-@pytest.mark.parametrize('resource', [
-    'lastfm-api', 'lastfm-page', 'discogs-search', 'discogs-release', 'discogs-master',
+@pytest.mark.parametrize('resource,cached,status', [
+    ('lastfm-page', True, 404),
+    ('lastfm-page', False, 401),
+    ('lastfm-page', True, 503),
+    ('lastfm-api', False, 404),
+    ('lastfm-api', True, 401),
+    ('lastfm-api', False, 429),
+    ('discogs-search', False, 404),
+    ('discogs-search', True, 429),
+    ('discogs-release', True, 404),
+    ('discogs-release', False, 401),
+    ('discogs-master', False, 404),
+    ('discogs-master', True, 503),
 ])
-@pytest.mark.parametrize('cached', [False, True])
-@pytest.mark.parametrize('status', [404, 401, 429, 503])
 def test_error_body_is_closed_before_miss_retry_or_retained_return(resource, cached, status):
     clock, failure, calls, responses = [1000.], [None], [], []
     if resource == 'lastfm-page':

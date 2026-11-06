@@ -24,7 +24,7 @@ def check(directory, wheel):
 def check_installed(directory, wheel, installed):
     root = Path(uplift.__file__).resolve().parents[1]
     names = ['rec/audio_vibe_runtime.py', 'rec/audio_vibe_uplift.py', 'rec/audio_vibe_relax.py', 'rec/audio_vibe_release.py', 'rec/audio_vibe_cruise.py',
-             'rec/audio_vibe_model.py', 'rec/audio_vibe_external.py', 'rec/audio_vibe_preview.py',
+             'rec/audio_vibe_model.py', 'rec/audio_vibe_external.py', 'rec/audio_vibe_prediction.py',
              'rec/vibe_preparation.py', 'rec/musical_character.py', 'repos/vibe_predictions.py',
              'core/audio_vibe_contract.py', 'rec/data/uplift-vibes.json', 'rec/data/uplift-vibes.NOTICE.md',
              'rec/data/relax-vibes.json', 'rec/data/relax-vibes.NOTICE.md', 'rec/data/release-vibes.NOTICE.md',
@@ -45,7 +45,7 @@ os.environ['YT_PLAYLIST_HOME'] = sys.argv[3]
 from yt_playlist.core import features
 features.LOCAL_ENV = features.LOCAL_ENV.with_name('absent-uplift-check.env')
 from yt_playlist.rec import audio_vibe_uplift as u, audio_vibe_relax as r, audio_vibe_release as e, audio_vibe_cruise as c, audio_vibe_model as m
-from yt_playlist.rec import audio_vibe_preview as p
+from yt_playlist.rec import audio_vibe_prediction as p
 for module in (u, r, e, c, m):
     os.environ.pop(module.ENVIRONMENT_KEY, None)
 for module in (u, r, e, c):

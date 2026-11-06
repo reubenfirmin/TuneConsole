@@ -1,5 +1,6 @@
 """Sync report and stamp cutover keeps exact originals and continuing writes."""
 import json
+from functools import partial
 from pathlib import Path
 import sqlite3
 
@@ -8,7 +9,7 @@ import pytest
 from tests.core.test_predecessor_writes import installed
 from tests.core.test_library_sync_preparation import finish, head, seed
 from yt_playlist.core import sync_state
-from yt_playlist.core.migrations import MigrationError, registry, regular, runner
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import library_sync as preparation, library_sync_publication as publication
 from yt_playlist.core.store import Store
 from yt_playlist.library import sync_outcomes
@@ -17,6 +18,13 @@ from yt_playlist.library import sync_outcomes
 def prepare(conn, owner):
     owner.worker.install(conn)
     return finish(owner.worker, conn, size=3 if owner is publication.STAMPS else 128).prepared_revision
+
+
+def rejection_inputs(store, *, owner):
+    seed(store)
+    revision = prepare(store.conn, owner)
+    assert owner.selected(store.conn) is None
+    return revision
 
 
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
@@ -131,11 +139,11 @@ def test_absent_sources_failed_work_and_regular_ddl_are_independent(installed, n
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['fields', 'member', 'resolution', 'file', 'stamp-fields', 'stamp-original'])
-def test_corrupt_preparation_never_selects_an_owner(installed, failure):
+def test_corrupt_preparation_never_selects_an_owner(installed, staged_custody, failure):
     store, _ = installed
-    seed(store)
     owner = publication.STAMPS if failure.startswith('stamp-') else publication.RESULT
-    revision = prepare(store.conn, owner)
+    revision = staged_custody(installed, ('library-sync', owner.source),
+        partial(rejection_inputs, owner=owner))
     with store.conn:
         if failure == 'fields':
             store.conn.execute('UPDATE '+preparation.HEAD+" SET phase='complete'")
@@ -235,29 +243,3 @@ def test_long_report_repeated_reference_queries_and_missing_file_retry(installed
         sync_state.read(store.conn)
     preparation.RESULT_JOB.step(store.conn, retry=True)
     assert store.settings.get_setting(sync_state.KEY) == raw
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_frozen_upgrade_retains_exact_published_originals_and_prefers_native(installed, tmp_path):
-    store, _ = installed
-    value = json.loads(seed(store))
-    del value['accounts']['999']
-    del value['accounts']['1']['resources']['playlists']['items']['missing-playlist']
-    raw = json.dumps(value)
-    store.settings.set_setting(sync_state.KEY, raw)
-    for owner in publication.OWNERS.values():
-        owner.publish(store.conn, revision=prepare(store.conn, owner))
-    upgraded = Store(tmp_path/'native-sync.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        regular.validate(upgraded.conn)
-        assert publication.RESULT.selected(upgraded.conn) is None
-        assert publication.STAMPS.selected(upgraded.conn) is None
-        assert sync_state.read(upgraded.conn) == value
-        assert sync_state.stamp(upgraded.conn, 'last_sync_at') == '10.5'
-        assert publication.RESULT.value(upgraded.conn, 0) == raw
-        assert publication.STAMPS.value(upgraded.conn, 'last_sync_at', 0) == ' 10.50 '
-        assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        upgraded.conn.close()

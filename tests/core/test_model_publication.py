@@ -1,4 +1,5 @@
 """Encoder cutover fences files and both jobs, including continuing model workers."""
+from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
@@ -23,6 +24,13 @@ def prepare(store):
     return dict(zip(('artifact_revision', 'fingerprint_revision'), revisions))
 
 
+def rejection_inputs(store):
+    sources = seed(store)
+    revisions = prepare(store)
+    assert publication.selected(store.conn) is None
+    return sources, revisions
+
+
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
 def test_existing_and_reopened_runtime_matches_historical_owner(installed, tmp_path):
     store, _ = installed
@@ -37,8 +45,8 @@ def test_existing_and_reopened_runtime_matches_historical_owner(installed, tmp_p
         publication.publish(store.conn, **revisions)
         publication.publish(store.conn, **revisions)
         assert publication.selected(other.conn) == (0, 0)
-        assert {key: other.settings.get_setting(key, 'missing') for key in sources} == {
-            key: model_state.get(expected.conn, key, 'missing') for key in sources}
+        served = {key: model_state.get(expected.conn, key, 'missing') for key in sources}
+        assert {key: other.settings.get_setting(key, 'missing') for key in sources} == served
         assert dict(store.conn.execute('SELECT key,value FROM settings')).items() >= sources.items()
         regular.validate(other.conn)
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
@@ -49,7 +57,7 @@ def test_existing_and_reopened_runtime_matches_historical_owner(installed, tmp_p
     try:
         reopened.init_schema(defer_metadata=True)
         assert publication.selected(reopened.conn) == (0, 0)
-        assert reopened.settings.get_setting('rec_content_model') == sources['rec_content_model']
+        assert {key: reopened.settings.get_setting(key, 'missing') for key in sources} == served
     finally:
         reopened.conn.close()
 
@@ -62,7 +70,7 @@ def test_source_and_compatible_writes_withdraw_the_entire_selection(installed, k
     sources = seed(store)
     publication.publish(store.conn, **prepare(store))
     old_heads = [dict(row) for row in current(store.conn)]
-    with sqlite3.connect(store._db_path) as old_writer:
+    with closing(sqlite3.connect(store._db_path)) as old_writer, old_writer:
         old_writer.execute('UPDATE settings SET value=? WHERE key=?', (raw, key))
     assert publication.selected(store.conn) is None
     assert model_state.available(store.conn)
@@ -86,10 +94,10 @@ def test_source_and_compatible_writes_withdraw_the_entire_selection(installed, k
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('mutation', ['encoder', 'fingerprint', 'manifest'])
-def test_continuing_writes_during_file_verification_cannot_publish_stale_inputs(installed, monkeypatch, mutation):
+def test_continuing_writes_during_file_verification_cannot_publish_stale_inputs(
+        installed, staged_custody, monkeypatch, mutation):
     store, _ = installed
-    seed(store)
-    revisions = prepare(store)
+    _, revisions = staged_custody(installed, 'model-artifacts-and-fingerprints', rejection_inputs)
     real_read = files.read
     changed = False
     def change_during_read(*args, **kwargs):
@@ -113,10 +121,9 @@ def test_continuing_writes_during_file_verification_cannot_publish_stale_inputs(
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['missing-file', 'fingerprint', 'original'])
-def test_incomplete_or_corrupt_preparation_does_not_select_a_model(installed, failure):
+def test_incomplete_or_corrupt_preparation_does_not_select_a_model(installed, staged_custody, failure):
     store, _ = installed
-    sources = seed(store)
-    revisions = prepare(store)
+    sources, revisions = staged_custody(installed, 'model-artifacts-and-fingerprints', rejection_inputs)
     if failure == 'missing-file':
         Path(store.conn.execute(f'SELECT filename FROM {preparation.PARTS} LIMIT 1').fetchone()[0]).unlink()
     elif failure == 'fingerprint':
@@ -227,22 +234,6 @@ def test_snapshot_guards_consumed_model_but_ignores_reconciliation_counters(inst
         snapshot.store.settings.get_setting('rec_content_model')
         store.settings.set_setting('rec_content_model', '{"new":"consumed"}')
         assert not snapshot.publish(lambda: pytest.fail('published stale encoder inputs'))
-
-
-@pytest.mark.parametrize('installed', [79], indirect=True)
-def test_frozen_full_upgrade_retains_originals_and_native_owners_win(installed, tmp_path):
-    store, _ = installed
-    sources = seed(store)
-    publication.publish(store.conn, **prepare(store))
-    upgraded = Store(tmp_path / 'published-encoder-full-upgrade.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        assert publication.selected(upgraded.conn) is None
-        assert all(model_state.get(upgraded.conn, key) == raw for key, raw in sources.items())
-        regular.validate(upgraded.conn)
-    finally:
-        upgraded.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

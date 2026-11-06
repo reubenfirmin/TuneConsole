@@ -146,11 +146,6 @@
 .taste-controls .taste-feature-section .knob-reset { grid-area: 1 / 4 / 3 / 5;
   width: 2.75rem; height: 2.75rem; margin: 0; padding: .5rem; justify-content: center; }
 .taste-learning-settings > .taste-settings-layout { margin-top: .75rem; }
-.taste-controls .taste-feature-section .knob-toggle label { grid-area: 1 / 1 / 2 / 5;
-  display: flex; align-items: center; gap: .65rem; min-height: 2.75rem; font-size: 1rem; cursor: pointer; }
-.taste-controls .taste-feature-section .knob-toggle input { flex: none; width: 1.25rem; height: 1.25rem;
-  margin: 0; accent-color: var(--setting-accent); }
-.taste-controls .taste-feature-section .knob-toggle .knob-help { grid-area: 2 / 1 / 3 / 5; }
 @container feature-controls (max-width: 42rem) {
   .taste-controls .taste-feature-section .knob { grid-template-columns: minmax(0, 1fr) 5rem 2.75rem;
     grid-template-rows: auto auto auto; gap: .2rem .5rem; padding: .65rem 0; }
@@ -159,8 +154,6 @@
   .taste-feature-section .knob-value { grid-area: 3 / 2; }
   .taste-controls .taste-feature-section input[type="range"] { grid-area: 3 / 1; }
   .taste-controls .taste-feature-section .knob-reset { grid-area: 3 / 3; }
-  .taste-controls .taste-feature-section .knob-toggle { grid-template-rows: auto auto; }
-  .taste-controls .taste-feature-section .knob-toggle :is(label, .knob-help) { grid-column: 1 / 4; }
 }
 .taste-experiment .sample-head { flex-wrap: wrap; }
 .taste-experiment .taste-comparison { margin-top: 1rem; }

@@ -275,10 +275,9 @@ def test_feature_settings_select_features_and_preserve_saved_edits(live_app, sto
     navigation.get_by_role("tab", name="Home cards", exact=True).click()
     expect(features.locator("details")).to_have_count(0)
     expect(features.locator("#taste-feature-radio")).to_have_count(0)
-    # Home keeps track length and the active setup threshold; the two inactive
-    # coverage/library thresholds have been retired.
-    expect(features.get_by_role("slider")).to_have_count(13)
-    expect(features.locator("#param-onboard_coverage_min, #param-onboard_library_min")).to_have_count(0)
+    # Home keeps its track-length control; all inactive setup thresholds are retired.
+    expect(features.get_by_role("slider")).to_have_count(12)
+    expect(features.locator("#param-onboard_coverage_min, #param-onboard_library_min, #param-onboard_feedback_min")).to_have_count(0)
     expect(features.locator("#param-max_track_minutes")).to_be_visible()
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
 
@@ -288,6 +287,7 @@ def test_feature_settings_select_features_and_preserve_saved_edits(live_app, sto
     expect(features.get_by_role("tabpanel")).to_have_count(1)
     expect(home.get_by_role("heading", name="Comfort listening", exact=True)).to_be_visible()
     expect(home.get_by_role("heading", name="Cards & variety", exact=True)).to_be_visible()
+    expect(home.get_by_role("heading", name="Getting started", exact=True)).to_have_count(0)
     page.screenshot(path=str(tmp_path / f"taste-features-{width}.png"), animations="disabled")
     if width == 1440:
         density = home.locator(".knob").evaluate_all("""rows => ({
@@ -545,14 +545,22 @@ def test_taste_recovery_restores_preexisting_settings_after_reload(live_app, sto
         slider.evaluate("el => { el.value = '0.5'; el.dispatchEvent(new Event('input')); el.dispatchEvent(new Event('change')); }")
     expect(restore).to_be_enabled()
     expect(page.locator("#taste-save-status")).to_contain_text("Change saved")
+    import json
+    checkpoint = json.loads(store.settings.get_setting('taste_settings_checkpoint_v1'))
+    assert checkpoint['params']['rec_param:breadth_bias'] == '-0.25'
     page.reload()
     expect(slider).to_have_value("0.5")
     page.get_by_role("tab", name="Experiment", exact=True).click()
     restore.click()
+    page.locator('#app-page').evaluate("main => main.setAttribute('data-before-restore', 'true')")
     with page.expect_navigation():
         page.get_by_role("dialog").get_by_role("button", name="Confirm", exact=True).click()
+    # Navigation API completion can precede its asynchronous page replacement.
+    # Wait for the restored page rather than selecting the old cached panel.
+    expect(page.locator('#app-page[data-before-restore]')).to_have_count(0)
     expect(page.get_by_role("tab", name="Experiment", exact=True)).to_have_attribute("aria-selected", "true")
     expect(page.get_by_role("heading", name="Your starting point", exact=True)).to_be_visible()
+    assert rec_params.get_param(store, 'breadth_bias') == -0.25
     page.get_by_role("tab", name="Recommendations", exact=True).click()
     subtabs.get_by_role("tab", name="Main controls", exact=True).click()
     expect(slider).to_have_value("-0.25")
@@ -626,9 +634,17 @@ def test_taste_loads_only_selected_panel_and_keeps_it_on_return(live_app, page):
 
 
 def test_taste_panel_failure_can_be_retried(live_app, page):
+    page.clock.install()
     page.route("**/taste/panels/overview", lambda route: route.fulfill(status=503, body="Unavailable"))
-    page.goto(live_app + "/taste")
-    expect(page.get_by_role("status").filter(has_text="Could not load Overview.")).to_be_visible()
+    with page.expect_response("**/taste/panels/overview") as failed:
+        page.goto(live_app + "/taste")
+    assert failed.value.status == 503
+    page.evaluate("window.tasteRecoveryDocument = document")
+    expect(page.get_by_role("tab", name="Overview", exact=True)).to_be_enabled()
+    expect(page.locator("[role=alert]:visible, .toast-err, #navigation-error")).to_have_count(0)
     page.unroute("**/taste/panels/overview")
-    page.get_by_role("button", name="Try again", exact=True).click()
+    with page.expect_response("**/taste/panels/overview") as retried:
+        page.clock.run_for(2100)
+    assert retried.value.status == 200
     expect(page.get_by_role("heading", name="Your long-term taste", exact=True)).to_be_visible()
+    assert page.evaluate("document === window.tasteRecoveryDocument")

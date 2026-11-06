@@ -308,10 +308,9 @@ def test_recording_snapshot_rejects_override_race_and_explicit_null_blocks_fallb
     assert get(store)['intensity']['override']
 
 
-def test_restart_budget_exhaustion_empty_tag_retraction_and_version_rebuild(tmp_path, monkeypatch):
-    path = tmp_path / 'profiles.db'
-    store = Store(path)
-    store.init_schema()
+def test_restart_budget_exhaustion_empty_tag_retraction_and_version_rebuild(file_backed_store, monkeypatch):
+    store = file_backed_store
+    path = store._db_path
     tid = store.tracks.upsert_track('v', 'Song', 'Artist', '', 200)
     observe(store, tid, [{'name': 'Metal'}])
     drain(store)
@@ -323,8 +322,8 @@ def test_restart_budget_exhaustion_empty_tag_retraction_and_version_rebuild(tmp_
     assert get(store) == previous
     store.conn.close()
     store = Store(path)
-    store.init_schema()
     try:
+        store.init_schema()
         drain(store)
         assert get(store)['intensity']['value'] is None
         with store.conn:

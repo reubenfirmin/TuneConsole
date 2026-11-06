@@ -42,13 +42,33 @@ def test_worker_materializes_proposals(store, monkeypatch):
     assert "Brand New LP" in titles        # the new album was scanned into the pool
 
 
-def test_home_discover_serves_cached(store):
+@pytest.mark.parametrize('predecessors', [False, True])
+def test_home_discover_serves_cached(store, monkeypatch, predecessors):
+    from tests.test_growth_journey import early_journey
+
     iid = store.accounts.upsert_account("main", "cred", None, True)
+    if predecessors:
+        early_journey(store)
     store.discovery.upsert_discovered_album("B", "X", "Cached LP", "2024", None, now=1.0)
-    assert home_prepared.prepare(store, 1.0) is not None
-    c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
-                   base_url="http://127.0.0.1")
-    assert "Cached LP" in c.get("/home/discover").text     # served from materialized proposals, no fetch
+    prepared = home_prepared.prepare_discovery(store, 1000.0)
+    assert any(album['title'] == 'Cached LP' for album in prepared['discovery_albums'])
+
+    def unexpected_fetch(*args, **kwargs):
+        pytest.fail('A cached discovery request must not fetch or prepare its content')
+
+    fake = FakeClient()
+    monkeypatch.setattr(fake, 'search', unexpected_fetch)
+    monkeypatch.setattr(fake, 'get_artist', unexpected_fetch)
+    monkeypatch.setattr(home_prepared, 'prepare', unexpected_fetch)
+    monkeypatch.setattr(home_prepared, 'prepare_discovery', unexpected_fetch)
+    with TestClient(create_app(store, lambda: {iid: fake}, now_fn=lambda: 1000.0,
+                               background_work=False), base_url="http://127.0.0.1") as client:
+        response = client.get('/home/discover')
+        if predecessors:
+            assert response.status_code == 200 and 'Cached LP' in response.text
+        else:
+            assert response.status_code == 409
+            assert 'This stop is still ahead on your journey' in response.text
 
 
 def test_discovery_pass_publishes_new_songs_before_the_next_rebuild(store, monkeypatch):
@@ -64,8 +84,13 @@ def test_discovery_pass_publishes_new_songs_before_the_next_rebuild(store, monke
 
     monkeypatch.setattr(discover, "populate_discovered_tracks", populate)
     monkeypatch.setattr(discover, "populate_radio_tracks", lambda *a: None)
-    RecWorker(ctx)._discover(10)
-    assert len(fresh_pool.pick(store, 11)) == 12
+    worker = RecWorker(ctx)
+    monkeypatch.setattr(worker, '_start_loop', lambda: None)
+    try:
+        worker._discover(10)
+        assert len(fresh_pool.pick(store, 11)) == 12
+    finally:
+        worker.shutdown()
 
 
 @pytest.mark.parametrize("fails", [False, True])
@@ -90,6 +115,98 @@ def test_discovery_finishes_and_queues_home_refresh_only_on_success(store, monke
     assert not worker._discovering
     assert worker.jobs.has('home') is (not fails)
     assert worker.discovery_busy is (not fails)
+    worker.shutdown()
+
+
+def test_discovery_retries_an_actual_sql_deadline_without_an_exception_trace(
+        file_backed_store, monkeypatch, caplog):
+    import logging
+    import sqlite3
+    from yt_playlist.core.activity import work_budget
+    from yt_playlist.rec import discover, fresh_pool
+
+    store = file_backed_store
+    _, ctx = _ctx(store, FakeClient())
+    worker = RecWorker(ctx)
+    monkeypatch.setattr(worker, '_start_loop', lambda: None)
+    waits, connections = [], []
+    attempts = 0
+
+    def wait(delay):
+        waits.append(delay)
+        return len(waits) == 3
+
+    def scan(*args):
+        nonlocal attempts
+        attempts += 1
+        assert worker.discovery_busy
+        if attempts == 1:
+            with store.read_view() as reader:
+                connections.append(reader.conn)
+                with work_budget(.005):
+                    reader.conn.execute('WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL '
+                        'SELECT x+1 FROM n WHERE x<100000000) SELECT SUM(x) FROM n').fetchone()
+        assert not worker.jobs.has('home'), 'A failed discovery must not queue a Home publication'
+        return {}
+
+    monkeypatch.setattr(worker._stop, 'wait', wait)
+    monkeypatch.setattr(discover, 'run_discovery', scan)
+    monkeypatch.setattr(fresh_pool, 'prepare', lambda *args: None)
+    with caplog.at_level(logging.INFO):
+        worker._tick_loop()
+    assert attempts == 2
+    assert waits == [1800, 60, 1800]
+    assert worker.jobs.has('home') and not worker._discovering
+    assert 'Discovery deferred by read deadline' in caplog.text
+    assert not any(record.exc_info for record in caplog.records)
+    with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+        connections[0].execute('SELECT 1')
+    # A failed private read must release every reader slot for the next pass.
+    for _ in range(4):
+        assert store._analytics_readers.acquire(blocking=False)
+    for _ in range(4):
+        store._analytics_readers.release()
+    worker.shutdown()
+
+
+@pytest.mark.parametrize('failure', ['closing', 'unexpected', 'policy-capacity'])
+def test_discovery_ticker_distinguishes_shutdown_from_unexpected_failures(store, monkeypatch, caplog, failure):
+    import time
+    from yt_playlist.core.activity import WorkClosing
+    from yt_playlist.repos.policy_storage import PolicyCapacityFull
+
+    _, ctx = _ctx(store, FakeClient())
+    worker = RecWorker(ctx)
+    waits = []
+    rejected_at = []
+
+    def wait(delay):
+        waits.append(delay)
+        return len(waits) == 2
+
+    def fail(now):
+        if failure == 'policy-capacity':
+            rejected_at.append(time.monotonic())
+            raise PolicyCapacityFull(131000, 60000000, 1024, 500000)
+        raise (WorkClosing('Stopping') if failure == 'closing' else RuntimeError('Unexpected discovery failure'))
+
+    monkeypatch.setattr(worker._stop, 'wait', wait)
+    monkeypatch.setattr(worker, '_discover', fail)
+    import logging
+    with caplog.at_level(logging.INFO):
+        worker._tick_loop()
+    failures = [record for record in caplog.records if record.message == 'discovery tick failed']
+    assert waits == ([1800] if failure == 'closing' else [1800, 1800])
+    assert len(failures) == int(failure == 'unexpected')
+    if failures:
+        assert failures[0].exc_info[0] is RuntimeError
+    if failure == 'policy-capacity':
+        assert worker.jobs.retry['bundles'].dirty
+        assert worker.jobs.retry['bundles'].failures == 0
+        assert worker.jobs.retry['bundles'].retry_at >= rejected_at[0] + 60
+        assert not worker.jobs.has('home')
+        assert 'batch adds 1024 variants' in caplog.text
+        assert not any(record.exc_info for record in caplog.records)
     worker.shutdown()
 
 

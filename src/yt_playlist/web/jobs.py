@@ -48,6 +48,12 @@ def run_library_sync(ctx, job, *, automatic=False, retry_now=False, max_age_s=86
         job.done = True
 
 
+def record_enrichment_progress(ctx, job, event):
+    job.events.append(event)
+    if event.get("warning") or event.get("deferred") or event.get("type") == "err":
+        ctx.logger.warning("Enrichment job %s: %s", job.id, event.get("text"))
+
+
 def start_playlist_enrichment(ctx, playlist_id):
     """Start or rejoin a playlist waterfall, shared by creation and the manual enrich action."""
     job, created = ctx.jobs.create_or_rejoin_playlist(playlist_id)
@@ -57,8 +63,10 @@ def start_playlist_enrichment(ctx, playlist_id):
     def run():
         try:
             waterfall.run_waterfall(ctx.store, ctx.store.tracks.tracks_for_waterfall(playlist_id),
-                                    enrichment.load_config(ctx.store), on_progress=job.events.append)
+                                    enrichment.load_config(ctx.store),
+                                    on_progress=lambda event: record_enrichment_progress(ctx, job, event))
         except Exception as e:  # noqa: BLE001
+            ctx.logger.exception("Playlist enrichment job %s failed", job.id)
             detail = str(e) or type(e).__name__
             job.error = detail
             job.events.append({"type": "err", "text": f"enrichment failed: {detail}"})
@@ -82,20 +90,35 @@ def start_fresh_pool(ctx, parameters):
 
     def run():
         from yt_playlist.rec import fresh_pool
+        from yt_playlist.core.action_errors import ActionInputError
         try:
             fresh_pool.populate(ctx, **parameters,
                                 on_progress=lambda text: job.events.append({"text": text}))
             job.events.append({"text": "Preparing your fresh mix…"})
-            fresh_pool.prepare(ctx.store, ctx.now_fn())
+            # Preference/offer inputs can change while a rank snapshot is being
+            # staged. Retry that guarded deferral before declaring the explicit
+            # build complete; a missing publication is not an empty result.
+            for _ in range(3):
+                if fresh_pool.prepare(ctx.store, ctx.now_fn()) is not None:
+                    break
+            else:
+                raise ActionInputError('fresh_preferences_changed')
             ctx.rec_worker.trigger_home_refresh(force=True)
         except Exception as e:  # noqa: BLE001
             ctx.logger.warning("Fresh pool build failed", exc_info=True)
-            job.error = (str(e) if isinstance(e, ValueError)
-                         else "Couldn't find fresh songs just now. Try again.")
+            job.error = str(e) or type(e).__name__
+            job.validation_code = e.code if isinstance(e, ActionInputError) else None
+            job.outcome = 'failed'
         finally:
             job.done = True
 
-    activity_for(ctx).start_thread(run)
+    try:
+        activity_for(ctx).start_thread(run)
+    except BaseException as exc:
+        job.error = str(exc) or type(exc).__name__
+        job.outcome = 'failed'
+        job.done = True
+        raise
     return job
 
 
@@ -166,6 +189,7 @@ class SyncJob:
         self._done = False
         self._on_done = on_done
         self.error = None
+        self.validation_code = None
         self.outcome = None
         self.result = None
         self.playlist_id = None   # set for playlist enrichment jobs, so a refreshed page can rejoin
@@ -260,6 +284,17 @@ class SyncJobs:
             job.source = "waterfall"
             return job, True
 
+    def create_or_rejoin_album(self, browse_id):
+        """An interrupted start receipt must not admit another album waterfall."""
+        with self._lock:
+            for job in reversed(self._active.values()):
+                if job.album_browse == browse_id and not job.done:
+                    return job, False
+            job = self._create(None)
+            job.album_browse = browse_id
+            job.source = "waterfall"
+            return job, True
+
     def has_active(self) -> bool:
         with self._lock:
             return bool(self._active)
@@ -278,5 +313,12 @@ class SyncJobs:
         with self._lock:
             for job in reversed(self._active.values()):
                 if job.playlist_id == playlist_id and not job.done:
+                    return job
+        return None
+
+    def find_active_album(self, browse_id) -> "SyncJob | None":
+        with self._lock:
+            for job in reversed(self._active.values()):
+                if job.album_browse == browse_id and not job.done:
                     return job
         return None

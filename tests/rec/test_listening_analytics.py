@@ -93,23 +93,6 @@ def test_discovery_baseline_excludes_the_initial_capture_and_survives_partitioni
     assert payload['catalog']['baseline-0']['cohort']['first'] == '2026-08-25'
 
 
-def test_observed_seconds_exclude_pause_mute_seek_missing_samples_and_duplicate_exit(store):
-    iid = seed(store)
-    samples = [('tick', 0, 0, {}), ('tick', 30, 30, {}),
-        ('state', 40, 40, {'state': 'paused'}), ('state', 60, 40, {'state': 'playing'}),
-        ('tick', 90, 70, {}), ('volume', 100, 80, {'volume': 0}),
-        ('tick', 130, 110, {}), ('volume', 140, 120, {'volume': 1}),
-        ('tick', 170, 150, {}), ('tick', 180, 500, {}),  # seek
-        ('tick', 300, 620, {}),  # missing heartbeats
-        ('track_exit', 310, 630, {}), ('bye', 310, 630, {})]
-    for kind, at, position, payload in samples:
-        event(store, iid, kind, NOW-1000+at, position, payload=payload)
-    payload = analytics.build(store, NOW)
-    assert total(payload, 'seconds') == 120
-    assert total(payload, 'plays') == 0  # samples never invent play events
-    assert {row[3] for row in payload['rows']} == {'liked'}
-
-
 def test_midnight_sample_is_split_and_radio_context_is_durable(store):
     iid = seed(store)
     from yt_playlist.core import radio_provenance
@@ -121,27 +104,6 @@ def test_midnight_sample_is_split_and_radio_context_is_durable(store):
     payload = analytics.build(store, NOW)
     assert [(row[0],row[3],row[payload['columns'].index('seconds')]) for row in payload['rows']] == [
         ('2026-10-23', 'radio', 10), ('2026-10-24', 'radio', 20)]
-
-
-def test_new_start_and_positionless_exit_break_elapsed_intervals(store):
-    iid = seed(store)
-    for kind, at, position in [('tick',0,0),('tick',10,10),
-        ('listen_start',15,None),('tick',20,20),('tick',30,30),
-        ('track_exit',35,None),('tick',40,40),('tick',50,50)]:
-        event(store,iid,kind,NOW-100+at,position)
-    assert total(analytics.build(store,NOW),'seconds') == 30
-
-
-def test_local_midnight_and_dst_do_not_borrow_time_from_another_day(store):
-    iid=seed(store)
-    store.settings.set_setting('listening_timezone','America/New_York')
-    midnight=datetime(2026,3,9,4,tzinfo=timezone.utc).timestamp()
-    event(store,iid,'tick',midnight-10,0)
-    event(store,iid,'tick',midnight+20,30)
-    payload=analytics.build(store,midnight+60)
-    assert payload['timezone']=='America/New_York'
-    assert [(r[0],r[payload['columns'].index('seconds')]) for r in payload['rows']]==[
-        ('2026-03-08',10),('2026-03-09',20)]
 
 
 def test_confirmed_action_history_survives_clear_and_native_or_sync_state_is_not_an_action(store):

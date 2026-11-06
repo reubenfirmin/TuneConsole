@@ -39,11 +39,3 @@ def test_deterministic_for_fixed_inputs():
     a = ms.select_modes(None, _modes(), leans={}, epoch=7, n=4)
     b = ms.select_modes(None, _modes(), leans={}, epoch=7, n=4)
     assert a == b
-
-
-def test_artist_cap_limits_per_artist():
-    items = [{"artist": "Muse", "key": str(i)} for i in range(5)] + [{"artist": "U2", "key": "x"}]
-    out = ms.artist_cap(items, max_per=2)
-    assert sum(1 for d in out if d["artist"] == "Muse") == 2
-    assert sum(1 for d in out if d["artist"] == "U2") == 1
-    assert [d["key"] for d in out][:2] == ["0", "1"]

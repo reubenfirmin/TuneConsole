@@ -2,6 +2,7 @@
 import json
 import logging
 
+from yt_playlist.core.action_errors import ActionInputError
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.library.album_fetch import fetch_album, shareable_album_tracks
 from yt_playlist.library.executor import add_tracks_to_playlist
@@ -68,7 +69,7 @@ def create_playlist_from_song(store, name, track, client, now, account_id) -> di
     """
     title = (name or "").strip()
     if not title or not track.get("videoId"):
-        raise ValueError("Choose a song and give the playlist a name.")
+        raise ActionInputError('song_playlist_name_required')
     new_pid = client.create_playlist(title, "Created by TuneConsole")
     # Creation is already a remote side effect. Retain its destination before any local
     # materialization or seed work can fail; pending actions cannot be undone mid-write.
@@ -111,7 +112,7 @@ def create_playlist_from_album(store, browse_id, name, client, now, account_id) 
     so it shows up immediately. Returns the new playlist's local db id for redirecting to its page."""
     a = with_retry(lambda: fetch_album(client, browse_id))
     if not a:
-        raise ValueError("couldn't load that album")
+        raise ActionInputError('album_load_unavailable')
     artist = ", ".join(x.get("name", "") for x in (a.get("artists") or []) if x.get("name"))
     vids, seen, meta = [], set(), {}
     for t in shareable_album_tracks(a):
@@ -121,7 +122,7 @@ def create_playlist_from_album(store, browse_id, name, client, now, account_id) 
             vids.append(v)
             meta[v] = (t.get("title") or "", artist, a.get("title") or "")
     if not vids:
-        raise ValueError("this album has no playable tracks")
+        raise ActionInputError('album_unplayable')
     title = (name or "").strip() or (a.get("title") or "Album playlist")
     new_pid = client.create_playlist(title, f"Created from “{a.get('title')}” by TuneConsole")
     addition = account_additions(_add_items, client, new_pid, vids, prior_tracks=[])
@@ -157,17 +158,17 @@ def copy_into_playlist(store, source_ids, target_id, client, now) -> dict:
     safe to re-run. The source playlists are left untouched."""
     target = store.playlists.get_playlist(target_id)
     if target is None:
-        raise ValueError("target playlist no longer exists")
+        raise ActionInputError('playlist_missing')
     if target.provider_playlist_id in SYSTEM_PLAYLIST_IDS:
-        raise ValueError("can't copy into a system playlist")
+        raise ActionInputError('playlist_regular_required')
     sources = [p for p in (store.playlists.get_playlist(i) for i in source_ids) if p is not None and p.id != target_id]
     if not sources:
-        raise ValueError("no source playlists to copy")
+        raise ActionInputError('playlist_sources_required')
     # Add with the TARGET's client, so every source video must belong to the target's account. A
     # cross-account copy would feed account A's videoIds to account B's client. Region/upload-scoped
     # ids silently 400 and land in `skipped`, leaving the destination short. Require one account.
     if any(p.account_id != target.account_id for p in sources):
-        raise ValueError("can only copy into a playlist on the same account")
+        raise ActionInputError('playlist_copy_account_mismatch')
     have = set(store.playlists.get_playlist_track_keys(target_id))   # songs already in the target
     vids, seen = [], set()
     for pl in sources:

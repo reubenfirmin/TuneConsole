@@ -10,13 +10,13 @@ from yt_playlist.providers import enrichment, lastfm
 from yt_playlist.providers.base import EnrichmentResult
 from yt_playlist.providers.waterfall import run_waterfall
 from tests.test_enrichment_config import _client
+from tests.metadata_provenance_support import metadata_provenance
 
 
 class Provider:
     def __init__(self, name, available=lambda store: True):
         self.name, self.available, self.calls = name, available, []
 
-    def reset(self): pass
     def tripped(self): return False
     def probe(self, track, store):
         self.calls.append(track["id"])
@@ -71,12 +71,12 @@ def test_reenrichment_keeps_genre_until_later_provider_replacement(store):
                                [(recording, name) for name in order])
     store.enrichment_state.record_enrichment_attempt('song|artist', 'musicbrainz', {}, providers=order)
     assert store.tracks.get_track_enrichment(tid)[0] == 'Rock'
-    assert store.enrichment_reports.metadata_provenance(tid)['fields']['genre']['source'] == 'musicbrainz'
+    assert metadata_provenance(store, tid)['fields']['genre']['source'] == 'musicbrainz'
     # A subsequent process can replace it using completed answers, without an empty interval.
     store.enrichment.apply_provider_fields(tid, 'discogs', {'genre': 'Soundtrack'}, providers=order)
     store.enrichment_state.record_enrichment_attempt('song|artist', 'discogs', {'genre': 'Soundtrack'}, providers=order)
     assert store.tracks.get_track_enrichment(tid)[0] == 'Soundtrack'
-    assert store.enrichment_reports.metadata_provenance(tid)['fields']['genre']['source'] == 'discogs'
+    assert metadata_provenance(store, tid)['fields']['genre']['source'] == 'discogs'
 
 
 def test_adding_or_changing_effective_key_schedules_only_that_provider(store, monkeypatch):
@@ -123,7 +123,9 @@ def test_provider_refresh_retains_durable_evidence_and_newer_state(store, newer_
     repo._configure_providers({'a': current})
     if newer_status is not None:
         repo.record_enrichment_attempt(subject['identity_key'], 'a', {'bpm': 130}, now=20,
-            retry=newer_status == 'retry', cooldown=newer_status == 'retry', run_id='a-new')
+            retry=newer_status == 'retry', run_id='a-new')
+        if newer_status == 'retry':
+            repo.defer_integration('a', now=20, retry_after=50, error='new outage')
     protected = ('metadata_deliveries', 'metadata_observations', 'metadata_choice_heads',
                  'recording_metadata_selections', 'entry_metadata_selections', 'metadata_conflicts',
                  'metadata_conflict_candidates', 'provider_attempts', 'provider_attempt_fields')

@@ -5,7 +5,6 @@ import pytest
 
 from yt_playlist.core import collection_recovery, experiment_decision_state, taste_control_state
 from yt_playlist.core.migrations import current, migrate, registry
-from tests.core.test_collection_state_migration import installed_92
 
 
 def decision(at):
@@ -14,8 +13,8 @@ def decision(at):
             'live_evidence':{'ppr':None,'cosine':None}}
 
 
-def test_installed_taste_controls_retain_unresolved_inputs_and_restart(tmp_path):
-    store = installed_92(tmp_path/'taste.db')
+def test_installed_taste_controls_retain_unresolved_inputs_and_restart(tmp_path, legacy_owner_store):
+    store = legacy_owner_store(tmp_path/'taste.db')
     checkpoint = {'saved_at':5,'params':{'rec_param:breadth_bias':'.3'},
                   'weights':[{'axis':'genre:An unknown original','weight':.4,'updated_at':None}]}
     baseline = [{'key':'unknown|artist','rank':None,'score':.2,'lane':'','lane_weight':None,'trace':{'terms':[1,2]}}]

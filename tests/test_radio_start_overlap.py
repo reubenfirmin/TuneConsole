@@ -18,7 +18,8 @@ def test_joined_start_adopts_unsent_handoff_without_overriding_newer_play(
     controller, remote, frames, _, _ = poc
     controller.ctx.store.settings.set_setting('onboard_listening_format', 'radio')
     offer = controller.seeds()
-    body = {'video_id': offer['tracks'][0]['video_id'], 'menu_id': offer['menu_id']}
+    body = {'video_id': offer['tracks'][0]['video_id'], 'menu_id': offer['menu_id'],
+            'launch_id': 'current-launch'}
     entered, release, joined_intent = threading.Event(), threading.Event(), threading.Event()
     creates, intents = [], []
     create = playlist_generated.create_generated_playlist
@@ -47,12 +48,19 @@ def test_joined_start_adopts_unsent_handoff_without_overriding_newer_play(
     app = FastAPI()
     app.include_router(radio_session.build(controller.ctx))
     with TestClient(app) as client, ThreadPoolExecutor(2) as workers:
+        assert client.post('/radio/stop', json={'launch_id': 'old-launch'}).json()['ok']
         first = workers.submit(client.post, '/radio/start', json=body)
         second = None
         try:
             assert entered.wait(5)
             second = workers.submit(client.post, '/radio/start', json=body)
             assert joined_intent.wait(5)
+            serial = controller.tuning_serial
+            state = client.post('/radio/stop', json={'launch_id': 'old-launch'}).json()
+            assert state['ok'] and not state['stopped'] and not state['stopping']
+            assert controller.session.launch_id == 'current-launch'
+            assert not controller.session.stop.is_set()
+            assert controller.tuning_serial == serial
             if newer_play:
                 assert controller.ctx.bridge.send_control(direct, intent=begin())
         finally:

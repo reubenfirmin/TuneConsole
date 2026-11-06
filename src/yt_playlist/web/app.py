@@ -12,9 +12,11 @@ from urllib.parse import urlsplit
 
 from markupsafe import Markup, escape
 from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from starlette.concurrency import run_in_threadpool
 from yt_playlist.web.fao_static import ManagedStaticFiles
 from yt_playlist.core import fao
+from yt_playlist.core.db_reads import MAX_READERS
 from fastapi.templating import Jinja2Templates
 
 from yt_playlist.web.icons import arrow_icon
@@ -33,7 +35,7 @@ from yt_playlist.web.provider_links import provider_search_url
 from yt_playlist.web.track_links import track_url
 from yt_playlist.web.request_priority import RequestPriorityMiddleware
 from yt_playlist.web.routes import build_all
-from yt_playlist.web.routes.bridge import build as build_bridge_route
+from yt_playlist.web.routes.bridge import EXTENSION_ORIGINS, build as build_bridge_route
 from yt_playlist.rec import account_growth, home_vibe
 
 
@@ -249,6 +251,11 @@ def create_app(store, client_provider, *, now_fn=time.time,
     worker_lifecycle = threading.Lock()
     @asynccontextmanager
     async def lifespan(app):
+        logging.getLogger(__name__).info(
+            'Foreground read scheduling enabled: total_readers=%d background_max=%d maintenance_guard=worker '
+            'radio_planning=detached live_radio_reader=checkpoint-only radio_rejoin=checkpoint '
+            'radio_tuning=retained-intent-v2 radio_candidate_reads=bounded-planning-pages-v1',
+            MAX_READERS, MAX_READERS - 1)
         ctx.work.open()
         stop.clear()
         ctx.work.start_executor()
@@ -317,8 +324,8 @@ def create_app(store, client_provider, *, now_fn=time.time,
     # fetch the current build after an edit (otherwise a stale cached file silently diverges). Content
     # (not mtime): Flatpak zeroes every packaged file's mtime for reproducible builds, so an mtime-based
     # version was constant ("0") across rebuilds and browsers kept running a stale app.js. Evaluated
-    # LAZILY per render, memoized by (mtime, size) so a dev edit still busts without a restart while the
-    # hash is only recomputed when a file actually changes.
+    # Once per template response, memoized by file identity so a dev edit still
+    # busts without a restart. Every asset URL in that response shares its token.
     class _AssetVersion:
         _key = None
         _val = "0"
@@ -336,7 +343,9 @@ def create_app(store, client_provider, *, now_fn=time.time,
                 return self._val
             except (OSError, ValueError):
                 return "0"
-    templates.env.globals["asset_v"] = _AssetVersion()
+    asset_version = _AssetVersion()
+    templates.env.globals["asset_v"] = asset_version
+    templates.context_processors.append(lambda request: {"asset_v": str(asset_version)})
     from yt_playlist.web.theme import mix_launch_tokens
     templates.env.globals["mix_launch_tokens"] = mix_launch_tokens
     from yt_playlist.core.features import listening_charts_enabled
@@ -362,7 +371,9 @@ def create_app(store, client_provider, *, now_fn=time.time,
             if host and host not in allowed:
                 return PlainTextResponse("invalid host", status_code=400)
             origin = request.headers.get("origin") or request.headers.get("referer")
-            if origin and urlsplit(origin).hostname not in allowed:
+            extension_collection = (origin in EXTENSION_ORIGINS and request.url.path in (
+                '/audio-vibes/samples', '/audio-vibes/runs', '/audio-vibes/failures'))
+            if origin and urlsplit(origin).hostname not in allowed and not extension_collection:
                 return PlainTextResponse("cross-origin request blocked", status_code=403)
             ctx = getattr(app.state, "ctx", None)
             playback_request = request.url.path in (
@@ -371,7 +382,10 @@ def create_app(store, client_provider, *, now_fn=time.time,
                 '/home/tv/takeover', '/heartbeat', '/goodbye') or (
                 request.url.path.startswith('/home/tv/playlist/') and request.url.path.endswith('/event'))
             if ctx is not None and not playback_request and request.url.path != '/storage-maintenance/rebuild':
-                maintenance = ctx.storage_maintenance.status()
+                # Status reads the durable feedback inbox and can wait for a
+                # capture/ack or SQLite. Keep that admission off the event loop
+                # just like the synchronous route handlers it protects.
+                maintenance = await run_in_threadpool(ctx.storage_maintenance.status)
                 if maintenance['active']:
                     return PlainTextResponse(maintenance['message'], status_code=503)
             if (ctx is not None and ctx.updater is not None
@@ -405,8 +419,18 @@ def create_app(store, client_provider, *, now_fn=time.time,
 
     @app.exception_handler(WorkBudgetExceeded)
     async def busy_publication(request, error):
-        logging.getLogger(__name__).warning('Request budget exceeded for %s %s',
-            request.method, request.url.path, exc_info=error)
+        logging.getLogger(__name__).warning('Request budget exceeded for %s %s: %s',
+            request.method, request.url.path, error)
+        if request.method == 'GET':
+            headers = {'Retry-After': '2', 'X-Read-Pending': 'true', 'Cache-Control': 'no-store'}
+            if request.headers.get('HX-Request') == 'true':
+                return Response(status_code=503, headers=headers)
+            if 'application/json' in request.headers.get('Accept', ''):
+                return JSONResponse({'pending': True}, status_code=503, headers=headers)
+            # Recovery rendering must not perform another database read: the
+            # interrupted reader has already unwound and released admission.
+            return templates.TemplateResponse(request, 'read_pending.html',
+                {'read_recovery': True}, status_code=503, headers=headers)
         return PlainTextResponse(str(error), status_code=503, headers={'Retry-After': '5'})
 
     from yt_playlist.providers import genres as genre_lib
@@ -427,7 +451,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
     ctx.storage_maintenance = StorageMaintenance(store, on_resume=resume_storage)
     def maintenance_notice():
         status = ctx.storage_maintenance.status()
-        if not status['banner_message'] and (not ctx.storage_maintenance.ready.is_set()
+        if not status['banner_message'] and not status['warning'] and status['phase'] != 'recovery_required' and (not ctx.storage_maintenance.ready.is_set()
                 or ctx.rec_worker.preparing or ctx.enrich_worker.busy) and not any(
                     store.rec_proposals.has_proposals(surface) for surface in
                     ('home_prepared', 'home_tuned', 'album_prepared', 'adaptive_group_preview')):

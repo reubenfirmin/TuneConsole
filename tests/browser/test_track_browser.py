@@ -1,10 +1,14 @@
 """Track actions and navigation work on desktop and narrow screens."""
+import json
 import pytest
 from playwright.sync_api import expect
 
 from tests.browser.test_song_actions_browser import song_app  # noqa: F401 - shared fixture
 from tests.test_song_actions import SONG
 from yt_playlist.web.track_links import track_url
+from tests.browser.quiet_action_support import (  # noqa: F401 - shared evidence fixture
+    DIAGNOSTIC, action_evidence, assert_quiet_action, fail_action,
+)
 
 
 @pytest.mark.parametrize('width', [1280])
@@ -143,10 +147,58 @@ def test_discovery_album_save_and_rating_error(song_app, page, monkeypatch):
     page.route('**/now-playing/rate', lambda route: route.fulfill(
         status=200, json={'ok': False, 'error': 'Rating unavailable'}))
     page.get_by_role('button', name='Like', exact=True).click()
-    expect(page.get_by_role('alert').filter(has_text='Rating unavailable')).to_be_visible()
+    expect(page.locator('.track-detail-actions').get_by_role('status')).to_have_text(
+        'Rating not confirmed. Check it in YouTube Music before trying again.')
+    expect(page.get_by_role('alert')).to_have_count(0)
+    expect(page.locator('body')).not_to_contain_text('Rating unavailable')
     expect(page.get_by_role('button', name='Like', exact=True)).to_have_attribute('aria-pressed', 'false')
     song_app['main']._albums['MPRE_new']['audioPlaylistId'] = 'ALBUM_PLAYLIST'
     monkeypatch.setattr(song_app['main'], 'rate_playlist', lambda *args: None, raising=False)
     page.get_by_role('button', name='Save album to collection', exact=True).click()
     expect(page.get_by_text('Saved to collection', exact=True)).to_be_visible()
     expect(page.get_by_role('button', name='Save album to collection', exact=True)).to_have_count(0)
+
+
+@pytest.mark.parametrize('outcome', ['provider_failed', 'player_failed', 'closing', 'plaintext', 'malformed', 'network'])
+def test_rating_outcome_is_quiet_and_never_repeats_the_write(song_app, page, monkeypatch, outcome, action_evidence):
+    app, remote = song_app['app'], song_app['main']
+    ctx, calls = app.state.ctx, []
+    if outcome == 'provider_failed':
+        def rejected(video, status):
+            calls.append((video, status))
+            return {'status': 'STATUS_FAILED', 'error': DIAGNOSTIC}
+        monkeypatch.setattr(remote, 'rate_song', rejected)
+    elif outcome == 'player_failed':
+        ctx.bridge._send = lambda _: None
+        ctx.bridge.now_playing = {'video_id': 'owned-song'}
+        async def rejected_control(frame, timeout=10):
+            calls.append(frame)
+            return 200, json.dumps({'ok': False, 'error': DIAGNOSTIC})
+        monkeypatch.setattr(ctx.bridge, 'request_control', rejected_control)
+    page.goto(song_app['base'] + '/track/owned-song')
+    if outcome == 'closing':
+        ctx.work.close_admission('restart')
+    elif outcome in ('plaintext', 'malformed', 'network'):
+        page.route('**/now-playing/rate', lambda route: (calls.append(route.request.post_data_json), fail_action(route, outcome)))
+    like = page.get_by_role('button', name='Like', exact=True)
+    observation = page.expect_request('**/now-playing/rate') if outcome == 'network' else page.expect_response('**/now-playing/rate')
+    with observation as response:
+        like.click()
+    expect(like).to_be_enabled()
+    saved = outcome == 'player_failed'
+    expect(like).to_have_attribute('aria-pressed', 'true' if saved else 'false')
+    expect(page.locator('.track-detail-actions').get_by_role('status')).to_have_text(
+        'Rating saved. Some updates are not confirmed; check it in YouTube Music.' if saved else
+        'Rating not confirmed. Check it in YouTube Music before trying again.')
+    if outcome == 'closing':
+        assert response.value.status == 503
+        assert response.value.headers['content-type'].startswith('text/plain')
+        ctx.work.resume_restart()
+    assert_quiet_action(page)
+    assert len(calls) == (0 if outcome == 'closing' else 1)
+    assert remote.rated == ([('owned-song', 'LIKE')] if saved else [])
+    page.screenshot(path=action_evidence + '.png', full_page=True)
+    page.reload()
+    expect(like).to_have_attribute('aria-pressed', 'true' if saved else 'false')
+    assert len(calls) == (0 if outcome == 'closing' else 1)
+    assert remote.rated == ([('owned-song', 'LIKE')] if saved else [])

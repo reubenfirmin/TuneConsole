@@ -23,7 +23,7 @@ MIN_STORY_GROUPS = 3
 def foundation(store, now):
     """Read prepared preference evidence and the current usable Fresh reserve."""
     def read():
-        taste = bool(store.modes.list_modes(active_only=True))
+        taste = bool(store.modes.list_summaries(active_only=True))
         for surface, field in ((home_prepared.SURFACE, 'choice_context'),
                                (album_choices.SURFACE, 'context')):
             if taste:
@@ -53,8 +53,8 @@ def albums(store, now):
     if not payload:
         return False
     tuning = album_tuning.state(store, now)
-    menu, _ = album_choices.menu(album_choices.eligible(store, payload['items'], now),
-        tuning['values'], home_cards._epoch(store, 'album_choices'), tuning['genres'], conn=store.conn)
+    _, menu, _ = album_choices.selection(store, payload['items'], now,
+        tuning['values'], home_cards._epoch(store, 'album_choices'), tuning['genres'])
     return len(menu) >= MIN_ALBUMS
 
 

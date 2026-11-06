@@ -148,10 +148,13 @@ def _profiles(encoded):
     return profiles
 
 
-def encode(value, *, group_pools=False, references=()):
+def encode(value, *, group_pools=False, references=(), shared_profiles=True):
     encoded = json.dumps(value, separators=(',', ':'))
     if len(encoded) < MIN_BYTES:
         return encoded
+    if not shared_profiles:
+        compact = json.dumps({MARKER: LEGACY_FORMAT, 'json': _pack(encoded)}, separators=(',', ':'))
+        return compact if len(compact.encode()) < len(encoded.encode()) else encoded
     profiles, positions = [], {}
     body = _share_profiles(value, profiles, positions)
     envelope = {MARKER: FORMAT}
@@ -212,6 +215,28 @@ def _finish(value, profiles, keys, project, *, detach=False, max_bytes=None):
         value = project(value)
     if profiles is not None:
         _check_profile_expansion(value, profiles, max_bytes)
+        if not profiles:
+            # Compact readiness documents have no musical profiles to restore.
+            # Their freshly parsed containers already belong to this caller;
+            # avoid rebuilding every scalar/list/dictionary just to return them.
+            # Still reject dangling references in malformed v2 envelopes.
+            check_cancellable_work()
+            pending, visited = [value], 0
+            while pending:
+                item = pending.pop()
+                if isinstance(item, dict):
+                    if isinstance(item.get('musical'), dict):
+                        raise ValueError('Invalid compressed recommendation cache profile')
+                    children = item.values()
+                elif isinstance(item, list):
+                    children = item
+                else:
+                    continue
+                pending.extend(child for child in children if isinstance(child, (dict, list)))
+                visited += 1
+                if visited % 128 == 0:
+                    check_cancellable_work()
+            return deepcopy(value) if detach else value
         return _restore_profiles(value, profiles)
     return deepcopy(value) if detach else value
 
@@ -257,8 +282,9 @@ class DecodeCache:
         self._lock = threading.Lock()
         self._key = None
         self._value = None
+        self._projections = {}
 
-    def decode(self, encoded, *, keys=None, project=None):
+    def decode(self, encoded, *, keys=None, project=None, cache_projection=False):
         keys = frozenset(keys) if keys is not None else None
         key = encoded, keys
         # Do not hold a serving/database lock while waiting for another decoder.
@@ -270,9 +296,21 @@ class DecodeCache:
             if self._key != key:
                 value = _read(encoded, keys)
                 self._key, self._value = key, value
+                self._projections.clear()
             value, profiles = self._value
+            if cache_projection:
+                # Only opt in for stable, pure projections. Bound their count
+                # as well as the single encoded document retained above.
+                if project not in self._projections:
+                    projected = _finish(value, profiles, keys, project)
+                    if len(self._projections) >= 2:
+                        self._projections.clear()
+                    self._projections[project] = projected
+                projected = self._projections[project]
         finally:
             self._lock.release()
+        if cache_projection:
+            return deepcopy(projected)
         return _finish(value, profiles, keys, project, detach=True)
 
 

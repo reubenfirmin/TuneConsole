@@ -26,9 +26,15 @@ def test_confirmed_choices_show_songs_and_reconcilable_totals(store, live_app, p
         video = f'choicevid{i}'
         seed_catalog_track(store, f'choice-{i}', f'Song {i}', f'Artist {i}', video_id=video)
         at = NOW - (i % 3) * 86400
-        ratings.record_confirmed(store, iid, video, 'LIKE', at-200)
-        ratings.record_confirmed(store, iid, video, 'DISLIKE', at-100)
-        ratings.record_confirmed(store, iid, video, 'INDIFFERENT', at)
+        # Preserve 24 real actions and eight of each kind, while exercising a
+        # repeated heart, an absent heart, and the unchanged remainder totals.
+        statuses = ('LIKE', 'DISLIKE', 'INDIFFERENT')
+        if i == 0:
+            statuses = ('LIKE', 'DISLIKE', 'LIKE', 'INDIFFERENT')
+        elif i == 1:
+            statuses = ('DISLIKE', 'INDIFFERENT')
+        for offset, status in enumerate(statuses, start=1):
+            ratings.record_confirmed(store, iid, video, status, at-(len(statuses)-offset)*100)
     listening_analytics.build(store, NOW)
     story = ListeningAnalyticsRepo(store).prepared('listening_edition')['stories'][0]
     assert story['family'] == 'rating_actions'
@@ -43,14 +49,35 @@ def test_confirmed_choices_show_songs_and_reconcilable_totals(store, live_app, p
     expect(table.locator('tbody tr')).to_have_count(7)
     expect(panel.locator('.le-rating-caption')).to_have_text('Latest 6 of 8 songs')
     expect(table.locator('tbody tr').last.locator('th')).to_have_text('2 other songs')
-    expect(table.locator('tbody tr').last.locator('td')).to_have_text(['2', '2', '2'])
+    remainder = table.locator('tbody tr').last
+    expect(remainder.locator('td')).to_have_count(1)
+    expect(remainder.get_by_role('img', name='2 hearts', exact=True)).to_be_visible()
+    expect(remainder.get_by_role('img', name='2 skulls', exact=True)).to_be_visible()
+    expect(remainder.get_by_role('img', name='2 ratings removed', exact=True)).to_be_visible()
+    expect(remainder.locator('.le-rating-count')).to_have_text(['2', '2', '2'])
     for row in table.locator('tbody tr').all()[:-1]:
         expect(row.locator('a')).to_have_attribute('href', re.compile(r'https://music.youtube.com/watch\?v=choicevid\d'))
-        assert [cell.inner_text() for cell in row.locator('td').all()] == ['1', '1', '1']
+        expect(row.locator('td')).to_have_count(1)
+        song = row.locator('a').inner_text()
+        labels = ['1 heart', '1 skull', '1 rating removed']
+        if song == 'Song 0':
+            labels[0] = '2 hearts'
+        elif song == 'Song 1':
+            labels.pop(0)
+        expect(row.get_by_role('img')).to_have_count(len(labels))
+        for label in labels:
+            mark = row.get_by_role('img', name=label, exact=True)
+            expect(mark).to_be_visible()
+            expect(mark).to_have_attribute('title', label)
+            expect(mark.locator('svg')).to_have_attribute('aria-hidden', 'true')
+        expect(row.locator('.le-rating-count')).to_have_text(['2'] if song == 'Song 0' else [])
+        expect(row.locator('time')).to_have_attribute('datetime', re.compile(r'2026-10-2[234]'))
+    expect(table.locator('tbody tr').filter(has=page.get_by_role('link', name='Song 0', exact=True))).to_have_count(1)
+    expect(table.locator('tbody tr').filter(has=page.get_by_role('link', name='Song 1', exact=True))).to_have_count(1)
     expect(panel.locator('.le-svg-count').first).to_have_text('Actions')
     page.evaluate('document.fonts.ready')
     headers = table.locator('thead th')
-    expect(headers).to_have_text(['Song', 'Hearts', 'Skulls', 'Clears'])
+    expect(headers).to_have_text(['Song', 'Rating changes'])
     header_bounds = headers.evaluate_all('''headers => headers.map(header => {
         const range = document.createRange();
         range.selectNodeContents(header);
@@ -66,8 +93,17 @@ def test_confirmed_choices_show_songs_and_reconcilable_totals(store, live_app, p
         assert header['right'] <= header['cellRight'] + .5, header_bounds
     for left, right in zip(header_bounds, header_bounds[1:]):
         assert right['left'] - left['right'] >= 4, header_bounds
+    assert table.locator('tbody tr').evaluate_all('''rows => rows.every(row => {
+        const song = row.querySelector('th').getBoundingClientRect();
+        const cell = row.querySelector('td').getBoundingClientRect();
+        const marks = [...row.querySelectorAll('[role="img"]')].map(mark => mark.getBoundingClientRect());
+        return song.right <= cell.left + .5 && marks.every((mark, i) => {
+            const icon = row.querySelectorAll('[role="img"] svg')[i].getBoundingClientRect();
+            return icon.width >= 18 && icon.height >= 18 && mark.left >= cell.left &&
+                mark.right <= cell.right + .5 && (!i || marks[i-1].right + 4 <= mark.left);
+        });
+    })''')
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    page.screenshot(path=f'/tmp/tuneconsole-ready-741-choices-{width}.png', full_page=True)
     assert not errors
 
 
@@ -104,7 +140,6 @@ def test_current_genre_preferences_and_known_start_share_are_visible(store, live
     expect(share.locator('.le-format-key')).to_contain_text('Unknown at start 9')
     page.evaluate('document.fonts.ready')
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    page.screenshot(path=f'/tmp/tuneconsole-383-ratings-{width}.png', full_page=True)
     assert not errors
 
 
@@ -215,5 +250,4 @@ def test_sparse_rating_capture_keeps_four_useful_visible_analyses(store, live_ap
     assert page.locator('.le-composition > svg').evaluate_all(
         "els => els.every(el => !/NaN|Infinity/.test(el.innerHTML))")
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    page.screenshot(path=f'/tmp/tuneconsole-ready-variety-{width}.png', full_page=True)
     assert not errors

@@ -3,15 +3,31 @@ plays. Quiet hours and thin evidence return None, never a weak guess."""
 import numpy as np
 import pytest
 
-from yt_playlist.core.store import Store
+from tests.repository_mock_support import no_database, repository_store
 from yt_playlist.rec import embedding_vectors as embed, layers
 
 
 @pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    return s
+def now_store(no_database):
+    return repository_store(
+        settings={'get_setting': None},
+        rec_model={'content_generation': {'model': None, 'library': []}},
+        history={'play_events_since': []},
+        rec_eligibility={'generated_only_keys': set()},
+        playlists={'radio_playlist_ids': []},
+        modes={'list_modes': [
+            {'mode_id': 1, 'centroid': np.array([1., 0.], dtype=np.float32)},
+            {'mode_id': 2, 'centroid': np.array([0., 1.], dtype=np.float32)},
+        ]},
+        values={'transient_radio_playlists': set()},
+    )
+
+
+def recent_plays(store, keys, now):
+    store.history.play_events_since.return_value = [
+        {'identity_key': key, 'played_at': now - i * 60}
+        for i, key in enumerate(keys)
+    ]
 
 
 def _identity(store):
@@ -35,31 +51,31 @@ def _install_content_vectors(store, monkeypatch, keys, V):
     return V, idx
 
 
-def test_recent_plays_near_one_mode_yield_near_certain_posterior(store, monkeypatch):
-    _install_modes(store)
+def test_recent_plays_near_one_mode_yield_near_certain_posterior(now_store, monkeypatch):
+    store = now_store
     keys = ["a1", "a2", "a3"]
     V = np.array([[1.0, 0.02], [1.0, 0.03], [1.0, 0.01]], dtype=np.float32)
     _install_content_vectors(store, monkeypatch, keys, V)
-    iid = _identity(store)
     now = 100_000.0
-    rows = [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)]
-    store.history.import_play_events(iid, rows)
+    recent_plays(store, keys, now)
 
     posterior = layers.now_mode_posterior(store, now)
     assert posterior is not None
     assert posterior[1] == pytest.approx(1.0, abs=1e-6)
     assert 2 not in posterior
+    store.history.play_events_since.assert_called_once_with(
+        now - 6 * 3600, exclude_list_ids=[], taste_only=True)
+    store.rec_model.content_generation.assert_called_once_with(keys=keys)
+    store.modes.list_modes.assert_called_once_with(active_only=True)
 
 
-def test_mixed_plays_split_proportionally_by_count(store, monkeypatch):
-    _install_modes(store)
+def test_mixed_plays_split_proportionally_by_count(now_store, monkeypatch):
+    store = now_store
     keys = ["a1", "a2", "b1"]
     V = np.array([[1.0, 0.02], [1.0, 0.03], [0.02, 1.0]], dtype=np.float32)
     _install_content_vectors(store, monkeypatch, keys, V)
-    iid = _identity(store)
     now = 100_000.0
-    rows = [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)]
-    store.history.import_play_events(iid, rows)
+    recent_plays(store, keys, now)
 
     posterior = layers.now_mode_posterior(store, now)
     assert posterior is not None
@@ -67,15 +83,13 @@ def test_mixed_plays_split_proportionally_by_count(store, monkeypatch):
     assert posterior[2] == pytest.approx(1 / 3, abs=1e-6)
 
 
-def test_below_min_events_returns_none(store, monkeypatch):
-    _install_modes(store)
+def test_below_min_events_returns_none(now_store, monkeypatch):
+    store = now_store
     keys = ["a1", "a2"]
     V = np.array([[1.0, 0.02], [1.0, 0.03]], dtype=np.float32)
     _install_content_vectors(store, monkeypatch, keys, V)
-    iid = _identity(store)
     now = 100_000.0
-    rows = [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)]
-    store.history.import_play_events(iid, rows)
+    recent_plays(store, keys, now)
 
     assert layers.now_mode_posterior(store, now) is None
 
@@ -96,26 +110,24 @@ def test_plays_older_than_window_are_excluded(store, monkeypatch):
     assert layers.now_mode_posterior(store, now) is None
 
 
-def test_no_active_modes_returns_none(store, monkeypatch):
+def test_no_active_modes_returns_none(now_store, monkeypatch):
+    store = now_store
+    store.modes.list_modes.return_value = []
     keys = ["a1", "a2", "a3"]
     V = np.array([[1.0, 0.02], [1.0, 0.03], [1.0, 0.01]], dtype=np.float32)
     _install_content_vectors(store, monkeypatch, keys, V)
-    iid = _identity(store)
     now = 100_000.0
-    rows = [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)]
-    store.history.import_play_events(iid, rows)
+    recent_plays(store, keys, now)
 
     assert layers.now_mode_posterior(store, now) is None
 
 
-def test_no_content_vectors_returns_none(store, monkeypatch):
-    _install_modes(store)
+def test_no_content_vectors_returns_none(now_store, monkeypatch):
+    store = now_store
     monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: ([], None, {}))
-    iid = _identity(store)
     now = 100_000.0
     keys = ["a1", "a2", "a3"]
-    rows = [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)]
-    store.history.import_play_events(iid, rows)
+    recent_plays(store, keys, now)
 
     assert layers.now_mode_posterior(store, now) is None
 
@@ -167,16 +179,16 @@ def test_radio_provenance_plays_are_excluded_from_now_layer_mood_evidence(store,
     assert posterior == {2: pytest.approx(1.0, abs=1e-6)}   # mode 1 (the radio-queued plays) absent
 
 
-def test_stale_mode_centroids_dim_mismatch_reads_as_quiet(store, monkeypatch):
+def test_stale_mode_centroids_dim_mismatch_reads_as_quiet(now_store, monkeypatch):
     # Live find (home render traceback): autotune can rebuild the content space at a NEW dim while
     # the stored mode centroids are still the old dim; the next mode rebuild heals them. That
     # window must read as quiet (None), never crash the render with a matmul shape error.
-    _install_modes(store)                                     # 2-D centroids
+    store = now_store                                        # 2-D centroids
     keys = ["a1", "a2", "a3"]
     V = np.array([[1.0, 0.0, 0.0], [1.0, 0.1, 0.0], [1.0, 0.0, 0.1]], dtype=np.float32)   # 3-D
     _install_content_vectors(store, monkeypatch, keys, V)
-    iid = _identity(store)
     now = 100_000.0
-    store.history.import_play_events(iid, [(k, "v" + k, now - i * 60) for i, k in enumerate(keys)])
+    recent_plays(store, keys, now)
 
-    assert layers.now_mode_posterior(store, now) is None
+    shares, n, modes = layers.now_mode_mix(store, now)
+    assert shares is None and n == 0 and len(modes) == 2

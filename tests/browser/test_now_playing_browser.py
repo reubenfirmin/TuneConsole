@@ -6,6 +6,7 @@ import pytest
 from playwright.sync_api import expect
 from websockets.sync.client import connect
 
+from tests.browser.quiet_action_support import action_evidence, assert_quiet_action
 from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
 
 
@@ -254,7 +255,9 @@ def test_playback_favicon_and_radio_tab_follow_confirmed_playback(live_app, stor
 
     def refresh():
         with page.expect_response("**/bridge/status"):
-            page.clock.run_for(3100)
+            # Exercise the periodic status poll; intervening animation frames
+            # are covered by the player progress cases above.
+            page.clock.fast_forward(3100)
 
     if path == "/":
         tab = page.get_by_role("tab", name="On air", exact=True)
@@ -548,7 +551,7 @@ def test_now_playing_without_local_source_has_no_source_link(live_app, page, sou
 
 
 @pytest.mark.parametrize("failure", ["disconnected", "network", "invalid_response"])
-def test_failed_playback_does_not_open_an_uncontrolled_music_tab(live_app, store, page, failure):
+def test_failed_playback_does_not_open_an_uncontrolled_music_tab(live_app, store, page, failure, action_evidence):
     requests = []
     recovered = False
 
@@ -566,15 +569,24 @@ def test_failed_playback_does_not_open_an_uncontrolled_music_tab(live_app, store
     page.route("**/play", play)
     playlist = store.playlists.get_playlists()[0]
     page.goto(f"{live_app}/playlist/{playlist.id}")
+    page.evaluate('''() => {
+      window.playResults = [];
+      window.addEventListener('playback-settled', event => playResults.push(event.detail));
+    }''')
     control = page.get_by_role("button", name="Play on YouTube Music", exact=True)
     control.click()
-    error = page.locator("#playback-error")
-    expect(error).to_contain_text("Couldn’t start playback")
+    page.wait_for_function('playResults.length === 1')
+    assert page.evaluate('playResults[0].ok') is False
+    expect(control).to_be_enabled()
+    assert_quiet_action(page)
+    page.screenshot(path=action_evidence + '-play-unconfirmed.png')
     assert len(page.context.pages) == 1
     assert requests == [{"url": f"https://music.youtube.com/playlist?list={playlist.provider_playlist_id}"}]
-    # The existing play control works on retry and clears the error once the bridge recovers.
+    # Only an explicit retry starts another play after the bridge recovers.
     recovered = True
     control.click()
-    expect(error).to_have_count(0)
+    page.wait_for_function('playResults.length === 2')
+    assert page.evaluate('playResults[1].ok') is True
+    assert_quiet_action(page)
     assert len(requests) == 2
     assert len(page.context.pages) == 1

@@ -12,7 +12,7 @@ from yt_playlist.rec import audio_vibe_runtime as runtime
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release
 from yt_playlist.rec import audio_vibe_relax as relax, audio_vibe_uplift as uplift
 from yt_playlist.rec import audio_vibe_energize as energize, audio_vibe_focus as focus
-from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_preview as preview
+from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_prediction as predictor
 
 SPECIALISTS = (cruise, release, relax, uplift, energize, focus)
 VIBES = ('cruise', 'release', 'relax', 'uplift', 'energize', 'concentrate')
@@ -58,14 +58,14 @@ def test_one_specialist_failure_preserves_other_five(module, vibe, error_type, m
         monkeypatch.setenv(item.MODE_KEY, 'active')
     rows = samples()
     original = deepcopy(rows)
-    before = preview.predict(rows)
+    before = predictor.predict(rows)
     assert set(before['individual_models']) == set(VIBES)
 
     def fail(_path):
         raise error_type('Unavailable optional model')
 
     monkeypatch.setattr(module, 'load', fail)
-    after = preview.predict(rows)
+    after = predictor.predict(rows)
     assert set(after['individual_models']) == set(VIBES) - {vibe}
     assert {k: v for k, v in after.items() if k not in ('suitability', 'individual_models')} == {
         k: v for k, v in before.items() if k not in ('suitability', 'individual_models')}

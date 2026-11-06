@@ -10,7 +10,8 @@ import pytest
 from tests.core.test_collection_control_preparation import finish
 from tests.core.test_saved_output_preparation import seed
 from tests.core.test_saved_output_publication import publish
-from yt_playlist.core import entity_names, policy_recovery, recommendation_outputs as files
+from tests import file_custody_support as fixture_files
+from yt_playlist.core import entity_names, recommendation_outputs as files
 from yt_playlist.core import saved_preparation_files as recovery
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.migrations import registry, runner
@@ -19,11 +20,11 @@ from yt_playlist.core.store import Store
 
 
 @pytest.fixture
-def installed(tmp_path):
+def installed(tmp_path, _pristine_installed_schema):
     path = tmp_path / 'installed.db'
     setup = Store(path)
     try:
-        runner.migrate(setup.conn, registry=registry.MIGRATIONS[:79])
+        _pristine_installed_schema(79).backup(setup.conn)
     finally:
         setup.conn.close()
     store = Store(path)
@@ -81,7 +82,7 @@ def _hashes(root):
 
 
 @pytest.mark.parametrize('kind', ['selected', 'unfinished', 'native-precedence'])
-@pytest.mark.parametrize('original', [False, True], ids=['compact', 'verified-backup'])
+@pytest.mark.parametrize('original', [False, True], ids=['restored', 'snapshot'])
 def test_recovered_saved_outputs_own_exact_history_and_continue_without_source(
         installed, tmp_path, monkeypatch, kind, original):
     producer, _ = installed
@@ -91,25 +92,24 @@ def test_recovered_saved_outputs_own_exact_history_and_continue_without_source(
     root = recovery.directory(producer.conn)
     hashes = _hashes(root)
     selected = {source: publication.selected(producer.conn, source) for source in expected}
-    report = policy_recovery.recover(producer._db_path, tmp_path / 'recovered', now=10000, progress=lambda _: None)
+    report = fixture_files.snapshot_library(producer._db_path, tmp_path / 'recovered')
     assert list(producer.conn.iterdump()) == before
     assert _hashes(root) == hashes
-    assert 'saved_preparation' in report['verified_backup_file_manifests']
-    assert not (tmp_path / 'recovered' / 'working.db.preparation').exists()
-    with closing(sqlite3.connect(report['verified_backup'])) as backup:
+    assert 'saved_preparation' in report['manifests']
+    with closing(sqlite3.connect(report['snapshot'])) as backup:
         assert list(backup.iterdump()) == before
         if original:
             path = tmp_path / 'restored.db'
             with closing(sqlite3.connect(path)) as destination:
                 backup.backup(destination)
         else:
-            path = Path(report['compact_database'])
+            path = Path(report['restored'])
     candidate = Store(path)
     hidden = root.with_name(root.name + '-unavailable')
     root.rename(hidden)
     try:
         if original:
-            policy_recovery._restore_files(candidate.conn, report['verified_backup_file_manifests'])
+            fixture_files.restore_files(candidate.conn, report['manifests'])
         candidate.init_schema(defer_metadata=True)
         assert _originals(candidate.conn) == originals
         assert _custody(candidate.conn) == custody
@@ -177,8 +177,8 @@ def test_missing_saved_file_cannot_report_success(installed, tmp_path):
     path.rename(hidden)
     try:
         with pytest.raises(FileNotFoundError):
-            policy_recovery.recover(store._db_path, tmp_path / 'failed', progress=lambda _: None)
-        assert not (tmp_path / 'failed' / 'report.json').exists()
+            fixture_files.snapshot_library(store._db_path, tmp_path / 'failed')
+        assert not (tmp_path / 'failed' / 'restored.db').exists()
         assert list(store.conn.iterdump()) == before
     finally:
         hidden.rename(path)

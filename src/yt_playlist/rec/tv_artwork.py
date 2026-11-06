@@ -30,11 +30,15 @@ def images(store, name):
         summary = store.wiki.get(f'artist:{store.artists.key(aid)}')
         if summary and summary.get('found') and summary.get('thumbnail'):
             photos.append(summary['thumbnail'])
-    for note in (store.rec_proposals.get_proposals('album_notes') or {}).values():
+    notes = store.memoized_read('tv-artwork-notes',
+        lambda: store.rec_proposals.get_proposals('album_notes') or {})
+    for note in notes.values():
         art = note.get('artwork') or {}
         if search_squash(note.get('artist') or '') == key and art.get('kind') == 'artist' and art.get('url'):
             photos.append(art['url'])
-    cached = (store.rec_proposals.get_proposals(SURFACE) or {}).get(key, {})
+    artwork = store.memoized_read('tv-artwork-images',
+        lambda: store.rec_proposals.get_proposals(SURFACE) or {})
+    cached = artwork.get(key, {})
     photos.extend(cached.get('images', []))
     return list(dict.fromkeys(photos))[:6], cached
 

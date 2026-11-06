@@ -14,7 +14,7 @@ import uuid
 
 from yt_playlist.core.activity import check_stopping, work_budget, WorkBudgetExceeded
 from yt_playlist.core import embeddings
-from yt_playlist.rec import content_model, group_assignment, group_preparation, musical_preparation, rec_params, taste_modes
+from yt_playlist.rec import content_model, group_preparation, musical_preparation, rec_params, taste_modes
 from yt_playlist.rec import vibe_preparation
 from yt_playlist.repos.rec_model import VectorChanges
 from yt_playlist.util import genre_catalog
@@ -140,7 +140,7 @@ def _delta(reader, rows, raw_model):
         if upserts or removed:
             changes[table] = VectorChanges(tuple(upserts), tuple(removed),
                 model_version=embeddings.version(table, {'rec_content_model': raw_model}))
-    return changes
+    return reader.rec_model.prepare_training_deltas(changes)
 
 
 class Preparation:
@@ -150,6 +150,7 @@ class Preparation:
         self.retry_fit_at = _state(store, FIT_STATE).get('next_attempt_at', 0)
         self.next_maintenance_at = 0
         self._repair_needed = False
+        self._repair_after = None
         self._source_turn = True
         self._vibe_turn = False
         self.groups = group_preparation.Preparation(store)
@@ -189,11 +190,16 @@ class Preparation:
         try:
             with work_budget(self.budget.capture_seconds), self.store.read_snapshot(
                     dependencies=REPAIR_INPUTS) as snapshot:
-                keys = snapshot.store.prepared_content.missing_unqueued(self.budget.batch)
+                keys = snapshot.store.prepared_content.missing_unqueued(
+                    self.budget.batch, after=self._repair_after)
                 snapshot.release_reader()
                 if not snapshot.publish(lambda: self.store.prepared_content.enqueue_missing(keys)):
+                    self._repair_after = None
                     return False
             self._repair_needed = len(keys) == self.budget.batch
+            # A new audit starts at the beginning, including lost work behind
+            # this cursor. Advance only after a guarded, successful enqueue.
+            self._repair_after = keys[-1] if self._repair_needed else None
             self.next_maintenance_at = now + MAINTENANCE_INTERVAL
             if keys:
                 self._record('published', 'missing-inputs-requeued', phase=INPUT_PHASE)
@@ -239,7 +245,8 @@ class Preparation:
         if self._source_turn:
             self._source_turn = False
             self._vibe_turn = not self._vibe_turn
-            if not self._vibe_turn and vibe_preparation.step(self.store, self.batch):
+            if not self._vibe_turn and vibe_preparation.step(self.store, self.batch,
+                    seconds=self.budget.fit_seconds, memory_bytes=self.budget.memory_bytes):
                 return True
             if musical_preparation.source_step(self.store, now, batch=self.batch,
                                                seconds=self.budget.capture_seconds):
@@ -249,7 +256,8 @@ class Preparation:
         self._source_turn = True
         pending = self.store.prepared_content.pending(self.batch)
         if not pending:
-            return vibe_preparation.step(self.store, self.batch)
+            return vibe_preparation.step(self.store, self.batch,
+                seconds=self.budget.fit_seconds, memory_bytes=self.budget.memory_bytes)
         try:
             with work_budget(self.budget.capture_seconds), self.store.read_snapshot() as snapshot:
                 reader = snapshot.store
@@ -257,7 +265,6 @@ class Preparation:
                 source_inputs = reader.musical_profiles.recording_inputs([row[0] for row in rows])
                 musical = musical_preparation.recordings(reader, rows, inputs=source_inputs)
                 musical, vibe_updates = vibe_preparation.recordings(reader, rows, musical, source_inputs=source_inputs)
-                assignments = group_assignment.prepare(reader, rows, musical, now)
                 raw_model = reader.settings.get_setting('rec_content_model')
                 revision = reader.settings.get_setting('rec_content_genre_revision')
                 changes = _delta(reader, rows, raw_model if revision == genre_catalog.REVISION else None)
@@ -268,7 +275,6 @@ class Preparation:
                     self.store.prepared_content.publish_capture(rows, now)
                     self.store.musical_profiles.publish_recordings(musical, now)
                     self.store.vibe_predictions.publish_prepared(vibe_plan)
-                    self.store.taste_groups.publish_assignments(assignments)
                     if changes:
                         self.store.rec_model.publish_training_generation(changes)
                         self.store.settings.publish_values({

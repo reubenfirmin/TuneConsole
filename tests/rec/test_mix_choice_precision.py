@@ -78,6 +78,81 @@ def test_menu_identity_does_not_change_with_hidden_membership_or_group_version(s
     second = choices.present(store, 'mixes', options, 101, context={'at':90, 'group_generation':'new'}, window='held')
     assert first == second
     assert store.conn.execute('SELECT count(*) FROM mix_choice_menus').fetchone()[0] == 1
+    # A displayed tuning selection changes the menu identity; hidden playback
+    # inputs still do not. All three menus can share the same compact descriptor.
+    relaxed = choices.present(store, 'mixes', options, 102, context={'at': 90},
+                              window='held', vibe='relax')
+    assert choices.present(store, 'mixes', options, 103, context={'at': 90},
+                           window='held', vibe='relax') == relaxed
+    energized = choices.present(store, 'mixes', options, 104, context={'at': 90},
+                                window='held', vibe='energize')
+    assert len({first, relaxed, energized}) == 3
+    offer = choices.opportunity(store, relaxed)
+    assert offer['vibe'] == 'relax' and 'recipe' not in offer['options'][0]
+    assert offer['options'][0]['descriptor_id'] == choices.opportunity(store, first)['options'][0]['descriptor_id']
+    with pytest.raises(ValueError, match='displayed Vibe'):
+        choices.issue(store, 'mixes', options, 105, context={}, vibe='unknown')
+
+
+@pytest.fixture
+def retirement_store(_pristine_current_schema, tmp_path):
+    from tests.store_fixture_support import initialize_consumer
+    from yt_playlist.core.store import Store
+
+    store = Store(tmp_path / 'retirement.db')
+    try:
+        initialize_consumer(store, _pristine_current_schema)
+        yield store
+    finally:
+        store.conn.close()
+
+
+@pytest.mark.parametrize('boundary', ['unlink', 'references'])
+def test_interrupted_retirement_reconciles_real_sql_after_restart(retirement_store, monkeypatch, boundary):
+    from yt_playlist.core import fao
+    from yt_playlist.core.activity import WorkBudgetExceeded
+    from yt_playlist.core.store import Store
+    from yt_playlist.rec import group_roots
+
+    store = retirement_store
+    menu(store)
+    choices.respond(store, 'menu', 'visible', 101, visible=['a', 'b'])
+    ledger = store.rec_ledger.evidence()
+    remove = fao.delete
+
+    def cutoff(path, **kwargs):
+        result = remove(path, **kwargs)
+        if path == ledger._path('opportunity', 'menu'):
+            raise WorkBudgetExceeded('Real menu unlink finished')
+        return result
+
+    def reconcile(offers, checkpoints):
+        group_roots.retired(store, offers, checkpoints)
+        if boundary == 'references':
+            raise WorkBudgetExceeded('Real SQL reconciliation finished')
+
+    if boundary == 'unlink':
+        monkeypatch.setattr(fao, 'delete', cutoff)
+    with group_roots.admission(store), pytest.raises(WorkBudgetExceeded):
+        ledger.maintain(200, retire_references=reconcile)
+    monkeypatch.setattr(fao, 'delete', remove)
+    if boundary == 'unlink':
+        assert store.conn.execute('SELECT 1 FROM mix_choice_menus').fetchone()
+    else:
+        assert not store.conn.execute('SELECT 1 FROM mix_choice_menus').fetchone()
+    reopened = Store(store._db_path)
+    try:
+        reopened.init_schema()
+        with group_roots.admission(reopened):
+            result = reopened.rec_ledger.evidence().maintain(200,
+                retire_references=lambda offers, checkpoints: group_roots.retired(reopened, offers, checkpoints))
+        assert not result['deferred']
+        assert not reopened.rec_ledger.evidence().records('response')
+        assert not reopened.conn.execute('SELECT 1 FROM mix_choice_menus').fetchone()
+        assert not reopened.conn.execute('SELECT 1 FROM mix_choice_options').fetchone()
+        assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchall()
+    finally:
+        reopened.conn.close()
 
 
 def test_artist_fallback_is_frozen_from_the_rendered_values(store, monkeypatch):
@@ -139,11 +214,9 @@ def test_track_model_replay_is_explicitly_unavailable_and_coverage_unknown(store
     assert row['known_coverage_episodes'] == 0 and row['mean_track_coverage'] is None
 
 
-def test_new_mix_builds_do_not_record_per_track_exposure(store):
+def test_mix_choice_identity_ignores_track_replacement_and_group_refresh():
     proto = {'lane':'fresh','label':'Explore','note':'A wider view','genres':['House'],
              'tracks':[{'key':'x','video_id':'v'}], 'recipe':{'track_keys':['x']}}
-    home_cards._record_served_cards(store,[proto],100)
-    assert store.conn.execute('SELECT count(*) FROM rec_served_impressions').fetchone()[0] == 0
     identity = home_cards.experiment_id(proto)
     proto.update(tracks=[{'key':'y'}], recipe={'track_keys':['y']}, group_version='new')
     assert home_cards.experiment_id(proto) == identity
@@ -269,7 +342,7 @@ def test_choice_backup_restores_descriptors_and_files_and_fences_retirement(stor
 
 
 def test_backup_snapshot_excludes_a_menu_with_future_sql_ownership(store, tmp_path):
-    from yt_playlist.core import policy_recovery
+    from tests import file_custody_support as custody
     from yt_playlist.core.store import Store
     menu(store, 'before')
     restored = Store(tmp_path / 'snapshot.db')
@@ -278,11 +351,11 @@ def test_backup_snapshot_excludes_a_menu_with_future_sql_ownership(store, tmp_pa
             assert reader.conn.execute('SELECT count(*) FROM mix_choice_menus').fetchone()[0] == 1
             menu(store, 'future')
             choices.respond(store,'future','choice',102,option_id='a')
-            manifests = policy_recovery._export_files(reader.conn, tmp_path / 'full.db')
+            manifests = custody.export_files(reader.conn, tmp_path / 'full.db')
             assert 'choice_evidence' in manifests
             reader.conn.backup(restored.conn)
         restored._bind_repositories()
-        policy_recovery._restore_files(restored.conn,manifests)
+        custody.restore_files(restored.conn,manifests)
         assert [o['id'] for o in restored.rec_ledger.evidence().records('opportunity')] == ['before']
         assert restored.rec_ledger.evidence().records('response') == []
     finally:

@@ -1,4 +1,6 @@
 """Calendar accelerators build incrementally and keep serving through writes."""
+from contextlib import closing
+from copy import deepcopy
 from dataclasses import replace
 import sqlite3
 
@@ -6,20 +8,15 @@ import pytest
 
 from tests.core.test_predecessor_writes import installed
 from tests.repos.test_foreign_calendar_batches import stamp
-from yt_playlist.core import listening, listening_calendar
+from yt_playlist.core import destination_schema, listening, listening_calendar
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import calendar_indexes as indexes
 from yt_playlist.core.store import Store
 
 
 @pytest.fixture
-def file_store(tmp_path):
-    store = Store(tmp_path/'calendar-publication.db')
-    try:
-        store.init_schema()
-        yield store
-    finally:
-        store.conn.close()
+def file_store(file_backed_store):
+    return file_backed_store
 
 
 def finish(conn):
@@ -125,9 +122,8 @@ def test_published_lookups_follow_continuing_writes_resolution_and_source_remova
     assert indexes.selected(store.conn)
 
 
-def test_failed_copy_does_not_block_ddl_and_reopened_retry_is_idempotent(tmp_path,monkeypatch):
-    store = Store(tmp_path/'calendar-retry.db')
-    store.init_schema()
+def test_failed_copy_does_not_block_ddl_and_reopened_retry_is_idempotent(file_backed_store,monkeypatch):
+    store = file_backed_store
     seed(store,count=90)
     job = indexes.job(store.conn)
     job.install(store.conn)
@@ -143,7 +139,15 @@ def test_failed_copy_does_not_block_ddl_and_reopened_retry_is_idempotent(tmp_pat
         conn.execute('CREATE TABLE independent_index_ddl(value TEXT)')
     def validate(conn):
         assert conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='independent_index_ddl'").fetchone()
-    monkeypatch.setattr(regular,'CHANGES',(*regular.CHANGES,regular.Change(len(regular.CHANGES) + 1,'independent_index_ddl',install,validate)))
+    change = regular.Change(len(regular.CHANGES) + 1,'independent_index_ddl',install,validate)
+    # Model a later shipped build consistently: its bounded change and complete
+    # destination both know the new owner. Unknown histories still fail closed.
+    definition = deepcopy(destination_schema.definition())
+    definition['regular_history'].append([change.version,change.name])
+    for key in ('installed_statements','destination_statements'):
+        definition[key].append('CREATE TABLE independent_index_ddl(value TEXT)')
+    monkeypatch.setattr(destination_schema,'definition',lambda:definition)
+    monkeypatch.setattr(regular,'CHANGES',(*regular.CHANGES,change))
     regular.migrate(store.conn)
     assert job.progress(store.conn) == failed
     reopened = Store(store._db_path)
@@ -157,7 +161,6 @@ def test_failed_copy_does_not_block_ddl_and_reopened_retry_is_idempotent(tmp_pat
         assert indexes.selected(reopened.conn)
     finally:
         reopened.conn.close()
-        store.conn.close()
 
 
 def test_interrupted_publication_and_source_transaction_roll_back_together(store):
@@ -242,7 +245,7 @@ def test_read_verification_leaves_other_writers_available_and_fences_changed_inp
     committed = []
 
     def mutate():
-        with sqlite3.connect(store._db_path,timeout=.5) as other:
+        with closing(sqlite3.connect(store._db_path,timeout=.5)) as other, other:
             if write=='unrelated':
                 other.execute("INSERT INTO settings(key,value) VALUES ('calendar-verification-probe','available')")
             elif write=='source':

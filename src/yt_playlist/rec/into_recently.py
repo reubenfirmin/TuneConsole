@@ -83,11 +83,11 @@ def _baseline_genre_shares(store) -> dict:
     corpus = store.charts.corpus_distribution("genre")
     total = sum(corpus.values()) or 1
     counts: dict = {}
+    axes = store.genres.feature_axes(corpus)
     for g, c in corpus.items():
-        fam = genre_map.family(g,conn=store.conn)
+        fam, sub = axes.get(g, ('', None))
         if fam:
             counts[fam] = counts.get(fam, 0) + c
-        sub = genre_map.subgenre(g,conn=store.conn)
         if sub and sub != fam:
             counts[sub] = counts.get(sub, 0) + c
     return {tok: c / total for tok, c in counts.items()}
@@ -116,11 +116,12 @@ def ranked_subjects(store, now) -> list:
     # Actual tags supply context even when the model only has a broad family
     # lean. Do not turn aggregate tokens such as rock-indie into fake articles.
     genres = {_genre_key(name): name for name in activity['genre']}
+    axes = store.genres.feature_axes(genres.values())
     for key, raw in genres.items():
         if key in ('electronic', 'electronica', 'electronic music', 'electronic dance music',
                    'music', 'other', 'unknown', 'dance'):
             continue
-        sub, family = genre_map.subgenre(raw,conn=store.conn), genre_map.family(raw,conn=store.conn)
+        family, sub = axes.get(raw, ('', None))
         strength = max(leans.get(f'genre:{key}', 0), leans.get(f'genre:{sub}', 0),
                        leans.get(f'genre:{family}', 0) * .5)
         if strength <= 0:

@@ -57,13 +57,13 @@ def test_discovery_encoder_retries_against_competing_library_generation(store, m
     encode = content_model.encode_discovered
     switched = False
 
-    def competing_encode(rows, model, *, conn=None):
+    def competing_encode(rows, model, *, genre_axes=None):
         nonlocal switched
         if not switched:
             switched = True
             store.tracks.set_track_genre(tid, "Folk")
             model_support.build_content_model(store)
-        return encode(rows, model, conn=conn)
+        return encode(rows, model, genre_axes=genre_axes)
 
     monkeypatch.setattr(content_model, "encode_discovered", competing_encode)
     assert vectors.build_discovered_content_vectors(store) == 0

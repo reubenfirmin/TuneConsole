@@ -135,7 +135,7 @@ def freeze(directory):
         references.append(pinned(source))
     model = ROOT / 'extension/audio_model'
     shutil.copytree(model, directory / 'snapshot/audio_model')
-    shutil.copyfile(ROOT / 'extension/audio_preview_capture.js', directory / 'snapshot/audio_preview_capture.js')
+    shutil.copyfile(ROOT / 'extension/audio_capture.js', directory / 'snapshot/audio_capture.js')
     (directory / 'snapshot/index.html').write_text('<!doctype html><title>Audio preparation comparison</title>')
     for source in model.rglob('*'):
         if source.is_file() and digest(source) != digest(directory / 'snapshot/audio_model' / source.relative_to(model)):

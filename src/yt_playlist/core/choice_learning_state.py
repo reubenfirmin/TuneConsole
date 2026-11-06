@@ -228,6 +228,42 @@ def read(conn, surface, *, store=None):
         return _read(conn, surface, head[0])
 
 
+def refresh_input(conn, surface, *, store=None):
+    """Ranking freshness needs identities and decay inputs, without learned vectors or songs."""
+    if surface not in {'choice_interests', 'choice_bandit'}:
+        raise ValueError('Unknown choice refresh input')
+    with keyed_reads(store, 'choice_learning_heads', (surface,)):
+        head = conn.execute('SELECT publication_id FROM choice_learning_heads WHERE surface=?', (surface,)).fetchone()
+    if head is None:
+        return None
+    identity = head[0]
+    with keyed_reads(store, 'choice_learning_publications', (identity,)):
+        columns = ','.join('schema_version' if field == 'schema' else field for field in SCALARS)
+        row = conn.execute('SELECT field_mask,' + columns + ' FROM choice_learning_publications WHERE id=?',
+                           (identity,)).fetchone()
+    fields = {'interest_version'} if surface == 'choice_interests' else {'state_version', 'expires_at'}
+    result = {key: value for key, value in _view(row, SCALARS).items() if key in fields}
+    if surface == 'choice_interests' and row[0] & (1 << HEADER.index('contexts')):
+        with keyed_reads(store, 'choice_interest_contexts', (identity,)):
+            scalar = CONTEXT[:-2]
+            records = conn.execute(f'SELECT position,field_mask,{",".join(scalar)} '
+                                   'FROM choice_interest_contexts WHERE publication_id=? ORDER BY position',
+                                   (identity,)).fetchall()
+        descriptors = {}
+        if mix_choices.available(conn):
+            with keyed_reads(store, 'choice_interest_mix_descriptors', (identity,)):
+                descriptors = dict(conn.execute('SELECT context_position,descriptor_id '
+                    'FROM choice_interest_mix_descriptors WHERE publication_id=?', (identity,)))
+        result['contexts'] = []
+        for position, *record in records:
+            context = {key: value for key, value in _view(record, scalar).items()
+                       if key in {'format', 'at', 'days', 'episode_support'}}
+            if position in descriptors:
+                context['descriptor_id'] = descriptors[position]
+            result['contexts'].append(context)
+    return result
+
+
 def present(conn, surface, *, store=None):
     with keyed_reads(store, 'choice_learning_heads', (surface,)):
         head = conn.execute('SELECT publication_id FROM choice_learning_heads WHERE surface=?', (surface,)).fetchone()

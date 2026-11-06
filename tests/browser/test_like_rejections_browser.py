@@ -1,4 +1,4 @@
-"""422 toasts retain HTMX failure status so optimistic hearts can roll back."""
+"""Quiet failures retain HTMX failure status so optimistic hearts roll back."""
 import pytest
 from playwright.sync_api import expect
 
@@ -35,13 +35,12 @@ def test_heart_completion_preserves_server_outcome(live_app, store, page, monkey
     expect(heart).to_have_attribute("aria-pressed", str(liked).lower())
     with page.expect_response(lambda response: response.url.endswith("/track/like")) as response:
         heart.click()
-    assert response.value.status == (422 if failure else 200)
+    assert response.value.status == (503 if failure else 200)
     page.wait_for_function("window.ratingCompletions.length === 1")
     expect(heart).to_have_attribute("aria-pressed", str(liked if failure else not liked).lower())
     assert page.evaluate("window.ratingCompletions[0]") == {"successful": not bool(failure), "failed": bool(failure)}
     assert store.charts.playlist_tracks_detail(pid)[0]["liked"] == (liked if failure else not liked)
     if failure:
-        expect(page.locator("#toasts .toast-err")).to_be_visible()
-        expect(page.locator("#toasts")).to_contain_text(
-            "Rating rejected" if failure == "validation" else "YouTube wouldn’t update your Liked Music.")
+        assert response.value.body() == b''
+    expect(page.locator(".toast-err, #navigation-error, [role=alert]:visible")).to_have_count(0)
     assert page_errors == []

@@ -6,7 +6,6 @@ The directory inventory comes from domain owners, not filesystem discovery.
 """
 from pathlib import Path
 import os
-import shutil
 
 from .. import (choice_evidence_files, evidence_ledger, fao, file_owners,
                metadata_runtime, metadata_runtime_files, served_facts)
@@ -38,13 +37,6 @@ def owners(conn):
             if required or (root / metadata_runtime_files.relative(kind, owner, revision)).exists())
 
 
-def restore(conn, manifests):
-    """Give a verified SQL backup its independent relative-file custody."""
-    for name, owner, _ in owners(conn):
-        if name in manifests:
-            owner.restore(conn, manifests[name])
-
-
 def borrow(source, candidate):
     """Let a private SQL candidate use the installed immutable file owners.
 
@@ -62,57 +54,6 @@ def borrow(source, candidate):
             raise ValueError('Candidate file owner already has independent custody: ' + name)
         else:
             destination.symlink_to(root, target_is_directory=True)
-
-
-def copy(conn, database, *, cancelled=lambda: False, progress=lambda *_: None):
-    """Copy explicit references; a retry verifies and reuses completed files.
-
-    Each managed copy has FAO's bounded streaming I/O and preserves file age.
-    This work runs before candidate SQL transactions and checks cancellation
-    between members. No conversion bookmark depends on an unpublished file.
-    """
-    destination = roots(database)
-    for name, owner, references in owners(conn):
-        root = owner.directory(conn)
-        for source in references:
-            if cancelled():
-                raise InterruptedError('Database file copy interrupted')
-            target = destination[name] / source.relative_to(root)
-            if target.exists():
-                if fao._hash(source) != fao._hash(target):
-                    raise ValueError('Resumed database file differs from its source: ' + name)
-            else:
-                fao.copy(source, target)
-            progress('files', {'domain': name})
-
-
-def stage(source, target, *, move, cancelled=lambda: False):
-    for name, root in roots(source).items():
-        if not root.exists():
-            continue
-        destination = roots(target)[name]
-        if move:
-            os.replace(root, destination)
-        else:
-            def member(source, target):
-                if cancelled():
-                    raise InterruptedError('Database file staging interrupted')
-                shutil.copy2(source, target)
-                with Path(target).open('rb') as stream:
-                    os.fsync(stream.fileno())
-                return target
-            shutil.copytree(root, destination, copy_function=member)
-            for directory, _, _ in os.walk(destination, topdown=False):
-                _sync_directory(Path(directory))
-        _sync_directory(destination)
-        _sync_directory(destination.parent)
-
-
-def plan(database, original, candidate):
-    installed, saved, prepared = roots(database), roots(original), roots(candidate)
-    return [dict(domain=name, installed=str(root), original=str(saved[name]), candidate=str(prepared[name]),
-                 had_original=root.exists(), has_candidate=prepared[name].exists())
-            for name, root in installed.items() if root.exists() or prepared[name].exists()]
 
 
 def _move(source, target):

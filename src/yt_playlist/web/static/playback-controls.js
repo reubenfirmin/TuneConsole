@@ -83,22 +83,9 @@
 // Music tab (in the background, you stay on TuneConsole). A bridge failure must not create another
 // player that cannot stop the existing music. Ctrl/meta/middle-click still open a new tab.
 function tcPlaybackError(message) {
-  document.getElementById('playback-error')?.remove();
-  const toast = document.createElement('div');
-  toast.id = 'playback-error';
-  toast.className = 'toast toast-err';
-  toast.setAttribute('role', 'alert');
-  const text = document.createElement('span');
-  text.className = 'toast-body';
-  text.textContent = message;
-  const dismiss = document.createElement('button');
-  dismiss.type = 'button';
-  dismiss.className = 'toast-x';
-  dismiss.setAttribute('aria-label', 'Dismiss');
-  dismiss.textContent = '×';
-  dismiss.onclick = () => toast.remove();
-  toast.append(text, dismiss);
-  document.getElementById('toasts')?.prepend(toast);
+  console.debug('[Playback] operation not confirmed', message);
+  // Read the existing player state; never repeat an uncertain play/toggle.
+  window.playbackStatus?.refresh();
 }
 window.tcPlaybackError = tcPlaybackError;
 

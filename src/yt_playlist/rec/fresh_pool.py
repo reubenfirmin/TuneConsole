@@ -4,9 +4,9 @@ from contextlib import nullcontext
 
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core.accounts import catalog_client
+from yt_playlist.core.action_errors import ActionInputError
 
 from yt_playlist.rec import embedding_vectors as vectors, home_themes, home_vibe, measurement, mode_surfaces, rec_params, road_trip_candidates, surfaces
-from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
 
 
@@ -14,20 +14,21 @@ def populate(ctx, include_genres=(), avoid_genres=(), on_progress=lambda message
     store = ctx.store
     client = catalog_client(ctx.client_provider())
     if client is None:
-        raise ValueError("Connect YouTube Music to find fresh songs.")
+        raise ActionInputError('fresh_account_required')
     options = home_themes.genre_options(store)
     labels = {g["family"]: g["label"] for g in options}
     genres = sorted(set(include_genres)) or [g["family"] for g in options if g["family"] not in avoid_genres][:6]
     if not genres:
-        raise ValueError("Choose some genres to find fresh songs.")
+        raise ActionInputError('fresh_genres_required')
     owned = store.rec_query.library_keys()
-    have = {t["identity_key"] for t in store.discovery.get_discovered_tracks()}
+    have = store.discovery.discovered_track_keys()
     suppressed = store.rec_model.suppressed_keys("for_you", ctx.now_fn())
     muted = store.rec_model.muted_artists()
     added = 0
+    members = store.genres.family_members(family for family in genres if family not in labels)
     for family in genres:
         # Internal families such as 'dnb' and 'rock-alt' are not searchable genre names.
-        genre = labels.get(family) or next(iter(genre_map.subgenres_of(family,conn=store.conn)), family.removeprefix("other:"))
+        genre = labels.get(family) or next(iter(members.get(family, ())), family.removeprefix("other:"))
         on_progress(f"Finding fresh {genre} songs…")
         # Resolve the genre to known artists, then fetch their songs. A text search for a genre
         # would return mixes and uploads whose titles merely contain those words.
@@ -35,6 +36,7 @@ def populate(ctx, include_genres=(), avoid_genres=(), on_progress=lambda message
             if artist in muted:
                 continue
             rows, _ = road_trip_candidates.other_input_songs(client, "artist", artist, 4, store)
+            axes = store.genres.feature_axes(row.get('genre') or genre for row in rows)
             for row in rows:
                 title, name = row.get("title"), row.get("artist")
                 if not title or not name or not row.get("video_id"):
@@ -43,7 +45,7 @@ def populate(ctx, include_genres=(), avoid_genres=(), on_progress=lambda message
                 if key in owned or key in have or key in suppressed or name in muted:
                     continue
                 actual_genre = row.get("genre") or genre
-                actual_family = genre_map.family(actual_genre,conn=store.conn)
+                actual_family = axes[actual_genre][0]
                 if actual_family in avoid_genres or (include_genres and actual_family not in include_genres):
                     continue
                 key = store.discovery.upsert_discovered_track(
@@ -97,9 +99,10 @@ def pick(store, now, include_genres=(), avoid_genres=(), size=12, *, minimum=4, 
             unique.setdefault(key, track)
     pool = (home_themes.matching_genres(store, list(unique.values()), include=include_genres, avoid=avoid_genres)
             if include_genres or avoid_genres else home_themes.resolved_genres(store, list(unique.values())))
-    pool = [t for t in pool if weights.get(f"genre:{genre_map.family(t.get('genre'),conn=store.conn)}", 1.0) != 0]
+    axes = store.genres.feature_axes(t.get('genre') for t in pool)
+    pool = [t for t in pool if weights.get(f"genre:{axes.get(t.get('genre'), ('', None))[0]}", 1.0) != 0]
     pool = home_vibe.rank(store, now, pool)
-    buckets = ({g: deque(t for t in pool if genre_map.family(t["genre"],conn=store.conn) == g) for g in include_genres}
+    buckets = ({g: deque(t for t in pool if axes.get(t['genre'], ('', None))[0] == g) for g in include_genres}
                if include_genres else {"all": deque(pool)})
     if not buckets or any(not b for b in buckets.values()):
         return []
@@ -117,7 +120,7 @@ def pick(store, now, include_genres=(), avoid_genres=(), size=12, *, minimum=4, 
                 break
             if len(picked) >= size:
                 break
-    if len(picked) < minimum or not set(include_genres) <= {genre_map.family(t["genre"],conn=store.conn) for t in picked}:
+    if len(picked) < minimum or not set(include_genres) <= {axes.get(t['genre'], ('', None))[0] for t in picked}:
         return []
     return picked
 
@@ -160,10 +163,11 @@ def _stored_pick(store, now, include_genres, avoid_genres, size, minimum):
                     blocked = reader.rec_eligibility.suppressed_candidate_keys(keys, now)
                     tracks = home_themes.matching_genres(reader, tracks,
                         include=(family,) if family is not None else (), avoid=avoid_genres)
+                    axes = reader.genres.feature_axes(track.get('genre') for track in tracks)
                     for track in tracks:
                         if (track['_radio_fresh'] and track['key'] not in blocked
                                 and track.get('artist') not in muted
-                                and weights.get(f"genre:{genre_map.family(track.get('genre'),conn=reader.conn)}", 1.0) != 0):
+                                and weights.get(f"genre:{axes.get(track.get('genre'), ('', None))[0]}", 1.0) != 0):
                             yield track
                     if page['exhausted']:
                         break
@@ -185,7 +189,8 @@ def _stored_pick(store, now, include_genres, avoid_genres, size, minimum):
                     del streams[family]
                 if len(picked) == size:
                     break
+        axes = reader.genres.feature_axes(track.get('genre') for track in picked)
         if (len(picked) < minimum
-                or not set(include_genres) <= {genre_map.family(track.get('genre'),conn=reader.conn) for track in picked}):
+                or not set(include_genres) <= {axes.get(track.get('genre'), ('', None))[0] for track in picked}):
             return []
         return picked

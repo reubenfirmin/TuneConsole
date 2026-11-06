@@ -91,7 +91,7 @@ def test_album_operation_rejects_overlapping_report_deletion_or_replacement(stor
     # Once accepted, deletion stays deleted and replacement keeps its own preview.
     if overlap == "replace":
         assert other.post("/import/spotify-library/prepare", data=replacement).status_code == 200
-        latest = _wait_for_library_job(store)
+        latest = _wait_for_library_job(other)
         assert latest["status"] == "preview" and latest["identity_id"] == second
         assert spotify_import.load_job(store)["account_id"] == second
         assert latest["preview_token"]
@@ -182,7 +182,7 @@ def test_status_poll_preserves_report_completed_or_replaced_during_its_read(stor
                     assert web.post("/import/spotify-library/prepare", data={
                         "selection_token": selection, "identity_id": second,
                         "include_albums": "on"}).status_code == 200
-                    latest = _wait_for_library_job(store)
+                    latest = _wait_for_library_job(web)
                     assert latest["status"] == "preview" and latest["identity_id"] == second
                     assert original_load(store)["account_id"] == second
                 elif handoff == "deleted":

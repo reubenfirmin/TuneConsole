@@ -1,5 +1,6 @@
 """Controlled transport checks for the shared Last.fm boundary; no vendor calls."""
 import io
+from tests.enrichment_support import complete_entries
 import json
 import urllib.error
 import urllib.parse
@@ -29,7 +30,7 @@ def query(method='artist.gettoptags', **kwargs):
 
 
 @pytest.fixture
-def boundary(monkeypatch):
+def boundary(monkeypatch, canonical_genre_matcher):
     monkeypatch.delenv('LASTFM_API_KEY', raising=False)
     def install(fetch):
         clock, calls, responses, paces = [1000.0], [], [], []
@@ -49,8 +50,11 @@ def boundary(monkeypatch):
 
 
 def http(code, headers=None):
-    return urllib.error.HTTPError('https://ws.audioscrobbler.com/2.0/', code,
-                                  'controlled error', headers or {}, None)
+    # Parameterized failures are constructed during collection, including when
+    # their test is deselected. They need only status/headers, never a live body.
+    with urllib.error.HTTPError('https://ws.audioscrobbler.com/2.0/', code,
+                               'controlled error', headers or {}, None) as error:
+        return error
 
 
 @pytest.mark.parametrize('body', [tags(), tags(None)])
@@ -94,8 +98,7 @@ def test_one_api_outage_defers_other_entry_points_and_recovers(boundary, store, 
     assert len(errors) == 4
     assert all(error.provider == 'lastfm' and error.retry_at == 1030 for error in errors)
     assert store.enrichment_state.integration_cooldown('lastfm')['retry_at'] == 1030
-    lastfm.reset()
-    assert lastfm.tripped()  # Batch boundaries cannot clear shared availability.
+    assert lastfm.tripped()
     b.clock[0] = 1030
     with lastfm.access(store):
         assert lastfm.artist_genre('Artist', 'secret') == 'House'
@@ -415,3 +418,121 @@ def test_album_failure_retains_genre_and_a_later_run_completes_year(boundary, st
     assert attempt['status'] == 'found' and attempt['fields']['year'] == '1996'
     assert len(b.calls) == 3  # The retained track API result is reused.
     assert store.enrichment_state.integration_cooldown('lastfm:pages') is None
+
+
+@pytest.mark.parametrize('title,artist', [
+    ('', ''), (None, 'Artist'), ('Song', None), ('Song', ''),
+    (' \t\n', 'Artist'), ('Song', '\u00a0\u2003\u2028'),
+    ('[Deleted video]', ''), ('Dominicalito, Costa Rica', ''),
+])
+def test_incomplete_queries_wait_locally_in_direct_and_queued_lookups(boundary, store, title, artist, caplog):
+    b = boundary(lambda request: pytest.fail('Incomplete metadata reached Last.fm'))
+    store.settings.set_setting('lastfm_api_key', 'secret')
+    entry = store.tracks.upsert_track('incomplete', title, artist, None, 200)
+    track = store.tracks.track_for_waterfall(entry)
+    assert lastfm.probe(track, store).deferred_reason
+    assert lastfm.enrich(title, artist, 'secret') == (None, None)
+    events = []
+    assert run_waterfall(store, [track], [{'name': 'lastfm', 'enabled': True}],
+        events.append, registry={'lastfm': lastfm}, now_fn=lambda: b.clock[0]) == []
+    assert any(event.get('deferred') == 'metadata' for event in events)
+    assert not any(event.get('retry_at') or event.get('warning') for event in events)
+    key = track['identity_key']
+    assert store.enrichment_state.enrichment_attempts(key) == {}
+    assert store.enrichment_queue.next_enrich_batch(10, providers=['lastfm'], now=1000) == []
+    assert store.enrichment_queue.priority_enrich_batch([key], 10, 500, providers=['lastfm'], now=1000) == []
+    complete_entries(store, [entry], 1)
+    assert store.enrichment_queue.resweep_batch(10, 500, providers=['lastfm'], now=1000) == []
+    assert b.calls == b.paces == []
+    assert not b.iao._waits['api'] and not b.iao._cache['api']
+    assert not caplog.records
+
+
+def test_worker_waits_for_metadata_and_correction_resumes_only_that_query(boundary, store):
+    from yt_playlist.providers import enrichment
+    from tests.test_enrichment_retries import worker
+
+    def fetch(request):
+        params = urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)
+        assert params['track'][0].strip() and params['artist'][0].strip()
+        return {'track': {'toptags': {'tag': [{'name': 'house'}, {'name': '1996'}]}}}
+
+    b = boundary(fetch)
+    store.settings.set_setting('lastfm_api_key', 'secret')
+    entries = [store.tracks.upsert_track(f'waiting-{i}', title, '', None, 200, created_at=1)
+               for i, title in enumerate(('', '[Deleted video]', 'Dominicalito, Costa Rica'))]
+    valid = store.tracks.upsert_track('valid', 'Song', 'Artist', None, 200, created_at=1)
+    healthy_calls = []
+    healthy = SimpleNamespace(name='deezer', available=lambda store: True, reset=lambda: None,
+        tripped=lambda: False, probe=lambda track, store: healthy_calls.append(track['id'])
+        or EnrichmentResult('deezer', {'year': '1996'}))
+    enrichment.save_config(store, [{'name': p['name'], 'enabled': p['name'] in ('lastfm', 'deezer')}
+                                   for p in enrichment.PROVIDERS])
+    # Include retry state created by the old incomplete-input bug. It remains
+    # evidence, but cannot schedule more network attempts while metadata is missing.
+    target = store.tracks.track_for_waterfall(entries[0])
+    other = store.tracks.track_for_waterfall(entries[1])
+    for track in (target, other):
+        store.enrichment_state.record_enrichment_attempt(track['identity_key'], 'lastfm',
+            {'genre': 'Rock'}, retry=True, now=999, retry_after=10000,
+            video_id=track['video_id'], error='Last.fm API error 6')
+    w = worker(store, b.clock, [lastfm, healthy])
+    assert w.drain_once(limit=10) == 1
+    assert len(b.calls) == 1 and set(healthy_calls) == {*entries, valid}
+    for _ in range(3):
+        b.clock[0] += 31
+        assert w.drain_once(limit=10) == 0
+    assert len(b.calls) == 1 and len(healthy_calls) == 4
+    assert store.enrichment_reports.queue_remaining() == 3
+    assert store.enrichment_state.enrichment_retry_status()['count'] == 0
+    before = store.enrichment_state.enrichment_provider_state(other['recording_id'])
+    store.tracks.set_track_title(entries[0], 'Corrected song')
+    store.tracks.set_track_artist(entries[0], 'Corrected artist')
+    assert store.enrichment_state.enrichment_provider_state(other['recording_id']) == before
+    state = store.enrichment_state.enrichment_provider_state(target['recording_id'])['lastfm']
+    assert state['fields'] == {'genre': 'Rock'} and state['retry_at'] == 0
+    assert w.drain_once(limit=10) == 1
+    assert len(b.calls) == 2 and len(healthy_calls) == 4
+    assert store.enrichment_reports.queue_remaining() == 2
+    assert store.tracks.get_track_enrichment(entries[0]) == ('House', '1996')
+    assert store.enrichment_state.enrichment_provider_state(other['recording_id']) == before
+
+
+@pytest.mark.parametrize('failure', [False, True])
+def test_complete_query_miss_and_transient_failure_keep_their_distinct_outcomes(boundary, store, failure):
+    def fetch(request):
+        if failure:
+            raise TimeoutError('controlled timeout')
+        return {'error': 6, 'message': 'Track not found'}
+    b = boundary(fetch)
+    store.settings.set_setting('lastfm_api_key', 'secret')
+    entry = store.tracks.upsert_track('complete', 'Song', 'Artist', None, 200)
+    track = store.tracks.track_for_waterfall(entry)
+    completed = run_waterfall(store, [track], [{'name': 'lastfm', 'enabled': True}],
+        lambda event: None, registry={'lastfm': lastfm}, now_fn=lambda: b.clock[0])
+    state = store.enrichment_state.enrichment_provider_state(track['recording_id'])['lastfm']
+    assert bool(completed) is not failure
+    assert state['status'] == ('retry' if failure else 'no_match')
+    assert bool(state['retry_at']) is failure
+    assert bool(store.enrichment_state.integration_cooldown('lastfm')) is failure
+    assert b.calls
+
+
+def test_queue_rechecks_metadata_changed_after_snapshot_selection(file_backed_store, monkeypatch):
+    from contextlib import contextmanager
+    from yt_playlist.core import catalog
+
+    store = file_backed_store
+    entry = store.tracks.upsert_track('changing-query', 'Song', 'Artist', None, 200)
+    original = store.read_snapshot
+
+    @contextmanager
+    def changed_reader():
+        with original() as snapshot:
+            yield snapshot
+        with store.conn:
+            catalog.choose_field(store.conn, entry, 'artist', '')
+
+    monkeypatch.setattr(store, 'read_snapshot', changed_reader)
+    assert store.enrichment_queue.next_enrich_batch(10, providers=['lastfm'], now=1000) == []
+    assert store.enrichment_reports.queue_remaining() == 1

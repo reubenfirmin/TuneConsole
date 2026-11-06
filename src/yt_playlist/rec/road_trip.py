@@ -106,20 +106,19 @@ def _pool_targets(recipe):
             min(MAX_OTHER_POOL, max(12, int(slots * POOL_SLACK * 0.6))))
 
 
-def repick(state: DraftState, store, now=0.0) -> DraftState:
+def repick(state: DraftState, store, now=0.0, *, own_pool=None) -> DraftState:
     """Re-draw the whole playlist under the state's current mix, familiarity, genre/era quotas and
     crossed-out slots. Mutates and returns `state` (picked, stats, axes).
 
     Their side comes from the draft's cached pool - it cost network time to assemble. Your side is
-    read fresh from the library every time (own_candidates, ~30ms of local SQL): the collection is
-    the pool, so there is nothing to cache and nothing to run out of. No network either way, so this
-    stays instant."""
-    _refresh_genre_families(state, store)
+    read fresh from the library for each transition. A draft start can pass its freshly detached
+    pool rather than reading it twice. The full collection remains eligible, without network I/O."""
+    own = own_candidates(store, now, state) if own_pool is None else own_pool
+    _refresh_genre_families(state, store, own)
     _repair_artist_clusters(state)
     for party in ("mine", "theirs"):
         state["axes"][party] = road_trip_axes.normalize(state["axes"][party], state["targets"][party])
-    pool = own_candidates(store, now, state) + [c for c in state["pool"] if c["source"] != "mine"]
-    _refresh_genre_families(state, store, pool)
+    pool = own + [c for c in state["pool"] if c["source"] != "mine"]
     result = road_trip_mix.construct(road_trip_mix.MixRequest(
         candidates=pool, own_pct=state["own_pct"], familiarity_pct=state["familiarity_pct"],
         target_minutes=state["target_minutes"], seed=state["seed"],
@@ -173,6 +172,8 @@ def reroll_slot(state: DraftState, store, index, now=0.0) -> DraftState:
             else [c for c in state["pool"] if c["source"] != "mine"])
     if _refresh_genre_families(state, store, pool):
         eligible = pool if side=='mine' else own_candidates(store,now,state)
+        if side != 'mine':
+            _refresh_genre_families(state, store, eligible)
         state['blend_available'] = any(c['video_id'] not in banned and _mix_source(c,state)=='blend'
                                        for c in eligible)
     # ...and, where a slider is pinned, from the same genre/decade, so one swap can't breach a quota.
@@ -209,9 +210,9 @@ def start_draft(store, recipe, now, seed, previous=None) -> DraftState:
     _, other_size = _pool_targets(recipe)
     pending = ([{"kind": "artist", "name": a} for a in (recipe["artists"] or []) if a]
                + [{"kind": "genre", "name": g} for g in (recipe["genres"] or []) if g])
-    # Their side is the only thing the draft holds a pool for; yours is read from the library on
-    # every re-pick (own_candidates), so there is nothing to assemble here.
-    bare = sum(1 for c in own_candidates(store, now) if not (c["genre"] and c["year"]))
+    # Reuse this transition's detached library pool for readiness and its first pick.
+    own = own_candidates(store, now, recipe)
+    bare = sum(1 for c in own if not (c["genre"] and c["year"]))
     state: DraftState = {"recipe_id": recipe["id"], "name": recipe["name"], "seed": seed,
              "own_pct": recipe["own_pct"],
              "blacklist_genres": list(recipe.get("blacklist_genres") or []),
@@ -232,7 +233,7 @@ def start_draft(store, recipe, now, seed, previous=None) -> DraftState:
              "inputs": {"artists": list(recipe["artists"] or []),
                         "genres": list(recipe["genres"] or []),
                         }}
-    return repick(state, store, now)
+    return repick(state, store, now, own_pool=own)
 
 
 def add_other_input(state: DraftState, store, client, item) -> DraftState:
@@ -389,17 +390,6 @@ def finish_draft(state: DraftState, store, now=0.0) -> DraftState:
     return repick(state, store, now)
 
 
-def build_draft(store, client, recipe, now, seed, previous=None) -> DraftState:
-    """Assemble a whole draft in one blocking call. The incremental path (start_draft +
-    add_other_input + finish_draft) is what the web route uses; this is its synchronous equivalent,
-    for callers with nothing to show progress to."""
-    state = start_draft(store, recipe, now, seed, previous)
-    while state["pending"]:
-        add_other_input(state, store, client, state["pending"].pop(0))
-    fill_own_facts(state, store, now)
-    return finish_draft(state, store, now)
-
-
 def normalized(state: DraftState, store=None, now=0.0) -> DraftState:
     """Bring a stored draft up to the current shape. A draft is persisted JSON, so one written by an
     earlier build can outlive the code that wrote it (the page reopens the last draft); every field
@@ -411,8 +401,10 @@ def normalized(state: DraftState, store=None, now=0.0) -> DraftState:
         # A family edit changes availability too. Refresh the local eligibility
         # pool only when meanings change, while retaining every selected slot.
         banned = set(state['banned'])
+        own = own_candidates(store,now,state)
+        _refresh_genre_families(state,store,own)
         state['blend_available'] = any(c['video_id'] not in banned and _mix_source(c,state)=='blend'
-                                       for c in own_candidates(store,now,state))
+                                       for c in own)
     repaired = _repair_artist_clusters(state)
     # Existing unsaved drafts otherwise retain the old duration-based, underfilled Blend draw
     # indefinitely. Reopening repairs it locally; a playlist already saved to YouTube stays put.

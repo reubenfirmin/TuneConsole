@@ -7,7 +7,6 @@ import pytest
 
 from tests.conftest import seed_catalog_track
 from yt_playlist.core import albums, artists, discovery_sources
-from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.preparation import subject_publication
 from tests.core.test_subject_publication import ready
@@ -20,10 +19,10 @@ NOW = 1700000000
 SUBJECTS = ('play_event_subjects', 'listening_observation_subjects')
 
 
-def installed(path, version, populated):
+def installed(path, version, populated, schema):
     store = Store(path)
     try:
-        migrate(store.conn, registry=registry.MIGRATIONS[:version])
+        schema.backup(store.conn)
         store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (3,'Listener','credential',1)")
         store.conn.commit()
         assert not store.conn.execute("SELECT 1 FROM sqlite_schema WHERE name IN (?,?)", SUBJECTS).fetchall()
@@ -78,8 +77,8 @@ def persisted(conn, *, home_visits=False):
 
 
 @contextmanager
-def deferred(path, version, populated):
-    setup = installed(path, version, populated)
+def deferred(path, version, populated, schema):
+    setup = installed(path, version, populated, schema)
     before = persisted(setup.conn)
     setup.conn.close()
     store = Store(path)
@@ -112,8 +111,8 @@ def listening_state(store):
 
 @pytest.mark.parametrize('version', [79, 88, 99])
 @pytest.mark.parametrize('populated', [False, True], ids=['empty', 'populated'])
-def test_startup_reads_installed_listening_without_mutating_it(tmp_path, version, populated):
-    with deferred(tmp_path / 'installed.db', version, populated) as store:
+def test_startup_reads_installed_listening_without_mutating_it(tmp_path, version, populated, _pristine_installed_schema):
+    with deferred(tmp_path / 'installed.db', version, populated, _pristine_installed_schema(version)) as store:
         before = persisted(store.conn,home_visits=True)
         client = web(store)
         read_startup(client)
@@ -155,8 +154,8 @@ def test_startup_reads_installed_listening_without_mutating_it(tmp_path, version
 
 
 @pytest.mark.parametrize('version', [79, 99])
-def test_pinned_listening_reader_survives_explicit_publication_and_new_readers_select_it(tmp_path, version):
-    with deferred(tmp_path / 'cutover.db', version, True) as store:
+def test_pinned_listening_reader_survives_explicit_publication_and_new_readers_select_it(tmp_path, version, _pristine_installed_schema):
+    with deferred(tmp_path / 'cutover.db', version, True, _pristine_installed_schema(version)) as store:
         client = web(store)
         # Publication is explicit and leaves installed writers/history intact.
         # Old read adapters retire only with their separately verified cleanup.

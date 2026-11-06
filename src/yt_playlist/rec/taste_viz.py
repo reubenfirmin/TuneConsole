@@ -26,7 +26,6 @@ shapes ranking).
 import time
 import numpy as np
 
-from yt_playlist.util import genre_map
 from yt_playlist.rec import embedding_training as training, embedding_vectors as vectors, layers, mix_tuning, mode_eval, mode_profiles, rec_params, scoring, surfaces, taste_analysis, transient
 
 
@@ -466,8 +465,9 @@ def playlist_influence_panel(store, top=8) -> dict:
     offset = 0.0
     for i in order[:top]:
         pid, weight = pids[i], float(pt.weights[i])
-        families = (Counter(genre_map.family(g,conn=store.conn) for g in store.rec_query.playlist_track_genres(pid) if g)
-                    if pid is not None else Counter())
+        raw_genres = store.rec_query.playlist_track_genres(pid) if pid is not None else []
+        genre_axes = store.genres.feature_axes(raw_genres)
+        families = Counter(genre_axes[g][0] for g in raw_genres if g)
         genres = [name for name, _ in sorted(families.items(), key=lambda row: (-row[1], row[0]))[:2]]
         context = {"pid": pid, "title": pt.titles[i], "weight": weight,
                    "percent": weight * 100, "percent_label": share_label(weight), "offset": offset,
@@ -495,9 +495,10 @@ def _family_centroids(store, keys, V, idx) -> dict:
     both free-vector layers are projected onto."""
     fam_keys: dict = {}
     tg = store.rec_query.track_genres(list(keys))
+    genre_axes = store.genres.feature_axes(tg.values())
     for k in keys:
         if k in tg:
-            fam = genre_map.family(tg[k],conn=store.conn)
+            fam = genre_axes.get(tg[k], ('', None))[0]
             if fam:
                 fam_keys.setdefault(fam, []).append(k)
     out = {}

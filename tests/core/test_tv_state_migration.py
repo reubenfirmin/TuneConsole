@@ -14,11 +14,13 @@ from tests.test_tv_stream import stream, video
 
 
 @pytest.fixture
-def store(tmp_path):
+def store(tmp_path, _pristine_installed_schema):
     result = Store(tmp_path / 'tv.db')
-    migrate(result.conn, registry=registry.MIGRATIONS[:94])
-    admit(result, through=94)
     try:
+        _pristine_installed_schema(94).backup(result.conn)
+        # Backup excludes TEMP views. Ordinary admission must recreate these
+        # for this connection while retaining the genuine v94 physical owners.
+        admit(result, through=94)
         yield result
     finally:
         result.conn.close()

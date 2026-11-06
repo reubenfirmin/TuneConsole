@@ -2,7 +2,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from yt_playlist.repos.base import Repo, synchronized, snapshot_read, GENERATED_GROUP
+from yt_playlist.repos.base import Repo, synchronized, snapshot_read
 
 
 class TrendsRepo(Repo):
@@ -23,15 +23,6 @@ class TrendsRepo(Repo):
         if not exclude_generated:
             return "", []
         return " AND COALESCE(pe.is_generated,0)=0", []
-
-    @synchronized
-    def generated_ytm_ids(self) -> set[str]:
-        """The ytm ids of playlists this app generated. Plays sourced from these are the app's own
-        recommendations echoed back, not listening the user chose."""
-        rows = self.conn.execute(
-            "SELECT s.provider_playlist_id ytm FROM quarantined_playlists q "
-            "JOIN playlist_scopes s ON s.id=q.playlist_scope_id WHERE s.kind='shared'").fetchall()
-        return {r["ytm"] for r in rows}
 
     @synchronized
     def catalog_artists(self) -> set[str]:
@@ -61,39 +52,10 @@ class TrendsRepo(Repo):
         return {r["a"] for r in rows}
 
     @synchronized
-    def catalog_track_keys(self) -> set[str]:
-        """identity_keys in a playlist the user owns. The track-level twin of catalog_artists()."""
-        rows = self.conn.execute(
-            "SELECT DISTINCT t.identity_key k FROM playlist_tracks pt "
-            "JOIN tracks t ON t.id = pt.track_id "
-            "JOIN playlists p ON p.id = pt.playlist_id "
-            "WHERE p.playlist_scope_id NOT IN "
-            "  (SELECT playlist_scope_id FROM quarantined_playlists)").fetchall()
-        return {r["k"] for r in rows}
-
-    @synchronized
     def has_play_ledger(self) -> bool:
         """True when play_events holds anything. False for a fresh install with no extension and no
         Takeout import, where the coarse history day model is still the only evidence of listening."""
         return self.conn.execute("SELECT 1 FROM play_events LIMIT 1").fetchone() is not None
-
-    @snapshot_read
-    def repetition_series(self, per_track) -> dict:
-        """Latest exact timestamps per track, oldest first, using retained play-time policy.
-
-        Unknown provenance remains eligible, as in the other descriptive Trends reads.
-        Filter before ranking so generated plays cannot displace eligible evidence.
-        """
-        rows = self.conn.execute(
-            "WITH ranked AS (SELECT identity_key,played_at,id,ROW_NUMBER() OVER ("
-            "PARTITION BY identity_key ORDER BY played_at DESC,id DESC) position "
-            "FROM play_event_subjects WHERE COALESCE(is_generated,0)=0) "
-            "SELECT identity_key,played_at FROM ranked WHERE position<=? "
-            "ORDER BY identity_key,played_at,id", (per_track,)).fetchall()
-        series = {}
-        for row in rows:
-            series.setdefault(row["identity_key"], []).append(row["played_at"])
-        return series
 
     @snapshot_read
     def ledger_day_counts(self, exclude_generated=True) -> list:
@@ -179,24 +141,6 @@ class TrendsRepo(Repo):
         return "", "pe.played_at>=? AND pe.played_at<?"
 
     # -- the reconciled daily model ------------------------------------------------------------
-    @snapshot_read
-    def history_track_first(self) -> dict:
-        """Earliest listening day per recording.
-
-        A snapshot watermark cannot bound late imports, calendar changes, or
-        recording reassociation, so this projection always scans all daily evidence.
-        """
-        rows = self.conn.execute(
-            "SELECT identity_key k,MIN(day_ts) ts FROM listening_days GROUP BY identity_key").fetchall()
-        return {r["k"]: (int(r["ts"] // 86400), r["ts"]) for r in rows}
-
-    @snapshot_read
-    def play_event_track_first(self) -> dict:
-        """{identity_key: (first_day, first_ts)} earliest real play from play_events (indexed on time)."""
-        rows = self.conn.execute(
-            "SELECT identity_key k, MIN(played_at) ts FROM play_event_subjects GROUP BY identity_key").fetchall()
-        return {r["k"]: (int(r["ts"] // 86400), r["ts"]) for r in rows}
-
     def _replace_first_play(self):
         from yt_playlist.core import first_play, listening_summaries
         if not listening_summaries.available(self.conn):
@@ -282,10 +226,6 @@ class TrendsRepo(Repo):
         return {r["id_key"]: r["first_day"] for r in rows}
 
     @synchronized
-    def first_play_floor_day(self):
-        return min(self.first_play_map('track').values(),default=None)
-
-    @synchronized
     def play_day_counts(self) -> list:
         """[(day, identity_key, count)] grouped by calendar date and recording.
 
@@ -320,45 +260,6 @@ class TrendsRepo(Repo):
             'WHERE d.day_ts>=? AND d.day_ts<? GROUP BY a.artist_id',(since,until))}
 
     @synchronized
-    def never_played(self) -> tuple:
-        """(total_tracks, never_played), per distinct identity_key."""
-        row = self.conn.execute(
-            "WITH owned AS MATERIALIZED (SELECT DISTINCT identity_key FROM tracks), "
-            "played AS MATERIALIZED (SELECT DISTINCT identity_key FROM listening_days) "
-            "SELECT COUNT(*) total, SUM(CASE WHEN p.identity_key IS NULL THEN 1 ELSE 0 END) never "
-            "FROM owned t LEFT JOIN played p USING(identity_key)").fetchone()
-        return (row["total"] or 0, row["never"] or 0)
-
-    @synchronized
-    def track_last_play(self) -> list:
-        """[(identity_key, last_ts_or_None)] newest snapshot per distinct track (None = never played)."""
-        rows = self.conn.execute(
-            "SELECT t.identity_key k,MAX(hi.at) last FROM tracks t "
-            "LEFT JOIN listening_activity hi ON hi.identity_key=t.identity_key "
-            "GROUP BY t.identity_key").fetchall()
-        return [(r["k"], r["last"]) for r in rows]
-
-    @synchronized
-    def dead_playlists(self, max_listens=0) -> list:
-        """[{playlist_id, title, last_listen, listens}] for playlists whose tracks were listened to at
-        most max_listens times across history (LEFT JOIN keeps never-listened playlists), listens asc."""
-        rows = self.conn.execute(
-            "WITH membership AS (SELECT DISTINCT pt.playlist_id pid,t.identity_key k "
-            "FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id),"
-            "stats AS (SELECT m.pid,MAX(a.at) last,COUNT(*) cnt FROM membership m "
-            "JOIN listening_activity a ON a.identity_key=m.k GROUP BY m.pid) "
-            "SELECT p.id pid,p.title,s.last,COALESCE(s.cnt,0) cnt FROM playlists p "
-            "LEFT JOIN stats s ON s.pid=p.id "
-            "WHERE p.id NOT IN (SELECT p2.id FROM playlists p2 "
-            "  JOIN quarantined_playlists g ON g.playlist_scope_id = p2.playlist_scope_id WHERE g.name = :grp)",
-            {"grp": GENERATED_GROUP}).fetchall()
-        out = [{"playlist_id": r["pid"], "title": r["title"], "last_listen": r["last"],
-                "listens": r["cnt"] or 0} for r in rows]
-        out = [d for d in out if d["listens"] <= max_listens]
-        out.sort(key=lambda d: (d["listens"], (d["title"] or "").lower()))
-        return out
-
-    @synchronized
     def track_cards(self, keys) -> dict:
         """{identity_key: {title, artist, thumbnail, album_browse_id}} batch lookup for insight art;
         empty dict for empty input."""
@@ -372,20 +273,6 @@ class TrendsRepo(Repo):
             f"FROM catalog_tracks WHERE identity_key IN ({ph}) GROUP BY identity_key", keys).fetchall()
         return {r["k"]: {"title": r["title"], "artist": r["artist"] or "",
                          "thumbnail": r["thumb"], "album_browse_id": r["abid"]} for r in rows}
-
-    @synchronized
-    def rediscover_tracks(self, before_ts, limit=3) -> list:
-        """[{identity_key, title, artist, thumbnail, plays, last_play}] owned tracks with the most
-        lifetime day-model plays whose newest play is < before_ts, plays desc."""
-        rows = self.conn.execute(
-            "WITH names AS (SELECT identity_key,MIN(title) title,MIN(artist) artist,"
-            "MIN(NULLIF(thumbnail,'')) thumb FROM tracks GROUP BY identity_key) "
-            "SELECT t.identity_key k,t.title,t.artist,t.thumb,COUNT(*) plays,MAX(hi.day_ts) last "
-            "FROM names t JOIN listening_days hi ON hi.identity_key=t.identity_key "
-            "GROUP BY t.identity_key HAVING plays > 0 AND last < ? "
-            "ORDER BY plays DESC, last ASC LIMIT ?", (before_ts, int(limit))).fetchall()
-        return [{"identity_key": r["k"], "title": r["title"], "artist": r["artist"] or "",
-                 "thumbnail": r["thumb"], "plays": r["plays"], "last_play": r["last"]} for r in rows]
 
     @synchronized
     def month_track_plays(self, since, until) -> dict:

@@ -253,10 +253,10 @@ def test_absent_and_empty_sources_select_native_empty_output_without_losing_pres
     assert header(store.conn)['source_present'] == int(value is not None)
 
 
-def test_frozen_native_upgrade_keeps_retained_files_and_guard_validation(tmp_path):
+def test_frozen_native_upgrade_keeps_retained_files_and_guard_validation(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path/'upgrade.db')
     try:
-        runner.migrate(store.conn, registry=registry.MIGRATIONS[:83])
+        _pristine_installed_schema(83).backup(store.conn)
         store.init_schema(defer_metadata=True)
         seed(store)
         publication.publish(store.conn, revision=prepared(store.conn))

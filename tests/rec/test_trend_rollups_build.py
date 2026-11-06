@@ -3,7 +3,6 @@ from datetime import datetime, timezone
 import pytest
 
 from yt_playlist.rec import trend_rollups, trend_statistics as stats
-from yt_playlist.repos.trends import TrendsRepo
 
 
 @pytest.mark.parametrize("now, expected", [
@@ -14,19 +13,13 @@ def test_last_complete_month(now, expected):
     assert stats.last_complete_month(datetime.fromisoformat(now).replace(tzinfo=timezone.utc).timestamp()) == expected
 
 
-def test_build_only_publishes_live_recap_and_preserves_first_play(store, monkeypatch):
+def test_build_only_publishes_live_recap_and_preserves_first_play(store):
     iid = store.accounts.upsert_account("Main", "bridge", None, True)
     store.tracks.upsert_track("video", "Song", "Artist", None, 200)
     key = store.tracks.identity_key_for_video("video")
     for day in (0, 1, 2, 31):
         store.history.record_history_plays(iid, day * 86400, [key], source_timezone="UTC")
 
-    def retired(*args, **kwargs):
-        pytest.fail("Retired Trends analysis was called")
-
-    for name in ("repetition_series", "catalog_track_keys", "never_played", "track_last_play",
-                 "dead_playlists", "rediscover_tracks"):
-        monkeypatch.setattr(TrendsRepo, name, retired)
     payload = trend_rollups.build(store, 59 * 86400)
     assert set(payload) == {"built_at", "story"}
     assert store.rec_proposals.get_proposals("trend_rollups") == payload

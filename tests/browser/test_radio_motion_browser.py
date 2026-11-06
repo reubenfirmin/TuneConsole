@@ -1,5 +1,7 @@
 """Radio artwork motion, restored shape and playback history geometry."""
 from pathlib import Path
+from functools import wraps
+import time
 
 import pytest
 from tests.template_support import web_templates
@@ -8,9 +10,7 @@ from playwright.sync_api import expect
 from tests.browser.radio_ui_support import radio_ui
 
 
-def _junction_snapshot(session):
-    """Measure the rendered routes, independently of their animation mechanism."""
-    return session.evaluate('''session => {
+_JUNCTION_SNAPSHOT = '''session => {
       const control = session.querySelector('.radio-tune').getBoundingClientRect();
       const cx = control.x + control.width / 2, cy = control.y + control.height / 2;
       const paths = ['line', 'flow'].map(name => {
@@ -86,7 +86,63 @@ def _junction_snapshot(session):
       const model = Alpine.$data(session.closest('.radio-home'));
       return {control: {x: control.x, y: control.y, width: control.width, height: control.height}, paths,
         x: model.junctionX, fork: model.junctionForkX};
-    }''')
+    }'''
+
+
+def _junction_snapshot(session):
+    """Measure the rendered routes, independently of their animation mechanism."""
+    return session.evaluate(_JUNCTION_SNAPSHOT)
+
+
+def _junction_frames(page, session, *, count, step):
+    # Keep every rendered observation while avoiding two driver round trips
+    # per sample. The real clock still runs every timer/animation frame.
+    session.evaluate('''(session, config) => {
+      const sample = (''' + _JUNCTION_SNAPSHOT + ''');
+      const frames = [];
+      const timer = setInterval(() => {
+        frames.push(sample(session));
+        if (frames.length === config.count) clearInterval(timer);
+      }, config.step);
+      session.__testJunctionFrames = {frames, timer};
+    }''', {'count': count, 'step': step})
+    try:
+        page.clock.run_for(count * step)
+    finally:
+        frames = session.evaluate('''session => {
+          const state = session.__testJunctionFrames;
+          clearInterval(state.timer);
+          delete session.__testJunctionFrames;
+          return state.frames;
+        }''')
+    assert len(frames) == count
+    return frames
+
+
+@pytest.fixture
+def motion_costs(monkeypatch, record_property, request, page):
+    totals = {}
+
+    def timed(name, operation):
+        @wraps(operation)
+        def call(*args, **kwargs):
+            started = time.perf_counter()
+            try:
+                return operation(*args, **kwargs)
+            finally:
+                values = totals.setdefault(name, [0, 0.0])
+                values[0] += 1
+                values[1] += time.perf_counter() - started
+        return call
+
+    for name in ('_junction_snapshot', '_junction_frames', '_assert_junction_motion',
+                 '_assert_accepted_junction_shape', 'capture'):
+        monkeypatch.setattr(request.module, name, timed(name, getattr(request.module, name)))
+    monkeypatch.setattr(type(page.clock), 'run_for', timed('clock_run_for', type(page.clock).run_for))
+    yield
+    for name, (calls, seconds) in totals.items():
+        record_property(name + '_calls', calls)
+        record_property(name + '_wall_s', seconds)
 
 
 def _assert_accepted_junction_shape(session):
@@ -137,10 +193,8 @@ def _assert_accepted_junction_shape(session):
 
 
 def _assert_junction_motion(page, session, initial, target_x, *, dense=False):
-    frames = [initial]
-    for _ in range(32 if dense else 10):
-        page.clock.run_for(16 if dense else 48)
-        frames.append(_junction_snapshot(session))
+    frames = [initial, *_junction_frames(page, session, count=32 if dense else 10,
+                                        step=16 if dense else 48)]
     page.clock.run_for(1500)
     final = _junction_snapshot(session)
     if dense:
@@ -352,9 +406,18 @@ def test_artwork_resumes_its_saved_shape_after_visiting_another_page(page, radio
     api.playlist = templates.get_template('_partials/radio_playlist.html').render(session=api.ready, tracks=api.tracks)
     api.state = api.ready
     expect(page.locator('.radio-session')).to_be_visible(timeout=6000)
+    drawing = page.evaluate('''() => {
+      const model = Alpine.$data(document.querySelector('.radio-home'));
+      return {playlistId: model.artworkPlaylistId, seed: model.artworkSeed};
+    }''')
+    assert drawing['playlistId'] == api.ready['playlist_id']
     page.evaluate('Alpine.$data(document.querySelector(".radio-home")).artworkPhase = 15')
     page.get_by_role('link', name='Playlists', exact=True).click()
+    # Navigation replaces the page after fetching it; click completion alone
+    # does not establish that the old component has saved and disposed itself.
+    expect(page.get_by_role('heading', name='Playlists', exact=True)).to_be_visible()
     saved = page.evaluate('JSON.parse(sessionStorage.getItem("radio-artwork"))')
+    assert saved['playlistId'] == drawing['playlistId'] and saved['seed'] == drawing['seed']
     assert 15 <= saved['phase'] < 15.01
     page.get_by_role('link', name='Home', exact=True).click()
     page.get_by_role('tab', name='On air', exact=True).click()
@@ -401,7 +464,8 @@ def test_record_cover_changes_immediately_when_replaying_history(page, radio_ui)
     pytest.param(1440, 1000, True, id='desktop-motion'),
     pytest.param(1792, 1398, False, id='tall-layout'),
 ])
-def test_session_history_rises_from_junction_and_queues_preview_without_switching(page, radio_ui, width, height, motion):
+def test_session_history_rises_from_junction_and_queues_preview_without_switching(
+        page, radio_ui, width, height, motion, motion_costs):
     api = radio_ui
     page.set_viewport_size({'width': width, 'height': height})
     page.add_script_tag(content=Path(__file__).with_name('radio_junction_baseline.js').read_text())

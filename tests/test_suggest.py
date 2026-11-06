@@ -1,4 +1,5 @@
 import json
+from tests.enrichment_support import complete_entries
 from html.parser import HTMLParser
 from fastapi.testclient import TestClient
 
@@ -92,7 +93,7 @@ def test_suggestion_add_appends_row_without_refresh(store):
 def test_genreless_suggestion_add_requeues_enrichment(store):
     target, c = _seed(store, genre=None)
     tid = store.tracks.track_ids_for_videos(["v2"])["v2"]
-    store.enrichment_queue.mark_enriched([tid], now=5.0)  # an earlier provider miss would otherwise wait 30 days
+    complete_entries(store, [tid], now=5.0)  # an earlier provider miss would otherwise wait 30 days
 
     class Worker:
         triggered = 0

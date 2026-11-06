@@ -1,4 +1,5 @@
 """Telemetry does not schedule models or invalidate snapshots of skip evidence."""
+from contextlib import closing
 import sqlite3
 
 import pytest
@@ -56,7 +57,7 @@ def test_reclassifying_or_deleting_a_consumed_event_invalidates_snapshot(player_
 
 
 def test_version_39_upgrade_preserves_events_and_pending_work(tmp_path):
-    with sqlite3.connect(tmp_path / 'old.db') as conn:
+    with closing(sqlite3.connect(tmp_path / 'old.db')) as conn, conn:
         conn.row_factory = sqlite3.Row
         conn.execute('PRAGMA foreign_keys=ON')
         migrate(conn, registry=registry.MIGRATIONS[:39])

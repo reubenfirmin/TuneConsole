@@ -8,7 +8,8 @@ import json
 
 from tests.group_benchmark_support import frozen_inputs, report_path
 from tests.group_support import recordings
-from yt_playlist.rec import group_discovery, group_eval, group_similarity
+from experiments.investigations import group_eval
+from yt_playlist.rec import group_discovery, group_similarity
 
 
 def test_compare_adaptive_engines_on_independently_prepared_libraries(tmp_path, request):

@@ -171,19 +171,21 @@ class PreparedContentRepo(Repo):
             "WHERE v.space IN ('content_library','content_discovery') AND p.recording_id IS NULL)").fetchone()[0]
 
     @synchronized
-    def missing_unqueued(self, limit=32):
+    def missing_unqueued(self, limit=32, *, after=None):
         """Find lost bootstrap work, including old vectors needing a retraction.
 
         Each indexed anti-join returns at most one batch. Already queued work
         keeps its revision and position; no accepted input is discarded.
         """
+        cursor = 'AND r.identity_key>? ' if after is not None else ''
+        args = (after, limit) if after is not None else (limit,)
         return [row[0] for row in self.conn.execute(
             'SELECT r.identity_key FROM recordings r '
             'LEFT JOIN prepared_recording_inputs p ON p.recording_id=r.id '
             'LEFT JOIN rec_content_pending q ON q.identity_key=r.identity_key '
             'WHERE p.recording_id IS NULL AND q.identity_key IS NULL AND NOT EXISTS('
             'SELECT 1 FROM recording_redirects d WHERE d.retired_id=r.id) '
-            'ORDER BY r.identity_key LIMIT ?', (limit,))]
+            + cursor + 'ORDER BY r.identity_key LIMIT ?', args)]
 
     @synchronized
     def enqueue_missing(self, keys):

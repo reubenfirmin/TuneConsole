@@ -10,7 +10,7 @@ import pytest
 
 from yt_playlist.core import audio_annotations, features
 from yt_playlist.core.store import Store
-from yt_playlist.rec import audio_vibe_preview, home_vibe
+from yt_playlist.rec import audio_vibe_prediction, home_vibe
 from yt_playlist.web.app import create_app
 
 
@@ -89,9 +89,20 @@ def test_flag_gates_rating_ui_and_feedback_but_not_collection(store, monkeypatch
             html = client.get(path).text
             assert 'audio-vibe-collection.js' in html and 'data-audio-vibe-banner' in html
             for key, preset in home_vibe.PRESETS.items():
-                assert f'data-vibe-choice="{key}"' in html and audio_vibe_preview.ATTRIBUTE_LABELS[key] in html
+                assert f'data-vibe-choice="{key}"' in html and audio_vibe_prediction.ATTRIBUTE_LABELS[key] in html
             assert 'data-vibe-choice=""' not in html
-        assert 'audio-vibe-collection.js' not in client.get('/audio-preview').text
+        preview = client.get('/audio-preview').text
+        assert 'audio-vibe-collection.js' in preview and 'data-audio-vibe-collection' in preview
+        assert 'data-audio-vibe-banner' in preview
+        from yt_playlist.web.routes.bridge import EXTENSION_ORIGINS
+        for origin in EXTENSION_ORIGINS:
+            assert client.post('/audio-vibes/samples', json=value, headers={'Origin': origin}).status_code == 200
+            assert client.post('/audio-vibes/feedback', json={}, headers={'Origin': origin}).status_code == 403
+            assert client.post('/track/like', json={}, headers={'Origin': origin}).status_code == 403
+        for origin in ('chrome-extension://unknown', 'https://evil.example'):
+            assert client.post('/audio-vibes/samples', json=value, headers={'Origin': origin}).status_code == 403
+        assert client.post('/audio-vibes/samples', json=value, headers={
+            'Origin': next(iter(EXTENSION_ORIGINS)), 'Host': 'evil.example'}).status_code == 400
         # A live dev process may still own the previous route globals while
         # Jinja reloads a newly edited template. Keep that page usable until restart.
         del client.app.state.ctx.templates.env.globals['audio_vibes_enabled']
@@ -106,7 +117,7 @@ def test_samples_and_feedback_survive_reload_and_freeze_the_labeled_excerpts(sto
         response = client.post('/audio-vibes/samples', json=first)
         assert response.status_code == 200, response.text
         state = response.json()
-        assert {key: choice['label'] for key, choice in state['choices'].items()} == audio_vibe_preview.LABELS
+        assert {key: choice['label'] for key, choice in state['choices'].items()} == audio_vibe_prediction.LABELS
         assert {key: choice['attribute_label'] for key, choice in state['choices'].items()} == {
             'relax': 'Calm, soothing, unhurried', 'concentrate': 'Steady, absorbing, unobtrusive',
             'cruise': 'Easygoing, moderately lively, comfortable company',
@@ -124,7 +135,7 @@ def test_samples_and_feedback_survive_reload_and_freeze_the_labeled_excerpts(sto
         assert client.post('/audio-vibes/samples', json=conflicting).status_code == 409
         assert client.post('/audio-vibes/samples', json={**first, 'run_id': str(uuid4())}).status_code == 409
         label = {'run_id': first['run_id'], 'sample_ids': [first['id']], 'vibes': ['cruise', 'release'],
-                 'taxonomy_version': audio_vibe_preview.TAXONOMY_VERSION}
+                 'taxonomy_version': audio_vibe_prediction.TAXONOMY_VERSION}
         assert client.post('/audio-vibes/feedback', json=label).status_code == 200
         second = sample(run_id=first['run_id'], point='middle', relaxed=.95, aggressive=.05, acoustic=.8)
         updated = client.post('/audio-vibes/samples', json=second).json()
@@ -162,25 +173,24 @@ def test_samples_and_feedback_survive_reload_and_freeze_the_labeled_excerpts(sto
         state = client.get('/audio-vibes/runs/' + first['run_id']).json()
         assert len(state['samples']) == 3
         assert state['feedback']['vibes'] == ['relax', 'cruise']
-        assert state['feedback']['taxonomy_version'] == audio_vibe_preview.TAXONOMY_VERSION
+        assert state['feedback']['taxonomy_version'] == audio_vibe_prediction.TAXONOMY_VERSION
         assert state['feedback']['prediction']['sample_count'] == 3
         assert state['feedback']['prediction']['arc']['order'] == 'position_seconds'
     assert store.settings.get_setting(home_vibe.SETTING) == 'release'
     assert store.conn.execute('SELECT COUNT(*) FROM rec_musical_profiles').fetchone()[0] == 0
 
 
-def test_feedback_route_preserves_withdrawal_and_explicit_empty_after_restart(tmp_path, monkeypatch):
+def test_feedback_route_preserves_withdrawal_and_explicit_empty_after_restart(file_backed_store, monkeypatch):
     monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '1')
-    path = tmp_path / 'judgments.db'
-    store = Store(path)
-    store.init_schema()
+    store = file_backed_store
+    path = store._db_path
     run = str(uuid4())
     empty_sample = sample()
     values = [sample(run_id=run, point=point) for point in ('thirty', 'middle', 'two_thirds')]
 
     def latest(run_id):
         return audio_annotations.latest(store.conn, run_id, kind='session',
-                                        taxonomy_version=audio_vibe_preview.TAXONOMY_VERSION)
+                                        taxonomy_version=audio_vibe_prediction.TAXONOMY_VERSION)
 
     try:
         with TestClient(create_app(store, lambda: {}), base_url='http://127.0.0.1') as client:
@@ -188,7 +198,7 @@ def test_feedback_route_preserves_withdrawal_and_explicit_empty_after_restart(tm
                 response = client.post('/audio-vibes/samples', json=value)
                 assert response.status_code == 200, response.text
             answer = {'run_id': run, 'sample_ids': [value['id'] for value in values],
-                      'vibes': ['cruise'], 'taxonomy_version': audio_vibe_preview.TAXONOMY_VERSION}
+                      'vibes': ['cruise'], 'taxonomy_version': audio_vibe_prediction.TAXONOMY_VERSION}
             response = client.post('/audio-vibes/feedback', json=answer)
             assert response.status_code == 200, response.text
             first = latest(run)
@@ -222,8 +232,8 @@ def test_feedback_route_preserves_withdrawal_and_explicit_empty_after_restart(tm
             assert client.post('/audio-vibes/feedback', json={**answer, 'vibes': []}).status_code == 200
             retry = latest(run)
             assert retry['state'] == 'withdrawn'
-            assert store.conn.execute('SELECT supersedes_id FROM audio_annotations WHERE id=?',
-                                       (retry['id'],)).fetchone()[0] == cleared['id']
+            assert retry['id'] == cleared['id'], 'An identical retry must preserve the withdrawal revision'
+            assert audio_annotations.read(store.conn, retry) == withdrawn
     finally:
         store.conn.close()
 
@@ -292,10 +302,10 @@ def test_replacement_provenance_and_attribute_validation(store, monkeypatch):
 def test_vibes_are_independent_cross_genre_targets_and_require_three_samples():
     club = sample(electronic=.95, House=.9, dance=.8)
     metal = sample(metal=.95, dance=.8, **{'heavy metal': .9})
-    assert audio_vibe_preview.predict([club]) is None
-    assert audio_vibe_preview.predict([club, metal]) is None
-    assert audio_vibe_preview.predict([club] * 3)['ranking'] == audio_vibe_preview.predict([metal] * 3)['ranking']
-    assert audio_vibe_preview.predict([club] * 3)['vibes'] == ['release']
+    assert audio_vibe_prediction.predict([club]) is None
+    assert audio_vibe_prediction.predict([club, metal]) is None
+    assert audio_vibe_prediction.predict([club] * 3)['ranking'] == audio_vibe_prediction.predict([metal] * 3)['ranking']
+    assert audio_vibe_prediction.predict([club] * 3)['vibes'] == ['release']
     # Positive tone selects uplift separately from energy and force.
     high_energy = []
     for tone in (2.0, 8.0):
@@ -304,7 +314,7 @@ def test_vibes_are_independent_cross_genre_targets_and_require_three_samples():
         value['traits']['valence'] = {'score': tone, 'per_patch': [tone] * 3}
         happy = .1 if tone == 2 else .9
         value['traits']['happy'] = {'score': happy, 'per_patch': [happy] * 3}
-        high_energy.append(audio_vibe_preview.predict([value] * 3))
+        high_energy.append(audio_vibe_prediction.predict([value] * 3))
     assert high_energy[0]['vibes'] == ['energize']
     assert set(high_energy[1]['vibes']) == {'energize', 'uplift'}
     for target in ('energize', 'release'):
@@ -313,17 +323,17 @@ def test_vibes_are_independent_cross_genre_targets_and_require_three_samples():
     assert high_energy[0]['dimensions']['emotional_tone']['values'][0] < high_energy[1]['dimensions']['emotional_tone']['values'][0]
     quiet = sample(relaxed=1.0, aggressive=0.0, dance=.9)
     quiet['traits']['arousal'] = {'score': 3.0, 'per_patch': [3.0] * 3}
-    prediction = audio_vibe_preview.predict([quiet] * 3)
+    prediction = audio_vibe_prediction.predict([quiet] * 3)
     assert 'relax' in prediction['vibes'] and 'release' not in prediction['vibes']
     assert prediction['calibrated'] is False
     assert {row['vibe'] for row in prediction['ranking']} == set(home_vibe.PRESETS)
     heavy = sample(aggressive=1.0)
     heavy['traits']['arousal'] = {'score': 2.0, 'per_patch': [2.0] * 3}
-    assert audio_vibe_preview.predict([heavy] * 3)['vibes'] == ['release']
+    assert audio_vibe_prediction.predict([heavy] * 3)['vibes'] == ['release']
     # Cruise has a genuine measured middle, rather than another name for calm.
     moderate = sample(relaxed=.5, aggressive=.1)
     moderate['traits']['arousal'] = {'score': 5.0, 'per_patch': [5.0] * 3}
-    prediction = audio_vibe_preview.predict([moderate] * 3)
+    prediction = audio_vibe_prediction.predict([moderate] * 3)
     assert prediction['vibes'] == ['cruise']
 
 
@@ -331,9 +341,9 @@ def test_every_complete_song_gets_a_best_guess_even_when_all_fits_are_weak():
     value = sample(relaxed=.3, aggressive=.55)
     for key, score in {'happy': .2, 'sad': .6, 'arousal': 5.8}.items():
         value['traits'][key] = {'score': score, 'per_patch': [score] * 3}
-    assert audio_vibe_preview.predict([value] * 2) is None
-    prediction = audio_vibe_preview.predict([value] * 3)
-    assert all(row['score'] < audio_vibe_preview.MATCH_THRESHOLD for row in prediction['ranking'])
+    assert audio_vibe_prediction.predict([value] * 2) is None
+    prediction = audio_vibe_prediction.predict([value] * 3)
+    assert all(row['score'] < audio_vibe_prediction.MATCH_THRESHOLD for row in prediction['ranking'])
     assert prediction['selection_method'] == 'best_available'
     assert prediction['vibe'] == prediction['ranking'][0]['vibe']
     assert prediction['vibes'] == [prediction['vibe']]
@@ -353,8 +363,8 @@ def target_score(prediction, target):
 
 def test_arc_does_not_turn_quiet_and_intense_sections_into_moderate_cruise():
     points = ('thirty', 'middle', 'two_thirds')
-    steady = audio_vibe_preview.predict([arc_sample(point, .5) for point in points])
-    building = audio_vibe_preview.predict([arc_sample(point, energy) for point, energy in zip(points, (0, .5, 1))])
+    steady = audio_vibe_prediction.predict([arc_sample(point, .5) for point in points])
+    building = audio_vibe_prediction.predict([arc_sample(point, energy) for point, energy in zip(points, (0, .5, 1))])
     # These have the same arithmetic feature means. Only the steady song has
     # observed, consistently moderate excerpts; averaging invented that fit.
     assert steady['vibe'] == 'cruise'
@@ -368,7 +378,7 @@ def test_arc_does_not_turn_quiet_and_intense_sections_into_moderate_cruise():
 
 def test_arc_distinguishes_build_fade_and_isolated_peak_with_the_same_values():
     points = ('thirty', 'middle', 'two_thirds')
-    predictions = [audio_vibe_preview.predict([arc_sample(point, energy)
+    predictions = [audio_vibe_prediction.predict([arc_sample(point, energy)
         for point, energy in zip(points, energies)])
         for energies in ((0, .5, 1), (1, .5, 0), (0, 1, 0), (1, 0, 1))]
     build, fade, peak, dip = predictions
@@ -385,7 +395,7 @@ def test_arc_distinguishes_build_fade_and_isolated_peak_with_the_same_values():
 def test_forceful_middle_passage_is_retained_without_labeling_the_song_relaxed():
     values = [arc_sample(point, energy, force) for point, energy, force in (
         ('thirty', .1, .1), ('middle', .9, .9), ('two_thirds', .1, .1))]
-    prediction = audio_vibe_preview.predict(values)
+    prediction = audio_vibe_prediction.predict(values)
     assert prediction['vibe'] == 'release'
     assert 'relax' not in prediction['vibes']
     assert prediction['dimensions']['aggression']['shape'] == 'peak'
@@ -400,8 +410,8 @@ def test_arc_uses_actual_positions_and_keeps_replacement_timing_and_excerpt_ids(
     later = arc_sample('two_thirds', .5)
     replacement = arc_sample('thirty', .9)
     replacement.update(position_seconds=215.0, capture_reason='catch_up')
-    prediction = audio_vibe_preview.predict([replacement, later, early])
-    assert prediction == audio_vibe_preview.predict([early, replacement, later])
+    prediction = audio_vibe_prediction.predict([replacement, later, early])
+    assert prediction == audio_vibe_prediction.predict([early, replacement, later])
     arc = prediction['arc']
     assert arc['scope'] == 'sampled_excerpts'
     assert [row['sample_id'] for row in arc['excerpts']] == [early['id'], later['id'], replacement['id']]
@@ -423,24 +433,22 @@ def test_changing_labels_preserves_original_prediction_across_heuristic_versions
     ids = [value['id'] for value in values]
     original = {'version': 'audio-vibe-preview-5', 'vibe': 'release', 'sample_count': 3,
                 'dimensions': {'intensity': .6}}
-    monkeypatch.setattr(audio_vibe_preview, 'predict', lambda samples, **kwargs: original)
+    monkeypatch.setattr(audio_vibe_prediction, 'predict', lambda samples, **kwargs: original)
     from yt_playlist.rec import audio_vibe_feedback
-    audio_vibe_feedback.save(store, first['run_id'], ids, ['release'], audio_vibe_preview.TAXONOMY_VERSION, 2)
-    monkeypatch.setattr(audio_vibe_preview, 'predict', lambda samples, **kwargs: {'version': 'new-version', 'vibe': 'energize'})
-    audio_vibe_feedback.save(store, first['run_id'], ids[::-1], ['energize'], audio_vibe_preview.TAXONOMY_VERSION, 3)
+    audio_vibe_feedback.save(store, first['run_id'], ids, ['release'], audio_vibe_prediction.TAXONOMY_VERSION, 2)
+    monkeypatch.setattr(audio_vibe_prediction, 'predict', lambda samples, **kwargs: {'version': 'new-version', 'vibe': 'energize'})
+    audio_vibe_feedback.save(store, first['run_id'], ids[::-1], ['energize'], audio_vibe_prediction.TAXONOMY_VERSION, 3)
     feedback = store.audio_vibes.feedback(first['run_id'])
     assert feedback['vibes'] == ['energize']
     assert feedback['prediction'] == original
 
 
-def test_audio_migration_preserves_existing_settings_and_reopens(tmp_path):
+def test_audio_migration_preserves_existing_settings_and_reopens(tmp_path, _pristine_installed_schema):
     from tests.historical_support import upgrade_fixture
     from yt_playlist.core.store import Store
-    from yt_playlist.core.migrations import migrate
-    from yt_playlist.core.migrations.registry import MIGRATIONS
     path = tmp_path / 'upgrade.db'
     previous = Store(path)
-    migrate(previous.conn, registry=MIGRATIONS[:55])
+    _pristine_installed_schema(55).backup(previous.conn)
     previous.conn.execute("INSERT INTO settings VALUES ('audio_test_sentinel','keep')")
     legacy_run = str(uuid4())
     previous.conn.execute('INSERT INTO audio_vibe_feedback VALUES (?,?,?,?,?)',
@@ -459,7 +467,7 @@ def test_audio_migration_preserves_existing_settings_and_reopens(tmp_path):
     assert len(upgraded.audio_vibes.earlier_feedback(legacy_run)) == 2
     from yt_playlist.rec import audio_vibe_feedback
     audio_vibe_feedback.save(upgraded, legacy_run, [value['id']], ['relax', 'cruise'],
-                             audio_vibe_preview.TAXONOMY_VERSION, 11)
+                             audio_vibe_prediction.TAXONOMY_VERSION, 11)
     upgraded.conn.close()
     reopened = Store(path)
     reopened.init_schema()
@@ -498,7 +506,7 @@ def test_feedback_without_analysis_keeps_song_and_observation_frozen(store, monk
         assert client.get('/audio-vibes/runs/' + run_id).json()['playback']['title'] == 'Unanswered song'
     # An absent prediction is also a frozen observation across policy versions.
     from yt_playlist.rec import audio_vibe_feedback
-    monkeypatch.setattr(audio_vibe_preview, 'predict', lambda samples: {'version': 'later-policy'})
+    monkeypatch.setattr(audio_vibe_prediction, 'predict', lambda samples: {'version': 'later-policy'})
     audio_vibe_feedback.save(store, run_id, [], ['relax'], 'audio-session-targets-1', 10)
     assert store.audio_vibes.feedback(run_id)['prediction'] is None
 
@@ -508,15 +516,15 @@ def test_replay_restores_latest_exact_video_answer_without_copying_or_changing_i
     monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '1')
     first, latest, unrelated, replay = [str(uuid4()) for _ in range(4)]
     store.audio_vibes.save_playback(first, 'repeat-song', 'Song', 'Artist', 1)
-    store.audio_vibes.save_feedback(first, [], ['release'], audio_vibe_preview.TAXONOMY_VERSION, None, 2)
+    store.audio_vibes.save_feedback(first, [], ['release'], audio_vibe_prediction.TAXONOMY_VERSION, None, 2)
     # Collection supplies the exact playback identity before the new judgment.
     value = sample(run_id=latest)
     value['video_id'] = 'repeat-song'
     store.audio_vibes.save_sample(value, 3)
     store.audio_vibes.save_feedback(latest, [value['id']], previous_labels,
-                                    audio_vibe_preview.TAXONOMY_VERSION, None, 4)
+                                    audio_vibe_prediction.TAXONOMY_VERSION, None, 4)
     store.audio_vibes.save_playback(unrelated, 'another-song', 'Song', 'Artist', 5)
-    store.audio_vibes.save_feedback(unrelated, [], ['energize'], audio_vibe_preview.TAXONOMY_VERSION, None, 6)
+    store.audio_vibes.save_feedback(unrelated, [], ['energize'], audio_vibe_prediction.TAXONOMY_VERSION, None, 6)
     frozen = store.audio_vibes.feedback(latest)
     with TestClient(create_app(store, lambda: {}), base_url='http://127.0.0.1') as client:
         response = client.get(f'/audio-vibes/runs/{replay}?video_id=repeat-song')
@@ -531,7 +539,7 @@ def test_replay_restores_latest_exact_video_answer_without_copying_or_changing_i
         # A real playback's identity overrides a conflicting caller-supplied hint.
         assert client.get(f'/audio-vibes/runs/{replay}?video_id=another-song').json()['previous_feedback']['run_id'] == latest
         answer = {'run_id': replay, 'sample_ids': [], 'vibes': ['concentrate'],
-                  'taxonomy_version': audio_vibe_preview.TAXONOMY_VERSION}
+                  'taxonomy_version': audio_vibe_prediction.TAXONOMY_VERSION}
         state = client.post('/audio-vibes/feedback', json=answer).json()
         assert state['feedback']['vibes'] == ['concentrate']
         assert state['previous_feedback'] is None
@@ -541,7 +549,7 @@ def test_replay_restores_latest_exact_video_answer_without_copying_or_changing_i
 def test_previous_answer_lookup_ignores_earlier_taxonomies(store):
     earlier, current = str(uuid4()), str(uuid4())
     store.audio_vibes.save_playback(current, 'exact-song', 'Song', 'Artist', 1)
-    store.audio_vibes.save_feedback(current, [], ['cruise'], audio_vibe_preview.TAXONOMY_VERSION, None, 2)
+    store.audio_vibes.save_feedback(current, [], ['cruise'], audio_vibe_prediction.TAXONOMY_VERSION, None, 2)
     store.audio_vibes.save_playback(earlier, 'exact-song', 'Song', 'Artist', 3)
     store.audio_vibes.save_feedback(earlier, [], ['gentle'], 'audio-feedback-presets-1', None, 4)
     assert store.audio_vibes.latest_feedback('exact-song', exclude_run_id=str(uuid4()))['run_id'] == current
@@ -554,9 +562,9 @@ def test_sampler_replaces_missed_points_without_seeking_and_deduplicates_reloads
         pytest.skip('Node.js required for scheduling checks')
     script = r"""
 import assert from 'node:assert/strict';
-import {AudioVibeSampler,samplingPoints,sampleMetadata} from './src/yt_playlist/web/static/audio-vibe-sampler.js';
-import {AudioPreviewSession} from './src/yt_playlist/web/static/audio-preview-session.js';
-let now=1000000,position=0,playing={video_id:'song',title:'Song',duration:240,paused:false};
+import './extension/worker/audio_sampler.js';
+const {AudioVibeSampler,samplingPoints,sampleMetadata}=globalThis.TuneConsoleAudioSampler;
+let now=1000000,position=0,playing={video_id:'song',title:'Song',duration:null,paused:false};
 let captures=0,changes=[],collected=[],cached=null;
 const session={port:{},current:null,validPlaying:()=>playing.paused?null:{...playing,position},
  start(){this.current={};captures++},check(){return true},stop(){this.current=null}};
@@ -574,7 +582,13 @@ playing.paused=false;sampler.tick();assert.equal(captures,2);
 assert.equal(sampler.active.reason,'catch_up');
 // Mark success exactly as the response handler does; never duplicate a saved point.
 sampler.active=null;session.current=null;sampler.run.points.thirty='saved';sampler.persist();
+assert.equal(cached.duration,null,'unknown full length still permits the first excerpt');
+// Full-song metadata may arrive after collection starts or the worker restarts.
+playing.duration=240;
 const resumed=new AudioVibeSampler({...opts,cached});resumed.tick();assert.equal(captures,2);
+assert.equal(resumed.run.id,cached.id);
+assert.equal(resumed.run.duration,240);
+assert.equal(resumed.run.points.thirty,'saved','new length must not repeat a completed excerpt');
 position=30;resumed.tick();assert.equal(captures,2);
 // Seeking past two points queues two distinct replacement excerpts, one at a time.
 position=170;resumed.tick();assert.equal(captures,3);assert.equal(resumed.active.point.key,'middle');
@@ -634,11 +648,93 @@ for(let i=0;i<6;i++) {
 }
 assert.equal(disconnectedStarts,6);
 assert.equal(recovering.run.attempts.thirty,6);
-// Controlled scheduling must never auto-start when the extension becomes ready.
-const controlled=new AudioPreviewSession({playback:()=>({video_id:'x',paused:false,position:30,at:Date.now()}),
- changed(){},result(){},automatic:false});
-controlled.port={postMessage(){throw Error('Unscheduled capture')},disconnect(){}};
-controlled.tryAutomatic();assert.equal(controlled.current,null);controlled.destroy();
+// Exercise the actual extension owner with durable storage and HTTP failures.
+// No app port is necessary to schedule, retain or deliver a completed sample.
+await import('./extension/worker/audio_collection.js');
+const {createAudioCollection}=globalThis.TuneConsoleAudioCollection;
+const key='tuneconsole.audio-collection.1',saved={},uploads=[],accepted=new Set();
+let offline=true,loseAcknowledgement=false,wrongReceipt=false,storageFailure=false;
+const storage={get:async()=>structuredClone(saved),set:async value=>{
+  if(storageFailure) throw Error('storage unavailable');Object.assign(saved,structuredClone(value));
+}};
+const settle=async()=>{for(let i=0;i<20;i++) await new Promise(resolve=>setImmediate(resolve))};
+function owner() {
+  const jobs=[],listeners=[];
+  let receive;
+  const capture={previewOpen:false,allowed:()=>true,onCollectionChanged(fn){listeners.push(fn)},
+    openCollection(fn){receive=fn;queueMicrotask(()=>fn({type:'ready'}));
+      return {postMessage(value){if(value.type==='capture') jobs.push(value)},disconnect(){}}}};
+  const worker=createAudioCollection({appOrigin:'http://127.0.0.1:8765',capture,storage,clock:()=>now,
+    interval(){},fetcher:async(url,options)=>{
+      const value=JSON.parse(options.body);
+      if(url.endsWith('/failures')) return {ok:true,json:async()=>({ok:true})};
+      assert.equal(url,'http://127.0.0.1:8765/audio-vibes/samples');
+      assert(saved[key].outbox.some(item=>item.id===value.id),'persist before network delivery');
+      uploads.push(value);
+      if(offline) throw Error('backend disconnected');
+      accepted.add(value.id);
+      if(loseAcknowledgement){loseAcknowledgement=false;throw Error('response lost after acceptance')}
+      return {ok:true,json:async()=>({run_id:value.run_id,samples:[{id:wrongReceipt?'wrong-id':value.id,point:value.point}]})};
+    }});
+  return {worker,jobs,capture,receive:data=>receive(data)};
+}
+let firstOwner=owner();await firstOwner.worker.loaded;await settle();
+const frame={type:'now-heartbeat',videoId:'durable-song',title:'Durable song',artist:'Artist',
+  paused:false,position:30,duration:240};
+firstOwner.worker.observe(frame);await settle();
+assert.equal(firstOwner.jobs.length,1);
+const job=firstOwner.jobs[0];
+firstOwner.receive({id:job.id,type:'analysing'});
+firstOwner.receive({id:job.id,type:'result',result:{...metadata,song_position_at_start:30,
+  analysis_location:'youtube_tab',audio_transferred_to_app:false}});
+await settle();
+assert.equal(saved[key].outbox.length,1);
+const immutable=structuredClone(saved[key].outbox[0]);
+assert.equal(uploads.length,1);
+firstOwner.worker.tick();await settle();assert.equal(uploads.length,1,'bounded retry backoff');
+// A fresh worker restores the exact UUID; a lost successful response cannot
+// create another sample and never removes an unacknowledged one.
+offline=false;loseAcknowledgement=true;
+let resumedOwner=owner();await resumedOwner.worker.loaded;await settle();
+assert.equal(saved[key].outbox.length,1);
+assert.deepEqual(saved[key].outbox[0],immutable);
+assert.equal(accepted.size,1);
+now+=60000;wrongReceipt=true;resumedOwner.worker.tick();await settle();
+assert.equal(saved[key].outbox.length,1,'a different sample receipt is insufficient');
+now+=60000;wrongReceipt=false;resumedOwner.worker.tick();await settle();
+assert.equal(saved[key].outbox.length,0);
+assert.equal(saved[key].run.points.thirty,'saved');assert.equal(accepted.size,1);
+assert(uploads.every(value=>value.id===immutable.id));
+// An observer closing does not cancel capture; preview arbitration does.
+resumedOwner.worker.observe({...frame,position:120});await settle();
+assert.equal(resumedOwner.jobs.length,1);
+const messages=[],disconnects=[],commands=[];
+assert(resumedOwner.worker.connect({name:'tc-audio-collection',sender:{},
+  postMessage:value=>messages.push(value),onDisconnect:{addListener:fn=>disconnects.push(fn)},
+  onMessage:{addListener:fn=>commands.push(fn)}}));
+disconnects[0]();resumedOwner.worker.tick();await settle();
+assert.equal(resumedOwner.jobs.length,1,'document disconnect retains the same job');
+resumedOwner.capture.previewOpen=true;
+// A worker restart recovers the interrupted point, without treating it as saved.
+const interruptedOwner=owner();await interruptedOwner.worker.loaded;await settle();
+assert.equal(saved[key].run.points.middle,'interrupted');
+// Legacy app outboxes transfer only after extension storage acknowledges them.
+saved[key]={run:null,outbox:[],recent:[]};offline=true;
+const backlogOwner=owner();await backlogOwner.worker.loaded;await settle();
+const replies=[],restoreCommands=[];
+backlogOwner.worker.connect({name:'tc-audio-collection',sender:{},postMessage:value=>replies.push(value),
+  onDisconnect:{addListener(){}},onMessage:{addListener:fn=>restoreCommands.push(fn)}});
+const legacy=Array.from({length:12},()=>({...immutable,id:crypto.randomUUID()}));
+storageFailure=true;
+await restoreCommands[0]({type:'restore',samples:legacy});await settle();
+assert(!replies.some(value=>value.type==='restored'),'no acknowledgement before durable storage');
+storageFailure=false;
+await restoreCommands[0]({type:'restore',samples:legacy});await settle();
+assert.equal(replies.find(value=>value.type==='restored').ids.length,12);
+assert.equal(saved[key].outbox.length,12);
+backlogOwner.worker.observe({...frame,videoId:'new-song',title:'New song'});await settle();
+assert.equal(saved[key].run.video_id,'new-song','identity advances while uploads are backed up');
+assert.equal(backlogOwner.jobs.length,0,'a full durable queue prevents further capture');
 """
     result = subprocess.run([node, '--input-type=module', '-e', script],
         cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=10)

@@ -10,17 +10,14 @@ def _key(label):
     return genre_catalog.catalog()[1].get(normalized, (normalized,))[0]
 
 
-def genre(track, *, conn=None):
+def genre(track):
     label = (track or {}).get("genre") or ""
-    if conn is not None:
-        from yt_playlist.core import genre_identity
-        return genre_identity.resolve(conn,label)[0] or ''
     return _key(label)
 
 
 class GenrePolicy:
-    def __init__(self, theme, history, *, current=None, conn=None, store=None):
-        self.conn, self.store = conn, store
+    def __init__(self, theme, history, *, current=None, store=None):
+        self.store = store
         self.current = current if current is not None else history[-1] if history else None
         # Detach genre meanings through the repository before scoring. The
         # serving connection can belong to sync/enrichment on another thread.
@@ -43,12 +40,12 @@ class GenrePolicy:
 
     def key(self, track):
         if self.axes is None:
-            return genre(track, conn=self.conn)
+            return genre(track)
         return self._axis((track or {}).get('genre'))[1] or ''
 
     def _family(self, label):
         if self.axes is None:
-            return genre_map.family(label, conn=self.conn)
+            return genre_map.family(label)
         return self._axis(label)[0]
 
     def allows(self, track):

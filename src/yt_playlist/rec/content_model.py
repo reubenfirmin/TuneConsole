@@ -35,13 +35,13 @@ class EncodedLibrary(NamedTuple):
     model: ContentModel
 
 
-def _genre_axes(genre, conn, genre_axes):
+def _genre_axes(genre, genre_axes):
     if genre_axes is not None:
         return genre_axes[genre]
-    return genre_map.family(genre,conn=conn), genre_map.subgenre(genre,conn=conn)
+    return genre_map.family(genre), genre_map.subgenre(genre)
 
 
-def content_features(content, *, conn=None, genre_axes=None):
+def content_features(content, *, genre_axes=None):
     """Categorical column vocabulary and each track's active genre/decade columns."""
     feats: dict = {}
 
@@ -52,7 +52,7 @@ def content_features(content, *, conn=None, genre_axes=None):
     for k, (genre, year) in content.items():
         active = []
         if genre:
-            family, sub = _genre_axes(genre,conn,genre_axes)
+            family, sub = _genre_axes(genre,genre_axes)
             active.append(col(f"fam:{family}"))
             if sub:
                 active.append(col(f"sub:{sub}"))
@@ -63,9 +63,9 @@ def content_features(content, *, conn=None, genre_axes=None):
     return feats, rows
 
 
-def build_content_model(content, audio, *, conn=None, genre_axes=None) -> ContentModel:
+def build_content_model(content, audio, *, genre_axes=None) -> ContentModel:
     """Fit ordered genre/era/key vocabulary and nonconstant audio z-score statistics."""
-    cat, _ = content_features(content,conn=conn,genre_axes=genre_axes)
+    cat, _ = content_features(content,genre_axes=genre_axes)
     cat = dict(cat)
 
     def cat_col(tok):
@@ -87,13 +87,13 @@ def build_content_model(content, audio, *, conn=None, genre_axes=None) -> Conten
     return {"cat": cat, "ncat": len(cat), "cont": cont}
 
 
-def encode_content(model: ContentModel, genre, year, audio, *, conn=None, genre_axes=None):
+def encode_content(model: ContentModel, genre, year, audio, *, genre_axes=None):
     """Unit float32 projection, or None without any feature the model recognizes."""
     cat, ncat, cont = model["cat"], model["ncat"], model["cont"]
     vec = np.zeros(ncat + len(cont), dtype=np.float32)
     toks = []
     if genre:
-        family, sub = _genre_axes(genre,conn,genre_axes)
+        family, sub = _genre_axes(genre,genre_axes)
         toks.append(f"fam:{family}")
         if sub:
             toks.append(f"sub:{sub}")
@@ -116,16 +116,16 @@ def encode_content(model: ContentModel, genre, year, audio, *, conn=None, genre_
     return (vec / n).astype(np.float32) if n > 0 else None
 
 
-def input_fingerprint(inputs: ContentInputs, *, conn=None, genre_axes=None):
-    axes = {genre: _genre_axes(genre,conn,genre_axes)
-            for genre in {genre for genre,_year in inputs.content.values()} if genre} if conn is not None or genre_axes is not None else None
+def input_fingerprint(inputs: ContentInputs, *, genre_axes=None):
+    axes = {genre: _genre_axes(genre,genre_axes)
+            for genre in {genre for genre,_year in inputs.content.values()} if genre} if genre_axes is not None else None
     return hashlib.sha256(json.dumps([inputs,axes] if axes is not None else inputs, sort_keys=True).encode()).hexdigest()
 
 
-def build_library_content(inputs: ContentInputs, *, conn=None, genre_axes=None) -> EncodedLibrary:
+def build_library_content(inputs: ContentInputs, *, genre_axes=None) -> EncodedLibrary:
     """Fit and encode detached library inputs in one shared content space."""
     _, content, audio = inputs
-    model = build_content_model(content, audio,conn=conn,genre_axes=genre_axes)
+    model = build_content_model(content, audio,genre_axes=genre_axes)
     candidates = sorted(set(content) | set(audio))
     matrix = np.empty((len(candidates), model['ncat'] + len(model['cont'])), dtype=np.float32)
     keys = []
@@ -133,7 +133,7 @@ def build_library_content(inputs: ContentInputs, *, conn=None, genre_axes=None) 
         if i % 256 == 0:
             check_stopping()
         genre, year = content.get(k, (None, None))
-        v = encode_content(model, genre, year, audio.get(k),conn=conn,genre_axes=genre_axes)
+        v = encode_content(model, genre, year, audio.get(k),genre_axes=genre_axes)
         if v is not None:
             matrix[len(keys)] = v
             keys.append(k)
@@ -151,12 +151,12 @@ def content_model_fingerprint(model) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def encode_discovered(rows, model: ContentModel, *, conn=None, genre_axes=None):
+def encode_discovered(rows, model: ContentModel, *, genre_axes=None):
     out = []
     for i, r in enumerate(rows):
         if i % 256 == 0:
             check_stopping()
-        v = encode_content(model, r.get("genre"), r.get("year"), r.get("audio"),conn=conn,genre_axes=genre_axes)
+        v = encode_content(model, r.get("genre"), r.get("year"), r.get("audio"),genre_axes=genre_axes)
         if v is not None:
             out.append((r["identity_key"], v.tobytes()))
     return out

@@ -41,6 +41,8 @@ def test_exact_aliases_aggregate_once_and_preserve_accounts_playback_and_shares(
     with store.conn:
         album_tracklists.freeze(store.conn,albums.lookup(store.conn,ALIAS),ALIAS,'Frozen',['video-0'],now=10)
     old_id, alias_id = store.collection.album_id(OLD), store.collection.album_id(ALIAS)
+    original_memberships = [dict(row) for row in store.conn.execute(
+        'SELECT * FROM account_albums WHERE album_id IN (?,?)', (old_id, alias_id))]
     assert old_id != alias_id
     assert store.collection.observe_album_representation(OLD, payload, now=200)
     assert store.collection.observe_album_representation(ALIAS, payload, now=201)
@@ -58,9 +60,9 @@ def test_exact_aliases_aggregate_once_and_preserve_accounts_playback_and_shares(
     assert len(store.charts.album_tracks_detail(ALIAS)) == 1
     assert store.artists.album_credits(ALIAS)
     assert album_tracklists.share(store.conn,old_id,ALIAS)=={'title':'Frozen','video_ids':['video-0']}
-    source_id = store.conn.execute("SELECT source_id FROM album_identity_evidence WHERE kind='album_alias_reconciliation'").fetchone()[0]
-    archive = json.loads(legacy_evidence.original(store.conn, 'album', 'album_alias_reconciliation', source_id))
-    assert len(archive['account_albums']) == 3
+    archive = json.loads(legacy_evidence.original(store.conn, 'album', 'album_alias_reconciliation', str(alias_id)))
+    assert archive['account_albums'] == original_memberships
+    assert len(original_memberships) == 3
     assert store.collection.saved_album_revision(first) > before_revision
     # A remote snapshot admitted before reconciliation cannot erase the merged ownership.
     assert store.collection.replace_saved_album_snapshots({first: []}, expected_revisions={first: before_revision}) == set()

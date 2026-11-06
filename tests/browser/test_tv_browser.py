@@ -1,5 +1,6 @@
 """TV's real preparation flow, with the external YouTube player boundary controlled."""
 import pytest
+from tests.derived_rating_support import seed_like
 from playwright.sync_api import expect
 
 from tests.conftest import FakeClient
@@ -7,6 +8,9 @@ from tests.home_fixture_support import browser_store as store, returning_listene
 from tests.onboarding_support import publish_personal_mix
 from yt_playlist.rec import tv, tv_artwork
 from yt_playlist.util.matching import search_squash
+from tests.browser.quiet_action_support import (  # noqa: F401 - shared evidence fixture
+    DIAGNOSTIC, action_evidence, assert_quiet_action,
+)
 
 
 @pytest.fixture
@@ -16,7 +20,7 @@ def tv_ui(store, live_app, page, monkeypatch):
     returning_listener(store, 'mixes', 'vibes', now=1)
     seeds = publish_personal_mix(store, now=1)
     for seed in seeds:
-        store.rec_model.record_like(seed['key'], 1)
+        seed_like(store, seed['key'], 1)
     store.settings.set_setting('last_sync_at', '1')
     store.settings.set_setting('onboard_dismissed', '1')
     searches, api_loads, errors, created = [], [], [], []
@@ -225,6 +229,27 @@ def test_tv_uses_prepared_pool_without_preview_and_shared_controls_own_video(pag
     page.get_by_role('tab', name='TV', exact=True).click()
     expect(page.locator('.tv-player iframe')).to_be_visible()
     assert page.evaluate('Alpine.$data(document.querySelector(".tv-home")).playlistId') == original_playlist
+    # Acknowledging the in-flow earned notice moves the TV slot. Keep the
+    # playing iframe mounted and align it with the new slot without restarting.
+    notice = page.locator('.growth-unlock-notice')
+    expect(notice).to_be_visible()
+    page.evaluate('window.noticePlayerFrame = document.querySelector(".tv-player iframe")')
+    before_ack = page.locator('.tv-session').bounding_box()['y']
+    unseen = page.evaluate('Alpine.$data(document.querySelector(".home-growth")).newNodes.length')
+    assert unseen > 0
+    for _ in range(unseen):
+        notice.get_by_role('button', name='Mark as seen', exact=True).click()
+    expect(notice).to_be_hidden()
+    page.wait_for_function('''() => {
+        const player = document.querySelector('.tv-session').getBoundingClientRect();
+        const slot = document.querySelector('.tv-slot').getBoundingClientRect();
+        return Math.abs(player.top-slot.top) < 1 && Math.abs(player.left-slot.left) < 1
+            && Math.abs(player.width-slot.width) < 1;
+    }''')
+    assert page.locator('.tv-session').bounding_box()['y'] < before_ack
+    assert page.evaluate('window.noticePlayerFrame === document.querySelector(".tv-player iframe")')
+    assert page.evaluate('({id: window.tvPlayer.id, calls: window.tvCalls.length})') == continued
+    assert page.evaluate('window.tvPlaybackControls.active()')
     # Reset is the explicit action that requests a fresh draw.
     page.get_by_role('button', name='Adjust TV parameters').click()
     page.get_by_role('dialog', name='TV parameters').get_by_role('button', name='Reset playlist', exact=True).click()
@@ -243,7 +268,16 @@ def test_tv_uses_prepared_pool_without_preview_and_shared_controls_own_video(pag
     expect(launch).to_have_attribute('target', '_self')
     launch.click()
     expect(page.locator('.tv-player iframe')).to_be_visible()
+    page.wait_for_function('window.tvPlayer.id === "visual00000" && window.tvPlaybackControls.active()')
+    assert page.evaluate('Alpine.$data(document.querySelector(".tv-home")).playlistId') == original_playlist
     expect(page.locator('.global-now-playing .hs-now-title')).to_have_text('Prepared 0 (Visualizer)')
+    expect(page.locator('.tv-session')).to_have_count(1)
+    expect(page.locator('.tv-backdrop')).to_have_count(1)
+    # Playlists was a new document; its first TV launch loads the API once.
+    assert len(api_loads) == 2
+    assert not searches
+    expect(page.locator('#connection-error, #navigation-error')).to_have_count(0)
+    page.screenshot(path=f'/tmp/tuneconsole-727-saved-return-{width}.png')
 
 
 def test_tv_parameters_apply_without_search_and_blocked_embeds_offer_recovery(page, live_app, tv_ui, store):
@@ -327,7 +361,7 @@ def test_initial_empty_pool_shows_the_embedded_loader(page, live_app, tv_ui, sto
     expect(page.locator('.tv-filmstrip')).to_be_hidden()
 
 
-def test_tv_waits_for_audio_pause_confirmation_and_rejects_failed_takeover(page, live_app, tv_ui):
+def test_tv_waits_for_audio_pause_confirmation_and_rejects_failed_takeover(page, live_app, tv_ui, action_evidence):
     pending = []
     page.route('**/home/tv/takeover', lambda route: pending.append(route))
     page.goto(live_app + '/#tv')
@@ -346,8 +380,10 @@ def test_tv_waits_for_audio_pause_confirmation_and_rejects_failed_takeover(page,
     page.evaluate('void window.tvPlaybackControls.command("toggle")')
     page.wait_for_timeout(100)
     assert pending
-    pending.pop().fulfill(status=409, json={'error': 'Audio pause was not confirmed'})
-    expect(page.get_by_role('status').filter(has_text='Audio pause was not confirmed')).to_be_visible()
+    pending.pop().fulfill(status=409, json={'error': DIAGNOSTIC})
+    expect(page.get_by_role('status').filter(has_text='Couldn’t start this video. Press play to try again.')).to_be_visible()
+    assert_quiet_action(page)
+    page.screenshot(path=action_evidence + '.png')
     assert page.evaluate('window.tvCalls') == [['pause', 'visual00000']]
     page.evaluate('void window.tvPlaybackControls.command("toggle")')
     page.wait_for_timeout(100)

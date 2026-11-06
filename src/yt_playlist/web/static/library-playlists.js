@@ -1,8 +1,14 @@
-function playlistsTab(rows) {
+function playlistsTab(rows, actionResult = null) {
   // Remember the particular row, since New playlists repeats rows from the library below.
   let lastPickedRow = null;
+  const unresolved = actionResult?.status !== 'complete';
+  const retainedIds = unresolved ? actionResult?.source_ids ||
+    (actionResult?.items || []).filter(item => item.status === 'failed').map(item => item.id) : [];
+  const retained = new Set(retainedIds || []);
   return {
-    rows, activityScale: 0, sel: {}, sortKey: 'title', sortDir: 1, split: false, busy: false,
+    rows, activityScale: 0,
+    sel: Object.fromEntries(rows.filter(row => retained.has(row.id)).map(row => [row.id, true])),
+    sortKey: 'title', sortDir: 1, split: false, busy: false,
     groupModal: false, groupName: '', delModal: false, collapsed: { New: false, Generated: true },
     init() {
       this.refreshActivityScale();
@@ -26,6 +32,37 @@ function playlistsTab(rows) {
       this.$watch('sortDir', v => { try { localStorage.setItem('pl.sortDir', v); } catch (e) {} });
     },
     selected() { return this.rows.filter(r => this.sel[r.id]); },
+    saveRecoverySelection(event) {
+      const state = event.detail?.state;
+      if (!state) return;
+      state.playlists = this.selected().map(row => row.id);
+      state.playlistResultId = actionResult?.result_id;
+      if (this.copyModal) state.playlistCopy = {ids: this.copyIds, name: this.copyName};
+      if (this.copyIntoModal) state.playlistCopyInto = {ids: this.copyIds,
+        target: this.copyIntoTarget, status: this.copyIntoStatus};
+    },
+    restoreRecoverySelection(event) {
+      const state = event.detail?.state;
+      // A newly returned result owns its retained selections. Do not restore
+      // the pre-submit batch over its confirmed per-item outcomes.
+      if (actionResult && actionResult.result_id !== state?.playlistResultId) return;
+      const ids = state?.playlists;
+      if (!Array.isArray(ids)) return;
+      const selected = new Set(ids);
+      this.sel = Object.fromEntries(this.rows.filter(row => selected.has(row.id)).map(row => [row.id, true]));
+      if (state.playlistCopy) {
+        this.copyIds = state.playlistCopy.ids.filter(id => this.rows.some(row => row.id === id));
+        this.copyName = state.playlistCopy.name;
+        this.copyModal = this.copyIds.length > 0;
+      }
+      if (state.playlistCopyInto) {
+        const saved = state.playlistCopyInto;
+        this.copyIds = saved.ids.filter(id => this.rows.some(row => row.id === id));
+        this.copyIntoTarget = this.intoTargets().some(row => String(row.id) === String(saved.target)) ? saved.target : '';
+        this.copyIntoStatus = saved.status;
+        this.copyIntoModal = this.copyIds.length > 0;
+      }
+    },
     count() { return this.selected().length; },
     toggle(id) { this.sel[id] = !this.sel[id]; },
     // checkbox (or its cell) clicked: shift extends the anchor row's state across the visible range
@@ -120,15 +157,19 @@ function playlistsTab(rows) {
       if (!sel.length) return;
       this.copyIds = sel.map(r => r.id);
       // single -> "Title (copy)"; multiple -> combine-to-new, prefilled with the joined names
-      this.copyName = sel.length === 1 ? sel[0].title + ' (copy)' : sel.map(r => r.title).join(' + ');
+      this.copyName = unresolved && actionResult?.operation === 'copy' &&
+        this.copyIds.length === retained.size && this.copyIds.every(id => retained.has(id))
+        ? actionResult.copy_name ?? ''
+        : sel.length === 1 ? sel[0].title + ' (copy)' : sel.map(r => r.title).join(' + ');
       this.copyModal = true;
     },
-    copyIntoModal: false, copyIntoTarget: '',
+    copyIntoModal: false, copyIntoTarget: '', copyIntoBusy: false, copyIntoStatus: '',
     openCopyInto() {
       const sel = this.selected();
       if (!sel.length) return;
       this.copyIds = sel.map(r => r.id);
       this.copyIntoTarget = '';
+      this.copyIntoStatus = '';
       this.copyIntoModal = true;
     },
     // destinations for "Copy into…": every playlist except the selected sources, by title
@@ -138,11 +179,17 @@ function playlistsTab(rows) {
         .sort((a, b) => a.title.localeCompare(b.title));
     },
     openGroup() { if (this.count()) { this.groupName = ''; this.groupModal = true; } },
-    // Modal "save" actions go through htmx.ajax so the server's HX-Refresh reload (success) and
-    // 422 OOB error toast (copy-into) behave exactly as the inline hx-post did, but the values
-    // come straight from this component's state, not a global Alpine.$data() reach-in.
+    // Modal actions share HTMX's recovery owner and take values from this component.
     copy() { htmx.ajax('POST', '/playlists/copy', { values: { ids: this.copyIds.join(','), name: this.copyName } }).catch(() => {}); },
-    copyInto() { htmx.ajax('POST', '/playlists/copy-into', { values: { ids: this.copyIds.join(','), target: this.copyIntoTarget } }); },
+    async copyInto(source) {
+      if (this.copyIntoBusy) return;
+      this.copyIntoBusy = true; this.copyIntoStatus = '';
+      try {
+        await htmx.ajax('POST', '/playlists/copy-into', {source,
+          values: { ids: this.copyIds.join(','), target: this.copyIntoTarget }, swap: 'none'});
+      } catch (error) { /* The action's request event retains its status. */ }
+      finally { this.copyIntoBusy = false; }
+    },
     group() { htmx.ajax('POST', '/playlists/group', { values: { ids: this.selected().map(r => r.id).join(','), name: this.groupName } }); },
     // Delete keeps the modal up with a spinner: one remote YouTube call per playlist, so a batch
     // can take a while. `busy` blocks a second submit; success ends in a full page reload.
@@ -206,10 +253,20 @@ function titleEditor(pid) {
   // Generated headings present a shorter name. Keep the exact escaped source
   // title on the editor root so editing never drops its type/date/version.
   return {
-    pid: pid, editing: false, draft: '',
+    pid: pid, editing: false, draft: '', status: '',
+    saveRecovery(state) {
+      if (state && this.editing) state.playlistTitle = {pid: this.pid, draft: this.draft, status: this.status};
+    },
+    restoreRecovery(state) {
+      if (state?.playlistTitle?.pid !== this.pid) return;
+      this.draft = state.playlistTitle.draft;
+      this.editing = this.draft !== this.originalTitle();
+      this.status = this.editing ? state.playlistTitle.status : '';
+    },
     originalTitle() { return this.$root.dataset.title ?? this.$refs.h1.textContent.trim(); },
     start() {
       this.draft = this.originalTitle();
+      this.status = '';
       this.editing = true;
       this.$nextTick(() => { this.$refs.inp.focus(); this.$refs.inp.select(); });
     },

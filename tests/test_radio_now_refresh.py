@@ -6,10 +6,17 @@ import numpy as np
 import pytest
 
 from tests.radio_session_support import poc, play
-from tests.test_radio_tuning import prepared
+from tests.test_radio_tuning import prepare_tuning
 from yt_playlist.rec import embedding_vectors as embed, radio_tuning, rec_params
 from yt_playlist.rec.radio_candidates import RadioCandidates
 from yt_playlist.web import radio_session
+
+
+@pytest.fixture
+def prepared(store):
+    # This input is additive: poc has already installed its account and pool.
+    # Restoring the isolated tuning template would erase that controller state.
+    return prepare_tuning(store)
 
 
 @pytest.fixture
@@ -24,7 +31,7 @@ def active(poc, prepared, monkeypatch):
     neutral_style = neutral.next_track([])["genre"]
     preferred = [t for t in prepared if t["genre"] != neutral_style][:3]
     keys = [t["key"] for t in preferred]
-    vector = [1., 0.] if preferred[0]["genre"] == "ambient" else [0., 1.]
+    vector = [1., 0.] if preferred[0]["genre"] == "Ambient" else [0., 1.]
     reads = []
 
     def vectors(*args, **kwargs):

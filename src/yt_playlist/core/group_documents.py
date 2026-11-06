@@ -34,32 +34,17 @@ def directory(conn, memory_key=None):
 
 def publish_many(root, documents, *, age=None):
     """Yield filename/digest/size/offset for each bounded (kind, object) record."""
-    header = policy_documents.pack_header(HEADER, age)
-    records, used = [], len(header)
+    def encoded_records():
+        for kind, value in documents:
+            if kind not in KINDS or not isinstance(value, dict):
+                raise ValueError('Invalid musical group document')
+            encoded = canonical({'format': FORMAT, 'kind': kind, 'value': value})
+            if len(encoded) > MAX_BYTES:
+                raise ValueError('Musical group document exceeds its file byte budget')
+            yield encoded
 
-    def flush():
-        encoded = header + b''.join(records)
-        # This primitive only publishes immutable bytes under their SHA256. It
-        # creates no shared registry or policy owner for these group files.
-        filename = policy_documents._publish_encoded(root, encoded, hashlib.sha256(encoded).hexdigest(), age=age)
-        offset = len(header)
-        for record in records:
-            yield filename, hashlib.sha256(record).hexdigest(), len(record), offset
-            offset += len(record)
-
-    for kind, value in documents:
-        if kind not in KINDS or not isinstance(value, dict):
-            raise ValueError('Invalid musical group document')
-        encoded = canonical({'format': FORMAT, 'kind': kind, 'value': value})
-        if len(encoded) > MAX_BYTES:
-            raise ValueError('Musical group document exceeds its file byte budget')
-        if records and used + len(encoded) > PACK_BYTES:
-            yield from flush()
-            records, used = [], len(header)
-        records.append(encoded)
-        used += len(encoded)
-    if records:
-        yield from flush()
+    yield from policy_documents.pack_encoded(root, encoded_records(),
+        header=HEADER, pack_bytes=PACK_BYTES, age=age)
 
 
 def read(filename, digest, size, offset, kind, *, with_age=False):
@@ -116,41 +101,6 @@ def repack_batch(conn, table, after=None, limit=128):
         conn.execute('UPDATE ' + table + ' SET ' + prefix + '_filename=?,' + prefix + '_offset=? WHERE ' +
                      ' AND '.join(column + '=?' for column in keys), (filename, offset, *row[:len(keys)]))
     return (tuple(pending[-1][:len(keys)]) if pending else after), len(pending), len(rows) < limit and len(pending) == len(rows)
-
-
-def collect_orphans_batch(conn, limit=128):
-    """Drain one bounded traversal of a stable candidate's unowned files.
-
-    Repacking must already be committed. The caller never deletes an owned
-    range, including one visible to an older retained reader.
-    """
-    from . import file_collection
-    if not conn.in_transaction or type(limit) is not int or not 0 < limit <= 128:
-        raise ValueError('Musical group collection needs a bounded writer transaction')
-    root = directory(conn)
-    if not root.exists():
-        return 0, True
-    with (root / '.readers.lock').open('a+b') as stream:
-        unlock = policy_documents._try_file_lock(stream, exclusive=True)
-        if unlock is None:
-            raise RuntimeError('Musical group files still have a retained reader')
-        try:
-            with file_collection.collection(conn, root, name='.rebuild-collection.json',
-                    valid_shard=lambda name: len(name) == 2 and all(c in '0123456789abcdef' for c in name)) as cursor:
-                removed = 0
-                for _ in range(limit):
-                    path = cursor.next()
-                    if cursor.finished:
-                        break
-                    if path is None or not (path.name.endswith('.json') or path.name.startswith('.pending-')):
-                        continue
-                    if not any(conn.execute('SELECT 1 FROM ' + table + ' WHERE ' + prefix + '_filename=? LIMIT 1',
-                                            (str(path),)).fetchone() for table, _keys, prefix, _kind in OWNERS):
-                        removed += fao.delete(path, missing_ok=True)
-                cursor.save()
-                return removed, cursor.finished
-        finally:
-            unlock()
 
 
 def _manifest(root, value):

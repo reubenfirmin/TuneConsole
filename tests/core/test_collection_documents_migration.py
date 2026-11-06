@@ -4,16 +4,15 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_collection_state_migration import installed_92
 from yt_playlist.core import collection_recovery, spotify_job_state
 from yt_playlist.core.migrations import current, migrate, registry, MigrationError
 from yt_playlist.core.store import Store
 from yt_playlist.web.spotify_import import load_job, save_job
 
 
-def test_upgrade_retains_import_unknown_account_and_verbatim_canvas(tmp_path):
+def test_upgrade_retains_import_unknown_account_and_verbatim_canvas(tmp_path, legacy_owner_store):
     path = tmp_path/'documents.db'
-    store = installed_92(path)
+    store = legacy_owner_store(path)
     job = {'status':'running','identity_id':999,'identity_label':'Retired account','started_at':2,
            'report':{'partial':[1,2]},'dismissed':None}
     store.settings.set_setting(spotify_job_state.KEY,json.dumps(job))
@@ -116,8 +115,8 @@ def test_recording_alias_rekeys_saved_documents_and_preserves_unknown_formats(st
     assert store.playlist_recipes.get_cluster_canvas('FUTURE')=='opaque text'
 
 
-def test_unsupported_job_rolls_back_original_documents(tmp_path):
-    store = installed_92(tmp_path/'rollback.db')
+def test_unsupported_job_rolls_back_original_documents(tmp_path, legacy_owner_store):
+    store = legacy_owner_store(tmp_path/'rollback.db')
     raw = json.dumps({'status':'running','unclassified_new_field':True})
     store.settings.set_setting(spotify_job_state.KEY,raw)
     store.playlist_recipes.set_cluster_canvas('PLAYLIST','untouched',2)

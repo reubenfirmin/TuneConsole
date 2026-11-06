@@ -1,0 +1,91 @@
+"""TV responses keep saved membership, metadata and photos on one committed view."""
+import sqlite3
+
+import pytest
+
+from tests.conftest import FakeClient
+from tests.store_fixture_support import initialize_consumer
+from tests.test_tv_stream import video
+from yt_playlist.core.store import Store
+from yt_playlist.library.playlist_generated import create_generated_playlist
+from yt_playlist.rec import tv_artwork
+from yt_playlist.repos.playlist_recipes import PlaylistRecipesRepo
+from yt_playlist.util.matching import search_squash
+from yt_playlist.web.routes.home_tv import playlist_items
+
+
+@pytest.mark.parametrize('file_backed', [False, True], ids=['memory', 'wal'])
+@pytest.mark.parametrize('artwork', [False, True], ids=['playback', 'display'])
+def test_playlist_response_stays_consistent_during_replacement_and_refreshes_next_read(
+        tmp_path, _pristine_current_schema, monkeypatch, file_backed, artwork):
+    source = Store(tmp_path / 'tv.db' if file_backed else ':memory:')
+    try:
+        initialize_consumer(source, _pristine_current_schema)
+        account = source.accounts.upsert_account('TV account', 'cred', None, True)
+        videos = [video(index) for index in range(11)]
+        client = FakeClient(catalog={item['video_id']: {
+            'videoId': item['video_id'], 'title': item['title'],
+            'artists': [{'name': item['artist']}]} for item in videos})
+        recipe = {'lane': 'tv', 'media': 'video', 'tv_stream': 'live', 'videos': videos[:7]}
+        created = create_generated_playlist(source, 'TV', videos[:7], client, 1, account, recipe=recipe)
+        playlist = source.playlists.get_playlist(created['pid'])
+
+        def photos(version):
+            return {search_squash(item['artist']): {
+                'images': [f'https://images.test/{version}/{item["video_id"]}.jpg'],
+                'retry_at': 86401} for item in videos}
+
+        source.rec_proposals.put_proposals(tv_artwork.SURFACE, photos('before'), 1)
+        read_recipe = PlaylistRecipesRepo.get_recipe
+        replaced = False
+
+        def replace_after_recipe(repo, scope):
+            nonlocal replaced
+            result = read_recipe(repo, scope)
+            if not replaced:
+                replaced = True
+                # Real committed owner writes between the recipe and membership
+                # reads must not splice different generations into one response.
+                source.playlists.publish_confirmed_tracks(playlist.id, 'Next TV', videos[7:], 2)
+                source.playlist_recipes.set_recipe(scope, {**recipe, 'videos': videos[7:]}, 2)
+                source.rec_proposals.put_proposals(tv_artwork.SURFACE, photos('after'), 2)
+            return result
+
+        monkeypatch.setattr(PlaylistRecipesRepo, 'get_recipe', replace_after_recipe)
+        make_reader = source._make_reader
+        readers = []
+
+        def open_reader():
+            reader = make_reader()
+            readers.append(reader)
+            return reader
+
+        monkeypatch.setattr(source, '_make_reader', open_reader)
+        before_playlist, before = playlist_items(source, playlist.id, artwork=artwork)
+        assert replaced
+        assert before_playlist.title == playlist.title
+        assert [item['video_id'] for item in before] == [item['video_id'] for item in videos[:7]]
+        assert [item['source_key'] for item in before] == [item['source_key'] for item in videos[:7]]
+        if artwork:
+            assert all(item['artist_art'] == [f'https://images.test/before/{item["video_id"]}.jpg']
+                       and not item['artist_art_pending'] for item in before)
+            before[0]['artist_art'].append('https://images.test/detached.jpg')
+        else:
+            assert all('artist_art' not in item for item in before)
+
+        after_playlist, after = playlist_items(source, playlist.id, artwork=artwork)
+        assert after_playlist.title == 'Next TV'
+        assert [item['video_id'] for item in after] == [item['video_id'] for item in videos[7:]]
+        assert [item['source_key'] for item in after] == [item['source_key'] for item in videos[7:]]
+        if artwork:
+            assert all(item['artist_art'] == [f'https://images.test/after/{item["video_id"]}.jpg']
+                       and not item['artist_art_pending'] for item in after)
+        else:
+            assert all('artist_art' not in item for item in after)
+
+        assert len(readers) == 2
+        for reader in readers:
+            with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+                reader.conn.execute('SELECT 1')
+    finally:
+        source.conn.close()

@@ -10,24 +10,25 @@ from threading import Barrier
 import pytest
 
 from yt_playlist.core import artists, fao, metadata_deliveries as deliveries, metadata_delivery_files as files, policy_documents
-from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations import v074_artist_credits as credits, v075_metadata_deliveries as migration
 from yt_playlist.core.migrations.runner import Context
 from yt_playlist.core.store import Store
 
 
 @pytest.fixture
-def store(tmp_path):
+def store(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path / 'metadata.db')
-    migrate(store.conn, registry=registry.MIGRATIONS[:69])
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        credits.apply(store.conn, Context(4))
-        migration.apply(store.conn, Context(4))
-    migration.validate(store.conn)
-    store._bind_repositories()
-    yield store
-    store.conn.close()
+    try:
+        _pristine_installed_schema(69).backup(store.conn)
+        with store.conn:
+            store.conn.execute('BEGIN IMMEDIATE')
+            credits.apply(store.conn, Context(4))
+            migration.apply(store.conn, Context(4))
+        migration.validate(store.conn)
+        store._bind_repositories()
+        yield store
+    finally:
+        store.conn.close()
 
 
 def delivery(store, key='capture:1', *, video='video', **kwargs):

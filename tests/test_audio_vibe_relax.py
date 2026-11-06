@@ -9,7 +9,7 @@ from tests.test_audio_vibe_cruise import samples
 from yt_playlist.core import features
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release, audio_vibe_relax as relax
 from yt_playlist.rec import audio_vibe_focus as focus
-from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_preview as preview
+from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_prediction as predictor
 from yt_playlist.rec import home_vibe, musical_character, vibe_preparation
 
 
@@ -26,7 +26,7 @@ def production_models(isolated_app_home, monkeypatch, tmp_path):
 def baseline(rows, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setenv(relax.MODE_KEY, 'off')
-        return preview.predict(rows, require_complete=False)
+        return predictor.predict(rows, require_complete=False)
 
 
 def controlled(tmp_path, value=.9):
@@ -46,7 +46,7 @@ def controlled(tmp_path, value=.9):
 def test_relax_preserves_both_specialists_shared_classification_and_input(count, monkeypatch):
     rows = samples()[:count]
     untouched = deepcopy(rows)
-    before, after = baseline(rows, monkeypatch), preview.predict(rows, require_complete=False)
+    before, after = baseline(rows, monkeypatch), predictor.predict(rows, require_complete=False)
     assert {k: v for k, v in before.items() if k not in ('suitability', 'individual_models')} == {
         k: v for k, v in after.items() if k not in ('suitability', 'individual_models')}
     for vibe in ('cruise', 'release'):
@@ -123,20 +123,20 @@ def test_optional_failure_preserves_both_specialists_and_shared(failure, tmp_pat
         path.write_text(json.dumps(artifact))
     if failure != 'disabled':
         monkeypatch.setenv(relax.ENVIRONMENT_KEY, str(path))
-    assert preview.predict(rows) == before
+    assert predictor.predict(rows) == before
 
 
 def test_provenance_and_excerpt_bounds(monkeypatch):
     rows = samples()
     rows[-1]['artifact_hashes']['musicnn/model.json'] = 'f' * 64
-    assert preview.predict(rows) == preview.predict(rows, use_model=False)
+    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
     model = relax.load(relax.DEFAULT_PATH)
     for values in ([], [[.2] * 200] * 129, [[float('nan')] * 200], [[1e7] * 200], [[.2] * 199]):
         with pytest.raises(ValueError):
             relax.score(model, values)
     monkeypatch.setenv(shared.ENVIRONMENT_KEY, '')
     rows = samples()
-    assert preview.predict(rows) == preview.predict(rows, use_model=False)
+    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
 
 
 def test_default_active_and_local_rollback_change_preparation_identity(monkeypatch):
@@ -166,7 +166,7 @@ def test_bounded_rollout_propagates_one_recording_preserves_history_and_rolls_ba
     drain(store, batch=1)
     assert fits(store, own)['relax']['source'] == 'heuristic'
     store.audio_vibes.save_sample(rows[2], 3)
-    store.audio_vibes.save_feedback(rows[0]['run_id'], [], ['relax'], preview.TAXONOMY_VERSION, None, 4)
+    store.audio_vibes.save_feedback(rows[0]['run_id'], [], ['relax'], predictor.TAXONOMY_VERSION, None, 4)
     feedback = store.audio_vibes.feedback(rows[0]['run_id'])
     drain(store, batch=1)
     keys = [own, neighbour]
@@ -216,5 +216,5 @@ def test_missing_metadata_still_uses_relax(store):
     for now, row in enumerate(samples('bare'), 1):
         store.audio_vibes.save_sample(row, now)
     drain(store, batch=1)
-    assert fits(store, key)['relax']['score'] == preview.predict(samples('bare'))['suitability']['relax']
+    assert fits(store, key)['relax']['score'] == predictor.predict(samples('bare'))['suitability']['relax']
     assert fits(store, key)['relax']['source'] == 'audio_measurement'

@@ -43,7 +43,7 @@ def test_health_panel_shows_graduation_counts(store):
     tid = store.tracks.upsert_track("v1", "song", "band", None, None)
     store.tracks.set_track_genre(tid, "Techno")
     graduation.graduate_moods(store, [identity_key("song", "band")], 2.0, 1000.0,
-                             source=rec_params.SOURCE_W_VIBE, source_label="vibe")
+                             source=rec_params.get_param(store, "source_w_vibe"), source_label="vibe")
     r = _client(store).get("/taste/recall")
     assert r.status_code == 200
     assert "Saved preference updates" in r.text and "Mood choices" in r.text

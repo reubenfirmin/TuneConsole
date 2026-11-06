@@ -135,7 +135,8 @@ def test_canonical_writes_update_current_physical_aliases_after_selection_and_wi
     store.rec_model.clear_lean('genre:known')
     assert store.rec_model.get_lean('genre:known')==1.0
     assert not store.conn.execute('SELECT 1 FROM rec_lean').fetchone()
-    assert publication.projection(store.conn,'rec_weights','axis,weight') is None
+    assert publication.selected(store.conn) is None
+    assert store.rec_model.weight_records()['genre:known']['weight']==pytest.approx(2.2)
     assert publication.stage(store.conn,first).complete==1
 
 

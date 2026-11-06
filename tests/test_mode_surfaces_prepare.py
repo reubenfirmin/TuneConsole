@@ -1,7 +1,6 @@
 import numpy as np
-import pytest
-from yt_playlist.core.store import Store
-from yt_playlist.rec import embedding_vectors as embed, surfaces, mode_surfaces as ms
+from tests.derived_rating_support import seed_dislike
+from yt_playlist.rec import embedding_vectors as embed, home_vibe, surfaces, mode_surfaces as ms
 from tests.conftest import seed_catalog_track
 from tests.recommendation_support import publish_bundles
 
@@ -9,13 +8,6 @@ from tests.recommendation_support import publish_bundles
 def seed_items(store, keys):
     for key in keys:
         seed_catalog_track(store, key, 'T' + key, 'A', video_id='v' + key, genre='House', mb_year='2000')
-
-
-@pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    return s
 
 
 class _Item:
@@ -79,7 +71,7 @@ def test_temporal_excludes_disliked_library_tracks(monkeypatch, store):
     for fn in ("for_you", "explore_for_you", "comfort_listening"):
         monkeypatch.setattr(surfaces, fn, lambda s, n, limit=0: [])
     monkeypatch.setattr(surfaces, "cold_candidates", lambda s, n, limit=None: [])
-    store.rec_model.record_dislike("hated", until=None, now=10.0)
+    seed_dislike(store, "hated", until=None, now=10.0)
 
     payload = ms.prepare_bundles(store, now=10.0)
     temporal_keys = {d["key"] for d in payload["1"]["temporal"]}
@@ -136,3 +128,7 @@ def test_prepare_reaches_genres_below_the_old_global_pool_cutoff(monkeypatch, st
     assert len(payload["2"]["wheelhouse"]) >= ms.PROTO_SIZE
     assert len(payload["all"]["wheelhouse"]) == 500
     assert len(payload["all"]["temporal"]) == 500
+    for preset in home_vibe.PRESETS:
+        reserve = payload['_vibes']['genres'][preset]['wheelhouse']['house']
+        assert reserve and all(item['genre'] == 'house' for item in reserve)
+        assert store.recommendations.pool('vibe:' + preset, 'house', 'wheelhouse') is not None

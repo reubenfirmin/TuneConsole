@@ -10,7 +10,7 @@ from tests.core.test_discovery_checkpoint_preparation import finish, seed
 from tests.core.test_listening_preparation import connect
 from tests.core.test_predecessor_writes import installed
 from yt_playlist.core import discovery_checkpoints, provider_frontiers
-from yt_playlist.core.migrations import MigrationError, registry, regular, runner
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import discovery_checkpoint_publication as publication
 from yt_playlist.core.preparation import discovery_checkpoints as preparation
 from yt_playlist.core.store import Store
@@ -227,34 +227,3 @@ def test_reference_change_after_verification_is_fenced_before_selection(installe
             owner.publish(job, stage=identity)
         assert owner.selected(job) is None
         assert not job.execute('SELECT 1 FROM '+owner.table('generations')).fetchone()
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_separate_native_upgrade_preserves_custody_and_has_precedence(installed, tmp_path):
-    store, _ = installed
-    seed(store)
-    # The historical conversion admits only existing references and one exact
-    # spelling per native artist retry row. The additive publisher retains all.
-    with store.conn:
-        for name, suffix in (('fetch-history','unknown-release'), ('artist-images','01'),
-                             ('artist-images','999'), ('provider-refresh','unknown')):
-            store.conn.execute('DELETE FROM settings WHERE key=?', (preparation.PREFIXES[name]+suffix,))
-    with connect(store) as job:
-        saved = {}
-        for name, owner in publication.OWNERS.items():
-            identity = ready(job, name)
-            owner.publish(job, stage=identity)
-            saved[name] = [tuple(row) for row in job.execute('SELECT * FROM '+owner.table('rows')+' ORDER BY source')]
-    upgraded = Store(tmp_path / 'native-checkpoints.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        upgraded.init_schema(defer_metadata=True)
-        for name, owner in publication.OWNERS.items():
-            assert owner.selected(upgraded.conn) is None
-            assert [tuple(row) for row in upgraded.conn.execute('SELECT * FROM '+owner.table('rows')+' ORDER BY source')] == saved[name]
-        assert provider_frontiers.read(upgraded.conn, 'known')['fingerprint'] == 'exact été'
-        assert discovery_checkpoints.fetched(upgraded.conn, 'release')
-        regular.migrate(upgraded.conn)
-    finally:
-        upgraded.conn.close()

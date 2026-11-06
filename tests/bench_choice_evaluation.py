@@ -19,145 +19,10 @@ import time
 import pytest
 
 from tests.bench_svd_background import _backup_library, _saved_library_source
-from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.core.numerics import limit_native_threads
 from yt_playlist.core.store import Store
-from yt_playlist.rec import comparison_preparation, daily_model_selection, model_selection as selection
-from yt_playlist.rec.comparison_storage import decode
-
-
-def test_saved_library_production_comparison_preparation(tmp_path):
-    """Exercise production candidate and serving preparation on a read-only backup."""
-    backup = tmp_path / 'library.db'
-    report = _backup_library(_saved_library_source(), backup)
-    command = [sys.executable, '-m', 'tests.bench_choice_evaluation', str(backup)]
-    # A stuck executor/loop must not hold the review test lock indefinitely.
-    # The child owns only this disposable database; timeout kills and reaps it.
-    try:
-        child = subprocess.run(command, cwd=Path(__file__).resolve().parents[1],
-                               capture_output=True, text=True, timeout=240)
-    except subprocess.TimeoutExpired as exc:
-        (tmp_path / 'comparison-stdout.log').write_bytes(exc.stdout or b'')
-        (tmp_path / 'comparison-stderr.log').write_bytes(exc.stderr or b'')
-        pytest.fail(f'Comparison audit exceeded 240 seconds; diagnostics in {tmp_path}')
-    (tmp_path / 'comparison-stdout.log').write_text(child.stdout)
-    (tmp_path / 'comparison-stderr.log').write_text(child.stderr)
-    destination = tmp_path / 'production-comparison.json'
-    print(json.dumps({'report': str(destination), 'backup': report,
-                      'returncode': child.returncode}), flush=True)
-    assert child.returncode == 0, f'{child.stdout}\n{child.stderr}'
-    print(destination.read_text(), flush=True)
-
-
-async def _concurrent_preparation(store, now, report):
-    lag, reads = [], []
-
-    def timed_read():
-        started = time.monotonic()
-        store.rec_model.rec_vectors_count()
-        return time.monotonic() - started
-
-    with ThreadPoolExecutor(2, thread_name_prefix='comparison-audit') as workers:
-        task = workers.submit(comparison_preparation.maintain, store, now)
-        read = None
-        # Poll raw worker futures on an event-loop timer. Completion/failure no
-        # longer depends on a thread-to-loop completion callback waking a waiter.
-        while not task.done() or read is not None:
-            if read is None:
-                read = workers.submit(timed_read)
-            due = time.monotonic() + .05
-            await asyncio.sleep(.05)
-            lag.append(max(0, time.monotonic() - due))
-            if read.done():
-                reads.append(read.result())  # Propagate foreground failures too.
-                read = None
-        report.update(event_loop_samples=len(lag), event_loop_max_ms=max(lag, default=0) * 1000,
-                      concurrent_read_samples=len(reads), concurrent_read_max_ms=max(reads, default=0) * 1000)
-        return task.result()
-
-
-def _production_comparison_preparation(backup, report, monkeypatch):
-    from yt_playlist.rec import comparison_preparation, comparison_storage, model_setup, product_comparison
-    limit_native_threads()
-    store = Store(backup)
-    store.init_schema()
-    try:
-        original_encode, encoded_values, encoded_payloads = comparison_storage.encode, [], []
-
-        def checked_encode(run_id, data):
-            value = original_encode(run_id, data)
-            payload = json.loads(value)
-            before = hashlib.sha256(canonical(data)).hexdigest()
-            encoded_payloads.append(payload)
-            encoded_values.append({key: payload[key] for key in ('codec', 'expanded_bytes', 'packed_bytes')})
-            encoded_values[-1].update(stored_bytes=len(value.encode()), sha256=before)
-            return value
-
-        monkeypatch.setattr(comparison_storage, 'encode', checked_encode)
-        report['encoded_values'] = encoded_values
-        # These resets affect only the disposable copy, never the source library.
-        store.settings.set_setting('rec_selection_paused', '0')
-        store.conn.execute("DELETE FROM rec_proposals WHERE surface='model_live_comparison'")
-        store.conn.commit()
-        previous = store.rec_model.get_rec_vectors()
-        now, started = time.time(), time.monotonic()
-        result = asyncio.run(_concurrent_preparation(store, now, report))
-        report['wall_seconds'] = time.monotonic() - started
-        report['result'] = result
-        print(json.dumps({'preparation': result}), flush=True)
-        assert result and result['status'] == 'running' and result['phase'] == 'observing', report
-        assert previous == store.rec_model.get_rec_vectors()
-        current = product_comparison.state(store)
-        report['projected_bytes'] = sum(len(row[0]) for row in store.conn.execute(
-            "SELECT payload FROM rec_proposals WHERE surface LIKE ?", (f"model_pair:{current['run_id']}:%",)))
-        assert report['projected_bytes'] <= comparison_preparation.MAX_PREPARED_BYTES, report
-        assert len(encoded_values) == 6, report
-        report['preparation_timings'] = store.model_selection.selection_run(current['run_id'])['preparation_timings']
-        report['evidence_bytes'] = sum(path.stat().st_size for path in store.rec_ledger.evidence().directory.glob('*/*/*.json'))
-        report['coverage'], pairs = {}, {}
-        expected_values = iter(encoded_values)
-        for arm in ('incumbent', 'challenger'):
-            report['coverage'][arm], pairs[arm] = {}, {}
-            for format in product_comparison.FORMATS:
-                data = decode(store.rec_proposals.get_proposals(product_comparison.pair_surface(current['run_id'], arm, format)))
-                expected = next(expected_values)
-                assert hashlib.sha256(canonical(data)).hexdigest() == expected['sha256']
-                pairs[arm][format] = data
-                report['coverage'][arm][format] = (len(data['menus']) if format == 'mixes' else len(data['items'])
-                    if format == 'albums' else sum(map(len, data['bundles'].get('_radio', {}).get('members', {}).values())))
-        report['observed'] = product_comparison.measure(store, current, now)['overall']['days']
-        old, new = pairs['incumbent'], pairs['challenger']
-        mix_tracks = lambda data: [[[t['key'] for t in proto['tracks']] for proto in menu['protos']]
-                                  for menu in data['menus']]
-        old_scores = {row['browse_id']: row['score'] for row in old['albums']['items']}
-        report['actual_serving_changes'] = {
-            'mix_menus': sum(a != b for a, b in zip(mix_tracks(old['mixes']), mix_tracks(new['mixes']))),
-            'album_order': [r['browse_id'] for r in old['albums']['items']] != [r['browse_id'] for r in new['albums']['items']],
-            'album_scores': sum(old_scores.get(row['browse_id']) != row['score'] for row in new['albums']['items']),
-            'radio_ranked_clusters': sum(keys != new['radio']['bundles']['_radio']['members'].get(mid)
-                for mid, keys in old['radio']['bundles']['_radio']['members'].items())}
-        # Daily refresh uses both original vector snapshots with fresh shared
-        # inputs, without resetting assignment, uncertainty or the fixed horizon.
-        monkeypatch.setattr(model_setup, 'build', lambda *a: pytest.fail('daily refresh refitted a model'))
-        started = time.monotonic()
-        comparison_preparation.maintain(store, now + product_comparison.DAY)
-        report['daily_refresh_seconds'] = time.monotonic() - started
-        refreshed = product_comparison.state(store)
-        assert refreshed['prepared_at'] == now + product_comparison.DAY, refreshed
-        assert refreshed['generation'] == current['generation']
-        assert refreshed['decision_at'] == current['decision_at']
-        assert store.rec_model.get_rec_vectors() == previous
-        assert len(encoded_values) == 12, report
-        for payload, expected in zip(encoded_payloads[6:], encoded_values[6:]):
-            assert hashlib.sha256(canonical(decode(payload))).hexdigest() == expected['sha256']
-        report['daily_refresh_timings'] = store.model_selection.selection_run(current['run_id'])['preparation_timings']
-        report['peak_process_rss_mib'] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (
-            1 if sys.platform == 'darwin' else 1024) / 1024 ** 2
-    finally:
-        destination = backup.parent / 'production-comparison.json'
-        destination.write_text(json.dumps(report, indent=2) + '\n')
-        print(json.dumps({'report': str(destination), **report}), flush=True)
-        store.conn.close()
+from yt_playlist.rec import (album_choices, choice_evidence, daily_model_selection,
+                            model_selection as selection)
 
 
 def test_saved_library_album_menu_frontier(tmp_path):
@@ -244,7 +109,7 @@ def test_saved_library_choice_evaluation_cost_and_coverage(tmp_path):
     backup = tmp_path / 'library.db'
     report = _backup_library(_saved_library_source(), backup)
     report['source'] = str(_saved_library_source())
-    command = [sys.executable, '-m', 'tests.bench_choice_evaluation', str(backup), '--daily']
+    command = [sys.executable, '-m', 'tests.bench_choice_evaluation', str(backup)]
     try:
         child = subprocess.run(command, cwd=Path(__file__).resolve().parents[1],
                                capture_output=True, text=True, timeout=300)
@@ -374,7 +239,4 @@ def _daily_comparison(backup, monkeypatch):
 if __name__ == '__main__':
     faulthandler.dump_traceback_later(90, repeat=True)
     with pytest.MonkeyPatch.context() as patch:
-        if '--daily' in sys.argv:
-            _daily_comparison(Path(sys.argv[1]), patch)
-        else:
-            _production_comparison_preparation(Path(sys.argv[1]), {}, patch)
+        _daily_comparison(Path(sys.argv[1]), patch)

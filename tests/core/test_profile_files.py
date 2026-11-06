@@ -31,6 +31,45 @@ def seed(store):
     return keys, bodies
 
 
+def test_profile_page_batches_heads_and_validates_mixed_publications(store, monkeypatch):
+    keys, bodies = seed(store)
+    profiles.prepare(store, limit=1)
+    statements, opened = [], []
+    original = fao.read_bytes
+    def read(path, **options):
+        opened.append(path)
+        return original(path, **options)
+    monkeypatch.setattr(fao, 'read_bytes', read)
+    store.conn.set_trace_callback(statements.append)
+    try:
+        assert owner.read_page(store.conn, 'recording', keys) == {
+            key: json.loads(raw) for key, raw in bodies.items()}
+    finally:
+        store.conn.set_trace_callback(None)
+    assert len(opened) == 1
+    assert len([sql for sql in statements if sql.startswith('SELECT')]) == 2
+    with pytest.raises(Exception, match='byte budget'):
+        owner.read_page(store.conn, 'recording', keys, max_bytes=1)
+    with atomic_write(store):
+        store.conn.execute('UPDATE recording_profile_files SET byte_size=byte_size+1')
+    with pytest.raises(fao.CorruptFile, match='exact head'):
+        owner.read_page(store.conn, 'recording', keys)
+
+
+def test_profile_page_reuses_a_chunk_for_interleaved_identity_order(store, monkeypatch):
+    keys, bodies = seed(store)
+    profiles.prepare(store)
+    opened = []
+    read = fao.read_bytes
+    def counted(path, **options):
+        opened.append(path)
+        return read(path, **options)
+    monkeypatch.setattr(fao, 'read_bytes', counted)
+    assert owner.read_page(store.conn, 'recording', list(reversed(keys))) == {
+        key: json.loads(raw) for key, raw in bodies.items()}
+    assert len(opened) == 1
+
+
 def test_exact_partial_conversion_budgets_and_failed_file_publication(store, monkeypatch):
     keys, bodies = seed(store)
     with monkeypatch.context() as patch:
@@ -50,6 +89,25 @@ def test_exact_partial_conversion_budgets_and_failed_file_publication(store, mon
         owner.read(store.conn, 'recording', keys[0], cache=owner.Cache(work_bytes=1))
 
 
+def test_cached_profile_page_keeps_file_and_caller_budget_checks(store, monkeypatch):
+    keys, bodies = seed(store)
+    profiles.prepare(store)
+    assert owner.read_page(store.conn, 'recording', keys) == {
+        key: json.loads(body) for key, body in bodies.items()}
+    with monkeypatch.context() as patch:
+        patch.setattr(fao, 'read_bytes', lambda *a, **k: pytest.fail('Unchanged chunk was reopened'))
+        assert owner.read_page(store.conn, 'recording', keys)[keys[0]] == json.loads(bodies[keys[0]])
+        with pytest.raises(Exception, match='work budget'):
+            owner.read(store.conn, 'recording', keys[0], cache=owner.Cache(work_bytes=1))
+    path = next(owner.references(store.conn))
+    fao.write_bytes(path, b'{}')
+    with pytest.raises(fao.CorruptFile, match='publication'):
+        owner.read_page(store.conn, 'recording', keys)
+    path.unlink()
+    with pytest.raises(FileNotFoundError):
+        owner.read_page(store.conn, 'recording', keys)
+
+
 def test_snapshot_retains_old_body_and_independent_restore(store, tmp_path):
     keys, bodies = seed(store)
     profiles.prepare(store)
@@ -59,9 +117,9 @@ def test_snapshot_retains_old_body_and_independent_restore(store, tmp_path):
         with atomic_write(store):
             store.musical_profiles.publish_recordings([(keys[0], raw, 'v2', digest)], 2)
         assert owner.read(snapshot.conn, 'recording', keys[0]) == before
-        assert profiles.maintain(store, 10**10) == 0
+        assert store.retention.collect_musical_profiles(10**10) == 0
     assert owner.read(store.conn, 'recording', keys[0]) == raw
-    profiles.maintain(store, 10**10)
+    store.retention.collect_musical_profiles(10**10)
     assert owner.read(store.conn, 'recording', keys[1]) == bodies[keys[1]]
     manifest = owner.export(store.conn, tmp_path / 'saved')
     restored = Store(tmp_path / 'restored.db')

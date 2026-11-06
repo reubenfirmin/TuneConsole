@@ -2,11 +2,10 @@
 import time
 
 from fastapi import APIRouter, Request, Response
-from fastapi.responses import RedirectResponse
 
 from yt_playlist.core.accounts import main_client
 from yt_playlist.providers import lastfm
-from yt_playlist.rec import account_growth, artist_start, home_cards, home_preferences, onboarding
+from yt_playlist.rec import artist_start, home_cards, home_preferences, onboarding
 from yt_playlist.rec.home_cards import _proto
 
 LASTFM_NUDGE_SNOOZE_S = 30 * 86400
@@ -55,22 +54,6 @@ def sample_fragment(ctx, request, kind):
 def build(ctx):
     router = APIRouter()
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
-
-    @router.post('/home/onboard/welcome')
-    def welcome():
-        store.settings.set_setting('onboard_welcomed', '1')
-        return RedirectResponse('/', status_code=303)
-
-    @router.post('/home/onboard/format')
-    async def choose_listening_format(request: Request):
-        preference = (await request.form()).get('format')
-        if preference not in home_preferences.PANELS:
-            return Response('Choose albums, mixes or radio.', status_code=422)
-        state = account_growth.view(store, now_fn(), radio=ctx.radio.bootstrap())
-        if not all(state['ready_formats'].values()):
-            return Response('Wait until all three listening formats are ready.', status_code=409)
-        store.settings.set_setting('home_format', preference)
-        return RedirectResponse('/', status_code=303)
 
     @router.post("/onboard/lastfm/dismiss")
     def dismiss_lastfm_nudge():

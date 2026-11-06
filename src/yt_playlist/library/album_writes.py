@@ -1,4 +1,5 @@
 """Confirmed album ratings and their account-scoped local publication."""
+from yt_playlist.core.action_errors import ActionInputError
 from yt_playlist.util.thumbnails import best_thumb
 
 
@@ -11,13 +12,12 @@ def set_saved(store, client, account_id, browse_id, album, *, saved, fallback=No
     """
     audio_id = album.get('audioPlaylistId')
     if not audio_id:
-        raise ValueError('YouTube Music cannot save that candidate as an album')
+        raise ActionInputError('album_unavailable')
     result = client.rate_playlist(audio_id, 'LIKE' if saved else 'INDIFFERENT')
     confirmed = (result is None or result is True or
                  isinstance(result, dict) and result.get('status') in (None, 'STATUS_SUCCEEDED'))
     if not confirmed:
-        operation = 'save' if saved else 'removal'
-        raise ValueError(f'YouTube Music did not confirm the album {operation}')
+        raise ActionInputError('album_save_rejected' if saved else 'album_remove_rejected')
     if not saved:
         store.collection.remove_saved_album(browse_id, account_id=account_id)
         return

@@ -41,6 +41,16 @@ def test_compressed_bundle_and_fresh_pool_round_trip():
     assert encode_proposals('mode_bundles', bundles) == encoded
 
 
+def test_small_menu_compression_preserves_profiles_and_bounds_expansion():
+    value = _bundles()
+    for item in value['all']['wheelhouse']:
+        item['musical'] = {'digest': item['key'], 'dimensions': {'energy': {'value': .5}}}
+    encoded = json_cache.encode(value, shared_profiles=False)
+    assert json_cache.decode(encoded) == value
+    with pytest.raises(ValueError, match='byte budget'):
+        json_cache.decode(encoded, max_bytes=4096)
+
+
 def test_group_subset_does_not_inflate_legacy_mode_copies(monkeypatch):
     bundles = _bundles()
     encoded = encode_proposals('mode_bundles', bundles)
@@ -268,24 +278,6 @@ def test_fingerprint_is_stable_across_subset_reads_and_changes_with_new_content(
     bundles['all']['wheelhouse'].reverse()
     publish_bundles(store, bundles, 2)
     assert generation() != before
-
-
-def test_discovery_cleanup_prunes_compressed_cached_tracks(store):
-    bundles = _bundles()
-    items = bundles['all']['wheelhouse']
-    seed_bundle_subjects(store, {}, fresh=items)
-    publish_bundles(store, bundles, 1, fresh=items)
-    head = store.recommendations.head('home')['id']
-    with store.conn:
-        store.conn.execute('DELETE FROM discovery_memberships WHERE recording_id IN '
-                           '(SELECT id FROM recordings WHERE identity_key=?)', ('song-1',))
-    assert store.discovery._prune_cached_tracks({'song-1'})
-    # Immutable rank evidence remains; current hydration must exclude removed discoveries.
-    for surface, mode, lane in [('home', 'all', 'wheelhouse'), ('home', '1', 'wheelhouse'), ('fresh', 'all', 'fresh')]:
-        page = store.recommendations.candidate_page(surface, mode, lane, limit=128)
-        assert 'song-1' not in {item['key'] for item in page['tracks']}
-    assert len(store.recommendations.candidate_page('fresh', 'all', 'fresh')['tracks']) == 99
-    assert store.recommendations.head('home')['id'] == head
 
 
 @pytest.mark.parametrize('body', [None, 'invalid base64!', 'eA=='])

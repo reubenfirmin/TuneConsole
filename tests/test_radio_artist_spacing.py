@@ -1,23 +1,28 @@
 """Radio keeps artists apart across heard history and every proposed stream."""
 import numpy as np
+from tests.enrichment_support import seed_enrichment
 import pytest
 
 from yt_playlist.rec import radio_tuning
 from yt_playlist.rec.radio_candidates import RadioCandidates
 from yt_playlist.rec.radio_directions import RadioDirections
 from tests.recommendation_support import publish_bundles
+from tests.prepared_fixture_support import prepared_template
+from tests.radio_timing_support import radio_costs
+from yt_playlist.core.db_writes import atomic_write
 
 
 def prepare(store, groups):
     modes, bundles, pools = [], {}, []
     for mid, artists in enumerate(groups, 1):
         tracks = []
-        for i, artist in enumerate(artists):
-            video = f"spacing-{mid}-{i}"
-            tid = store.tracks.upsert_track(video, video, artist, "", 200)
-            store.tracks.set_track_enrichment(tid, "Ambient", "2002")
-            tracks.append(dict(key=store.tracks.identity_key_for_video(video), video_id=video,
-                               title=video, artist=artist, genre="Ambient"))
+        with atomic_write(store):
+            for i, artist in enumerate(artists):
+                video = f"spacing-{mid}-{i}"
+                tid = store.tracks.upsert_track(video, video, artist, "", 200)
+                seed_enrichment(store, tid, "Ambient", "2002")
+                tracks.append(dict(key=store.tracks.identity_key_for_video(video), video_id=video,
+                                   title=video, artist=artist, genre="Ambient"))
         modes.append(dict(mode_id=mid, label="Ambient", families=[["ambient", len(tracks)]],
                           centroid=np.array([1., mid * .01], dtype=np.float32),
                           size=len(tracks), rep_keys=[]))
@@ -26,6 +31,20 @@ def prepare(store, groups):
     store.modes.replace_modes(modes, [], 1)
     publish_bundles(store, bundles)
     return pools
+
+
+@pytest.fixture(scope='module')
+def spacing_template(_pristine_current_schema):
+    def build(store):
+        return prepare(store, [[f'Artist {i % 9}' for i in range(54)]])
+
+    with prepared_template(_pristine_current_schema, build) as template:
+        yield template
+
+
+@pytest.fixture
+def spacing_library(store, spacing_template):
+    return spacing_template.restore(store)
 
 
 def candidates(store, **controls):
@@ -41,8 +60,8 @@ def assert_spaced(tracks):
 
 
 @pytest.mark.parametrize("theme,comfort", [(.5, .5), (.5, 1), (1, 1)])
-def test_artist_does_not_repeat_within_six_songs_even_when_highly_ranked(store, theme, comfort):
-    tracks, = prepare(store, [[f"Artist {i % 9}" for i in range(54)]])
+def test_artist_does_not_repeat_within_six_songs_even_when_highly_ranked(store, spacing_library, theme, comfort):
+    tracks, = spacing_library
     c = candidates(store, theme=theme, comfort=comfort)
     history = [tracks[0]]
     for _ in range(24):
@@ -56,6 +75,7 @@ def test_each_direction_spaces_artists_against_history_and_its_own_prefix(store)
     history = tracks[:6]
     directions = RadioDirections(c, history[-1])
     directions.update(history, [], 0)
+    assert len(directions.slots) == 4
     for branch in directions.slots:
         assert len(branch["tracks"]) == 6
         assert_spaced(history + branch["tracks"])

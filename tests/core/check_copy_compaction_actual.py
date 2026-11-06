@@ -16,10 +16,14 @@ import time
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
-from yt_playlist.core import (album_description_files, collection_recovery, copy_compaction,
-    group_documents, legacy_evidence, playback_feedback, policy_recovery, preparation_files,
-    recommendation_outputs, retained_copy, saved_preparation_files, sample_files)
+from tests import file_custody_support as custody
+from experiments.retained_copy import playback_feedback_backup
+from yt_playlist.core import (album_description_files, collection_recovery, db_handles,
+    group_documents, legacy_evidence, playback_feedback, preparation_files,
+    recommendation_outputs, saved_preparation_files, sample_files)
 from yt_playlist.core.store import Store
+from yt_playlist.core.db_rebuild import install, installed_format, job
+from yt_playlist.core.db_rebuild.sqlite_checks import tables, verify
 from yt_playlist.web.app import create_app
 
 
@@ -47,8 +51,8 @@ def rebuild_exported_fixture(source, root):
     if not fixture.exists():
         shutil.copyfile(source, fixture)
     if 'sql_sha256' not in report:
-        assert copy_compaction._digest(source) == copy_compaction._digest(fixture)
-        report['sql_sha256'] = copy_compaction._digest(fixture)
+        assert install.digest(source) == install.digest(fixture)
+        report['sql_sha256'] = install.digest(fixture)
         journal.write_text(json.dumps(report,indent=2)+'\n')
     kinds = dict(samples='sample-backup', annotations='backup-manifest',
         policies='backup-manifest', descriptions='backup-manifest', groups='manifest',
@@ -78,21 +82,21 @@ def rebuild_exported_fixture(source, root):
                     continue  # Packed content records are not root manifests.
             assert len(matches)==1,(domain,matches)
             print(json.dumps(dict(event='fixture_restore_start',domain=domain)),flush=True)
-            policy_recovery._restore_files(conn,{domain:str(matches[0])})
+            custody.restore_files(conn,{domain:str(matches[0])})
             report['domains'][domain] = dict(manifest=str(matches[0]),seconds=time.monotonic()-began)
             journal.write_text(json.dumps(report,indent=2)+'\n')
             print(json.dumps(dict(event='fixture_restore_complete',domain=domain,
                                  seconds=report['domains'][domain]['seconds'])),flush=True)
         if 'playback_feedback' not in report['domains']:
-            snapshot = policy_recovery.playback_feedback_backup._queue(
+            snapshot = playback_feedback_backup._queue(
                 source.parent/'original-files/playback-feedback/snapshot.db').path
-            manifest = dict(format=1,database=str(snapshot),sha256=copy_compaction._digest(snapshot))
-            policy_recovery._restore_files(conn,{'playback_feedback':manifest})
+            manifest = dict(format=1,database=str(snapshot),sha256=install.digest(snapshot))
+            playback_feedback_backup.restore(conn,manifest)
             report['domains']['playback_feedback'] = dict(manifest=manifest)
             journal.write_text(json.dumps(report,indent=2)+'\n')
-        policy_recovery._verify(conn)
-        report.update(seconds=time.monotonic()-started,files=copy_compaction._owned_files(conn),
-                      installed_version=retained_copy._format(conn))
+        verify(conn)
+        report.update(seconds=time.monotonic()-started,files=job._owned_files(conn),
+                      installed_version=installed_format.validate(conn))
     marker.write_text(json.dumps(report,indent=2)+'\n')
     return fixture
 
@@ -112,10 +116,10 @@ def coordinates(conn):
     columns.extend((table,'filename') for table in saved_preparation_files.OWNERS)
     for _,_,table,_,slots in preparation_files._owners(conn):
         columns.extend((table,slot[0]) for slot in slots)
-    tables = policy_recovery._tables(conn)
+    source_tables = tables(conn)
     result = {}
     for table,column in columns:
-        if table in tables and column in {row[1] for row in conn.execute('PRAGMA table_info('+table+')')}:
+        if table in source_tables and column in {row[1] for row in conn.execute('PRAGMA table_info('+table+')')}:
             result.setdefault(table,set()).add(column)
     return result
 
@@ -138,15 +142,15 @@ def prepare(producer,fixture,root):
             select = ','.join(('fixture_filename('+name+') AS '+name) if name in fields else name for name in columns)
             reader.execute('CREATE TEMP VIEW '+table+' AS SELECT '+select+' FROM main.'+table)
         reader.execute('BEGIN')
-        with copy_compaction._files(original):
-            manifests = policy_recovery._export_files(reader,fixture,backup_root=root/'fixture-files')
+        with job._files(original):
+            manifests = custody.export_files(reader,fixture,backup_root=root/'fixture-files')
         reader.rollback()
     with closing(sqlite3.connect(fixture)) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute('PRAGMA foreign_keys=ON')
-        policy_recovery._restore_files(conn,manifests)
-        policy_recovery._verify(conn)
-        files = copy_compaction._owned_files(conn)
+        custody.restore_files(conn,manifests)
+        verify(conn)
+        files = job._owned_files(conn)
     return dict(seconds=time.monotonic()-started,files=files,manifests=manifests)
 
 
@@ -191,7 +195,7 @@ def check(producer,fixture,output):
         sample_runs = [row[0] for row in store.conn.execute('SELECT DISTINCT run_id FROM sample_attributes')]
         expected_samples = {run:store.audio_vibes.samples(run) for run in sample_runs}
         assert sum(map(len,expected_samples.values())) == len(actual_samples)
-        report['installed_version_before'] = retained_copy._format(store.conn)
+        report['installed_version_before'] = installed_format.validate(store.conn)
         accounts = store.accounts.get_accounts()
         assert accounts
         account = store.accounts.get_master_account().id
@@ -233,10 +237,10 @@ def check(producer,fixture,output):
         assert ctx.storage_maintenance.phase=='done',report['maintenance_status']
         assert not store.activity_paused and not playback_feedback.inbox(store).pending()
         assert store.tracks.item_rating(account,video)['status']=='LIKE'
-        assert retained_copy._format(store.conn)==report['installed_version_before']
+        assert installed_format.validate(store.conn)==report['installed_version_before']
         store.settings.set_setting('658-isolated-post-cutover','accepted')
         browse()
-        report['installed_files_verified'] = copy_compaction._owned_files(store.conn)
+        report['installed_files_verified'] = job._owned_files(store.conn)
         assert actual_samples == {row['id']:Path(row['filename']).read_bytes()
                                   for row in store.conn.execute('SELECT id,filename FROM sample_attributes')}
         assert expected_samples == {run:store.audio_vibes.samples(run) for run in sample_runs}
@@ -246,7 +250,7 @@ def check(producer,fixture,output):
     except BaseException as error:
         report.update(status='failed',error=repr(error))
         if store is not None:
-            report['durable_state'] = copy_compaction.db_handles.state(fixture)
+            report['durable_state'] = db_handles.state(fixture)
         raise
     finally:
         if ctx is not None:
@@ -296,11 +300,11 @@ def test_reopened_actual_library_reads_without_recovery_files():
     assert report['status']=='passed'
     prepared = json.loads((root/'fixture-preparation.json').read_text())
     source = Path(prepared['source'])
-    assert copy_compaction._digest(source)==prepared['sql_sha256']
+    assert install.digest(source)==prepared['sql_sha256']
     with closing(sqlite3.connect(source.as_uri()+'?mode=ro',uri=True)) as original:
         original_samples = {row[0]:(list(row[:-1]),Path(row[-1]).stem)
                             for row in original.execute(sample_files.REFERENCES)}
-    state = copy_compaction.db_handles.state(fixture)
+    state = db_handles.state(fixture)
     assert state['phase']=='complete'
     destination = Path(state['destination'])
     assert destination.parent==root
@@ -319,8 +323,8 @@ def test_reopened_actual_library_reads_without_recovery_files():
             hidden.append((original,unavailable))
         store = Store(fixture)
         store.init_schema(defer_metadata=True)
-        assert retained_copy._format(store.conn)==result['installed_version']
-        result['verified_files'] = copy_compaction._owned_files(store.conn)
+        assert installed_format.validate(store.conn)==result['installed_version']
+        result['verified_files'] = job._owned_files(store.conn)
         samples = {}
         for row in store.conn.execute(sample_files.REFERENCES):
             identity, _, video, run, point, _, filename = row

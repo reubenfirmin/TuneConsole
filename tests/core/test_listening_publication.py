@@ -2,11 +2,13 @@
 import json
 from pathlib import Path
 import sqlite3
+import time
 
 import pytest
 
 from tests.core.test_listening_output_preparation import chunk, head, seed
 from tests.core.test_predecessor_writes import installed
+from tests.publication_timing_support import publication_costs
 from yt_playlist.core import recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import listening_outputs as preparation, listening_publication as publication
@@ -108,37 +110,49 @@ def test_manifest_must_match_chunks_in_the_same_map(installed, failure):
 
 
 @pytest.mark.parametrize('installed', [89], indirect=True)
-def test_long_edition_bounded_resume_snapshot_continuing_writer_and_custody(installed):
+def test_long_edition_bounded_resume_snapshot_continuing_writer_and_custody(installed, publication_costs, record_property):
+    def measured(phase, operation, *args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return operation(*args, **kwargs)
+        finally:
+            record_property(phase + '_seconds', time.perf_counter() - started)
+
     store, _ = installed
+    started = time.perf_counter()
     chunks = dict(chunk(number) for number in range(600))
     refs = [{'key':key, 'from':'2026-01-01', 'until':'2026-01-02', 'bytes':len(raw.encode())} for key,raw in chunks.items()]
     documents = {'listening_analytics':json.dumps({'chunks':refs}), 'listening_edition':'{"text":"Old edition"}',
         **{'listening_chunk:'+key:raw for key,raw in chunks.items()}}
     with store.conn:
         store.conn.executemany('INSERT INTO rec_proposals VALUES (?,?,100)', documents.items())
-    prepared(store.conn)
-    first = publication.OWNER.step(store.conn, batch_size=128)
+    record_property('source_documents_seconds', time.perf_counter() - started)
+    measured('initial_preparation', prepared, store.conn)
+    first = measured('first_map_checkpoint', publication.OWNER.step, store.conn, batch_size=128)
     assert first.copied == 128 and not first.complete
-    reopened = Store(store._db_path)
+    reopened = measured('reopen', Store, store._db_path)
     try:
-        resumed = publication.OWNER.step(reopened.conn, batch_size=128)
+        resumed = measured('resumed_map_checkpoint', publication.OWNER.step, reopened.conn, batch_size=128)
         assert resumed.id == first.id and resumed.copied == 256
-        stage = mapped(reopened.conn)
+        stage = measured('remaining_map_drain', mapped, reopened.conn)
         assert stage.copied == 602
-        publication.OWNER.publish(reopened.conn, stage=stage.id)
+        measured('first_publication', publication.OWNER.publish, reopened.conn, stage=stage.id)
     finally:
         reopened.conn.close()
     old_manifest = head(store.conn)['generation']
+    started = time.perf_counter()
     with store.read_snapshot() as snapshot:
         assert snapshot.store.rec_proposals._proposal_json('listening_edition') == documents['listening_edition']
         with store.conn:
             ListeningAnalyticsRepo(store).publish('{"text":"Continuing result"}', 200, 'listening_edition')
         assert snapshot.store.rec_proposals._proposal_json('listening_edition') == documents['listening_edition']
         assert not snapshot.publish(lambda:None)
+    record_property('continuing_writer_snapshot_seconds', time.perf_counter() - started)
     assert publication.OWNER.selected(store.conn) is None
-    prepared(store.conn)
-    next_stage = mapped(store.conn)
-    publication.OWNER.publish(store.conn, stage=next_stage.id)
+    measured('second_preparation', prepared, store.conn)
+    next_stage = measured('second_map', mapped, store.conn)
+    measured('second_publication', publication.OWNER.publish, store.conn, stage=next_stage.id)
+    started = time.perf_counter()
     assert head(store.conn)['generation'] == old_manifest
     assert store.rec_proposals.get_proposals('listening_edition') == {'text':'Continuing result'}
     assert publication.OWNER.value(store.conn, stage.id, 'listening_edition') == documents['listening_edition']
@@ -150,6 +164,7 @@ def test_long_edition_bounded_resume_snapshot_continuing_writer_and_custody(inst
             with store.conn:
                 store.conn.execute(sql)
     assert files.collect_orphans(store.conn) == 0
+    record_property('retained_custody_readback_seconds', time.perf_counter() - started)
 
 
 @pytest.mark.parametrize('installed', [89], indirect=True)
@@ -247,10 +262,11 @@ def test_interruptions_missing_file_repair_and_failed_preparation_leave_ddl_inde
     assert store.rec_proposals.get_proposals('listening_edition') == {'text':'New'}
 
 
-def test_native_upgrade_preserves_files_and_requires_retained_custody_guards(tmp_path):
+def test_native_upgrade_preserves_files_and_requires_retained_custody_guards(
+        tmp_path, publication_costs, _pristine_installed_schema):
     store = Store(tmp_path/'upgrade.db')
     try:
-        runner.migrate(store.conn, registry=registry.MIGRATIONS[:89])
+        _pristine_installed_schema(89).backup(store.conn)
         store.init_schema(defer_metadata=True)
         documents = seed(store)
         prepared(store.conn)

@@ -91,7 +91,7 @@ def test_saved_session_is_restored_only_for_fresh_matching_playback(poc, presenc
 
 
 @pytest.mark.parametrize("presence", ["missing", "matching", "paused", "other_playlist", "no_music_tab", "stopped"])
-def test_saved_session_keeps_loading_only_for_confirmed_playback_until_join(poc, presence):
+def test_saved_session_is_usable_immediately_only_for_confirmed_playback(poc, presence):
     c, *_ = poc
     c.start()
     play(c, "v2")
@@ -112,7 +112,7 @@ def test_saved_session_keeps_loading_only_for_confirmed_playback_until_join(poc,
         c.stop()
     restored = PlaylistRadio(c.ctx)
     before = restored.bootstrap()["state"]
-    assert before["resolving"] is (presence == "matching")
+    assert not before.get("resolving")
     assert before["active"] is (presence == "matching")
     if presence in {"missing", "matching"}:
         if presence == "missing":

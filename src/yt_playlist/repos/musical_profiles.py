@@ -5,9 +5,11 @@ import hashlib
 
 from yt_playlist.core import metadata_native, metadata_evidence, metadata_runtime, profile_files, vibe_versions
 from yt_playlist.core.preparation import metadata_destinations
-from yt_playlist.core.db_revisions import keyed_reads
+from yt_playlist.core.db_revisions import column_group_reads, keyed_reads
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read
+
+MAX_MASKED_SOURCE_LINKS = 4096
 
 
 class MusicalProfilesRepo(Repo):
@@ -152,8 +154,13 @@ class MusicalProfilesRepo(Repo):
                                   (key, *row))
 
     @synchronized
-    def recording_inputs(self, keys, max_bytes=8 * 1024 * 1024):
-        """Bound each recording's source set; choices stay attached to catalog entries."""
+    def recording_inputs(self, keys, max_bytes=8 * 1024 * 1024, *, source_scopes=None):
+        """Bound sources; an evaluation mask precedes slots and file-byte charges.
+
+        Masked admission inspects at most 4096 link identities per recording,
+        failing closed above that bound rather than truncating allowed inputs.
+        Ordinary preparation keeps its existing first-64/all-source semantics.
+        """
         result = {}
         used_bytes, file_cache = 0, profile_files.Cache()
         with ExitStack() as guards:
@@ -168,7 +175,19 @@ class MusicalProfilesRepo(Repo):
                 rid = recording[0]
                 with keyed_reads(self._store, 'rec_musical_links', [rid]):
                     links = [r[0] for r in self.conn.execute('SELECT source_key FROM rec_musical_links '
-                        'WHERE recording_id=? ORDER BY source_key LIMIT 65', (rid,))]
+                        'WHERE recording_id=? ORDER BY source_key LIMIT ?',
+                        (rid, 65 if source_scopes is None else MAX_MASKED_SOURCE_LINKS + 1))]
+                if source_scopes is not None:
+                    if len(links) > MAX_MASKED_SOURCE_LINKS:
+                        raise WorkBudgetExceeded('Masked recording source links exceed bounded admission')
+                    allowed = set()
+                    for start in range(0, len(links), 64):
+                        batch = links[start:start + 64]
+                        with keyed_reads(self._store, 'rec_musical_sources', batch):
+                            allowed.update(row[0] for row in self.conn.execute(
+                                'SELECT source_key,scope FROM rec_musical_sources WHERE source_key IN ('
+                                + ','.join('?' for _ in batch) + ')', batch) if row[1] in source_scopes)
+                    links = [link for link in links if link in allowed][:65]
                 profiles = []
                 with keyed_reads(self._store, 'rec_musical_source_profiles', links[:64]):
                     for link in links[:64]:
@@ -231,20 +250,26 @@ class MusicalProfilesRepo(Repo):
 
     @snapshot_read
     def readiness_fingerprint(self, keys):
+        return self.readiness_state(keys)[0]
+
+    @snapshot_read
+    def readiness_state(self, keys):
         """Identify current ranking/support inputs without decoding profile files.
 
         Profiles and relational fits can advance independently of a menu head.
-        Use their persisted contents so this also works across restarts and copies.
+        Return the small current fit projection alongside its persisted identity
+        so an older menu can be revalidated without restoring every profile.
         """
         digest = hashlib.sha256()
+        profiles = {}
         keys = sorted(set(keys))
         version = vibe_versions.expression(self.conn, 'recording_vibes', 'v')
         for offset in range(0, len(keys), 512):
             page = keys[offset:offset + 512]
             qs = ','.join('?' for _ in page)
-            with keyed_reads(self._store, 'recordings', page):
+            with column_group_reads(self._store, 'recordings', 'identity'):
                 ids = [row[0] for row in self.conn.execute(
-                    f'SELECT id FROM recordings WHERE identity_key IN ({qs})', page)]
+                    f'SELECT id FROM recordings WHERE identity_key IN ({qs})', page).fetchall()]
                 with keyed_reads(self._store, 'rec_musical_profiles', page), \
                         keyed_reads(self._store, 'recording_vibes', ids), \
                         keyed_reads(self._store, 'vibe_versions', []):
@@ -252,22 +277,27 @@ class MusicalProfilesRepo(Repo):
                         f'v.vibe,v.score,v.support,v.source,{version} FROM recordings r '
                         'LEFT JOIN rec_musical_profiles p ON p.identity_key=r.identity_key '
                         'LEFT JOIN recording_vibes v ON v.recording_id=r.id '
-                        f'WHERE r.identity_key IN ({qs}) ORDER BY r.identity_key,v.vibe', page)
+                        f'WHERE r.identity_key IN ({qs}) ORDER BY r.identity_key,v.vibe', page).fetchall()
+                    # Bound the fetch to this identity page instead of entering
+                    # the connection's Python wrappers for every fit row. Keep
+                    # the exact page boundaries and saved JSON/hash format.
                     digest.update(json.dumps([tuple(row) for row in rows],
                                              separators=(',', ':')).encode())
-        return digest.hexdigest()
+                    for key, policy, _digest, vibe, score, support, source, stamp in rows:
+                        profile = profiles.setdefault(key, {'version': policy, 'vibes': {
+                            'inputs_version': stamp, 'fits': {}}})
+                        if vibe is not None and policy is not None:
+                            profile['vibes']['fits'][vibe] = {
+                                'score': score, 'support': support, 'source': source,
+                                'inputs_version': stamp}
+        return digest.hexdigest(), profiles
 
     @snapshot_read
     def by_keys(self, keys):
         if len(keys) > 512:
             raise ValueError('Musical profile page exceeds 512 identities')
         with keyed_reads(self._store, 'rec_musical_profiles', keys):
-            qs = ','.join('?' for _ in keys)
-            cache = profile_files.Cache()
-            if sum(profile_files.size(self.conn, 'recording', key) for key in keys) > 8 * 1024 * 1024:
-                raise WorkBudgetExceeded('Musical profile page exceeds byte budget')
-            result = {r[0]: json.loads(profile_files.read(self.conn, 'recording', r[0], cache=cache))
-                for r in self.conn.execute(f'SELECT identity_key FROM rec_musical_profiles WHERE identity_key IN ({qs})', keys)}
+            result = profile_files.read_page(self.conn, 'recording', keys)
         return self._store.vibe_predictions.overlay(result)
 
     @snapshot_read

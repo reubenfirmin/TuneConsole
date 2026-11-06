@@ -13,9 +13,15 @@ def test_radio_projection_decomposes_complete_candidates_and_retains_original_mo
     store.rec_ledger.record_serving_policy('original-pool', {'algorithm': 'retained'}, 1)
     run = store.model_selection.start_selection(1, {'kind': 'product'})
     items = []
-    for index in range(515):
-        store.tracks.upsert_track(f'video{index}', f'Song {index}', 'Artist', None, 100)
-        items.append({'key': f'song {index}|artist', 'score': 1 / (index + 1), 'pool_policy': 'original-pool'})
+    # Admit the complete catalog input as one genuine atomic unit. Every track
+    # still publishes its provider evidence through the ordinary catalog owner.
+    with store._lock, store.conn.atomic():
+        for index in range(515):
+            store.tracks.upsert_track(f'video{index}', f'Song {index}', 'Artist', None, 100)
+            items.append({'key': f'song {index}|artist', 'score': 1 / (index + 1), 'pool_policy': 'original-pool'})
+    assert not store.conn.in_transaction
+    assert store.conn.execute('SELECT count(*) FROM catalog_entries').fetchone()[0] == 515
+    assert store.conn.execute('SELECT count(*) FROM metadata_deliveries').fetchone()[0] == 515
     keys = [item['key'] for item in items]
     modes = [{'mode_id': 1, 'space': '', 'centroid': [1., 0.], 'label': 'Original mode', 'size': 515}]
     value = {'policy_version': 'original-pool', 'context': {}, 'modes': modes, 'encoding_model': None,
@@ -36,7 +42,8 @@ def test_radio_projection_decomposes_complete_candidates_and_retains_original_mo
         tracks = prepared.tracks('radio', '1', 'membership', allowed=lambda item: item['key'] == keys[-1], limit=1)
         assert [item['key'] for item in tracks] == [keys[-1]]
         with store.read_view() as reader:
-            inputs = prepared.inputs(reader, {'1': modes[0]}, '', 'new-current-model', set(), set(), .5)
+            captured = prepared.capture_inputs(reader, {'1': modes[0]}, '', 'new-current-model', set(), set(), .5)
+        inputs = prepared.decode_inputs(captured)
         assert inputs['_radio']['members'] == {'1': 515}
         assert len(inputs['1']['_radio_pool']) <= 96
     finally:

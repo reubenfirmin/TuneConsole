@@ -1,4 +1,5 @@
 """Independent preparation admission against the unchanged historical installers."""
+from contextlib import closing
 import sqlite3
 
 import pytest
@@ -11,7 +12,7 @@ from yt_playlist.core.schema_contract import MigrationError
 
 @pytest.mark.parametrize('version', [79, 80, 81, 82, 83, 84, 85, 86, 88, 91, 92, 93, 99, 104, 107])
 def test_preparation_admits_frozen_installed_schemas_without_writing(version):
-    with sqlite3.connect(':memory:') as conn:
+    with closing(sqlite3.connect(':memory:')) as conn, conn:
         conn.row_factory = sqlite3.Row
         migrate(conn, registry=MIGRATIONS[:version])
         conn.execute('PRAGMA query_only=ON')
@@ -23,7 +24,7 @@ def test_preparation_admits_frozen_installed_schemas_without_writing(version):
 
 @pytest.mark.parametrize('damage', ['history_name', 'history_gap', 'future', 'column', 'trigger'])
 def test_preparation_rejects_changed_history_and_owner_definitions(damage):
-    with sqlite3.connect(':memory:') as conn:
+    with closing(sqlite3.connect(':memory:')) as conn, conn:
         conn.row_factory = sqlite3.Row
         migrate(conn, registry=MIGRATIONS[:79])
         if damage == 'history_name':

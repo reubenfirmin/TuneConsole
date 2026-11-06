@@ -13,16 +13,17 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core.migrations import registry, runner
+from yt_playlist.core import genre_identity
+from yt_playlist.core.db_rebuild import build, source
+from yt_playlist.core.migrations import current, registry, runner
 
 
 PRODUCTION_DDL_SHA256 = '95036d09b6a69976b6b6898bd94d1eef88b6b670b089198c9092491f00bfa8b7'
 
 
-@pytest.fixture
-def production64(tmp_path):
-    path = tmp_path/'production64.db'
-    with closing(sqlite3.connect(path)) as conn:
+def build_production64(conn):
+    """Build the unchanged, genuinely migrated and populated release source."""
+    with conn:
         runner.migrate(conn, registry=registry.MIGRATIONS[:64], clock=lambda: 1000.)
         objects = conn.execute("SELECT type,name,tbl_name,sql FROM sqlite_schema "
             "WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name").fetchall()
@@ -55,4 +56,36 @@ def production64(tmp_path):
             conn.execute("INSERT INTO play_event_sources VALUES(91,'live')")
         assert conn.execute('PRAGMA integrity_check').fetchone() == ('ok',)
         assert not conn.execute('PRAGMA foreign_key_check').fetchall()
+
+
+@pytest.fixture
+def production64(tmp_path, production64_template):
+    path = tmp_path/'production64.db'
+    with closing(sqlite3.connect(path)) as conn:
+        production64_template.backup(conn)
     return path
+
+
+def build_development93(conn, released):
+    """Produce the explicit populated v93 input, before consumer mutations."""
+    conn.row_factory = sqlite3.Row
+    build._configure(conn)
+    conn.execute('BEGIN IMMEDIATE')
+    for sql in current.statements(version=93):
+        conn.execute(sql)
+    genre_identity.seed_catalog(conn)
+    conn.executemany('INSERT INTO settings VALUES (?,?)', current.SEED_SETTINGS.items())
+    conn.executemany('INSERT INTO schema_migrations VALUES (?,?,?)',
+                     [(m.version, m.name, 2000.) for m in registry.MIGRATIONS[:93]])
+    conn.execute('INSERT INTO group_retention_state VALUES (1,0)')
+    for table in ('identities', 'recordings', 'youtube_items', 'catalog_entries', 'library_memberships',
+                  'playlist_scopes', 'playlists', 'playlist_items', 'item_ratings', 'play_events', 'play_event_sources',
+                  'rec_change_queue', 'rec_preparation', 'rec_group_clock', 'rec_vibe_pending'):
+        fields = source.columns(released, table)
+        mapped = ['unresolved_genre' if field == 'genre' else field for field in fields]
+        conn.execute('DELETE FROM ' + table)
+        conn.executemany('INSERT INTO ' + table + '(' + ','.join(mapped) + ') VALUES (' +
+                         ','.join('?' for _ in fields) + ')',
+                         released.execute('SELECT ' + ','.join(fields) + ' FROM ' + table))
+    conn.commit()
+    runner.validate_version(conn, 93)

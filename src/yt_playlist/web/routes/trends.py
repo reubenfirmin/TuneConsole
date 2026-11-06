@@ -8,6 +8,7 @@ route only renders that reel from the baked `story` payload the rec worker mater
 from fastapi import APIRouter, HTTPException, Request
 
 from yt_playlist.rec.recap_story import listening_summary
+from yt_playlist.rec.recap_details import slides
 
 
 def build(ctx) -> APIRouter:
@@ -21,6 +22,10 @@ def build(ctx) -> APIRouter:
         story = (store.rec_proposals.get_proposals("trend_rollups") or {}).get("story")
         if not story or story.get("month") != month:
             raise HTTPException(status_code=404, detail="no recap for that month")
+        grouped = any('groups' in beat for beat in story['beats'])
+        story = {**story, 'beats': slides(story['beats'])}
+        if grouped and ctx.rec_worker:
+            ctx.rec_worker.trigger_trends_refresh()
         # Refresh the copy from baked counts so cached recaps also get accurate wording immediately.
         numbers = next((b for b in story["beats"] if b["kind"] == "numbers"), None)
         if numbers:

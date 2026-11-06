@@ -106,10 +106,13 @@ def test_radio_creation_uses_the_main_account(store,monkeypatch,order):
     ctx = SimpleNamespace(store=store,client_provider=lambda:clients,now_fn=lambda:1,
                           bridge=ConnectedBridge())
     radio = radio_session.PlaylistRadio(ctx)
-    monkeypatch.setattr(radio,'join',lambda:None)
-    song = dict(video_id='song',title='Song',artist='Artist')
+    monkeypatch.setattr(radio,'join',lambda *, cancelled=None:None)
+    store.tracks.upsert_track('song', 'Song', 'Artist', None, 120)
+    song = dict(video_id='song', title='Song', artist='Artist', duration=120,
+                key=store.tracks.identity_key_for_video('song'))
     monkeypatch.setattr(radio_session,'RadioCandidates',lambda *args:SimpleNamespace(
-        by_video={'song':song},seed_offer=lambda n:[song], tuning=radio_session.radio_tuning.DEFAULTS.copy()))
+        by_video={'song':song},seed_offer=lambda n:[song], retain=lambda tracks:None,
+        tuning=radio_session.radio_tuning.DEFAULTS.copy()))
     monkeypatch.setattr(radio.policy,'pick',lambda session:song)
     writes = []
     def create(store,title,tracks,client,now,identity):

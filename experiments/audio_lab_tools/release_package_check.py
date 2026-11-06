@@ -19,7 +19,7 @@ def check(directory, wheel):
     installed = directory / 'installed'
     root = Path(release.__file__).resolve().parents[1]
     names = ['rec/audio_vibe_runtime.py', 'rec/audio_vibe_release.py', 'rec/audio_vibe_cruise.py', 'rec/audio_vibe_model.py',
-             'rec/audio_vibe_external.py', 'rec/vibe_preparation.py', 'rec/musical_character.py',
+             'rec/audio_vibe_external.py', 'rec/audio_vibe_prediction.py', 'rec/vibe_preparation.py', 'rec/musical_character.py',
              'repos/vibe_predictions.py', 'core/audio_vibe_contract.py', 'rec/data/release-vibes.json',
              'rec/data/release-vibes.NOTICE.md', 'rec/data/cruise-vibes.json', 'rec/data/emotify-vibes.json']
     with zipfile.ZipFile(wheel) as archive:
@@ -35,7 +35,7 @@ def check(directory, wheel):
 sys.path.insert(0, sys.argv[1])
 os.environ['YT_PLAYLIST_HOME'] = sys.argv[3]
 from yt_playlist.rec import audio_vibe_release as r, audio_vibe_cruise as c, audio_vibe_model as m
-from yt_playlist.rec import audio_vibe_preview as p
+from yt_playlist.rec import audio_vibe_prediction as p
 for module in (r, c, m):
     os.environ[module.ENVIRONMENT_KEY] = str(module.DEFAULT_PATH)
 os.environ[r.MODE_KEY] = os.environ[c.MODE_KEY] = 'active'

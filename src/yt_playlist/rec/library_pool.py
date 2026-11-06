@@ -1,6 +1,5 @@
 """Library pools built only after clicking an unfilled Home mix."""
 from yt_playlist.rec import home_themes, home_vibe, measurement, mode_surfaces, rec_params, surfaces
-from yt_playlist.util import genre_map
 
 
 def prepare(store, now, parameters):
@@ -9,7 +8,6 @@ def prepare(store, now, parameters):
         # menu. Its consumer must not get stuck waiting on an unrelated cache.
         return mode_surfaces.prepare_bundles(store, now)
     if store._clicked_library_pools:
-        from yt_playlist.core import library_pool_state
         with store.read_snapshot() as snapshot:
             reader = snapshot.store
             tracks = _calculate(reader, now, parameters)
@@ -18,13 +16,12 @@ def prepare(store, now, parameters):
             policy = policies.generation_policy()
             rows, bases = list(policies.rows.values()), list(policies.bases.values())
             surface = 'home_pool:' + parameters['lane']
-            plan = library_pool_state.prepare(reader.conn, surface,
+            plan = reader.recommendations.prepare_clicked_pool(surface,
                 {'parameters': parameters, 'tracks': tracks}, now, policy=policy,
                 input_revision=reader.prepared_content.serial(), pending_policies=rows)
             snapshot.release_reader()
             build = store.recommendations.claim(plan, policies=rows, bases=bases)
-            with store._lock, store.conn.atomic():
-                library_pool_state.parameters(store.conn, build.generation_id, parameters, now)
+            store.recommendations.remember_clicked_pool_parameters(build.generation_id, parameters, now)
             store.recommendations.stage(plan, build)
             return snapshot.publish(lambda: store.recommendations.publish(build, now),
                                     # Staging creates unpublished generation rows.
@@ -76,9 +73,10 @@ def pick(store, now, parameters, exclude_keys=()):
     weights = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
     tracks = home_themes.matching_genres(store, cached["tracks"], include=parameters["include_genres"],
                                         avoid=parameters["avoid_genres"])
+    axes = store.genres.feature_axes(t.get('genre') for t in tracks)
     tracks = [t for t in tracks if t["key"] in owned and t["key"] not in blocked
               and t["artist"] not in muted
-              and weights.get(f"genre:{genre_map.family(t.get('genre'),conn=store.conn)}", 1.0) != 0]
+              and weights.get(f"genre:{axes.get(t.get('genre'), ('', None))[0]}", 1.0) != 0]
     if parameters["lane"] == "temporal":
         cuts = mode_surfaces.bundle_metadata(store).get('year_cuts')
         if not cuts:

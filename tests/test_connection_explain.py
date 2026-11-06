@@ -7,6 +7,7 @@ bridges the two in taste space. The /clusters/explain route stitches them togeth
 mid-edge dot.
 """
 import math
+from tests.enrichment_support import seed_enrichment
 
 import numpy as np
 from fastapi.testclient import TestClient
@@ -35,7 +36,7 @@ def _track(store, title, artist, *, album="", album_browse_id=None, genre="", ye
                               album_browse_id=album_browse_id)
     k = identity_key(title, artist)
     if genre or year:
-        store.tracks.set_track_enrichment(entry,genre,year)
+        seed_enrichment(store, entry, genre, year)
     return k
 
 

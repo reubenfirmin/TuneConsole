@@ -18,7 +18,7 @@ def test_recs_journey_nudges_journey_weight(store):
     store.playlists.mark_generated_playlist('PLG')
     store.playlist_recipes.set_recipe("PLG", {"journey": "energy_arc", "facets": {}, "dj": {"seed": 1}}, 1.0)
 
-    for _ in range(int(rec_params.THEME_THRESHOLD) + 1):
+    for _ in range(int(rec_params.get_param(store, "theme_threshold")) + 1):
         r = c.post("/recs/journey", data={"pid": pid, "dir": 1})
         assert r.status_code == 200
     # #85 the route's now_fn is fixed at 1.0; read at the same `now` so reversion (vs real wall-clock

@@ -1,11 +1,36 @@
-/* Keep TV's iframe connected while server-rendered pages change around it.
+/* Keep a recoverable document while server-rendered pages change around it,
+ * including TV's connected iframe.
  * The Navigation API covers links, forms, scripted redirects, and Back/Forward:
  * https://developer.chrome.com/docs/web-platform/navigation-api
  */
 (() => {
-  if (!window.navigation) return;
-  let scripts = null, stylesheets = null, renderedUrl = location.href, pageBodyClasses = [];
+  let scripts = null, stylesheets = null, renderedUrl = location.href, pageBodyClasses = null;
+  let activePage = null, recovery = null;
+  const writes = new Set();
+  document.addEventListener('htmx:beforeSend', event => {
+    if (!['get', 'head'].includes(event.detail.requestConfig?.verb?.toLowerCase())) writes.add(event.detail.xhr);
+  });
+  document.addEventListener('htmx:afterRequest', event => writes.delete(event.detail.xhr));
   const assetKey = url => new URL(url, location.href).pathname;
+
+  function cancelRecovery() {
+    if (!recovery) return;
+    clearTimeout(recovery.timer);
+    recovery.controller.abort();
+    recovery = null;
+  }
+
+  function recoverPage(url) {
+    // One owner survives repeated failures. A later navigation cancels both
+    // its backoff and its active read, so old destinations cannot reappear.
+    if (recovery && recovery.url !== url) cancelRecovery();
+    const state = recovery ||= {url, attempt: 0, controller: new AbortController()};
+    clearTimeout(state.timer);
+    state.timer = setTimeout(() => showPage({destination: {url},
+      info: {refresh: true, recovery: state}, signal: state.controller.signal}),
+    Math.min(30000, 2000 * 2 ** Math.min(state.attempt++, 4)));
+  }
+  window.addEventListener('pagehide', cancelRecovery);
 
   async function loadAssets(page, signal) {
     scripts ||= new Map([...document.scripts].filter(script => script.src)
@@ -68,7 +93,7 @@
       !!page.querySelector('.tools-btn.active'));
     const search = document.querySelector('.topbar .omni');
     if (search) search.hidden = !page.querySelector('.topbar .omni');
-    pageBodyClasses.forEach(name => document.body.classList.remove(name));
+    (pageBodyClasses || [...document.body.classList]).forEach(name => document.body.classList.remove(name));
     pageBodyClasses = [...page.body.classList];
     pageBodyClasses.forEach(name => document.body.classList.add(name));
     document.body.classList.toggle('app-standalone', !page.querySelector('.topbar'));
@@ -78,18 +103,21 @@
   }
 
   async function showPage(event) {
+    if (event.info?.recovery && writes.size) { recoverPage(event.destination.url); return; }
+    const request = {};
+    activePage = request;
     const previous = renderedUrl;
     let swapped = false;
     const main = document.getElementById('app-page');
-    main.setAttribute('aria-busy', 'true');
+    if (!event.info?.recovery) main.setAttribute('aria-busy', 'true');
     try {
       const response = await fetch(event.destination.url, {
         signal: event.signal, headers: {Accept: 'text/html'},
         ...(event.formData ? {method: 'POST', body: event.formData} : {}),
       });
-      if (!response.ok) throw new Error('Page unavailable');
+      if (!response.ok) throw Object.assign(new Error('Page unavailable'), {httpStatus: response.status});
       if (!response.headers.get('Content-Type')?.includes('text/html'))
-        throw new Error('Unexpected page response');
+        throw Object.assign(new Error('Unexpected page response'), {httpStatus: response.status});
       const page = new DOMParser().parseFromString(await response.text(), 'text/html');
       await loadAssets(page, event.signal);
       let next = page.querySelector('#app-page');
@@ -100,11 +128,18 @@
         next.append(...page.body.childNodes);
       }
       event.signal.throwIfAborted();
-      window.dispatchEvent(new Event('app-page-leaving'));
+      // A quiet refresh can have started before a new save. Let that action
+      // settle on its original controls before reconciling the page again.
+      if (event.info?.recovery && writes.size) { recoverPage(event.destination.url); return; }
+      const destination = new URL(response.redirected ? response.url : event.destination.url, location.href);
+      const current = new URL(previous);
+      const state = event.info?.refresh && !event.formData
+        && destination.pathname === current.pathname && destination.search === current.search ? {} : null;
+      window.dispatchEvent(new CustomEvent('app-page-leaving', {detail: {state}}));
       document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
       updateNavigation(page);
       renderedUrl = response.redirected ? response.url : event.destination.url;
-      if (response.redirected) history.replaceState(history.state, '', renderedUrl);
+      if (response.redirected || event.info?.recovery) history.replaceState(history.state, '', renderedUrl);
       // Dispose page scopes while their full subtree is still intact. HTMX
       // clears descendants before Alpine's removal observer can walk them;
       // teleported panels and page timers would otherwise survive the swap.
@@ -113,7 +148,15 @@
         {swapStyle: 'outerHTML', settleDelay: 0},
         {afterSettleCallback: () => Alpine.nextTick(resolve)}));
       swapped = true;
-      window.dispatchEvent(new Event('app-page-changed'));
+      // A document opened in the library has not mounted Home's persistent
+      // TV player yet. Install it on first entry; later visits retain its
+      // iframe and browsing context outside the replaceable page subtree.
+      const tv = page.querySelector('body > .tv-session');
+      if (tv && !document.querySelector('body > .tv-session')) {
+        document.body.append(document.importNode(tv, true));
+        await Alpine.nextTick();
+      }
+      window.dispatchEvent(new CustomEvent('app-page-changed', {detail: {state}}));
       // The persistent player card also needs to update its Back to source link.
       window.dispatchEvent(new Event('hashchange'));
       // Modules can bind directly to their page DOM, like a deferred module on
@@ -121,7 +164,7 @@
       await loadScripts(page, event.signal, true);
       const toasts = page.querySelector('#toasts');
       if (toasts?.innerHTML.trim()) htmx.swap('#toasts', toasts.innerHTML, {swapStyle: 'beforeend', settleDelay: 0});
-      document.getElementById('navigation-error')?.remove();
+      cancelRecovery();
     } catch (error) {
       if (event.signal.aborted) return;
       if (!swapped) {
@@ -129,31 +172,56 @@
         history.replaceState(history.state, '', previous);
       }
       window.dispatchEvent(new Event('app-page-changed'));
-      document.getElementById('navigation-error')?.remove();
-      const toast = document.createElement('div');
-      toast.id = 'navigation-error'; toast.className = 'toast toast-err'; toast.setAttribute('role', 'alert');
-      toast.textContent = 'Couldn’t open that page. Please try again.';
-      document.getElementById('toasts')?.append(toast);
+      // A failed write is never replayed: reconcile the last usable page.
+      // Ordinary HTTP rejections stay rejected; only transient reads retry.
+      if (event.formData || !error.httpStatus || error.httpStatus >= 500 || error.httpStatus === 429)
+        recoverPage(event.formData ? previous : event.destination.url);
+      else cancelRecovery();
       console.debug('[Navigation] page unavailable', error);
     } finally {
-      if (!event.signal.aborted) document.getElementById('app-page')?.removeAttribute('aria-busy');
+      if (activePage === request) {
+        activePage = null;
+        document.getElementById('app-page')?.removeAttribute('aria-busy');
+      }
     }
   }
 
+  document.addEventListener('DOMContentLoaded', () => {
+    if (!document.querySelector('[data-read-recovery]')) return;
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    window.addEventListener('pagehide', cancel, {once: true});
+    window.navigation?.addEventListener('navigate', cancel, {once: true});
+    showPage({destination: {url: location.href}, signal: controller.signal})
+      .finally(() => {
+        window.removeEventListener('pagehide', cancel);
+        window.navigation?.removeEventListener('navigate', cancel);
+      });
+  });
+
+  window.addEventListener('app-request-failed', event => {
+    // Navigation, JSON controls and background polls own their reads. Only
+    // uncertain fragment writes request page reconciliation here; a failed
+    // status poll must never replace an unrelated form or interaction.
+    if (!event.detail.reconcile || activePage || recovery) return;
+    recoverPage(renderedUrl);
+  });
+  if (!window.navigation) return;
   navigation.addEventListener('navigate', event => {
-    if (!window.tvPlaybackControls?.keepAlive() || !event.canIntercept || event.hashChange
+    if (!document.getElementById('app-page') || !event.canIntercept || event.hashChange
         || event.downloadRequest !== null || event.navigationType === 'reload') return;
     // Existing panels use pushState/replaceState for local filters. Let those
     // update their own DOM; actual document navigation and traversal use fetch.
-    if (event.destination.sameDocument && ['push', 'replace'].includes(event.navigationType)) {
+    if (event.destination.sameDocument && !event.formData && !event.info?.refresh
+        && ['push', 'replace'].includes(event.navigationType)) {
       renderedUrl = event.destination.url;
       return;
     }
+    cancelRecovery();
     event.intercept({handler: () => showPage(event)});
   });
 
   document.addEventListener('htmx:beforeOnLoad', event => {
-    if (!window.tvPlaybackControls?.keepAlive()) return;
     const xhr = event.detail.xhr;
     const refresh = xhr.getResponseHeader('HX-Refresh') === 'true';
     const redirect = xhr.getResponseHeader('HX-Redirect');
@@ -161,6 +229,20 @@
     const url = new URL(redirect || location.href, location.href);
     if (url.origin !== location.origin) return;
     event.preventDefault();
-    navigation.navigate(url.href, {history: refresh ? 'replace' : 'auto'});
+    // Cancelling beforeOnLoad also skips HTMX's response-header events.
+    // Deliver them before navigating so confirmed saves can retire their
+    // launch window and duplicate-save guard when the new page is ready.
+    const trigger = xhr.getResponseHeader('HX-Trigger');
+    if (trigger) {
+      if (trigger.trim().startsWith('{')) {
+        for (const [name, value] of Object.entries(JSON.parse(trigger))) {
+          const detail = value !== null && typeof value === 'object' ? value : {value};
+          htmx.trigger(detail.target || event.detail.elt, name, detail);
+        }
+      } else {
+        for (const name of trigger.split(',')) htmx.trigger(event.detail.elt, name.trim(), []);
+      }
+    }
+    navigation.navigate(url.href, {history: refresh ? 'replace' : 'auto', info: {refresh: true}});
   });
 })();

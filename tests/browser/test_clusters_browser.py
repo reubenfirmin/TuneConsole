@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from playwright.sync_api import expect
 
+from tests.prepared_fixture_support import prepared_template
 from yt_playlist.util.matching import identity_key
 
 
@@ -15,8 +16,7 @@ SONG = "A very long song title that must wrap inside the central cluster without
 DATA = "Alpine.$data(document.querySelector('.cluster-page'))"
 
 
-@pytest.fixture
-def cluster_library(store, live_app):
+def seed_cluster_library(store):
     rows = []
     for a, artist in enumerate(ARTISTS + ["Related Artist"]):
         for i in range(12):
@@ -27,6 +27,22 @@ def cluster_library(store, live_app):
             angle = math.radians(a * 65 + i)
             rows.append((key, np.array([math.cos(angle), math.sin(angle)], dtype=np.float32).tobytes()))
     store.rec_model.replace_rec_vectors(rows)
+
+
+@pytest.fixture(scope='module')
+def cluster_template(_pristine_current_schema):
+    with prepared_template(_pristine_current_schema, seed_cluster_library) as template:
+        yield template
+
+
+@pytest.fixture
+def store(store, cluster_template):
+    cluster_template.restore(store)
+    return store
+
+
+@pytest.fixture
+def cluster_library(store, live_app):
     return live_app
 
 

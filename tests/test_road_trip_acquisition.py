@@ -4,7 +4,7 @@ import pytest
 from yt_playlist.rec import road_trip, road_trip_candidates as candidates
 from yt_playlist.rec.road_trip_state import ROW_FIELDS
 from tests.conftest import FakeClient
-from tests.road_trip_support import _library, _recipe, no_network
+from tests.road_trip_support import _library, _recipe, complete_draft, no_network
 
 # Captured before the autouse no_network fixture stubs it out, for the one test that exercises the
 # real genre -> artists resolution rather than mocking past it.
@@ -151,7 +151,7 @@ def test_passenger_genre_grows_the_seed_artists_neighborhood_and_era(store, monk
     monkeypatch.setattr(candidates, "genre_artists", lambda *a, **kw: pytest.fail("Broad genre lookup"))
     monkeypatch.setattr(candidates, "_genre_songs", lambda *a, **kw: pytest.fail("Broad genre search"))
 
-    state = road_trip.build_draft(store, FakeClient(), _recipe(
+    state = complete_draft(store, FakeClient(), _recipe(
         own_pct=0, artists=["Weezer", "Staind"], genres=["Alternative Rock"]), 1000, seed=7)
 
     assert {c["artist"] for c in state["pool"]} == {"Weezer", "Staind", "Peer A", "Peer B"}
@@ -205,7 +205,7 @@ def test_passenger_sliders_keep_each_seeds_genre_and_repair_old_assignments(stor
     monkeypatch.setattr(candidates, "artist_genre", lambda store, artist: catalog[artist][0])
     monkeypatch.setattr(candidates, "genre_artists", lambda *a, **kw: pytest.fail("Broad genre lookup"))
     monkeypatch.setattr(candidates, "_genre_songs", lambda *a, **kw: pytest.fail("Broad genre search"))
-    state = road_trip.build_draft(store, FakeClient(), _recipe(
+    state = complete_draft(store, FakeClient(), _recipe(
         own_pct=0, artists=seeds, genres=["alt rock", "indie rock"]), 1000, seed=7)
     expected = {"Alternative Rock": ["Weezer", "Staind"], "Indie Rock": [seeds[1]]}
     assert {a["name"]: a["artists"] for a in state["axes"]["theirs"]

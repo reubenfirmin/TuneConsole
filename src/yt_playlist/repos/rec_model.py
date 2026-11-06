@@ -6,12 +6,11 @@ Split out of the former monolithic RecRepo so each rec concern is its own focuse
 import json
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from yt_playlist.repos.base import Repo, synchronized, lookup_read, snapshot_read
-from yt_playlist.core import artists, catalog, collection_recovery, embeddings, policy_documents, taste_axes, taste_control_state
+from yt_playlist.core import artists, catalog, collection_recovery, embeddings, genre_identity, policy_documents, taste_axes, taste_control_state
 from yt_playlist.core.db_revisions import column_group_reads
-from yt_playlist.util import genre_map
 
 # Learned blend weights live in [_WEIGHT_MIN, _WEIGHT_MAX] around the 1.0 prior: the floor stops a run
 # of negative feedback from disabling an axis outright (a 0 weight would never win the for_you fair
@@ -26,6 +25,7 @@ class VectorChanges:
     removed: tuple[str, ...]
     replace: bool = False
     model_version: str | None = None
+    publication: embeddings.Publication | None = None
 
 
 def _reverted(weight, updated_at, now, halflife_d):
@@ -206,14 +206,14 @@ class RecModelRepo(Repo):
                     "SELECT identity_key,genre FROM tracks WHERE genre<>''" + clause +
                     " UNION SELECT identity_key,genre FROM discovered_tracks WHERE genre<>''" + clause,
                     (keys or []) * 2):
-                if (genre_map.family(row["genre"],conn=self.conn) in muted_genres
-                        or genre_map.subgenre(row["genre"],conn=self.conn) in muted_genres):
+                if (genre_identity.family(self.conn, row['genre']) in muted_genres
+                        or genre_identity.resolve(self.conn, row['genre'])[0] in muted_genres):
                     blocked.add(row["identity_key"])
         return blocked
 
     def _record_once(self, surface, item_key, kind, until, now) -> bool:
         """Insert a first-seen feedback row (scope=''), idempotently. Returns True iff newly created,
-        so the caller feeds transient/graduation exactly once. Shared by record_dislike/record_like."""
+        so graduation can feed a recording's facets exactly once."""
         if self.conn.execute(
                 "SELECT 1 FROM rec_feedback WHERE surface=? AND item_key=? AND scope='' AND kind=?",
                 (surface, item_key, kind)).fetchone():
@@ -231,19 +231,6 @@ class RecModelRepo(Repo):
 
         with self.conn:
             return rating_feedback.apply(self.conn, states, dislike_seconds=dislike_seconds)
-
-    @synchronized
-    def record_dislike(self, identity_key, until, now) -> bool:
-        """Persist a thumbs-down as a long global suppression (surface='sync'). Returns True iff newly
-        created. The row feeds transient facets and durable negative vectors; re-sync never
-        refreshes its evidence time or creates permanent genre/era preference changes."""
-        return self._record_once("sync", identity_key, "dislike", until, now)
-
-    @synchronized
-    def clear_dislike(self, identity_key) -> None:
-        """Reconcile an un-disliked track: drop its dislike row (un-suppress)."""
-        self.conn.execute("DELETE FROM rec_feedback WHERE item_key=? AND kind='dislike'", (identity_key,))
-        self.conn.commit()
 
     @synchronized
     def unban(self, identity_key, now) -> None:
@@ -303,28 +290,6 @@ class RecModelRepo(Repo):
     #   'sync':   discovered by the library sync's bulk rated map. YTM reports no like-time, so
     #             created_at is only first-sight time; these must NOT feed the transient model and
     #             graduate into the permanent model only, at the low sync-like weight.
-    @synchronized
-    def record_like(self, identity_key, now, provenance="sync") -> bool:
-        """Persist a like (surface='like', reason=provenance). Returns True iff newly created, so the
-        caller feeds graduation exactly once. Idempotent on re-sync. If the like already exists with
-        'sync' provenance and is re-observed as an 'action', the row is UPGRADED to action provenance
-        (never downgraded) and False is still returned: an upgrade is not a new like."""
-        row = self.conn.execute(
-            "SELECT reason FROM rec_feedback WHERE surface='like' AND item_key=? AND scope='' "
-            "AND kind='like'", (identity_key,)).fetchone()
-        if row:
-            if provenance == "action" and row["reason"] != "action":
-                self.conn.execute(
-                    "UPDATE rec_feedback SET reason='action' WHERE surface='like' AND item_key=? "
-                    "AND scope='' AND kind='like'", (identity_key,))
-                self.conn.commit()
-            return False
-        self.conn.execute(
-            "INSERT INTO rec_feedback(surface,item_key,kind,reason,scope,until,created_at) "
-            "VALUES ('like',?,'like',?,'',NULL,?)", (identity_key, provenance, now))
-        self.conn.commit()
-        return True
-
     @snapshot_read
     def recent_liked_keys(self, limit=None) -> list:
         """ALL liked identity_keys regardless of provenance, most-recent (created_at) first. For
@@ -361,9 +326,9 @@ class RecModelRepo(Repo):
         signals stamp independently under rec_feedback's UNIQUE(surface, item_key, scope)).
         Invariant: a like/dislike may graduate its facets at most once per identity_key, ever. The
         stamp lives in rec_feedback but is intentionally independent of the like/dislike row
-        lifecycle: clear_like/clear_dislike delete only their own kind, so a likeStatus flap (or a
+        lifecycle: rating projection deletes only rating rows, so a likeStatus flap (or a
         genuine unlike-then-relike) can never re-arm graduation. A provenance upgrade does not
-        re-graduate either (record_like returns False on upgrade). Returns True iff this key has
+        re-graduate either. Returns True iff this key has
         never graduated for this signal."""
         return self._record_once(kind, identity_key, kind, None, now)
 
@@ -375,12 +340,6 @@ class RecModelRepo(Repo):
             "SELECT item_key, created_at FROM rec_feedback WHERE kind='dislike' "
             "ORDER BY created_at DESC").fetchall()
         return [(r["item_key"], float(r["created_at"])) for r in rows]
-
-    @synchronized
-    def clear_like(self, identity_key) -> None:
-        """Reconcile an un-liked track: drop its like row."""
-        self.conn.execute("DELETE FROM rec_feedback WHERE item_key=? AND kind='like'", (identity_key,))
-        self.conn.commit()
 
     # --- Standing slider leans (rec_lean): non-decaying transient multipliers, centered at 1.0 ---
     @synchronized
@@ -517,6 +476,10 @@ class RecModelRepo(Repo):
         self.conn.commit()
 
     # --- taste-embedding vectors ---
+    @lookup_read
+    def collaborative_basis(self):
+        return embeddings.head(self.conn, 'rec_vectors')
+
     @synchronized
     def next_feedback_expiry(self, now):
         row = self.conn.execute('SELECT MIN(until) FROM rec_feedback WHERE until>?', (now,)).fetchone()
@@ -570,7 +533,18 @@ class RecModelRepo(Repo):
             if upserts or current:
                 changes[table] = VectorChanges(tuple(upserts), tuple(current),
                                               model_version=version if head is None else None)
-        return changes
+        return self.prepare_training_deltas(changes)
+
+    @synchronized
+    def prepare_training_deltas(self, changes):
+        """Materialize a bounded incremental publication on its pinned reader."""
+        if not getattr(self._store, '_read_only', False):
+            raise RuntimeError('Training changes require a read snapshot')
+        with column_group_reads(self._store, 'recordings', 'identity'):
+            return {table: replace(delta, publication=embeddings.prepare(
+                self.conn, table, delta.upserts, delta.removed,
+                replace=delta.replace, model_version=delta.model_version))
+                for table, delta in changes.items()}
 
     def _embedding_settings(self, overrides=None):
         values = {key: self._store.settings.get_setting(key) for key in (
@@ -604,8 +578,13 @@ class RecModelRepo(Repo):
         for table in changes:
             embeddings.descriptor(table)
         for table, delta in changes.items():
-            embeddings.publish(self.conn, table, delta.upserts, delta.removed,
-                               replace=delta.replace, model_version=delta.model_version)
+            if delta.publication is None:
+                embeddings.publish(self.conn, table, delta.upserts, delta.removed,
+                                   replace=delta.replace, model_version=delta.model_version)
+            else:
+                if delta.publication.name != table:
+                    raise ValueError('Training publication belongs to another space')
+                embeddings.publish_prepared(self.conn, delta.publication)
 
     @synchronized
     def replace_rec_vectors(self, rows) -> None:

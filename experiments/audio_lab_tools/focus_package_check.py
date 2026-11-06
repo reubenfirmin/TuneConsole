@@ -25,7 +25,7 @@ def check(directory, wheel):
 
 def check_installed(directory, wheel, installed):
     root = Path(focus.__file__).resolve().parents[1]
-    names = ['rec/audio_vibe_runtime.py', 'rec/audio_vibe_model.py', 'rec/audio_vibe_external.py', 'rec/audio_vibe_preview.py',
+    names = ['rec/audio_vibe_runtime.py', 'rec/audio_vibe_model.py', 'rec/audio_vibe_external.py', 'rec/audio_vibe_prediction.py',
              'rec/vibe_preparation.py', 'rec/musical_character.py', 'repos/vibe_predictions.py',
              'core/audio_vibe_contract.py', 'rec/data/emotify-vibes.json']
     for name in ('cruise', 'release', 'relax', 'uplift', 'energize', 'focus'):
@@ -54,7 +54,7 @@ from yt_playlist.core import features
 features.LOCAL_ENV = features.LOCAL_ENV.with_name('absent-focus-check.env')
 from yt_playlist.rec import audio_vibe_focus as f, audio_vibe_energize as n, audio_vibe_uplift as u, audio_vibe_relax as r
 from yt_playlist.rec import audio_vibe_release as e, audio_vibe_cruise as c, audio_vibe_model as m
-from yt_playlist.rec import audio_vibe_preview as p
+from yt_playlist.rec import audio_vibe_prediction as p
 for module in (f, n, u, r, e, c, m):
     os.environ.pop(module.ENVIRONMENT_KEY, None)
 for module in (f, n, u, r, e, c):

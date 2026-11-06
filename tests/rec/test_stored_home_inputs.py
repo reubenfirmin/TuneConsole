@@ -13,6 +13,7 @@ from yt_playlist.rec import album_choices, home_prepared, home_themes, rec_param
 from yt_playlist.repos import recommendation_publication as publication
 from yt_playlist.repos.rec_proposals import RecProposalsRepo
 from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
+from yt_playlist.repos.genres import GenreRepo
 
 
 @pytest.fixture
@@ -68,14 +69,6 @@ def test_unavailable_whole_page_still_advances_to_later_metadata(home):
     assert second['tracks'][0]['key'] == 'fresh-128'
 
 
-@pytest.mark.parametrize('options', [{'limit': 0}, {'limit': 513}, {'limit': True}, {'after': -1},
-                                   {'after': True}, {'mode_key': 1}])
-def test_metadata_page_rejects_unbounded_or_ambiguous_inputs(home, options):
-    store, _, _ = home
-    with pytest.raises(ValueError, match='bounded recommendation metadata'):
-        store.recommendations.recording_metadata_page('home', **options)
-
-
 def test_genre_options_keep_rare_tail_without_duplicate_mode_votes(home, monkeypatch):
     store, generation, _ = home
     forbid_bundle_and_files(monkeypatch)
@@ -102,12 +95,12 @@ def test_genre_options_resolve_current_metadata_after_preparation(home, monkeypa
 
 def test_genre_options_resolve_each_distinct_label_once_across_metadata_pages(home, monkeypatch):
     store, _, _ = home
-    original = home_themes.genre_map.family
+    original = GenreRepo.feature_axes
     labels = []
-    def family(label, **kwargs):
-        labels.append(label)
-        return original(label, **kwargs)
-    monkeypatch.setattr(home_themes.genre_map, 'family', family)
+    def axes(self, requested):
+        labels.extend(requested)
+        return original(self, requested)
+    monkeypatch.setattr(GenreRepo, 'feature_axes', axes)
     assert home_themes.genre_options(store, genre_plays={})
     assert len(labels) == len(set(labels)) == 2
 

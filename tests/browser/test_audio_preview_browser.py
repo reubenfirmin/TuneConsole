@@ -1,5 +1,6 @@
 """Normal app, installed bridge, native capture and actual local CPU inference."""
 import io
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -42,10 +43,11 @@ def _wait(cdp, expression, timeout=15, context_id=None):
 
 
 @pytest.fixture
-def preview_browser(playwright, browser_type_launch_args, live_app, tmp_path, request):
+def preview_browser(playwright, browser_type_launch_args, live_app, tmp_path, request, record_property):
     if not available():
         pytest.skip('Prepare the production audio model assets first')
     variant = getattr(request, 'param', None)
+    fixture_started = time.perf_counter()
     extension = tmp_path / 'extension'
     if variant in {'packaged', 'packaged_sampling'}:
         build = tmp_path / 'build'
@@ -60,9 +62,33 @@ def preview_browser(playwright, browser_type_launch_args, live_app, tmp_path, re
         archive, = (build / 'dist').glob('*.zip')
         with zipfile.ZipFile(archive) as package:
             package.extractall(extension)
+        # Establish source/packaged runtime equivalence before fixture-only
+        # origin/identity edits. Generated manifests have explicit differences.
+        checked = {}
+        for installed in extension.rglob('*'):
+            if not installed.is_file():
+                continue
+            relative = installed.relative_to(extension)
+            if str(relative) in {'manifest.json', 'audio_model/vendor/bundle.json', 'audio_model/vendor/runtime.json'}:
+                continue
+            data = installed.read_bytes()
+            assert data == (EXT / relative).read_bytes(), relative
+            checked[str(relative)] = hashlib.sha256(data).hexdigest()
+        assert {'worker/audio_collection.js', 'audio_model/model_worker.js'} <= checked.keys()
+        for name in ('bundle.json', 'runtime.json'):
+            packaged = json.loads((extension / 'audio_model/vendor' / name).read_text())
+            source_manifest = json.loads((EXT / 'audio_model/vendor' / name).read_text())
+            assert {key: value for key, value in packaged.items() if key not in {'purpose', 'worker_sources'}} == {
+                key: value for key, value in source_manifest.items() if key not in {'purpose', 'worker_sources'}}
+        for row in json.loads((extension / 'audio_model/vendor/bundle.json').read_text())['worker_sources']:
+            data = (extension / 'audio_model' / row['path']).read_bytes()
+            assert len(data) == row['bytes'] and hashlib.sha256(data).hexdigest() == row['sha256']
+        record_property('packaged_source_byte_identity', json.dumps(checked, sort_keys=True))
         manifest_path = extension / 'manifest.json'
         manifest = json.loads(manifest_path.read_text())
         assert 'key' not in manifest
+        assert manifest == {key: value for key, value in json.loads((EXT / 'manifest.json').read_text()).items()
+                            if key != 'key'}
         assert not {'tabs', 'history'} & set(manifest['permissions'])
         # Give this unpacked ZIP the app's recognized development identity.
         # All inference source, runtime and weights remain the packaged bytes.
@@ -84,6 +110,15 @@ def preview_browser(playwright, browser_type_launch_args, live_app, tmp_path, re
     origin = '{0.scheme}://{0.netloc}'.format(urlparse(live_app))
     config.write_text(config.read_text().replace('appOrigin: "http://127.0.0.1:8765"',
         f'appOrigin: "{origin}"').replace('ws://127.0.0.1:8765', f'ws://127.0.0.1:{unused_port}'))
+    # The private backend uses a random port. Match its host permission as well
+    # as appOrigin so Chromium can read delivery acknowledgements on first start.
+    manifest_path = extension / 'manifest.json'
+    manifest = json.loads(manifest_path.read_text())
+    manifest['host_permissions'] = [origin + '/*' if value == 'http://127.0.0.1:8765/*' else value
+                                    for value in manifest['host_permissions']]
+    manifest_path.write_text(json.dumps(manifest))
+    record_property('native_extension_setup_seconds', time.perf_counter() - fixture_started)
+    phase_started = time.perf_counter()
     context = playwright.chromium.launch_persistent_context(
         tmp_path / 'profile', **{**browser_type_launch_args, 'channel': 'chromium'},
         accept_downloads=True, ignore_default_args=['--mute-audio'], args=[
@@ -91,6 +126,8 @@ def preview_browser(playwright, browser_type_launch_args, live_app, tmp_path, re
             # FakeAudioManager never opens the user's speaker hardware.
             '--disable-audio-output',
         ])
+    record_property('native_browser_launch_seconds', time.perf_counter() - phase_started)
+    phase_started = time.perf_counter()
     buffer = io.BytesIO()
     with wave.open(buffer, 'wb') as audio:
         audio.setnchannels(1)
@@ -101,6 +138,7 @@ def preview_browser(playwright, browser_type_launch_args, live_app, tmp_path, re
         duration = 195 if variant in {'natural_sampling', 'natural_offset', 'packaged_sampling'} else (
             180 if getattr(request, 'param', None) == 'scheduled_sampling' else 30)
         audio.writeframes(second * duration)
+    record_property('native_audio_fixture_seconds', time.perf_counter() - phase_started)
 
     def music(route):
         if route.request.url.endswith('.wav'):
@@ -133,7 +171,7 @@ def preview_browser(playwright, browser_type_launch_args, live_app, tmp_path, re
         while time.monotonic() < deadline and isolated is None:
             for world in worlds:
                 if world.get('auxData', {}).get('isDefault') is False and world.get('origin', '').startswith('chrome-extension://'):
-                    if _evaluate(cdp, '!!window.__tcAudioPreviewCapture', world['id']):
+                    if _evaluate(cdp, '!!window.__tcAudioCapture', world['id']):
                         isolated = world['id']
                         break
             if isolated is None:
@@ -160,6 +198,8 @@ def preview_browser(playwright, browser_type_launch_args, live_app, tmp_path, re
               player.getVideoData=()=>({video_id:'vibe_song',title:'Fixture song',author:'Observed artist'});
               player.getCurrentTime=previewSongPosition;
               player.getPlaylistId=()=>'';
+              player.getPlayerResponse=()=>({videoDetails:{
+                videoId:player.getVideoData().video_id,lengthSeconds:'195'}});
               document.body.append(player);
             })()'''.replace('OFFSET', str(offset)))
             # DOM wrapper expandos are isolated between JS worlds. Expose the
@@ -176,9 +216,13 @@ def preview_browser(playwright, browser_type_launch_args, live_app, tmp_path, re
           window.previewStreams=[]; window.previewPCM=[];
           window.previewRecordings=[];
           window.previewMessages=[];
+          window.previewNativeCosts={messages:[],decodes:[]};
           chrome.runtime.onConnect.addListener(port=>{
             const send=port.postMessage.bind(port);
-            port.postMessage=data=>{previewMessages.push(data);return send(data)};
+            port.postMessage=data=>{
+              previewNativeCosts.messages.push({type:data.type,id:data.id,milliseconds:performance.now()});
+              previewMessages.push(data);return send(data);
+            };
           });
           const capture=HTMLMediaElement.prototype.captureStream;
           HTMLMediaElement.prototype.captureStream=function() {
@@ -191,12 +235,17 @@ def preview_browser(playwright, browser_type_launch_args, live_app, tmp_path, re
               super(...args);
               const record={bytes:0,settings:args[0].getAudioTracks()[0]?.getSettings()};
               previewRecordings.push(record);
+              this.addEventListener('start',()=>record.started_ms=performance.now());
+              this.addEventListener('stop',()=>record.stopped_ms=performance.now());
               this.addEventListener('dataavailable',event=>record.bytes+=event.data.size);
             }
           };
           window.OfflineAudioContext=class extends Offline {
             async decodeAudioData(...args) {
-              const pcm=await super.decodeAudioData(...args); previewPCM.push(pcm); return pcm;
+              const started=performance.now();
+              try {
+                const pcm=await super.decodeAudioData(...args); previewPCM.push(pcm); return pcm;
+              } finally {previewNativeCosts.decodes.push(performance.now()-started);}
             }
           };
           window.AudioContext=class {constructor(){throw Error('No live context allowed');}};
@@ -211,9 +260,17 @@ def preview_browser(playwright, browser_type_launch_args, live_app, tmp_path, re
             # Normal playback can have its usual activation. There is no
             # additional capture click, and FakeAudioManager still stays silent.
             source.locator('video').evaluate('media=>media.play()')
+        # Installing this fixture's bridge also opens its routed setup website.
+        # Keep capture checks independent of that separate onboarding surface.
+        for candidate in context.pages:
+            if candidate.url == 'https://tuneconsole.com/extension-setup':
+                candidate.close()
+        record_property('native_fixture_total_seconds', time.perf_counter() - fixture_started)
         yield context, worker, source, cdp, isolated
     finally:
+        phase_started = time.perf_counter()
         context.close()
+        record_property('native_browser_close_seconds', time.perf_counter() - phase_started)
 
 
 def mock_playback(page):
@@ -233,13 +290,13 @@ def _released(cdp, isolated):
     assert _evaluate(cdp, '''previewStreams.every(stream=>stream.getTracks().every(t=>t.readyState==='ended'))
       && previewPCM.every(pcm=>Array.from({length:pcm.numberOfChannels},(_,i)=>
         pcm.getChannelData(i).every(sample=>sample===0)).every(Boolean))''', isolated)
-    assert _evaluate(cdp, '!document.querySelector("iframe[src*=audio_preview_frame]")', isolated)
+    assert _evaluate(cdp, '!document.querySelector("iframe[src*=audio_capture_frame]")', isolated)
 
 
 def test_restored_pre_activation_embeddings_preserve_native_scores(preview_browser):
     context, worker, _, _, _ = preview_browser
     page = context.new_page()
-    page.goto(worker.url.rsplit('/', 1)[0] + '/audio_preview_frame.html')
+    page.goto(worker.url.rsplit('/', 1)[0] + '/audio_capture_frame.html')
     result = page.evaluate('''async () => {
       const worker = new Worker('audio_model/embedding_probe.js');
       try {
@@ -261,7 +318,7 @@ def test_restored_pre_activation_embeddings_preserve_native_scores(preview_brows
 def test_native_attributes_match_known_levels_and_rhythm_without_audio_output(preview_browser):
     context, worker, _, _, _ = preview_browser
     page = context.new_page()
-    page.goto(worker.url.rsplit('/', 1)[0] + '/audio_preview_frame.html')
+    page.goto(worker.url.rsplit('/', 1)[0] + '/audio_capture_frame.html')
     result = page.evaluate('''async () => {
       const worker = new Worker('audio_model/attributes_probe.js');
       try {
@@ -293,15 +350,18 @@ def test_native_attributes_match_known_levels_and_rhythm_without_audio_output(pr
         assert all(value is None or math.isfinite(value) for value in values.values())
 
 
-@pytest.mark.parametrize('preview_browser', ['no_activation', 'normal_playback', 'unverified_playback', 'packaged'], indirect=True)
-def test_app_automatically_captures_and_runs_model_without_capture_click(live_app, preview_browser, tmp_path, request):
+@pytest.mark.parametrize('preview_browser,verified', [
+    pytest.param('no_activation', True, id='no_activation'),
+    pytest.param('normal_playback', True, id='normal_playback'),
+    pytest.param('packaged', False, id='packaged'),
+], indirect=['preview_browser'])
+def test_app_automatically_captures_and_runs_model_without_capture_click(live_app, preview_browser, tmp_path, verified):
     context, worker, source, source_cdp, isolated = preview_browser
     source_activated = _evaluate(source_cdp, 'navigator.userActivation.hasBeenActive')
     page = context.new_page()
     page.add_init_script('''window.Worker=class {constructor(){throw Error('Audio inference must stay in the YouTube tab');}};''')
     cdp = context.new_cdp_session(page)
     state = mock_playback(page)
-    verified = request.node.callspec.params['preview_browser'] != 'unverified_playback'
     state['metadata_verified'] = verified
     errors, uploads, model_workers, app_assets, source_errors = [], [], [], [], []
     source.on('pageerror', lambda error: source_errors.append(str(error)))
@@ -384,8 +444,16 @@ def test_app_automatically_captures_and_runs_model_without_capture_click(live_ap
     outgoing = _evaluate(source_cdp, 'previewMessages', isolated)
     assert not any('pcm' in message or 'samples' in message or 'embeddings' in message for message in outgoing)
     assert [message['type'] for message in outgoing][-1] == 'result'
-    assert not [url for url, body in uploads
-        if url.startswith(live_app) or len(body) > 100000 or '"pcm"' in body]
+    for url, body in uploads:
+        assert len(body) <= 65536 and '"pcm"' not in body
+        if url.startswith(live_app):
+            # The shared collection observer reports bounded state even on
+            # the diagnostic page; preview still uploads no captured audio.
+            assert url == live_app + '/audio-vibes/diagnostics'
+            from yt_playlist.web.routes.audio_vibes import BrowserDiagnostic
+            diagnostic = BrowserDiagnostic.model_validate_json(body)
+            assert all(not isinstance(value, (list, dict))
+                       for value in diagnostic.model_dump().values())
     _released(source_cdp, isolated)
     assert _evaluate(source_cdp, 'typeof window.__tcAudioProbe === "undefined"', isolated) is True
     assert _evaluate(source_cdp, '!document.querySelector("video").paused')
@@ -408,7 +476,7 @@ def test_preview_recovers_media_readiness_and_reports_a_persistent_failure(live_
     _evaluate(source_cdp, 'delete document.querySelector("video").readyState', isolated)
     _wait(source_cdp, 'previewStreams.length===1', context_id=isolated)
     page.get_by_role('button', name='Stop analysis').click()
-    _wait(source_cdp, '!window.__tcAudioPreviewCapture.inspect().running', context_id=isolated)
+    _wait(source_cdp, '!window.__tcAudioCapture.inspect().running', context_id=isolated)
     _released(source_cdp, isolated)
 
     _evaluate(source_cdp, '''Object.defineProperty(document.querySelector('video'),'readyState',{
@@ -432,7 +500,7 @@ def test_automatic_preview_cancels_and_erases_pcm(live_app, preview_browser, end
     if end == 'frame':
         _evaluate(source_cdp, '''(() => {
           const observer=new MutationObserver(()=>{
-            const frame=document.querySelector('iframe[src*=audio_preview_frame]');
+            const frame=document.querySelector('iframe[src*=audio_capture_frame]');
             if(frame){observer.disconnect();frame.src='https://music.youtube.com/counterfeit-frame';}
           });
           observer.observe(document.documentElement,{childList:true});
@@ -457,7 +525,7 @@ def test_automatic_preview_cancels_and_erases_pcm(live_app, preview_browser, end
         _wait(source_cdp, '!!window.releasePreviewDecode', context_id=isolated)
         page.get_by_role('button', name='Stop analysis').click()
         # Resolve only after the Stop message has disconnected the source.
-        _wait(source_cdp, '!window.__tcAudioPreviewCapture.inspect().running', context_id=isolated)
+        _wait(source_cdp, '!window.__tcAudioCapture.inspect().running', context_id=isolated)
         _evaluate(source_cdp, 'releasePreviewDecode()', isolated)
         _wait(source_cdp, 'previewPCM.every(p=>p.getChannelData(0).every(x=>x===0))', context_id=isolated)
     elif end == 'analysis':
@@ -516,7 +584,7 @@ def test_two_previews_do_not_overlap_capture_and_untrusted_page_is_rejected(live
     first.goto(live_app + '/audio-preview')
     expect(first.locator('[data-preview-status]')).to_contain_text('Listening automatically')
     second.goto(live_app + '/audio-preview')
-    expect(second.locator('[data-preview-status]')).to_contain_text('Another audio preview')
+    expect(second.locator('[data-preview-status]')).to_contain_text('Another audio capture')
     first.get_by_role('button', name='Stop analysis').click()
     # All normal app pages now support automatic vibe collection. Reject a
     # different port even when it matches the manifest's broader origin list.

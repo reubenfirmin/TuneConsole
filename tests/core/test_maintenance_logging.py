@@ -59,27 +59,55 @@ def test_publication_summaries_are_bounded_and_keep_phase_reason_and_progress_co
                for r in caplog.records) == (publication_threshold == 0.)
 
 
-def test_home_budget_is_counted_once_and_keeps_last_good_collections(store, monkeypatch, caplog):
+@pytest.mark.parametrize('report_all_publications', [False, True], ids=['normal-publications', 'all-publications'])
+def test_home_budget_is_counted_once_and_keeps_last_good_collections(
+        store, monkeypatch, caplog, report_all_publications):
     clock = [0.0]
     store.maintenance_diagnostics = work_diagnostics.MaintenanceDiagnostics(clock=lambda: clock[0])
     store.rec_proposals.put_proposals('home_prepared', {'last-good': True}, 0)
+    exhausted_calls = []
 
-    def exhausted(*args):
+    def exhausted(source, now):
+        assert source is store
+        exhausted_calls.append(now)
         raise WorkBudgetExceeded('budget exhausted')
 
     monkeypatch.setattr(home_prepared, '_prepare', exhausted)
     tasks = ServingTasks(SimpleNamespace(store=store, now_fn=lambda: 1000, client_provider=lambda: {},
         logger=logging.getLogger('test')), lambda name, target, *args, **kwargs: target(*args, **kwargs))
+    if report_all_publications:
+        # Exercise the collision even on a fast machine, keeping actual
+        # publication diagnostics visible rather than suppressing them.
+        monkeypatch.setattr(db_diagnostics, 'SLOW_LOCK_SECONDS', 0.)
     caplog.set_level(logging.INFO)
+
+    def summaries():
+        return [record for record in caplog.records if record.name == work_diagnostics.logger.name
+                and record.getMessage().startswith('Maintenance summary:')]
+
     for attempt in range(30):
         clock[0] = attempt
-        assert tasks.home()
-    assert not caplog.records
+        if attempt == 0:
+            assert tasks.home()  # Keep the real worker-pipeline integration.
+        else:
+            # Further retries count Home's actual budget handling without
+            # repeatedly preparing unrelated worker stages.
+            assert home_prepared.prepare(store, 1000) is None
+    assert exhausted_calls == [1000] * 30
+    assert not summaries()
+    if report_all_publications:
+        assert any(record.name == db_diagnostics.logger.name and record.levelno == logging.INFO
+                   and record.getMessage().startswith('Maintenance publication:')
+                   for record in caplog.records)
     clock[0] = 60
     store.maintenance_diagnostics.flush()
-    assert len(caplog.records) == 1
-    assert caplog.records[0].args[2] == 30
-    assert caplog.records[0].args[5] == {'rec: Home collections': {'time_budget': 30}}
+    records = summaries()
+    assert len(records) == 1
+    elapsed, _published, deferred, failed, phases, reasons, waiting = records[0].args
+    assert (elapsed, deferred, failed) == (60, 30, 0)
+    assert phases['rec: Home collections'] == {'deferred': 30}
+    assert reasons == {'rec: Home collections': {'time_budget': 30}}
+    assert waiting['rec: Home collections'] == 60
     assert store.rec_proposals.get_proposals('home_prepared') == {'last-good': True}
 
 

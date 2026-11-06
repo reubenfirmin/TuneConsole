@@ -7,6 +7,7 @@ import pytest
 from tests.core.test_predecessor_writes import installed
 from yt_playlist.core import genre_identity
 from yt_playlist.rec import home_themes, transient
+from yt_playlist.repos.rec_query import RecQueryRepo
 from yt_playlist.util.matching import identity_key
 
 
@@ -20,31 +21,59 @@ def test_startup_genres_read_committed_identity_while_writer_is_busy(installed, 
     store.genres.set_genre_family('synth pop', 'jazz')
     key = identity_key('Owned genre', 'Artist')
     track = {'key': key, 'video_id': 'genre-concurrency', 'genre': 'Renamed Synth'}
-    original = genre_identity.resolve
-    reads = []
+    original = genre_identity.feature_axes
+    reads, metadata_reads, statements = [], [], []
+    locked, release = threading.Event(), threading.Event()
 
     def owned_read(conn, label):
         assert conn is not store.conn or store._lock.held_by_current_thread, 'Unowned serving connection'
+        assert locked.is_set() and not release.is_set() and not writer.done()
         reads.append(conn)
-        return original(conn, label)
+        conn.set_trace_callback(statements.append)
+        try:
+            result = original(conn, label)
+        finally:
+            conn.set_trace_callback(None)
+        expected_label = 'renamed synth' if consumer == 'home_options' else 'Renamed Synth'
+        assert result == {expected_label: ('jazz', 'synth pop')}
+        return result
 
-    monkeypatch.setattr(genre_identity, 'resolve', owned_read)
-    locked, release = threading.Event(), threading.Event()
+    monkeypatch.setattr(genre_identity, 'feature_axes', owned_read)
+    if consumer == 'facets':
+        for method in ('track_genres', 'track_decades', 'track_artists'):
+            metadata = getattr(RecQueryRepo, method)
+
+            def owned_metadata(repo, keys, _metadata=metadata):
+                assert repo.conn is not store.conn
+                assert locked.is_set() and not release.is_set() and not writer.done()
+                metadata_reads.append(repo.conn)
+                return _metadata(repo, keys)
+
+            monkeypatch.setattr(RecQueryRepo, method, owned_metadata)
 
     def sync():
         with store._lock, store.conn:
             store.conn.execute("INSERT INTO settings VALUES ('concurrent-sync','pending')")
+            store.conn.execute("UPDATE genre_catalog SET family_key='pop' WHERE key='synth pop'")
             locked.set()
             assert release.wait(10)
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         writer = pool.submit(sync)
-        assert locked.wait(2)
         try:
+            if not locked.wait(2):
+                writer.result(1)
+                pytest.fail('Concurrent writer did not acquire the serving connection')
+            with pytest.raises(AssertionError, match='Unowned serving connection'):
+                owned_read(store.conn, ['Renamed Synth'])
+            assert not reads
             if consumer == 'facets':
                 facets = transient.facets_for(store, [key])
                 assert facets['genre:jazz'] == [key]
                 assert facets['genre:synth pop'] == [key]
+                assert len(metadata_reads) == 3
+                assert all(conn is reads[0] for conn in metadata_reads)
+                assert any(sql.startswith('WITH wanted') and 'genre_catalog' in sql for sql in statements)
             elif consumer == 'home_filter':
                 assert home_themes.matching_genres(store, [track], include=['jazz']) == [track]
                 assert home_themes.matching_genres(store, [track], avoid=['jazz']) == []
@@ -56,7 +85,10 @@ def test_startup_genres_read_committed_identity_while_writer_is_busy(installed, 
             release.set()
         writer.result(2)
     assert reads and all(conn is not store.conn for conn in reads)
+    assert any(sql.startswith('WITH wanted') and 'genre_catalog' in sql for sql in statements)
     assert store.settings.get_setting('concurrent-sync') == 'pending'
+    with store._lock:
+        assert store.conn.execute("SELECT family_key FROM genre_catalog WHERE key='synth pop'").fetchone()[0] == 'pop'
 
 
 @pytest.mark.parametrize('installed', [93, 107], indirect=True)

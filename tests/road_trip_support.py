@@ -1,7 +1,18 @@
-"""Road Trip candidate builders and an explicitly imported network-isolation fixture."""
+"""Road Trip fixture construction and explicitly imported network isolation."""
 import pytest
 
-from yt_playlist.rec import road_trip_candidates as candidates
+from yt_playlist.rec import road_trip, road_trip_candidates as candidates
+
+
+def complete_draft(store, client, recipe, now, seed, previous=None):
+    """Drive the incremental domain operations for completed-mix assertions."""
+    state = road_trip.start_draft(store, recipe, now, seed, previous)
+    while state['pending']:
+        road_trip.add_other_input(state, store, client, state['pending'].pop(0))
+    road_trip.fill_own_facts(state, store, now)
+    return road_trip.finish_draft(state, store, now)
+
+
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
     """Every outbound lookup their side makes, stubbed: Deezer facts, the Last.fm artist genre, and

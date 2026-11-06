@@ -1,4 +1,6 @@
 import re
+from copy import deepcopy
+import logging
 from html import escape
 from html.parser import HTMLParser
 from urllib.parse import parse_qs
@@ -7,15 +9,14 @@ import pytest
 from playwright.sync_api import expect
 
 from tests.home_fixture_support import browser_store as store, publish_menu, returning_listener
-from tests.test_home_vibe import seed_sounds
 from tests.test_mode_cards_route import prepare_home
 from tests.visual_support import capture
-from yt_playlist.rec import home_vibe, mix_tuning
+from yt_playlist.rec import home_cards, home_prepared, home_vibe, mix_tuning
 from yt_playlist.util.matching import identity_key
 
 
 def prepare(store):
-    seed_sounds(store)
+    """Finish a private measured-sound input with this app's listening history."""
     # These controls operate after the listener has earned Vibes access.
     returning_listener(store, 'vibes', now=1)
     store.settings.set_setting("last_sync_at", "1")
@@ -32,6 +33,23 @@ def prepare(store):
     assert store.recommendations.candidate_page('fresh', 'all', 'fresh', limit=1)['tracks']
 
 
+@pytest.fixture(autouse=True)
+def finish_vibe_routes(page):
+    yield
+    # A root-page route.fetch can still be completing after the last assertion.
+    # Drain original handlers before context teardown or the next case inherits
+    # their TargetClosedError. Waiting also preserves failures in those handlers.
+    page.unroute_all(behavior='wait')
+
+
+@pytest.fixture
+def prepared_vibe_app(request, measured_browser_home_store):
+    # Restore before live_app creates its account, playlist and application
+    # settings. A later SQL restore would discard that live app's state.
+    base = request.getfixturevalue('live_app')
+    return base
+
+
 def prepare_controls(store):
     """Render a complete board and dense controls without fitting/preparing music."""
     returning_listener(store, 'vibes', now=1)
@@ -44,6 +62,31 @@ def prepare_controls(store):
     store.rec_proposals.put_proposals('home_prepared', payload, 1)
     store.settings.set_setting('last_sync_at', '1')
     store.settings.set_setting('onboard_dismissed', '1')
+
+
+@pytest.fixture
+def published_vibe_controls(store, monkeypatch, unlocked_home_controls):
+    """Exercise post-unlock UI consumers with controlled, already prepared music.
+
+    The persistence/reset and genre-focus journeys below retain real ranking.
+    These cases test browser lifecycle, not numerical selection or readiness.
+    Routes, settings, cache publication, templates and HTMX still run normally.
+    """
+    prepare_controls(store)
+    service = home_cards.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__))
+    prepared = home_prepared.cards(store, store.rec_proposals.get_proposals('home_prepared'),
+                                   1, service, record=False)
+    assert len(prepared.protos) == 4 and not prepared.preparing
+
+    def ready_cards(service, request):
+        result = deepcopy(prepared)
+        result.epoch = home_cards._epoch(service.store, 'cards')
+        result.vibe = home_vibe.current(service.store, request.now)
+        for proto in result.protos:
+            proto['recipe']['vibe'] = result.vibe
+        return result
+
+    monkeypatch.setattr(home_cards.HomeCards, 'cards', ready_cards)
 
 
 def readiness_fragment(html, *, preparing, notice='', vibe=None):
@@ -75,8 +118,8 @@ def readiness_fragment(html, *, preparing, notice='', vibe=None):
 
 
 @pytest.mark.parametrize('activation', ['pointer', 'keyboard'])
-def test_default_vibe_closes_without_dimming_or_marking_an_adjustment(live_app, store, page, activation):
-    prepare(store)
+def test_default_vibe_closes_without_dimming_or_marking_an_adjustment(
+        live_app, store, page, activation, published_vibe_controls):
     errors, requests = [], []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.on('request', lambda request: requests.append((request.method, request.url)))
@@ -138,8 +181,8 @@ def test_default_vibe_closes_without_dimming_or_marking_an_adjustment(live_app, 
     assert not errors
 
 
-def test_vibe_applies_persists_recovers_from_failure_and_resets(live_app, store, page):
-    prepare(store)
+def test_vibe_applies_persists_recovers_from_failure_and_resets(prepared_vibe_app, store, page):
+    live_app = prepared_vibe_app
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
@@ -213,8 +256,8 @@ def test_vibe_applies_persists_recovers_from_failure_and_resets(live_app, store,
 
 
 @pytest.mark.parametrize('width,height', [(1440, 1000)])
-def test_slow_vibe_request_closes_dialog_and_keeps_ready_mixes_usable(live_app, store, page, width, height):
-    prepare(store)
+def test_slow_vibe_request_closes_dialog_and_keeps_ready_mixes_usable(
+        live_app, store, page, width, height, published_vibe_controls):
     page.set_viewport_size({'width': width, 'height': height})
     page.route('https://i.ytimg.com/**', lambda route: route.abort())
     pending = []
@@ -246,8 +289,8 @@ def test_slow_vibe_request_closes_dialog_and_keeps_ready_mixes_usable(live_app, 
     expect(feedback).to_have_attribute('data-state', 'ready')
 
 
-def test_vibe_feedback_replacement_keeps_one_owner_and_drops_the_previous_timer(live_app, store, page):
-    prepare(store)
+def test_vibe_feedback_replacement_keeps_one_owner_and_drops_the_previous_timer(
+        live_app, store, page, published_vibe_controls):
     page.route('https://i.ytimg.com/**', lambda route: route.abort())
     page.clock.install()
     page.set_viewport_size({'width': 1280, 'height': 850})
@@ -281,9 +324,9 @@ def test_vibe_feedback_replacement_keeps_one_owner_and_drops_the_previous_timer(
 
 
 @pytest.mark.parametrize('notice', ['', "Heads up - we're unable to create relax mix tapes right now."])
-def test_vibe_feedback_waits_for_preparation_and_recovers_after_reload(live_app, store, page, notice):
+def test_vibe_feedback_waits_for_preparation_and_recovers_after_reload(
+        live_app, store, page, notice, published_vibe_controls):
     """Controlled readiness fragments isolate the browser's lifecycle from worker timing."""
-    prepare(store)
     page.route('https://i.ytimg.com/**', lambda route: route.abort())
     page.clock.install()
     fragments = {}
@@ -330,19 +373,98 @@ def test_vibe_feedback_waits_for_preparation_and_recovers_after_reload(live_app,
     expect(feedback).not_to_be_visible()
 
 
+@pytest.mark.parametrize('selection_succeeds', [True, False])
+def test_preparation_poll_cannot_replace_a_pending_vibe_selection(
+        live_app, store, page, published_vibe_controls, selection_succeeds):
+    """An old poll must leave the selection's target mounted, including on failure."""
+    page.route('https://i.ytimg.com/**', lambda route: route.abort())
+    page.clock.install()
+    fragments, polls, selections = {}, [], []
+    page.add_init_script("""window.finishedPreparationPolls = 0;
+      window.finishedVibeSelections = 0;
+      document.addEventListener('htmx:afterRequest', event => {
+        if (event.detail.requestConfig?.path?.startsWith('/home/cards?prepare_attempt='))
+          window.finishedPreparationPolls++;
+        if (event.detail.requestConfig?.path === '/home/vibe') window.finishedVibeSelections++;
+      });""")
+
+    def initial_home(route):
+        response = route.fetch()
+        fragments['pending'] = readiness_fragment(response.text(), preparing=True)
+        route.fulfill(response=response, body=fragments['pending'])
+
+    page.route(live_app + '/', initial_home)
+    page.route('**/home/cards?prepare_attempt=*', lambda route: polls.append(route))
+    page.route('**/home/vibe', lambda route: selections.append(route))
+    page.goto(live_app)
+    fragments['board'] = page.locator('#home-mode-cards').evaluate('board => board.outerHTML')
+    with page.expect_request('**/home/cards?prepare_attempt=*'):
+        page.clock.fast_forward(3000)
+    page.evaluate('null')  # Dispatch the route callback after the request event.
+    assert len(polls) == 1
+    page.get_by_role('button', name='Tune these mixes', exact=True).click()
+    with page.expect_request('**/home/vibe'):
+        page.get_by_role('radio', name='Relax', exact=True).check()
+    page.evaluate('null')
+    assert len(selections) == 1
+    page.locator('#home-mode-cards').evaluate('board => window.selectionBoard = board')
+    # The response arrives while the explicit POST still needs its original target.
+    with page.expect_response('**/home/cards?prepare_attempt=*'):
+        polls[0].fulfill(status=200, content_type='text/html', body=fragments['board'])
+    page.wait_for_function('window.finishedPreparationPolls === 1')
+    page.clock.fast_forward(6000)
+    assert page.locator('#home-mode-cards').evaluate('board => board === window.selectionBoard')
+    assert len(polls) == 1, 'Automatic preparation must wait for the explicit selection'
+
+    if selection_succeeds:
+        with page.expect_response('**/home/vibe') as selected:
+            selections[0].continue_()
+        assert selected.value.status == 200
+        assert 'data-vibe="relax"' in selected.value.text(), selected.value.text()[:2000]
+        page.wait_for_function('window.finishedVibeSelections === 1')
+        page.clock.fast_forward(100)
+        expect(page.locator('#home-mode-cards')).to_have_attribute('data-vibe', 'relax')
+        expect(page.locator('#home-mode-cards')).to_have_attribute('data-preparing', 'false')
+        expect(page.locator('#home-vibe-feedback')).to_have_attribute('data-state', 'ready')
+    else:
+        selections[0].abort('failed')
+        expect(page.locator('#home-vibe-feedback')).to_have_attribute('data-state', 'error')
+        # A failed selection must release the guard so preparation can recover.
+        with page.expect_request('**/home/cards?prepare_attempt=*'):
+            page.clock.fast_forward(3000)
+        page.evaluate('null')
+        assert len(polls) == 2
+        polls[-1].fulfill(status=200, content_type='text/html',
+                          body=readiness_fragment(fragments['board'], preparing=False))
+        expect(page.locator('#home-mode-cards')).to_have_attribute('data-preparing', 'false')
+
+
 @pytest.mark.parametrize('width,height', [(1440, 1000), (1024, 600)])
 def test_tuning_launcher_stays_at_mix_board_center_with_preference_notices(
         live_app, store, page, width, height, unlocked_home_controls):
     prepare_controls(store)
     page.set_viewport_size({'width': width, 'height': height})
     page.route('https://i.ytimg.com/**', lambda route: route.abort())
+    page.add_init_script("""window.mixFocusScrollEnded = false;
+      window.addEventListener('scrollend', () => {
+        if (document.querySelector('#home-mode-cards.has-focus')) window.mixFocusScrollEnded = true;
+      });""")
     page.goto(live_app)
     board = page.locator('#home-mode-cards')
     expect(board.locator(':scope > .gen-card')).to_have_count(4)
+    expect(page.locator('#home-mix-status')).to_have_count(0)
     # Only the notice text/state is controlled; the board and layout use actual rendered markup.
     for message in ['', "Heads up - we're unable to create relax mix tapes right now.",
                     ' '.join(["Heads up - we're unable to create relax + techno mix tapes right now."] * 4), '']:
-        page.locator('#home-mix-status').evaluate('(el, text) => { el.textContent = text; el.hidden = !text; }', message)
+        board.evaluate("""(el, text) => {
+          el.dataset.vibe = 'relax';
+          el.dataset.preparing = 'true';
+          el.dataset.preferenceNotice = text;
+          syncHomeVibeFeedback();
+        }""", message)
+        if message:
+            expect(page.locator('#home-vibe-feedback')).to_be_visible()
+            expect(page.locator('#home-vibe-feedback-title')).to_have_text(message)
         # Sample both rectangles in one frame while the page's normal motion continues.
         centers = board.evaluate("""el => {
           const board = el.getBoundingClientRect();
@@ -352,6 +474,24 @@ def test_tuning_launcher_stays_at_mix_board_center_with_preference_notices(
         }""")
         assert abs(centers['dx']) < 2, centers
         assert abs(centers['dy']) < 2, centers
+    board.evaluate("""el => {
+      el.dataset.preferenceNotice = "Heads up - we're unable to create relax mix tapes right now.";
+      syncHomeVibeFeedback();
+    }""")
+    board.locator('.gen-poster').first.click()
+    back = board.get_by_role('button', name='Back to all mixes', exact=True)
+    expect(back).to_be_visible()
+    # Opening a mix changes the page's scroll position. An early hit test can
+    # pass before the control subsequently moves behind the fixed navigation.
+    page.wait_for_function('window.mixFocusScrollEnded')
+    assert back.evaluate("""el => {
+      const box = el.getBoundingClientRect();
+      return el.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+    }""")
+    page.screenshot(path=f'/tmp/tuneconsole-867-expanded-{width}.png')
+    back.click()
+    expect(board).not_to_have_class(re.compile(r'has-focus'))
+    expect(board.locator(':scope > .gen-card')).to_have_count(4)
 
 
 def test_mix_tabs_fit_desktop_and_short_windows(live_app, store, page, tmp_path, unlocked_home_controls):
@@ -427,8 +567,7 @@ def test_mix_tabs_fit_desktop_and_short_windows(live_app, store, page, tmp_path,
     expect(dialog.get_by_role("tab", name="Vibe", exact=True)).to_be_focused()
 
 
-def test_open_vibe_tab_resets_when_tuning_expires(live_app, store, page):
-    prepare(store)
+def test_open_vibe_tab_resets_when_tuning_expires(live_app, store, page, published_vibe_controls):
     page.route("https://i.ytimg.com/**", lambda route: route.abort())
     page.clock.install()
     page.goto(live_app)
@@ -449,8 +588,8 @@ def test_open_vibe_tab_resets_when_tuning_expires(live_app, store, page):
     expect(page.locator('#home-vibe-feedback')).not_to_be_visible()
 
 
-def test_vibe_respects_genre_focus_through_clear_and_expiry(live_app, store, page):
-    prepare(store)
+def test_vibe_respects_genre_focus_through_clear_and_expiry(prepared_vibe_app, store, page):
+    live_app = prepared_vibe_app
     page.route('https://i.ytimg.com/**', lambda route: route.abort())
     page.clock.install()
     page.goto(live_app)

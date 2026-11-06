@@ -9,9 +9,9 @@ from yt_playlist.core.store import Store
 
 
 @pytest.fixture
-def predecessor(tmp_path):
+def predecessor(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path / 'classification.db')
-    migrate(store.conn, registry=registry.MIGRATIONS[:85])
+    _pristine_installed_schema(85).backup(store.conn)
     store._bind_repositories()
     store.genres.configure_catalog()
     yield store

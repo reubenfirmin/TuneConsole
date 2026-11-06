@@ -17,17 +17,15 @@ from yt_playlist.web.app import create_app
 
 
 @pytest.fixture
-def deletion(tmp_path, monkeypatch):
+def deletion(file_backed_store, tmp_path, monkeypatch):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    database = tmp_path / "deletion.db"
-    store = Store(database)
-    store.init_schema()
+    store = file_backed_store
+    database = store._db_path
     identity = store.accounts.upsert_account("Main", "bridge", None, True)
     source = store.playlists.upsert_playlist(identity, "SOURCE", "Source", 2, "", 1)
     keeper = store.playlists.upsert_playlist(identity, "KEEP", "Keeper", 2, "", 1)
     client = RecoveryClient({"SOURCE": ["a", "b"], "KEEP": ["a", "b"]})
-    yield store, database, identity, source, keeper, client
-    store.conn.close()
+    return store, database, identity, source, keeper, client
 
 
 def _reopen(database):
@@ -84,26 +82,51 @@ def test_parent_sync_failure_prevents_delete_and_retry_resyncs_existing_director
     target = home if ancestor == 'data' else home.parent
     monkeypatch.setenv('YT_PLAYLIST_HOME', str(home))
     fsync = playlist_backups.os.fsync
-    attempts = []
+    attempt = 'initial'
+    events = []
 
     def fail_once(fd):
         info = os.fstat(fd)
         if stat.S_ISDIR(info.st_mode) and os.path.samestat(info, target.stat()):
-            attempts.append(target)
-            if len(attempts) == 1:
+            if not events:
+                events.append((attempt, 'sync_failed'))
                 raise OSError('parent sync failed')
+            fsync(fd)
+            events.append((attempt, 'synced'))
+            return
         return fsync(fd)
 
     monkeypatch.setattr(playlist_backups.os, 'fsync', fail_once)
+    record_action = store.actions.record_action
+
+    def record_after_resync(*args, **kwargs):
+        assert attempt == 'retry' and (attempt, 'synced') in events
+        result = record_action(*args, **kwargs)
+        events.append((attempt, 'intent'))
+        return result
+
+    monkeypatch.setattr(store.actions, 'record_action', record_after_resync)
+    delete = client.delete_playlist
+
+    def delete_after_intent(playlist_id):
+        assert events[-1] == ('retry', 'intent')
+        events.append((attempt, 'delete'))
+        return delete(playlist_id)
+
+    monkeypatch.setattr(client, 'delete_playlist', delete_after_intent)
     with pytest.raises(OSError, match='parent sync failed'):
         executor.delete_playlist(store, source, client, 3)
+    assert events == [('initial', 'sync_failed')]
     assert backups.is_dir()
     assert client.deleted == []
     assert store.actions.get_actions() == []
     assert store.playlists.get_playlist(source) is not None
 
+    attempt = 'retry'
     executor.delete_playlist(store, source, client, 4)
-    assert attempts == [target, target]
+    retry_stages = [stage for run, stage in events if run == 'retry']
+    assert retry_stages[-2:] == ['intent', 'delete']
+    assert retry_stages[:-2] and set(retry_stages[:-2]) == {'synced'}
     assert client.deleted == ['SOURCE']
     action, = store.actions.get_actions()
     assert action.status == 'executed'

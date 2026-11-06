@@ -1,4 +1,5 @@
 from fastapi import Request
+from tests.enrichment_support import seed_enrichment
 from fastapi.testclient import TestClient
 import pytest
 
@@ -146,7 +147,7 @@ def test_worker_connects_genre_and_artist_articles_using_recorded_credits(store,
         ('artist', 'Tin Man'), ('genre', 'shoegaze')]]
     entry = store.tracks.upsert_track('collab', 'Together', 'Rrose & Guest', '', 180,
         credits=[{'name': 'Rrose', 'id': 'UC_rrose'}, {'name': 'Guest', 'id': 'UC_guest'}])
-    store.tracks.set_track_enrichment(entry,'Minimal',None)
+    seed_enrichment(store, entry, 'Minimal', None)
     seed_catalog_track(store, 'slow|slowdive', 'Slow', 'Slowdive', video_id='slow', genre='Shoegaze')
     seed_catalog_track(store, 'acid|tinman', 'Acid', 'Tin Man', video_id='acid', genre='Acid')
     _heard(store, 'collab', 'slow', 'acid')

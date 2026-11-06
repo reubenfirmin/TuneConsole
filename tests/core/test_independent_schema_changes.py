@@ -1,4 +1,5 @@
 """Regular DDL and truthful legacy conversion history have separate commits."""
+from contextlib import closing
 import sqlite3
 import threading
 
@@ -11,13 +12,13 @@ from yt_playlist.core.migrations.__main__ import main
 
 
 @pytest.fixture
-def installed(tmp_path):
+def installed(tmp_path, _pristine_installed_schema):
     path = tmp_path / 'old-format.db'
     conn = sqlite3.connect(path)
     try:
         conn.row_factory = sqlite3.Row
         conn.execute('PRAGMA foreign_keys=ON')
-        migrate(conn, registry=registry.MIGRATIONS[:79])
+        _pristine_installed_schema(79).backup(conn)
         with conn:
             conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (3,'Listener','credential',1)")
             conn.execute("INSERT INTO settings VALUES ('retained-setting','original')")
@@ -30,11 +31,49 @@ def legacy_history(conn):
     return list(map(tuple, conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
 
 
+def test_album_feedback_outbox_installation_rolls_back_and_retries_without_advancing_layout(installed, monkeypatch):
+    from yt_playlist.core import album_feedback_outbox
+    with closing(sqlite3.connect(installed)) as conn:
+        version = next(change.version for change in regular.CHANGES if change.name == 'durable_album_feedback_responses')
+        regular.migrate(conn, changes=regular.CHANGES[:version - 1])
+        history = legacy_history(conn)
+        before = list(conn.iterdump())
+        install = album_feedback_outbox.install
+        def interrupted(*args):
+            install(*args)
+            raise OSError('controlled outbox installation interruption')
+        with monkeypatch.context() as stopped:
+            stopped.setattr(album_feedback_outbox, 'install', interrupted)
+            with pytest.raises(OSError, match='controlled outbox installation interruption'):
+                regular.migrate(conn)
+        assert list(conn.iterdump()) == before
+        assert legacy_history(conn) == history
+        regular.migrate(conn)
+        album_feedback_outbox.validate(conn)
+        assert legacy_history(conn) == history
+        assert conn.execute('SELECT name FROM schema_changes WHERE version=?', (version,)).fetchone() == (
+            'durable_album_feedback_responses',)
+
+
+def test_wrong_album_feedback_outbox_is_rejected_without_stamping_change(installed):
+    with closing(sqlite3.connect(installed)) as conn:
+        version = next(change.version for change in regular.CHANGES if change.name == 'durable_album_feedback_responses')
+        regular.migrate(conn, changes=regular.CHANGES[:version - 1])
+        with conn:
+            conn.execute('CREATE TABLE album_feedback_response_outbox(action_id TEXT)')
+        before = list(conn.iterdump())
+        with pytest.raises(MigrationError, match='album feedback response outbox'):
+            regular.migrate(conn)
+        assert list(conn.iterdump()) == before
+        assert not conn.execute('SELECT 1 FROM schema_changes WHERE name=?',
+                                ('durable_album_feedback_responses',)).fetchone()
+
+
 def test_routine_runner_never_starts_real_metadata_conversion(installed, monkeypatch):
     def failed_conversion(conn):
         raise RuntimeError('Conversion deliberately suspended for retry')
 
-    with sqlite3.connect(installed) as conn:
+    with closing(sqlite3.connect(installed)) as conn, conn:
         conn.row_factory = sqlite3.Row
         conn.execute('PRAGMA foreign_keys=ON')
         before = legacy_history(conn)
@@ -62,7 +101,7 @@ def test_regular_failure_keeps_prior_commit_and_never_changes_legacy_history(ins
         conn.execute('CREATE TABLE interrupted_owner(id INTEGER PRIMARY KEY)')
         raise RuntimeError('Interrupted regular DDL')
 
-    with sqlite3.connect(installed) as conn:
+    with closing(sqlite3.connect(installed)) as conn, conn:
         before = legacy_history(conn)
         next_version = len(regular.CHANGES) + 1
         changes = regular.CHANGES + (regular.Change(next_version, 'later_addition', interrupted, lambda conn: None),)
@@ -80,7 +119,7 @@ def test_regular_failure_keeps_prior_commit_and_never_changes_legacy_history(ins
 
 
 def test_wrong_preexisting_independent_owner_is_rejected_without_stamping(installed):
-    with sqlite3.connect(installed) as conn:
+    with closing(sqlite3.connect(installed)) as conn, conn:
         conn.execute('CREATE TABLE playback_feedback_receipts(capture_id TEXT)')
         before = list(conn.iterdump())
         with pytest.raises(MigrationError, match='receipt owner'):
@@ -89,7 +128,7 @@ def test_wrong_preexisting_independent_owner_is_rejected_without_stamping(instal
 
 
 def test_regular_runner_preserves_caller_transaction(installed):
-    with sqlite3.connect(installed) as conn:
+    with closing(sqlite3.connect(installed)) as conn, conn:
         conn.execute("UPDATE settings SET value='uncommitted' WHERE key='retained-setting'")
         with pytest.raises(MigrationError, match='outstanding caller transaction'):
             regular.migrate(conn)
@@ -105,7 +144,7 @@ def test_regular_cli_does_not_run_legacy_conversion(installed, tmp_path, monkeyp
     monkeypatch.setattr(v080_metadata_evidence, 'convert_legacy', forbidden)
     assert main(['upgrade-schema', str(installed)]) == 0
     assert 'legacy layout remains 79' in capsys.readouterr().out
-    with sqlite3.connect(installed) as conn:
+    with closing(sqlite3.connect(installed)) as conn, conn:
         assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone() == (79,)
         assert conn.execute('SELECT version FROM schema_changes ORDER BY version').fetchall() == [(c.version,) for c in regular.CHANGES]
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='entry_field_choices' AND type='table'").fetchone()
@@ -122,7 +161,7 @@ def test_competing_regular_startups_install_once(installed):
 
     def start():
         try:
-            with sqlite3.connect(installed, timeout=5) as conn:
+            with closing(sqlite3.connect(installed, timeout=5)) as conn, conn:
                 conn.execute('PRAGMA foreign_keys=ON')
                 barrier.wait()
                 regular.migrate(conn)
@@ -136,13 +175,13 @@ def test_competing_regular_startups_install_once(installed):
         thread.join(10)
     assert all(not thread.is_alive() for thread in threads)
     assert not errors
-    with sqlite3.connect(installed) as conn:
+    with closing(sqlite3.connect(installed)) as conn, conn:
         assert conn.execute('SELECT version FROM schema_changes ORDER BY version').fetchall() == [(c.version,) for c in regular.CHANGES]
         assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone() == (79,)
 
 
 def test_completed_regular_validation_leaves_writer_available(installed, monkeypatch):
-    with sqlite3.connect(installed) as conn:
+    with closing(sqlite3.connect(installed)) as conn, conn:
         # Match Store's production journal mode; a rollback journal naturally
         # makes every retained reader delay the writer's commit.
         conn.execute('PRAGMA journal_mode=WAL')
@@ -157,7 +196,7 @@ def test_completed_regular_validation_leaves_writer_available(installed, monkeyp
     monkeypatch.setattr(regular, 'validate_version', slow)
     def inspect():
         try:
-            with sqlite3.connect(installed, timeout=.1) as conn:
+            with closing(sqlite3.connect(installed, timeout=.1)) as conn, conn:
                 regular.migrate(conn)
         except BaseException as exc:
             errors.append(exc)
@@ -165,7 +204,7 @@ def test_completed_regular_validation_leaves_writer_available(installed, monkeyp
     worker.start()
     try:
         assert entered.wait(15)
-        with sqlite3.connect(installed, timeout=.1) as conn:
+        with closing(sqlite3.connect(installed, timeout=.1)) as conn, conn:
             conn.execute("UPDATE settings SET value='continuing writer' WHERE key='retained-setting'")
     finally:
         release.set()
@@ -177,7 +216,7 @@ def test_regular_change_repairs_retired_preparation_capture_without_rewriting_hi
     from yt_playlist.core import genre_identity
     from yt_playlist.core.migrations import v085_genre_preferences
     from yt_playlist.core.preparation import genre_preferences
-    with sqlite3.connect(installed) as conn:
+    with closing(sqlite3.connect(installed)) as conn, conn:
         conn.row_factory = sqlite3.Row
         with conn:
             genre_identity.seed_catalog(conn)
@@ -207,7 +246,7 @@ def test_regular_change_repairs_retired_preparation_capture_without_rewriting_hi
 def test_taste_capture_retirement_preserves_evidence_and_supported_upgrade(installed,monkeypatch,former):
     from yt_playlist.core.migrations import v088_taste_axes
     from yt_playlist.core.preparation import taste_axes
-    with sqlite3.connect(installed) as conn:
+    with closing(sqlite3.connect(installed)) as conn, conn:
         conn.row_factory=sqlite3.Row
         with conn:
             conn.execute("INSERT INTO rec_weights VALUES ('genre:Rock',1.25,10)")

@@ -15,7 +15,6 @@ from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.library.listen_derive import classify_exit
 from yt_playlist.rec import rec_params
 from yt_playlist.core import mix_choices
-from yt_playlist.util import genre_map
 
 WEIGHTS = ('choice', 'open', 'start', 'completion', 'promotion', 'early_exit')
 POLICY = 'theme-raw-genre-response-v2'
@@ -79,7 +78,7 @@ def observations(store, offers, responses, now, excluded):
         if not seen:
             excluded['unseen'] += 1
             continue
-        options = [mix_choices.expand(store.conn, option) for option in offer['options']]
+        options = store.rec_ledger.expand_mix_options(offer['options'])
         def signature(option):
             return (option.get('intent'), option.get('label'), option.get('note'), tuple(option['genres']))
         chosen_option = next((option for option in options if str(option['id']) == chosen), None)
@@ -124,14 +123,18 @@ def compile(store, offers, responses, now):
     since = now - params['window_d'] * 86400
     current = store.modes.list_modes(active_only=True)
     modes = {mode['mode_id']: mode for mode in current}
+    mode_genres = {mid: [entry[0] if isinstance(entry, (list, tuple)) else entry
+                        for entry in mode.get('families') or []] for mid, mode in modes.items()}
+    axes = store.genres.feature_axes(genre for genres in mode_genres.values() for genre in genres)
+    mode_families = {mid: {axes.get(genre, ('', None))[0] for genre in genres}
+                     for mid, genres in mode_genres.items()}
     units, expirations = {}, []
     excluded = {'unseen': 0, 'unmapped_mode': 0, 'drifted_mode': 0,
                 'future_context': 0, 'missing_context': 0}
     for observation in observations(store, offers, responses, now, excluded):
-        families = {genre_map.family(genre, conn=store.conn) for genre in observation['option']['genres']}
-        matches = [mid for mid, mode in modes.items() if families & {
-            genre_map.family(entry[0] if isinstance(entry, (list, tuple)) else entry, conn=store.conn)
-            for entry in mode.get('families') or []}]
+        axes = store.genres.feature_axes(observation['option']['genres'])
+        families = {value[0] for value in axes.values()}
+        matches = [mid for mid, current_families in mode_families.items() if families & current_families]
         # Legacy modes have no current raw-genre membership. A unique broad
         # family match is admissible; ambiguous children get no invented wins.
         if len(matches) != 1:

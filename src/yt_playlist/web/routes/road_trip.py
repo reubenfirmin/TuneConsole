@@ -68,9 +68,7 @@ def build(ctx) -> APIRouter:
         # Progress polls of an unchanged draft are one offer, rather than new opportunities.
         fingerprint = hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()[:16]
         request_id = f"road-trip:{rid}:{fingerprint}"
-        with store._lock:
-            already_shown = store.conn.execute("SELECT 1 FROM rec_served_impressions WHERE request_id=? LIMIT 1",
-                                                (request_id,)).fetchone()
+        already_shown = store.rec_ledger.has_served_request(request_id)
         if not already_shown:
             measurement.record_recommendations(store, "road_trip", [
                 {**track, "key": store.tracks.identity_key_for_video(track["video_id"]) or
@@ -81,7 +79,10 @@ def build(ctx) -> APIRouter:
                             "own_pct": state.get("own_pct"),
                             "familiarity_pct": state.get("familiarity_pct"),
                             "targets": state.get("targets"), "blacklist_genres": state.get("blacklist_genres")})
-        return {"state": state, "recipe_id": rid, "tracks": tracks}
+        # Keep acquisition diagnostics in the durable draft and logs, outside
+        # the template context. The screen only needs the incomplete outcome.
+        return {"state": {**state, 'build_error': bool(state.get('build_error'))},
+                "recipe_id": rid, "tracks": tracks}
 
     BLANK_RECIPE = {"id": None, "name": "", "own_pct": 50, "familiarity_pct": 50,
                     "target_minutes": 60, "artists": [], "genres": [], "blacklist_genres": []}
@@ -228,24 +229,6 @@ def build(ctx) -> APIRouter:
         return _mutate(request, recipe_id,
                        lambda s: road_trip_rec.clear_share(s, party, axis, store, now_fn()))
 
-    @router.post("/road_trip/draft/{recipe_id}/mix")
-    def mix_draft(request: Request, recipe_id: int, form=Depends(request_form)):
-        """The mine/theirs or favorites/deep-cuts slider moved: re-pick the whole playlist. The
-        recipe on file is left alone - this steers the mix in front of you, not the saved recipe."""
-        def change(state):
-            # The mix bar posts THEIR share (its left end is labelled "Mine", so left must mean more
-            # of yours); own_pct is still accepted for anything posting the other way round.
-            if form.get("their_pct") is not None:
-                state["own_pct"] = 100 - _pct(form.get("their_pct"), 100 - state["own_pct"])
-            elif form.get("own_pct") is not None:
-                state["own_pct"] = _pct(form.get("own_pct"), state["own_pct"])
-            if form.get("familiarity_pct") is not None:
-                state["familiarity_pct"] = _pct(form.get("familiarity_pct"),
-                                                state["familiarity_pct"])
-            return road_trip_rec.repick(state, store, now_fn())
-
-        return _mutate(request, recipe_id, change)
-
     @router.post("/road_trip/draft/{recipe_id}/slot/{index}")
     def reroll_slot(request: Request, recipe_id: int, index: int):
         """Cross out one slot; the recipe fills it back in with something else of the same side."""
@@ -267,18 +250,18 @@ def build(ctx) -> APIRouter:
         return _body(request)
 
     @router.post("/road_trip/draft/{recipe_id}/save")
-    async def save_draft(request: Request, recipe_id: int):
+    async def save_draft(request: Request, recipe_id: int, form=Depends(request_form)):
         """Materialize exactly what's on screen as a YouTube playlist (Generated group: quarantined
         from the taste model and GC'd on the normal schedule), using the shared save/play feedback."""
         bridge = getattr(ctx, "bridge", None)
         intent = bridge.begin_playback_intent() if bridge is not None else None
-        return await activity_for(ctx).to_thread(_save_draft, request, recipe_id, intent)
+        return await activity_for(ctx).to_thread(_save_draft, request, recipe_id, intent, form.get("launch_id", ""))
 
-    def _save_draft(request, recipe_id, intent):
+    def _save_draft(request, recipe_id, intent, launch_id):
         # Reads, normalization, remote mutation, bookkeeping and rendering all
         # belong to the admitted worker, including after request cancellation.
         recipe, state = drafts.for_save(recipe_id)
-        result = {"name": f"Road Trip: {recipe['name']}" if recipe else "Road Trip"}
+        result = {"name": f"Road Trip: {recipe['name']}" if recipe else "Road Trip", "launch_id": launch_id}
 
         def response(error=None):
             if error:

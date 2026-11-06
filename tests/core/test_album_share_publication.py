@@ -33,6 +33,13 @@ def stage(conn, size=128):
     pytest.fail('Album share map did not finish bounded fixture')
 
 
+def rejection_inputs(store):
+    complete_source(store)
+    preparation.JOB.install(store.conn)
+    finish(preparation.JOB, store.conn)
+    assert publication.OWNER.selected(store.conn) is None
+
+
 @pytest.mark.parametrize('installed', [79, 93, 98], indirect=True)
 def test_preopened_readers_use_exact_choices_aliases_and_existing_completeness(installed):
     store, _ = installed
@@ -78,11 +85,9 @@ def test_preopened_readers_use_exact_choices_aliases_and_existing_completeness(i
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['fields','member','reference','extra','omitted','original','plan'])
-def test_wrong_header_choices_references_coverage_or_files_cannot_publish(installed, failure):
+def test_wrong_header_choices_references_coverage_or_files_cannot_publish(installed, staged_custody, failure):
     store, _ = installed
-    complete_source(store)
-    preparation.JOB.install(store.conn)
-    finish(preparation.JOB, store.conn)
+    staged_custody(installed, 'album-shares', rejection_inputs)
     header = preparation.head(store.conn, 'release')
     with store.conn:
         if failure == 'fields':
@@ -196,11 +201,11 @@ def test_missing_files_and_failed_preparation_remain_independent_of_ddl(installe
     publication.OWNER.publish(store.conn, stage=stage(store.conn))
 
 
-def test_frozen_native_owner_has_precedence_without_losing_map_custody(tmp_path):
+def test_frozen_native_owner_has_precedence_without_losing_map_custody(tmp_path, _pristine_installed_schema):
     path = tmp_path / 'upgrade.db'
     store = Store(path)
     try:
-        runner.migrate(store.conn, registry=registry.MIGRATIONS[:98])
+        _pristine_installed_schema(98).backup(store.conn)
         store.init_schema(defer_metadata=True)
         complete_source(store)
         selected = stage(store.conn)

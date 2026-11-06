@@ -10,6 +10,14 @@ def test_production_file_body_operations_have_an_explicit_boundary(tmp_path):
     source = tmp_path/'new_owner.py'
     source.write_text("from pathlib import Path\ndef read(path):\n    return Path(path).read_text()\n")
     assert boundary(inventory(tmp_path)[0]) is None
+    # A schema module's bundled-resource reader does not exempt other readers
+    # in that module from the managed-file boundary.
+    core = tmp_path/'core'
+    core.mkdir()
+    for name in ('schema_admission', 'schema_definition', 'schema_transforms'):
+        (core/(name+'.py')).write_text(
+            "from pathlib import Path\ndef runtime_asset(path):\n    return Path(path).read_bytes()\n")
+    assert all(boundary(row) is None for row in inventory(core.parent))
 
 
 def test_conversion_restart_and_small_compressed_asset_overhead(tmp_path,store):

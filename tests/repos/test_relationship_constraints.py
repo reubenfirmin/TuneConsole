@@ -59,7 +59,7 @@ def test_populated_upgrade_reconciles_order_and_retains_unknown_evidence(install
     missing = store.conn.execute('SELECT * FROM rec_mode_picks WHERE membership_ref_id=999').fetchone()
     assert missing['mode_id'] is None and missing['legacy_mode_id']==999
     assert store.modes.impression_counts()=={7:1}
-    assert store.modes.pick_rows()==[(1,7)]
+    assert store.modes.pick_counts()=={7:1}
     kinds = {r[0] for table in ('metadata_legacy_evidence', 'workflow_legacy_evidence', 'playlist_legacy_evidence')
              for r in store.conn.execute(f"SELECT DISTINCT kind FROM {table} WHERE kind LIKE 'constraint_legacy:%'")}
     assert {'constraint_legacy:enrichment_log','constraint_legacy:enrichment_conflict',
@@ -141,17 +141,21 @@ def test_retained_history_survives_membership_removal_and_mode_refresh(installed
     upgrade_relationship_fixture(store)
     store.history.record_play_event(1,'a|artist','a',100,playlist_ytm_id='PL')
     store.player_events.record_player_event(1,'track_exit','a',190,200,'PL',None,101)
-    before = store.modes.playlist_engagement()[1]
+    before = (store.history.play_events_since(0), store.player_events.player_events_since(0))
+    assert [(r['account_id'],r['playlist_ytm_id'],r['played_at']) for r in before[0]]==[(1,'PL',100)]
+    assert [(r['account_id'],r['playlist_ytm_id'],r['position'],r['duration'])
+            for r in before[1]]==[(1,'PL',190,200)]
     store.playlists.remove_playlist(1)
     store.conn.execute('DELETE FROM library_memberships WHERE entry_id=1')
     store.conn.commit()
-    assert store.modes.playlist_engagement()[1]==before==dict(plays=1,last_play=100,skips=0,completions=1)
+    assert (store.history.play_events_since(0),store.player_events.player_events_since(0))==before
     assert store.conn.execute('SELECT COUNT(*) FROM enrichment_log WHERE track_id=1').fetchone()[0]==1
     assert store.playlists.get_playlist_groups()=={'PL':'Keep'}
     mode = store.modes.list_modes()[0]
     store.modes.replace_modes([mode],[],200)
     store.modes.replace_modes([],[7],300)
-    assert store.modes.pick_rows()==[(1,7)]
+    assert store.modes.pick_counts()=={7:1}
+    assert store.conn.execute('SELECT mode_id FROM rec_mode_picks WHERE membership_ref_id=1').fetchone()[0]==7
     for sql in ('DELETE FROM catalog_entries WHERE id=1','DELETE FROM taste_modes WHERE mode_id=7',
                 "DELETE FROM playlist_scopes WHERE id='PL'"):
         with pytest.raises(sqlite3.IntegrityError),store.conn:
@@ -182,7 +186,7 @@ def test_unknown_legacy_modes_cannot_become_feedback_for_a_new_mode(installed_v2
     upgrade_relationship_fixture(store)
     seed_modes(store,999)
     assert store.modes.impression_counts()=={7:1}
-    assert store.modes.pick_rows()==[(1,7)]
+    assert store.modes.pick_counts()=={7:1}
     assert all(r['mode_id']!=999 for r in store.modes.choice_learning_rows())
 
 
@@ -207,9 +211,13 @@ def test_deleted_playlist_ids_never_attach_old_feedback_to_new_memberships(store
     assert second!=first
     store.modes.log_pick(second,2,30)
     store.history.record_play_event(owner,'song|artist','video',40,playlist_ytm_id='SECOND')
-    stats = store.modes.playlist_engagement()
-    assert stats[first]['plays']==0 and stats[second]['plays']==1
-    assert store.modes.pick_rows()==[(first,1),(second,2)]
+    retained = store.conn.execute(
+        'SELECT p.membership_ref_id,p.mode_id,m.account_id,s.provider_playlist_id '
+        'FROM rec_mode_picks p JOIN playlist_membership_refs m ON m.id=p.membership_ref_id '
+        'JOIN playlist_scopes s ON s.id=m.playlist_scope_id ORDER BY p.membership_ref_id')
+    assert [tuple(row) for row in retained]==[(first,1,owner,'FIRST'),(second,2,owner,'SECOND')]
+    events = store.history.play_events_since(0)
+    assert [(r['account_id'],r['playlist_ytm_id']) for r in events]==[(owner,'SECOND')]
     with pytest.raises(sqlite3.IntegrityError),store.conn:
         store.conn.execute('UPDATE playlist_membership_refs SET playlist_scope_id=? WHERE id=?',('SECOND',first))
 

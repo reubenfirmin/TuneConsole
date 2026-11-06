@@ -1,5 +1,7 @@
 """Saved Radio offers and requested starts follow current upload eligibility."""
 from copy import deepcopy
+from tests.enrichment_support import complete_entries
+from tests.derived_rating_support import seed_dislike
 from datetime import date
 import json
 import threading
@@ -7,7 +9,7 @@ import threading
 import pytest
 
 from tests.conftest import seed_catalog_track
-from tests.test_growth_destinations import publish_full_journey
+from tests.test_growth_destinations import finish_full_journey
 from tests.test_onboarding_routes import _client
 from yt_playlist.core import catalog
 from yt_playlist.rec import account_growth, rec_params
@@ -37,22 +39,22 @@ def invalidate(store, tracks, condition):
             elif condition == 'overlong':
                 catalog.choose_field(store.conn, entry, 'duration_s', 9000)
             elif condition == 'feedback':
-                store.rec_model.record_dislike(track['key'], until=None, now=1000)
+                seed_dislike(store, track['key'], until=None, now=1000)
             elif condition == 'artist':
                 store.rec_model.record_feedback('for_you', 'artist:' + track['artist'], 'mute', now=1000)
             elif condition == 'genre':
-                from yt_playlist.util import genre_map
-                store.rec_model.set_weight('genre:' + genre_map.family('Jazz', conn=store.conn), 0, lo=0, now=1000)
+                store.rec_model.set_weight('genre:' + store.genres.feature_axes(['Jazz'])['Jazz'][0], 0, lo=0, now=1000)
             elif condition == 'identity':
                 track['key'] = 'missing|source identity'
 
 
 @pytest.mark.parametrize('condition', ['unavailable', 'overlong'])
-def test_cached_radio_offer_agrees_across_http_bootstrap_and_direct_growth(store, condition):
+def test_cached_radio_offer_agrees_across_http_bootstrap_and_direct_growth(store, condition, full_journey_prefix):
+    full_journey_prefix.restore(store)
     _, client = _client(store)
-    publish_full_journey(store)
+    finish_full_journey(store)
     tracks = seeds(store)
-    store.enrichment_queue.mark_enriched([row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1000)
+    complete_entries(store, [row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1000)
     offer = {'menu_id': 'original-radio-menu', 'tracks': tracks}
     encoded = json.dumps(offer)
     store.settings.set_setting('radio_seed_offer', encoded)

@@ -1,14 +1,9 @@
 """Repo primitives for bounding the album pool (#52): top-N interest restriction, per-artist
 delete, orphaned-track prune."""
-from yt_playlist.core.store import Store
 
 
-def _s():
-    s = Store(":memory:"); s.init_schema(); return s
-
-
-def test_interested_artists_limit():
-    s = _s()
+def test_interested_artists_limit(store):
+    s = store
     # two artists with different engagement: A (2 plays), B (1 play)
     iid = s.accounts.upsert_account("m", "c", None, True)
     s.tracks.upsert_track("v1", "S1", "A", None, None)
@@ -20,8 +15,8 @@ def test_interested_artists_limit():
     assert len(top) == 1 and top[0]["artist"] == "A"     # most-engaged only
 
 
-def test_delete_discovered_albums_and_artist_query():
-    s = _s()
+def test_delete_discovered_albums_and_artist_query(store):
+    s = store
     for i in range(3):
         s.discovery.upsert_discovered_album(f"k{i}", "Keep", f"T{i}", "2000", None, 0.0)
     assert set(s.discovery.discovered_albums_for_artist("Keep")) == {"k0", "k1", "k2"}
@@ -29,8 +24,8 @@ def test_delete_discovered_albums_and_artist_query():
     assert set(s.discovery.discovered_albums_for_artist("Keep")) == {"k1"}
 
 
-def test_prune_orphan_discovered_tracks_keeps_radio_and_live_albums():
-    s = _s()
+def test_prune_orphan_discovered_tracks_keeps_radio_and_live_albums(store):
+    s = store
     s.discovery.upsert_discovered_album("alb1", "A", "T", "2000", None, 0.0)
     s.discovery.upsert_discovered_album("gone", "A", "Gone", None, None, 0)
     s.discovery.upsert_discovered_track("t|1", "v", "T", "A", "Alb", None, None, None, "alb1", 0.0)   # source exists

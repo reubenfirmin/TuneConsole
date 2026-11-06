@@ -16,12 +16,12 @@ import shutil
 import sqlite3
 import socket
 import tempfile
-import threading
 import time
 
 from yt_playlist.core import db_handles, metadata_retention
 from yt_playlist.core.db_rebuild import build, files, install, job
 from yt_playlist.core.store import Store
+from tests.live_server import LiveServer
 
 
 def digest(path):
@@ -139,7 +139,7 @@ def measure(args):
         save()
         opened = time.monotonic()
         store = Store(target)
-        server = thread = client = None
+        owner = client = None
         try:
             store.init_schema()
             result['schema_admission_seconds'] = time.monotonic()-opened
@@ -156,13 +156,7 @@ def measure(args):
                 port = reserve.getsockname()[1]
             server = uvicorn.Server(uvicorn.Config(app,host='127.0.0.1',port=port,
                 lifespan='off',log_level='warning'))
-            thread = threading.Thread(target=server.run,daemon=True)
-            thread.start()
-            deadline = time.monotonic()+30
-            while not server.started:
-                if not thread.is_alive() or time.monotonic()>=deadline:
-                    raise RuntimeError('Qualification HTTP server failed to start')
-                time.sleep(.01)
+            owner = LiveServer(server)
             result['server_ready_seconds'] = time.monotonic()-opened
             client = httpx.Client(base_url=f'http://127.0.0.1:{port}',timeout=60)
             def http_checks(label):
@@ -227,10 +221,8 @@ def measure(args):
         finally:
             if client is not None:
                 client.close()
-            if server is not None:
-                server.should_exit = True
-                thread.join(5)
-                assert not thread.is_alive()
+            if owner is not None:
+                owner.close()
             store.conn.close()
             result['changed_donor_files'] = [path for path,expected in result['files'].items()
                                             if digest(Path(path))!=expected]

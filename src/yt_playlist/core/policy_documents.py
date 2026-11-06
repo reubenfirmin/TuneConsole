@@ -98,6 +98,29 @@ def pack_header(header, age):
     return header + b'Custody clocks 1 ' + canonical([age.mtime_ns, age.ctime_ns]) + b'\n'
 
 
+def pack_encoded(root, records, *, header, pack_bytes, age=None):
+    """Publish validated records lazily, admitting one record above the pack target."""
+    header = pack_header(header, age)
+    pending, size = [], len(header)
+
+    def sealed():
+        encoded = header + b''.join(pending)
+        filename = _publish_encoded(root, encoded, hashlib.sha256(encoded).hexdigest(), age=age)
+        offset = len(header)
+        for record in pending:
+            yield filename, hashlib.sha256(record).hexdigest(), len(record), offset
+            offset += len(record)
+
+    for record in records:
+        if pending and size + len(record) > pack_bytes:
+            yield from sealed()
+            pending, size = [], len(header)
+        pending.append(record)
+        size += len(record)
+    if pending:
+        yield from sealed()
+
+
 def publish_many(root, configurations, *, age=None):
     """Pack small configurations without allocating a filesystem block per leaf.
 
@@ -105,28 +128,16 @@ def publish_many(root, configurations, *, age=None):
     Packs are immutable and contain at most PACK_BYTES, apart from one admitted
     larger record. No file index or shared artifact owner is needed.
     """
-    header = pack_header(PACK_HEADER, age)
-    records, size = [], len(header)
-    def sealed():
-        encoded = header + b''.join(records)
-        filename = _publish_encoded(root, encoded, hashlib.sha256(encoded).hexdigest(), age=age)
-        offset = len(header)
-        for record in records:
-            yield filename, hashlib.sha256(record).hexdigest(), len(record), offset
-            offset += len(record)
-    for configuration in configurations:
-        if not isinstance(configuration, dict):
-            raise ValueError('Recommendation configuration must be an object')
-        encoded = canonical({'format': FORMAT, 'configuration': configuration})
-        if len(encoded) > MAX_BYTES:
-            raise ValueError('Recommendation policy exceeds its file byte budget')
-        if records and size + len(encoded) > PACK_BYTES:
-            yield from sealed()
-            records, size = [], len(header)
-        records.append(encoded)
-        size += len(encoded)
-    if records:
-        yield from sealed()
+    def encoded_records():
+        for configuration in configurations:
+            if not isinstance(configuration, dict):
+                raise ValueError('Recommendation configuration must be an object')
+            encoded = canonical({'format': FORMAT, 'configuration': configuration})
+            if len(encoded) > MAX_BYTES:
+                raise ValueError('Recommendation policy exceeds its file byte budget')
+            yield encoded
+
+    yield from pack_encoded(root, encoded_records(), header=PACK_HEADER, pack_bytes=PACK_BYTES, age=age)
 
 
 def repack(root, records, publisher):

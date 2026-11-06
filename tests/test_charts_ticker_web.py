@@ -1,6 +1,7 @@
 """Web-route test: the /charts page renders the four new ticker tabs (genre / year / album /
 playlist) with candle rows for a seeded library + history."""
 from fastapi.testclient import TestClient
+from tests.enrichment_support import seed_enrichment
 import re
 import pytest
 
@@ -12,8 +13,8 @@ def _seed(store):
     iid = store.accounts.upsert_account("me", "c", None, True)
     a = store.tracks.upsert_track("v1", "Alpha", "Artist A", "Album A", 200, album_browse_id="album-a")
     b = store.tracks.upsert_track("v2", "Beta", "Artist B", "Album B", 200, album_browse_id="album-b")
-    store.tracks.set_track_enrichment(a, "techno", "1995")
-    store.tracks.set_track_enrichment(b, "house", "2005")
+    seed_enrichment(store, a, "techno", "1995")
+    seed_enrichment(store, b, "house", "2005")
     p = store.playlists.upsert_playlist(iid, "P1", "Mix", 0, "h", 0.0)
     store.playlists.set_playlist_tracks(p, [a, b])
 

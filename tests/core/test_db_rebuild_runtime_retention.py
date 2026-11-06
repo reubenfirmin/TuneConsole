@@ -1,7 +1,11 @@
 """Runtime admission excludes history while retaining independent live owners."""
 from contextlib import closing
+from copy import deepcopy
+import hashlib
+import inspect
 import json
 from pathlib import Path
+import shutil
 import sqlite3
 
 import pytest
@@ -89,32 +93,35 @@ def test_runtime_keeps_current_checkpoint_and_unpublished_lineage_without_obsole
         assert not conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
-@pytest.mark.parametrize('codec',['json-zlib-v1','json-shared-zlib-v2'])
-def test_released_runtime_retains_compressed_comparison_body_context(production64,tmp_path,codec):
+def test_released_runtime_retains_compressed_comparison_body_context(production64,tmp_path):
     import base64
     import zlib
     from yt_playlist.core import model_projections
     from yt_playlist.core.evidence_ledger import canonical
-    from yt_playlist.rec import comparison_storage
-    surface = 'model_pair:1:incumbent:mixes'
     body = {'context':{'group_generation':'obsolete','groups':[{'version':'obsolete-leaf'}]},'protos':[]}
     raw = canonical(body)
-    packed = comparison_storage._pack(body) if codec==comparison_storage.CODEC else raw
-    envelope = {'run_id':1,'codec':codec,'expanded_bytes':len(raw),'packed_bytes':len(packed),
-        'context':{'group_generation':'stale-envelope-header'},
-        'data':base64.b64encode(zlib.compress(packed)).decode('ascii')}
+    nodes = ['obsolete', 'obsolete-leaf', {'version': 1}, [2],
+             {'group_generation': 0, 'groups': 3}, [], {'context': 4, 'protos': 5}]
+    envelopes = []
+    for role, codec in [('incumbent', 'json-zlib-v1'), ('challenger', 'json-shared-zlib-v2')]:
+        packed = canonical({'nodes': nodes, 'root': 6}) if codec=='json-shared-zlib-v2' else raw
+        envelope = {'run_id':1,'codec':codec,'expanded_bytes':len(raw),'packed_bytes':len(packed),
+            'context':{'group_generation':'stale-envelope-header'},
+            'data':base64.b64encode(zlib.compress(packed)).decode('ascii')}
+        envelopes.append(('model_pair:1:'+role+':mixes', json.dumps(envelope), 1))
     with closing(sqlite3.connect(production64)) as conn:
         conn.row_factory = sqlite3.Row
         build._configure(conn)
         with conn:
             conn.execute('BEGIN IMMEDIATE')
             groups(conn,released=True)
-            conn.execute('INSERT INTO rec_proposals VALUES (?,?,1)',(surface,json.dumps(envelope)))
+            conn.executemany('INSERT INTO rec_proposals VALUES (?,?,?)',envelopes)
     target = tmp_path/'runtime.db'
     build.construct(production64,target,destination.for_source(production64,split=True),runtime_only=True)
     with closing(sqlite3.connect(target)) as conn:
         conn.row_factory = sqlite3.Row
-        assert model_projections.read(conn,surface)=={'run_id':1,'data':body}
+        for surface, _, _ in envelopes:
+            assert model_projections.read(conn,surface)=={'run_id':1,'data':body}, surface
         assert conn.execute("SELECT 1 FROM group_generations WHERE external_key='obsolete'").fetchone()
         assert not conn.execute("SELECT 1 FROM unresolved_group_evidence WHERE raw_key='obsolete'").fetchone()
         assert not conn.execute('PRAGMA foreign_key_check').fetchall()
@@ -188,14 +195,11 @@ def test_unknown_time_captures_and_known_delivery_receipts_survive_without_raw_m
         assert not conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
-@pytest.mark.parametrize('new_format',[False,True])
-@pytest.mark.parametrize('legacy,damage',[(False,None),(True,None),(False,'descriptor'),(False,'file')])
-def test_analytics_verifies_captured_choices_without_rejecting_new_publications(development93,new_format,legacy,damage):
-    from yt_playlist.core import db_handles, evidence_ledger, fao, home_outputs, mix_choices
+def _capture_choice_rebuild(path,new_format):
+    from yt_playlist.core import evidence_ledger, fao, mix_choices
     from yt_playlist.core.db_rebuild import job
     from yt_playlist.core.store import Store
-    from yt_playlist.rec import choice_evidence
-    with closing(sqlite3.connect(development93)) as conn:
+    with closing(sqlite3.connect(path)) as conn:
         conn.row_factory = sqlite3.Row
         mix_choices.install(conn)
         ledger = evidence_ledger.EvidenceLedger(evidence_ledger.directory(conn),2**63-1)
@@ -208,10 +212,116 @@ def test_analytics_verifies_captured_choices_without_rejecting_new_publications(
             record = mix_choices.publish_menu(conn,record,compact)
         ledger.put('opportunity',record['id'],record)
         conn.commit()
+        expected = {str(file.relative_to(ledger.directory)):list(fao._hash(file))
+                    for kind in ('artifact','opportunity')
+                    for file in (ledger.directory/kind).glob('*/*.json')}
+        assert {'artifact','opportunity'}=={Path(name).parts[0] for name in expected}
+    store = Store(path)
+    try:
+        store.init_schema()
+        report = job.run(store,rebuild=True)
+        pending = build._checkpoint(store.conn)
+        assert report['phase']=='complete' and report['analytics_pending']
+        assert 0<pending['stage']<len(pending['stages'])
+        assert dict(pending['evidence'])==expected
+    finally:
+        # Flush WAL before copying any database or retained original.
+        store.conn.close()
+    return record
+
+
+@pytest.fixture(scope='module')
+def captured_choice_templates(tmp_path_factory,development93_template):
+    templates = {}
+    def get(new_format):
+        if new_format not in templates:
+            root = tmp_path_factory.mktemp('captured-choices-'+str(new_format))
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setenv('YT_PLAYLIST_HOME',str(root/'app-home'))
+                patch.setenv('YT_PLAYLIST_AUDIO_VIBES','0')
+                patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL','')
+                patch.delenv('DEEPSEEK_API_KEY',raising=False)
+                # Clone the genuinely populated historical prefix without
+                # coupling this module owner to function-fixture signatures.
+                template, _seconds = development93_template
+                path = root/'development93.db'
+                with closing(sqlite3.connect(path)) as conn:
+                    template.backup(conn)
+                record = _capture_choice_rebuild(path,new_format)
+            templates[new_format] = root,record
+        return templates[new_format]
+    return get
+
+
+def _workspace_contents(root):
+    return {str(path.relative_to(root)):
+            ('link',str(path.readlink())) if path.is_symlink() else
+            ('file',hashlib.sha256(path.read_bytes()).hexdigest())
+            for path in root.rglob('*') if path.is_symlink() or path.is_file()}
+
+
+def _clone_captured_rebuild(source,target,name='development93.db'):
+    from yt_playlist.core import db_handles
+    from yt_playlist.core.db_rebuild import install
+    # Include every owner, retained original and intermediate rebuild artifact.
+    # Preserve links while copying, then confine them to this consumer's tree.
+    shutil.copytree(source,target,symlinks=True)
+    for path in target.rglob('*'):
+        if path.is_symlink():
+            destination = target/path.readlink().relative_to(source)
+            path.unlink()
+            path.symlink_to(destination,target_is_directory=True)
+    def relocate(value):
+        if isinstance(value,dict):
+            return {key:relocate(item) for key,item in value.items()}
+        if isinstance(value,list):
+            return [relocate(item) for item in value]
+        if isinstance(value,str) and value.startswith(str(source)+'/'):
+            return str(target/Path(value).relative_to(source))
+        return value
+    path = target/name
+    state = relocate(db_handles.state(source/name))
+    assert install.digest(state['original'])==state['original_sha256']
+    with closing(sqlite3.connect(path)) as conn, conn:
+        pending = build._checkpoint(conn)
+        # Relocate custody only; preserve the genuine captured evidence and work.
+        pending['source']['path'] = relocate(pending['source']['path'])
+        build._checkpoint(conn,pending)
+    # These bounded historical inputs have no SQL-stored absolute file locators.
+    # Fail explicitly if that changes instead of silently borrowing template files.
+    for database in (path,Path(state['original'])):
+        with closing(sqlite3.connect(database.as_uri()+'?mode=ro',uri=True)) as conn:
+            for table, in conn.execute("SELECT name FROM sqlite_schema WHERE type='table'"):
+                for column in conn.execute('PRAGMA table_info('+build.quote(table)+')'):
+                    if column[1]=='filename' or column[1].endswith('_filename'):
+                        assert not any(Path(row[0]).is_absolute() for row in conn.execute(
+                            'SELECT '+build.quote(column[1])+' FROM '+build.quote(table)+
+                            ' WHERE '+build.quote(column[1])+' IS NOT NULL'))
+    install.save(path,state)
+    return path
+
+
+@pytest.fixture
+def captured_choices(captured_choice_templates,new_format,tmp_path):
+    source,record = captured_choice_templates(new_format)
+    original = _workspace_contents(source)
+    try:
+        yield _clone_captured_rebuild(source,tmp_path/'captured'),deepcopy(record)
+    finally:
+        assert _workspace_contents(source)==original,'Captured rebuild template was modified'
+
+
+@pytest.mark.parametrize('new_format',[False,True])
+@pytest.mark.parametrize('legacy,damage',[(False,None),(True,None),(False,'descriptor'),(False,'file')])
+def test_analytics_verifies_captured_choices_without_rejecting_new_publications(captured_choices,new_format,legacy,damage):
+    from yt_playlist.core import db_handles, evidence_ledger, fao, home_outputs, mix_choices
+    from yt_playlist.core.db_rebuild import job
+    from yt_playlist.core.store import Store
+    from yt_playlist.rec import choice_evidence
+    development93,record = captured_choices
     store = Store(development93)
     try:
         store.init_schema()
-        job.run(store,rebuild=True)
         if legacy:
             with store.conn:
                 pending = build._checkpoint(store.conn)
@@ -280,17 +390,51 @@ def test_analytics_verifies_captured_choices_without_rejecting_new_publications(
         store.conn.close()
 
 
+@pytest.fixture(scope='module')
+def legacy_runtime_template(tmp_path_factory,production64_template):
+    from yt_playlist.core.db_rebuild import job
+    from yt_playlist.core.store import Store
+
+    root = tmp_path_factory.mktemp('legacy-runtime')
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('YT_PLAYLIST_HOME',str(root/'app-home'))
+        patch.setenv('YT_PLAYLIST_AUDIO_VIBES','0')
+        patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL','')
+        patch.delenv('DEEPSEEK_API_KEY',raising=False)
+        path = inspect.unwrap(production64)(root,production64_template)
+        store = Store(path)
+        try:
+            store.init_schema()
+            first = job.run(store,destination=destination.for_source(path,split=True,legacy=True))
+            assert first['phase']=='complete' and first['analytics_pending']
+        finally:
+            store.conn.close()
+    return root
+
+
+@pytest.fixture
+def legacy_runtime(legacy_runtime_template,tmp_path):
+    from yt_playlist.core import db_handles
+
+    original = _workspace_contents(legacy_runtime_template)
+    try:
+        path = _clone_captured_rebuild(legacy_runtime_template,tmp_path/'legacy-runtime','production64.db')
+        yield path,db_handles.state(path)
+    finally:
+        assert _workspace_contents(legacy_runtime_template)==original,'Legacy runtime template was modified'
+
+
 @pytest.mark.parametrize('interrupt',[False,True])
-def test_existing_large_runtime_finishes_original_checkpoint_and_repairs_current_database(production64,interrupt):
+def test_existing_large_runtime_finishes_original_checkpoint_and_repairs_current_database(legacy_runtime,interrupt):
     from yt_playlist.core import db_handles, metadata_retention
     from yt_playlist.core.db_rebuild import job
     from yt_playlist.core.storage_maintenance import StorageMaintenance
     from yt_playlist.core.store import Store
+    production64,first = legacy_runtime
     store = Store(production64)
     maintenance = StorageMaintenance(store)
     try:
         store.init_schema()
-        first = job.run(store,destination=destination.for_source(production64,split=True,legacy=True))
         with pytest.raises(RuntimeError,match='Finish library analytics preparation'):
             job.run(store)
         assert db_handles.state(production64)['id']==first['id']
@@ -334,17 +478,17 @@ def test_existing_large_runtime_finishes_original_checkpoint_and_repairs_current
 
 
 @pytest.mark.parametrize('phase',['closing','original_moved','installed','reopening','complete'])
-def test_old_runtime_repair_recovers_crash_before_publishing_completion(production64,monkeypatch,phase):
+def test_old_runtime_repair_recovers_crash_before_publishing_completion(legacy_runtime,monkeypatch,phase):
     from yt_playlist.core import db_handles
     from yt_playlist.core.db_rebuild import job
     from yt_playlist.core.storage_maintenance import StorageMaintenance
     from yt_playlist.core.store import Store
     class ProcessDied(BaseException):
         pass
+    production64,first = legacy_runtime
     store = Store(production64)
     try:
         store.init_schema()
-        first = job.run(store,destination=destination.for_source(production64,split=True,legacy=True))
         store.settings.set_setting('accepted-before-repair-crash','keep')
         def during_close():
             raise ProcessDied()

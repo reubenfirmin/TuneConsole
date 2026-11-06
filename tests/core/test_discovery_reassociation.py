@@ -16,14 +16,11 @@ REGISTRY = (*MIGRATIONS[:27],Migration(28,'discovery_representatives',upgrade.ap
 
 
 @pytest.fixture
-def store():
-    s = Store(':memory:')
+def store(store):
     # Workflow cases call current repositories. The explicit migration cases
     # below retain their independent v027/v028 databases and registry.
-    s.init_schema()
-    yield s
-    upgrade.validate(s.conn)
-    s.conn.close()
+    yield store
+    upgrade.validate(store.conn)
 
 
 def subject(s,entry):
@@ -38,6 +35,13 @@ def move(s,video,entry,now=10):
 def discover(s,video,source,now):
     return s.discovery.upsert_discovered_track(video+'|artist',video,video,'Artist',None,None,
                                                None,None,source,now)
+
+
+def retained_source(s, video, original):
+    association = s.conn.execute('SELECT id FROM item_recording_associations '
+        'WHERE video_id=? ORDER BY id DESC LIMIT 1', (video,)).fetchone()[0]
+    return json.loads(legacy_evidence.original(s.conn, 'discovery', 'discovery_reassociation',
+                                              json.dumps([association, original['id']])))
 
 
 @pytest.mark.parametrize('representative_moves',[True,False])
@@ -65,11 +69,11 @@ def test_partial_move_preserves_counters_and_independent_sources_through_expiry(
     assert s.discovery.discovery_sources_for_track(key)[0]['source_token']=='genre:b'
     newkey = subject(s,target)['identity_key']
     assert s.discovery.discovery_sources_for_track(newkey)[0]['source_token']=='radio:a'
-    # Refresh one branch, expire the other, then remove the last surviving source.
+    # Refresh one branch, expire the other, then let the surviving branch age out.
     discover(s,'a','radio:a',50*86400)
     assert s.discovery.gc_discovery_pool(50*86400,30,set())['tracks']==1
     assert [r['recording_id'] for r in s.discovery.get_discovered_tracks()]==[new]
-    assert s.discovery.remove_discovery_source(newkey,'radio:a')
+    assert s.discovery.gc_discovery_pool(81*86400,30,set())['tracks']==1
     assert not s.discovery.get_discovered_tracks()
     assert len(s.conn.execute('SELECT * FROM youtube_items').fetchall())==3
     assert subject(s,b)['recording_id']==old
@@ -83,15 +87,16 @@ def test_complete_move_merges_counts_and_preserves_source_collision_evidence(sto
     newkey = discover(s,'target','radio:same',2)
     s.discovery.mark_offered('track',[oldkey],3)
     s.discovery.mark_offered('track',[newkey],4)
+    original = dict(s.conn.execute("SELECT * FROM discovery_sources WHERE input_video_id='a'").fetchone())
     move(s,'a',target,5)
     row = s.discovery.get_discovered_tracks()[0]
     assert (row['offered_count'],row['first_shown'],row['last_shown'])==(2,3,4)
     sources = s.discovery.discovery_sources_for_track(newkey)
     assert {(r['input_video_id'],r['found_at'],r['last_found_at']) for r in sources}=={('a',1,1),('target',2,2)}
-    archived = [json.loads(legacy_evidence.original(s.conn, 'discovery', 'discovery_reassociation', r[0]))
-                for r in s.conn.execute("SELECT source_id FROM discovery_identity_evidence WHERE kind='discovery_reassociation'")]
+    archived = [retained_source(s, 'a', original)]
+    assert archived == [original]
     assert {r['input_video_id'] for r in archived}=={'a'}
-    assert s.discovery.remove_discovery_source(newkey,'radio:same')
+    assert s.discovery.gc_discovery_pool(31*86400,30,set())['tracks']==1
     assert not s.conn.execute('SELECT * FROM discovery_memberships').fetchall()
 
 
@@ -105,11 +110,15 @@ def test_same_timestamp_moves_retain_each_original_source_input(store):
     newkey = discover(s,'target','radio:same',2)
     s.discovery.mark_offered('track',[oldkey],3)
     s.discovery.mark_offered('track',[newkey],4)
+    original_a = dict(s.conn.execute("SELECT * FROM discovery_sources WHERE input_video_id='a'").fetchone())
     move(s,'a',target,10)
+    archived = [retained_source(s, 'a', original_a)]
     discover(s,'b','radio:same',5)
+    original_b = dict(s.conn.execute("SELECT * FROM discovery_sources WHERE input_video_id='b'").fetchone())
     move(s,'b',target,10)
-    archived = [json.loads(legacy_evidence.original(s.conn, 'discovery', 'discovery_reassociation', r[0]))
-                for r in s.conn.execute("SELECT source_id FROM discovery_identity_evidence WHERE kind='discovery_reassociation'")]
+    archived.append(retained_source(s, 'b', original_b))
+    assert archived == [original_a, original_b]
+    assert retained_source(s, 'a', original_a) == original_a
     assert {row['input_video_id'] for row in archived}=={'a','b'}
     assert len(archived)==2
     assert len(s.discovery.get_discovered_tracks())==1

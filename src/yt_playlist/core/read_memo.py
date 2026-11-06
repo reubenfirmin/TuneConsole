@@ -20,7 +20,9 @@ class ReadMemo:
             # Never reuse a newer reader's result in an older pinned view. Seek
             # consumed inputs outside the memo lock to avoid lock-order cycles.
             if (previous_epoch == epoch and previous_serial <= serial
-                    and unchanged(dependencies, previous_serial)):
+                    # Equal serials describe the same pinned inputs. Later
+                    # writer changes cannot change either reader's snapshot.
+                    and (previous_serial == serial or unchanged(dependencies, previous_serial))):
                 reads.include(dependencies)
                 with self._lock:
                     if self._entries.get(name) is entry:

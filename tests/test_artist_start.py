@@ -109,7 +109,7 @@ def test_empty_owned_library_with_incidental_history_reaches_artist_setup(store,
     client = client_for(store, fake)
     result = sync_all(store, {1: fake}, 1000.)
     assert result['status'] == ('complete' if likes_readable else 'partial')
-    assert store.history.get_recent_history_keys(0) == {'one past song|past artist'}
+    assert set(dict(store.history.recent_plays_with_ts())) == {'one past song|past artist'}
     assert store.conn.execute('SELECT COUNT(*) FROM play_events').fetchone()[0] == 0
     assert store.conn.execute('SELECT COUNT(*) FROM playable_library_tracks').fetchone()[0] == 0
     for index in range(live_plays):

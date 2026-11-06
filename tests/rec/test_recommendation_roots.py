@@ -1,4 +1,5 @@
 """Actual capture, file-ledger and prepared-menu publication lifetimes."""
+from contextlib import contextmanager
 import json
 import sqlite3
 import threading
@@ -9,6 +10,7 @@ import pytest
 from tests.core.test_compact_groups_migration import predecessor
 from tests.repos.test_compact_group_publication import database
 from tests.repos.test_typed_recommendation_publication import recommendations, publish, plan, collect
+from yt_playlist.core import group_documents
 from yt_playlist.rec import choice_evidence, group_roots, recommendation_roots
 from yt_playlist.rec.choice_capture import CaptureQueue
 from yt_playlist.core.activity import WorkBudgetExceeded
@@ -37,21 +39,52 @@ def exists(store, generation):
     return store.conn.execute('SELECT 1 FROM recommendation_generations WHERE id=?', (generation,)).fetchone() is not None
 
 
-def test_reader_selects_and_retains_the_head_atomically_until_idempotent_close(recommendations):
+def test_reader_selects_and_retains_the_head_atomically_until_idempotent_close(recommendations, monkeypatch):
     store = recommendations
     first = publish(store, plan(store)).generation_id
-    generation, close = group_roots.pending_head(store, ('radio', 'home'), 10)
-    assert generation == first and close is not None
-    assert [value for _, value in roots(store, 'pending')] == [first]
-    publish(store, plan(store, 'new-head'))
-    group_roots.reap_pending(store)
-    collect(store)
-    assert exists(store, first)
-    close()
-    close()
+    selecting, switched = threading.Event(), threading.Event()
+    writer = group_roots.writer
+
+    @contextmanager
+    def before_selection(source):
+        # Replace the head after the fallback's presence check, before the
+        # transaction which must select and retain the current publication.
+        selecting.set()
+        assert switched.wait(5)
+        with writer(source) as conn:
+            yield conn
+
+    def replacement():
+        try:
+            assert selecting.wait(5)
+            second = publish(store, plan(store, 'new-head')).generation_id
+            collect(store)
+            assert not exists(store, first)
+            return second
+        finally:
+            switched.set()
+
+    close = None
+    try:
+        with ThreadPoolExecutor(1) as executor:
+            worker = executor.submit(replacement)
+            with monkeypatch.context() as patch:
+                patch.setattr(group_roots, 'writer', before_selection)
+                generation, close = group_roots.pending_head(store, ('radio', 'home'), 10)
+            second = worker.result(2)
+        assert generation == second and close is not None
+        assert [value for _, value in roots(store, 'pending')] == [second]
+        publish(store, plan(store, 'third-head'))
+        group_roots.reap_pending(store)
+        collect(store)
+        assert exists(store, second)
+    finally:
+        if close is not None:
+            close()
+            close()
     assert not roots(store, 'pending')
     collect(store)
-    assert not exists(store, first)
+    assert not exists(store, second)
 
 
 @pytest.mark.parametrize('query_only', [False, True], ids=['writable', 'paused'])
@@ -72,10 +105,12 @@ def test_reader_without_a_head_leaves_no_pending_sql_or_lifetime_file(recommenda
 
 
 @pytest.mark.parametrize('has_head', [False, True])
-def test_fallback_reader_during_publication_only_needs_admission_for_an_existing_head(recommendations, has_head):
+def test_sql_reader_during_evidence_publication_retains_its_head_until_reaped(recommendations, has_head):
     store = recommendations
+    directory = group_documents.directory(store.conn) / '.pending'
+    first, close = None, None
     if has_head:
-        publish(store, plan(store))
+        first = publish(store, plan(store)).generation_id
     entered, release = threading.Event(), threading.Event()
 
     def publication():
@@ -87,15 +122,50 @@ def test_fallback_reader_during_publication_only_needs_admission_for_an_existing
         worker = executor.submit(publication)
         try:
             assert entered.wait(2)
+            # Actual historical file evidence still needs its domain guard.
+            with pytest.raises(WorkBudgetExceeded, match='using publication'):
+                group_roots.pending(store, {'group_generation': 'second'}, 10)
+            assert not list(directory.glob('*.lock'))
+            changes = store.conn.total_changes
+            generation, close = group_roots.pending_head(store, ('radio', 'home'), 10)
             if has_head:
-                with pytest.raises(WorkBudgetExceeded, match='using publication'):
-                    group_roots.pending_head(store, ('radio', 'home'), 10)
+                assert generation == first and close is not None
+                retained = roots(store, 'pending')
+                assert len(retained) == 1 and retained[0][1] == first
+                assert len(list(directory.glob('*.lock'))) == 1
+                publish(store, plan(store, 'new-head'))
+                collect(store)
+                assert exists(store, first)
+                close()
+                close()
+                # Busy evidence admission defers retirement. The released OS
+                # lifetime lets a later bounded reaper finish the SQL owner.
+                assert roots(store, 'pending') == retained
+                assert len(list(directory.glob('*.lock'))) == 1
+                collect(store)
+                assert exists(store, first)
             else:
-                assert group_roots.pending_head(store, ('radio', 'home'), 10) == (None, None)
-            assert not roots(store, 'pending')
+                assert (generation, close) == (None, None)
+                assert store.conn.total_changes == changes
+                assert not roots(store, 'pending')
+                assert not list(directory.glob('*.lock'))
         finally:
-            release.set()
+            try:
+                if close is not None:
+                    close()
+            finally:
+                release.set()
         worker.result(2)
+    group_roots.reap_pending(store)
+    assert not roots(store, 'pending')
+    assert not store.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
+    assert not list(directory.glob('*.lock'))
+    if close is not None:
+        close()
+    collect(store)
+    if has_head:
+        assert not exists(store, first)
+        assert store.recommendations.head('home') is not None
 
 
 def test_private_reader_selects_its_pinned_head_after_the_writer_switches_and_retires_it(recommendations):

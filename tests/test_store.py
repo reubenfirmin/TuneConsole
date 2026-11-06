@@ -151,13 +151,6 @@ def test_upsert_track_backfills_duration_on_resync(store):
     dur = store.conn.execute("SELECT duration_s FROM tracks WHERE id=?", (t,)).fetchone()["duration_s"]
     assert dur == 250
 
-def test_history_keys_window(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    day = 86400
-    store.history.record_history_plays(iid, 5 * day, ["song a|artist", "song c|artist"], source_timezone="UTC")
-    assert store.history.get_recent_history_keys(4 * day) == {"song a|artist", "song c|artist"}
-    assert store.history.get_recent_history_keys(6 * day) == set()
-
 def test_get_action_roundtrip(store):
     import json
 
@@ -194,30 +187,145 @@ def test_get_playlist_tracks_with_meta_includes_duration(store):
     assert rows == [("song|artist", "v1", "Song", "Artist", 207, 1)]  # trailing field = available
 
 
-def test_concurrent_access_is_serialized(store):
-    # FastAPI serves sync routes from a threadpool, so the shared connection is hit from many
-    # threads. Without the Store lock this raises sqlite3 ProgrammingError / corrupts state.
+def _assert_shared_store_sql_owned(statements):
+    assert statements, "No shared-connection SQL was observed"
+    unowned = [(name, sql) for name, owned, sql in statements if not owned]
+    assert not unowned, f"Shared-connection SQL without Store ownership: {unowned[:3]}"
+
+
+def test_concurrent_access_is_serialized(store, monkeypatch):
     import threading
-    store.accounts.upsert_account("main", "cred", None, True)
-    errors = []
+    import time
+
+    # Three rounds cover insert, replacement, then removal/reordering. Four
+    # workers must actually contend before each round; scheduling luck and 200
+    # repeated publications are not needed to exercise the shared connection.
+    count, rounds = 4, 3
+    iid = store.accounts.upsert_account("main", "cred", None, True)
+    condition = threading.Condition()
+    start, finish = (threading.Barrier(count + 1) for _ in range(2))
+    phase = threading.Barrier(count)
+    barriers = (start, finish, phase)
+    blocked = [set() for _ in range(rounds)]
+    reentered, statements, errors = set(), [], []
+    round_number = 0
+    real_acquire = store._lock.acquire
+
+    def observe_acquire(blocking=True, timeout=-1):
+        # Keep the original ServingLock, its reentrant ownership and the SQLite
+        # lock. Only observe a failed real acquisition before its ordinary wait.
+        if blocking and timeout == -1:
+            if store._lock.held_by_current_thread:
+                with condition:
+                    reentered.add(threading.current_thread().name)
+            if real_acquire(blocking=False):
+                return True
+            with condition:
+                blocked[round_number].add(threading.current_thread().name)
+                condition.notify_all()
+        return real_acquire(blocking=blocking, timeout=timeout)
+
+    def observe_sql(sql):
+        with condition:
+            statements.append((threading.current_thread().name,
+                               store._lock.held_by_current_thread, sql))
 
     def worker(n):
         try:
-            for i in range(25):
-                tid = store.tracks.upsert_track(f"v{n}_{i}", f"Song {n} {i}", "Artist", "Alb", 200)
-                pid = store.playlists.upsert_playlist(1, f"PL{n}_{i}", "p", 1, f"h{n}_{i}", 1.0)
-                store.playlists.set_playlist_tracks(pid, [tid])
-                store.playlists.get_playlists()
-        except Exception as e:  # noqa: BLE001
-            errors.append(e)
+            tids = []
+            for i in range(rounds):
+                start.wait(10)
+                tids.append(store.tracks.upsert_track(
+                    f"v{n}_{i}", f"Song {n} {i}", "Artist", "Alb", 200 + i))
+                phase.wait(10)
+                pid = store.playlists.upsert_playlist(
+                    iid, f"PL{n}", f"Mix {n} {i}", min(i + 1, 2), f"h{n}_{i}", 1000 + i)
+                phase.wait(10)
+                store.playlists.set_playlist_tracks(pid, list(reversed(tids[-2:])))
+                phase.wait(10)
+                assert {p.provider_playlist_id for p in store.playlists.get_playlists()} == {
+                    f"PL{other}" for other in range(count)}
+                # This public method calls another repository read while it
+                # still owns the Store lock, exercising actual re-entry.
+                assert store.playlists.get_playlist_for_account(iid, f"PL{n}").id == pid
+                finish.wait(10)
+        except BaseException as error:
+            with condition:
+                errors.append((n, repr(error)))
+                condition.notify_all()
+            for barrier in barriers:
+                barrier.abort()
 
-    threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    names = {f"store-worker-{n}" for n in range(count)}
+    threads = [threading.Thread(target=worker, args=(n,), name=f"store-worker-{n}")
+               for n in range(count)]
+    started = []
+    completed = False
+    monkeypatch.setattr(store._lock, "acquire", observe_acquire)
+    store.conn.set_trace_callback(observe_sql)
+    try:
+        for thread in threads:
+            thread.start()
+            started.append(thread)
+        for round_number in range(rounds):
+            with store._lock:
+                start.wait(10)
+                with condition:
+                    assert condition.wait_for(
+                        lambda: blocked[round_number] == names or errors, timeout=10), blocked
+                    assert not errors, errors
+                # Every worker is inside its real repository's acquisition,
+                # waiting for this owner. Release it before any phase barrier.
+            finish.wait(10)
+        completed = True
+    finally:
+        if not completed:
+            for barrier in barriers:
+                barrier.abort()
+        deadline = time.monotonic() + 10
+        for thread in started:
+            thread.join(max(0, deadline - time.monotonic()))
+        store.conn.set_trace_callback(None)
+    assert not [thread.name for thread in started if thread.is_alive()]
     assert errors == []
-    assert len(store.playlists.get_playlists()) == 8 * 25
+    assert blocked == [names] * rounds
+    assert reentered == names
+    assert {name for name, _, _ in statements} == names
+    _assert_shared_store_sql_owned(statements)
+
+    playlists = store.playlists.get_playlists()
+    assert {p.provider_playlist_id: (p.account_id, p.title, p.track_count,
+                                   p.content_hash, p.first_seen, p.last_seen, p.last_changed)
+            for p in playlists} == {
+        f"PL{n}": (iid, f"Mix {n} 2", 2, f"h{n}_2", 1000, 1002, 1002)
+        for n in range(count)}
+    assert [tuple(row) for row in store.conn.execute(
+        "SELECT video_id,title,artist,duration_s FROM tracks ORDER BY video_id")] == [
+        (f"v{n}_{i}", f"Song {n} {i}", "Artist", 200 + i)
+        for n in range(count) for i in range(rounds)]
+    assert [tuple(row) for row in store.conn.execute(
+        "SELECT p.provider_playlist_id,t.video_id,pt.position FROM playlist_tracks pt "
+        "JOIN playlists p ON p.id=pt.playlist_id JOIN tracks t ON t.id=pt.track_id "
+        "ORDER BY p.provider_playlist_id,pt.position")] == [
+        (f"PL{n}", f"v{n}_{i}", position)
+        for n in range(count) for position, i in enumerate((2, 1))]
+
+
+def test_shared_store_ownership_check_rejects_unserialized_write(store):
+    import threading
+    import pytest
+
+    statements = []
+    store.conn.set_trace_callback(lambda sql: statements.append((
+        threading.current_thread().name, store._lock.held_by_current_thread, sql)))
+    try:
+        # A real catalog publication with only the repository's serialization
+        # decorator bypassed. SQLite's per-call lock and durability stay intact.
+        store.tracks.upsert_track.__wrapped__(store.tracks, "unowned", "Song", "Artist", "Alb", 200)
+    finally:
+        store.conn.set_trace_callback(None)
+    with pytest.raises(AssertionError, match="SQL without Store ownership"):
+        _assert_shared_store_sql_owned(statements)
 
 
 def test_suppress_overlap_roundtrip(store):

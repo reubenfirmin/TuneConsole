@@ -5,10 +5,12 @@ contains one compact receipt per calculation, never one SQL row per input edge.
 """
 import hashlib
 import json
+from collections import OrderedDict
 from pathlib import Path
 import tempfile
 
-from . import fao, file_collection
+from . import fao, file_collection, vibe_model_files
+from yt_playlist.repos import vibe_models
 from .evidence_ledger import canonical
 
 CHUNK_ROWS = 128
@@ -161,7 +163,13 @@ def fingerprint(inputs):
     return hashlib.sha256(canonical(sorted(inputs))).digest()
 
 
-def _read(conn, pid, load, installed):
+def _model_manifest(conn, generation):
+    value = vibe_models.read(conn, generation)
+    return {'vibe': value['vibe'], 'inputs': sorted(vibe_model_files.measurement_ids(value)),
+            'recordings': {row['recording'] for row in value['inputs']}}
+
+
+def _read(conn, pid, load, installed, model_load=None):
     row = (conn.execute('SELECT input_fingerprint,byte_size,state FROM prediction_provenance WHERE prediction_id=?', (pid,)).fetchone()
            if installed else None)
     if row is None:
@@ -173,6 +181,16 @@ def _read(conn, pid, load, installed):
     if row[2] == 'expired':
         return None
     value = load(pid).get(str(pid))
+    if vibe_model_files.is_receipt(value):
+        if (len(canonical(value)) != row[1] or hashlib.sha256(canonical(value)).digest() != row[0]
+                or vibe_models.linked(conn, pid) != value['generation']):
+            raise fao.CorruptFile('Required shared model receipt is missing or corrupt')
+        model = model_load(value['generation']) if model_load else _model_manifest(conn, value['generation'])
+        prediction = vibe_models.subject(conn, pid)
+        if (not prediction or prediction[0] != model['vibe']
+                or prediction[1] in model['recordings']):
+            raise fao.CorruptFile('Shared model does not match its prediction conditioning')
+        return {**value, 'inputs': model['inputs']}
     if (not isinstance(value, dict) or set(value) != {'inputs', 'artists'}
             or len(canonical(value)) != row[1] or fingerprint(value['inputs']) != row[0]):
         raise fao.CorruptFile('Required calculation provenance is missing or corrupt')
@@ -187,6 +205,14 @@ def read_many(conn, identities):
     """Verify each calculation while retaining at most one shared file chunk."""
     chunk, records = None, None
     installed = available(conn)
+    manifests = OrderedDict()
+    def model_load(generation):
+        if generation not in manifests:
+            manifests[generation] = _model_manifest(conn, generation)
+            if len(manifests) > 8:
+                manifests.popitem(last=False)
+        manifests.move_to_end(generation)
+        return manifests[generation]
     def load(pid):
         nonlocal chunk, records
         key = pid // CHUNK_ROWS
@@ -195,7 +221,7 @@ def read_many(conn, identities):
             chunk = key
         return records
     for pid in identities:
-        yield pid, _read(conn, pid, load, installed)
+        yield pid, _read(conn, pid, load, installed, model_load)
 
 
 def same_inputs(conn, pid, inputs):
@@ -208,6 +234,10 @@ def same_inputs(conn, pid, inputs):
     return {r[0] for r in conn.execute('SELECT measurement_id FROM prediction_inputs WHERE prediction_id=?', (pid,))} == set(inputs)
 
 
+def same_receipt(conn, pid, receipt):
+    return vibe_models.same_receipt(conn, pid, receipt)
+
+
 def stage_many(conn, values):
     """Prepare complete chunks against a pinned snapshot, before SQL publication.
 
@@ -217,10 +247,12 @@ def stage_many(conn, values):
     """
     grouped, markers, originals = {}, [], set()
     for pid, inputs, artists in values:
-        value = {'inputs':sorted(set(inputs)), 'artists':sorted(set(artists))}
+        shared = vibe_model_files.is_receipt(inputs)
+        value = inputs if shared else {'inputs':sorted(set(inputs)), 'artists':sorted(set(artists))}
         grouped.setdefault(pid//CHUNK_ROWS,{})[str(pid)] = value
-        markers.append((pid,fingerprint(value['inputs']),len(canonical(value))))
-        originals.update(value['inputs'])
+        markers.append((pid,hashlib.sha256(canonical(value)).digest() if shared else fingerprint(value['inputs']),len(canonical(value))))
+        if not shared:
+            originals.update(value['inputs'])
     staged = []
     try:
         for chunk, pending in grouped.items():
@@ -245,7 +277,11 @@ def publish_many(conn, values):
     if not conn.in_transaction:
         raise RuntimeError('Provenance publication requires the calculation writer reservation')
     grouped = {}
+    shared = []
     for pid, inputs, artists in values:
+        if vibe_model_files.is_receipt(inputs):
+            shared.append((pid, inputs, artists))
+            continue
         prediction = conn.execute('SELECT vibe,recording_id,lineage_complete,kind FROM predictions WHERE id=?', (pid,)).fetchone()
         if not prediction:
             raise ValueError('Unknown prediction owner')
@@ -281,6 +317,11 @@ def publish_many(conn, values):
         conn.executemany('INSERT INTO prediction_provenance VALUES (?,?,?,\'ready\') '
                          'ON CONFLICT(prediction_id) DO NOTHING',
                          [(int(identity), fingerprint(value['inputs']), len(canonical(value))) for identity, value in values.items()])
+    if shared:
+        # Rebuilds preserve compact shared identities rather than expanding each
+        # manifest into an ordinary contributor graph. Borrowed FAO roots are
+        # pinned for the rebuild's full lifetime by file_owners.readers.
+        vibe_models.publish_receipts(conn, shared, stage_receipts=stage_many, load_manifest=_model_manifest)
 
 
 def prepare_batch(conn, limit=128):

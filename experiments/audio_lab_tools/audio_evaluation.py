@@ -16,7 +16,7 @@ import time
 import numpy as np
 from threadpoolctl import threadpool_limits
 
-from .browser_capture import CAPTURE_FILES, browser_sample
+from .browser_capture import CAPTURE_FILES, browser_sample, capture_files
 from .external_checkpoint import RUN
 from .external_experiment import LAB, ROOT, digest, save, stamp
 from .reference_pipeline import WORK as NATIVE_WORK, maximum_delta, process_sample
@@ -267,7 +267,7 @@ def compare(directory, limit, lifetime):
         context.route('**/*', lambda route: route.continue_() if route.request.url.startswith(base + '/')
                       else (network.append(route.request.url), route.abort()))
         page = context.new_page()
-        page.goto(base + '/snapshot/audio_preview_frame.html')
+        page.goto(base + '/snapshot/' + capture_files(directory / 'snapshot')[2])
         session = browser.new_browser_cdp_session()
         roots = [row['id'] for row in session.send('SystemInfo.getProcessInfo')['processInfo'] if row['type'] == 'browser']
         remaining = [r for r in plan['cases'] if not (directory / 'comparison' / f"{r['index']:03d}" / 'receipt.json').exists()]
@@ -348,7 +348,7 @@ def decode_retained(directory, lifetime):
         browser = playwright.chromium.launch(headless=True, args=['--mute-audio'])
         page = browser.new_page()
         page.route('**/*', lambda route: route.continue_() if route.request.url.startswith(base + '/') else route.abort())
-        page.goto(base + '/snapshot/audio_preview_frame.html')
+        page.goto(base + '/snapshot/' + capture_files(directory / 'snapshot')[2])
         for index, row in enumerate(load(plan['capture_report'])['cases']):
             work = target / str(index)
             work.mkdir()
@@ -372,17 +372,18 @@ def decode_retained(directory, lifetime):
 def prepare_current(directory, snapshot):
     destination = directory / 'extension'
     destination.mkdir()
-    for name in CAPTURE_FILES:
+    files = capture_files(snapshot)
+    for name in files:
         shutil.copyfile(snapshot / name, destination / name)
     shutil.copytree(snapshot / 'audio_model', destination / 'audio_model')
     save(destination / 'manifest.json', {'manifest_version': 3, 'name': 'TuneConsole #424 current package audit',
         'version': '1.0', 'key': load(snapshot / 'original_manifest.json')['key'], 'permissions': ['scripting'],
         'host_permissions': ['https://music.youtube.com/*'], 'background': {'service_worker': 'audit_background.js'},
         'content_security_policy': {'extension_pages': "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"},
-        'web_accessible_resources': [{'resources': ['audio_preview_frame.html'], 'matches': ['https://music.youtube.com/*']}],
-        'content_scripts': [{'matches': ['https://music.youtube.com/*'], 'js': ['audio_preview_capture.js'], 'run_at': 'document_idle'}]})
+        'web_accessible_resources': [{'resources': [files[2]], 'matches': ['https://music.youtube.com/*']}],
+        'content_scripts': [{'matches': ['https://music.youtube.com/*'], 'js': [files[0]], 'run_at': 'document_idle'}]})
     (destination / 'audit_background.js').write_text('chrome.runtime.onMessage.addListener(() => {});\n')
-    return destination, {name: digest(destination / name) for name in CAPTURE_FILES}, destination / 'audio_model/model_worker.js'
+    return destination, {name: digest(destination / name) for name in files}, destination / 'audio_model/model_worker.js'
 
 
 def capture_current(directory, limit, lifetime):

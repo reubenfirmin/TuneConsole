@@ -4,6 +4,7 @@ Expansion only offers tracks whose genre FAMILY is in the chosen set; untagged t
 while a filter is active (strict: a track with no genre can't be vouched safe).
 """
 import math
+from tests.enrichment_support import seed_enrichment
 
 import numpy as np
 from fastapi.testclient import TestClient
@@ -30,7 +31,7 @@ def _track(store, title, artist, *, genre="", xy=None):
     entry = store.tracks.upsert_track(f"v_{title}", title, artist, "", 200, thumbnail="t.jpg")
     k = identity_key(title, artist)
     if genre:
-        store.tracks.set_track_enrichment(entry,genre,None)
+        seed_enrichment(store, entry, genre, None)
     if xy is not None:
         v = np.asarray(xy, dtype=np.float32)
         v /= np.linalg.norm(v) + 1e-9
@@ -40,16 +41,7 @@ def _track(store, title, artist, *, genre="", xy=None):
     return k
 
 
-# --- keys_in_families / library_genre_families -------------------------------------------------
-
-def test_keys_in_families_filters_by_family_and_drops_untagged(store):
-    store.accounts.upsert_account("m", "c", None, True)
-    a = _track(store, "Goa One", "A", genre="goa trance")     # -> trance family
-    b = _track(store, "Techno One", "B", genre="acid techno")  # -> techno family
-    _track(store, "Untagged", "C")                             # no genre -> never included
-    keys = store.rec_query.keys_in_families(["trance"])
-    assert a in keys and b not in keys
-    assert all("Untagged" not in k for k in keys)
+# --- library_genre_families -------------------------------------------------------------------
 
 
 def test_library_genre_families_lists_present_families_with_counts(store):
@@ -68,7 +60,7 @@ def test_cluster_expand_allow_restricts_candidates(store):
     kp = _track(store, "Seed", "P", genre="goa trance", xy=_unit(0))
     ka = _track(store, "Near Trance", "A", genre="psytrance", xy=_unit(10))
     kb = _track(store, "Near Techno", "B", genre="acid techno", xy=_unit(12))
-    allow = store.rec_query.keys_in_families(["trance"])
+    allow = store.rec_query.keys_in_genre_selection(["trance"])
     out = [k for k, _ in embed.cluster_expand(store, pos_keys=[kp], allow=allow, topn=5)]
     assert ka in out                      # trance candidate kept
     assert kb not in out                  # techno candidate filtered out
@@ -101,6 +93,9 @@ def test_keys_in_genre_selection_matches_genre_or_family(store):
     goa = _track(store, "Goa", "A", genre="goa trance")
     psy = _track(store, "Psy", "B", genre="psytrance")
     tek = _track(store, "Tek", "C", genre="acid techno")
+    _track(store, "Untagged", "D")
+    assert store.rec_query.keys_in_genre_selection([]) == set()
+    assert store.rec_query.keys_in_genre_selection([' ']) == set()
     # a specific sub-genre token matches only that genre
     assert store.rec_query.keys_in_genre_selection(["goa trance"]) == {goa}
     # a family token matches every genre in the family

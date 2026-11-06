@@ -12,6 +12,7 @@ from urllib.parse import urlencode, urlparse, parse_qs
 
 from anyio import CancelScope
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 from starlette.concurrency import run_in_threadpool
 
 from yt_playlist.core.activity import activity_for
@@ -126,7 +127,13 @@ def build(ctx) -> APIRouter:
         radio = getattr(ctx, "radio", None)
         # The persisted session can already be playing before the radio panel has been opened
         # and its controller reattached. Use the same snapshot for attribution and the tab light.
-        session = radio.state() if radio is not None else {}
+        if radio is not None:
+            # Live status needs only the session lock. The controller opens a
+            # read-only view itself when a saved checkpoint is needed; never
+            # retain a scarce reader while waiting for live session state.
+            session = radio.state()
+        else:
+            session = {}
         now_playing = bridge.now_playing
         seen_at = getattr(bridge, "now_playing_seen_at", None)
         if now_playing is not None and seen_at is not None and time.monotonic() - seen_at > 8:
@@ -239,10 +246,14 @@ def build(ctx) -> APIRouter:
             result = await activity_for(ctx).to_thread(ctx.ops().set_rating, video_id, like_status,
                                                        after_confirmed=mirror)
             logger.info("rating confirmed: video=%s desired=%s", video_id, like_status)
-        except Exception as exc:
+        except Exception:
             logger.warning("rating failed: video=%s desired=%s", video_id, like_status, exc_info=True)
-            return {"ok": False, "error": str(exc)}
-        return {"ok": True, "error": "", **{k: v for k, v in result.items() if k == "player_error"}}
+            return {"ok": False, "error": "Rating not confirmed. Check it in YouTube Music before trying again."}
+        # Player or local-history trouble cannot undo the confirmed provider write.
+        if result.get("player_error"):
+            return {"ok": True, "error": "", "player_error":
+                    "Rating saved. Some updates are not confirmed; check it in YouTube Music."}
+        return {"ok": True, "error": ""}
 
     async def mirror_rating(action, video_id, like_status, account_id):
         # The API confirms the exact upload/account even if playback has moved on. When it
@@ -250,7 +261,7 @@ def build(ctx) -> APIRouter:
         # the saved rating. Radio repairs its saved future before advancing.
         playing = bridge.now_playing or {}
         if bridge.connected and playing.get("video_id") == video_id:
-            player_errors = []
+            player_failed = False
             native_diagnostics = None
             identity = None
             try:
@@ -264,10 +275,10 @@ def build(ctx) -> APIRouter:
                 native_diagnostics = result.get("diagnostics")
                 if status != 200 or not result.get("ok"):
                     raise ValueError(result.get("error") or "Player command failed")
-            except Exception as exc:
+            except Exception:
                 logger.warning("rating saved but native thumb update failed: video=%s diagnostics=%s",
                                video_id, json.dumps(native_diagnostics, ensure_ascii=True)[:4000], exc_info=True)
-                player_errors.append(str(exc))
+                player_failed = True
             # A missing native rating control must not prevent the requested
             # skip after the exact song's dislike has already been saved.
             if like_status == "DISLIKE" and identity is not None:
@@ -275,11 +286,11 @@ def build(ctx) -> APIRouter:
                     skipped = await skip_song(video_id, brand_id=identity.brand_account_id or "")
                     if not skipped.get("ok"):
                         raise ValueError(skipped.get("error") or "The player did not advance")
-                except Exception as exc:
+                except Exception:
                     logger.warning("rating saved but skip failed: video=%s", video_id, exc_info=True)
-                    player_errors.append(str(exc))
-            if player_errors:
-                return {"ok": True, "error": "", "player_error": " ".join(player_errors)}
+                    player_failed = True
+            if player_failed:
+                return {"ok": True, "error": "", "player_error": "Player update not confirmed"}
         return {"ok": True, "error": ""}
 
     async def skip_song(video_id, *, brand_id=None):
@@ -437,7 +448,10 @@ def build(ctx) -> APIRouter:
             wake = getattr(ctx, "sync_wake", None)
             if wake is not None:
                 wake.set()
-            while True:
+            # A concurrent command/keepalive can fail while pairing or play
+            # persistence runs off-thread. Starlette then marks the socket
+            # disconnected before receive_json can observe a disconnect frame.
+            while ws.application_state == WebSocketState.CONNECTED:
                 msg = await ws.receive_json()
                 # No await separates this check from presence updates or reply
                 # resolution. Only this event loop installs socket owners.

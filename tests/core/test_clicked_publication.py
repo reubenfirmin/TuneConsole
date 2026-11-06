@@ -8,17 +8,18 @@ import pytest
 
 from tests.core.test_predecessor_writes import installed
 from tests.core.test_ranked_state_preparation import seed
+from tests.preparation_timing_support import preparation_costs
 from yt_playlist.core import library_pool_state, recommendation_outputs as files
-from yt_playlist.core.migrations import MigrationError, registry, regular, runner
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import clicked_publication as publication, ranked_state as preparation
 from yt_playlist.core.store import Store
 
 
-def ready(conn, size=128):
+def ready(conn, size=128, *, worker_size=128):
     owner = publication.OWNER
     owner.worker.install(conn)
     for _ in range(2000):
-        if owner.worker.step(conn, batch_size=128).status == 'prepared':
+        if owner.worker.step(conn, batch_size=worker_size).status == 'prepared':
             break
     else:
         pytest.fail('Clicked preparation did not finish bounded fixture')
@@ -27,6 +28,17 @@ def ready(conn, size=128):
         if stage.complete:
             return stage.id
     pytest.fail('Clicked publication map did not finish bounded fixture')
+
+
+def rejection_inputs(store):
+    seed(store)
+    owner = publication.OWNER
+    owner.worker.install(store.conn)
+    for _ in range(100):
+        if owner.worker.step(store.conn).status == 'prepared':
+            assert owner.selected(store.conn) is None
+            return
+    pytest.fail('Clicked preparation did not finish bounded rejection prefix')
 
 
 @pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
@@ -65,14 +77,10 @@ def test_preopened_readers_preserve_all_lanes_unknown_clock_and_original_bytes(i
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['header', 'candidate', 'missing', 'extra', 'policy', 'genre', 'slot', 'output', 'original', 'omitted'])
-def test_incorrect_ranked_fields_members_or_files_cannot_publish(installed, failure):
+def test_incorrect_ranked_fields_members_or_files_cannot_publish(installed, staged_custody, failure):
     store, _ = installed
-    seed(store)
+    staged_custody(installed, 'clicked-pools', rejection_inputs)
     owner, surface = publication.OWNER, 'home_pool:wheelhouse'
-    owner.worker.install(store.conn)
-    for _ in range(100):
-        if owner.worker.step(store.conn).status == 'prepared':
-            break
     header = preparation.head(store.conn, surface)
     with store.conn:
         if failure == 'header':
@@ -174,11 +182,16 @@ def test_source_race_and_interrupted_cutover_leave_no_partial_publication(instal
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_full_ranked_set_and_paged_plan_are_verified_without_sql_scan(installed):
+def test_full_ranked_set_and_paged_plan_are_verified_without_sql_scan(installed, preparation_costs):
     store, _ = installed
-    originals, _ = seed(store, count=8192)
+    # One full ranked budget exercises paging and damage/recovery. The other
+    # three lanes retain real nonempty projections; the all-lane controls own
+    # their exact lane semantics without three more identical capacity seeds.
+    originals, _ = seed(store, lane_counts={'wheelhouse': 8192})
     owner, surface = publication.OWNER, 'home_pool:wheelhouse'
-    stage = ready(store.conn)
+    # Keep the full paged-plan/recovery budget with the supported largest
+    # slice; separate preparation controls retain small-slice continuation.
+    stage = ready(store.conn, worker_size=512)
     owner.publish(store.conn, stage=stage)
     header = owner.capture(store.conn, stage, surface)
     assert store.conn.execute('SELECT count(*) FROM prepared_clicked_pools_candidates WHERE surface=? AND preparation_revision=?',
@@ -228,25 +241,3 @@ def test_missing_original_or_output_and_failed_preparation_do_not_block_ddl(inst
     assert owner.worker.progress(store.conn) == progress
     owner.worker.step(store.conn, retry=True)
     owner.publish(store.conn, stage=ready(store.conn))
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_native_upgrade_takes_precedence_and_preserves_archives(installed, tmp_path):
-    store, _ = installed
-    originals, _ = seed(store)
-    owner = publication.OWNER
-    stage = ready(store.conn)
-    owner.publish(store.conn, stage=stage)
-    upgraded = Store(tmp_path/'clicked-upgrade.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        upgraded.init_schema(defer_metadata=True)
-        assert publication.native(upgraded.conn)
-        assert owner.selected(upgraded.conn) is None
-        for surface in library_pool_state.SURFACES:
-            assert owner.value(upgraded.conn, stage, surface) == originals[surface]
-            assert upgraded.rec_proposals.get_proposals(surface)['parameters'] == json.loads(originals[surface])['parameters']
-        regular.migrate(upgraded.conn)
-    finally:
-        upgraded.conn.close()

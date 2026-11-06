@@ -1,12 +1,19 @@
 """Explicit action ownership survives supported legacy formats and lost workers."""
+from contextlib import closing
 import json
 import sqlite3
 
 import pytest
 
-from tests.core.test_collection_state_migration import installed_92
 from yt_playlist.core import action_work, collection_recovery, playlist_scopes
 from yt_playlist.core.migrations import current, migrate, registry
+
+
+@pytest.fixture
+def legacy_action_store(tmp_path, legacy_owner_store):
+    store = legacy_owner_store(tmp_path / 'actions.db')
+    with closing(store.conn):
+        yield store
 
 
 def legacy_account(store,label='Original'):
@@ -31,8 +38,8 @@ def backup(tmp_path,account,remote):
     return str(path)
 
 
-def test_upgrade_preserves_action_links_plain_draft_and_unavailable_historical_backup(tmp_path):
-    store = installed_92(tmp_path/'actions.db')
+def test_upgrade_preserves_action_links_plain_draft_and_unavailable_historical_backup(tmp_path,legacy_action_store):
+    store = legacy_action_store
     account = legacy_account(store)
     legacy_playlist(store,account,'SOURCE')
     undo = {'deletions':[{'identity':account,'ytm':'SOURCE','phase':'uncertain',
@@ -195,9 +202,9 @@ def test_unknown_copy_deletion_reconciles_without_replaying_write(store,tmp_path
     assert step['phase']=='deleting' and step['outcome']=='unknown' and step['backup_status']=='verified'
 
 
-def test_workflow_settings_upgrade_keeps_unknown_accounts_and_ordered_transfer_slots(tmp_path):
+def test_workflow_settings_upgrade_keeps_unknown_accounts_and_ordered_transfer_slots(legacy_action_store):
     from yt_playlist.core import workflow_settings
-    store = installed_92(tmp_path/'receipts.db')
+    store = legacy_action_store
     account = legacy_account(store)
     receipt = {'creation_phase':'creating','marker':'original marker','complete':False,'updated_at':3,
                'last_run_added':0,'source_video_ids':['one',None,'one']}
@@ -237,8 +244,8 @@ def test_spotify_receipt_revision_and_destination_fence_stale_workers(store):
     assert workflow_settings.receipts(store.conn,'playlist',account)['fingerprint']['source_video_ids']==['one',None,'one']
 
 
-def test_reused_historical_membership_keeps_original_remote_without_new_account(tmp_path):
-    store = installed_92(tmp_path/'reused.db')
+def test_reused_historical_membership_keeps_original_remote_without_new_account(legacy_action_store):
+    store = legacy_action_store
     account = legacy_account(store,'Newer')
     membership = legacy_playlist(store,account,'NEWER')
     identity = store.actions.record_action('plan',json.dumps({'source':membership,'mode':'delete','source_ytm':'ORIGINAL'}),
@@ -309,9 +316,9 @@ def test_cloned_recovery_relocates_backup_references_without_original_directory(
     from yt_playlist.library.playlist_undo import undo_action
     monkeypatch.setenv('YT_PLAYLIST_HOME',str(tmp_path/'home'))
     original = Store(tmp_path/'original.db')
-    original.init_schema()
     restored = None
     try:
+        original.init_schema()
         client = RecoveryClient({'SOURCE':['one','one','two']})
         account,action = _deleted(original,client)
         prior = original.actions.claim_undo(action,3)
@@ -320,7 +327,7 @@ def test_cloned_recovery_relocates_backup_references_without_original_directory(
         undo['recovery'] = {'version':2,'steps':_steps(undo,action)}
         original.actions.save_undo_progress(action,undo,3,claim_token=prior.execution_token)
         original.conn.execute('BEGIN')
-        with sqlite3.connect(tmp_path/'restored.db') as copied:
+        with closing(sqlite3.connect(tmp_path/'restored.db')) as copied, copied:
             original.conn.backup(copied)
         collection_manifest = collection_recovery.export(original.conn,tmp_path/'collections')
         backup_manifest = action_backup_files.export(original.conn,tmp_path/'backups')

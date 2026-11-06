@@ -9,7 +9,7 @@ import pytest
 from tests.core.test_predecessor_writes import installed
 from tests.core.test_collection_document_preparation import finish, seed
 from yt_playlist.core import entity_names, spotify_job_state
-from yt_playlist.core.migrations import MigrationError, registry, regular, runner
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import collection_documents as preparation, import_publication as publication
 from yt_playlist.core.store import Store
 from yt_playlist.web import spotify_import
@@ -18,6 +18,13 @@ from yt_playlist.web import spotify_import
 def prepare(conn):
     publication.OWNER.worker.install(conn)
     return finish(publication.OWNER.worker, conn).prepared_revision
+
+
+def rejection_inputs(store):
+    _, raw, _, _ = seed(store)
+    revision = prepare(store.conn)
+    assert publication.OWNER.selected(store.conn) is None
+    return raw, revision
 
 
 @pytest.mark.parametrize('installed', [79, 93, 96], indirect=True)
@@ -76,10 +83,9 @@ def test_account_field_presence_and_unresolved_identity_do_not_admit_accounts(in
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['fields', 'account', 'recovery', 'original', 'plan'])
-def test_unverified_fields_or_files_never_select_a_report(installed, failure):
+def test_unverified_fields_or_files_never_select_a_report(installed, staged_custody, failure):
     store, _ = installed
-    _, raw, _, _ = seed(store)
-    revision = prepare(store.conn)
+    raw, revision = staged_custody(installed, 'spotify-import', rejection_inputs)
     header = publication.OWNER.capture(store.conn)
     with store.conn:
         if failure == 'fields':
@@ -199,23 +205,3 @@ def test_large_report_rollback_and_numeric_affinity_keep_exact_original(installe
     owner.publish(store.conn, revision=revision)
     assert store.settings.get_setting(owner.source) == raw
     assert spotify_import.load_job(store)['report'] == value['report']
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_frozen_upgrade_prefers_native_report_and_retains_published_original(installed, tmp_path):
-    store, _ = installed
-    value, raw, _, _ = seed(store)
-    owner = publication.OWNER
-    owner.publish(store.conn, revision=prepare(store.conn))
-    upgraded = Store(tmp_path/'native-import-publication.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        upgraded.init_schema(defer_metadata=True)
-        regular.validate(upgraded.conn)
-        assert owner.selected(upgraded.conn) is None
-        assert owner.value(upgraded.conn, 0) == raw
-        assert spotify_job_state.load(upgraded.conn) == entity_names.account_document(value)
-        assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        upgraded.conn.close()

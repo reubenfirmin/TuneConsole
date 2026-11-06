@@ -272,6 +272,26 @@ class TrackRepo(Repo):
         return row["identity_key"] if row else None
 
     @lookup_read
+    def library_identity_key_for_video(self, video_id) -> str | None:
+        """Resolve a library upload without treating cached observations as membership."""
+        row = self.conn.execute(
+            "SELECT identity_key FROM tracks WHERE video_id=? LIMIT 1", (video_id,)).fetchone()
+        return row['identity_key'] if row else None
+
+    @snapshot_read
+    def identity_keys_for_videos(self, video_ids) -> dict:
+        """Resolve a bounded set of uploads without reopening the catalog per video."""
+        requested = list(dict.fromkeys(video_ids))
+        result = {}
+        for offset in range(0, len(requested), 500):
+            page = requested[offset:offset + 500]
+            placeholders = ','.join('?' for _ in page)
+            for row in self.conn.execute(
+                    f'SELECT video_id,identity_key FROM catalog_tracks WHERE video_id IN ({placeholders})', page):
+                result.setdefault(row['video_id'], row['identity_key'])
+        return result
+
+    @lookup_read
     def thumbnail_for_video(self, video_id) -> str | None:
         """Cached artwork for this exact upload, including tracks outside the library."""
         row = self.conn.execute(
@@ -298,29 +318,6 @@ class TrackRepo(Repo):
         exact = [r for r in rows if (r["title"] or "").strip().casefold() == (title or "").strip().casefold()
                  and (r["artist"] or "").strip().casefold() == (artist or "").strip().casefold()]
         return max((r["duration_s"] for r in exact if r["duration_s"] is not None), default=None)
-
-    @synchronized
-    def tracks_to_enrich(self, playlist_id) -> list:
-        """Tracks in this playlist still missing genre or year (NULL or blank), in playlist order.
-        Blank counts as missing so re-running enrichment retries tracks that didn't fully resolve."""
-        rows = self.conn.execute(
-            "SELECT t.id, t.video_id, t.title, t.artist FROM playlist_tracks pt "
-            "JOIN catalog_tracks t ON t.id=pt.track_id WHERE pt.playlist_id=? "
-            "AND (t.genre IS NULL OR t.genre = '' OR t.mb_year IS NULL OR t.mb_year = '') "
-            "ORDER BY pt.position", (playlist_id,)).fetchall()
-        return [{"id": r["id"], "video_id": r["video_id"], "title": r["title"], "artist": r["artist"]}
-                for r in rows]
-
-    @synchronized
-    def album_tracks_to_enrich(self, album_browse_id) -> list:
-        """A saved album's folded-in tracks still missing genre or year, the album-scoped twin of
-        tracks_to_enrich, so the same enrich runners work over an album."""
-        rows = self.conn.execute(
-            f"SELECT t.id, t.video_id, t.title, t.artist FROM catalog_tracks t JOIN {self.album_track_links_table} a ON a.entry_id=t.id WHERE a.browse_id=? "
-            "AND (t.genre IS NULL OR t.genre = '' OR t.mb_year IS NULL OR t.mb_year = '') "
-            "ORDER BY t.id", (album_browse_id,)).fetchall()
-        return [{"id": r["id"], "video_id": r["video_id"], "title": r["title"], "artist": r["artist"]}
-                for r in rows]
 
     # A track still has work when anything is missing, INCLUDING its cover: YouTube serves a generic
     # grey disc rather than nothing when it has no art, so a track can be complete on genre/year/audio
@@ -463,24 +460,6 @@ class TrackRepo(Repo):
                 metadata.select(self.conn, track_id, 'artist', row[0], 'youtube')
 
     @synchronized
-    def tracks_missing_genre(self, playlist_id) -> list:
-        """Playlist tracks with no genre yet (for Last.fm genre enrichment), in playlist order."""
-        rows = self.conn.execute(
-            "SELECT t.id, t.video_id, t.title, t.artist FROM playlist_tracks pt "
-            "JOIN catalog_tracks t ON t.id=pt.track_id WHERE pt.playlist_id=? "
-            "AND (t.genre IS NULL OR t.genre = '') ORDER BY pt.position", (playlist_id,)).fetchall()
-        return [{"id": r["id"], "video_id": r["video_id"], "title": r["title"], "artist": r["artist"]}
-                for r in rows]
-
-    @synchronized
-    def set_track_enrichment(self, track_id, genre, year) -> None:
-        track_id = catalog.resolve_entry(self.conn, track_id)
-        # fill-only: set a field just when it's currently blank. So enrichment fills gaps and never
-        # overwrites what you already have. MusicBrainz and Last.fm each top up the other's misses.
-        with self.conn:
-            metadata.fill(self.conn,track_id,{'genre':genre,'mb_year':year},'track_enrichment',blank=True)
-
-    @synchronized
     def get_track_enrichment(self, track_id):
         track_id = catalog.resolve_entry(self.conn, track_id)
         """Current (genre, year) for a track, used to report the effective value after a fill."""
@@ -488,28 +467,6 @@ class TrackRepo(Repo):
         if row is None:
             return ("", "")
         return (row["genre"] or "", row["mb_year"] or "")
-
-    @synchronized
-    def set_track_audio(self, track_id, bpm=None, energy=None, danceability=None,
-                        music_key=None, music_scale=None, mood_happy=None, mood_sad=None,
-                        mood_relaxed=None, mood_acoustic=None, instrumental=None,
-                        loudness=None, dynamic_complexity=None,
-                        popularity=None, gain=None, label=None) -> None:
-        track_id = catalog.resolve_entry(self.conn, track_id)
-        # fill-only: each provided (non-None) field fills its column only when it's currently NULL,
-        # so re-running a provider (or a second provider) tops up gaps without clobbering data.
-        fields = {"bpm": bpm, "energy": energy, "danceability": danceability,
-                  "music_key": music_key, "music_scale": music_scale,
-                  "mood_happy": mood_happy, "mood_sad": mood_sad, "mood_relaxed": mood_relaxed,
-                  "mood_acoustic": mood_acoustic, "instrumental": instrumental,
-                  "loudness": loudness, "dynamic_complexity": dynamic_complexity,
-                  "popularity": popularity, "gain": gain, "label": label}
-        updates = {c: v for c, v in fields.items() if v is not None}
-        if not updates:
-            return
-        with self.conn:
-            catalog.replace_hints(self.conn,track_id,updates)
-            metadata.fill(self.conn,track_id,updates,'track_audio')
 
     @synchronized
     def get_track_audio(self, track_id):
@@ -520,27 +477,6 @@ class TrackRepo(Repo):
         if row is None:
             return (None, None, None)
         return (row["bpm"], row["energy"], row["danceability"])
-
-    @synchronized
-    def set_track_mbid(self, track_id, mbid) -> None:
-        track_id = catalog.resolve_entry(self.conn, track_id)
-        # fill-only: keep the first MBID we resolve for a track.
-        if not mbid:
-            return
-        with self.conn:
-            metadata.fill(self.conn,track_id,{'mb_recording_id':mbid},'track_mbid',blank=True)
-
-    @synchronized
-    def tracks_missing_audio(self, playlist_id) -> list[dict]:
-        """Playlist tracks still missing any audio feature (bpm/energy/danceability), in order.
-        Carries mb_recording_id so AcousticBrainz can key off it without a second query."""
-        rows = self.conn.execute(
-            "SELECT t.id, t.video_id, t.title, t.artist, t.mb_recording_id FROM playlist_tracks pt "
-            "JOIN catalog_tracks t ON t.id=pt.track_id WHERE pt.playlist_id=? "
-            "AND (t.bpm IS NULL OR t.energy IS NULL OR t.danceability IS NULL) "
-            "ORDER BY pt.position", (playlist_id,)).fetchall()
-        return [{"id": r["id"], "video_id": r["video_id"], "title": r["title"],
-                 "artist": r["artist"], "mb_recording_id": r["mb_recording_id"]} for r in rows]
 
     @synchronized
     def track_ids_for_videos(self, video_ids) -> dict:

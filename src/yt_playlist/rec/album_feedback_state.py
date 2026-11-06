@@ -1,5 +1,4 @@
 """Read resolved release judgments without depending on evidence-writing policy."""
-from yt_playlist.core import album_feedback_storage
 
 
 def state(store, browse_ids=None):
@@ -9,12 +8,14 @@ def state(store, browse_ids=None):
     A selection retains the caller's IDs, including unknown/unreconciled releases.
     Reading never changes the original feedback or its opportunity/action IDs.
     """
+    if getattr(store._lock, 'held_by_current_thread', False):
+        return _state(store, browse_ids)
     with store.read_view() as reader:
         return _state(reader, browse_ids)
 
 
 def _state(store, browse_ids):
-    original = album_feedback_storage.original(store.conn)
+    original = store.album_feedback.original()
     if not original:
         return {}
     requested = None if browse_ids is None else set(browse_ids)

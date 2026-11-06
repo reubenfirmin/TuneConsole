@@ -89,8 +89,7 @@ def test_technical_log_zip_is_rejected():
         load_spotify_library(_zip({"Spotify Technical Log Information/Download.json": []}))
 
 
-def test_library_import_creates_matches_and_is_idempotent():
-    store = Store(":memory:"); store.init_schema()
+def test_library_import_creates_matches_and_is_idempotent(store):
     identity = store.accounts.upsert_account("main", "bridge", None, True)
     client = LibraryClient()
 
@@ -137,8 +136,7 @@ def test_library_import_creates_matches_and_is_idempotent():
     assert len(client.created) == 1 and len(client.album_ratings) == 1
 
 
-def test_same_name_with_different_contents_is_imported():
-    store = Store(":memory:"); store.init_schema()
+def test_same_name_with_different_contents_is_imported(store):
     identity = store.accounts.upsert_account("main", "bridge", None, True)
     track = store.tracks.upsert_track("existing", "Song", "Artist", "Record", 200)
     playlist = store.playlists.upsert_playlist(identity, "PL_EXISTING", "Road songs", 1, "hash", 1.0)
@@ -168,7 +166,7 @@ class SongClient(FakeClient):
 @pytest.mark.parametrize("discovery", ["visible", "delayed", "unreadable", "duplicate"])
 @pytest.mark.parametrize("interruption", ["reply_loss", "local_publication"])
 def test_creation_interruption_retains_marker_and_never_recreates_after_restart(
-        tmp_path, monkeypatch, discovery, interruption):
+        file_backed_store, monkeypatch, discovery, interruption):
     class LostCreation(SongClient):
         visible = discovery != "delayed"
         readable = discovery != "unreadable"
@@ -191,8 +189,8 @@ def test_creation_interruption_retains_marker_and_never_recreates_after_restart(
                 detail["description"] = self.created[0][2]
             return detail
 
-    path = tmp_path / "creation.db"
-    store = Store(path); store.init_schema()
+    store = file_backed_store
+    path = store._db_path
     identity = store.accounts.upsert_account("Main", "bridge", None, True)
     client = LostCreation()
     raw = _playlists_zip(("Road songs", ["One", "Two"]))
@@ -211,8 +209,9 @@ def test_creation_interruption_retains_marker_and_never_recreates_after_restart(
     assert "ytm_playlist_id" not in first["details"]["playlists"][0]
     assert not client.added
     store.conn.close()
-    store = Store(path); store.init_schema()
+    store = Store(path)
     try:
+        store.init_schema()
         retry = import_spotify_library(store, raw, client, identity, 101)
         if discovery != "visible":
             assert retry["playlists_failed"] == 1
@@ -226,8 +225,8 @@ def test_creation_interruption_retains_marker_and_never_recreates_after_restart(
         assert retry["playlists_imported"] == 1
         assert [t["videoId"] for t in client._tracks["PL_NEW_0"]] == ["yt-One", "yt-Two"]
     finally:
-        assert len(client.created) == 1
         store.conn.close()
+        assert len(client.created) == 1
 
 
 def test_identical_contents_in_destination_are_skipped_even_in_a_different_order(store):
@@ -261,7 +260,7 @@ def test_legacy_global_marker_requires_corresponding_destination_contents(store)
     assert import_spotify_library(store, raw, SongClient(), identity, 100)["playlists_imported"] == 1
 
 
-def test_resume_reconciles_lost_batch_response_after_restart(tmp_path):
+def test_resume_reconciles_lost_batch_response_after_restart(file_backed_store):
     class LostResponse(SongClient):
         fail = True
 
@@ -272,16 +271,17 @@ def test_resume_reconciles_lost_batch_response_after_restart(tmp_path):
                 raise RuntimeError("response lost after remote write")
             return result
 
-    path = tmp_path / "state.db"
-    store = Store(path); store.init_schema()
+    store = file_backed_store
+    path = store._db_path
     identity = store.accounts.upsert_account("main", "bridge", None, True)
     client = LostResponse()
     raw = _playlists_zip(("Road songs", ["One", "Two"]))
     assert import_spotify_library(store, raw, client, identity, 100)["playlists_failed"] == 1
     assert store.playlists.get_playlists()[0].track_count == 0
     store.conn.close()
-    store = Store(path); store.init_schema()
+    store = Store(path)
     try:
+        store.init_schema()
         report = import_spotify_library(store, raw, client, identity, 101)
         assert report["playlists_imported"] == 1 and report["tracks_imported"] == 0
         assert report["details"]["playlists"][0]["reason"] == "resumed"
@@ -490,7 +490,7 @@ def test_album_match_treats_expanded_edition_as_the_same_release():
     assert candidates[0]["confident"] is True
 
 
-def test_second_spotify_edition_is_skipped_after_equivalent_album_is_saved():
+def test_second_spotify_edition_is_skipped_after_equivalent_album_is_saved(store):
     payload = _zip({"Spotify Account Data/YourLibrary.json": {"albums": [
         {"artist": "The Prodigy", "album": "The Fat of the Land - Expanded Edition",
          "uri": "spotify:album:expanded"},
@@ -512,7 +512,6 @@ def test_second_spotify_edition_is_skipped_after_equivalent_album_is_saved():
                          "artists": [{"name": "The Prodigy"}]}]
             return []
 
-    store = Store(":memory:"); store.init_schema()
     identity = store.accounts.upsert_account("main", "bridge", None, True)
     report = import_spotify_library(store, payload, EditionClient(), identity, 1000.0)
 

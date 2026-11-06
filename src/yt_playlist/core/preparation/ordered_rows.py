@@ -22,6 +22,7 @@ class OrderedJob:
     revision_aware: bool = False
     resume_read: object | None = None
     repair_files: object | None = None
+    copy_batch: object | None = None
 
     @property
     def name(self):
@@ -92,8 +93,11 @@ class OrderedJob:
             if row is not None:
                 if start == 0:
                     self.begin(conn, row, generation, plan)
-                for position, unit in selected:
-                    self.copy(conn, row, generation, position, unit)
+                if self.copy_batch is not None:
+                    self.copy_batch(conn, row, generation, selected)
+                else:
+                    for position, unit in selected:
+                        self.copy(conn, row, generation, position, unit)
                 if end == total:
                     self.complete(conn, row, generation, plan)
             elif key is not None:

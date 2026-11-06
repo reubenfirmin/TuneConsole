@@ -19,7 +19,7 @@ def _fold_album(store, bid="BID", n=4):
 
 def test_album_waterfall_fills_genres(store, monkeypatch, canonical_genre_matcher):
     _fold_album(store)
-    pending = store.tracks.album_tracks_to_enrich("BID")
+    pending = store.tracks.album_tracks_for_waterfall("BID")
     assert len(pending) == 4
     monkeypatch.setattr(musicbrainz, "enrich_full",
                         lambda title, artist, *, observations=None: ("rock", "2001", None, [], []))
@@ -29,7 +29,12 @@ def test_album_waterfall_fills_genres(store, monkeypatch, canonical_genre_matche
 
     detail = store.charts.album_tracks_detail("BID")
     assert all(t["genre"] == "Rock" and t["year"] == "2001" for t in detail)
-    assert store.tracks.album_tracks_to_enrich("BID") == []          # nothing left to enrich
+    # Genre/year completion still leaves audio and artwork work for this album.
+    assert len(store.tracks.album_tracks_for_waterfall('BID')) == 4
+    for track in pending:
+        store.enrichment.apply_provider_fields(track['id'], 'deezer', {'bpm': 120, 'energy': .5, 'danceability': .5})
+        store.tracks.set_track_art(track['id'], 'https://example.com/cover.jpg')
+    assert store.tracks.album_tracks_for_waterfall('BID') == []
 
 
 def test_album_page_renders_enrichable_table(store):

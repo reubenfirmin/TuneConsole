@@ -11,7 +11,8 @@ from pathlib import Path
 import sqlite3
 import time
 
-from .. import db_handles, policy_documents, policy_recovery
+from .. import db_handles, policy_documents
+from .sqlite_checks import verify
 from ..evidence_ledger import _sync_directory
 from . import files, installed_format
 
@@ -64,6 +65,7 @@ def _open_store(store, internal):
         store._evidence_recovery_pending = store.settings.get_setting(STORAGE_PENDING) == '1'
         store._snapshot_revisions = Revisions(store.conn)
         store._read_memo = ReadMemo()
+        store._foreground_read_memo = ReadMemo()
         if store._rebuild_source_version:
             store.conn.execute('PRAGMA query_only=ON')
             store.conn._storage_compacting = True
@@ -199,7 +201,7 @@ def recover(database):
                 raise ValueError('Interrupted installed database failed its durable digest')
             with closing(sqlite3.connect(database.as_uri()+'?mode=ro', uri=True)) as conn:
                 conn.row_factory = sqlite3.Row
-                policy_recovery._verify(conn)
+                verify(conn)
                 installed_format.validate(conn)
                 if not pending.get('analytics_pending'):
                     files.verify(conn)

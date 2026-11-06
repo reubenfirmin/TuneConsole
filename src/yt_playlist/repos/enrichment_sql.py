@@ -1,4 +1,5 @@
 """Shared enrichment subject and provider eligibility SQL; no connection or transaction owner."""
+from yt_playlist.core import provider_queries
 
 # One representative input per recording, independent of library/discovery overlap.
 TRACKS_CTE = "enrichment_tracks AS (SELECT * FROM catalog_enrichment_tracks)"
@@ -20,6 +21,9 @@ def eligible_providers(*, coverage=False):
     if coverage:
         pending += " AND (t.first_enriched_at IS NULL OR EXISTS (SELECT 1 FROM " \
                    "enrichment_provider_jobs j WHERE j.recording_id=t.recording_id AND j.provider=p.value))"
+    input_ready = "(p.value<>'lastfm' OR (" + provider_queries.lastfm_ready_sql() + "))"
     return ("(:providers IS NULL OR EXISTS (SELECT 1 " + pending +
+            " AND " + input_ready +
             " AND COALESCE(s.retry_at,0)<=:now AND COALESCE(c.retry_at,0)<=:now) "
-            "OR NOT EXISTS (SELECT 1 " + pending + "))")
+            "OR (NOT EXISTS (SELECT 1 " + pending + ") AND EXISTS "
+            "(SELECT 1 FROM json_each(:providers) p WHERE " + input_ready + ")))")

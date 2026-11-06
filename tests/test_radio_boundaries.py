@@ -51,7 +51,8 @@ def test_legacy_flags_have_explicit_migration_precedence(changes, phase):
 @pytest.mark.parametrize("replacement", [False, True])
 def test_restart_checks_an_uncertain_write_before_sending_another(poc, version, replacement):
     c, remote, *_ = poc
-    c.start()
+    with c.launch_request('restorable-launch') as cancelled:
+        c.start(cancelled=cancelled)
     assert c.session.phase == Phase.AWAITING_PLAYBACK
     play(c, "v1" if replacement else "v3")
     if not replacement:
@@ -79,6 +80,9 @@ def test_restart_checks_an_uncertain_write_before_sending_another(poc, version, 
     restored = PlaylistRadio(c.ctx)
     restored.join()
     assert restored.session.phase == phase
+    assert restored.status()['launch_id'] == 'restorable-launch'
+    restored.stop(launch_id='an-older-launch')
+    assert not restored.session.stopped_by_user
     assert len(remote.adds) == before + 1
     restored.listening.observe(restored.session)
     restored.advance(restored.session)
@@ -86,7 +90,19 @@ def test_restart_checks_an_uncertain_write_before_sending_another(poc, version, 
     assert len(remote.adds) == before + 1
     assert [t["video_id"] for t in restored.session.tracks] == remote.ids
     assert restored.session.tracks[0]["video_id"] == "v1"
-    restored.stop()
+    if version == 1:
+        # Cancel can reach a restarted process while another launch already
+        # owns admission. Deferred restoration must honor the old owner's
+        # receipt without cancelling that new request.
+        deferred = PlaylistRadio(c.ctx)
+        with deferred.launch_request('pending-new-launch') as pending:
+            deferred.stop(launch_id='restorable-launch')
+            assert deferred.session is None and not pending.is_set()
+            deferred.join()
+            assert deferred.session.stopped_by_user and not pending.is_set()
+    else:
+        restored.stop(launch_id='restorable-launch')
+        assert restored.session.stopped_by_user
 
 
 def test_stop_during_a_tail_write_cannot_reactivate_the_session(poc):

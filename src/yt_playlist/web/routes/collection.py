@@ -1,6 +1,7 @@
 """Albums and Artists tabs (playlists and saved albums) + save/unsave album."""
 from yt_playlist.core.activity import activity_for
 from yt_playlist.core.accounts import client_for
+from yt_playlist.core.action_errors import ActionInputError
 
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
@@ -43,7 +44,7 @@ def build(ctx) -> APIRouter:
         account_id,client = client_for(store,ctx.client_provider(),account_id=account_id)
         album = client.get_album(browse_id)
         if not album.get("audioPlaylistId"):
-            raise ValueError("album has no playlist")
+            raise ActionInputError('album_unavailable')
         return account_id,client,album
 
     def _save_album(browse_id):
@@ -54,10 +55,10 @@ def build(ctx) -> APIRouter:
         owners = store.collection.saved_album_owners(browse_id).get(browse_id, [])
         if account_id is None:
             if len(owners) != 1 or owners[0]['account_id'] is None:
-                raise ValueError("Choose which account to remove this album from.")
+                raise ActionInputError('album_owner_required')
             account_id = owners[0]['account_id']
         if account_id not in {owner['account_id'] for owner in owners}:
-            raise ValueError("This album is not saved in the selected account.")
+            raise ActionInputError('album_owner_mismatch')
         account_id,client,album = _album_and_client(browse_id,account_id=account_id)
         album_writes.set_saved(store, client, account_id, browse_id, album, saved=False)
 
@@ -70,11 +71,11 @@ def build(ctx) -> APIRouter:
         try:
             # Lookup and rating both wait on replies delivered by the ASGI WebSocket loop.
             await activity_for(ctx).to_thread(_save_album, browse_id)
-        except ValueError as e:
+        except ActionInputError as e:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001
             ctx.logger.exception("save-album %s failed", browse_id)
-            return _toast(request, "YouTube refused the save")
+            return Response(status_code=503, headers={"HX-Reswap": "none"})
         if form.get("opportunity_id"):
             choice_evidence.safe_respond(store, form["opportunity_id"], "save", ctx.now_fn(), option_id=browse_id)
         if worker := getattr(ctx, 'rec_worker', None):
@@ -91,13 +92,13 @@ def build(ctx) -> APIRouter:
             try:
                 account_id = int(form['identity_id']) if form.get('identity_id') else None
             except ValueError:
-                raise ValueError("Invalid account selection.") from None
+                raise ActionInputError('account_invalid') from None
             await activity_for(ctx).to_thread(_unsave_album, browse_id, account_id)
-        except ValueError as e:
+        except ActionInputError as e:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001
             ctx.logger.exception("unsave-album %s failed", browse_id)
-            return _toast(request, "YouTube refused")
+            return Response(status_code=503, headers={"HX-Reswap": "none"})
         return _refresh()
 
     return router

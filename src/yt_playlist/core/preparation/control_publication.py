@@ -9,6 +9,7 @@ import json
 import sqlite3
 import time
 
+from ..control_reads import selected
 from ..schema_contract import MigrationError
 from . import collection_controls as preparation
 from .selection import invalidators
@@ -77,21 +78,6 @@ def validate(conn):
         row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()
         if row is None or _tokens(row[0]) != _tokens(sql):
             raise MigrationError('Incompatible control publication object: ' + name)
-
-
-def installed(conn, name):
-    return (conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?', (HEAD,)).fetchone() is not None
-            and conn.execute(f'SELECT 1 FROM {HEAD} WHERE name=?', (name,)).fetchone() is not None)
-
-
-def selected(conn, name):
-    """Resolve dynamically, including on readers opened before publication."""
-    if conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?', (NATIVE[name],)).fetchone():
-        return None
-    if not conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?', (HEAD,)).fetchone():
-        return None
-    row = conn.execute(f'SELECT revision FROM {HEAD} WHERE name=? AND active=1', (name,)).fetchone()
-    return row[0] if row else None
 
 
 def validate_installed(conn):
@@ -183,30 +169,6 @@ def publish(conn, name, *, revision, clock=time.time):
     except BaseException:
         conn.rollback()
         raise
-
-
-def album_read(conn, revision, default):
-    row = conn.execute(f'SELECT expires_at,novelty,source_kind FROM {ALBUM} WHERE revision=?', (revision,)).fetchone()
-    if row is None or row['source_kind'] != 'controls':
-        return default
-    genres = [row[0] for row in conn.execute(f'SELECT coalesce(genre_key,raw_label) FROM {GENRES} '
-                                           'WHERE revision=? ORDER BY position', (revision,))]
-    return json.dumps({'until': row['expires_at'], 'values': {'novelty': row['novelty']}, 'genres': genres})
-
-
-def pointer_read(conn, revision, key, default):
-    row = conn.execute(f'SELECT recorded_run_id FROM {RUNS} WHERE revision=? AND source=?', (revision, key)).fetchone()
-    return (str(row[0]) if row[0] is not None else '') if row else default
-
-
-def retained_write(conn, values):
-    """Continuing runtime writes invalidate selection through installed journals."""
-    for key, value in values.items():
-        if value is None:
-            conn.execute('DELETE FROM main.settings WHERE key=?', (key,))
-        else:
-            conn.execute('INSERT INTO main.settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
-                         (key, value))
 
 
 def main(argv=None):

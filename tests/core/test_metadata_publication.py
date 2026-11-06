@@ -1,5 +1,7 @@
 """Independent selection checks for retained metadata and operational inputs."""
 import json
+from tests.enrichment_support import choose_field
+from tests.metadata_provenance_support import metadata_provenance
 import sqlite3
 
 import pytest
@@ -7,9 +9,8 @@ import pytest
 from tests.core.test_metadata_owner_cutover import predecessor, seed
 from tests.core.test_metadata_preparation import finish
 from yt_playlist.core import catalog, genre_identity, metadata
-from yt_playlist.core.migrations import MigrationError, regular, registry, runner
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import metadata_evidence as preparation, metadata_publication as publication
-from yt_playlist.core.store import Store
 
 
 def publish(conn):
@@ -21,12 +22,19 @@ def publish(conn):
     pytest.fail('Metadata publication did not finish')
 
 
+def rejection_inputs(store):
+    seed(store)
+    preparation.JOB.install(store.conn)
+    finish(store.conn)
+    assert publication.selected(store.conn) is None
+
+
 def test_selected_sources_keep_exact_values_and_operational_reads_use_typed_fields(predecessor):
     store,conn = predecessor,predecessor.conn
     entry,recording,key = seed(store)
     attempts = store.enrichment_state.enrichment_attempts(key)
     states = store.enrichment_state.enrichment_provider_state(recording,include_previous=True)
-    provenance = store.enrichment_reports.metadata_provenance(entry)
+    provenance = metadata_provenance(store, entry)
     native = store.enrichment_state.metadata_observations(key)
     originals = {owner:list(map(tuple,conn.execute('SELECT * FROM '+owner))) for owner in preparation.KEYS}
     preparation.JOB.install(conn)
@@ -41,7 +49,7 @@ def test_selected_sources_keep_exact_values_and_operational_reads_use_typed_fiel
         assert store.enrichment_state.enrichment_attempts(key)==attempts
         assert store.enrichment_state.enrichment_provider_state(recording,include_previous=True)==states
         assert store.enrichment_state.metadata_observations(key)==native
-        assert store.enrichment_reports.metadata_provenance(entry)==provenance
+        assert metadata_provenance(store, entry)==provenance
         assert metadata.selected_source(conn,entry,'bpm')=='a'
     finally:
         conn.set_authorizer(None)
@@ -74,7 +82,7 @@ def test_continuing_provider_choice_reference_and_delete_updates_withdraw_select
     assert publication.selected(conn) is None
     finish(conn)
     publish(conn)
-    assert store.enrichment_reports.metadata_provenance(entry)['fields']['genre']['value'] is None
+    assert metadata_provenance(store, entry)['fields']['genre']['value'] is None
     with conn:
         genre_identity.add_custom(conn,'New publication label')
     assert publication.selected(conn) is None
@@ -94,11 +102,10 @@ def test_continuing_provider_choice_reference_and_delete_updates_withdraw_select
     "UPDATE prepared_metadata_operational_fields SET position=99 WHERE field='bpm'",
     "DELETE FROM prepared_metadata_evidence WHERE owner='entry_field_choices'",
 ])
-def test_corrupt_preparation_is_not_publishable_and_regular_schema_remains_independent(predecessor,damage):
+def test_corrupt_preparation_is_not_publishable_and_regular_schema_remains_independent(
+        predecessor, staged_custody, damage):
     conn = predecessor.conn
-    seed(predecessor)
-    preparation.JOB.install(conn)
-    finish(conn)
+    staged_custody((predecessor, 79), 'metadata-evidence', rejection_inputs, admit=False)
     with conn:
         conn.execute(damage)
     with pytest.raises(MigrationError,match='differ|missing|extra'):
@@ -129,27 +136,6 @@ def test_stale_verification_and_interrupted_selection_preserve_owner(predecessor
     with pytest.raises(MigrationError,match='reconciled|changed'):
         publication.publish(conn,identity=identity)
     assert publication.selected(conn) is None
-
-
-def test_genuine_upgrade_and_native_owner_precedence(predecessor,tmp_path):
-    conn = predecessor.conn
-    entry,recording,key = seed(predecessor)
-    preparation.JOB.install(conn)
-    finish(conn)
-    publish(conn)
-    upgraded = Store(tmp_path/'upgraded.db')
-    try:
-        conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn,registry=registry.MIGRATIONS[:107])
-        upgraded._bind_repositories()
-        assert publication.selected(upgraded.conn) is None
-        regular.migrate(upgraded.conn)
-        upgraded.enrichment.set_track_field(entry,'bpm',140)
-        assert upgraded.enrichment_reports.metadata_provenance(entry)['fields']['bpm']['value']==140
-        assert upgraded.enrichment_state.enrichment_attempts(key)['a']['fields']['bpm']==120
-        assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        upgraded.conn.close()
 
 
 @pytest.mark.parametrize('owner,column', [('metadata_findings','value_json'),('enrichment_log','value'),

@@ -5,17 +5,17 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core import artists, legacy_evidence as evidence, policy_documents, policy_recovery
+from tests import file_custody_support as custody
+from yt_playlist.core import artists, legacy_evidence as evidence, policy_documents
 from yt_playlist.core.migrations import v076_legacy_evidence_owners as migration
-from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations.runner import Context, MigrationError
 from yt_playlist.core.store import Store
 
 
 @pytest.fixture
-def predecessor(tmp_path):
+def predecessor(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path / 'archive.db')
-    migrate(store.conn, registry=registry.MIGRATIONS[:75])
+    _pristine_installed_schema(75).backup(store.conn)
     store._bind_repositories()
     yield store
     store.conn.close()
@@ -157,10 +157,10 @@ def test_backup_restores_every_owner_before_relocation(predecessor, tmp_path):
             store.conn.execute('BEGIN')
             store.conn.execute('SELECT 1 FROM workflow_legacy_evidence').fetchone()
             store.conn.backup(destination)
-            manifests = policy_recovery._export_files(store.conn, tmp_path / 'bundle.db')
+            manifests = custody.export_files(store.conn, tmp_path / 'bundle.db')
             store.conn.rollback()
         assert 'archives' in manifests
-        policy_recovery._restore_files(destination, manifests)
+        custody.restore_files(destination, manifests)
         assert evidence.original(destination, 'workflow', 'actions', 'signature') == 'not-json'
         assert destination.execute('SELECT filename FROM workflow_legacy_evidence').fetchone()[0] != store.conn.execute('SELECT filename FROM workflow_legacy_evidence').fetchone()[0]
     finally:

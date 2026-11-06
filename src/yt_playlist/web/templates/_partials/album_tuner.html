@@ -29,7 +29,7 @@
       {% endfor %}
     </div>
     <p class="album-tuning-scope">Use these settings for 4 hours.{% if tuning.remaining %} Currently active.{% endif %}</p>
-    <p class="album-tuning-error" x-show="error" x-text="error" role="alert" x-cloak></p>
+    <p class="album-tuning-status" x-show="error" x-text="error" role="status" x-cloak></p>
     <footer class="radio-tuning-actions">
       <button type="button" class="radio-tuning-reset" @click="resetDraft()">Reset</button>
       <button type="button" class="radio-tuning-reset" @click="apply(true)" :disabled="busy" x-text="refreshing ? 'Refreshing…' : 'Refresh selection'">Refresh selection</button>

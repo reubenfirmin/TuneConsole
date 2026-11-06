@@ -22,7 +22,6 @@ from yt_playlist.providers.base import EnrichmentResult, MetadataObservation
 logger = logging.getLogger(__name__)
 
 name = "acousticbrainz"
-manages_availability = True
 _iao = AcousticBrainzIAO()
 
 
@@ -36,10 +35,6 @@ def available(store=None) -> bool:
 
 def tripped() -> bool:
     return not _iao.availability().ready(_iao.now())
-
-
-def reset() -> None:
-    """Batch starts do not discard shared cooldowns or useful responses."""
 
 
 def probe(track, store=None, enrich_fn=None, mbid_fn=None) -> EnrichmentResult:

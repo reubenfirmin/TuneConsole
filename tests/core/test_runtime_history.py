@@ -220,7 +220,7 @@ def test_reader_keeps_retired_payload_until_release_and_stale_publication_is_rej
 def test_idle_maintenance_does_not_activate_bulk_work_and_retains_reactivated_modes(store, monkeypatch):
     store.modes.replace_modes([mode(1), mode(2)], [], 1)
     store.modes.replace_modes([], [1, 2], 2)
-    assert not any(runtime_history.maintain(store, 3).values())
+    assert not any(store.retention.maintain_runtime_history(3).values())
     assert store.conn.execute('SELECT count(*) FROM taste_mode_retired_payloads').fetchone()[0] == 0
     monkeypatch.setattr(mode_retention, 'BATCH', 1)
     assert runtime_history.step(store, 'modes', 3, activate=True)
@@ -229,7 +229,7 @@ def test_idle_maintenance_does_not_activate_bulk_work_and_retains_reactivated_mo
     assert [m['mode_id'] for m in store.modes.list_modes()] == [2]
     store.modes.replace_modes([], [2], 6)
     # Completed idle passes run daily rather than continuously rescanning heads.
-    assert not any(runtime_history.maintain(store, 7).values())
+    assert not any(store.retention.maintain_runtime_history(7).values())
     for _ in range(5):
-        runtime_history.maintain(store, DAY + 7)
+        store.retention.maintain_runtime_history(DAY + 7)
     assert store.modes.list_modes(active_only=False)[1]['centroid'] is None

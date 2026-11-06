@@ -41,8 +41,8 @@ def test_seed_grid_fills_available_space_without_javascript_sizing(page, radio_u
             overflow: document.documentElement.scrollWidth > innerWidth};
         }''')
         assert abs(geometry['bottom'] - geometry['expectedBottom']) < 2, geometry
-        # Account health lives in the desktop sidebar. The launcher fills the
-        # dashboard's remaining viewport without sizing itself in JavaScript.
+        # The launcher fills the dashboard's remaining viewport without sizing
+        # itself in JavaScript.
         assert geometry['height'] > height / 2, geometry
         assert geometry['pageBottom'] <= height + 12, geometry  # main's entrance animation may translate 10px
         assert geometry['columns'] == 4, geometry
@@ -78,6 +78,27 @@ def test_launch_waits_for_playback_and_playlist_before_revealing_session(page, r
     expect(launch.locator(".gen-node")).to_have_count(8)
     expect(launch).to_have_css("opacity", "1")
     page.screenshot(path="/tmp/tuneconsole-radio-launch.png")
+
+    # Cancel is reachable while the original POST is held. Its late response
+    # cannot reveal the old session or clear a subsequent Start's busy state.
+    first = api.starts.pop()
+    first_id = first.request.post_data_json['launch_id']
+    cancel = launch.get_by_role('button', name='Cancel', exact=True)
+    expect(cancel).to_be_enabled()
+    cancel.focus()
+    with page.expect_request('**/radio/stop') as stopping:
+        cancel.press('Enter')
+    assert stopping.value.post_data_json == {'launch_id': first_id}
+    expect(page.locator('.radio-seeds')).to_be_visible()
+    expect(launch).to_be_hidden()
+    page.locator('.radio-seed').first.click()
+    assert len(api.starts) == 1
+    assert api.starts[0].request.post_data_json['launch_id'] != first_id
+    with page.expect_response('**/radio/start'):
+        first.fulfill(json={'ok': True, **api.ready})
+    expect(launch).to_contain_text('Finding your frequency')
+    expect(page.locator('.radio-session')).to_be_hidden()
+    assert page.evaluate("Alpine.$data(document.querySelector('.radio-home')).busy")
 
     api.state = {**api.ready, "starting": True}
     api.hold_playlist = True
@@ -153,6 +174,22 @@ def test_resuming_session_waits_for_history_and_keeps_it_visible_during_refresh(
     api.playlists.pop().fulfill(content_type='text/html', body=api.playlist)
     expect(session).to_be_visible()
 
+    # Restored identified sessions cancel their persisted owner. Older saved
+    # sessions still use the ordinary global Stop contract.
+    api.hold_playlist = True
+    for launch_id in ('restored-launch', None):
+        api.state = {**api.ready, 'launch_id': launch_id}
+        page.reload(wait_until='domcontentloaded')
+        expect(launch).to_be_visible(timeout=6000)
+        with page.expect_request('**/radio/stop') as stopping:
+            launch.get_by_role('button', name='Cancel', exact=True).click()
+        assert stopping.value.post_data_json == {'launch_id': launch_id}
+        expect(launch).to_be_hidden()
+        expect(page.locator('.radio-seeds')).to_be_visible()
+        for route in api.playlists:
+            route.fulfill(content_type='text/html', body=api.playlist)
+        api.playlists.clear()
+
 
 def test_restart_waits_for_extension_and_join_before_showing_radio(page, radio_ui, live_app):
     api = radio_ui
@@ -219,51 +256,56 @@ def test_resume_does_not_accept_a_table_with_missing_history(page, radio_ui, liv
 
 
 @pytest.mark.parametrize("outcome", ["loaded", "failed", "stalled", "record"])
-def test_resume_waits_for_artwork_or_uses_its_placeholder(page, radio_ui, live_app, outcome):
+def test_resume_is_usable_while_artwork_loads_in_place(page, radio_ui, live_app, outcome):
     api = radio_ui
     pending = []
     url = live_app + '/radio-art/100.svg'
     page.route(url, lambda route: pending.append(route))
     if outcome == 'record':
         api.playlist += f'<svg><image href="{url}" width="100" height="100"/></svg>'
-        api.state = api.ready
+        state = api.ready
     else:
         branches = [{**branch, 'tracks': [
             {**song, 'thumbnail': url} if index == 0 and branch['slot'] == 0 else song
             for index, song in enumerate(branch['tracks'])]} for branch in api.ready['directions']]
-        api.state = {**api.ready, 'directions': branches}
+        state = {**api.ready, 'directions': branches}
+    with page.expect_request(url, timeout=6000):
+        api.state = state
+        page.evaluate('() => Alpine.$data(document.querySelector(".radio-home")).poll()')
     launch = page.get_by_role('status', name='Starting radio')
-    expect(launch).to_be_visible(timeout=6000)
-    page.wait_for_function('Alpine.$data(document.querySelector(".radio-home")).preparingKey !== ""')
-    expect(page.locator('.radio-session')).to_be_hidden()
-    expect(page.locator('.radio-directions')).to_be_hidden()
-    assert pending
-    if outcome in {'loaded', 'record'}:
-        for route in pending:
-            route.fulfill(content_type='image/svg+xml', body='<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="purple"/></svg>')
-    elif outcome == 'failed':
-        for route in pending:
-            route.abort()
-    expect(page.locator('.radio-session')).to_be_visible(timeout=11000)
-    expect(launch).to_be_hidden()
-    if outcome in {'failed', 'stalled'}:
-        expect(page.locator(f'.radio-session img[src="{url}"]')).to_have_count(0)
-    else:
-        assert page.locator('.radio-session img').evaluate_all('images => images.every(img => img.complete && img.naturalWidth > 0)')
-    if outcome == 'stalled':
+    try:
+        # The image remains deliberately unresolved while the actual controls
+        # and published song list are visible and usable.
+        expect(page.locator('.radio-session')).to_be_visible(timeout=3000)
+        expect(page.locator('.radio-directions')).to_be_visible()
+        expect(page.locator('.radio-session tr[data-vid="radio0"]')).to_be_visible()
+        expect(launch).to_be_hidden()
+        assert pending
+        if outcome in {'loaded', 'record'}:
+            for route in pending:
+                route.fulfill(content_type='image/svg+xml', body='<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="purple"/></svg>')
+            pending.clear()
+        elif outcome == 'failed':
+            for route in pending:
+                route.abort()
+            pending.clear()
+            expect(page.locator(f'.radio-session img[src="{url}"]')).to_have_count(0)
+        expect(page.locator('.radio-session')).to_be_visible()
+        expect(launch).to_be_hidden()
+    finally:
         for route in pending:
             route.abort()
 
 
 @pytest.mark.parametrize("source", ["server", "cache"])
-def test_restored_table_waits_for_its_artwork(page, radio_ui, live_app, source):
+def test_restored_table_is_usable_before_its_artwork_finishes(page, radio_ui, live_app, source):
     api = radio_ui
     pending = []
     url = live_app + '/radio-art/101.svg'
     page.route(url, lambda route: pending.append(route))
     api.state = api.ready
     api.playlist = api.playlist.replace('<td>Night frequency 1</td>',
-                                        f'<td><img src="{url}" alt="">Night frequency 1</td>')
+                                        f'<td><img class="pl-thumb" src="{url}" alt="">Night frequency 1</td>')
     if source == 'cache':
         key = json.dumps([1, 0, ['radio0']], separators=(',', ':'))
         page.evaluate('data => sessionStorage.setItem("radio-view", JSON.stringify(data))',
@@ -282,15 +324,21 @@ def test_restored_table_waits_for_its_artwork(page, radio_ui, live_app, source):
 
     page.route(live_app + '/', restored_home)
     page.reload(wait_until='domcontentloaded')
-    page.wait_for_function('Alpine.$data(document.querySelector(".radio-home")).preparingKey !== ""')
-    expect(page.get_by_role('status', name='Starting radio')).to_be_visible()
-    expect(page.locator('.radio-session')).to_be_hidden()
-    assert pending
-    for route in pending:
-        route.fulfill(content_type='image/svg+xml', body='<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"/>')
-    expect(page.locator('.radio-session')).to_be_visible(timeout=6000)
-    expect(page.get_by_role('status', name='Starting radio')).to_be_hidden()
-    assert page.locator(f'.radio-session img[src="{url}"]').evaluate('img => img.complete && img.naturalWidth > 0')
+    try:
+        expect(page.locator('.radio-session')).to_be_visible(timeout=3000)
+        expect(page.get_by_role('status', name='Starting radio')).to_be_hidden()
+        image = page.locator(f'.radio-session img[src="{url}"]')
+        expect(image).to_be_visible()
+        assert not image.evaluate('img => img.complete')
+        assert pending
+        for route in pending:
+            route.fulfill(content_type='image/svg+xml', body='<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"/>')
+        pending.clear()
+        page.wait_for_function('url => [...document.images].some(img => img.src === url && img.complete && img.naturalWidth > 0)', arg=url)
+        expect(page.locator('.radio-session')).to_be_visible()
+    finally:
+        for route in pending:
+            route.abort()
 
 
 def test_launch_failure_keeps_its_selection_in_the_existing_loader(page, radio_ui):
@@ -418,6 +466,35 @@ def test_unknown_launch_cannot_be_settled_by_the_previous_active_session(page, r
     message.get_by_role('button', name='Check playback').click()
     assert not radio_ui.starts
 
+    # A missing Stop receipt and even an inactive poll cannot authorize another
+    # creation. Reload retains cancellation, and admitted work must drain first.
+    page.route('**/radio/stop', lambda route: route.abort())
+    message.get_by_role('button', name='Cancel', exact=True).click()
+    expect(message).to_contain_text('haven’t confirmed your Stop request')
+    expect(page.locator('.radio-seeds')).to_be_hidden()
+    assert page.evaluate("JSON.parse(sessionStorage.getItem('radio-launch')).cancelling")
+    page.reload()
+    message = page.locator('.radio-launch')
+    expect(message).to_contain_text('haven’t confirmed your Stop request')
+    expect(page.locator('.radio-seeds')).to_be_hidden()
+    old_launch = page.evaluate("JSON.parse(sessionStorage.getItem('radio-launch')).id")
+    # Another tab can already own a fresh active session while the old
+    # cancelled request drains. Its state must remain intact throughout.
+    radio_ui.state = {**radio_ui.ready, 'launch_id': 'another-launch',
+                      'stopping': True, 'stopping_launches': [old_launch]}
+    page.route('**/radio/stop', lambda route: route.fulfill(json={'ok': True, **radio_ui.state}))
+    message.get_by_role('button', name='Cancel', exact=True).click()
+    expect(message).to_contain_text('Stopping your radio')
+    expect(page.locator('.radio-seed-start').first).to_be_disabled()
+    assert not radio_ui.starts
+    radio_ui.state = {**radio_ui.ready, 'launch_id': 'another-launch',
+                      'stopping': False, 'stopping_launches': []}
+    page.evaluate("Alpine.$data(document.querySelector('.radio-home')).refresh()")
+    expect(message).to_be_hidden()
+    expect(page.locator('.radio-session table')).to_be_visible(timeout=6000)
+    assert radio_ui.state['active']
+    assert page.evaluate("sessionStorage.getItem('radio-launch')") is None
+
 
 def test_rejected_playlist_launch_keeps_its_title_and_retry_target(page, radio_ui):
     selected = {'id': 41, 'title': 'Evening records', 'tracks': radio_ui.tracks[:4]}
@@ -465,7 +542,7 @@ def test_history_refreshes_for_native_song_missing_from_saved_queue(page, radio_
     expect(rows.last).to_have_attribute('aria-current', 'true')
 
 
-def test_unconfirmed_launch_returns_to_launcher_instead_of_showing_session(page, radio_ui):
+def test_unconfirmed_launch_keeps_selection_for_retry_instead_of_showing_session(page, radio_ui):
     api = radio_ui
     page.locator(".radio-seed").first.click()
     expect(page.locator(".radio-launch")).to_be_visible()
@@ -473,13 +550,33 @@ def test_unconfirmed_launch_returns_to_launcher_instead_of_showing_session(page,
     api.starts.pop().fulfill(json={"ok": True, **api.state})
     expect(page.locator(".radio-launch")).to_contain_text("Connecting to YouTube Music")
     api.state = {**api.ready, "starting": False, "active": False}
-    expect(page.locator(".radio-seeds")).to_be_visible(timeout=6000)
+    # A confirmed rejection retains the chosen song in the shared loader. The
+    # latest recovery contract offers an explicit retry rather than a seed grid.
+    message = page.locator('.radio-launch')
+    retry = message.get_by_role('button', name='Try this selection again')
+    expect(retry).to_be_visible(timeout=6000)
+    expect(retry).to_be_enabled()
+    expect(message.get_by_role('heading')).to_have_text('Night frequency 1')
+    expect(message).to_contain_text('Artist 1')
+    expect(message.get_by_role('link')).to_have_attribute('href', 'https://music.youtube.com/watch?v=radio0')
+    expect(page.locator('.radio-seeds')).to_be_hidden()
     expect(page.locator(".radio-session")).to_be_hidden()
     expect(page.locator(".radio-home").get_by_role("alert")).to_have_count(0)
+    page.screenshot(path='/tmp/tuneconsole-830-unconfirmed-retry.png', full_page=True)
+    assert not api.starts
+    retry.click()
+    assert len(api.starts) == 1
+    request = api.starts.pop()
+    assert request.request.post_data_json['video_id'] == 'radio0'
+    assert 'playlist_id' not in request.request.post_data_json
+    request.fulfill(json={'ok': False, 'reason': 'No playable songs'})
+    expect(retry).to_be_enabled()
+    expect(page.locator('.radio-session')).to_be_hidden()
 
 
-def test_launcher_highlight_keyboard_and_pointer(page, radio_ui):
-    page.set_viewport_size({"width": 1440, "height": 1000})
+@pytest.mark.parametrize('width,height', [(1280, 520), (1280, 720), (1440, 1000)])
+def test_launcher_highlight_keyboard_and_pointer(page, radio_ui, width, height):
+    page.set_viewport_size({"width": width, "height": height})
     seed = page.locator(".radio-seed").first
     seed.get_by_role('button').focus()
     expect(seed.locator(".radio-seed-info")).to_have_css("opacity", "1")
@@ -487,7 +584,7 @@ def test_launcher_highlight_keyboard_and_pointer(page, radio_ui):
     assert seed.locator(".radio-seed-play").bounding_box()["width"] >= 40
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     seed.hover()
-    page.screenshot(path="/tmp/tuneconsole-radio-launcher-1440.png")
+    page.screenshot(path=f"/tmp/tuneconsole-radio-launcher-{width}-{height}.png")
     expect(page.locator(".radio-seed").nth(1)).to_have_css("opacity", "0.55")
     page.locator(".radio-seed").nth(1).hover()
     expect(page.locator(".radio-seed").nth(1)).to_have_css("opacity", "1")
@@ -500,6 +597,41 @@ def test_launcher_highlight_keyboard_and_pointer(page, radio_ui):
     page.wait_for_function("start => document.querySelector('.radio-launch .gen-node').style.transform !== start", arg=start)
     expect(page.locator(".radio-launch .gen-hub-ring")).to_have_css("animation-play-state", "running")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
+@pytest.mark.parametrize('height', [520, 720])
+def test_short_desktop_play_control_and_song_link_are_separate(page, radio_ui, live_app, height):
+    page.set_viewport_size({'width': 1280, 'height': height})
+    seed = page.locator('.radio-seed').first
+    play = seed.locator('.radio-seed-play')
+    link = seed.get_by_role('link')
+    play.hover()
+    expect(seed.locator('.radio-seed-info')).to_have_css('opacity', '1')
+    geometry = seed.evaluate('''seed => {
+      const bounds = node => node.getBoundingClientRect().toJSON();
+      return {tile: bounds(seed), play: bounds(seed.querySelector('.radio-seed-play')),
+        link: bounds(seed.querySelector('.radio-seed-info a'))};
+    }''')
+    tile, control, title = (geometry[key] for key in ('tile', 'play', 'link'))
+    assert control['width'] >= 40 and control['height'] >= 40, geometry
+    assert tile['left'] <= control['left'] and control['right'] <= tile['right'], geometry
+    assert tile['top'] <= control['top'] and control['bottom'] <= tile['bottom'], geometry
+    assert control['right'] <= title['left'] or control['bottom'] <= title['top'], geometry
+    page.screenshot(path=f'/tmp/tuneconsole-1075-covers-1280-{height}.png')
+    # Follow the real song link, then return and launch with the visible play
+    # circle. Disabling the link's pointer events must not satisfy this check.
+    target = link.get_attribute('href')
+    link.click()
+    expect(page).to_have_url(f'{live_app}{target}')
+    assert not radio_ui.starts
+    page.goto(f'{live_app}/#radio')
+    play.hover()
+    play.click()
+    expect(page.get_by_role('status', name='Starting radio')).to_be_visible()
+    assert len(radio_ui.starts) == 1
+    request = radio_ui.starts.pop()
+    assert request.request.post_data_json['video_id'] == radio_ui.tracks[0]['video_id']
+    request.fulfill(json={'ok': False, 'reason': 'No playable songs'})
 
 
 @pytest.mark.parametrize("width", [1440])

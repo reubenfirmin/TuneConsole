@@ -146,7 +146,7 @@ def test_partial_neutrals_cannot_erase_ratings_or_independent_history(store, cac
     ratings.record_confirmed(store, iid, "a", "LIKE", 110)
     ratings.record_confirmed(store, other, "a", "DISLIKE", 111)
     store.history.record_history_plays(other, 100, ["a|artist"], source_timezone="UTC")
-    history = store.history.recent_play_counts(100)
+    history = store.history.listening_day_counts(other)
     assert history == {"a|artist": 1}
     client.response = {"tracks": [client._tracks["PL"][1],
                                   {**_track("new", "New song", "Artist"), "likeStatus": "LIKE"}],
@@ -156,7 +156,8 @@ def test_partial_neutrals_cannot_erase_ratings_or_independent_history(store, cac
     assert store.tracks.item_rating(iid, "a")["status"] == "LIKE"
     assert store.tracks.item_rating(other, "a")["status"] == "DISLIKE"
     assert store.tracks.item_rating(iid, "new")["status"] == "LIKE"
-    assert store.history.recent_play_counts(100) == history
+    assert store.history.listening_day_counts(other) == history
+    assert store.history.listening_day_counts(iid) == {}
     assert store.playlists.get_playlist(before.id) == before
     assert store.playlists.get_playlist_track_ids(before.id) == ordered
 

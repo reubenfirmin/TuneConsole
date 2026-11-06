@@ -8,13 +8,10 @@ from yt_playlist.util import genre_catalog, genre_family_data
 from yt_playlist.util.genre_family_data import load as _load
 
 
-def family(genre, *, conn=None) -> str:
+def family(genre) -> str:
     """Family for a genre (case-insensitive). Unknown genres map to 'other:<genre>' (singleton)."""
     if not genre:
         return ""
-    if conn is not None:
-        from yt_playlist.core import genre_identity
-        return genre_identity.family(conn,genre)
     return genre_family_data.family(genre)
 
 
@@ -41,15 +38,11 @@ def energy(genre) -> float:
     return en.get(family(genre), 0.5)
 
 
-def subgenre(genre, *, conn=None) -> str | None:
+def subgenre(genre) -> str | None:
     """The normalized (lowercased) subgenre tag for a known genre, or None if unknown.
     Distinct from family(): family() collapses subgenres to a bucket; subgenre() keeps the fine axis."""
     if not genre:
         return None
-    if conn is not None:
-        from yt_playlist.core import genre_identity
-        key, _ = genre_identity.resolve(conn,genre)
-        return key
     records, labels = genre_catalog.catalog()
     if label := labels.get(genre_catalog.normalize(genre)):
         return records[label[0]]["name"].lower()
@@ -57,13 +50,8 @@ def subgenre(genre, *, conn=None) -> str | None:
     return genre.strip().lower() if genre_catalog.normalize(genre) in g2f else None
 
 
-def subgenres_of(fam, *, conn=None) -> list:
+def subgenres_of(fam) -> list:
     """All member genre tags (lowercased) for the given family. Empty list if the family is unknown."""
-    if conn is not None:
-        retired = ("AND NOT EXISTS(SELECT 1 FROM genre_redirects r WHERE r.retired_key=c.key)"
-                   if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='genre_redirects'").fetchone() else '')
-        return [row[0] for row in conn.execute('SELECT c.key FROM genre_catalog c WHERE family_key=? '
-                                              +retired+' ORDER BY c.name COLLATE NOCASE',(fam,))]
     _, _, _, families = _load()
     members = families.get(fam)
     if members is None:

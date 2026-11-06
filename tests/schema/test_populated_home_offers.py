@@ -8,17 +8,21 @@ import time
 import pytest
 
 from yt_playlist.core.migrations import current, v080_metadata_evidence
+from yt_playlist.core.migrations import migrate, registry, regular
 from yt_playlist.core.store import Store
+from tests.schema.actual_library import copy_readonly_library
 
 
-def test_actual_completed_library_preserves_offer_history(request, tmp_path):
+def test_actual_completed_library_preserves_offer_history(request, tmp_path, monkeypatch):
     option = request.config.getoption('--schema-recovery-db')
     if not option:
         pytest.skip('Supply the retained isolated schema82 library')
-    target = Path(option).resolve(strict=True)
-    assert target.is_relative_to(Path(request.config.rootpath).resolve() / '.pytest_cache')
-    custody = json.loads((target.parent / 'metadata-conversion.json').read_text())
+    source = Path(option).resolve(strict=True)
+    custody = json.loads((source.parent / 'metadata-conversion.json').read_text())
     assert custody['interruption_rollback_verified'] and len(custody['copied_domains']) == 7
+    target, capture = tmp_path / 'home-offers.db', {}
+    copy_readonly_library(source, target, monkeypatch, capture)
+    assert capture['source_version'] == 82
     store = Store(target)
     try:
         assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 82
@@ -41,31 +45,37 @@ def test_actual_completed_library_preserves_offer_history(request, tmp_path):
         schedule = tuple(store.conn.execute('SELECT * FROM model_selection_schedule').fetchone())
         preparation = tuple(store.conn.execute('SELECT * FROM tv_preparation_state').fetchone())
         started = time.monotonic()
+        # Exercise the explicit historical Home-owner conversion. Ordinary
+        # startup preserves installed history instead of running bulk upgrades.
+        migrate(store.conn, registry=registry.MIGRATIONS[:83])
         store.init_schema()
         elapsed = time.monotonic() - started
-        assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == current.VERSION
+        assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 83
         assert store.rec_proposals.get_proposals('home_shown') == original
         assert store.conn.execute('SELECT built_at FROM home_offer_dedup').fetchone()[0] == built_at
-        assert store.rec_ledger.claim_home_offers(original['epoch'], original['signatures'], built_at + 1) == set()
         assert tuple(store.conn.execute('SELECT * FROM model_selection_schedule').fetchone()) == schedule
         assert tuple(store.conn.execute('SELECT * FROM tv_preparation_state').fetchone()) == preparation
         assert v080_metadata_evidence._catalog_digest(store.conn) == original_catalog
         assert counts() == before
+        store.rec_proposals.put_proposals('home_shown', original, built_at + 1)
         reopened = Store(target)
         try:
             reopened.init_schema()
             assert reopened.rec_proposals.get_proposals('home_shown') == original
-            assert reopened.rec_ledger.claim_home_offers(original['epoch'], original['signatures'], built_at + 2) == set()
+            assert reopened.conn.execute('SELECT built_at FROM home_offer_dedup').fetchone()[0] == built_at + 1
+            regular.validate(reopened.conn)
         finally:
             reopened.conn.close()
-        (tmp_path / 'home-offers.json').write_text(json.dumps({
+        report = Path(request.config.rootpath) / 'build/test-reports/implementation1137-home-offers-actual.json'
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(json.dumps({
             'status': 'passed', 'isolated_target': str(target), 'recordings': recordings,
             'python': sys.version, 'sqlite': sqlite3.sqlite_version,
-            'schema_before': 82, 'schema_after': current.VERSION,
+            'schema_before': 82, 'schema_after': 83, 'current_supported_version': current.VERSION,
             'offer_history': original, 'built_at': built_at,
             'schedule': schedule, 'preparation': preparation,
             'protected_counts': before, 'catalog_digest': original_catalog.hex(),
             'upgrade_seconds': elapsed, 'restarted': True,
-            'same_window_offers_recounted': 0}, indent=2) + '\n')
+            'continuing_write_built_at': built_at + 1, 'source_capture': capture}, indent=2) + '\n')
     finally:
         store.conn.close()

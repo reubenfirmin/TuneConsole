@@ -9,7 +9,7 @@ import json
 import numpy as np
 
 from yt_playlist.rec import content_model, embedding_vectors as vector_reads
-from yt_playlist.util import genre_catalog, genre_map
+from yt_playlist.util import genre_catalog
 
 
 def _breakdown(counts, total, labels, limit=3, *, complete=False):
@@ -88,6 +88,7 @@ def describe_modes(store):
     nearest = (vectors.astype(np.float64) @ centers.T).argmax(axis=1)
     dao = store.rec_query
     content, audio = dao.track_content(), dao.track_audio_features()
+    genre_axes = store.genres.feature_axes(genre for genre, _year in content.values())
     for index, mode in enumerate(current):
         members = [keys[i] for i in np.flatnonzero(nearest == index)]
         size = len(members)
@@ -96,7 +97,7 @@ def describe_modes(store):
         families, tags, decades = Counter(), Counter(), Counter()
         for key in members:
             genre, year = content.get(key, (None, None))
-            families[genre_map.family(genre,conn=store.conn)] += 1
+            families[genre_axes.get(genre, ('', None))[0]] += 1
             if genre:
                 tags[genre] += 1
             if year and str(year)[:4].isdigit():

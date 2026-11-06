@@ -1,17 +1,31 @@
 """Bounded idle collection for established file owners, never live-body expiry."""
 from .. import (fao, policy_documents, metadata_delivery_files, audio_annotation_files,
-               album_description_files, sample_files, legacy_evidence)
+               album_description_files, sample_files, legacy_evidence,
+               metadata_runtime_files, playback_inbox)
 from ..db_writes import reserved_write
 
 
+def _owners(*relations):
+    def required(conn, path):
+        return any(conn.execute(f'SELECT 1 FROM {table} WHERE {column}=? LIMIT 1',
+                                (str(path),)).fetchone() is not None
+                   for table,column in relations
+                   if conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?',(table,)).fetchone())
+    return required
+
+
 def contracts(conn):
-    yield policy_documents.directory(conn),[(table,'configuration_filename') for table in policy_documents.OWNERS]
-    yield metadata_delivery_files.directory(conn),[('metadata_deliveries','raw_filename')]
-    yield audio_annotation_files.directory(conn,getattr(conn,'_policy_memory_key',str(id(conn)))),[
-        ('audio_annotations','model_output_filename')]
-    yield album_description_files.directory(conn),[(table,fields[1]) for table,fields in album_description_files.OWNERS.items()]
-    yield sample_files.directory(conn,getattr(conn,'_policy_memory_key',str(id(conn)))),[('sample_attributes','filename')]
-    yield legacy_evidence.directory(conn),[(table,'filename') for table in legacy_evidence.DOMAINS.values()]
+    yield policy_documents.directory(conn),_owners(*[(table,'configuration_filename') for table in policy_documents.OWNERS])
+    yield metadata_delivery_files.directory(conn),metadata_delivery_files.owns_file
+    yield audio_annotation_files.directory(conn,getattr(conn,'_policy_memory_key',str(id(conn)))),_owners(
+        ('audio_annotations','model_output_filename'))
+    yield album_description_files.directory(conn),_owners(*[(table,fields[1]) for table,fields in album_description_files.OWNERS.items()])
+    yield sample_files.directory(conn,getattr(conn,'_policy_memory_key',str(id(conn)))),_owners(('sample_attributes','filename'))
+    yield legacy_evidence.directory(conn),_owners(*[(table,'filename') for table in legacy_evidence.DOMAINS.values()])
+    # Named files without committed owners receive the ordinary 30-day grace.
+    # Active publications, old snapshots and current SQL heads remain fenced.
+    yield metadata_runtime_files.directory(conn),metadata_runtime_files.owns_file
+    yield playback_inbox.directory(conn),playback_inbox.owns_file
 
 
 class Orphans:
@@ -21,7 +35,7 @@ class Orphans:
         self.paths = None
 
     def step(self,store,now,limit=16):
-        root,owners = self.contracts[self.position]
+        root,required = self.contracts[self.position]
         if self.paths is None:
             self.paths = fao.walk_entries(root)
         removed = 0
@@ -44,12 +58,7 @@ class Orphans:
                         continue
                     with reserved_write(store):
                         # Existing snapshots and new publication are fenced.
-                        required = False
-                        for table,column in owners:
-                            if store.conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?',(table,)).fetchone():
-                                required |= store.conn.execute(f'SELECT 1 FROM {table} WHERE {column}=? LIMIT 1',
-                                                               (str(path),)).fetchone() is not None
-                        if not required:
+                        if not required(store.conn,path):
                             removed += fao.delete(path,expected=info.identity,missing_ok=True)
             except (FileNotFoundError,fao.FileChanged):
                 continue

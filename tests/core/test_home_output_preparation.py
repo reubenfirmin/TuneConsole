@@ -5,6 +5,7 @@ import json
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.publication_timing_support import publication_costs
 from yt_playlist.core import group_evidence, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import home_outputs as preparation
@@ -51,17 +52,23 @@ def root_rows(conn):
         + ','.join(preparation.ROOT_KEYS[owner]))] for owner in preparation.ROOT_KEYS}
 
 
+@pytest.fixture
+def home_inputs(installed, staged_custody):
+    return staged_custody(installed, 'home-output-inputs', seed)
+
+
 @pytest.mark.parametrize('installed', [79, 90], indirect=True)
-def test_exact_display_parts_policies_and_existing_evidence_roots_are_additive(installed):
+def test_exact_display_parts_policies_and_existing_evidence_roots_are_additive(
+        installed, home_inputs, publication_costs):
     store, _ = installed
     conn = store.conn
-    original = seed(store)
+    original = home_inputs
     roots = root_rows(conn)
     preparation.JOB.install(conn)
     assert preparation.JOB.step(conn, batch_size=1).processed == 1
     assert head(conn, 'adaptive_group_preview') is None
     regular.migrate(conn)
-    finish(preparation.JOB, conn)
+    finish(preparation.JOB, conn, size=128)
     for surface, raw in original.items():
         assert preparation.read_original(conn, head(conn, surface)) == raw
         assert conn.execute('SELECT payload FROM rec_proposals WHERE surface=?', (surface,)).fetchone()[0] == raw
@@ -73,7 +80,7 @@ def test_exact_display_parts_policies_and_existing_evidence_roots_are_additive(i
         f'FROM {preparation.POLICIES} ORDER BY raw_key')] == [
             ('missing-policy', None, 'missing_policy'), ('real-policy', 'real-policy', None)]
     preparation.ROOT_JOB.install(conn)
-    finish(preparation.ROOT_JOB, conn)
+    finish(preparation.ROOT_JOB, conn, size=8)
     archived = [json.loads(row[0]) for row in conn.execute(f'SELECT source_snapshot FROM {preparation.ORIGINALS}')]
     assert len(archived) == sum(map(len, roots.values())) == 4
     assert all(row in archived for rows in roots.values() for row in rows)
@@ -85,8 +92,8 @@ def test_exact_display_parts_policies_and_existing_evidence_roots_are_additive(i
     store.rec_ledger.record_serving_policy('missing-policy', {'algorithm': 'later'}, 2)
     assert preparation.JOB.progress(conn).prepared_revision is None
     assert preparation.ROOT_JOB.progress(conn).prepared_revision is None
-    finish(preparation.JOB, conn)
-    finish(preparation.ROOT_JOB, conn)
+    finish(preparation.JOB, conn, size=128)
+    finish(preparation.ROOT_JOB, conn, size=8)
     current = head(conn)
     assert tuple(conn.execute(f'SELECT policy_version,unresolved_reason FROM {preparation.POLICIES} '
         "WHERE surface=? AND generation=? AND raw_key='missing-policy'", ('home_prepared', current['generation'])).fetchone()) == (
@@ -115,10 +122,10 @@ def test_large_policy_set_checkpoints_individual_references(installed):
 
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
-def test_partial_replacement_and_renamed_source_withdraw_only_current_heads(installed):
+def test_partial_replacement_and_renamed_source_withdraw_only_current_heads(installed, home_inputs):
     store, _ = installed
     conn = store.conn
-    original = seed(store)
+    original = home_inputs
     preparation.JOB.install(conn)
     preparation.JOB.step(conn, batch_size=1)
     previous = conn.execute(f'SELECT * FROM {preparation.HEAD} WHERE surface=\'adaptive_group_preview\'').fetchone()
@@ -140,10 +147,16 @@ def test_partial_replacement_and_renamed_source_withdraw_only_current_heads(inst
 
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
-def test_roots_capture_continuing_release_without_reinterpreting_unknown_alias(installed):
+def test_roots_capture_continuing_release_without_reinterpreting_unknown_alias(installed, staged_custody_templates):
     store, _ = installed
     conn = store.conn
-    seed(store)
+    original = seed(store)  # Independent uncached producer for the shared input prefix.
+    template = staged_custody_templates(installed[1], 'home-output-inputs', seed)
+    assert original == template.result
+    assert root_rows(conn) == root_rows(template.source.conn)
+    if template.source.conn.execute(
+            "SELECT 1 FROM sqlite_schema WHERE name=?", (preparation.CURRENT,)).fetchone():
+        assert head(template.source.conn) is None
     preparation.JOB.install(conn)
     preparation.ROOT_JOB.install(conn)
     with pytest.raises(MigrationError, match='requires reconciled output files'):
@@ -216,10 +229,9 @@ def test_oversized_root_fails_without_truncation_or_releasing_the_source(install
 
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
-def test_file_io_fences_source_edits_without_reserving_a_writer(installed, monkeypatch):
+def test_file_io_fences_source_edits_without_reserving_a_writer(installed, home_inputs, monkeypatch):
     store, _ = installed
     conn = store.conn
-    seed(store)
     preparation.JOB.install(conn)
     second = Store(store._db_path)
     publish = files.publish
@@ -242,10 +254,10 @@ def test_file_io_fences_source_edits_without_reserving_a_writer(installed, monke
 
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
-def test_interrupt_and_disk_failure_preserve_checkpoint_until_explicit_retry(installed, monkeypatch):
+def test_interrupt_and_disk_failure_preserve_checkpoint_until_explicit_retry(installed, home_inputs, monkeypatch):
     store, _ = installed
     conn = store.conn
-    original = seed(store)
+    original = home_inputs
     preparation.JOB.install(conn)
     checkpoint = preparation.JOB.step(conn, batch_size=1)
     copy = preparation.copy

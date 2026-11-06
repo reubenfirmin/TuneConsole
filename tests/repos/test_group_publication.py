@@ -1,6 +1,6 @@
 """Hidden batches must preserve serving state and the final source revision guard."""
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import json
 import sqlite3
 from threading import Event
@@ -21,16 +21,16 @@ from yt_playlist.repos import group_publication
 
 
 @pytest.fixture
-def database(tmp_path):
+def database(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path / 'group-publication.db')
-    # These checks exercise the predecessor's hidden-row protocol and SQL
-    # protections. The compact protocol has its own current-schema tests.
-    migrate(store.conn, registry=MIGRATIONS[:69])
-    store._bind_repositories()
-    store.conn.execute('PRAGMA journal_mode=WAL')
-    store._snapshot_revisions = Revisions(store.conn)
-    yield store
-    store.conn.close()
+    with closing(store.conn):
+        # These checks exercise the predecessor's hidden-row protocol and SQL
+        # protections. The compact protocol has its own current-schema tests.
+        _pristine_installed_schema(69).backup(store.conn)
+        store._bind_repositories()
+        store.conn.execute('PRAGMA journal_mode=WAL')
+        store._snapshot_revisions = Revisions(store.conn)
+        yield store
 
 
 def prepare(store, tracks, previous):
@@ -112,7 +112,7 @@ def test_staging_keeps_original_input_and_publication_guards(database, monkeypat
         elif change == 'unrelated-setting':
             database.settings.set_setting('foreground-setting', 'new')
         elif change in ('external-writer', 'schema'):
-            with sqlite3.connect(database._db_path) as other:
+            with closing(sqlite3.connect(database._db_path)) as other, other:
                 other.execute("INSERT INTO settings VALUES ('external-setting','new')" if change == 'external-writer'
                               else 'CREATE INDEX unrelated_external_index ON settings(value)')
         else:
@@ -120,7 +120,7 @@ def test_staging_keeps_original_input_and_publication_guards(database, monkeypat
         return owner
 
     monkeypatch.setattr(database.taste_groups, 'stage', stage)
-    worker.request_rebuild()
+    seed(database, recordings([('Pop', 13, .2)]))
     assert worker.step(2000) == (change == 'unrelated-setting')
     if change == 'unrelated-setting':
         assert database.taste_groups.head_generation() == staged[0]
@@ -188,23 +188,22 @@ def test_failed_batch_and_expired_cleanup_preserve_published_history(database, m
     assert not database.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
-def test_new_head_hides_old_assignments_before_bounded_cache_cleanup(database, monkeypatch):
+def test_bounded_cleanup_preserves_current_cache_and_published_history(database, monkeypatch):
     tracks = recordings([('House', 12, .3)])
     first = publish(database, tracks)
     database.conn.execute('BEGIN')
     with database.conn:
-        database.taste_groups.publish_assignments([
+        database.conn.executemany('INSERT INTO rec_group_assignments VALUES (?,?,?,?,?,?,?)', [
             ('candidate', first['generation'], first['groups'][0]['version'], .5, .7, 'old', 1000)])
-    assert database.taste_groups.assignment('candidate')['profile_digest'] == 'old'
     pending = prepare(database, tracks, first)
     owner = database.taste_groups.stage(pending)
     database.conn.execute('BEGIN')
     with database.conn:
         database.taste_groups.finish_staged(pending['generation'], owner)
-    assert database.taste_groups.assignment('candidate') is None
+    assert database.taste_groups.head_generation() == pending['generation']
     database.conn.execute('BEGIN')
     with database.conn:
-        database.taste_groups.publish_assignments([
+        database.conn.executemany('INSERT INTO rec_group_assignments VALUES (?,?,?,?,?,?,?)', [
             ('candidate', pending['generation'], pending['groups'][0]['version'], .8, .9, 'new', 2000)])
     assert database.conn.execute('SELECT COUNT(*) FROM rec_group_assignments').fetchone()[0] == 2
     current_edges = graph(database)
@@ -214,8 +213,8 @@ def test_new_head_hides_old_assignments_before_bounded_cache_cleanup(database, m
             break
     else:
         pytest.fail('Obsolete cache cleanup did not finish')
-    assert database.taste_groups.assignment('candidate')['profile_digest'] == 'new'
-    assert database.conn.execute('SELECT COUNT(*) FROM rec_group_assignments').fetchone()[0] == 1
+    assert [tuple(row) for row in database.conn.execute(
+        'SELECT generation,profile_digest FROM rec_group_assignments')] == [(pending['generation'], 'new')]
     assert graph(database) == current_edges
     assert database.taste_groups.definitions(first['generation'], members=True) == first['groups']
 
@@ -268,7 +267,6 @@ def test_upgrade_preserves_existing_head_history_graph_and_assignments(tmp_path)
         store._bind_repositories()
         assert before == {table: [tuple(row) for row in store.conn.execute(f'SELECT * FROM {table}')] for table in tables}
         assert store.taste_groups.head_generation() == 'old'
-        assert store.taste_groups.assignment('assigned')['version'] == 'version'
         assert store.taste_groups.leaf_members('old') == {'song': 'version'}
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
         with store.conn:

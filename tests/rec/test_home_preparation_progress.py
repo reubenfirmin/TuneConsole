@@ -1,16 +1,16 @@
 """Shared snapshot inputs must let bounded Home preparation make useful progress."""
 from collections import Counter
+from tests.derived_rating_support import seed_dislike
 
 import pytest
 
-from tests.rec.test_home_prepared import seed
 from tests.recommendation_support import publish_bundles
 from yt_playlist.rec import (discover, embedding_vectors as embed, home_prepared, home_themes, home_vibe,
                              mode_surfaces, rec_params, stored_home, surfaces, transient)
 
 
-def test_each_preparation_snapshot_reuses_listening_signals_for_all_discovery_families(store, monkeypatch):
-    seed(store)
+def test_each_preparation_snapshot_reuses_listening_signals_for_all_discovery_families(
+        store, home_seed_inputs, monkeypatch):
     for index, genre in enumerate(('House', 'Techno', 'Jazz', 'Ambient', 'Trance', 'Classical')):
         store.discovery.upsert_discovered_artist(f'New {index}', 0.5, [], [], None, 1, genre=genre)
         store.discovery.upsert_discovered_album(f'new-{index}', f'New {index}', 'New album',
@@ -55,13 +55,14 @@ def test_shared_discovery_signals_preserve_selection_and_mutes(store, monkeypatc
 
 
 @pytest.mark.parametrize('include', [(), ('jazz', 'techno')])
-def test_snapshot_reuses_eligibility_and_union_metadata_without_changing_offers(store, monkeypatch, include):
-    bundles = seed(store)
+def test_snapshot_reuses_eligibility_and_union_metadata_without_changing_offers(
+        store, home_seed_inputs, monkeypatch, include):
+    bundles = home_seed_inputs
     bundles['_ppr'] = {str(mid): [item['key'] for items in bundles[str(mid)].values()
                                   for item in reversed(items)] for mid in range(6)}
     publish_bundles(store, bundles, 1)
     rec_params.set_param(store, 'ppr_ab_share', 0.5)
-    store.rec_model.record_dislike(bundles['0']['wheelhouse'][0]['key'], until=None, now=1)
+    seed_dislike(store, bundles['0']['wheelhouse'][0]['key'], until=None, now=1)
     orders = [(epoch, tuple(range(epoch, 6)) + tuple(range(epoch))) for epoch in range(3)]
     with store.read_snapshot() as snapshot, stored_home.preparation_inputs() as metadata_inputs:
         reader = snapshot.store
@@ -103,9 +104,9 @@ def test_snapshot_reuses_eligibility_and_union_metadata_without_changing_offers(
 
 
 @pytest.mark.parametrize('missing_bundles', [False, True])
-def test_preparation_never_rebuilds_the_library_for_cold_or_shallow_bundles(store, monkeypatch,
-                                                                        missing_bundles):
-    bundles = seed(store, publish=not missing_bundles)
+def test_preparation_never_rebuilds_the_library_for_cold_or_shallow_bundles(
+        store, home_seed_templates, monkeypatch, missing_bundles):
+    bundles = home_seed_templates(publish=not missing_bundles).restore(store)
     bundles['_meta']['full_pools'] = False
     if not missing_bundles:
         publish_bundles(store, bundles, 1)

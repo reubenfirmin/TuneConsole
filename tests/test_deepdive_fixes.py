@@ -16,17 +16,6 @@ def test_normalize_non_latin_stays_distinct():
     assert identity_key("Песня", "Кино") != "|"
 
 
-# --- X recent-mood: ordered-by-recency keys ---
-def test_recent_keys_ordered_returns_latest_first(store):
-    iid = store.accounts.upsert_account("me", "c", None, True)
-    day = 86400.0
-    store.history.record_history_plays(iid, day, ["old1", "old2"], source_timezone="UTC")
-    store.history.record_history_plays(iid, 3 * day, ["new1"], source_timezone="UTC")
-    recent = store.history.recent_keys_ordered(0, limit=2)
-    assert recent[0] == "new1" and len(recent) == 2
-    assert store.history.recent_keys_ordered(2 * day) == ["new1"]
-
-
 # --- Z set_weight is clamped like nudge_weight ---
 def test_set_weight_clamps(store):
     import pytest

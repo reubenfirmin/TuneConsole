@@ -4,13 +4,15 @@ from pathlib import Path
 import sqlite3
 import shutil
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from threading import Barrier
 
 import pytest
 
 from yt_playlist.core import (album_description_files as files, album_description_requests as requests,
                               album_aliases, audio_annotation_files, audio_annotations, choice_evidence_files,
-                              policy_documents, policy_recovery, sample_files)
+                              policy_documents, sample_files)
+from tests import file_custody_support as custody
 from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations import v070_policy_documents as policies
 from yt_playlist.core.migrations import v071_album_descriptions as migration
@@ -23,18 +25,17 @@ from yt_playlist.rec import album_descriptions
 
 
 @pytest.fixture
-def predecessor(tmp_path):
-    conn = sqlite3.connect(tmp_path / 'paid.db')
-    conn.row_factory = sqlite3.Row
-    conn.execute('PRAGMA foreign_keys=ON')
-    migrate(conn, registry=registry.MIGRATIONS[:69])
-    with conn:
-        conn.execute('BEGIN IMMEDIATE')
-        policies.apply(conn, Context(4))
-        policy_documents.install(conn, [('new-policy', '{"prompt_version":1}', 1)])
-        conn.execute("INSERT INTO albums(id,title,metadata_rank) VALUES (1,'Canonical release',0)")
-    yield conn
-    conn.close()
+def predecessor(tmp_path, _pristine_installed_schema):
+    with closing(sqlite3.connect(tmp_path / 'paid.db')) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        _pristine_installed_schema(69).backup(conn)
+        with conn:
+            conn.execute('BEGIN IMMEDIATE')
+            policies.apply(conn, Context(4))
+            policy_documents.install(conn, [('new-policy', '{"prompt_version":1}', 1)])
+            conn.execute("INSERT INTO albums(id,title,metadata_rank) VALUES (1,'Canonical release',0)")
+        yield conn
 
 
 def seed(conn):
@@ -438,7 +439,7 @@ def test_recovery_file_bundle_combines_policy_annotation_and_paid_owners_from_on
     try:
         with policy_documents.retained_reader(policy_documents.directory(conn)), conn:
             conn.execute('BEGIN')
-            manifests = policy_recovery._export_files(conn, tmp_path / 'all-domains.db',
+            manifests = custody.export_files(conn, tmp_path / 'all-domains.db',
                                                        backup_root=tmp_path / 'backup')
             conn.backup(restored)
         assert set(manifests) == {'annotations', 'policies', 'descriptions', 'samples', 'choice_evidence'}
@@ -450,7 +451,7 @@ def test_recovery_file_bundle_combines_policy_annotation_and_paid_owners_from_on
         for root in (files.directory(conn), audio_annotation_files.directory(conn), policy_documents.directory(conn)):
             shutil.rmtree(root)
         restored.execute('PRAGMA foreign_keys=ON')
-        policy_recovery._restore_files(restored, manifests)
+        custody.restore_files(restored, manifests)
         assert {key: value[1:] for key, value in references(restored).items()} == original_paid
         assert policy_documents.configuration(restored, 'new-policy') == {'prompt_version': 1}
         assert {row[0]: audio_annotation_files.read(row[1]) for row in restored.execute(
@@ -530,9 +531,8 @@ def test_bad_backup_cannot_repoint_any_paid_owner(predecessor, tmp_path, problem
 
 
 @pytest.fixture
-def paid_store(tmp_path):
-    store = Store(tmp_path / 'paid-repository.db')
-    store.init_schema()
+def paid_store(file_backed_store):
+    store = file_backed_store
     with store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
         store.conn.executemany('INSERT INTO albums(id,title,metadata_rank) VALUES (?,?,0)',
@@ -540,8 +540,7 @@ def paid_store(tmp_path):
         store.conn.executemany('INSERT INTO album_provider_ids(provider,provider_id,album_id) '
                                "VALUES ('youtube',?,?)", [('release-one', 1), ('release-two', 2)])
     store._bind_repositories()
-    yield store
-    store.conn.close()
+    return store
 
 
 def test_paid_repository_uses_exact_album_identity_and_keeps_policy_and_admission_together(paid_store):

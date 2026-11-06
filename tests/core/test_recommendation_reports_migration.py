@@ -12,10 +12,10 @@ from yt_playlist.core.store import Store
 
 
 @pytest.fixture
-def predecessor(tmp_path):
+def predecessor(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path / 'reports.db')
     store.conn.execute('PRAGMA journal_mode=WAL')
-    migrate(store.conn, registry=registry.MIGRATIONS[:92])
+    _pristine_installed_schema(92).backup(store.conn)
     store._bind_repositories()
     yield store
     store.conn.close()

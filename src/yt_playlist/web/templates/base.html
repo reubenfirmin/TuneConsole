@@ -1,5 +1,5 @@
 <!doctype html>
-{% set maintenance = storage_maintenance_status() %}
+{% set maintenance = {'active': false, 'warning': false, 'banner_message': ''} if read_recovery else storage_maintenance_status() %}
 <html lang="en" data-storage-compacting="{{ 'true' if maintenance.active else 'false' }}">
 <head>
   {% set path = request.url.path if request else "/" %}
@@ -106,13 +106,11 @@
   <!-- CSS token -> canvas bridge; must load before any script that paints. -->
   <script src="/static/theme.js?v={{ asset_v }}"></script>
   <script src="/static/playback-status.js?v={{ asset_v }}"></script>
-  {% if path != '/audio-preview' %}
   <script type="module" src="/static/audio-vibe-collection.js?v={{ asset_v }}"></script>
-  {% endif %}
-  {% if audio_vibes_enabled is defined and audio_vibes_enabled() and path != '/audio-preview' %}
+  {% if audio_vibes_enabled is defined and audio_vibes_enabled() %}
   <link rel="stylesheet" href="/static/audio-vibe-banner.css?v={{ asset_v }}">
   {% endif %}
-  {% set setup_pending = initial_setup_pending() %}
+  {% set setup_pending = false if read_recovery else initial_setup_pending() %}
   {% if setup_pending %}
   <link rel="stylesheet" href="/static/setup-status.css?v={{ asset_v }}">
   <script src="/static/setup-status.js?v={{ asset_v }}"></script>
@@ -121,6 +119,7 @@
   {% if path == '/' or path.startswith('/album') %}<script src="/static/album-player.js?v={{ asset_v }}"></script>{% endif %}
   {% if path.startswith('/playlist/') %}<script src="/static/playlist-player.js?v={{ asset_v }}"></script>{% endif %}
   <script src="/static/app.js?v={{ asset_v }}"></script>
+  <script src="/static/read-recovery.js?v={{ asset_v }}"></script>
   <script src="/static/app-navigation.js?v={{ asset_v }}"></script>
   {% if path == '/' or path.startswith('/album') %}<script src="/static/listening-choices.js?v={{ asset_v }}"></script>{% endif %}
   <script src="/static/player-card.js?v={{ asset_v }}"></script>
@@ -184,9 +183,9 @@
   </template>
   {% if setup_pending %}{% include "_partials/setup_status.html" %}{% endif %}
   <div id="storage-maintenance" class="storage-maintenance"
-       data-warning="{{ 'true' if maintenance.warning else 'false' }}"
-       role="{{ 'alert' if maintenance.warning else 'status' }}"
-       aria-live="{{ 'assertive' if maintenance.warning else 'polite' }}"
+       data-warning="false"
+       role="status"
+       aria-live="polite"
        aria-atomic="true"{% if not maintenance.banner_message %} hidden{% endif %}>{{ maintenance.banner_message }}</div>
   <header class="topbar">
     <a class="brand" href="/" aria-label="TuneConsole home">
@@ -233,7 +232,7 @@
         <div class="tools-pop" x-show="open" x-cloak x-transition.opacity.scale.origin.top.right>
           <a href="/setup" class="{{ 'active' if path.startswith('/setup') else '' }}">Setup</a>
           <a href="/cleanup" class="{{ 'active' if path.startswith('/cleanup') else '' }}">Cleanup</a>
-          {% if has_multiple_identities() %}
+          {% if not read_recovery and has_multiple_identities() %}
           <a href="/move" class="{{ 'active' if path.startswith('/move') else '' }}">Move</a>
           {% endif %}
           <a href="/enrich" class="{{ 'active' if path.startswith('/enrich') else '' }}">Enrichment</a>
@@ -247,7 +246,6 @@
         </div>
       </div>
     </nav>
-    <div id="account-health-slot"></div>
     <div class="sidebar-dock-slot" aria-label="Now playing"></div>
     <a class="sidebar-privacy" href="/privacy">Privacy</a>
   </header>
@@ -277,12 +275,10 @@
   <div id="genre-candidates-modal"></div>
   {% include "_partials/song_actions.html" %}
   <div id="toasts" class="toasts" aria-live="polite">{% block toasts %}{% endblock %}</div>
-  {% if path != '/audio-preview' %}
   <div hidden data-audio-vibe-collection
        data-extension-ids="{{ audio_vibe_extension_ids|join(',') }}"
        data-taxonomy-version="{{ audio_vibe_taxonomy_version }}"></div>
   {% if audio_vibes_enabled is defined and audio_vibes_enabled() %}{% include "_partials/audio_vibe_banner.html" %}{% endif %}
-  {% endif %}
   {% include "_partials/heartbeat.html" %}
 </body>
 </html>

@@ -10,6 +10,7 @@ import sqlite3
 import time
 
 from .. import model_state, recommendation_outputs as files
+from ..model_reads import native, selected
 from ..schema_contract import MigrationError
 from . import collection_controls, model_artifacts as preparation
 from .selection import invalidators
@@ -65,22 +66,6 @@ def definitions():
                 f'WHEN EXISTS(SELECT 1 FROM {LINKS} WHERE {condition}) '
                 "BEGIN SELECT RAISE(ABORT,'Published content encoder parts are retained'); END")
     yield from invalidators(HEAD, JOBS, names={name: NAME for name in JOBS})
-
-
-def native(conn):
-    return conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='taste_model_state'").fetchone() is not None
-
-
-def installed(conn):
-    return (conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?', (HEAD,)).fetchone() is not None
-            and conn.execute(f'SELECT 1 FROM {HEAD} WHERE name=?', (NAME,)).fetchone() is not None)
-
-
-def selected(conn):
-    if native(conn) or not conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?', (HEAD,)).fetchone():
-        return None
-    row = conn.execute(f'SELECT artifact_revision,fingerprint_revision FROM {HEAD} WHERE name=? AND active=1', (NAME,)).fetchone()
-    return tuple(row) if row else None
 
 
 def validate(conn):
@@ -206,16 +191,6 @@ def publish(conn, *, artifact_revision, fingerprint_revision, clock=time.time):
     except BaseException:
         conn.rollback()
         raise
-
-
-def read(conn, revisions, key, default):
-    if key in preparation.FINGERPRINTS:
-        row = conn.execute(f'SELECT raw_value FROM {TOKENS} WHERE artifact_revision=? AND fingerprint_revision=? AND source=?',
-                           (*revisions, key)).fetchone()
-        return row[0] if row and row[0] is not None else default
-    row = conn.execute(f'SELECT g.* FROM {LINKS} l JOIN {preparation.HEAD} g USING(source,generation) '
-                       'WHERE l.artifact_revision=? AND l.fingerprint_revision=? AND l.source=?', (*revisions, key)).fetchone()
-    return preparation.read_original(conn, row) or default if row is not None else default
 
 
 def main(argv=None):

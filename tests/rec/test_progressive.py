@@ -1,5 +1,6 @@
 """Progress without a quiet catalog, using guarded, resumable inputs."""
 from dataclasses import replace
+from tests.enrichment_support import seed_enrichment
 import json
 import logging
 from types import SimpleNamespace
@@ -98,6 +99,31 @@ def test_hot_recording_yields_without_losing_its_pending_revision(store, monkeyp
     assert p.status()['prepared'] == 3
 
 
+def test_repeated_unrelated_enrichment_keeps_advancing_bounded_batches(store, monkeypatch):
+    p = Preparation(store, budget=replace(Budget(), batch=3))
+    drain(p)  # Finish version bootstrap/fanout before measuring recording batches.
+    ids = catalog(store)
+    capture = PreparedContentRepo.capture
+    writes = []
+
+    def write_elsewhere(repo, pending):
+        rows = capture(repo, pending)
+        assert store.tracks.identity_key_for_video('v11') not in {key for key, _revision in pending}
+        writes.append(True)
+        audio(store, ids[-1], 200 + len(writes))
+        return rows
+
+    with monkeypatch.context() as patch:
+        patch.setattr(PreparedContentRepo, 'capture', write_elsewhere)
+        for prepared in (3, 6, 9):
+            assert p.capture(1000)
+            assert p.status()['prepared'] == prepared
+            assert p.status()['pending'] == 12 - prepared
+    assert len(writes) == 3
+    drain(p)
+    assert p.status()['prepared'] == 12 and p.status()['pending'] == 0
+
+
 def test_basis_publishes_accepted_inputs_while_live_metadata_keeps_changing(store, monkeypatch):
     ids = catalog(store, 96)
     rec_params.set_param(store, 'modes_k', 4)
@@ -121,7 +147,8 @@ def test_basis_publishes_accepted_inputs_while_live_metadata_keeps_changing(stor
     assert json.loads(store.settings.get_setting('rec_content_model'))['cont'][0][1] < 200
 
 
-def test_delta_uses_exact_published_basis_and_preserves_other_vectors(store):
+def test_delta_uses_exact_published_basis_and_preserves_other_vectors(store, monkeypatch):
+    from yt_playlist.core import fao
     ids = catalog(store, 20)
     p = Preparation(store)
     drain(p)
@@ -129,7 +156,18 @@ def test_delta_uses_exact_published_basis_and_preserves_other_vectors(store):
     before = store.rec_model.content_generation()
     key = store.tracks.identity_key_for_video('v0')
     audio(store, ids[0], 190)
+    writes, write = [], fao.write_bytes
+
+    def off_lock(path, *args, **kwargs):
+        if path.suffix == '.bin':
+            assert not store._lock.held_by_current_thread
+            assert not store.conn.in_transaction
+            writes.append(path)
+        return write(path, *args, **kwargs)
+
+    monkeypatch.setattr(fao, 'write_bytes', off_lock)
     assert p.capture(1001)
+    assert writes
     after = store.rec_model.content_generation()
     assert after['model'] == before['model']
     assert after['generation'] != before['generation']
@@ -164,7 +202,7 @@ def test_pending_and_accepted_work_survive_restart_and_timestamp_only_reenrichme
         assert not p.due(1100)
         assert store.rec_model.content_generation() == generation
         # A provider re-read with the same values retains every accepted row.
-        store.tracks.set_track_enrichment(ids[0], 'Techno', None)
+        seed_enrichment(store, ids[0], 'Techno', None)
         assert not p.due(1101)
     finally:
         store.conn.close()

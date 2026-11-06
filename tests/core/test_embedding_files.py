@@ -1,5 +1,6 @@
 """Binary vectors keep exact bytes, coherent bases and discovery tie ordering."""
 import shutil
+import sqlite3
 import struct
 
 import pytest
@@ -9,6 +10,49 @@ from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.preparation import embeddings as preparation
 from yt_playlist.core.store import Store
 from yt_playlist.repos.rec_model import VectorChanges
+
+
+def test_basis_validation_work_grows_linearly_and_rejects_both_storage_forms(store):
+    # Count SQLite work, not machine-dependent elapsed time. Doubling an
+    # admitted space must not quadruple the cost of validating its next rows.
+    conn = store.conn
+    with atomic_write(store):
+        conn.executemany('INSERT INTO recordings(identity_key) VALUES (?)',
+                         [(f'basis-scale-{i}',) for i in range(1024)])
+    subjects = [row[0] for row in conn.execute('SELECT id FROM recordings ORDER BY id')]
+    counts = []
+    for count in (512, 1024):
+        steps = [0]
+        def tick():
+            steps[0] += 1
+            return 0
+        with atomic_write(store):
+            conn.execute("DELETE FROM recording_embedding_files WHERE space='content_library'")
+            conn.set_progress_handler(tick, 1000)
+            try:
+                conn.executemany('INSERT INTO recording_embedding_files VALUES (?,?,?,?,?,?,?,?)',
+                    [(rid, 'content_library', 'basis', 2, b'x' * 32, 0, i + 1, 0)
+                     for i, rid in enumerate(subjects[:count])])
+            finally:
+                conn.set_progress_handler(None, 0)
+        counts.append(steps[0])
+    assert counts[1] < 2.5 * counts[0], counts
+    with atomic_write(store):
+        rid = conn.execute("INSERT INTO recordings(identity_key) VALUES ('basis-scale-installed') RETURNING id").fetchone()[0]
+        conn.execute('INSERT INTO recording_embeddings VALUES (?,?,?,?,?,?)',
+                     (rid, 'content_library', 'basis', 2, b'\0' * 8, 0))
+    for table in ('recording_embedding_files', 'recording_embeddings'):
+        for version, dimensions in (('other', 2), ('basis', 3)):
+            with pytest.raises(sqlite3.IntegrityError, match='Mixed bases'), atomic_write(store):
+                if table.endswith('_files'):
+                    conn.execute(f'INSERT INTO {table} VALUES (?,?,?,?,?,?,?,?)',
+                        (subjects[0], 'content_library', version, dimensions, b'y' * 32, 0, 1, 0))
+                else:
+                    conn.execute(f'INSERT INTO {table} VALUES (?,?,?,?,?,?)',
+                        (subjects[0], 'content_library', version, dimensions, b'\0' * (dimensions * 4), 0))
+        with pytest.raises(sqlite3.IntegrityError, match='Mixed bases'), atomic_write(store):
+            conn.execute(f"UPDATE {table} SET dimensions=3 WHERE space='content_library'")
+    assert conn.execute("SELECT COUNT(*) FROM recording_embedding_files WHERE space='content_library'").fetchone()[0] == 1024
 
 
 def test_empty_publications_clear_and_retract_each_space_during_partial_conversion(store):
@@ -87,6 +131,12 @@ def test_partial_conversion_and_incremental_publication_preserve_order(store, mo
     with pytest.raises(Exception, match='Mixed bases'), atomic_write(store):
         embeddings.publish(store.conn, 'rec_discovered_content_vectors', [expected[0]], model_version='wrong')
     assert embeddings.rows(store.conn, 'rec_discovered_content_vectors') == expected
+    # A retraction followed by the same subject's upsert appends it; an absent
+    # raw identity has no effect on the maximum or the retained subjects.
+    with atomic_write(store):
+        embeddings.publish(store.conn, 'rec_discovered_content_vectors', [expected[0]],
+                           removed=(expected[0][0], 'absent-owner'), model_version='basis')
+    assert embeddings.rows(store.conn, 'rec_discovered_content_vectors') == expected[1:] + expected[:1]
 
 
 def test_required_chunks_snapshot_and_independent_restore(store, tmp_path):
@@ -99,8 +149,8 @@ def test_required_chunks_snapshot_and_independent_restore(store, tmp_path):
         with atomic_write(store):
             embeddings.publish(store.conn, 'rec_vectors', [(key, vector[::-1])], replace=True, model_version='second')
         assert embeddings.rows(snapshot.conn, 'rec_vectors') == [(key, vector)]
-        assert preparation.maintain(store, 10**10) == 0
-    preparation.maintain(store, 10**10)
+        assert store.retention.collect_embeddings(10**10) == 0
+    store.retention.collect_embeddings(10**10)
     manifest = owner.export(store.conn, tmp_path / 'saved')
     restored = Store(tmp_path / 'restored.db')
     try:

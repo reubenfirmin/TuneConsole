@@ -8,7 +8,8 @@ import time
 
 import pytest
 
-from yt_playlist.core import group_documents, policy_recovery
+from tests import file_custody_support as custody
+from yt_playlist.core import group_documents
 from yt_playlist.core.migrations import Migration, migrate, registry
 from yt_playlist.core.migrations import v070_policy_documents as policies
 from yt_playlist.core.migrations import v071_album_descriptions as descriptions
@@ -47,12 +48,12 @@ def populated(request, tmp_path):
             donor.execute('PRAGMA query_only=ON')
             donor.execute('BEGIN')
         donor.backup(target)
-        files = policy_recovery._export_files(donor, tmp_path / 'populated.db')
+        files = custody.export_files(donor, tmp_path / 'populated.db')
     finally:
         if upgraded:
             donor.close()
     with target:
-        policy_recovery._restore_files(target, files)
+        custody.restore_files(target, files)
     evidence = request.config.getoption('--schema-evidence-dir')
     if evidence:
         shutil.copytree(Path(evidence).resolve(strict=True), tmp_path / 'populated.db.evidence')

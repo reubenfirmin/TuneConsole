@@ -9,10 +9,11 @@ import json
 import pytest
 
 from yt_playlist.library import live_plays, player_events, sync
-from yt_playlist.rec import rec_params, graduation
+from yt_playlist.rec import rec_params
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
 from tests.conftest import FakeClient
+from tests.retained_rating_support import apply_model_ratings
 
 
 def _t(status):
@@ -49,7 +50,7 @@ def test_flap_graduates_at_most_once_across_three_runs(store):
         sync.sync_identity(store, iid, _client(order), now=1000.0 + i)
     # the graduation ledger was fed exactly once, at the low sync-like weight; before the fix each
     # run cleared and re-recorded the like, feeding the ledger daily until the axis hit the cap
-    assert store.rec_signals.get_theme("artist:Band") == rec_params.SOURCE_W_LIKE_SYNCED
+    assert store.rec_signals.get_theme("artist:Band") == rec_params.get_param(store, "source_w_like_synced")
     assert store.rec_model.recent_liked_keys() == [KEY]
 
 
@@ -204,7 +205,7 @@ def _play_msg(**over):
 
 def test_pevent_indifferent_never_clears_a_like(store):
     store.accounts.upsert_account("main", "bridge", None, True)
-    store.rec_model.record_like(KEY, 900.0, provenance="action")
+    live_plays.handle_play_event(_ctx(store), _play_msg(likeStatus='LIKE'), 900.0)
     # the player readout shows INDIFFERENT before YTM hydrates the real rating
     live_plays.handle_play_event(_ctx(store), _play_msg(likeStatus="INDIFFERENT"), 1000.0)
     assert KEY in store.rec_model.recent_liked_keys()
@@ -220,7 +221,7 @@ def test_pevent_like_records_action_provenance(store):
 def test_rate_removelike_pevent_does_not_clear_a_like(store):
     store.accounts.upsert_account("main", "bridge", None, True)
     store.tracks.upsert_track("v1", "Song", "Band", "", None)
-    store.rec_model.record_like(KEY, 900.0, provenance="action")
+    live_plays.handle_play_event(_ctx(store), _play_msg(likeStatus='LIKE'), 900.0)
     body = json.dumps({"target": {"videoId": "v1"}})
     msg = {"kind": "rate", "url": ".../youtubei/v1/like/removelike", "body": body, "brandId": "", "brandKnown": True}
     assert player_events.handle_player_event(_ctx(store), msg, 1000.0) is True   # persisted raw
@@ -248,23 +249,23 @@ def _genre_track(store):
 
 def test_like_clear_rerecord_does_not_regraduate(store):
     axis = _genre_track(store)
-    graduation.apply_dislikes(store, {KEY: "LIKE"}, 1000.0, provenance="action")
-    assert store.rec_signals.get_theme(axis) == rec_params.SOURCE_W_LIKE           # graduated once
-    graduation.apply_dislikes(store, {KEY: "INDIFFERENT"}, 2000.0)      # genuine un-like: row gone
+    apply_model_ratings(store, {KEY: "LIKE"}, 1000.0, provenance="action")
+    assert store.rec_signals.get_theme(axis) == rec_params.get_param(store, "source_w_like")  # graduated once
+    apply_model_ratings(store, {KEY: "INDIFFERENT"}, 2000.0)      # genuine un-like: row gone
     assert KEY not in store.rec_model.recent_liked_keys()
-    graduation.apply_dislikes(store, {KEY: "LIKE"}, 3000.0, provenance="action")   # re-liked
+    apply_model_ratings(store, {KEY: "LIKE"}, 3000.0, provenance="action")   # re-liked
     assert KEY in store.rec_model.recent_liked_keys()                            # the like itself is back
-    assert store.rec_signals.get_theme(axis) == rec_params.SOURCE_W_LIKE           # but NO second graduation
+    assert store.rec_signals.get_theme(axis) == rec_params.get_param(store, "source_w_like")  # no second graduation
 
 
 def test_dislike_clear_rerecord_does_not_regraduate(store):
     axis = _genre_track(store)
-    graduation.apply_dislikes(store, {KEY: "DISLIKE"}, 1000.0)
+    apply_model_ratings(store, {KEY: "DISLIKE"}, 1000.0)
     assert store.rec_signals.get_theme(axis) is None
     # a like supersedes (clears the dislike row), then the user dislikes again
-    graduation.apply_dislikes(store, {KEY: "LIKE"}, 2000.0)
+    apply_model_ratings(store, {KEY: "LIKE"}, 2000.0)
     assert KEY not in store.rec_model.disliked_identity_keys()
     theme_after_like = store.rec_signals.get_theme(axis)
-    graduation.apply_dislikes(store, {KEY: "DISLIKE"}, 3000.0)
+    apply_model_ratings(store, {KEY: "DISLIKE"}, 3000.0)
     assert KEY in store.rec_model.disliked_identity_keys()                       # suppression is back
     assert store.rec_signals.get_theme(axis) == theme_after_like                   # no second negative feed

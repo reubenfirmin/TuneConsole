@@ -5,7 +5,9 @@ and a 'Made from' line built from the seeds you used, the genre families you res
 and the genres/eras actually present. The standard generated-playlist feedback panel then applies.
 """
 import json
+from tests.enrichment_support import seed_enrichment
 
+import pytest
 from fastapi.testclient import TestClient
 
 from yt_playlist.rec import recipes
@@ -13,6 +15,33 @@ from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 from tests.playlist_fixture_support import library_catalog
+from tests.repository_mock_support import no_database, repository_store
+
+
+@pytest.fixture
+def recipe_store(no_database):
+    return repository_store(
+        values={'_read_only': True},
+        rec_query={'track_genres': {}, 'track_decades': {}, 'track_last_played': {},
+                   'play_counts': {}, 'tracks_by_keys': {}},
+        genres={'feature_axes': {'goa trance': ('trance', 'goa-trance'),
+                                 'psytrance': ('trance', 'psytrance'),
+                                 'acid techno': ('techno', 'acid-techno'),
+                                 'techno': ('techno', None)}},
+        musical_profiles={'by_keys': {}},
+    )
+
+
+def _recipe_tracks(store, rows):
+    keys = [identity_key(title, artist) for title, artist, _, _ in rows]
+    store.rec_query.track_genres.return_value = {
+        key: genre for key, (_, _, genre, _) in zip(keys, rows) if genre}
+    store.rec_query.track_decades.return_value = {
+        key: str(int(year) // 10 * 10)
+        for key, (_, _, _, year) in zip(keys, rows) if year}
+    store.rec_query.tracks_by_keys.return_value = {
+        key: {'artist': artist} for key, (_, artist, _, _) in zip(keys, rows)}
+    return keys
 
 
 def _client(store):
@@ -25,16 +54,16 @@ def _track(store, vid, title, artist, *, genre="", year=""):
     entry = store.tracks.upsert_track(vid, title, artist, "Alb", 200, thumbnail="t.jpg")
     k = identity_key(title, artist)
     if genre or year:
-        store.tracks.set_track_enrichment(entry,genre,year)
+        seed_enrichment(store, entry, genre, year)
     return k
 
 
 # --- recipes.cluster_recipe ------------------------------------------------------------------
 
-def test_cluster_recipe_shape_and_seeds(store):
-    store.accounts.upsert_account("m", "c", None, True)
-    a = _track(store, "v1", "Goa One", "A", genre="goa trance", year="2003")
-    b = _track(store, "v2", "Goa Two", "B", genre="psytrance", year="2008")
+def test_cluster_recipe_shape_and_seeds(recipe_store):
+    store = recipe_store
+    a, b = _recipe_tracks(store, [('Goa One', 'A', 'goa trance', '2003'),
+                                  ('Goa Two', 'B', 'psytrance', '2008')])
     recipe, order = recipes.cluster_recipe(store, [a, b], seed_labels=["Ritmo"],
                                              allow_families=["trance"])
     assert recipe["model"] == "cluster"
@@ -45,24 +74,24 @@ def test_cluster_recipe_shape_and_seeds(store):
     assert sorted(order) == sorted([a, b])                 # a permutation of the kept keys
 
 
-def test_cluster_recipe_derives_genres_without_whitelist(store):
-    store.accounts.upsert_account("m", "c", None, True)
-    a = _track(store, "v1", "Goa One", "A", genre="goa trance")
-    b = _track(store, "v2", "Goa Two", "B", genre="psytrance")
+def test_cluster_recipe_derives_genres_without_whitelist(recipe_store):
+    store = recipe_store
+    a, b = _recipe_tracks(store, [('Goa One', 'A', 'goa trance', ''),
+                                  ('Goa Two', 'B', 'psytrance', '')])
     recipe, _ = recipes.cluster_recipe(store, [a, b], seed_labels=[], allow_families=[])
     assert recipe["facets"]["genres"] == ["trance"]        # derived from the tracks present
 
 
-def test_cluster_recipe_uses_chosen_journey(store):
-    store.accounts.upsert_account("m", "c", None, True)
-    a = _track(store, "v1", "X", "A", genre="acid techno", year="1995")
+def test_cluster_recipe_uses_chosen_journey(recipe_store):
+    store = recipe_store
+    a, = _recipe_tracks(store, [('X', 'A', 'acid techno', '1995')])
     recipe, _ = recipes.cluster_recipe(store, [a], journey="time_machine")
     assert recipe["journey"] == "time_machine"
 
 
-def test_cluster_recipe_auto_journey_defaults_to_energy_arc(store):
-    store.accounts.upsert_account("m", "c", None, True)
-    a = _track(store, "v1", "X", "A", genre="acid techno")
+def test_cluster_recipe_auto_journey_defaults_to_energy_arc(recipe_store):
+    store = recipe_store
+    a, = _recipe_tracks(store, [('X', 'A', 'acid techno', '')])
     for j in ("auto", "bogus", ""):
         recipe, _ = recipes.cluster_recipe(store, [a], journey=j)
         assert recipe["journey"] == "energy_arc"
@@ -81,17 +110,19 @@ def test_save_passes_journey_through(store):
     assert store.playlist_recipes.get_recipe(ytm)["journey"] == "deep_dive"
 
 
-def test_cluster_recipe_remembers_inputs_in_params(store):
-    store.accounts.upsert_account("m", "c", None, True)
-    a = _track(store, "v1", "X", "A", genre="acid techno")
+def test_cluster_recipe_remembers_inputs_in_params(recipe_store):
+    store = recipe_store
+    a, = _recipe_tracks(store, [('X', 'A', 'acid techno', '')])
     recipe, _ = recipes.cluster_recipe(store, [a], seed_labels=["A"], allow_families=["techno"])
     assert recipe["params"]["seeds"] == ["A"]
     assert recipe["params"]["genre_whitelist"] == ["techno"]
 
 
-def test_cluster_recipe_shuffle_spaces_artists_for_track_keys(store):
-    keys = [_track(store, f"v{artist}{i}", f"Song {i}", artist, genre="techno")
-            for artist, count in [("A", 3), ("B", 2), ("C", 2)] for i in range(count)]
+def test_cluster_recipe_shuffle_spaces_artists_for_track_keys(recipe_store):
+    store = recipe_store
+    keys = _recipe_tracks(store, [(f'Song {i}', artist, 'techno', '')
+                                 for artist, count in [('A', 3), ('B', 2), ('C', 2)]
+                                 for i in range(count)])
     _, order = recipes.cluster_recipe(store, keys, journey="shuffle")
     meta = store.rec_query.tracks_by_keys(keys)
     assert sorted(order) == sorted(keys)

@@ -78,8 +78,9 @@ def test_waterfall_resolves_mbid_then_fills_and_records_evidence(store, monkeypa
     run_waterfall(store, store.tracks.tracks_for_waterfall(pid),
                   [{"name": "acousticbrainz", "enabled": True}], events.append)
     assert store.tracks.get_track_audio(t1) == (130.0, 0.6, 0.8)
-    rows = store.tracks.tracks_missing_audio(pid)
-    assert rows == []  # fully populated now
+    assert store.tracks.track_for_waterfall(t1)['mb_recording_id'] == 'mbid-live'
+    # Audio is complete; missing genre/year/artwork still warrants another provider pass.
+    assert [row['id'] for row in store.tracks.tracks_for_waterfall(pid)] == [t1]
     assert any(e.get("type") == "done" for e in events)
     attempt = store.enrichment_state.enrichment_attempts("song|artist")["acousticbrainz"]
     assert attempt["status"] == "found" and attempt["fields"]["mb_recording_id"] == "mbid-live"

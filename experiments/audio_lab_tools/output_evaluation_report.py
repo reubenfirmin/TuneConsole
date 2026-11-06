@@ -40,7 +40,7 @@ def inference_audit(directory, run, profiles):
     """Verify specialist routing and legacy audio fallback without a database reader."""
     from pytest import MonkeyPatch
     from yt_playlist.core import audio_embedding, sample_files
-    from yt_playlist.rec import audio_vibe_preview
+    from yt_playlist.rec import audio_vibe_prediction
     plan = json.loads((directory / 'plan.json').read_text())
     samples = {r['id']: r for r in json.loads((directory / 'samples.json').read_text())['rows']}
     joins = json.loads((run / 'capture-joins.json').read_text())
@@ -61,9 +61,9 @@ def inference_audit(directory, run, profiles):
                     reason = 'Embedding provenance differs from the pinned shared model'
             except ValueError as error:
                 compatible, reason = False, str(error)
-            prediction = audio_vibe_preview.predict(captured, metadata={})
+            prediction = audio_vibe_prediction.predict(captured, metadata={})
             routed = verify_route(prediction, shared, expected, compatible=compatible)
-            if not compatible and prediction != audio_vibe_preview.predict(captured, use_model=False):
+            if not compatible and prediction != audio_vibe_prediction.predict(captured, use_model=False):
                 raise ValueError('Legacy capture did not retain the exact audio heuristic: ' + key)
             shared_scores = {row['vibe']: row['score'] for row in prediction['ranking']}
             for vibe, score in (prediction.get('suitability') or shared_scores).items():

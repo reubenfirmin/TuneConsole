@@ -2,12 +2,14 @@
 import json
 import math
 import re
+import time
 
 from playwright.sync_api import expect
 import pytest
 
 from tests.conftest import seed_catalog_track
 from tests.home_fixture_support import publish_menu
+from tests.prepared_fixture_support import prepared_template
 from tests.visual_support import capture
 from yt_playlist.core import radio_provenance
 from yt_playlist.rec import listening_analytics
@@ -53,9 +55,48 @@ def prepare(store):
     store.settings.set_setting('onboard_dismissed','1')
 
 
+@pytest.fixture(scope='module')
+def charts_history_template(_pristine_current_schema):
+    def build(source):
+        started = time.perf_counter()
+        identity = source.accounts.upsert_account('main', 'cred', None, True)
+        assert identity == 1
+        source.playlists.upsert_playlist(identity, 'PLZ', 'Old Mix', 3, 'h', 0.0)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv('YT_PLAYLIST_LISTENING_CHARTS', '1')
+            prepare(source)
+        assert source.conn.execute('SELECT COUNT(*) FROM catalog_entries').fetchone()[0] == 144
+        assert not source.conn.execute(
+            "SELECT 1 FROM rec_impressions WHERE surface='listening_editorial'").fetchone()
+        return {'build_seconds': time.perf_counter() - started,
+                'plays': source.conn.execute('SELECT COUNT(*) FROM play_events').fetchone()[0]}
+
+    with prepared_template(_pristine_current_schema, build) as template:
+        yield template
+
+
+@pytest.fixture
+def prepared_charts_app(request, store, charts_history_template, listening_enabled, record_property):
+    started = time.perf_counter()
+    receipt = charts_history_template.restore(store)
+    record_property('charts_clone_seconds', time.perf_counter() - started)
+    record_property('charts_source_build_seconds', receipt['build_seconds'])
+    record_property('charts_source_identity', str(charts_history_template.source.conn._policy_memory_key))
+    assert store.conn.execute('SELECT COUNT(*) FROM play_events').fetchone()[0] == receipt['plays']
+    assert not store.conn.execute(
+        "SELECT 1 FROM rec_impressions WHERE surface='listening_editorial'").fetchone()
+    # Account, confirmed playlist and retained files are restored before startup.
+    live_app = request.getfixturevalue('live_app')
+    started = time.perf_counter()
+    yield live_app
+    record_property('charts_live_consumer_seconds', time.perf_counter() - started)
+    assert not charts_history_template.source.conn.execute(
+        "SELECT 1 FROM rec_impressions WHERE surface='listening_editorial'").fetchone()
+
+
 @pytest.mark.parametrize('width', [1440])
-def test_charts_home_and_analytics_filtering_and_shared_styles(live_app,store,page,width):
-    prepare(store)
+def test_charts_home_and_analytics_filtering_and_shared_styles(prepared_charts_app,store,page,width):
+    live_app = prepared_charts_app
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.route('**/bridge/status',lambda route:route.fulfill(json={'connected':True}))
@@ -310,8 +351,8 @@ def test_preparing_retry_and_empty_state(live_app,page):
     expect(charts.locator('.lp-summary')).to_contain_text('0 recorded plays')
 
 
-def test_home_has_no_journal_and_hidden_charts_stories_do_not_count(live_app,store,page,unlocked_home_controls):
-    prepare(store)
+def test_home_has_no_journal_and_hidden_charts_stories_do_not_count(prepared_charts_app,store,page,unlocked_home_controls):
+    live_app = prepared_charts_app
     publish_menu(store,1)
     requests=[]
     page.on('request',lambda req: requests.append(req.url))

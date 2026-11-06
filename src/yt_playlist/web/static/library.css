@@ -65,6 +65,22 @@ main:not(.page-clusters) .library-page-head p {
   gap: .5rem;
   margin-inline-start: auto;
 }
+.playlist-head-actions .playlist-action-result {
+  flex: 1 0 100%;
+  min-width: 0;
+  color: var(--dim);
+  font-size: var(--type-sm);
+  overflow-wrap: anywhere;
+}
+.playlist-action-result summary {
+  width: fit-content;
+  color: var(--text);
+  cursor: pointer;
+}
+.playlist-action-result ul {
+  max-height: 12rem;
+  overflow-y: auto;
+}
 .page-albums .albums-head-actions {
   justify-content: flex-end;
 }
@@ -115,15 +131,14 @@ main:not(.page-clusters) h2.section::after {
 }
 .page-playlists .playlist-index :is(th, td):nth-child(1) { width: 2.5rem; }
 .page-playlists .playlist-index :is(th, td):nth-child(2) { width: 4.4rem; }
-.page-playlists .playlist-index :is(th, td):nth-child(3) { width: 39%; }
-.page-playlists .playlist-index :is(th, td):nth-child(4) { width: 17%; }
-.page-playlists .playlist-index :is(th, td):nth-child(5) { width: 10%; }
-.page-playlists .playlist-index :is(th, td):nth-child(6) { width: 15%; }
-.page-playlists .playlist-index :is(th, td):nth-child(7) { width: 12%; }
-.page-playlists .playlists-no-groups .playlist-index :is(th, td):nth-child(3) { width: 51%; }
-.page-playlists .playlists-no-groups .playlist-index :is(th, td):nth-child(4) { width: 12%; }
-.page-playlists .playlists-no-groups .playlist-index :is(th, td):nth-child(5) { width: 17%; }
-.page-playlists .playlists-no-groups .playlist-index :is(th, td):nth-child(6) { width: 12%; }
+.page-playlists .playlist-index :is(th, td):nth-child(3) { width: auto; }
+.page-playlists .playlist-index :is(th, td):nth-child(4) { width: 6rem; }
+.page-playlists .playlist-index :is(th, td):nth-child(5) { width: 4.5rem; }
+.page-playlists .playlist-index :is(th, td):nth-child(6) { width: 8.5rem; }
+.page-playlists .playlist-index :is(th, td):nth-child(7) { width: 6rem; }
+.page-playlists .playlists-no-groups .playlist-index :is(th, td):nth-child(4) { width: 4.5rem; }
+.page-playlists .playlists-no-groups .playlist-index :is(th, td):nth-child(5) { width: 8.5rem; }
+.page-playlists .playlists-no-groups .playlist-index :is(th, td):nth-child(6) { width: 6rem; }
 .page-playlists .playlist-index td:nth-child(3) {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -145,7 +160,14 @@ main:not(.page-clusters) h2.section::after {
 .playlist-created { display:block; margin-top:.25rem; color:var(--text); font-size:var(--type-sm); }
 .playlist-playback { display:none; margin-top:.25rem; color:var(--dim); font-size:var(--type-sm); }
 .playlist-created, .playlist-playback { white-space:normal; overflow-wrap:anywhere; }
-.page-playlists .lastcol { white-space:normal; overflow-wrap:anywhere; }
+.page-playlists .lastcol { white-space:normal; overflow-wrap:normal; }
+@media (min-width: 65rem) and (max-width: 78rem) {
+  /* Use the space beside the rail for readable titles and listening columns. */
+  body:not(:has(.page-clusters)) main.page-playlists {
+    width: calc(100% - 13.5rem);
+    margin-inline: 13.5rem 0;
+  }
+}
 @media (max-width: 720px) { .playlist-playback { display:block; } }
 .page-playlists .playlist-table-card tbody td {
   padding-block: .52rem;

@@ -9,7 +9,7 @@ from tests.test_audio_vibe_cruise import samples
 from yt_playlist.core import features
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release, audio_vibe_relax as relax
 from yt_playlist.rec import audio_vibe_uplift as uplift, audio_vibe_energize as energize, audio_vibe_focus as focus
-from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_preview as preview
+from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_prediction as predictor
 from yt_playlist.rec import home_vibe, musical_character, vibe_preparation
 
 SPECIALISTS = (cruise, release, relax, uplift, energize, focus)
@@ -27,7 +27,7 @@ def production_models(isolated_app_home, monkeypatch, tmp_path):
 def baseline(rows, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setenv(focus.MODE_KEY, 'off')
-        return preview.predict(rows, require_complete=False)
+        return predictor.predict(rows, require_complete=False)
 
 
 def controlled(tmp_path, values=(.8, 1.)):
@@ -44,7 +44,7 @@ def controlled(tmp_path, values=(.8, 1.)):
 def test_focus_preserves_five_specialists_and_shared_classification(count, monkeypatch):
     rows = samples()[:count]
     original = deepcopy(rows)
-    before, after = baseline(rows, monkeypatch), preview.predict(rows, require_complete=False)
+    before, after = baseline(rows, monkeypatch), predictor.predict(rows, require_complete=False)
     assert {k: v for k, v in before.items() if k not in ('suitability', 'individual_models')} == {
         k: v for k, v in after.items() if k not in ('suitability', 'individual_models')}
     assert set(after['individual_models']) == set(shared.LABELS)
@@ -122,20 +122,20 @@ def test_invalid_optional_artifact_retains_five_specialists(failure, tmp_path, m
         path.write_text(json.dumps(artifact))
     if failure != 'disabled':
         monkeypatch.setenv(focus.ENVIRONMENT_KEY, str(path))
-    assert preview.predict(rows) == before
+    assert predictor.predict(rows) == before
 
 
 def test_provenance_input_bounds_and_disabled_shared(monkeypatch):
     rows = samples()
     rows[-1]['artifact_hashes']['musicnn/model.json'] = 'f' * 64
-    assert preview.predict(rows) == preview.predict(rows, use_model=False)
+    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
     model = focus.load(focus.DEFAULT_PATH)
     for values in ([], [[.2] * 200] * 129, [[float('nan')] * 200], [[1e7] * 200], [[.2] * 199]):
         with pytest.raises(ValueError):
             focus.score(model, values)
     monkeypatch.setenv(shared.ENVIRONMENT_KEY, '')
     rows = samples()
-    assert preview.predict(rows) == preview.predict(rows, use_model=False)
+    assert predictor.predict(rows) == predictor.predict(rows, use_model=False)
 
 
 def test_default_active_local_override_and_identity(monkeypatch):
@@ -163,7 +163,7 @@ def test_refresh_partial_captures_propagation_continuing_updates_and_rollback(st
     drain(store, batch=1)
     assert fits(store, own)[focus.VIBE]['source'] == 'heuristic'
     store.audio_vibes.save_sample(rows[2], 3)
-    store.audio_vibes.save_feedback(rows[0]['run_id'], [], [focus.VIBE], preview.TAXONOMY_VERSION, None, 4)
+    store.audio_vibes.save_feedback(rows[0]['run_id'], [], [focus.VIBE], predictor.TAXONOMY_VERSION, None, 4)
     feedback = store.audio_vibes.feedback(rows[0]['run_id'])
     drain(store, batch=1)
     keys = [own, neighbour]
@@ -213,5 +213,5 @@ def test_missing_metadata_uses_direct_measured_focus(store):
     for now, row in enumerate(samples('bare'), 1):
         store.audio_vibes.save_sample(row, now)
     drain(store, batch=1)
-    assert fits(store, key)[focus.VIBE]['score'] == preview.predict(samples('bare'))['suitability'][focus.VIBE]
+    assert fits(store, key)[focus.VIBE]['score'] == predictor.predict(samples('bare'))['suitability'][focus.VIBE]
     assert fits(store, key)[focus.VIBE]['source'] == 'audio_measurement'

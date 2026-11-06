@@ -287,7 +287,6 @@ def run(directory, arm, *, resume=None):
     from yt_playlist.rec.radio_candidates import RadioCandidates
     from yt_playlist.rec.radio_directions import RadioDirections
     from yt_playlist.rec.radio_genres import GenrePolicy, genre
-    from yt_playlist.util import genre_map
     from experiments.investigations.bench_musical_character import _vector_digest
     if arm not in ARMS:
         raise ValueError('Choose one declared arm')
@@ -396,7 +395,8 @@ def run(directory, arm, *, resume=None):
                 seed.pop('musical', None)
                 save(seed_path, seed)
             report['seed_sha256'] = digest(seed_path)
-            genres = [family for family, _count in Counter(genre_map.family(m['genre'], conn=store.conn)
+            genre_axes = store.genres.feature_axes({m['genre'] for m in data['metadata'].values() if m['genre']})
+            genres = [family for family, _count in Counter(genre_axes[m['genre']][0]
                 for m in data['metadata'].values() if m['genre']).most_common(2)]
             report['explicit_genres'] = genres
 
@@ -440,8 +440,9 @@ def run(directory, arm, *, resume=None):
                         cards = measure('restriction:' + name, lambda vibe=vibe, family=family, kind=kind:
                             vibe_pools.assemble(store, NOW, vibe, **{kind + '_genres': [family]}))
                         tracks = [t for c in cards for t in c['tracks']]
+                        axes = store.genres.feature_axes({t.get('genre') for t in tracks})
                         invalid = [t['key'] for t in tracks if
-                            (genre_map.family(t.get('genre'), conn=store.conn) == family) != (kind == 'include')]
+                            (axes[t.get('genre')][0] == family) != (kind == 'include')]
                         restrictions[name] = {'tracks': tracks, 'violations': invalid}
                         if invalid:
                             report['violations'].append(name)

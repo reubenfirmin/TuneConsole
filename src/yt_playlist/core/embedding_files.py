@@ -57,11 +57,53 @@ def install(conn, context=None):
 def validate(conn):
     from .schema_contract import tokens as _tokens
     replacements = dict(legacy_order_guards()) if ordered_legacy(conn) else {}
+    if bounded_basis(conn):
+        replacements.update(bounded_basis_guards())
     for name, sql in definitions():
         sql = replacements.get(name,sql)
         row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
         if row is None or _tokens(row[0]) != _tokens(sql):
             raise ValueError('Incompatible embedding file owner: ' + name)
+
+
+def bounded_basis(conn):
+    return (conn.execute("SELECT 1 FROM sqlite_schema WHERE name='schema_changes'").fetchone() is not None
+            and conn.execute("SELECT 1 FROM schema_changes WHERE version=32 "
+                             "AND name='bounded_embedding_basis_guards'").fetchone() is not None)
+
+
+def bounded_basis_guards():
+    """A space already has one basis; compare its head instead of scanning it.
+
+    Each inserted or updated row must match that head in both installed and
+    file-backed storage. The invariant remains true after deletions too.
+    """
+    for kind in ('recording', 'artist'):
+        files, plain = kind + '_embedding_files', kind + '_embeddings'
+        for operation in ('insert', 'update'):
+            for owner, other, name in (
+                    (files, plain, files + '_file_basis_' + operation),
+                    (plain, files, plain + '_file_basis_' + operation),
+                    (files, files, files + '_basis_' + operation)):
+                yield name, (f'CREATE TRIGGER {name} BEFORE {operation.upper()} ON {owner} '
+                    f'WHEN EXISTS(SELECT 1 FROM (SELECT model_version,dimensions FROM {other} '
+                    'WHERE space=NEW.space LIMIT 1) e '
+                    'WHERE e.model_version<>NEW.model_version OR e.dimensions<>NEW.dimensions) '
+                    "BEGIN SELECT RAISE(ABORT,'Mixed bases in an embedding space'); END")
+
+
+def install_basis_guards(conn, context=None):
+    for name, sql in bounded_basis_guards():
+        conn.execute('DROP TRIGGER IF EXISTS ' + name)
+        conn.execute(sql)
+
+
+def validate_basis_guards(conn):
+    from .schema_contract import tokens
+    for name, sql in bounded_basis_guards():
+        row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
+        if row is None or tokens(row[0]) != tokens(sql):
+            raise ValueError('Incompatible bounded embedding basis guard: ' + name)
 
 
 def ordered_legacy(conn):
@@ -171,14 +213,17 @@ def load_many(conn, kind, rows):
     return [tuple(row) for row in result]
 
 
-def publish(conn, kind, space, version, dimensions, rows):
-    """Rows are canonical (subject, exact bytes, built time, insertion order)."""
-    if not conn.in_transaction:
-        raise RuntimeError('Embedding file publication requires a writer reservation')
+def prepare(conn, kind, dimensions, rows):
+    """Write immutable chunks while the caller holds its retained-reader fence.
+
+    Return SQL metadata only. A rejected snapshot leaves collectible orphan
+    chunks and never changes the previous serving references.
+    """
     rows = list(rows)
     if type(dimensions) is not int or not 0 < dimensions <= (MAX_BYTES-HEADER.size)//4:
         raise ValueError('Embedding dimensions exceed the chunk byte budget')
     batch_rows = min(MAX_ROWS,(MAX_BYTES-HEADER.size)//(dimensions*4))
+    result = []
     for offset in range(0, len(rows), batch_rows):
         batch = rows[offset:offset + batch_rows]
         if any(not isinstance(vector, bytes) or len(vector) != dimensions * 4 for _, vector, _, _ in batch):
@@ -187,11 +232,27 @@ def publish(conn, kind, space, version, dimensions, rows):
         publication = hashlib.sha256(raw).digest()
         fao.write_bytes(directory(conn) / relative(kind, publication), raw, immutable=True, max_bytes=MAX_BYTES)
         for position, (subject, vector, built, order) in enumerate(batch):
-            conn.execute(f'DELETE FROM {kind}_embeddings WHERE {kind}_id=? AND space=?', (subject, space))
-            conn.execute(f'INSERT INTO {kind}_embedding_files VALUES (?,?,?,?,?,?,?,?) '
-                f'ON CONFLICT({kind}_id,space,model_version) DO UPDATE SET publication=excluded.publication,'
-                'position=excluded.position,built_at=excluded.built_at',
-                (subject, space, version, dimensions, publication, position, order, built))
+            result.append((subject, dimensions, publication, position, order, built))
+    return tuple(result)
+
+
+def publish_prepared(conn, kind, space, version, rows):
+    if not conn.in_transaction:
+        raise RuntimeError('Embedding file publication requires a writer reservation')
+    conn.executemany(f'DELETE FROM {kind}_embeddings WHERE {kind}_id=? AND space=?',
+                     [(row[0], space) for row in rows])
+    conn.executemany(f'INSERT INTO {kind}_embedding_files VALUES (?,?,?,?,?,?,?,?) '
+        f'ON CONFLICT({kind}_id,space,model_version) DO UPDATE SET publication=excluded.publication,'
+        'position=excluded.position,built_at=excluded.built_at',
+        [(subject, space, version, dimensions, publication, position, order, built)
+         for subject, dimensions, publication, position, order, built in rows])
+
+
+def publish(conn, kind, space, version, dimensions, rows):
+    """Rows are canonical (subject, exact bytes, built time, insertion order)."""
+    if not conn.in_transaction:
+        raise RuntimeError('Embedding file publication requires a writer reservation')
+    publish_prepared(conn, kind, space, version, prepare(conn, kind, dimensions, rows))
 
 
 def prepare_batch(conn, kind, limit=MAX_ROWS):

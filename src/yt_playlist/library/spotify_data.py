@@ -149,12 +149,6 @@ def prepare_streaming_history(raw):
     return eligible, report
 
 
-def load_streaming_history(raw) -> tuple[list[dict], int]:
-    """Return eligible, unique music listens and the count of excluded entries."""
-    rows, report = prepare_streaming_history(raw)
-    return rows, report['skipped']
-
-
 def resolve_import_identity(store):
     """A local Spotify export belongs to the configured main identity, not a live YTM session."""
     identities = store.accounts.get_accounts()

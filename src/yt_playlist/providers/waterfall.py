@@ -19,6 +19,7 @@ from yt_playlist.core.metadata_observations import SubjectChanged
 from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded
 from yt_playlist.providers import musicbrainz, lastfm, discogs, deezer, acousticbrainz
 from yt_playlist.providers import base, coverart
+from yt_playlist.core import provider_queries
 from yt_playlist.providers.enrich_queue import PriorityGate
 from yt_playlist.util.thumbnails import is_placeholder_art
 from yt_playlist.util import net
@@ -208,9 +209,6 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
         return []
 
     cooldowns = store.enrichment_state.enrichment_cooldowns()
-    for m in chosen:
-        if cooldowns.get(m.name, {}).get("retry_at", 0) <= now_fn():
-            m.reset()
     names = ", ".join(m.name for m in chosen)
     on_progress({"type": "info", "text": f"Enriching {total} track(s) via {names}…", "total": total})
     seq = _gate.enter()
@@ -285,6 +283,11 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                     continue
                 if m.name in dead:
                     continue
+                reason = provider_queries.deferred_reason(m.name, t)
+                if reason:
+                    on_progress({"type": "info", "provider": m.name, "deferred": "metadata",
+                                 "text": f"{labels[m.name]}: {reason}"})
+                    continue
                 deadline = max(prior.get("retry_at", 0),
                                cooldowns.get(m.name, {}).get("retry_at", 0))
                 if deadline > now_fn():
@@ -299,6 +302,10 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                 with net.probe_errors() as errors:
                     try:
                         res = m.probe(t, store)
+                        if res.deferred_reason:
+                            on_progress({"type": "info", "provider": m.name, "deferred": "metadata",
+                                         "text": f"{labels[m.name]}: {res.deferred_reason}"})
+                            continue
                         with store.enrichment_state.subject_guard(t['id'], t['recording_id']):
                             fields = dict(res.fields)
                             if isinstance(sink, TrackSink):
@@ -326,8 +333,6 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                         if not any(error is exc for error in errors):
                             net.record_probe_failure(exc)
                 retry = bool(errors) or m.tripped()
-                outage = m.tripped() or any(net.provider_outage(e) and
-                    getattr(e, 'provider', m.name) == m.name for e in errors)
                 now = now_fn()
                 error = "; ".join(str(e) or type(e).__name__ for e in errors)
                 if m.tripped() and not error:
@@ -336,10 +341,9 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
                     with store.enrichment_state.subject_guard(t['id'], t['recording_id']):
                         store.enrichment_state.record_enrichment_attempt(
                             key, m.name, fields, retry=retry, video_id=t.get("video_id"), now=now,
-                            error=error, cooldown=outage,
+                            error=error,
                             retry_after=max((net.retry_after(e, now) for e in errors), default=0),
                             providers=[mod.name for mod in chosen],
-                            manage_cooldown=not getattr(m, 'manages_availability', False),
                             **({'run_id': run_id, 'delivery_id': sink.result_delivery(m.name)}
                                if isinstance(sink, TrackSink) else {}))
                 except SubjectChanged:
@@ -396,7 +400,7 @@ def run_waterfall(store, tracks, config, on_progress, should_stop=None, run_id=N
         remaining = total - len(fully_attempted)
         retry_note = f" {remaining} track(s) remain queued for retry." if remaining else ""
         on_progress({"type": "done", "text": f"Checked {len(fully_attempted)} track(s).{note}{retry_note}",
-                     "total": len(fully_attempted), "conflicts": conflicts_found})
+                     "total": len(fully_attempted), "remaining": remaining, "conflicts": conflicts_found})
         return fully_attempted
     finally:
         _gate.leave(seq)

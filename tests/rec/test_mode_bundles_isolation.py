@@ -1,6 +1,8 @@
 """Home preparation must not hold UI locks or publish results from superseded inputs."""
 import asyncio
+from tests.derived_rating_support import seed_dislike
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import logging
 import sqlite3
 import threading
@@ -12,17 +14,51 @@ from yt_playlist.core.activity import Activity
 from yt_playlist.core.store import Store
 from yt_playlist.rec import embedding_vectors as embed, measurement, mode_surfaces, surfaces
 from tests import model_support
+from tests.prepared_fixture_support import prepared_template, roots
 from tests.recommendation_support import publish_bundles
+from tests.store_fixture_support import initialize_consumer
 from yt_playlist.rec.rec_worker import RecWorker
 
 
+@pytest.fixture(scope="module")
+def isolation_template(_pristine_current_schema):
+    with prepared_template(_pristine_current_schema, _seed) as template:
+        yield template
+
+
 @pytest.fixture(params=["memory", "file"])
-def database(request, tmp_path):
+def database(request, tmp_path, _pristine_current_schema, isolation_template):
     store = Store(":memory:" if request.param == "memory" else tmp_path / "state.db")
-    store.init_schema()
-    _seed(store)
-    yield store
-    store.conn.close()
+    with closing(store.conn):
+        initialize_consumer(store, _pristine_current_schema)
+        store._isolation_saved_heads = isolation_template.restore(store)
+        assert store._isolation_saved_heads == isolation_template.result
+        assert all(head is not original for head, original in zip(
+            store._isolation_saved_heads, isolation_template.result, strict=True))
+        _assert_content_inputs(store, isolation_template.source)
+        _saved(store)
+        destinations = roots(store.conn)
+        copied = 0
+        for name, source in isolation_template.files.items():
+            destination = destinations[name]
+            assert destination != source
+            for path in source.rglob("*"):
+                if path.is_file():
+                    private = destination / path.relative_to(source)
+                    assert private.read_bytes() == path.read_bytes()
+                    assert not private.samefile(path)
+                    copied += 1
+        assert copied
+        yield store
+
+
+@pytest.fixture
+def _worker_store(tmp_path):
+    # Keep real fresh startup as well as the real seed in the worker control.
+    store = Store(tmp_path / "state.db")
+    with closing(store.conn):
+        store.init_schema()
+        yield store
 
 
 def _seed(store):
@@ -40,6 +76,14 @@ def _seed(store):
     publish_bundles(store, {'all': {'wheelhouse': [{'key': keys[0], 'video_id': 'video',
         'title': 'Song', 'artist': 'Artist', 'genre': 'House'}]}}, 1, fresh=[fresh])
     store._isolation_saved_heads = store.recommendations.heads()
+    return store._isolation_saved_heads
+
+
+def _assert_content_inputs(store, original):
+    assert embed.content_space_id(store) == embed.content_space_id(original)
+    assert store.rec_model.get_rec_content_vectors() == original.rec_model.get_rec_content_vectors()
+    assert list(map(tuple, store.conn.execute("SELECT * FROM taste_modes ORDER BY mode_id"))) == list(
+        map(tuple, original.conn.execute("SELECT * FROM taste_modes ORDER BY mode_id")))
 
 
 def _saved(store):
@@ -50,10 +94,11 @@ def _saved(store):
         'fresh', 'all', 'fresh', limit=4)['tracks']] == ['fresh']
 
 
-def test_ui_read_and_write_complete_while_bundle_scorer_is_still_running(tmp_path, monkeypatch):
-    store = Store(tmp_path / "state.db")
-    store.init_schema()
+def test_ui_read_and_write_complete_while_bundle_scorer_is_still_running(
+        _worker_store, isolation_template, monkeypatch):
+    store = _worker_store
     _seed(store)
+    _assert_content_inputs(store, isolation_template.source)
     started = threading.Event()
     work = Activity()
     worker = RecWorker(SimpleNamespace(store=store, work=work,
@@ -103,7 +148,7 @@ def test_mutation_during_calculation_preserves_saved_bundles_and_retries(databas
 
     def mutate(reader, now, policies):
         result = calculate(reader, now, policies)
-        store.rec_model.record_dislike("song|artist", until=None, now=now)
+        seed_dislike(store, "song|artist", until=None, now=now)
         return result
 
     monkeypatch.setattr(mode_surfaces, "_calculate_bundles", mutate)

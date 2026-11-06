@@ -1,19 +1,29 @@
 """#85 timestamped transient-event sources: real play_events timestamps with day-model fallback."""
 import datetime
+from contextlib import ExitStack
+
+from tests.derived_rating_support import seed_dislike, seed_like
+from tests.store_fixture_support import initialize_consumer
 
 import pytest
 
 from yt_playlist.core.store import Store
 
 
-def _store():
-    s = Store(":memory:"); s.init_schema()
-    s.accounts.upsert_account("main", "bridge", None, True)
-    return s
+@pytest.fixture
+def make_store(_pristine_current_schema):
+    with ExitStack() as cleanup:
+        def create():
+            s = Store(":memory:")
+            cleanup.callback(s.conn.close)
+            initialize_consumer(s, _pristine_current_schema)
+            assert s.accounts.upsert_account("main", "bridge", None, True) == 1
+            return s
+        yield create
 
 
-def test_plays_with_ts_prefers_real_timestamps():
-    s = _store()
+def test_plays_with_ts_prefers_real_timestamps(make_store):
+    s = make_store()
     # day-model row at noon of day 100; live play_event later the same day with a REAL timestamp
     s.history.record_history_plays(1, 100 * 86400 + 50000, ["song|artist"])
     s.history.record_play_event(1, "song|artist", "v1", 100 * 86400 + 61000)
@@ -21,8 +31,8 @@ def test_plays_with_ts_prefers_real_timestamps():
     assert out == [("song|artist", 100 * 86400 + 61000)]
 
 
-def test_plays_with_ts_day_model_fallback_and_order():
-    s = _store()
+def test_plays_with_ts_day_model_fallback_and_order(make_store):
+    s = make_store()
     s.history.record_history_plays(1, 100 * 86400 + 50000, ["old|a"])      # noon bucket only
     s.history.record_play_event(1, "new|b", "v2", 101 * 86400 + 3600.0)
     out = s.history.recent_plays_with_ts()
@@ -30,8 +40,8 @@ def test_plays_with_ts_day_model_fallback_and_order():
     assert out[1][1] == 100 * 86400 + 43200                        # noon-of-day fallback ts
 
 
-def test_plays_with_ts_limit():
-    s = _store()
+def test_plays_with_ts_limit(make_store):
+    s = make_store()
     for i in range(5):
         s.history.record_play_event(1, f"k{i}|a", None, 1000.0 + i * 4000)
     assert len(s.history.recent_plays_with_ts(limit=2)) == 2
@@ -41,8 +51,8 @@ def test_plays_with_ts_limit():
 # evidence, and their day-granular history_items shadows (recorded provenance-free by the next YTM
 # sync) must not resurrect them through the union's MAX(ts) GROUP BY key dedupe. ---
 
-def test_exclusion_drops_radio_play_and_keeps_null_and_other_provenance():
-    s = _store()
+def test_exclusion_drops_radio_play_and_keeps_null_and_other_provenance(make_store):
+    s = make_store()
     s.history.record_play_event(1, "radio|x", "v1", 100 * 86400 + 1000, playlist_ytm_id="PLRADIO")
     s.history.record_play_event(1, "other|y", "v2", 100 * 86400 + 2000, playlist_ytm_id="PLOTHER")
     s.history.record_play_event(1, "none|z", "v3", 100 * 86400 + 3000, playlist_ytm_id=None)
@@ -50,29 +60,29 @@ def test_exclusion_drops_radio_play_and_keeps_null_and_other_provenance():
     assert [k for k, _ in out] == ["none|z", "other|y"]
 
 
-def test_radio_play_stays_excluded_when_history_shadow_lands_same_day():
+def test_radio_play_stays_excluded_when_history_shadow_lands_same_day(make_store):
     # The re-entry case: radio plays a track (provenance PLRADIO), then the next YTM history sync
     # re-records that same play as a provenance-free history_items noon-bucket row for the same key
     # and day. The union must NOT resurrect the play through that shadow.
-    s = _store()
+    s = make_store()
     day = 100 * 86400
     s.history.record_play_event(1, "radio|x", "v1", day + 61000, playlist_ytm_id="PLRADIO")
     s.history.record_history_plays(1,day+70000,[("radio|x","Today")])
     assert s.history.recent_plays_with_ts(exclude_list_ids={"PLRADIO"}) == []
 
 
-def test_radio_exclusion_uses_account_calendar_on_both_sides_of_utc():
+def test_radio_exclusion_uses_account_calendar_on_both_sides_of_utc(make_store):
     for zone,seconds in [('America/Costa_Rica',3600),('Pacific/Kiritimati',61000)]:
-        s = _store()
+        s = make_store()
         day = 100 * 86400
         s.history.record_play_event(1,'radio|x','v1',day+seconds,playlist_ytm_id='PLRADIO',source_timezone=zone)
         s.history.record_history_plays(1,day+seconds+60,[('radio|x','Today')],source_timezone=zone)
         assert s.history.recent_plays_with_ts(exclude_list_ids={'PLRADIO'})==[]
 
 
-def test_independent_adjacent_day_is_not_guessed_to_be_a_radio_shadow():
+def test_independent_adjacent_day_is_not_guessed_to_be_a_radio_shadow(make_store):
     for offset in (-1,1):
-        s = _store()
+        s = make_store()
         day = 100*86400
         s.history.record_play_event(1,'radio|x','v1',day+61000,playlist_ytm_id='PLRADIO')
         s.history.record_history_plays(1,day+offset*86400+70000,['radio|x'])
@@ -80,10 +90,10 @@ def test_independent_adjacent_day_is_not_guessed_to_be_a_radio_shadow():
             ('radio|x',day+offset*86400+43200)]
 
 
-def test_play_events_subject_time_indexes_exist():
+def test_play_events_subject_time_indexes_exist(make_store):
     # Shadow suppression must probe canonical and unresolved subjects without
     # scanning every event. Current owners store those subjects separately.
-    s = _store()
+    s = make_store()
     indexed_cols = {r["name"]: [c["name"] for c in s.conn.execute(f"PRAGMA index_info({r['name']})")]
                     for r in s.conn.execute("PRAGMA index_list(play_events)")}
     assert indexed_cols.get('ix_play_event_account_subject_time') == ['account_id', 'recording_id', 'played_at']
@@ -96,18 +106,18 @@ def test_play_events_subject_time_indexes_exist():
         assert any('SEARCH' in row['detail'] and index in row['detail'] for row in plan)
 
 
-def test_history_row_without_matching_radio_event_survives_exclusion():
+def test_history_row_without_matching_radio_event_survives_exclusion(make_store):
     # Pre-live/organic history (no radio play_event on that key/day) must pass through untouched.
-    s = _store()
+    s = make_store()
     s.history.record_history_plays(1, 100 * 86400 + 50000, ["organic|a"])
     out = s.history.recent_plays_with_ts(exclude_list_ids={"PLRADIO"})
     assert out == [("organic|a", 100 * 86400 + 43200)]
 
 
-def test_shadow_suppression_is_day_scoped_not_key_global():
+def test_shadow_suppression_is_day_scoped_not_key_global(make_store):
     # Same key: an organic history play on day 100, then a radio-queued play on day 102. Only day
     # 102's rows disappear; the day-100 organic listen still counts (with its own noon timestamp).
-    s = _store()
+    s = make_store()
     s.history.record_history_plays(1, 100 * 86400 + 50000, ["song|a"])   # organic, day 100
     s.history.record_play_event(1, "song|a", "v1", 102 * 86400 + 61000, playlist_ytm_id="PLRADIO")
     s.history.record_history_plays(1,102*86400+70000,[("song|a","Today")])
@@ -115,8 +125,8 @@ def test_shadow_suppression_is_day_scoped_not_key_global():
     assert out == [("song|a", 100 * 86400 + 43200)]              # day-100 noon ts, not day 102's
 
 
-def test_empty_exclusion_is_identical_to_no_exclusion_arg():
-    s = _store()
+def test_empty_exclusion_is_identical_to_no_exclusion_arg(make_store):
+    s = make_store()
     s.history.record_history_plays(1, 100 * 86400 + 50000, ["song|a"])
     s.history.record_play_event(1, "radio|x", "v1", 100 * 86400 + 61000, playlist_ytm_id="PLRADIO")
     baseline = s.history.recent_plays_with_ts()
@@ -126,8 +136,8 @@ def test_empty_exclusion_is_identical_to_no_exclusion_arg():
     assert s.history.recent_plays_with_ts(limit=1, exclude_list_ids=None) == baseline[:1]   # limit still binds
 
 
-def test_exclusion_respects_limit_param():
-    s = _store()
+def test_exclusion_respects_limit_param(make_store):
+    s = make_store()
     for i in range(5):
         s.history.record_play_event(1, f"k{i}|a", None, 1000.0 + i * 4000)
     s.history.record_play_event(1, "radio|x", "v1", 999999.0, playlist_ytm_id="PLRADIO")
@@ -189,11 +199,11 @@ def test_native_recent_history_keeps_subject_probes_within_serving_work(store, e
     assert [timestamp for _, timestamp in actual] == sorted(expected.values(), reverse=True)
 
 
-def test_liked_and_disliked_with_ts():
-    s = _store()
-    s.rec_model.record_like("liked|a", 5000.0, provenance="action")   # live-observed: has a real event time
-    s.rec_model.record_like("bulk|c", 5500.0)                         # sync-discovered: no real event time
-    s.rec_model.record_dislike("bad|b", 99999.0, 6000.0)
+def test_liked_and_disliked_with_ts(make_store):
+    s = make_store()
+    seed_like(s, "liked|a", 5000.0, provenance="action")   # live-observed: has a real event time
+    seed_like(s, "bulk|c", 5500.0)                         # sync-discovered: no real event time
+    seed_dislike(s, "bad|b", 99999.0, 6000.0)
     # only the action-provenance like reaches the transient reader (sync likes have no true
     # timestamp, so they must not masquerade as fresh user actions)
     assert s.rec_model.recent_liked_with_ts() == [("liked|a", 5000.0)]

@@ -12,8 +12,9 @@ def prepare(store, *, limit=128):
 
 
 def maintain(store, now):
-    if not owner.available(store.conn):
-        return 0
+    with store._lock:
+        if not owner.available(store.conn):
+            return 0
     with atomic_write(store):
         count = owner.maintain(store.conn,now)
     with store._lock:

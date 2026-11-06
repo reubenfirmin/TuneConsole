@@ -5,7 +5,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from yt_playlist.rec import embed, graduation, rec_params, scoring, surfaces
-from yt_playlist.util import genre_map
 from yt_playlist.web.context import request_form
 
 # feedback kinds that suppress an item (vs 'more'/'less' which only nudge future weights)
@@ -32,7 +31,7 @@ def _feedback_axis(store, form, reason, item):
     dao = store.rec_query
     if reason == "vibe":
         g = dao.track_genres([item]).get(item)
-        return f"genre:{genre_map.family(g,conn=store.conn)}" if g else None
+        return f"genre:{store.genres.feature_axes([g])[g][0]}" if g else None
     if reason == "era":
         d = dao.track_decades([item]).get(item)
         return f"era:{d}" if d else None

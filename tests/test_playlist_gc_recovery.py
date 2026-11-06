@@ -42,11 +42,10 @@ class Client(RecoveryClient):
 
 
 @pytest.fixture
-def case(tmp_path, monkeypatch):
+def case(tmp_path, monkeypatch, file_backed_store):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     monkeypatch.setattr(playlist_backups, "with_retry", lambda fn, **kwargs: fn())
-    store = Store(tmp_path / "gc.db")
-    store.init_schema()
+    store = file_backed_store
     iid = store.accounts.upsert_account("Main", "bridge", None, True)
     pid = store.playlists.upsert_playlist(iid, "SOURCE", "Generated", 2, "", 1)
     tids = [store.tracks.upsert_track(v, v, "Artist", None, None, 1) for v in ("a", "b")]
@@ -54,9 +53,12 @@ def case(tmp_path, monkeypatch):
     store.playlists.mark_generated_playlist("SOURCE")
     client = Client()
     result = SimpleNamespace(store=store, iid=iid, pid=pid, client=client,
-                             path=tmp_path / "gc.db", tmp=tmp_path)
-    yield result
-    result.store.conn.close()
+                             path=Path(store._db_path), tmp=tmp_path)
+    try:
+        yield result
+    finally:
+        # Restart cases replace the original fixture's Store.
+        result.store.conn.close()
 
 
 def collect(case, now=NOW, **kwargs):
@@ -426,16 +428,17 @@ def test_failed_target_does_not_block_healthy_playlist_and_retry_only_leaves_new
     case.client.read_failure = TimeoutError("Unavailable")
     collect(case)
     healthy = Client()
+    healthy._tracks['HEALTHY'] = healthy._tracks.pop('SOURCE')
     other = case.store.accounts.upsert_account("Other", "bridge", "brand", False)
-    pid = case.store.playlists.upsert_playlist(other, "SOURCE", "Other generated", 2, "", 1)
-    case.store.playlists.set_playlist_provenance("SOURCE", account_id=other,
+    pid = case.store.playlists.upsert_playlist(other, "HEALTHY", "Other generated", 2, "", 1)
+    case.store.playlists.set_playlist_provenance("HEALTHY", account_id=other,
                                                 origin="tuneconsole", adopted=False)
     clients = {case.iid: case.client, other: healthy}
 
     assert gc_generated_playlists(case.store, clients, NOW + 1, grace_days=1, retry_only=True) == []
     assert healthy.reads == [] and healthy.writes == []
     result = gc_generated_playlists(case.store, clients, NOW + 2, grace_days=1)
-    assert len(result) == 1 and healthy.writes == ["SOURCE"]
+    assert len(result) == 1 and healthy.writes == ["HEALTHY"]
     assert case.store.playlists.get_playlist(pid) is None
     assert case.store.playlists.get_playlist(case.pid) is not None
     assert case.client.writes == []

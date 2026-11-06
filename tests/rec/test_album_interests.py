@@ -1,4 +1,5 @@
 import numpy as np
+from tests.enrichment_support import seed_enrichment
 import pytest
 
 from tests import model_support
@@ -12,7 +13,7 @@ def album(store, browse, title, genre, size, year='2020'):
     for index in range(size):
         track = store.tracks.upsert_track(f"{browse}-{index}", f"Track {index}", title, title, 100,
                                          album_browse_id=browse)
-        store.tracks.set_track_enrichment(track, genre, year)
+        seed_enrichment(store, track, genre, year)
         keys.append(f"track {index}|{title.lower()}")
     return keys
 
@@ -68,8 +69,15 @@ def test_album_preparation_reuses_one_day_aggregate_across_both_spaces(store):
 def test_context_allocation_does_not_prefer_the_average_of_separated_interests():
     taste = PlaylistTaste(["Dance", "Acoustic"], np.eye(2), np.array([.5, .5]))
     candidates = np.array([[1., 0.], [0., 1.], [1., 1.]])
-    assert taste.score_all(candidates).argmax() == 2  # The former blend's failure mode.
-    assert list(np.argsort(-taste.allocated_scores(candidates)))[:2] == [0, 1]
+    # Serve one exact fit from each interest before their shared midpoint.
+    assert taste.allocated_scores(candidates) == pytest.approx([1., 2 / 3, 1 / 3])
+    # Equal fits preserve candidate order; a three-to-one weight gets three of the first four slots.
+    # When context priorities and their next fits tie, the earlier context gets the turn.
+    tied_candidates = np.array([[1., 0.]] * 3 + [[0., 1.]] * 3)
+    taste.weights = np.array([.75, .25])
+    assert list(np.argsort(-taste.allocated_scores(tied_candidates))) == [0, 1, 2, 3, 4, 5]
+    taste.weights = np.array([.25, .75])
+    assert list(np.argsort(-taste.allocated_scores(tied_candidates))) == [3, 4, 0, 5, 1, 2]
 
 
 def test_album_recommendations_use_interest_ranking_for_new_releases(store):
@@ -212,7 +220,7 @@ def test_partial_album_returns_focus_on_heard_tracks_without_shrinking_the_denom
     assert source['return_weight'] == pytest.approx(np.log(3) / 12)
     assert (source['modeled_tracks'], source['known_tracks']) == (2, 12)
     assert taste.centroids[0] == pytest.approx([1., 0.])
-    assert taste.score_all(np.eye(2))[0] > taste.score_all(np.eye(2))[1]
+    assert taste.allocated_scores(np.eye(2)) == pytest.approx([1., 0.])
     reason = album_choices._rationale({'browse_id': 'different'}, taste, np.array([1.]), 'collaborative')
     assert reason['text'] == 'A possible fit with tracks you keep returning to on “Record · Record”.'
     # Explicit release feedback can deliberately support the full record.

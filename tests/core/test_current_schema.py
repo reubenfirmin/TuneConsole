@@ -1,20 +1,31 @@
 """The current schema is complete without replaying the historical baseline."""
 import hashlib
+import json
+from collections import Counter
 from contextlib import closing
 from pathlib import Path
 import sqlite3
+import runpy
+import subprocess
+import sys
 import threading
+import time
 
 import pytest
 
 from yt_playlist.core.migrations import Migration, MigrationError, migrate
-from yt_playlist.core.migrations import current, registry, v001_baseline
+from yt_playlist.core.migrations import current, registry, regular, v001_baseline
 
 # The checked-in bootstrap includes the entire production registry.
 LATEST_VERSION = registry.MIGRATIONS[-1].version
 PREDECESSOR_VERSIONS = (1, 7, 8, 10, 11, 15, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
                        28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
                        48, 51, 52, 53, 59, 60, 61, 62, 63, 69, 70, 71, 72)
+FOREIGN_KEY_VERSIONS = (66, 76, 77, 78, 79, 85, 93, 103, 106)
+# Keep independent raw-track, normalized-catalog and listening representations,
+# plus the original first/middle/late real disk sessions. Every other installed
+# start still gets its own populated admission below, without a repeated suffix.
+FULL_REPLAY_VERSIONS = (1, 8, 24, 33, 72)
 
 
 def connect(path=':memory:'):
@@ -24,10 +35,21 @@ def connect(path=':memory:'):
     return conn
 
 
-def objects(conn):
-    return {name: (kind, current._table(conn, name, sql) if kind == 'table' else current._tokens(sql))
+def objects(conn, *, canonical_versions=False):
+    result = {name: (kind, current._table(conn, name, sql) if kind == 'table' else current._tokens(sql))
             for name, kind, sql in conn.execute(
                 "SELECT name,type,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'")}
+    if canonical_versions:
+        from yt_playlist.core import vibe_versions
+        if not vibe_versions.normalized(conn):
+            # Installed text identities remain writable until explicit rebuild.
+            # These comparisons account only for that supported representation;
+            # all other objects and constraints still compare exactly.
+            result.update(current._schema_contract([
+                vibe_versions.transform(conn.execute(
+                    'SELECT sql FROM sqlite_schema WHERE name=?', (table,)).fetchone()[0], table)
+                for table in vibe_versions.COLUMNS]))
+    return result
 
 
 def replay(conn):
@@ -49,8 +71,10 @@ def predecessor_templates(tmp_path_factory):
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv('YT_PLAYLIST_HOME', str(root / 'app-home'))
         with closing(connect(root / 'chain.db')) as chain:
-            for version in PREDECESSOR_VERSIONS:
+            for version in sorted(set(PREDECESSOR_VERSIONS + FOREIGN_KEY_VERSIONS)):
                 migrate(chain, registry=registry.MIGRATIONS[:version])
+                from tests.prepared_fixture_support import coordinates
+                assert not coordinates(chain), 'Empty predecessor retains external files'
                 path = root / f'v{version}.db'
                 with closing(connect(path)) as snapshot:
                     chain.backup(snapshot)
@@ -59,12 +83,49 @@ def predecessor_templates(tmp_path_factory):
 
 
 @pytest.fixture(scope='module')
-def current_contract(tmp_path_factory):
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('current-contract')))
-        with closing(connect()) as fresh:
-            migrate(fresh)
-            return objects(fresh)
+def numbered_template(tmp_path_factory):
+    """The real current bootstrap before independent regular admission."""
+    with closing(connect()) as template:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('numbered-template')))
+            template.execute('BEGIN IMMEDIATE')
+            current.bootstrap(template, registry.MIGRATIONS, 0.)
+            template.commit()
+        template.execute('PRAGMA query_only=ON')
+        before = list(template.iterdump())
+        yield template
+        assert list(template.iterdump()) == before
+
+
+@pytest.fixture(scope='module')
+def current_template(numbered_template, tmp_path_factory):
+    """Admit once; restart rejection cases and contract comparisons share SQL."""
+    with closing(connect()) as template:
+        numbered_template.backup(template)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('current-restart-template')))
+            migrate(template)
+        template.execute('PRAGMA query_only=ON')
+        before = list(template.iterdump())
+        yield template
+        assert list(template.iterdump()) == before
+
+
+@pytest.fixture(scope='module')
+def current_contract(current_template):
+    return objects(current_template)
+
+
+@pytest.fixture(scope='module')
+def numbered_contract(numbered_template):
+    return objects(numbered_template)
+
+
+@pytest.fixture
+def current_database(current_template):
+    with closing(connect()) as conn:
+        current_template.backup(conn)
+        yield conn
 
 
 def populate(conn, version):
@@ -95,13 +156,15 @@ def policy_predecessor(conn):
     populate(conn, 31)
 
 
-@pytest.mark.parametrize('version', [66, 76, 77, 78, 79])
-def test_predecessor_validation_checks_all_foreign_keys_once(version):
+@pytest.mark.parametrize('version', FOREIGN_KEY_VERSIONS)
+def test_predecessor_validation_checks_all_foreign_keys_once(version, predecessor_templates):
     from yt_playlist.core.migrations.runner import validate_version
 
     conn = connect()
     try:
-        migrate(conn, registry=registry.MIGRATIONS[:version])
+        source = predecessor_templates[version].resolve().as_uri() + '?mode=ro'
+        with closing(sqlite3.connect(source, uri=True)) as predecessor:
+            predecessor.backup(conn)
         traced = []
         conn.set_trace_callback(traced.append)
         validate_version(conn, version)
@@ -117,9 +180,23 @@ def test_predecessor_validation_checks_all_foreign_keys_once(version):
         conn.close()
 
 
-def test_fresh_and_current_do_not_call_historical_bootstrap_or_validation(monkeypatch):
+def _forbid_historical_schema(monkeypatch):
+    from yt_playlist.core import (
+        frozen_share_contract, genre_contract, schema_definition, schema_transforms)
+
     def forbidden(*args, **kwargs):
         raise AssertionError('historical schema used by current database')
+
+    monkeypatch.setattr(schema_definition, 'assembled_statements', forbidden)
+    monkeypatch.setattr(schema_definition, '_statements', forbidden)
+    for name, operation in vars(schema_transforms).copy().items():
+        if callable(operation) and getattr(operation, '__module__', None) == schema_transforms.__name__:
+            monkeypatch.setattr(schema_transforms, name, forbidden)
+    monkeypatch.setattr(genre_contract, 'classified_definition', forbidden)
+    monkeypatch.setattr(frozen_share_contract, 'fences', forbidden)
+    schema_definition.contract.cache_clear()
+    schema_definition._normalized_vibe_contract.cache_clear()
+    schema_definition._reference_contract.cache_clear()
     monkeypatch.setattr(v001_baseline, 'expected', forbidden)
     monkeypatch.setattr(v001_baseline, 'validate', forbidden)
     from yt_playlist.core.migrations import runner
@@ -130,17 +207,114 @@ def test_fresh_and_current_do_not_call_historical_bootstrap_or_validation(monkey
         module = __import__(migration.apply.__module__, fromlist=['statements'])
         if hasattr(module, 'statements'):
             monkeypatch.setattr(module, 'statements', forbidden)
+        if hasattr(module, 'retire_preparation_capture'):
+            monkeypatch.setattr(module, 'retire_preparation_capture', forbidden)
     monkeypatch.setattr(registry, 'MIGRATIONS', tuple(
         Migration(m.version, m.name, forbidden) for m in registry.MIGRATIONS))
-    conn = connect()
-    migrate(conn)
-    conn.execute("INSERT INTO settings VALUES ('personal-setting','retain')")
-    conn.commit()
-    before = list(conn.iterdump())
-    migrate(conn)
-    assert list(conn.iterdump()) == before
-    assert [tuple(row)[:2] for row in conn.execute('SELECT * FROM schema_migrations ORDER BY version')] == [
-        (migration.version, migration.name) for migration in registry.MIGRATIONS]
+    monkeypatch.setattr(regular, 'CHANGES', tuple(
+        regular.Change(c.version, c.name, forbidden, c.validate) for c in regular.CHANGES))
+
+
+def test_fresh_and_current_do_not_call_historical_bootstrap_or_validation(monkeypatch, tmp_path):
+    from yt_playlist.core import schema_definition
+
+    # A warm process can hide import-time historical DDL behind cached jobs.
+    # Exercise both admissions with the same guard in independent cold processes.
+    cold = '''
+import sys
+from pathlib import Path
+root, home = map(Path, sys.argv[1:3])
+sys.path[:0] = [str(root), str(root / 'src')]
+import os
+os.environ['YT_PLAYLIST_HOME'] = str(home)
+import pytest
+from tests.core.test_current_schema import _forbid_historical_schema
+from yt_playlist.core.store import Store
+with pytest.MonkeyPatch.context() as patch:
+    _forbid_historical_schema(patch)
+    assert 'yt_playlist.core.preparation.model_trials' not in sys.modules
+    store = Store(home / 'current.db')
+    try:
+        store.init_schema(defer_metadata=True)
+        store.settings.set_setting('cold-current', 'persisted é')
+        assert store.settings.get_setting('cold-current') == 'persisted é'
+        before = list(store.conn.iterdump())
+        store.init_schema(defer_metadata=True)
+        assert list(store.conn.iterdump()) == before
+    finally:
+        store.conn.close()
+'''
+    cold_home = tmp_path / 'cold-home'
+    cold_home.mkdir()
+    for admission in ('fresh', 'current reopen'):
+        result = subprocess.run(
+            [sys.executable, '-I', '-c', cold, str(Path(__file__).parents[2]), str(cold_home)],
+            cwd=tmp_path, capture_output=True, text=True, timeout=60)
+        assert result.returncode == 0, (admission, result.stdout, result.stderr)
+
+    # Compare the maintained source export before forbidding every generator.
+    # This reads/generates text only; the actual bootstrap below owns its DB.
+    exporter = runpy.run_path(Path(__file__).parents[2] / 'scripts/export-current-schema.py')
+    with monkeypatch.context() as text_only:
+        text_only.setattr(sqlite3, 'connect', lambda *a, **kw: pytest.fail('Exporter opened a database'))
+        for path, expected in exporter['render'](schema_definition).items():
+            assert path.read_text(encoding='utf-8') == expected
+
+    _forbid_historical_schema(monkeypatch)
+    path = tmp_path / 'complete-current.db'
+    with closing(connect(path)) as conn:
+        migrate(conn)
+        assert dict(conn.execute('SELECT key,value FROM settings')) == current.SEED_SETTINGS
+        assert tuple(conn.execute('SELECT * FROM rec_preparation').fetchone()) == (1, 0, 0)
+        assert tuple(conn.execute('SELECT * FROM rec_group_clock').fetchone()) == (1, 0)
+        assert tuple(conn.execute('SELECT position,group_key,revision,cursor FROM rec_vibe_pending').fetchone()) == (
+            1, '*', 2, '')
+        assert conn.execute("SELECT 1 FROM genre_catalog WHERE name='Techno'").fetchone()
+        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE type='index' AND name='ix_genre_catalog_name'").fetchone()
+        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE type='view' AND name='listening_days'").fetchone()
+        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE type='trigger' AND name='playlists_scope_insert'").fetchone()
+        from yt_playlist.core.db_rebuild import destination
+        from yt_playlist.core import vibe_versions
+        assert vibe_versions.normalized(conn)
+        with closing(connect()) as candidate:
+            candidate.execute('BEGIN IMMEDIATE')
+            destination.initialize(candidate)
+            cursor = None
+            while True:
+                batch = destination.indexes(candidate, candidate, cursor, 128)
+                if batch.done:
+                    break
+                cursor = batch.cursor
+            assert destination.finish(candidate, candidate, None, 10000).done
+            candidate_objects = objects(candidate)
+            # Only the candidate's explicit retained-source provenance is
+            # additional. Every application table, index, view and guard is
+            # compared in its actual stored format, without normalization.
+            for name in ('database_rebuild_source_history', 'database_rebuild_source_changes'):
+                assert candidate_objects.pop(name)[0] == 'table'
+                assert not candidate.execute('SELECT 1 FROM '+name).fetchall()
+            assert candidate_objects == objects(conn)
+            for table, (kind, _) in candidate_objects.items():
+                if kind != 'table':
+                    continue
+                columns = 'version,name' if table in ('schema_migrations', 'schema_changes') else '*'
+                assert sorted(map(tuple, candidate.execute('SELECT '+columns+' FROM "'+table+'"')), key=repr) == sorted(
+                    map(tuple, conn.execute('SELECT '+columns+' FROM "'+table+'"')), key=repr), table
+            assert not candidate.execute('PRAGMA foreign_key_check').fetchall()
+        conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (1,'Main','test',1)")
+        with pytest.raises(sqlite3.IntegrityError, match='CHECK constraint failed'):
+            conn.execute("INSERT INTO listening_calendars(account_id,timezone,confirmed) VALUES (1,'UTC',2)")
+        conn.rollback()
+        conn.execute("INSERT INTO settings VALUES ('personal-setting','retain')")
+        conn.commit()
+        before = list(conn.iterdump())
+        migrate(conn)
+        assert list(conn.iterdump()) == before
+        assert [tuple(row)[:2] for row in conn.execute('SELECT * FROM schema_migrations ORDER BY version')] == [
+            (migration.version, migration.name) for migration in registry.MIGRATIONS]
+    with closing(connect(path)) as reopened:
+        migrate(reopened)
+        assert list(reopened.iterdump()) == before
 
 
 @pytest.mark.parametrize('name', ['rec_mood', 'audio_vibe_feedback', 'audio_vibe_labels', 'audio_session_labels',
@@ -152,9 +326,9 @@ def test_fresh_and_current_do_not_call_historical_bootstrap_or_validation(monkey
                                  'rec_group_head', 'rec_group_publications', 'rec_group_builds',
                                  'rec_group_graph', 'rec_group_assignments',
                                  'rec_proposal_cache_heads', 'rec_proposal_cache_chunks', 'rec_proposal_cache_builds'])
-def test_current_restart_rejects_competing_retired_owners(name):
-    with connect() as conn:
-        migrate(conn)
+def test_current_restart_rejects_competing_retired_owners(name, current_database):
+    conn = current_database
+    with conn:
         conn.execute(f'CREATE TABLE {name}(original_evidence TEXT)')
         conn.execute(f'INSERT INTO {name} VALUES (?)', ('retained original',))
         conn.commit()
@@ -166,26 +340,268 @@ def test_current_restart_rejects_competing_retired_owners(name):
 
 
 @pytest.mark.parametrize('version', PREDECESSOR_VERSIONS)
+def test_populated_predecessor_admission_preserves_exact_contents(version, predecessor_templates, monkeypatch):
+    from yt_playlist.core.migrations import runner
+
+    with closing(connect()) as conn, closing(sqlite3.connect(
+            predecessor_templates[version].resolve().as_uri()+'?mode=ro',uri=True)) as predecessor:
+        predecessor.backup(conn)
+        populate(conn, version)
+        before = list(conn.iterdump())
+        changes = conn.total_changes
+        admitted = []
+        validate = runner._validate_migration_structure
+        def stop_after_admission(connection, installed):
+            assert connection is conn and installed == version
+            validate(connection, installed)
+            admitted.append(installed)
+            raise RuntimeError(f'Completed installed entry validation {version}')
+        monkeypatch.setattr(runner, '_validate_migration_structure', stop_after_admission)
+        # Only the full frozen registry takes this entry-validation branch.
+        # Interrupt after the actual validator, before any suffix is applied.
+        with pytest.raises(MigrationError, match=f'Completed installed entry validation {version}'):
+            migrate(conn, registry=registry.MIGRATIONS)
+        assert admitted == [version]
+        assert not conn.in_transaction, version
+        assert conn.total_changes == changes, version
+        assert list(conn.iterdump()) == before, version
+        assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok', version
+        assert not conn.execute('PRAGMA foreign_key_check').fetchall(), version
+
+
+def test_populated_historical_chain_preserves_each_boundary(
+        tmp_path, predecessor_templates, numbered_contract, record_property):
+    from yt_playlist.core.migrations import runner
+    from yt_playlist.core.store import Store
+
+    store = Store(tmp_path / 'populated-chain.db')
+    try:
+        conn = store.conn
+        with closing(sqlite3.connect(predecessor_templates[1].resolve().as_uri()+'?mode=ro',uri=True)) as first:
+            first.backup(conn)
+        populate(conn, 1)
+        steps = []
+        for version in (*PREDECESSOR_VERSIONS, LATEST_VERSION):
+            historical = list(conn.execute('SELECT * FROM schema_migrations ORDER BY version'))
+            started = time.perf_counter()
+            # Each real callback runs once as this single populated chain grows.
+            migrate(conn, registry=registry.MIGRATIONS[:version])
+            steps.append({'version': version, 'seconds': time.perf_counter() - started})
+            assert runner.history(conn, registry.MIGRATIONS[:version]) == version
+            assert list(conn.execute('SELECT * FROM schema_migrations WHERE version<=? ORDER BY version',
+                                     (len(historical),))) == historical, version
+            if version == LATEST_VERSION:
+                expected = numbered_contract
+            else:
+                with closing(sqlite3.connect(
+                        predecessor_templates[version].resolve().as_uri()+'?mode=ro',uri=True)) as predecessor:
+                    expected = objects(predecessor)
+            assert objects(conn) == expected, version
+            assert tuple(conn.execute('SELECT id,title,artist FROM tracks').fetchone()) == (17, 'Song', 'Artist'), version
+            assert conn.execute("SELECT value FROM settings WHERE key='personal-setting'").fetchone()[0] == 'retain', version
+            if version < 33:
+                assert tuple(conn.execute('SELECT snapshot_id,identity_key FROM history_items').fetchone()) == (
+                    1, 'song|artist'), version
+            else:
+                assert conn.execute('SELECT count(*) FROM listening_observations').fetchone()[0] == 1, version
+            assert not conn.execute('PRAGMA foreign_key_check').fetchall(), version
+        before = list(conn.iterdump())
+        migrate(conn, registry=registry.MIGRATIONS)
+        assert list(conn.iterdump()) == before
+        assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        record_property('populated_historical_steps', json.dumps(steps))
+    finally:
+        store.conn.close()
+
+
+@pytest.mark.parametrize('version', FULL_REPLAY_VERSIONS)
 def test_explicit_predecessor_replay_matches_current_contract(
-        tmp_path, version, predecessor_templates, current_contract):
-    with closing(connect(tmp_path / 'upgrade.db')) as conn:
+        tmp_path, version, predecessor_templates, numbered_contract, monkeypatch, record_property):
+    from tests.prepared_fixture_support import cleanup_memory_files, roots
+    from yt_playlist.core import schema_definition
+    from yt_playlist.core.migrations import runner
+    from yt_playlist.core.store import Store
+
+    # Every starting version still executes its entire real upgrade suffix.
+    # Keep disk transactions at the start, middle and end of the history;
+    # the remaining cases exercise the same SQL and retained rows in memory.
+    path = tmp_path / 'upgrade.db' if version in (1, 24, 72) else ':memory:'
+    store = Store(path)
+    try:
+        conn = store.conn
         source = predecessor_templates[version].resolve().as_uri() + '?mode=ro'
         with closing(sqlite3.connect(source, uri=True)) as predecessor:
             predecessor.backup(conn)
         populate(conn, version)
-        replay(conn)
+        inspections, validations, measurements = Counter(), [], []
+        inspect = schema_definition._inspect_table
+        validate = runner._validate_migration_structure
+
+        def inspect_table(connection, name, sql):
+            if connection is conn:
+                inspections[(name, sql)] += 1
+            return inspect(connection, name, sql)
+
+        def validate_structure(connection, installed):
+            if connection is conn:
+                validations.append(installed)
+            return validate(connection, installed)
+
+        monkeypatch.setattr(schema_definition, '_inspect_table', inspect_table)
+        monkeypatch.setattr(runner, '_validate_migration_structure', validate_structure)
+
+        def measured_replay(phase):
+            inspections.clear()
+            validations.clear()
+            before = schema_definition._reference_contract.cache_info()
+            started = time.perf_counter()
+            migrate(conn, registry=registry.MIGRATIONS)
+            elapsed = time.perf_counter() - started
+            after = schema_definition._reference_contract.cache_info()
+            measurements.append({
+                'phase': phase, 'seconds': elapsed, 'validation_versions': list(validations),
+                'table_inspections': sum(inspections.values()),
+                'distinct_table_definitions': len(inspections),
+                'reference_constructions': after.misses - before.misses,
+                'reference_reuses': after.hits - before.hits,
+            })
+            # Settings can acquire a new definition during older replays, but
+            # each unchanged definition needs only one real owner inspection.
+            settings = [count for (name, _sql), count in inspections.items() if name == 'settings']
+            assert settings and max(settings) == 1
+
+        # Exercise every genuine starting-version replay. Regular admission
+        # consumes the resulting current layout and has one populated control
+        # below, rather than repeating all its DDL after every starting version.
+        measured_replay('upgrade')
         current.validate(conn)
-        assert objects(conn) == current_contract
+        assert objects(conn) == numbered_contract
         for key in current.SEED_SETTINGS:
             assert conn.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone() is not None
         assert conn.execute("SELECT value FROM settings WHERE key='personal-setting'").fetchone()[0] == 'retain'
         assert tuple(conn.execute('SELECT id,title,artist FROM tracks').fetchone()) == (17, 'Song', 'Artist')
         assert conn.execute('SELECT COUNT(*) FROM listening_observations').fetchone()[0] == 1
         before = list(conn.iterdump())
-        migrate(conn)
+        measured_replay('idempotence')
+        assert sum(count for (name, _sql), count in inspections.items() if name == 'settings') == 1
+        record_property('historical_replay', json.dumps(measurements))
         assert list(conn.iterdump()) == before
         assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+    finally:
+        cleanup_memory_files(store, roots(store.conn))
+        store.conn.close()
     assert not (tmp_path / 'backups').exists()
+
+
+@pytest.mark.parametrize('change,error', [
+    ('row', None),
+    ('owner', 'identities'),
+    ('index', 'ix_entries_recording'),
+    ('seed', 'catalog identity'),
+    ('history', 'contiguous prefix'),
+    ('advance', None),
+    ('advance_damage', 'identities'),
+])
+def test_historical_replay_rechecks_foreign_key_reservation_gap(
+        tmp_path, predecessor_templates, monkeypatch, change, error):
+    from yt_playlist.core import schema_definition
+    from yt_playlist.core.migrations import runner
+
+    class RebuildConnection(sqlite3.Connection):
+        before_rebuild = None
+
+        def execute(self, sql, *args, **kwargs):
+            if (sql == 'BEGIN IMMEDIATE' and self.before_rebuild is not None
+                    and not self.execute('PRAGMA foreign_keys').fetchone()[0]):
+                callback, self.before_rebuild = self.before_rebuild, None
+                assert not self.in_transaction
+                callback()
+            return super().execute(sql, *args, **kwargs)
+
+    path = tmp_path / 'reservation.db'
+    with closing(sqlite3.connect(path, factory=RebuildConnection)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        source = predecessor_templates[93].resolve().as_uri() + '?mode=ro'
+        with closing(sqlite3.connect(source, uri=True)) as predecessor:
+            predecessor.backup(conn)
+        changed, validations, inspections = [], [], []
+        validate, inspect = runner._validate_migration_structure, schema_definition._inspect_table
+
+        def validate_structure(connection, version):
+            if connection is conn:
+                validations.append(version)
+            return validate(connection, version)
+
+        def inspect_table(connection, name, sql):
+            if connection is conn:
+                inspections.append(name)
+            return inspect(connection, name, sql)
+
+        monkeypatch.setattr(runner, '_validate_migration_structure', validate_structure)
+        monkeypatch.setattr(schema_definition, '_inspect_table', inspect_table)
+
+        def concurrent_commit():
+            # Execute a real independent writer in the released reservation.
+            # Advancing uses the actual v94 conversion, followed by optional
+            # damage: the next entry check must precede v95's first write.
+            with closing(connect(path)) as other:
+                if change.startswith('advance'):
+                    migrate(other, registry=registry.MIGRATIONS[:94])
+                with other:
+                    if change in ('owner', 'advance_damage'):
+                        other.execute('ALTER TABLE identities RENAME COLUMN label TO damaged')
+                    elif change == 'index':
+                        other.execute('DROP INDEX ix_entries_recording')
+                    elif change == 'seed':
+                        other.execute("UPDATE settings SET value='changed' WHERE key='catalog_identity_version'")
+                    elif change == 'history':
+                        other.execute("UPDATE schema_migrations SET name='changed' WHERE version=93")
+                    else:
+                        other.execute("INSERT INTO settings VALUES ('concurrent-setting','committed')")
+                changed.extend(other.iterdump())
+
+        conn.before_rebuild = concurrent_commit
+        if error:
+            with pytest.raises(MigrationError, match=error):
+                migrate(conn, registry=registry.MIGRATIONS)
+            assert list(conn.iterdump()) == changed
+            assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == (
+                94 if change.startswith('advance') else 93)
+        else:
+            migrate(conn, registry=registry.MIGRATIONS)
+            assert validations[:2] == [93, 94 if change == 'advance' else 93]
+            assert inspections.count('identities') == 2
+            assert conn.execute("SELECT value FROM settings WHERE key='concurrent-setting'").fetchone()[0] == 'committed'
+            assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == LATEST_VERSION
+            assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        assert conn.before_rebuild is None
+        assert changed
+        assert not conn.in_transaction
+        assert conn.execute('PRAGMA foreign_keys').fetchone()[0] == 1
+
+
+def test_populated_historical_replay_admits_regular_schema_without_losing_rows(
+        tmp_path, predecessor_templates, current_contract):
+    from tests.regular_schema_support import admit_regular_schema
+    from yt_playlist.core.store import Store
+
+    store = Store(tmp_path/'admitted.db')
+    try:
+        source = predecessor_templates[1].resolve().as_uri()+'?mode=ro'
+        with closing(sqlite3.connect(source, uri=True)) as predecessor:
+            predecessor.backup(store.conn)
+        populate(store.conn, 1)
+        migrate(store.conn, registry=registry.MIGRATIONS)
+        # Independent declarations verify every original row and program,
+        # allowing only the named regular owners and their expected seed rows.
+        admit_regular_schema(store)
+        assert objects(store.conn) == current_contract
+        before = list(store.conn.iterdump())
+        migrate(store.conn)
+        assert list(store.conn.iterdump()) == before
+    finally:
+        store.conn.close()
 
 
 @pytest.mark.parametrize('has_counts_view', [False, True])
@@ -218,7 +634,7 @@ def test_unversioned_early_schema_matches_fresh(tmp_path):
         replay(conn)
         with connect() as fresh:
             migrate(fresh)
-            assert objects(conn) == objects(fresh)
+            assert objects(conn, canonical_versions=True) == objects(fresh, canonical_versions=True)
         assert tuple(conn.execute('SELECT id,orig_title,orig_artist FROM tracks').fetchone()) == (
             17, 'Original title', 'Artist')
 
@@ -238,12 +654,18 @@ def test_preexisting_play_ledger_receives_constraint_missing_from_v001(tmp_path)
             conn.execute('UPDATE play_events SET is_generated=2')
 
 
-def test_initialized_state_matches_full_historical_chain():
-    with connect() as upgraded, connect() as fresh:
+@pytest.mark.parametrize('start_version', [None, 107])
+def test_initialized_state_matches_full_historical_chain(start_version):
+    with closing(connect()) as upgraded, closing(connect()) as fresh:
+        history = []
+        if start_version is not None:
+            migrate(upgraded, registry=registry.MIGRATIONS[:start_version])
+            history = list(map(tuple, upgraded.execute('SELECT * FROM schema_migrations ORDER BY version')))
         migrate(upgraded, registry=registry.MIGRATIONS)
+        assert list(map(tuple, upgraded.execute('SELECT * FROM schema_migrations ORDER BY version')))[:len(history)] == history
         migrate(upgraded)
         migrate(fresh)
-        assert objects(upgraded) == objects(fresh)
+        assert objects(upgraded, canonical_versions=True) == objects(fresh, canonical_versions=True)
         for table, (kind, _) in objects(upgraded).items():
             if kind == 'table' and table not in ('schema_migrations', 'schema_changes'):
                 assert sorted(map(tuple, upgraded.execute(f'SELECT * FROM "{table}"')), key=repr) == sorted(
@@ -298,7 +720,7 @@ def test_installed_v64_with_earlier_group_definition_gets_library_lookup(missing
         current.validate(conn)
         with connect() as fresh:
             migrate(fresh)
-            assert objects(conn) == objects(fresh)
+            assert objects(conn, canonical_versions=True) == objects(fresh, canonical_versions=True)
 
 
 def test_installed_optional_generated_column_is_migrated_with_all_event_evidence():
@@ -363,16 +785,18 @@ def test_policy_repair_refuses_invalid_values_without_discarding_them():
     'DROP INDEX ix_play_event_account_time',
     'DROP VIEW listening_days',
     'DROP TRIGGER playlists_scope_insert',
+    'DROP INDEX ix_album_feedback_response_pending',
     "DELETE FROM settings WHERE key='catalog_identity_version'",
     "UPDATE settings SET value='99' WHERE key='catalog_identity_version'",
     "UPDATE schema_migrations SET name='wrong' WHERE version=31",
     "DELETE FROM schema_migrations WHERE version=15",
     f"INSERT INTO schema_migrations VALUES ({LATEST_VERSION + 1},'future',1)",
+    f"INSERT INTO schema_changes VALUES ({len(regular.CHANGES) + 1},'future',1)",
     'ALTER TABLE listening_calendars DROP COLUMN confirmed',
 ])
-def test_malformed_current_database_is_rejected_without_repair(sql):
-    with connect() as conn:
-        migrate(conn)
+def test_malformed_current_database_is_rejected_without_repair(sql, current_database):
+    conn = current_database
+    with conn:
         conn.execute(sql)
         conn.commit()
         before = list(conn.iterdump())
@@ -391,7 +815,7 @@ def test_malformed_current_database_is_rejected_without_repair(sql):
      'id INTEGER PRIMARY KEY,title TEXT,artist TEXT,year TEXT', 'albums'),
 ])
 def test_current_constraints_are_validated(old, new, owner):
-    with connect() as conn:
+    with closing(connect()) as conn, conn:
         source = ';\n'.join(current.statements())+';'
         assert old in source
         conn.executescript(source.replace(old, new))
@@ -411,7 +835,7 @@ def test_deferral_on_another_foreign_key_is_rejected_before_catalog_use():
         inline, inline.replace('REFERENCES recordings(id)',
                                'REFERENCES recordings(id) DEFERRABLE INITIALLY DEFERRED'))
     malformed = source.replace(catalog_table, malformed_table)
-    with connect() as conn:
+    with closing(connect()) as conn, conn:
         conn.executescript(malformed)
         conn.executemany('INSERT INTO settings VALUES (?,?)', current.SEED_SETTINGS.items())
         with pytest.raises(MigrationError, match='catalog_entries'):
@@ -442,7 +866,7 @@ def test_validated_fresh_and_upgraded_catalogs_allow_verified_reassociation(vers
 
 
 def test_composite_foreign_key_order_and_grouping_are_validated():
-    with connect() as conn:
+    with closing(connect()) as conn, conn:
         source = ';\n'.join(current.statements())+';'
         catalog_table = next(sql for sql in current.statements() if sql.startswith('CREATE TABLE catalog_entries '))
         original = 'FOREIGN KEY(video_id,recording_id) REFERENCES youtube_items(video_id,recording_id)'

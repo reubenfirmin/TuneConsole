@@ -41,7 +41,7 @@ def test_preparation_uses_existing_notice_without_pausing_normal_use(store, monk
         assert re.search(r'<div id="storage-maintenance"[^>]* hidden>', prepared_html)
         ctx.storage_maintenance.active = True
         assert client.get('/storage-maintenance/status').json()['banner_message'] == (
-            'Performing database maintenance.')
+            'Optimizing app storage; some recommendations are temporarily unavailable.')
         ctx.storage_maintenance.active = False
         ctx.storage_maintenance.ready.set()
         ctx.rec_worker.jobs.cancel()
@@ -51,20 +51,25 @@ def test_preparation_uses_existing_notice_without_pausing_normal_use(store, monk
 
 @pytest.mark.parametrize('state,expected,active,warning', [
     ('idle', '', False, False),
-    ('compacting', 'Performing database maintenance.', True, False),
-    ('evidence', 'Performing database maintenance.', True, False),
-    ('retrying', 'Library updates need attention.', True, True),
-    ('feedback', 'Catching up on your listening.', True, False),
-    ('low_space', 'Free disk space to finish.', False, True),
-    ('deferred', 'Library update will retry.', False, True),
-    ('schema_retry', 'Library update needs a retry.', False, True),
-    ('copy_stopped', 'Library preparation stopped.', False, True),
+    ('compacting', 'Optimizing app storage; some recommendations are temporarily unavailable.', True, False),
+    ('evidence', '', False, False),
+    ('retrying', '', False, True),
+    ('feedback', '', False, False),
+    ('low_space', '', False, True),
+    ('deferred', '', False, True),
+    ('schema_retry', '', False, True),
+    ('copy_stopped', '', False, True),
+    ('recovery_required', '', True, False),
 ])
 def test_notice_matches_status_without_javascript(store, state, expected, active, warning):
     app = create_app(store, lambda: {}, background_work=False)
     maintenance = app.state.ctx.storage_maintenance
-    if state == 'compacting':
+    if state in ('compacting', 'recovery_required'):
         maintenance.active = True
+        maintenance.phase = state
+        maintenance.ready.clear()
+        if state == 'recovery_required':
+            maintenance.report = {'analytics_pending': True}
     elif state in ('evidence', 'retrying'):
         store._evidence_recovery_pending = True
         store._evidence_recovery_failed = state == 'retrying'
@@ -88,7 +93,7 @@ def test_notice_matches_status_without_javascript(store, state, expected, active
         assert notice is not None
         assert notice[2] == expected
         assert (' hidden' in notice[1]) == (not expected)
-        assert f'role="{"alert" if warning else "status"}"' in notice[1]
+        assert 'role="status"' in notice[1]
         if expected:
             assert '\n' not in expected and expected.count('.') == 1
             assert status['message'] != expected

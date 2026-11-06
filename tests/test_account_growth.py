@@ -1,5 +1,6 @@
 """Growth reports describe actual music state, independently of notice dismissal."""
 from tests.conftest import seed_catalog_track
+from tests.enrichment_support import complete_entries, complete_discovered
 from tests.test_artist_start import Catalog, client_for
 from yt_playlist.rec import account_growth, home_preferences
 
@@ -10,7 +11,7 @@ def catalog(store, processed=9, total=10):
         entry = seed_catalog_track(store, f'song {index}|artist', f'Song {index}', 'Artist',
                                    video_id=f'video-{index}')
         if index < processed:
-            store.enrichment_queue.mark_enriched([entry], 1)
+            complete_entries(store, [entry], 1)
 
 
 def ready_radio():
@@ -22,6 +23,45 @@ def nodes(state):
     return {node['id']: node for node in state['nodes']}
 
 
+def test_home_inputs_reuse_journey_and_invalidate_on_supplied_or_committed_changes(file_backed_store, monkeypatch):
+    store = file_backed_store
+    catalog(store, processed=10, total=10)
+    collections = {field: [] for field in ('discovery_tracks', 'discovery_albums',
+        'rediscover', 'rediscover_albums', 'rediscover_tracks')}
+    original = account_growth._view
+    calls = []
+
+    def observe(*args, **kwargs):
+        calls.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(account_growth, '_view', observe)
+
+    def read(**overrides):
+        supplied = {'mixes_ready': False, 'albums_ready': False, 'radio': {},
+                    'collections': collections, **overrides}
+        with store.read_view(tracked=True) as reader:
+            return account_growth.view(reader, 1000, **supplied)
+
+    first = read()
+    assert read() == first
+    assert len(calls) == 1
+    assert not nodes(first)['listening']['usable']
+    assert nodes(read(mixes_ready=True))['listening']['usable']
+    assert len(calls) == 2
+    discovered = {**collections, 'discovery_tracks': [{}] * 10}
+    assert nodes(read(collections=discovered))['discover']['usable']
+    assert len(calls) == 3
+    assert nodes(read(radio={'state': {'active': True}}))['radio']['usable']
+    assert len(calls) == 4
+    # A committed library change must invalidate a result with identical supplied
+    # inputs, and a caller cannot mutate the detached cached journey.
+    first['health']['total'] = -1
+    store.tracks.upsert_track('new-owned', 'New song', 'Artist', None, 200)
+    assert read()['health']['total'] == 11
+    assert len(calls) == 5
+
+
 def test_health_counts_distinct_scoped_recordings_from_empty_through_new_additions(store):
     def health():
         value = account_growth.view(store, 1000, mixes_ready=False, albums_ready=False, radio={})['health']
@@ -29,7 +69,7 @@ def test_health_counts_distinct_scoped_recordings_from_empty_through_new_additio
 
     assert health() == (0, 0, 0, 'Waiting for music')
     owned = store.tracks.upsert_track('owned', 'Owned', 'Artist', None, 200)
-    store.enrichment_queue.mark_enriched([owned], 10)
+    complete_entries(store, [owned], 10)
     owned_key = store.tracks.identity_key_for_video('owned')
     store.discovery.upsert_discovered_track(
         owned_key, 'owned', 'Owned', 'Artist', None, None, None, None, 'radio:review', 20)
@@ -38,12 +78,12 @@ def test_health_counts_distinct_scoped_recordings_from_empty_through_new_additio
         None, None, None, None, 'radio:review', 20)
     # Cached catalog entries outside both memberships must not enter the count.
     cached = store.tracks.observe_track_entry('cached', 'Cached', 'Artist', now=20)
-    store.enrichment_queue.mark_enriched([cached], 21)
+    complete_entries(store, [cached], 21)
     assert store.conn.execute('SELECT COUNT(*) FROM library_memberships').fetchone()[0] == 1
     assert store.conn.execute('SELECT COUNT(*) FROM discovery_memberships').fetchone()[0] == 2
     assert health() == (2, 1, 50, 'Preparing your music')
 
-    store.discovery.mark_discovered_enriched([discovered_key], 30)
+    complete_discovered(store, [discovered_key], 30)
     # Processing coverage can be complete while listening menus still prepare.
     assert health() == (2, 2, 100, 'Ready to keep growing')
     store.tracks.upsert_track('new', 'New song', 'Artist', None, 200)
@@ -61,7 +101,7 @@ def test_health_excludes_available_provider_refresh_jobs_until_they_finish(store
     key = store.tracks.identity_key_for_video('review')
     recording = store.tracks.catalog_subject(entry)['recording_id']
     state.record_enrichment_attempt(key, 'deezer', {}, now=10)
-    store.enrichment_queue.mark_enriched([entry], 11)
+    complete_entries(store, [entry], 11)
     assert health() == (1, 1, 100)
 
     state.reconcile_provider_configuration({'deezer': {'fingerprint': 'new', 'status': 'available'}})
@@ -91,8 +131,8 @@ def test_readiness_requires_usable_outputs_and_defers_home_choice(store):
     assert not state['home_choice_available']
     from tests.test_growth_journey import early_journey
     early_journey(store)
-    store.enrichment_queue.mark_enriched([row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1)
-    store.discovery.mark_discovered_enriched([row[0] for row in store.conn.execute(
+    complete_entries(store, [row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1)
+    complete_discovered(store, [row[0] for row in store.conn.execute(
         'SELECT identity_key FROM discovered_tracks')], 1)
     state = account_growth.view(store, 1000, mixes_ready=True, albums_ready=True, radio=ready_radio())
     assert nodes(state)['radio']['state'] == 'ready', state['health']
@@ -172,9 +212,30 @@ def test_keys_and_empty_imports_are_not_completed_bonuses(store, monkeypatch):
                         {'configured': True, 'enabled': True, 'status': None})
     state = account_growth.view(store, 1000, mixes_ready=True, albums_ready=True, radio=ready_radio())
     assert nodes(state)['lastfm']['state'] == 'preparing'
+    assert nodes(state)['lastfm']['connected']
+    assert not nodes(state)['lastfm']['ready']
     assert nodes(state)['deepseek']['state'] == 'preparing'
     assert nodes(state)['takeout']['state'] == 'untouched'
     assert all(nodes(state)[name]['bonus'] for name in ('lastfm', 'deepseek', 'takeout'))
+
+
+def test_lastfm_connection_tracks_configuration_without_waiting_for_coverage(store, monkeypatch):
+    monkeypatch.setattr(account_growth.lastfm, 'api_key',
+                        lambda source: source.settings.get_setting('lastfm_api_key') or None)
+
+    def music_details():
+        return nodes(account_growth.view(store, 1000, mixes_ready=False, albums_ready=False, radio={}))['lastfm']
+
+    assert not music_details()['connected']
+    store.settings.set_setting('lastfm_api_key', 'controlled-key')
+    assert music_details()['connected']
+    assert not music_details()['ready']
+    store.settings.set_setting('enrichment_order', '[{"name":"lastfm","enabled":false}]')
+    assert not music_details()['connected']
+    store.settings.set_setting('enrichment_order', '[]')
+    assert music_details()['connected']
+    store.settings.set_setting('lastfm_api_key', '')
+    assert not music_details()['connected']
 
 
 def test_lastfm_bonus_requires_current_refresh_and_real_coverage(store, monkeypatch):
@@ -219,15 +280,21 @@ def test_home_choice_endpoint_requires_readiness_and_preserves_navigation_distin
 
 def test_vibe_use_requires_a_choice_and_confirmed_start_of_the_actual_vibe_offer():
     offers = {'menu': {'id': 'menu', 'format': 'mixes', 'episode_id': 'episode', 'at': 1,
-                        'options': [{'id': 'relax-set', 'recipe': {'vibe': 'relax'}}]}}
+                        'vibe': 'relax', 'options': [{'id': 'relax-set', 'descriptor_id': 1}]}}
     choice = {'id': 'choice', 'kind': 'choice', 'opportunity_id': 'menu', 'option_id': 'relax-set', 'at': 2}
     start = {'id': 'start', 'kind': 'start', 'opportunity_id': 'menu', 'option_id': 'relax-set', 'at': 3}
     assert home_preferences.compile_usage(offers, [start], 10, 30)['vibe_episodes'] == 0
     assert home_preferences.compile_usage(offers, [choice], 10, 30)['vibe_episodes'] == 0
     assert home_preferences.compile_usage(offers, [choice, start], 10, 30)['vibe_episodes'] == 1
+    # Old compact choices with no frozen purpose cannot establish historical use.
+    del offers['menu']['vibe']
+    assert home_preferences.compile_usage(offers, [choice, start], 10, 30)['vibe_episodes'] == 0
+    offers['menu']['options'][0]['recipe'] = {'vibe': 'relax'}
+    assert home_preferences.compile_usage(offers, [choice, start], 10, 30)['vibe_episodes'] == 1
 
 
 def test_vibes_require_current_sound_evidence_and_playable_prepared_pools(store):
+    from yt_playlist.core import vibe_versions
     from tests.test_growth_readiness import publish_vibe_menus
     from tests.test_growth_destinations import publish_destinations
 
@@ -238,7 +305,9 @@ def test_vibes_require_current_sound_evidence_and_playable_prepared_pools(store)
     assert state['health']['measured'] > 0
     assert state['vibes_ready'] and nodes(state)['vibes']['state'] == 'ready'
     with store.conn:
-        store.conn.execute("UPDATE recording_vibes SET inputs_version='outdated'")
+        column = vibe_versions.column(store.conn, 'recording_vibes')
+        store.conn.execute(f"UPDATE recording_vibes SET {column}=?",
+                           (vibe_versions.stored(store.conn, 'outdated'),))
     state = account_growth.view(store, 1000, mixes_ready=True, albums_ready=False, radio={})
     assert not state['vibes_ready']
     assert nodes(state)['vibes']['state'] == 'preparing'

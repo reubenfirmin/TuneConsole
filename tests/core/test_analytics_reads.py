@@ -12,12 +12,10 @@ from yt_playlist.repos.base import Repo, snapshot_read
 
 
 @pytest.fixture(params=['file', 'memory'])
-def database(request, tmp_path):
-    store = Store(tmp_path / 'analytics.db' if request.param == 'file' else ':memory:')
-    store.init_schema()
+def database(request):
+    store = request.getfixturevalue('file_backed_store' if request.param == 'file' else 'store')
     store.settings.set_setting('input', 'old')
-    yield store
-    store.conn.close()
+    return store
 
 
 class Analytics(Repo):
@@ -63,9 +61,8 @@ def test_in_memory_private_reader_preserves_published_group_membership(store):
         assert reader.taste_groups.definitions(expected['generation'], members=True) == expected['groups']
 
 
-def test_file_reader_pins_committed_state_without_copying_database(tmp_path, monkeypatch):
-    store = Store(tmp_path / 'state.db')
-    store.init_schema()
+def test_file_reader_pins_committed_state_without_copying_database(file_backed_store, tmp_path, monkeypatch):
+    store = file_backed_store
     store.settings.set_setting('input', 'old')
     def backup(*args, **kwargs):
         pytest.fail('File-backed analytics copied the database')
@@ -80,9 +77,9 @@ def test_file_reader_pins_committed_state_without_copying_database(tmp_path, mon
                 reader.conn.execute("INSERT INTO settings VALUES ('forbidden','write')")
         assert Analytics(store).value() == 'new'
         added = set(tmp_path.iterdir()) - before
-        assert added <= {tmp_path / ('state.db.' + domain) for domain in (
+        assert added <= {tmp_path / ('store.db.' + domain) for domain in (
             'policies', 'groups', 'recommendations', 'evidence', 'served', 'collections',
-            'metadata', 'metadata-runtime', 'archives', 'vibe-provenance', 'profiles',
+            'metadata', 'metadata-runtime', 'archives', 'vibe-provenance', 'vibe-models', 'profiles',
             'embeddings', 'legacy-journals', 'policy-history')}
         # Empty owner stores still establish their reader-lifetime lock before
         # pinning SQL. They must not create a database or output snapshot.
@@ -92,9 +89,8 @@ def test_file_reader_pins_committed_state_without_copying_database(tmp_path, mon
         store.conn.close()
 
 
-def test_releasing_reader_allows_wal_checkpoint_to_finish(tmp_path):
-    store = Store(tmp_path / 'state.db')
-    store.init_schema()
+def test_releasing_reader_allows_wal_checkpoint_to_finish(file_backed_store):
+    store = file_backed_store
     store.settings.set_setting('input', 'old')
     try:
         store.conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
@@ -205,9 +201,8 @@ def test_read_inside_owned_write_transaction_keeps_uncommitted_visibility(databa
 
 
 @pytest.mark.parametrize('operation', ['summary', 'counts', 'playlist'])
-def test_slow_analytics_allows_foreground_write(tmp_path, monkeypatch, operation):
-    store = Store(tmp_path / 'state.db')
-    store.init_schema()
+def test_slow_analytics_allows_foreground_write(file_backed_store, monkeypatch, operation):
+    store = file_backed_store
     store.tracks.upsert_track('v', 'Song', 'Artist', 'Release', 100, album_browse_id='B')
     started, release = threading.Event(), threading.Event()
     original = store._make_reader

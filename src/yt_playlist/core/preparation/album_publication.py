@@ -286,11 +286,12 @@ def verify(conn, identity):
                 ' ORDER BY '+key+' LIMIT 32', (identity, *((after,) if after is not None else ()))).fetchall()
             if not batch:
                 break
+            references = ({}, {})
             for row in batch:
                 source = preparation.JOB._read(conn, owner, json.dumps([row[key]], separators=(',', ':')))
                 if source is None or preparation.original(conn, owner, row[key], row['source_digest']) != dict(source):
                     raise MigrationError('Album publication original differs from its installed source')
-                expected = preparation.describe(conn, owner, dict(source))
+                expected = preparation.describe(conn, owner, dict(source), references)
                 if {column:row[column] for column in expected} != expected:
                     raise MigrationError('Album publication row differs from its original or references')
                 if kind == 'tracks' and row['is_full'] and row['captured_recording_id'] is not None and row['captured_recording_id'] != row['recording_id']:

@@ -19,7 +19,7 @@ import pytest
 
 from tests.schema import populated_scope_restart
 from yt_playlist.core import (
-    group_documents, group_storage, policy_recovery, prepared_inputs,
+    group_documents, group_storage, prepared_inputs,
     recommendation_outputs, recommendation_pools,
 )
 from yt_playlist.core.activity import WorkBudgetExceeded, work_budget
@@ -45,7 +45,7 @@ def _sha(path):
 
 def _sources():
     paths = (
-        'core/store.py', 'core/db_reads.py', 'core/policy_recovery.py',
+        'core/store.py', 'core/db_reads.py', 'core/db_rebuild/sqlite_checks.py',
         'core/recommendation_outputs.py', 'core/recommendation_pools.py',
         'core/migrations/current.py', 'core/migrations/registry.py',
         'core/migrations/runner.py', 'core/migrations/schema.sql',
@@ -70,6 +70,8 @@ def _sources():
     result = {name: _sha(ROOT / 'src/yt_playlist' / name) for name in paths}
     result.update({str(path.relative_to(ROOT)): _sha(path) for path in current.DEFINITIONS})
     result[str(Path(__file__).relative_to(ROOT))] = _sha(__file__)
+    fixture_helper = ROOT / 'tests/file_custody_support.py'
+    result[str(fixture_helper.relative_to(ROOT))] = _sha(fixture_helper)
     restart_helper = Path(populated_scope_restart.__file__).resolve()
     result[str(restart_helper.relative_to(ROOT))] = _sha(restart_helper)
     return result
@@ -105,11 +107,12 @@ def isolated_current_library(request, tmp_path_factory):
             'Use the completed normal-startup v79 output, not another migration predecessor')
         started = time.monotonic()
         source.backup(target)
-        manifests = policy_recovery._export_files(source, db_path)
+        from tests import file_custody_support as custody
+        manifests = custody.export_files(source, db_path)
         # Commit every relocated file owner before closing this connection or
         # allowing either continuation to open the disposable database.
         with target:
-            policy_recovery._restore_files(target, manifests)
+            custody.restore_files(target, manifests)
         report.update(copy_and_relocation_seconds=time.monotonic() - started,
                       relocated_domains=sorted(manifests), status='ready')
     finally:
@@ -342,7 +345,7 @@ def test_one_actual_fresh_pool_update_preserves_other_pools_and_measures_serving
         assert _slots(store.conn) == after_slots
 
         # Install serving observers only after all preparation/publication work.
-        # read() currently invokes _decode twice; count both real invocations.
+        # Count every real decode, including validation work.
         decoded, read_bytes, pages = Counter(), Counter(), Counter()
         report.update(serving_decode=decoded, serving_file_reads=read_bytes, serving_candidate_pages=pages)
         phase = ['fresh']

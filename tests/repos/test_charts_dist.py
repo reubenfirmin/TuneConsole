@@ -3,6 +3,8 @@ listen_distribution (plays per category in a time window) and corpus_distributio
 (library composition per category), across genre / year / album / playlist dimensions.
 """
 
+from tests.enrichment_support import seed_enrichment
+
 NOW = 11*86400.0+43200
 
 
@@ -16,9 +18,9 @@ def _seed(store):
     a = store.tracks.upsert_track("v1", "Alpha", "Artist A", "Album A", 200, album_browse_id="album-a")
     b = store.tracks.upsert_track("v2", "Beta", "Artist B", "Album B", 200, album_browse_id="album-b")
     g = store.tracks.upsert_track("v3", "Gamma", "Artist A", "Album A", 200, album_browse_id="album-a")
-    store.tracks.set_track_enrichment(a, "techno", "1995")   # 1990s
-    store.tracks.set_track_enrichment(b, "house", "2005")    # 2000s
-    store.tracks.set_track_enrichment(g, "techno", "2015")   # 2010s
+    seed_enrichment(store, a, "techno", "1995")   # 1990s
+    seed_enrichment(store, b, "house", "2005")    # 2000s
+    seed_enrichment(store, g, "techno", "2015")   # 2010s
     p1 = store.playlists.upsert_playlist(iid, "P1", "Mix", 0, "h", 0.0)
     p2 = store.playlists.upsert_playlist(iid, "P2", "Chill", 0, "h", 0.0)
     store.playlists.set_playlist_tracks(p1, [a, b])

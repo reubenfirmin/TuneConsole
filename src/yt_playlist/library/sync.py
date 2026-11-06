@@ -334,6 +334,9 @@ def _sync_playlists(store, account_id, client, now, on_progress, label, on_auth_
         _emit(on_progress, "auth_expired",
               f"{label}: returned no playlists. Session may have expired, re-authenticate", label=label)
         resources["playlist_listing"] = resource("failed", "Unverified empty playlist snapshot")
+        # This response disproves no membership. Preserve the same active
+        # children as other unavailable-listing paths, including their clocks.
+        items = {pid: retained(item) for pid, item in previous_items.items()}
 
     incomplete_summary = f", {incomplete} incomplete" if incomplete else ""
     playlist_summary = f"{refreshed} refreshed, {skipped} skipped{incomplete_summary}, {reused} reused"

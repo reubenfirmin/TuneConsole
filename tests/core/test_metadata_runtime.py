@@ -4,6 +4,7 @@ import json
 import time
 
 import pytest
+from tests.metadata_provenance_support import metadata_provenance
 
 from yt_playlist.core import catalog, fao, metadata, metadata_native
 from yt_playlist.core.evidence_ledger import canonical
@@ -13,15 +14,13 @@ from yt_playlist.core.store import Store
 
 
 @pytest.fixture
-def runtime_store(tmp_path):
-    store = Store(tmp_path / 'runtime.db')
-    store.init_schema()
+def runtime_store(file_backed_store):
+    store = file_backed_store
     with store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
         runtime.install(store.conn)
         runtime.activate(store.conn)
-    yield store
-    store.conn.close()
+    return store
 
 
 def entry(store, video='video'):
@@ -72,7 +71,7 @@ def test_manual_null_blank_reset_and_rollback_orphan(runtime_store):
     with store.conn:
         catalog.withdraw_choice(store.conn, track, 'bpm')
     assert store.conn.execute('SELECT bpm FROM catalog_tracks WHERE id=?', (track,)).fetchone()[0] == 135
-    decisions = store.enrichment_reports.metadata_provenance(track)['decisions']
+    decisions = metadata_provenance(store, track)['decisions']
     assert [json.loads(row['value_json']) for row in decisions] == [None, '', None]
     assert decisions[-1]['withdrawn']
 
@@ -130,7 +129,7 @@ def test_reopen_and_file_backup_restore_use_derived_paths(runtime_store, tmp_pat
         files.restore(target.conn, manifest)
         target.init_schema()
         assert target.conn.execute('SELECT genre FROM catalog_tracks WHERE id=?', (track,)).fetchone()[0] == 'Jazz'
-        assert target.enrichment_reports.metadata_provenance(track)['decisions'][0]['source'] == 'user'
+        assert metadata_provenance(target, track)['decisions'][0]['source'] == 'user'
         for _, sql in runtime.definitions():
             assert 'filename' not in sql and 'digest' not in sql
     finally:
@@ -147,7 +146,7 @@ def test_rejected_backup_preserves_all_live_metadata_bytes(runtime_store, tmp_pa
     with store.conn:
         catalog.choose_field(store.conn, track, 'bpm', 120)
         catalog.choose_field(store.conn, track, 'genre', 'Jazz')
-    decisions = store.enrichment_reports.metadata_provenance(track)['decisions']
+    decisions = metadata_provenance(store, track)['decisions']
     with store.conn:
         store.conn.execute('BEGIN')
         manifest = files.export(store.conn, tmp_path/'backup')
@@ -187,7 +186,7 @@ def test_rejected_backup_preserves_all_live_metadata_bytes(runtime_store, tmp_pa
     with pytest.raises((ValueError, FileNotFoundError)):
         files.restore(store.conn, manifest)
     assert {path: (files.directory(store.conn)/path).read_bytes() for path in paths} == before
-    assert store.enrichment_reports.metadata_provenance(track)['decisions'] == decisions
+    assert metadata_provenance(store, track)['decisions'] == decisions
 
 
 def test_restore_publishes_verified_copies_after_backup_changes(runtime_store, tmp_path, monkeypatch):
@@ -196,7 +195,7 @@ def test_restore_publishes_verified_copies_after_backup_changes(runtime_store, t
     with store.conn:
         catalog.choose_field(store.conn, track, 'bpm', None)
         catalog.choose_field(store.conn, track, 'bpm', '')
-    decisions = store.enrichment_reports.metadata_provenance(track)['decisions']
+    decisions = metadata_provenance(store, track)['decisions']
     with store.conn:
         store.conn.execute('BEGIN')
         manifest = files.export(store.conn, tmp_path/'backup')
@@ -219,7 +218,7 @@ def test_restore_publishes_verified_copies_after_backup_changes(runtime_store, t
     monkeypatch.setattr(fao, 'copy', replace_backup_before_publication)
     files.restore(store.conn, manifest)
     assert len(published) == len(paths)
-    assert store.enrichment_reports.metadata_provenance(track)['decisions'] == decisions
+    assert metadata_provenance(store, track)['decisions'] == decisions
     for path in paths:
         restored = fao.stat(root/path)
         assert restored.compressed
@@ -307,16 +306,20 @@ def test_expiry_collects_deleted_subjects_and_is_bounded(runtime_store):
     now = time.time()
     with store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
-        for revision in range(180):
-            files.publish(store.conn, 'alternatives', (recording, 999), float(now-revision), {'fields':{}})
+        # Cross the 128-entry traversal budget by one document. Publication is
+        # setup here; keep real durable writes while using the bounded batch API.
+        for start in (0, 128):
+            files.publish_many(store.conn, (
+                ('alternatives', (recording, 999), float(now-revision), {'fields':{}})
+                for revision in range(start, min(start+128, 129))))
     root = files.directory(store.conn)
     before = len(list(root.rglob('*.json')))
-    assert before == 180
+    assert before == 129
     # No SQL provider owns these files: failed publications/configuration changes
     # and deleted inputs must not leave expired alternatives indefinitely.
     with store.conn:
         removed = runtime.expire(store.conn, now=now+runtime.ALTERNATIVE_SECONDS+1)
-    assert 0 < removed < before
+    assert 0 < removed <= 128 < before
     for _ in range(4):
         with store.conn:
             runtime.expire(store.conn, now=now+runtime.ALTERNATIVE_SECONDS+1)
@@ -337,7 +340,7 @@ def test_relocation_restores_current_native_inputs_alternatives_and_conflicts(ru
     with store.conn:
         catalog.choose_field(store.conn, track, 'bpm', None)
         catalog.choose_field(store.conn, track, 'bpm', '')
-    decisions = store.enrichment_reports.metadata_provenance(track)['decisions']
+    decisions = metadata_provenance(store, track)['decisions']
     store.enrichment_state.record_enrichment_attempt('song|artist', 'b', {'genre': 'Rock'},
         now=now-runtime.ALTERNATIVE_SECONDS-1, video_id='video')
     with store.conn:
@@ -353,7 +356,7 @@ def test_relocation_restores_current_native_inputs_alternatives_and_conflicts(ru
         assert metadata_native.source_values(moved.conn, source) == native
         assert moved.enrichment_state.enrichment_provider_state(recording)['a']['fields'] == {'genre':'Jazz'}
         assert moved.enrichment_state.enrichment_provider_state(recording)['b']['fields'] == {}
-        assert moved.enrichment_reports.metadata_provenance(track)['decisions'] == decisions
+        assert metadata_provenance(moved, track)['decisions'] == decisions
         assert moved.enrichment.resolve_enrichment_candidate(track,'genre','Rock')
         assert moved.tracks.get_track_enrichment(track)[0] == 'Rock'
         row = moved.conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?',(source,)).fetchone()
@@ -421,23 +424,24 @@ def test_worker_retry_reopens_without_repeating_successful_providers(runtime_sto
 
 
 def test_recovery_and_compaction_include_derived_metadata_files(runtime_store, tmp_path):
-    from yt_playlist.core import policy_recovery, copy_compaction
+    from yt_playlist.core.db_rebuild import job
+    from tests import file_custody_support as custody
     store = runtime_store
     track, _ = entry(store)
     with store.conn:
         catalog.choose_field(store.conn, track, 'genre', 'Jazz')
     with store.conn:
         store.conn.execute('BEGIN')
-        manifests = policy_recovery._export_files(store.conn, tmp_path/'backup.db')
-        owned = copy_compaction._owned_files(store.conn)
+        manifests = custody.export_files(store.conn, tmp_path/'backup.db')
+        owned = job._owned_files(store.conn)
     assert 'runtime_metadata' in manifests
     assert owned['files'] >= 1
     restored = Store(tmp_path/'restored.db')
     try:
         store.conn.backup(restored.conn)
-        policy_recovery._restore_files(restored.conn, manifests)
+        custody.restore_files(restored.conn, manifests)
         restored.init_schema()
-        assert restored.enrichment_reports.metadata_provenance(track)['decisions'][0]['source'] == 'user'
+        assert metadata_provenance(restored, track)['decisions'][0]['source'] == 'user'
     finally:
         restored.conn.close()
 

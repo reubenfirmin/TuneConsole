@@ -7,15 +7,9 @@ choice evidence projection. Serving this view never starts provider or model wor
 import json
 import math
 
-from yt_playlist.core import vibe_versions
 from yt_playlist.providers import deepseek, enrichment, lastfm
 from yt_playlist.rec import (artist_start, festival_layout, growth_readiness, home_preferences, home_prepared, home_vibe, into_recently,
                              onboarding_outputs, tv, vibe_preparation)
-from yt_playlist.repos.enrichment_sql import pending_coverage
-
-_SCOPE = ("WITH scope AS (SELECT e.recording_id FROM catalog_entries e "
-          "JOIN library_memberships l ON l.entry_id=e.id UNION "
-          "SELECT recording_id FROM discovery_memberships) ")
 
 # Revisit is an early optional detour: a pool-only account may have nothing to
 # revisit yet. Its absence must never block the listening formats.
@@ -26,10 +20,11 @@ PARENTS = dict(zip(MAIN_PATH[1:], MAIN_PATH)) | {
 
 
 def _node(identity, label, *, ready=False, used=False, bonus=False, optional=False, started=False,
-          detail='', href='', x=0, y=0):
+          connected=False, detail='', href='', x=0, y=0):
     state = 'explored' if ready and used else 'ready' if ready else 'preparing' if started else 'untouched'
     return {'id': identity, 'label': label, 'ready': ready, 'usable': ready, 'used': used,
             'optional': optional or bonus, 'unlocked': False, 'state': state, 'bonus': bonus,
+            'connected': connected, 'upcoming': False,
             'status': ('Done' if bonus else 'Explored') if state == 'explored' else
                       'Ready to try' if state == 'ready' else
                       'Preparing' if state == 'preparing' else 'Not started',
@@ -46,6 +41,7 @@ def _connect_paths(nodes, *, resume=()):
         stop['unlocked'] = index <= historical or bool(previous and stop['usable'])
         stop['ready'] = bool(stop['unlocked'] and stop['usable'])
         frontier = previous and not stop['unlocked']
+        stop['upcoming'] = bool(frontier)
         stop['state'] = ('explored' if stop['ready'] and stop['used'] else 'ready' if stop['ready']
                          else 'preparing' if stop['unlocked'] or frontier and (identity != 'first' or stop['state'] == 'preparing')
                          else 'untouched')
@@ -80,9 +76,17 @@ def view(store, now, *, mixes_ready=None, albums_ready=None, radio=None, collect
         def read():
             return _view(reader, now, mixes_ready=mixes_ready, albums_ready=albums_ready,
                          radio=radio, collections=collections)
-        if mixes_ready is not None or albums_ready is not None or radio is not None or collections is not None:
-            return read()
-        return reader.memoized_read(('growth-journey', 2, int(now // 60)), read)
+        # Home already owns these prepared outputs. Include their effective
+        # inputs in the ordinary revision-guarded cache instead of disabling
+        # reuse whenever the caller supplies them. Radio eligibility resolves
+        # current metadata by video ID and verifies its offered identity.
+        radio_input = (None if radio is None else (
+            bool(radio.get('state', {}).get('active')), bool(radio.get('seedMenu')),
+            tuple((track.get('key'), track.get('video_id')) for track in radio.get('seeds') or [])))
+        collection_input = (None if collections is None else (
+            growth_readiness.discover(collections), growth_readiness.revisit(collections)))
+        return reader.memoized_read(('growth-journey', 3, int(now // 60),
+            mixes_ready, albums_ready, radio_input, collection_input), read)
 
 
 def radio_access(store, now, *, radio):
@@ -133,11 +137,63 @@ def retained_access(store, area):
 
 
 def vibe_access(store, now):
-    """Resolve a saved Vibe without rebuilding menus for already earned access."""
-    with store.read_view() as reader:
-        if reader.rec_proposals.choice_usage().get('vibe_episodes'):
-            return True
-        return has_access(view(reader, now), 'vibes')
+    """Evaluate the journey prefix without articles, bonuses or later outputs.
+
+    Historical use retains exactly the prefix in _connect_paths. Otherwise each
+    required predecessor must still have its ordinary usable output. The Vibes
+    stop also keeps its independent natural-mix and current-evidence conditions.
+    """
+    with home_vibe.natural(), store.read_view() as reader:
+        return reader.memoized_read(('vibe-access', 1, now), lambda: _vibe_access(reader, now))
+
+
+def _vibe_access(reader, now):
+    format_usage = reader.rec_proposals.choice_usage()
+    if format_usage.get('vibe_episodes'):
+        return True
+    usage = format_usage.get('episodes') or {}
+    resume = [identity for format, identity in
+              (('mixes', 'listening'), ('albums', 'albums'), ('radio', 'radio')) if usage.get(format)]
+    if tv.draw_number(reader) > 0:
+        resume.append('tv')
+    historical = max((MAIN_PATH.index(identity) for identity in resume), default=-1)
+    mixes = onboarding_outputs.prepared_mixes_ready(reader, now)
+    if not mixes:
+        return False
+    prefix = vibe_preparation.serving_prefix()
+    evidence = reader.readiness.has_vibe_evidence(prefix)
+    if not evidence or not growth_readiness.vibes(reader, now):
+        return False
+    for identity in MAIN_PATH[historical+1:MAIN_PATH.index('vibes')]:
+        if identity == 'first':
+            usable = (reader.readiness.playable_owned()
+                or onboarding_outputs.starter_album(reader) or artist_start.first_set(reader, now))
+        elif identity == 'foundation':
+            usable = growth_readiness.foundation(reader, now)
+        elif identity == 'albums':
+            usable = growth_readiness.albums(reader, now)
+        elif identity == 'discover':
+            prepared = reader.rec_proposals.get_proposals(home_prepared.SURFACE) or {}
+            usable = growth_readiness.discover(home_prepared.collections(reader, prepared, now))
+        elif identity == 'listening':
+            usable = mixes
+        elif identity == 'radio':
+            try:
+                radio = json.loads(reader.settings.get_setting('radio_seed_offer') or '{}')
+            except (ValueError, TypeError):
+                radio = {}
+            from yt_playlist.rec.radio_candidates import eligible_seeds
+            seeds = eligible_seeds(reader, radio.get('tracks') or radio.get('seeds') or [], now)
+            menu = radio.get('offer_id') or radio.get('menu_id')
+            usable = bool(menu and len({track['key'] for track in seeds}) >= growth_readiness.MIN_RADIO_SEEDS)
+            if usable and not usage.get('radio'):
+                total, processed = reader.readiness.coverage()
+                usable = bool(total and processed * 10 >= total * 9)
+        elif identity == 'tv':
+            usable = len(tv.queue(reader, now)) >= tv.QUEUE_SIZE
+        if not usable:
+            return False
+    return True
 
 
 def _view(store, now, *, mixes_ready=None, albums_ready=None, radio=None, collections=None,
@@ -145,10 +201,7 @@ def _view(store, now, *, mixes_ready=None, albums_ready=None, radio=None, collec
     with store.read_view() as reader:
         # Read queue subjects directly. Expanding every catalog metadata field on
         # this frequently polled surface makes large libraries needlessly slow.
-        coverage = reader.conn.execute(_SCOPE +
-            'SELECT COUNT(*),COALESCE(SUM(r.first_enriched_at IS NOT NULL AND NOT ' +
-            pending_coverage('r.id') + ') ,0) FROM scope s JOIN recordings r ON r.id=s.recording_id').fetchone()
-        total, processed = coverage
+        total, processed = reader.memoized_read(('growth-coverage', 1), reader.readiness.coverage)
         imported = reader.settings.get_setting('last_sync_at') is not None
         mixes = onboarding_outputs.prepared_mixes_ready(reader, now) if mixes_ready is None else mixes_ready
         albums = growth_readiness.albums(reader, now) if albums_ready is None else albums_ready
@@ -170,10 +223,9 @@ def _view(store, now, *, mixes_ready=None, albums_ready=None, radio=None, collec
         format_usage = reader.rec_proposals.choice_usage()
         usage = format_usage.get('episodes') or {}
         radio_ready = bool(radio_usable and (usage.get('radio') or total and processed * 10 >= total * 9))
-        has_starts = bool(reader.conn.execute(
-            "SELECT 1 FROM play_event_sources WHERE source='live' LIMIT 1").fetchone())
-        playable_owned = reader.conn.execute('SELECT 1 FROM playable_library_tracks WHERE '
-            + reader.rec_eligibility.track_length_clause() + ' LIMIT 1').fetchone()
+        history = reader.readiness.journey_history()
+        has_starts = history['live_starts']
+        playable_owned = reader.readiness.playable_owned()
         first_ready = bool(playable_owned
                            or onboarding_outputs.starter_album(reader) or artist_start.first_set(reader, now))
         # Read the same bounded, currently eligible outputs that each area serves.
@@ -189,39 +241,25 @@ def _view(store, now, *, mixes_ready=None, albums_ready=None, radio=None, collec
         recent_ready = (len(groups) >= growth_readiness.MIN_STORY_GROUPS
                         and all(any(card.get('songs') for card in group) for group in groups))
         tv_ready = not for_radio_access and len(tv.queue(reader, now)) >= tv.QUEUE_SIZE
-        takeout = reader.conn.execute(
-            "SELECT COUNT(DISTINCT e.id) FROM play_events e JOIN play_event_sources s ON s.event_id=e.id "
-            "WHERE s.source='takeout' AND e.played_at IS NOT NULL AND e.video_id IS NOT NULL").fetchone()[0]
-        takeout_started = bool(reader.conn.execute('SELECT 1 FROM takeout_imports LIMIT 1').fetchone())
-        lastfm_config = reader.conn.execute(
-            "SELECT status,fingerprint FROM enrichment_provider_config WHERE provider='lastfm'").fetchone()
+        takeout, takeout_started = history['takeout'], history['takeout_started']
+        lastfm_config = history['lastfm_config']
         current_lastfm = enrichment.provider_configuration(reader, {'lastfm': lastfm})['lastfm']
         lastfm_available = current_lastfm['status'] == 'available'
-        lastfm_done = reader.conn.execute(_SCOPE +
-            "SELECT COUNT(*) FROM scope s WHERE EXISTS (SELECT 1 FROM enrichment_provider_state p "
-            "WHERE p.recording_id=s.recording_id AND p.provider='lastfm' AND p.status IN ('found','no_match')) "
-            "AND NOT EXISTS (SELECT 1 FROM enrichment_provider_jobs j "
-            "WHERE j.recording_id=s.recording_id AND j.provider='lastfm')").fetchone()[0]
+        lastfm_done = history['lastfm_checked']
         lastfm_ready = bool(lastfm_available and total and lastfm_done * 10 >= total * 9
                             and lastfm_config and tuple(lastfm_config) == (
                                 current_lastfm['status'], current_lastfm['fingerprint'])
                             and not reader.enrichment_state.provider_refresh_pending('lastfm'))
         prefix = vibe_preparation.serving_prefix()
-        version = vibe_versions.expression(reader.conn, 'recording_vibes', 'v')
-        evidence = reader.conn.execute(_SCOPE +
-            "SELECT COUNT(DISTINCT CASE WHEN v.source IN ('audio_measurement','provider_measurement') "
-            "THEN v.recording_id END), COUNT(DISTINCT CASE WHEN v.source IN ('artist_genre','artist','genre') "
-            "THEN v.recording_id END) FROM recording_vibes v JOIN scope s ON s.recording_id=v.recording_id "
-            "WHERE v.support>0 AND substr(" + version + ",1,?)=? AND length(" + version + ")>?",
-            (len(prefix), prefix, len(prefix))).fetchone()
-        measured, predicted = evidence
+        measured, predicted = reader.memoized_read(('growth-vibe-evidence', prefix),
+                                                  lambda: reader.readiness.vibe_evidence(prefix))
         vibes_ready = bool(not for_radio_access and measured + predicted and mixes
                            and growth_readiness.vibes(reader, now))
         deep = deepseek.settings(reader, now)
         descriptions, descriptions_pending = reader.album_descriptions.summary()
-        explicit_home = reader.settings.get_setting('home_format') in {*home_preferences.PANELS, 'both', 'auto'}
-        created = reader.conn.execute(
-            "SELECT COUNT(DISTINCT playlist_scope_id) FROM playlists WHERE created_at_source='local'").fetchone()[0]
+        home_choice = reader.settings.get_setting('home_format')
+        explicit_home = home_choice in {*home_preferences.PANELS, 'both', 'auto'}
+        created = history['created_playlists']
         likes = len(reader.rec_model.recent_liked_keys())
         achievements = [
             {'id': 'playlist', 'label': 'Make it yours', 'count': created, 'goal': 1,
@@ -282,7 +320,8 @@ def _view(store, now, *, mixes_ready=None, albums_ready=None, radio=None, collec
               started=takeout_started, detail=f'{takeout:,} past listens imported' if takeout else 'Import past YouTube Music listening from Google Takeout.',
               href='/setup?tab=import', x=54, y=79),
         _node('lastfm', 'Richer music details', ready=lastfm_ready, used=lastfm_ready, bonus=True,
-              started=lastfm_available, detail=(f'{lastfm_done:,} of {total:,} songs checked' if lastfm_available else
+              started=lastfm_available, connected=lastfm_available,
+              detail=(f'{lastfm_done:,} of {total:,} songs checked' if lastfm_available else
               'Look up song and artist genre information with Last.fm.'), href='/setup?tab=enrichment', x=71, y=61),
         _node('deepseek', 'Stories behind the records', ready=bool(descriptions), used=bool(descriptions), bonus=True,
               started=deep['configured'] and deep['enabled'], detail=(f'{descriptions:,} album descriptions' if descriptions else
@@ -313,6 +352,7 @@ def _view(store, now, *, mixes_ready=None, albums_ready=None, radio=None, collec
             'label': 'Preparing your music' if processed < total else 'Ready to keep growing' if total else 'Waiting for music',
             'measured': measured, 'predicted': predicted},
             'home_choice_available': bool(mixes and albums and radio_ready and not explicit_home),
+            'home_choice': home_choice,
             'ready_formats': {'mixes': mixes, 'albums': albums, 'radio': radio_ready},
             'ready_areas': {'directions': mixes, 'album-choices': albums, 'radio': radio_ready,
                             'tv': stops['tv']['ready'], 'discover': stops['discover']['ready'],

@@ -24,13 +24,23 @@ def bundle(label='one'):
 
 
 @pytest.fixture
-def predecessor(tmp_path):
+def predecessor(tmp_path, _pristine_installed_schema, record_property):
+    import time
+
     store = Store(tmp_path / 'listening.db')
-    store.conn.execute('PRAGMA journal_mode=WAL')
-    migrate(store.conn, registry=registry.MIGRATIONS[:89])
-    store._bind_repositories()
-    yield store
-    store.conn.close()
+    try:
+        began = time.perf_counter()
+        template = _pristine_installed_schema(89)
+        record_property('legacy_prefix_seconds', time.perf_counter() - began)
+        began = time.perf_counter()
+        template.backup(store.conn)
+        store.conn.execute('PRAGMA journal_mode=WAL')
+        store._bind_repositories()
+        assert store.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 89
+        record_property('legacy_clone_seconds', time.perf_counter() - began)
+        yield store
+    finally:
+        store.conn.close()
 
 
 def cutover(store):

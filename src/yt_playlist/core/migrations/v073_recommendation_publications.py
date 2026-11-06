@@ -346,11 +346,13 @@ def apply(conn, context):
         conn.execute(f'DROP TABLE {table}')
 
 
-def validate(conn):
+def validate(conn, *, replaced=frozenset()):
     from .current import _tokens
     for sql in statements():
         words = sql.split()
         name = words[3] if words[1] == 'UNIQUE' else words[2]
+        if name in replaced:
+            continue
         actual = conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone()
         if actual is None or _tokens(actual[0]) != _tokens(sql):
             raise MigrationError(f'Incompatible recommendation publication structure: {name}')

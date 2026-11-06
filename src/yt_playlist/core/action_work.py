@@ -461,8 +461,3 @@ def require_claim(conn,target_id,token):
     if not conn.execute('SELECT 1 FROM action_target_claims WHERE action_target_id=? AND claim_token=?',
                         (target_id,token)).fetchone():
         raise ValueError('Action target completion belongs to a stale worker')
-
-
-def release_claim(conn,target_id,token):
-    require_claim(conn,target_id,token)
-    conn.execute('DELETE FROM action_target_claims WHERE action_target_id=? AND claim_token=?',(target_id,token))

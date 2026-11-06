@@ -5,13 +5,12 @@ rows belong to rec_ledger and must participate in that same outer transaction.
 """
 import json
 import uuid
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 
-from yt_playlist.core import (album_note_outputs, album_note_requests, choice_learning_state, home_offers,
-                              home_outputs, json_cache, library_pool_state, listening_outputs, model_comparison_state, model_projections, recommendation_reports,
-                              recommendation_requests, recommendation_work, tv_recommendation_state)
+from yt_playlist.core import (album_note_outputs, album_note_requests, choice_learning_state, home_outputs,
+                              json_cache, recommendation_reports, tv_recommendation_state)
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
-from yt_playlist.repos import proposal_cache
+from yt_playlist.repos import proposal_cache, proposal_storage
 
 
 def encode_proposals(surface, value):
@@ -22,6 +21,23 @@ def encode_proposals(surface, value):
 
 
 class RecProposalsRepo(Repo):
+    @contextmanager
+    def verified_home_reads(self):
+        """Reuse verified bytes only while composing one pinned Home response.
+
+        A following request must reopen the physical files, even when SQL has
+        not changed. Immutable strings can be shared here; decoded callers still
+        own their detached mutable results.
+        """
+        if not getattr(self._store, '_read_only', False):
+            raise ValueError('Verified Home reads require a pinned read-only store')
+        previous = getattr(self, '_verified_home_reads', None)
+        self._verified_home_reads = previous if previous is not None else {}
+        try:
+            yield
+        finally:
+            self._verified_home_reads = previous
+
     @snapshot_read
     def tv_artwork_observation(self, key):
         """Capture the request and result revisions before optional provider I/O."""
@@ -363,59 +379,7 @@ class RecProposalsRepo(Repo):
     @synchronized
     def publish_prepared_home(self, payload, now, *, surface="home_prepared", input_revision=None) -> None:
         """Publish pre-encoded Home output; the snapshot publisher owns the transaction."""
-        if self._store._model_projections and surface.startswith('model_pair:'):
-            prepared = model_projections.prepare(self.conn, surface, json.loads(payload), now, input_revision=input_revision)
-            model_projections.publish(self.conn, prepared, store=self._store)
-            return
-        if self._store._model_comparison_state and surface in model_comparison_state.SURFACES:
-            model_comparison_state.write(self.conn, surface, model_comparison_state.decode(surface, payload), now)
-            return
-        if self._store._clicked_library_pools and surface in library_pool_state.SURFACES:
-            library_pool_state.write(self.conn, surface, library_pool_state.decode(surface, payload), now)
-            return
-        if self._store._tv_recommendations and surface in tv_recommendation_state.SURFACES:
-            tv_recommendation_state.write(self.conn, surface, tv_recommendation_state.decode(surface, payload), now)
-            return
-        if self._store._choice_learning and surface in choice_learning_state.SURFACES:
-            choice_learning_state.write(self.conn, surface, choice_learning_state.decode(surface, payload), now)
-            return
-        if self._store._recommendation_reports and surface in recommendation_reports.SURFACES:
-            recommendation_reports.publish(self.conn, recommendation_reports.prepare(surface, payload, now))
-            return
-        if self._store._home_display_files and surface in home_outputs.SURFACES:
-            prepared = payload if isinstance(payload, home_outputs.Prepared) else home_outputs.prepare(surface, payload, now)
-            if prepared.surface != surface or prepared.built_at != now:
-                raise ValueError('Prepared Home surface or observation time does not match')
-            home_outputs.publish(self.conn, prepared, store=self._store,
-                                 input_revision=input_revision)
-            return
-        if self._store._listening_files and listening_outputs.owns(surface):
-            listening_outputs.publish_document(self.conn, surface, payload, now)
-            return
-        if self._store._recommendation_requests and surface in recommendation_requests.SURFACES:
-            recommendation_requests.write(self.conn, surface, json.loads(payload), now)
-            return
-        if self._store._album_note_demand and surface == 'album_notes':
-            album_note_outputs.replace(self.conn, json.loads(payload), now)
-            return
-        if self._store._album_note_demand and surface == 'album_note_requests':
-            album_note_requests.replace(self.conn, json.loads(payload), now)
-            return
-        if surface == 'home_shown' and home_offers.available(self.conn):
-            home_offers.replace(self.conn, json.loads(payload), now)
-            return
-        if surface in recommendation_work.SURFACES and recommendation_work.available(self.conn):
-            recommendation_work.write(self.conn, surface, json.loads(payload), now)
-            return
-        if getattr(self._store, '_compact_group_files', False):
-            from yt_playlist.core import prepared_references
-            value = (home_outputs.prepare(surface, payload, now).value if surface in home_outputs.SURFACES
-                     else json.loads(payload))
-            prepared_references.replace_prepared(self._store, surface, value, now)
-        self.conn.execute(
-            "INSERT INTO rec_proposals(surface,payload,built_at) VALUES (?,?,?) "
-            "ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload,built_at=excluded.built_at",
-            (surface, payload, now))
+        proposal_storage.publish(self._store, surface, payload, now, input_revision=input_revision)
 
     @synchronized
     def remember_home(self, payload, held_choice, now) -> None:
@@ -432,79 +396,7 @@ class RecProposalsRepo(Repo):
     @synchronized
     def _put_proposals_json(self, surface, encoded, now):
         with self.conn:
-            if self._store._model_projections and surface.startswith('model_pair:'):
-                prepared = model_projections.prepare(self.conn, surface, json.loads(encoded), now)
-                if not self.conn.in_transaction:
-                    self.conn.execute('BEGIN IMMEDIATE')
-                model_projections.publish(self.conn, prepared, store=self._store)
-                return
-            if self._store._model_comparison_state and surface in model_comparison_state.SURFACES:
-                if not self.conn.in_transaction:
-                    self.conn.execute('BEGIN IMMEDIATE')
-                model_comparison_state.write(self.conn, surface, model_comparison_state.decode(surface, encoded), now)
-                return
-            if self._store._clicked_library_pools and surface in library_pool_state.SURFACES:
-                if not self.conn.in_transaction:
-                    self.conn.execute('BEGIN IMMEDIATE')
-                library_pool_state.write(self.conn, surface, library_pool_state.decode(surface, encoded), now)
-                return
-            if self._store._tv_recommendations and surface in tv_recommendation_state.SURFACES:
-                if not self.conn.in_transaction:
-                    self.conn.execute('BEGIN IMMEDIATE')
-                tv_recommendation_state.write(self.conn, surface, tv_recommendation_state.decode(surface, encoded), now)
-                return
-            if self._store._choice_learning and surface in choice_learning_state.SURFACES:
-                if not self.conn.in_transaction:
-                    self.conn.execute('BEGIN IMMEDIATE')
-                choice_learning_state.write(self.conn, surface, choice_learning_state.decode(surface, encoded), now)
-                return
-            if self._store._recommendation_reports and surface in recommendation_reports.SURFACES:
-                if not self.conn.in_transaction:
-                    self.conn.execute('BEGIN IMMEDIATE')
-                recommendation_reports.publish(self.conn, recommendation_reports.prepare(surface, encoded, now))
-                return
-            if self._store._home_display_files and surface in home_outputs.SURFACES:
-                if not self.conn.in_transaction:
-                    self.conn.execute('BEGIN IMMEDIATE')
-                home_outputs.publish(self.conn, home_outputs.prepare(surface, encoded, now), store=self._store)
-                return
-            if self._store._listening_files and listening_outputs.owns(surface):
-                if not self.conn.in_transaction:
-                    self.conn.execute('BEGIN IMMEDIATE')
-                listening_outputs.publish_document(self.conn, surface, encoded, now)
-                return
-            if self._store._recommendation_requests and surface in recommendation_requests.SURFACES:
-                if not self.conn.in_transaction:
-                    self.conn.execute('BEGIN IMMEDIATE')
-                recommendation_requests.write(self.conn, surface, json.loads(encoded), now)
-                return
-            if self._store._album_note_demand and surface == 'album_notes':
-                if not self.conn.in_transaction:
-                    self.conn.execute('BEGIN IMMEDIATE')
-                album_note_outputs.replace(self.conn, json.loads(encoded), now)
-                return
-            if self._store._album_note_demand and surface == 'album_note_requests':
-                if not self.conn.in_transaction:
-                    self.conn.execute('BEGIN IMMEDIATE')
-                album_note_requests.replace(self.conn, json.loads(encoded), now)
-                return
-            if surface == 'home_shown' and home_offers.available(self.conn):
-                if not self.conn.in_transaction:
-                    self.conn.execute('BEGIN IMMEDIATE')
-                home_offers.replace(self.conn, json.loads(encoded), now)
-                return
-            if surface in recommendation_work.SURFACES and recommendation_work.available(self.conn):
-                recommendation_work.write(self.conn, surface, json.loads(encoded), now)
-                return
-            if getattr(self._store, '_compact_group_files', False):
-                from yt_playlist.core import prepared_references
-                if not self.conn.in_transaction:
-                    self.conn.execute('BEGIN IMMEDIATE')
-                prepared_references.replace_prepared(self._store, surface, json.loads(encoded), now)
-            self.conn.execute(
-                "INSERT INTO rec_proposals(surface, payload, built_at) VALUES (?,?,?) "
-                "ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload, built_at=excluded.built_at",
-                (surface, encoded, now))
+            proposal_storage.publish(self._store, surface, encoded, now, standalone=True)
 
     def get_proposals(self, surface):
         """Last materialized proposals for a surface, or None if never built."""
@@ -516,6 +408,15 @@ class RecProposalsRepo(Repo):
         """Read a small prepared header without restoring unrelated song profiles."""
         payload = self._proposal_json(surface)
         return json_cache.decode(payload, keys=set(fields)) if payload is not None else None
+
+    @snapshot_read
+    def choice_refresh_inputs(self):
+        """Read current choice identities and decay evidence through their installed owner."""
+        surfaces = ('choice_interests', 'choice_bandit')
+        if self._store._choice_learning:
+            return tuple(choice_learning_state.refresh_input(self.conn, surface, store=self._store) or {}
+                         for surface in surfaces)
+        return tuple(self.get_proposals(surface) or {} for surface in surfaces)
 
     def fresh_candidates(self):
         """Project the existing ranked Fresh inputs before restoring musical profiles."""
@@ -530,177 +431,27 @@ class RecProposalsRepo(Repo):
     @snapshot_read
     def has_proposals(self, surface):
         """Check dependency presence without reading or decoding a large display pool."""
-        from yt_playlist.core.db_revisions import keyed_reads
-
-        if surface in home_outputs.SURFACES:
-            from yt_playlist.core.preparation import home_publication
-            with keyed_reads(self._store, 'rec_proposals', (surface,)):
-                handled, header = home_publication.header(self.conn, surface)
-                if handled:
-                    return header is not None and bool(header['has_content'])
-        if listening_outputs.owns(surface):
-            from yt_playlist.core.preparation import listening_publication
-            with keyed_reads(self._store, 'rec_proposals', (surface,)):
-                handled, encoded = listening_publication.read(self.conn, surface)
-                if handled:
-                    return encoded is not None
-        if surface == 'album_notes':
-            from yt_playlist.core.preparation import album_note_publication
-            with keyed_reads(self._store, 'rec_proposals', (surface,)):
-                revision = album_note_publication.selected(self.conn)
-                if revision is not None:
-                    return self.conn.execute('SELECT 1 FROM '+album_note_publication.preparation.FILES+
-                        ' WHERE generation=? LIMIT 1', (revision,)).fetchone() is not None
-        if self._store._model_projections and surface.startswith('model_pair:'):
-            run, arm, format = model_projections.address(surface)
-            return self.conn.execute('SELECT 1 FROM model_pair_heads WHERE run_id=? AND arm=? AND format=?',
-                                     (run, arm, format)).fetchone() is not None
-        if self._store._model_comparison_state and surface in model_comparison_state.SURFACES:
-            return bool(model_comparison_state.read(self.conn, surface))
-        if self._store._clicked_library_pools and surface in library_pool_state.SURFACES:
-            return library_pool_state.read_parameters(self.conn, surface) is not None
-        if self._store._tv_recommendations and surface in tv_recommendation_state.SURFACES:
-            return bool(tv_recommendation_state.read(self.conn, surface))
-        if self._store._choice_learning and surface in choice_learning_state.SURFACES:
-            return choice_learning_state.present(self.conn, surface, store=self._store)
-        if surface in choice_learning_state.SURFACES:
-            from yt_playlist.core.preparation import choice_publication
-            if choice_publication.selected(self.conn) is not None:
-                return bool(choice_publication.read(self.conn, surface))
-        if surface in recommendation_reports.SURFACES and (self._store._recommendation_reports or recommendation_reports.prepared_owner(self.conn)):
-            return recommendation_reports.present(self.conn, surface)
-        if self._store._home_display_files and surface in home_outputs.SURFACES:
-            return home_outputs.present(self.conn, surface)
-        if self._store._listening_files and listening_outputs.owns(surface):
-            return listening_outputs.encoded(self.conn, surface) is not None
-        if self._store._recommendation_requests and surface in recommendation_requests.SURFACES:
-            return bool(recommendation_requests.read(self.conn, surface))
-        if surface in recommendation_requests.SURFACES:
-            from yt_playlist.core.preparation import demand_publication
-            identity = demand_publication.selected(self.conn)
-            if identity is not None:
-                return bool(demand_publication.read(self.conn, surface, identity))
-        if self._store._album_note_demand and surface == 'album_notes':
-            return self.conn.execute('SELECT 1 FROM album_note_outputs LIMIT 1').fetchone() is not None
-        if self._store._album_note_demand and surface == 'album_note_requests':
-            return self.conn.execute('SELECT 1 FROM album_note_requests LIMIT 1').fetchone() is not None
-        if surface == 'home_shown' and home_offers.available(self.conn):
-            return home_offers.read(self.conn) is not None
-        if surface in recommendation_work.SURFACES and recommendation_work.available(self.conn):
-            return recommendation_work.read(self.conn, surface) is not None
-        if getattr(self._store, '_recommendation_files', False) and surface in ('mode_bundles', 'fresh_pool'):
-            return self._store.recommendations.head('home' if surface == 'mode_bundles' else 'fresh') is not None
-        if surface in proposal_cache.SURFACES:
-            build = proposal_cache.head(self.conn, surface, store=self._store)
-            if build is not None:
-                return bool(build[3])
-        with keyed_reads(self._store, 'rec_proposals', (surface,)):
-            return self.conn.execute(
-                "SELECT 1 FROM rec_proposals WHERE surface=? AND payload NOT IN ('null','{}')",
-                (surface,)).fetchone() is not None
+        return proposal_storage.read(self._store, surface, presence=True)
 
     @snapshot_read
     def _proposal_json(self, surface):
-        from yt_playlist.core.db_revisions import keyed_reads
-
-        if surface in home_outputs.SURFACES:
-            from yt_playlist.core.preparation import home_publication
-            with keyed_reads(self._store, 'rec_proposals', (surface,)):
-                handled, encoded = home_publication.read(self.conn, surface)
-                if handled:
-                    return encoded
-        if listening_outputs.owns(surface):
-            from yt_playlist.core.preparation import listening_publication
-            with keyed_reads(self._store, 'rec_proposals', (surface,)):
-                handled, encoded = listening_publication.read(self.conn, surface)
-                if handled:
-                    return encoded
-        if surface == 'album_notes':
-            from yt_playlist.core.preparation import album_note_publication
-            with keyed_reads(self._store, 'rec_proposals', (surface,)):
-                handled, encoded = album_note_publication.read(self.conn)
-                if handled:
-                    return encoded
-        if surface in tv_recommendation_state.SURFACES:
-            from yt_playlist.core.preparation import tv_publication
-            owner = tv_publication.SOURCES[surface]
-            with keyed_reads(self._store, 'rec_proposals', (surface,)):
-                revision = owner.selected(self.conn)
-                if revision is not None:
-                    return owner.value(self.conn,revision)
-        if surface in library_pool_state.SURFACES:
-            from yt_playlist.core.preparation.clicked_publication import OWNER
-            with keyed_reads(self._store, 'rec_proposals', (surface,)):
-                revision = OWNER.selected(self.conn)
-                if revision is not None:
-                    return OWNER.value(self.conn, revision, surface)
-        if surface in model_comparison_state.SURFACES:
-            from yt_playlist.core.preparation import trial_publication
-            owner = trial_publication.SOURCES[surface]
-            with keyed_reads(self._store, 'rec_proposals', (surface,)):
-                revision = owner.selected(self.conn)
-                if revision is not None:
-                    return owner.value(self.conn, revision)
-        if surface.startswith('model_pair:'):
-            from yt_playlist.core.preparation.pair_publication import OWNER
-            with keyed_reads(self._store, 'rec_proposals', (surface,)):
-                revision = OWNER.selected(self.conn)
-                if revision is not None:
-                    return OWNER.value(self.conn, revision, surface)
-        if self._store._model_projections and surface.startswith('model_pair:'):
-            value = model_projections.read(self.conn, surface)
-            return json.dumps(value) if value is not None else None
-        if self._store._model_comparison_state and surface in model_comparison_state.SURFACES:
-            value = model_comparison_state.read(self.conn, surface)
-            return json.dumps(value) if value is not None else None
-        if self._store._clicked_library_pools and surface in library_pool_state.SURFACES:
-            value = library_pool_state.read(self._store, surface)
-            return json.dumps(value) if value is not None else None
-        if self._store._tv_recommendations and surface in tv_recommendation_state.SURFACES:
-            value = tv_recommendation_state.read(self.conn, surface)
-            return json.dumps(value) if value is not None else None
-        if self._store._choice_learning and surface in choice_learning_state.SURFACES:
-            value = choice_learning_state.read(self.conn, surface, store=self._store)
-            return json.dumps(value) if value is not None else None
-        if surface in choice_learning_state.SURFACES:
-            from yt_playlist.core.preparation import choice_publication
-            if choice_publication.selected(self.conn) is not None:
-                value = choice_publication.read(self.conn, surface)
-                return json.dumps(value) if value is not None else None
-        if surface in recommendation_reports.SURFACES and (self._store._recommendation_reports or recommendation_reports.prepared_owner(self.conn)):
-            return recommendation_reports.encoded(self.conn, surface)
-        if self._store._home_display_files and surface in home_outputs.SURFACES:
-            return home_outputs.encoded(self.conn, surface)
-        if self._store._listening_files and listening_outputs.owns(surface):
-            return listening_outputs.encoded(self.conn, surface)
-        if self._store._recommendation_requests and surface in recommendation_requests.SURFACES:
-            value = recommendation_requests.read(self.conn, surface)
-            return json.dumps(value) if value is not None else None
-        if surface in recommendation_requests.SURFACES:
-            from yt_playlist.core.preparation import demand_publication
-            identity = demand_publication.selected(self.conn)
-            if identity is not None:
-                value = demand_publication.read(self.conn, surface, identity)
-                return json.dumps(value) if value is not None else None
-        if self._store._album_note_demand and surface == 'album_notes':
-            value = album_note_outputs.read(self.conn)
-            return json.dumps(value) if value is not None else None
-        if self._store._album_note_demand and surface == 'album_note_requests':
-            return json.dumps(album_note_requests.read(self.conn))
-        if surface == 'home_shown' and home_offers.available(self.conn):
-            value = home_offers.read(self.conn)
-            return json.dumps(value) if value is not None else None
-        if surface in recommendation_work.SURFACES and recommendation_work.available(self.conn):
-            value = recommendation_work.read(self.conn, surface)
-            return json.dumps(value) if value is not None else None
-        if surface in proposal_cache.SURFACES:
-            encoded = proposal_cache.read(self.conn, surface, store=self._store)
-            if encoded is not None:
-                return encoded
-        with keyed_reads(self._store, "rec_proposals", (surface,)):
-            row = self.conn.execute(
-                "SELECT payload FROM rec_proposals WHERE surface=?", (surface,)).fetchone()
-        return row["payload"] if row else None
+        cache = getattr(self, '_verified_home_reads', None)
+        if cache is None or surface not in home_outputs.SURFACES:
+            return proposal_storage.read(self._store, surface)
+        reads = getattr(self._store, '_snapshot_reads', None)
+        if surface in cache:
+            encoded, dependencies, _ = cache[surface]
+            if reads is not None:
+                reads.include(dependencies)
+            return encoded
+        with reads.capture() if reads is not None else nullcontext(set()) as dependencies:
+            encoded = proposal_storage.read(self._store, surface)
+        # Home documents already have an individual limit. Keep this extra
+        # response-local reuse bounded across all surfaces as well.
+        size = len((encoded or '').encode('utf-8'))
+        if sum(entry[2] for entry in cache.values()) + size <= home_outputs.MAX_BYTES:
+            cache[surface] = encoded, frozenset(dependencies), size
+        return encoded
 
     @snapshot_read
     def choice_usage(self):

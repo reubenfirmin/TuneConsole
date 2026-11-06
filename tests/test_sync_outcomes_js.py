@@ -16,7 +16,8 @@ def _evaluate(function, argument=None):
     runner = """
         const fs = require('node:fs'), vm = require('node:vm');
         const input = JSON.parse(fs.readFileSync(0, 'utf8'));
-        const context = vm.createContext({setTimeout, clearTimeout, setInterval, clearInterval, console});
+        const context = vm.createContext({setTimeout, clearTimeout, setInterval, clearInterval, console,
+            AbortController, addEventListener() {}, removeEventListener() {}});
         vm.runInContext('window = globalThis', context);
         vm.runInContext(fs.readFileSync(input.source, 'utf8'), context, {filename: input.source});
         context.argument = input.argument;

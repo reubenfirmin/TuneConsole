@@ -22,11 +22,12 @@ def test_artist_svd_basis_is_independent_of_the_track_model_configuration():
 
 
 @pytest.fixture
-def predecessor(tmp_path):
+def predecessor(tmp_path, request, _pristine_installed_schema):
     conn = sqlite3.connect(tmp_path / 'embeddings.db')
+    request.addfinalizer(conn.close)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys=ON')
-    migrate(conn, registry=registry.MIGRATIONS[:67])
+    _pristine_installed_schema(67).backup(conn)
     with conn:
         conn.executemany('INSERT INTO recordings(id,identity_key) VALUES (?,?)', [(1, 'one'), (2, 'two')])
         conn.executemany('INSERT INTO artists(id,name,provisional) VALUES (?,?,?)',
@@ -40,7 +41,6 @@ def predecessor(tmp_path):
             conn.executemany(f'INSERT INTO {source} VALUES (?,?)',
                              [(key, struct.pack('ff', i + 1, .5)) for i, key in enumerate(keys)])
     yield conn
-    conn.close()
 
 
 def upgrade(conn):

@@ -1,10 +1,14 @@
 """Time SQLite work separately from the serving lock, without logging SQL or values."""
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import hashlib
+from itertools import islice
+import json
 import logging
+import os
 from pathlib import Path
 import sqlite3
 import sys
+import tempfile
 from time import monotonic, thread_time
 
 from yt_playlist.core.work_diagnostics import current_phase
@@ -21,7 +25,7 @@ SLOW_SQL_SECONDS = .25
 def _site():
     frame = sys._getframe(1)
     try:
-        while frame and frame.f_code.co_filename == __file__:
+        while frame and frame.f_globals.get('__name__') in {__name__, HandleConnection.__module__}:
             frame = frame.f_back
         return f"{Path(frame.f_code.co_filename).name}:{frame.f_lineno}" if frame else "unknown"
     finally:
@@ -37,6 +41,67 @@ def _warn_sql(sql, elapsed, stage, error):
     logger.warning("Slow SQL: operation=%s phase=%s elapsed=%.3fs stage=%s outcome=%s "
                    "statement=%s sql_id=%s site=%s", _operation.get(), current_phase(), elapsed,
                    stage, _outcome(error), verb, hashlib.sha256(sql.encode()).hexdigest()[:12], _site())
+
+
+def _warn_storage(conn, error, stage):
+    code = getattr(error, 'sqlite_errorcode', 0)
+    if code & 255 not in (sqlite3.SQLITE_FULL, sqlite3.SQLITE_IOERR):
+        return
+    try:
+        detail = _storage_detail(conn, error, stage)
+    except Exception as diagnostic_error:
+        # Diagnostics must preserve the original storage error even when
+        # resolving a temporary directory or inspecting capacity also fails.
+        detail = dict(pid=os.getpid(), code=code, stage=stage,
+                      diagnostic_error=type(diagnostic_error).__name__)
+    logger.warning('SQLite storage failure: %s', json.dumps(detail, sort_keys=True))
+
+
+def _storage_detail(conn, error, stage):
+    code = error.sqlite_errorcode
+    detail = dict(pid=os.getpid(), code=code, name=getattr(error, 'sqlite_errorname', ''),
+                  stage=stage, operation=_operation.get(), phase=current_phase(), site=_site())
+    paths = {'system_temp': '/tmp', 'cwd': os.getcwd(), 'python_temp': tempfile.gettempdir()}
+    paths.update({key: os.environ[key] for key in ('TMPDIR', 'SQLITE_TMPDIR') if key in os.environ})
+    try:
+        # Bypass the diagnostic cursors to avoid recursive error reporting.
+        # The connection mutex also protects against another serving thread.
+        with conn._sqlite_lock:
+            with closing(sqlite3.Connection.execute(conn, 'PRAGMA database_list')) as cursor:
+                detail['databases'] = [tuple(row) for row in cursor]
+            detail['limits'] = {}
+            for name in ('page_size', 'page_count', 'max_page_count', 'temp_store', 'journal_mode'):
+                with closing(sqlite3.Connection.execute(conn, 'PRAGMA main.' + name)) as cursor:
+                    detail['limits'][name] = cursor.fetchone()[0]
+        for _, schema, path in detail['databases']:
+            if path:
+                paths['database_' + schema] = str(Path(path).parent)
+    except Exception as diagnostic_error:
+        detail['sqlite_probe_error'] = type(diagnostic_error).__name__
+    detail['filesystems'] = {}
+    for name, path in paths.items():
+        try:
+            usage = os.statvfs(path)
+            detail['filesystems'][name] = dict(path=path, device=os.stat(path).st_dev,
+                available_bytes=usage.f_bavail * usage.f_frsize, available_inodes=usage.f_favail)
+        except (OSError, AttributeError) as diagnostic_error:
+            detail['filesystems'][name] = dict(path=path, error=type(diagnostic_error).__name__)
+    # SQLite immediately unlinks its temporary files. A directory-size scan
+    # misses them; inspect a bounded number of this process's own descriptors.
+    detail['sqlite_temporary_files'] = []
+    try:
+        for descriptor in islice(Path('/proc/self/fd').iterdir(), 256):
+            try:
+                target = str(descriptor.readlink())
+                if 'etilqs_' in target:
+                    info = descriptor.stat()
+                    detail['sqlite_temporary_files'].append(dict(
+                        path=target, bytes=info.st_size, allocated_bytes=info.st_blocks * 512))
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return detail
 
 
 class PublicationTimings:
@@ -90,6 +155,7 @@ class DiagnosticCursor(HandleCursor):
             raise
         except BaseException as exc:
             error = exc
+            _warn_storage(self.connection, exc, stage)
             if (getattr(exc, 'sqlite_errorcode', 0) & 255 == sqlite3.SQLITE_READONLY
                     and getattr(self.connection, '_storage_compacting', False)):
                 from yt_playlist.core.db_space import StorageCompacting
@@ -98,10 +164,14 @@ class DiagnosticCursor(HandleCursor):
             raise
         finally:
             # Sum only time inside SQLite, excluding Python work between fetches.
-            self._elapsed += monotonic() - started
-            if self._elapsed >= SLOW_SQL_SECONDS and (not self._reported or error is not None):
-                self._reported = True
-                _warn_sql(self._sql, self._elapsed, stage, error)
+            try:
+                self._elapsed += monotonic() - started
+                if self._elapsed >= SLOW_SQL_SECONDS and (not self._reported or error is not None):
+                    self._reported = True
+                    _warn_sql(self._sql, self._elapsed, stage, error)
+            finally:
+                # Do not create an exception/frame/cursor cycle of our own.
+                error = None
 
     def execute(self, sql, parameters=()):
         self._start(sql)
@@ -183,15 +253,15 @@ class DiagnosticConnection(HandleConnection):
         return super().cursor(factory)
 
     def execute(self, sql, parameters=()):
-        return self.cursor().execute(sql, parameters)
+        return super().execute(sql, parameters)
 
     def executemany(self, sql, parameters):
-        return self.cursor().executemany(sql, parameters)
+        return super().executemany(sql, parameters)
 
     def executescript(self, sql):
         if getattr(self, '_atomic_unit', False):
             raise RuntimeError('Scripts cannot implicitly commit an atomic unit')
-        return self.cursor().executescript(sql)
+        return super().executescript(sql)
 
     def _finish(self, sql, target, *args):
         started = monotonic()
@@ -200,6 +270,7 @@ class DiagnosticConnection(HandleConnection):
             return target(*args)
         except BaseException as exc:
             error = exc
+            _warn_storage(self, exc, 'transaction')
             raise
         finally:
             elapsed = monotonic() - started

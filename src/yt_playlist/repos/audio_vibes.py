@@ -41,6 +41,12 @@ class AudioVibesRepo(Repo):
                               (run_id, video_id, title, artist, now))
 
     @synchronized
+    def sample_receipts(self, run_id):
+        """Acknowledge published identities without loading their evidence payloads."""
+        return [dict(row) for row in self.conn.execute(
+            'SELECT id,point FROM sample_attributes WHERE run_id=? ORDER BY captured_at,id', (run_id,))]
+
+    @synchronized
     def samples(self, run_id):
         result = []
         for row in self.conn.execute('SELECT id,run_id,point,video_id,filename FROM sample_attributes '
@@ -155,6 +161,11 @@ class AudioVibesRepo(Repo):
                                                 taxonomy_version=taxonomy_version)
             state = ('labeled' if vibes else 'withdrawn'
                      if previous and previous['state'] in ('labeled', 'withdrawn') else 'empty')
+            if previous and previous['state'] == state:
+                current = audio_annotations.read(self.conn, previous)
+                if (current['sample_ids'] == list(sample_ids) and current['vibes'] == list(vibes)
+                        and current['prediction'] == prediction):
+                    return  # A lost HTTP acknowledgement must not add another revision.
             audio_annotations.save(self.conn, run_id, sample_ids, vibes, taxonomy_version, prediction, now,
                                    state=state, memory_key=self._store._evidence_key)
 

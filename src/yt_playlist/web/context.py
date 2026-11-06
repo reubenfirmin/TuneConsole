@@ -8,7 +8,6 @@ six arguments through every module.
 """
 from __future__ import annotations
 
-import json
 import logging
 import threading
 from dataclasses import dataclass, field
@@ -18,8 +17,6 @@ from fastapi.templating import Jinja2Templates
 
 from yt_playlist.library.ops import PlaylistOps
 from yt_playlist.core.activity import Activity
-from yt_playlist.core import account_auth_state
-from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.web.jobs import SyncJobs
 
 logger = logging.getLogger("yt_playlist.web")
@@ -41,6 +38,15 @@ def form_float(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def refresh_playlist_view(ctx, provider_playlist_id):
+    """Refresh a connected extension's playlist after a confirmed mutation."""
+    try:
+        if provider_playlist_id:
+            ctx.bridge.send_control({"type": "refresh-view", "playlist": provider_playlist_id})
+    except Exception:  # noqa: BLE001 - notification failure must not change the mutation result
+        ctx.logger.debug("refresh-view control not sent for %s", provider_playlist_id, exc_info=True)
 
 
 @dataclass
@@ -72,47 +78,19 @@ class Ctx:
     spotify_import_lock: object = field(default_factory=threading.Lock)
 
     def __post_init__(self):
-        if getattr(self.store,'_collection_files',False):
-            self.auth_expired.update(account_auth_state.read(self.store.conn))
-            return
-        raw = self.store.settings.get_setting(AUTH_EXPIRED_KEY)
-        if raw:
-            try:                                    # keys are ints (identity ids) so on_auth_ok's pop matches
-                self.auth_expired.update(account_auth_state.legacy_map(json.loads(raw)))
-            except (ValueError, TypeError):         # corrupt/legacy value: ignore, the next sync rebuilds it
-                self.logger.warning("ignoring unreadable %s setting", AUTH_EXPIRED_KEY)
+        try:
+            self.auth_expired.update(self.store.accounts.auth_expirations())
+        except (ValueError, TypeError):
+            self.logger.warning("ignoring unreadable %s setting", AUTH_EXPIRED_KEY)
 
     def _persist_auth_expired(self, *, account_id=None, label=None, clear_all=False):
-        if getattr(self.store, 'activity_paused', False):
+        result = self.store.accounts.update_auth_expiration(
+            account_id=account_id, label=label, clear_all=clear_all)
+        if result is None:
             return
-        with atomic_write(self.store):
-            if getattr(self.store, 'activity_paused', False):
-                return
-            if account_auth_state.available(self.store.conn):
-                if clear_all:
-                    account_auth_state.clear(self.store.conn)
-                elif label is not None:
-                    account_auth_state.flag(self.store.conn, account_id, label)
-                else:
-                    account_auth_state.clear(self.store.conn, account_id)
-                current = account_auth_state.read(self.store.conn)
-            else:
-                raw = self.store.settings.get_setting(AUTH_EXPIRED_KEY)
-                try:
-                    current = account_auth_state.legacy_map(json.loads(raw)) if raw else {}
-                except (ValueError, TypeError):
-                    self.logger.warning('ignoring unreadable %s setting', AUTH_EXPIRED_KEY)
-                    current = {}
-                if clear_all:
-                    current.clear()
-                elif label is not None:
-                    current[account_id] = label
-                else:
-                    current.pop(account_id, None)
-                if current:
-                    self.store.settings.set_setting(AUTH_EXPIRED_KEY, json.dumps(current))
-                else:
-                    self.store.settings.delete_setting(AUTH_EXPIRED_KEY)
+        current, invalid = result
+        if invalid:
+            self.logger.warning('ignoring unreadable %s setting', AUTH_EXPIRED_KEY)
         self.auth_expired.clear()
         self.auth_expired.update(current)
 

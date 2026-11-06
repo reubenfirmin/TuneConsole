@@ -1,15 +1,10 @@
 """Task 2 (#52): TTL-since-first-shown GC of the discovery pool, with held tracks (live generated
 playlists) kept, and the acquisition prune respecting the same hold."""
-from yt_playlist.core.store import Store
 from tests.recommendation_support import publish_bundles
 
 
-def _s():
-    s = Store(":memory:"); s.init_schema(); return s
-
-
-def test_gc_expires_aged_unshown_tracks_and_keeps_recent_and_held():
-    s = _s()
+def test_gc_expires_aged_unshown_tracks_and_keeps_recent_and_held(store):
+    s = store
     day = 86400.0
     for k in ("old|x", "new|y", "held|z", "unshown|w"):
         s.discovery.upsert_discovered_track(k, "v:" + k, k[0], k[0], None, None, None, None, "r", 0.0)
@@ -24,8 +19,8 @@ def test_gc_expires_aged_unshown_tracks_and_keeps_recent_and_held():
     assert out["tracks"] == 2
 
 
-def test_gc_albums_and_artists_by_clock():
-    s = _s()
+def test_gc_albums_and_artists_by_clock(store):
+    s = store
     day = 86400.0
     s.discovery.upsert_discovered_album("b1", "A", "Alb", "2020", None, 0.0, genre=None)
     s.discovery.upsert_discovered_artist("Art", 0.5, None, None, None, 0.0, genre=None)
@@ -37,8 +32,8 @@ def test_gc_albums_and_artists_by_clock():
     assert s.discovery.get_discovered_albums() == [] and s.discovery.get_discovered_artists() == []
 
 
-def test_prune_keeps_held_generated_keys():
-    s = _s()
+def test_prune_keeps_held_generated_keys(store):
+    s = store
     s.discovery.upsert_discovered_track("g|x", "v", "A", "X", None, None, None, None, "r", 0.0)
     s.discovery.prune_discovered_tracks({"g|x"}, held_keys={"g|x"})         # in library but held -> kept
     assert {r["identity_key"] for r in s.discovery.get_discovered_tracks()} == {"g|x"}
@@ -46,8 +41,8 @@ def test_prune_keeps_held_generated_keys():
     assert s.discovery.get_discovered_tracks() == []
 
 
-def test_gc_removes_stale_tracks_from_cached_fresh_and_mode_recommendations():
-    s = _s()
+def test_gc_removes_stale_tracks_from_cached_fresh_and_mode_recommendations(store):
+    s = store
     for key, found in (("old", 0), ("held", 0), ("recent", 99 * 86400)):
         s.discovery.upsert_discovered_track(key, "v:" + key, key, "Artist", None, None, "House", "2020", "album", found)
     items = [{"key": key, "title": key,'artist':'Artist'} for key in ("old", "held", "recent")]
@@ -59,8 +54,8 @@ def test_gc_removes_stale_tracks_from_cached_fresh_and_mode_recommendations():
     assert s.settings.get_setting("enrich_attempts:old") is None
 
 
-def test_orphan_cleanup_preserves_tracks_in_generated_playlists():
-    s = _s()
+def test_orphan_cleanup_preserves_tracks_in_generated_playlists(store):
+    s = store
     s.discovery.upsert_discovered_album('gone-album','Artist','Gone',None,None,0)
     for key in ("held", "unheld"):
         s.discovery.upsert_discovered_track(key, "v:" + key, key, "Artist", None, None, None, None, "gone-album", 0)

@@ -1,8 +1,12 @@
 """Home policy and effect boundaries can be exercised without an HTTP request."""
 import logging
 from types import SimpleNamespace
+from unittest.mock import Mock
 
-from yt_playlist.rec import home_cards, mode_surfaces, stored_home
+import pytest
+
+from tests.repository_mock_support import no_database, transient_repository_store
+from yt_playlist.rec import home_cards, measurement, mode_surfaces, stored_home
 
 
 class Jobs:
@@ -27,8 +31,22 @@ def proto(lane="wheelhouse"):
             "recipe": {}}
 
 
-def test_empty_menu_has_four_buildable_slots_and_does_not_admit_work(store):
-    home = service(store)
+@pytest.fixture
+def home_store(no_database):
+    return transient_repository_store(
+        rec_ledger={'card_views': 0},
+        rec_proposals={'group_checkpoint': None},
+        recommendations={'head': None, 'framing': None},
+        rec_query={'artist_genre_years': {}, 'artist_genre_years_for': {},
+                   'genre_play_distribution': {}, 'era_play_distribution': {}},
+        modes={'log_impressions': None},
+        discovery={'mark_offered': None},
+        values={'_recommendation_files': True},
+    )
+
+
+def test_empty_menu_has_four_buildable_slots_and_does_not_admit_work(home_store):
+    home = service(home_store)
     result = home.cards(home_cards.CardsRequest(1000))
     assert result.protos == []
     assert [slot["pool"]["lane"] for slot in result.slots] == ["wheelhouse", "explore", "fresh", "comfort"]
@@ -36,34 +54,35 @@ def test_empty_menu_has_four_buildable_slots_and_does_not_admit_work(store):
     assert home.jobs.admitted == []
 
 
-def test_other_genre_fallback_records_only_final_offer_once(store, monkeypatch):
-    store.rec_proposals.put_proposals("home_genre_request", {"epoch": 0, "avoid_genres": ["jazz"]}, 1000)
-    home = service(store)
-    final_menus, searches = [], []
+def test_other_genre_fallback_returns_usable_mix_without_track_exposure(home_store, monkeypatch):
+    request = {"epoch": 0, "avoid_genres": ["jazz"]}
+    home_store.rec_proposals.get_proposals.side_effect = (
+        lambda key: request if key == 'home_genre_request' else {})
+    home = service(home_store)
+    searches = []
 
     def candidates(store, now, **filters):
         searches.append(filters)
         return [] if filters.get('avoid') else [proto()]
 
     monkeypatch.setattr(stored_home, "unmodeled_cards", candidates)
-    monkeypatch.setattr(home, "record_offer", lambda protos, now: final_menus.append((protos, now)))
-    def no_track_exposure(*args, **kwargs):
-        raise AssertionError("A mix menu does not expose its individual tracks")
-    monkeypatch.setattr(home_cards, "_record_served_cards", no_track_exposure)
-    monkeypatch.setattr(store.discovery, "mark_offered", no_track_exposure)
+    no_track_exposure = Mock(side_effect=AssertionError("A mix menu does not expose its individual tracks"))
+    monkeypatch.setattr(measurement, "record_offers", no_track_exposure)
+    home_store.discovery.mark_offered.side_effect = AssertionError("No tracks were served")
     result = home.cards(home_cards.CardsRequest(1000))
     assert "usual mixes" in result.genre_warning
     assert any(search.get("avoid") == {"jazz"} for search in searches)
     assert [track['key'] for track in result.protos[0]['tracks']] == ['a|b']
-    assert final_menus == [(result.protos, 1000)]
+    no_track_exposure.assert_not_called()
+    home_store.discovery.mark_offered.assert_not_called()
     assert home.jobs.admitted == []
 
 
-def test_chosen_genres_reach_ranker_and_stay_on_final_recipe(store, monkeypatch):
-    from tests.mode_fixtures import seed_modes
-    seed_modes(store, 7)
-    store.rec_proposals.put_proposals("home_genre_request", {"epoch": 0, "include_genres": ["jazz"]}, 1000)
-    home = service(store)
+def test_chosen_genres_reach_ranker_and_stay_on_final_recipe(home_store, monkeypatch):
+    request = {"epoch": 0, "include_genres": ["jazz"]}
+    home_store.rec_proposals.get_proposals.side_effect = (
+        lambda key: request if key == 'home_genre_request' else {})
+    home = service(home_store)
     calls = []
 
     def assemble(store, now, epoch, **filters):
@@ -77,32 +96,23 @@ def test_chosen_genres_reach_ranker_and_stay_on_final_recipe(store, monkeypatch)
     assert result.requested_genres == ["jazz"]
     assert result.protos[0]["recipe"]["genre_request"] == {"kind": "chosen_genres", "include": ["jazz"]}
     assert result.protos[0]["recipe"]["ranker"] == "lane"
+    home_store.modes.log_impressions.assert_called_once_with(0, [('wheelhouse', 7, 'lane')], 1000)
 
 
-def test_pool_failure_and_polling_do_not_admit_jobs_or_record_offers(store, monkeypatch):
-    home = service(store)
+def test_pool_failure_and_polling_do_not_admit_jobs_or_record_offers(home_store):
+    home = service(home_store)
     parameters = {"include_genres": [], "avoid_genres": []}
     job = home.start_pool("fresh_pool", parameters, [])
     assert home.jobs.admitted == [("fresh_pool", parameters, [])]
-    monkeypatch.setattr(store.discovery, "mark_offered", lambda *args: (_ for _ in ()).throw(AssertionError("not served")))
     assert home.pool(job, 1000, "/home/fresh-pool/1").pool["building"]
     job.done, job.error = True, "Provider unavailable"
     result = home.pool(job, 1000, "/home/fresh-pool/1")
     assert result.proto is None
-    assert result.pool["message"] == "Provider unavailable"
+    assert result.pool["message"] == "Fresh mix not completed. You can try again."
+    assert job.error == "Provider unavailable"
     assert not result.pool["building"]
     assert len(home.jobs.admitted) == 1
-
-
-def test_measurement_failure_keeps_offers_available(store, monkeypatch):
-    home = service(store)
-    monkeypatch.setattr(stored_home, "unmodeled_cards", lambda store, now, **kw: [proto()])
-
-    def unavailable(*args, **kwargs):
-        raise OSError("measurement unavailable")
-
-    monkeypatch.setattr(home_cards, "_record_served_cards", unavailable)
-    assert home.cards(home_cards.CardsRequest(1000)).protos[0]["tracks"][0]["key"] == "a|b"
+    home_store.discovery.mark_offered.assert_not_called()
 
 
 def test_catalog_excludes_only_displayed_wheelhouse_tracks(store, monkeypatch):

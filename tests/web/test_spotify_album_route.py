@@ -32,7 +32,7 @@ def test_album_preview_binds_release_and_destination_and_report_deletion_preserv
     assert web.post("/import/spotify-library/confirm", data={
         "preview_token": token, "identity_id": first, "album_choice_0": "MPRE-One"},
         follow_redirects=False).status_code == 303
-    assert _wait_for_library_job(store)["report"]["albums_imported"] == 1
+    assert _wait_for_library_job(web)["report"]["albums_imported"] == 1
     assert clients[first].album_ratings == []
     assert clients[second].album_ratings == [("OLAK-One", "LIKE")]
     assert store.collection.get_saved_albums(account_id=first) == []
@@ -51,7 +51,7 @@ def test_album_preview_binds_release_and_destination_and_report_deletion_preserv
     assert 'Previously imported to this account' in web.get(
         f"/import/spotify-library/preview/{token}").text
     web.post("/import/spotify-library/confirm", data={"preview_token": token}, follow_redirects=False)
-    assert _wait_for_library_job(store)["report"]["albums_skipped"] == 1
+    assert _wait_for_library_job(web)["report"]["albums_skipped"] == 1
     assert clients[second].album_ratings == [("OLAK-One", "LIKE")]
 
 
@@ -70,7 +70,7 @@ def test_ambiguous_album_needs_review_and_playlist_override_is_explicit(store, c
     response = web.post("/import/spotify-library/confirm", data={
         "preview_token": token, "album_choice_0": choice, "album_action_0": action}, follow_redirects=False)
     assert response.status_code == 303
-    report = _wait_for_library_job(store)["report"]
+    report = _wait_for_library_job(web)["report"]
     if not choice:
         assert report["albums_unmatched"] == 1
         assert client.album_ratings == [] and client.created == []

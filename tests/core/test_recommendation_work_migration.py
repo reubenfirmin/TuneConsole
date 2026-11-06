@@ -11,9 +11,9 @@ from yt_playlist.rec import daily_model_selection
 
 
 @pytest.fixture
-def predecessor(tmp_path):
+def predecessor(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path / 'work.db')
-    migrate(store.conn, registry=registry.MIGRATIONS[:81])
+    _pristine_installed_schema(81).backup(store.conn)
     store._bind_repositories()
     yield store
     store.conn.close()

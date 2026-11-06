@@ -24,7 +24,7 @@ from threadpoolctl import threadpool_limits
 
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
 from yt_playlist.rec import audio_vibe_model as model
-from yt_playlist.rec import audio_vibe_preview as heuristic
+from yt_playlist.rec import audio_vibe_prediction as heuristic
 from yt_playlist.core import audio_annotations, audio_embedding, audio_vibe_metadata, sample_files
 
 MIN_SUPPORT = 3

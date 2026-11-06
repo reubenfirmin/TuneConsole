@@ -1,4 +1,5 @@
 import numpy as np
+from types import SimpleNamespace
 from yt_playlist.rec import content_model, embedding_vectors as vectors
 
 
@@ -30,11 +31,9 @@ def test_content_features_tokens(monkeypatch):
     assert fam_col in rowmap["s|a"] and fam_col in rowmap["u|c"]
 
 
-def test_build_content_vectors_normalized_and_filtered(tmp_path, monkeypatch):
-    from yt_playlist.core.store import Store
-    s = Store(str(tmp_path / "t.db")); s.init_schema()
+def test_build_content_vectors_normalized_and_filtered():
     content = {"s|a": ("Techno", "1995"), "t|b": ("Techno", "1990")}
-    monkeypatch.setattr(s, "rec_query", FakeDao(content))
+    s = SimpleNamespace(rec_query=FakeDao(content))
     keys, V, _ = content_model.build_library_content(vectors.content_inputs(s))
     assert set(keys) == {"s|a", "t|b"}
     norms = np.linalg.norm(V, axis=1)
@@ -43,26 +42,22 @@ def test_build_content_vectors_normalized_and_filtered(tmp_path, monkeypatch):
     assert float(V[0] @ V[1]) > 0.99
 
 
-def test_build_content_vectors_excludes_untagged(tmp_path, monkeypatch):
-    from yt_playlist.core.store import Store
-    s = Store(str(tmp_path / "t.db")); s.init_schema()
-    monkeypatch.setattr(s, "rec_query", FakeDao({}))   # no genre, no audio anywhere
+def test_build_content_vectors_excludes_untagged():
+    s = SimpleNamespace(rec_query=FakeDao({}))   # no genre, no audio anywhere
     keys, V, _ = content_model.build_library_content(vectors.content_inputs(s))
     assert keys == [] and V.shape[0] == 0
 
 
-def test_audio_features_sharpen_within_genre(tmp_path, monkeypatch):
+def test_audio_features_sharpen_within_genre():
     """Same genre, but audio (energy/bpm) separates: a high-energy track should be MORE similar to
     another high-energy track than to a low-energy one, even though all three share the genre."""
-    from yt_playlist.core.store import Store
-    s = Store(str(tmp_path / "t.db")); s.init_schema()
     content = {k: ("Techno", "2000") for k in ("hi1", "hi2", "lo")}
     audio = {
         "hi1": {"energy": 0.95, "bpm": 150.0, "danceability": 0.9},
         "hi2": {"energy": 0.92, "bpm": 148.0, "danceability": 0.88},
         "lo":  {"energy": 0.10, "bpm": 90.0,  "danceability": 0.2},
     }
-    monkeypatch.setattr(s, "rec_query", FakeDao(content, audio))
+    s = SimpleNamespace(rec_query=FakeDao(content, audio))
     keys, V, _ = content_model.build_library_content(vectors.content_inputs(s))
     idx = {k: i for i, k in enumerate(keys)}
     sim_hi = float(V[idx["hi1"]] @ V[idx["hi2"]])
@@ -70,27 +65,35 @@ def test_audio_features_sharpen_within_genre(tmp_path, monkeypatch):
     assert sim_hi > sim_cross               # audio pulls the two high-energy tracks together
 
 
-def test_track_with_audio_but_no_genre_is_included(tmp_path, monkeypatch):
+def test_track_with_audio_but_no_genre_is_included():
     """A track with only audio (no genre) still gets a content vector from its audio block."""
-    from yt_playlist.core.store import Store
-    s = Store(str(tmp_path / "t.db")); s.init_schema()
     content = {"g1": ("Techno", "2000"), "g2": ("Techno", "2000")}
     audio = {"g1": {"energy": 0.9, "bpm": 150.0}, "g2": {"energy": 0.85, "bpm": 145.0},
              "x":  {"energy": 0.88, "bpm": 148.0}}     # x has audio but no genre
-    monkeypatch.setattr(s, "rec_query", FakeDao(content, audio))
+    s = SimpleNamespace(rec_query=FakeDao(content, audio))
     keys, V, _ = content_model.build_library_content(vectors.content_inputs(s))
     assert "x" in keys
     assert np.isclose(np.linalg.norm(V[keys.index("x")]), 1.0)
 
 
-def test_music_scale_is_a_categorical_feature(tmp_path, monkeypatch):
+def test_music_scale_is_a_categorical_feature():
     """Two same-genre tracks in the same musical scale are pulled closer than opposite scales."""
-    from yt_playlist.core.store import Store
-    s = Store(str(tmp_path / "t.db")); s.init_schema()
     content = {k: ("Techno", "2000") for k in ("m1", "m2", "maj")}
     audio = {"m1": {"music_scale": "minor"}, "m2": {"music_scale": "minor"},
              "maj": {"music_scale": "major"}}
-    monkeypatch.setattr(s, "rec_query", FakeDao(content, audio))
+    s = SimpleNamespace(rec_query=FakeDao(content, audio))
     keys, V, _ = content_model.build_library_content(vectors.content_inputs(s))
     idx = {k: i for i, k in enumerate(keys)}
     assert float(V[idx["m1"]] @ V[idx["m2"]]) > float(V[idx["m1"]] @ V[idx["maj"]])
+
+
+def test_detached_genre_axes_override_builtin_meanings_and_keep_ambiguity():
+    inputs = content_model.ContentInputs(['a', 'b'],
+        {'a': ('Techno', None), 'b': ('ambiguous', None)}, {})
+    axes = {'Techno': ('jazz', 'custom-techno'), 'ambiguous': ('other:ambiguous', None)}
+    keys, matrix, model = content_model.build_library_content(inputs, genre_axes=axes)
+    assert set(model['cat']) == {'fam:jazz', 'sub:custom-techno', 'fam:other:ambiguous'}
+    assert keys == ['a', 'b'] and np.allclose(np.linalg.norm(matrix, axis=1), 1)
+    assert np.array_equal(content_model.encode_content(model, 'Techno', None, {}, genre_axes=axes), matrix[0])
+    changed = {**axes, 'Techno': ('rock', 'custom-techno')}
+    assert content_model.input_fingerprint(inputs, genre_axes=axes) != content_model.input_fingerprint(inputs, genre_axes=changed)

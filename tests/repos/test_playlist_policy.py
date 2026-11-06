@@ -26,7 +26,7 @@ def test_group_names_cannot_adopt_or_quarantine_and_stale_sync_cannot_revoke_ado
     store.playlists.reconcile_playlist_provenance('PL', GENERATED_DESCRIPTION)
     assert store.rec_eligibility.excluded_playlist_ids() == set()
     assert store.playlists.get_playlist_groups()['PL'] == 'Road trips'
-    assert store.rec_evidence.generated_only_play_days() == {(0, 'song')}
+    assert store.rec_evidence.generated_only_keys_between(0, 86400) == {'song'}
     assert store.trends.ledger_day_counts() == []
 
 
@@ -34,7 +34,7 @@ def test_group_names_cannot_adopt_or_quarantine_and_stale_sync_cannot_revoke_ado
     (True, False, 'manual'), (True, False, 'gc'),
     (True, True, 'manual'), (False, True, 'manual')])
 def test_recovery_preserves_policy_groups_and_remote_markers(store, tmp_path, monkeypatch,
-                                                           generated, adopted, operation):
+                                                           generated, adopted, operation, consumer_store):
     monkeypatch.setenv('YT_PLAYLIST_HOME', str(tmp_path))
     iid = store.accounts.upsert_account('main', 'bridge', None, True)
     pid = store.playlists.upsert_playlist(iid, 'SOURCE', 'Mix', 1, '', 1)
@@ -61,8 +61,7 @@ def test_recovery_preserves_policy_groups_and_remote_markers(store, tmp_path, mo
     assert store.playlists.get_playlist_groups()[new_id] == 'Road trips'
     assert store.playlists.is_quarantined_playlist(new_id) == (generated and not adopted)
     # Another install sees only remote metadata, so it must reach the same policy decision.
-    other = Store(':memory:')
-    other.init_schema()
+    other = consumer_store()
     other_id = other.accounts.upsert_account('other', 'bridge', None, True)
     sync.refresh_playlist(other, other_id, client, new_id, 'Mix', 40 * 86400 + 2)
     assert other.playlists.is_quarantined_playlist(new_id) == (generated and not adopted)

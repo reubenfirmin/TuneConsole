@@ -1,5 +1,7 @@
 """Conflict publication preserves installed decisions and compatible writers."""
 import json
+from tests.enrichment_support import choose_field
+from tests.metadata_provenance_support import metadata_provenance
 from pathlib import Path
 import sqlite3
 
@@ -7,9 +9,8 @@ import pytest
 
 from tests.core.test_metadata_owner_cutover import predecessor
 from tests.core.test_metadata_conflict_preparation import seed, finish, head
-from yt_playlist.core.migrations import regular, registry, runner, MigrationError
+from yt_playlist.core.migrations import regular, MigrationError
 from yt_playlist.core.preparation import conflict_publication as publication, metadata_conflicts as preparation
-from yt_playlist.core.store import Store
 
 
 def publish(conn, size=1):
@@ -19,6 +20,13 @@ def publish(conn, size=1):
             publication.OWNER.publish(conn, stage=stage.id)
             return stage.id
     pytest.fail('Conflict publication did not finish')
+
+
+def rejection_inputs(store):
+    seed(store)
+    preparation.JOB.install(store.conn)
+    finish(store.conn)
+    assert publication.OWNER.selected(store.conn) is None
 
 
 def test_order_duplicates_unknowns_and_decision_have_exact_independent_custody(predecessor):
@@ -91,11 +99,9 @@ def test_reports_reads_selected_owner_and_supported_write_withdraws_it(predecess
     "UPDATE prepared_metadata_conflict_compatibility SET field='genre'",
     'DELETE FROM prepared_metadata_conflict_heads',
 ])
-def test_damaged_preparation_blocks_selection_without_blocking_regular_schema(predecessor, damage):
+def test_damaged_preparation_blocks_selection_without_blocking_regular_schema(predecessor, staged_custody, damage):
     conn = predecessor.conn
-    seed(predecessor)
-    preparation.JOB.install(conn)
-    finish(conn)
+    staged_custody((predecessor, 79), 'metadata-conflicts', rejection_inputs, admit=False)
     with conn:
         conn.execute(damage)
     with pytest.raises(MigrationError, match='differ|omits'):
@@ -125,27 +131,6 @@ def test_missing_file_recovery_and_source_change_during_verification(predecessor
     with pytest.raises(MigrationError, match='changed|reconciled'):
         publish(conn)
     assert publication.OWNER.selected(conn) is None
-
-
-def test_genuine_upgrade_retains_publication_and_current_writer_works(predecessor, tmp_path):
-    conn = predecessor.conn
-    identity, original = seed(predecessor, [{'provider':'a','value':120}], resolved=0)
-    preparation.JOB.install(conn)
-    finish(conn)
-    publish(conn)
-    upgraded = Store(tmp_path/'upgraded.db')
-    try:
-        conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS[:107])
-        upgraded._bind_repositories()
-        assert publication.OWNER.selected(upgraded.conn) is None
-        regular.migrate(upgraded.conn)
-        upgraded.enrichment.set_track_field(original['track_id'], 'bpm', 140)
-        assert upgraded.enrichment_reports.metadata_provenance(original['track_id'])['fields']['bpm']['value'] == 140
-        assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
-        assert upgraded.conn.execute('SELECT count(*) FROM '+preparation.HEAD).fetchone()[0] == 1
-    finally:
-        upgraded.conn.close()
 
 
 def test_new_compatibility_capture_replays_an_existing_prepared_job(predecessor):

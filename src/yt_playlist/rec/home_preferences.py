@@ -30,7 +30,11 @@ def compile_usage(offers, responses, now, half_life_days):
             units[unit] = max(units.get(unit, choice['at']), choice['at'])
             option = next((option for option in offer.get('options', [])
                            if str(option['id']) == event.get('option_id')), {})
-            if (option.get('recipe') or {}).get('vibe'):
+            # Current compact menus keep the displayed preset in the decision
+            # envelope. Older unprojected menus may still have the recipe.
+            # Missing historical purpose cannot be inferred from today's tuning.
+            if option and offer['format'] == 'mixes' and (
+                    offer.get('vibe') or (option.get('recipe') or {}).get('vibe')):
                 vibe_units.add(unit)
     scores = {format: 0. for format in PANELS}
     counts = {format: 0 for format in PANELS}

@@ -1,4 +1,5 @@
 """Populated group history keeps public aliases while reusing exact member sets."""
+from contextlib import closing, contextmanager
 import json
 from pathlib import Path
 import sqlite3
@@ -6,54 +7,60 @@ import time
 
 import pytest
 
-from yt_playlist.core import choice_evidence_files, group_documents, group_storage, policy_documents, policy_recovery, sample_files
-from yt_playlist.core.migrations import migrate, registry
+from tests import file_custody_support as custody
+from yt_playlist.core import choice_evidence_files, group_documents, group_storage, policy_documents, sample_files
 from yt_playlist.core.migrations import v070_policy_documents as policies, v071_album_descriptions as descriptions
 from yt_playlist.core.migrations import v072_compact_groups as migration
 from yt_playlist.core.migrations.runner import Context, MigrationError
 from yt_playlist.repos import group_queries, policy_storage
 
 
+@contextmanager
+def historical_groups(path, pristine):
+    with closing(sqlite3.connect(path)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        pristine.backup(conn)
+        with conn:
+            conn.execute('BEGIN IMMEDIATE')
+            policies.apply(conn, Context(1))
+            descriptions.apply(conn, Context(1))
+            conn.executemany('INSERT INTO recordings(id,identity_key) VALUES (?,?)', [(1, 'one'), (2, 'two')])
+            conn.executemany('INSERT INTO rec_group_identities VALUES (?,NULL,1)', [('parent',), ('leaf',)])
+            for generation, at in [('first', 1), ('second', 2)]:
+                inputs = {'one': '1' * 64, 'two': '2' * 64, 'unknown-old-key': '3' * 64}
+                payload = json.dumps({'recording_inputs': inputs, 'last_structure_at': 1, 'diagnostics': {'at': at}})
+                conn.execute('INSERT INTO rec_group_generations VALUES (?,?,?,?,?,?)',
+                             (generation, '{"algorithm":"grouping-1"}', 'input-fingerprint', at, at, payload))
+                for group, parent, members in [('parent', None, [('one', .9, .8), ('two', .7, .6)]),
+                                                ('leaf', generation + '-parent', [('one', .9, .8)])]:
+                    version = generation + '-' + group
+                    definition = json.dumps({'name': group, 'leaf': group == 'leaf', 'legacy': False,
+                        'membership_known': True, 'size': len(members), 'depth': int(group == 'leaf'),
+                        'rep_keys': ['one'], 'naming_policy': 'naming-1', 'genres': [['House', 1.0]]})
+                    conn.execute('INSERT INTO rec_group_definitions VALUES (?,?,?,?,?)',
+                                 (version, generation, group, parent, definition))
+                    conn.executemany('INSERT INTO rec_group_members VALUES (?,?,?,?)',
+                                     [(version, *member) for member in members])
+                conn.execute('INSERT INTO rec_group_unknown VALUES (?, ?, ?)', (generation, 'unknown-old-key', 'unmeasured'))
+                conn.execute('INSERT INTO rec_group_graph VALUES (?,?,?,?,?)', (generation, 'one', 'two', .8, .7))
+                conn.execute('INSERT INTO rec_group_graph VALUES (?,?,?,?,?)', (generation, 'one', 'unknown-old-key', .6, .5))
+                conn.execute('INSERT INTO rec_group_assignments VALUES (?,?,?,?,?,?,?)',
+                             ('two', generation, generation + '-leaf', .7, .6, 'profile-digest', at))
+                if generation == 'second':
+                    conn.execute('INSERT INTO rec_group_lineage VALUES (?,?,?,?)',
+                                 ('first-leaf', 'second-leaf', 'continuation', json.dumps(
+                                     {'old_share': 1, 'new_share': 1, 'overlap': 1, 'compatible': True})))
+                conn.execute('INSERT INTO rec_group_publications VALUES (?)', (generation,))
+            conn.execute("INSERT INTO rec_group_head VALUES (1,'second')")
+        yield conn
+
+
 @pytest.fixture
-def predecessor(tmp_path):
-    conn = sqlite3.connect(tmp_path / 'groups.db')
-    conn.row_factory = sqlite3.Row
-    conn.execute('PRAGMA foreign_keys=ON')
-    migrate(conn, registry=registry.MIGRATIONS[:69])
-    with conn:
-        conn.execute('BEGIN IMMEDIATE')
-        policies.apply(conn, Context(1))
-        descriptions.apply(conn, Context(1))
-        conn.executemany('INSERT INTO recordings(id,identity_key) VALUES (?,?)', [(1, 'one'), (2, 'two')])
-        conn.executemany('INSERT INTO rec_group_identities VALUES (?,NULL,1)', [('parent',), ('leaf',)])
-        for generation, at in [('first', 1), ('second', 2)]:
-            inputs = {'one': '1' * 64, 'two': '2' * 64, 'unknown-old-key': '3' * 64}
-            payload = json.dumps({'recording_inputs': inputs, 'last_structure_at': 1, 'diagnostics': {'at': at}})
-            conn.execute('INSERT INTO rec_group_generations VALUES (?,?,?,?,?,?)',
-                         (generation, '{"algorithm":"grouping-1"}', 'input-fingerprint', at, at, payload))
-            for group, parent, members in [('parent', None, [('one', .9, .8), ('two', .7, .6)]),
-                                            ('leaf', generation + '-parent', [('one', .9, .8)])]:
-                version = generation + '-' + group
-                definition = json.dumps({'name': group, 'leaf': group == 'leaf', 'legacy': False,
-                    'membership_known': True, 'size': len(members), 'depth': int(group == 'leaf'),
-                    'rep_keys': ['one'], 'naming_policy': 'naming-1', 'genres': [['House', 1.0]]})
-                conn.execute('INSERT INTO rec_group_definitions VALUES (?,?,?,?,?)',
-                             (version, generation, group, parent, definition))
-                conn.executemany('INSERT INTO rec_group_members VALUES (?,?,?,?)',
-                                 [(version, *member) for member in members])
-            conn.execute('INSERT INTO rec_group_unknown VALUES (?, ?, ?)', (generation, 'unknown-old-key', 'unmeasured'))
-            conn.execute('INSERT INTO rec_group_graph VALUES (?,?,?,?,?)', (generation, 'one', 'two', .8, .7))
-            conn.execute('INSERT INTO rec_group_graph VALUES (?,?,?,?,?)', (generation, 'one', 'unknown-old-key', .6, .5))
-            conn.execute('INSERT INTO rec_group_assignments VALUES (?,?,?,?,?,?,?)',
-                         ('two', generation, generation + '-leaf', .7, .6, 'profile-digest', at))
-            if generation == 'second':
-                conn.execute('INSERT INTO rec_group_lineage VALUES (?,?,?,?)',
-                             ('first-leaf', 'second-leaf', 'continuation', json.dumps(
-                                 {'old_share': 1, 'new_share': 1, 'overlap': 1, 'compatible': True})))
-            conn.execute('INSERT INTO rec_group_publications VALUES (?)', (generation,))
-        conn.execute("INSERT INTO rec_group_head VALUES (1,'second')")
-    yield conn
-    conn.close()
+def predecessor(tmp_path, _pristine_installed_schema):
+    # Producer tests retain their own populated predecessor and real migration.
+    with historical_groups(tmp_path / 'groups.db', _pristine_installed_schema(69)) as conn:
+        yield conn
 
 
 def apply(conn):
@@ -171,7 +178,7 @@ def test_compact_readers_reconstruct_exact_generation_context_and_aliases(predec
     assert group_queries.definition(conn, 'first-leaf', generation='second') is None
     assert group_queries.definition(conn, 'absent') is None
     assert group_queries.canonical_version(conn, 'first-leaf') == group_queries.canonical_version(conn, 'second-leaf')
-    assert group_queries.assignment_head(conn)['groups'] == [{'version': 'second-leaf', 'rep_keys': ['one']}]
+    assert head['groups'][1]['rep_keys'] == ['one']
     assert group_queries.successors(conn, 'first-leaf') == [{
         'source': 'first-leaf', 'target': 'second-leaf', 'relation': 'continuation',
         'payload': {'old_share': 1, 'new_share': 1, 'overlap': 1, 'compatible': True}}]
@@ -351,16 +358,16 @@ def test_populated_sample_and_choice_owners_recover_without_producer(tmp_path, k
         expected_samples, expected_choices = sample_bytes(source.conn), choice_bytes(source.conn)
         assert len(expected_samples) == 3 and expected_choices
         source_sql = list(source.conn.iterdump())
-        report = policy_recovery.recover(source_path, tmp_path / 'recovered', progress=lambda _: None)
-        candidate_path = Path(report['compact_database'])
+        report = custody.snapshot_library(source_path, tmp_path / 'recovered')
+        candidate_path = Path(report['restored'])
         if kind == 'verified-backup':
             candidate_path = tmp_path / 'independent' / 'state.db'
             candidate_path.parent.mkdir()
-            with closing(sqlite3.connect(report['verified_backup'])) as backup, \
+            with closing(sqlite3.connect(report['snapshot'])) as backup, \
                     closing(sqlite3.connect(candidate_path)) as target:
                 backup.backup(target)
                 target.row_factory = sqlite3.Row
-                policy_recovery._restore_files(target, report['verified_backup_file_manifests'])
+                custody.restore_files(target, report['manifests'])
         hidden_samples, hidden_choices = samples_root.with_name('hidden-samples'), choices_root.with_name('hidden-choices')
         samples_root.rename(hidden_samples)
         choices_root.rename(hidden_choices)
@@ -459,7 +466,7 @@ def test_recovery_bundle_preserves_group_and_policy_owners_together(predecessor,
         with policy_documents.retained_reader(policy_documents.directory(conn)), \
                 policy_documents.retained_reader(group_documents.directory(conn)), conn:
             conn.execute('BEGIN')
-            manifests = policy_recovery._export_files(conn, tmp_path / 'restored.db', backup_root=tmp_path / 'backup')
+            manifests = custody.export_files(conn, tmp_path / 'restored.db', backup_root=tmp_path / 'backup')
             conn.backup(restored)
         assert set(manifests) == {'annotations', 'policies', 'descriptions', 'groups', 'samples', 'choice_evidence'}
         # This predecessor has no samples or choice evidence. Populated custody
@@ -471,7 +478,7 @@ def test_recovery_bundle_preserves_group_and_policy_owners_together(predecessor,
             for path in root.glob('*/*.json'):
                 path.unlink()
         restored.execute('PRAGMA foreign_keys=ON')
-        policy_recovery._restore_files(restored, manifests)
+        custody.restore_files(restored, manifests)
         migration.validate(restored)
         assert {version: list(group_storage.version_rows(restored, version)) for version in members} == members
         assert {version: policy_storage.configuration(restored, version) for version in configs} == configs

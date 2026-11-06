@@ -1,4 +1,5 @@
 import json
+from tests.enrichment_support import complete_entries, seed_audio, seed_enrichment
 from pathlib import Path
 
 import pytest
@@ -111,8 +112,8 @@ def test_exact_uploads_versions_and_verified_grouping_keep_item_choices_and_like
     assert s.tracks.match_recording('Song (Live)','Artist') == s.tracks.catalog_subject(b)['identity_key']
     pid = s.playlists.upsert_playlist(iid,'LM','Liked',3,'hash',1)
     s.playlists.set_playlist_tracks(pid,[a,b,c])
-    s.tracks.set_track_audio(a,bpm=123)
-    s.tracks.set_track_audio(c,danceability=.7)
+    seed_audio(s, a, bpm=123)
+    seed_audio(s, c, danceability=.7)
     c_key = s.tracks.catalog_subject(c)['identity_key']
     s.enrichment_state.record_enrichment_attempt(c_key,'provider',{'danceability':.7},video_id='c',now=1)
     s.tracks.set_track_genre(c,'')
@@ -124,8 +125,8 @@ def test_exact_uploads_versions_and_verified_grouping_keep_item_choices_and_like
     assert s.tracks.get_track_audio(c)[0] == 123
     assert s.enrichment_state.enrichment_attempts(s.tracks.catalog_subject(a)['identity_key'])['provider']['fields'] == {'danceability':.7}
     assert s.conn.execute('SELECT danceability FROM catalog_tracks WHERE id=?',(a,)).fetchone()[0] == .7
-    s.tracks.set_track_enrichment(a,'House',None)
-    s.tracks.set_track_audio(c,energy=.5)
+    seed_enrichment(s, a, 'House', None)
+    seed_audio(s, c, energy=.5)
     assert s.tracks.get_track_enrichment(a) == ('House','1990')
     assert s.tracks.get_track_enrichment(c) == ('','2020')
     s.playlists.set_song_liked(iid,'a',False)
@@ -144,7 +145,8 @@ def test_discovery_promotion_expiry_and_attempts_share_catalog_without_ownership
     assert s.conn.execute('SELECT COUNT(*) FROM provider_attempts').fetchone()[0] == 2
     tid = s.tracks.upsert_track('cold','Cold','Artist','Album',200)
     assert len(s.enrichment_queue.next_enrich_batch(20)) == 1
-    assert s.enrichment_queue.enrichment_memberships([s.tracks.catalog_subject(tid)['recording_id']]) == {'library','discovery'}
+    assert key in s.rec_query.library_keys()
+    assert key in s.discovery.discovered_tracks_by_keys([key])
     s.discovery.gc_discovery_pool(100*86400,30,set())
     assert not s.discovery.get_discovered_tracks()
     assert s.tracks.identity_key_for_video('cold') == key
@@ -277,7 +279,7 @@ def test_enrichment_priority_counts_confirmed_recording_once_per_artist(store):
     other_key = store.tracks.catalog_subject(other)['identity_key']
     store.history.record_history_plays(iid,86400,[key,other_key])
     store.history.record_history_plays(iid,172800,[other_key])
-    store.enrichment_queue.mark_enriched([a,b,other],3)
+    complete_entries(store, [a, b, other], 3)
     preferred = store.tracks.upsert_track('other-new','New song','Other artist',None,200,created_at=10)
     store.tracks.upsert_track('artist-new','New song','Artist',None,200,created_at=20)
     store.settings.set_setting('enrich_caught_up_at','30')

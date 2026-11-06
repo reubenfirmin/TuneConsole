@@ -14,6 +14,7 @@ ROOT = EXPERIMENTS.parent
 LOCAL = EXPERIMENTS / 'audio_lab/local'
 CHECKPOINT = LOCAL / 'external-20261028/checkpoint-1'
 MODULES = {
+    'vibe-pooling': 'vibe_pooling_evaluation',
     'quality-round': 'quality_round',
     'focus-counts': 'focus_count_experiment',
     'focus-confirmation': 'focus_confirmation',
@@ -92,6 +93,7 @@ MODULES = {
     'release-wheel': 'release_package_check',
 }
 TESTS = (
+    'retained_copy/test_playback_feedback_backup.py',
     'test_representation_study.py',
     'test_focus_counts.py',
     'test_many_windows.py',
@@ -123,6 +125,7 @@ TESTS = (
     'test_audio_evaluation.py',
     'test_preprocessing_quality.py',
     'test_provider_pilot.py',
+    'test_evidence_versions.py',
     'test_focus_experiment.py',
     'test_focus_mapping.py',
     'test_focus_controls.py',
@@ -273,6 +276,7 @@ def main(argv=None):
         options = checks.parse_args(args.args)
         if options.syntax_only:
             paths = [Path(__file__), *EXPERIMENTS.joinpath('audio_lab_tools').glob('*.py'),
+                     *EXPERIMENTS.joinpath('retained_copy').glob('*.py'),
                      *EXPERIMENTS.joinpath('investigations').glob('*.py')]
             for path in paths:
                 ast.parse(path.read_text(), filename=str(path))
@@ -286,7 +290,8 @@ def main(argv=None):
         command = [executable, 'run', 'pytest', '--confcutdir=' + str(EXPERIMENTS), '-p', 'tests.conftest',
                    '-o', 'cache_dir=experiments/audio_lab/local/pytest-cache',
                    '--basetemp=experiments/audio_lab/local/pytest-checkpoint',
-                   *(str(EXPERIMENTS / 'audio_lab_tools' / name) for name in (options.test or TESTS))]
+                   *(str(EXPERIMENTS / (name if name.startswith('retained_copy/') else
+                                       'audio_lab_tools/' + name)) for name in (options.test or TESTS))]
     else:
         if args.command == 'reference':
             reference = argparse.ArgumentParser(prog='./experiments/run.py reference', description=(

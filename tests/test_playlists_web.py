@@ -14,6 +14,7 @@ from yt_playlist.rec import actions
 from yt_playlist.rec.actions import CLEANUP_SURFACE
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
+from tests.template_support import playlist_rows
 
 
 def _client(store, provider):
@@ -155,7 +156,7 @@ def test_copy_into_rejects_system_target(store, monkeypatch, tmp_path):
     c = _client(store, lambda: {iid: FakeClient()})
 
     r = c.post("/playlists/copy-into", data={"ids": str(src), "target": str(lm)})
-    assert r.status_code == 422 and "system playlist" in r.text.lower()
+    assert r.status_code == 422 and "regular playlist" in r.text.lower()
 
 
 def test_copy_into_rejects_cross_account_target(store, monkeypatch, tmp_path):
@@ -232,8 +233,7 @@ def test_playlist_rows_use_song_artwork_when_no_cover_is_available(store):
     def rows():
         response = client.get("/playlists")
         assert response.status_code == 200
-        return {row["ytm"]: row for row in json.loads(
-            re.search(r"playlistsTab\((\[.*?\])\)", response.text).group(1))}
+        return {row["ytm"]: row for row in playlist_rows(response.text)}
 
     initial = rows()
     assert initial["new"]["is_new"] is True
@@ -264,7 +264,7 @@ def test_playlists_page_carries_generated_created_at(store):
     c = _client(store, lambda: {iid: FakeClient()})
     r = c.get("/playlists")
     assert r.status_code == 200
-    rows = json.loads(re.search(r"playlistsTab\((\[.*?\])\)", r.text).group(1))
+    rows = playlist_rows(r.text)
     created = {row["ytm"]: row["created"] for row in rows}
     assert created["PLold"] == 100.0 and created["PLnew"] == 200.0
 
@@ -291,7 +291,7 @@ def test_generated_sort_recovers_dates_without_claiming_imports_were_created_at_
     store.playlist_recipes.set_recipe("known", {}, now=300)  # actual creation date takes precedence
 
     response = _client(store, lambda: {iid: FakeClient()}).get("/playlists")
-    rows = json.loads(re.search(r"playlistsTab\((\[.*?\])\)", response.text).group(1))
+    rows = playlist_rows(response.text)
     rows = {r["ytm"]: r for r in rows}
     for ytm, _, created, expected in cases:
         assert rows[ytm]["generated_created"] == expected
@@ -322,7 +322,7 @@ def test_new_playlists_use_seven_day_creation_window_not_recent_edits(store):
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
                    base_url="http://127.0.0.1")
     html = c.get("/playlists").text
-    rows = json.loads(re.search(r"playlistsTab\((\[.*?\])\)", html).group(1))
+    rows = playlist_rows(html)
     assert {row["ytm"] for row in rows if row["is_new"]} == {"today", "boundary"}
     assert "hidden" not in {row["ytm"] for row in rows}
     assert next(row for row in rows if row["ytm"] == "edited")["created"] == cutoff - 1

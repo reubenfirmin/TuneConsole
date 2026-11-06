@@ -1,8 +1,9 @@
 """Versioned current bootstrap and schema contract, independent of the baseline.
 
 Recognized unversioned databases and every numbered predecessor remain supported
-through the frozen historical upgrade path. Empty databases start directly at
-VERSION. A later schema replacement must publish its own current definition.
+through the frozen historical upgrade path. Empty databases use the complete
+destination resource, covering both numbered and regular histories. The numbered
+SQL resource remains the baseline for explicit historical replay and export.
 """
 from collections import Counter, defaultdict
 from contextlib import contextmanager
@@ -17,8 +18,10 @@ from .schema_contract import MigrationError, tokens as _tokens
 
 CONTRACT_FLOOR = 32
 VERSION = 107
+CURRENT_DEFINITION = Path(__file__).with_name('schema') / f'layout-{VERSION}.sql'
+CURRENT_SEEDS = CURRENT_DEFINITION.with_name(f'seeds-{VERSION}.sql')
 DEFINITION = Path(__file__).with_name('migrations') / 'schema.sql'
-DEFINITIONS = (DEFINITION.with_name('schema_discovery_subjects.sql'),
+SOURCE_DEFINITIONS = (DEFINITION.with_name('schema_discovery_subjects.sql'),
                DEFINITION.with_name('schema_listening_subjects.sql'),
                DEFINITION, DEFINITION.with_name('schema_metadata_deliveries.sql'),
                DEFINITION.with_name('schema_archives.sql'), DEFINITION.with_name('schema_scope_account_state.sql'),
@@ -48,6 +51,8 @@ DEFINITIONS = (DEFINITION.with_name('schema_discovery_subjects.sql'),
                DEFINITION.with_name('schema_transfer_work.sql'),
                DEFINITION.with_name('schema_album_occurrences.sql'),
                DEFINITION.with_name('schema_foreign_calendar_scopes.sql'))
+DEFINITIONS = (CURRENT_DEFINITION, CURRENT_SEEDS,
+               CURRENT_DEFINITION.with_name('current.json'), *SOURCE_DEFINITIONS)
 SEED_SETTINGS = {
     'catalog_identity_version': '2',
     'discovery_enrichment_audit_requeued': '1',
@@ -57,6 +62,13 @@ SEED_SETTINGS = {
                             'sync-provenance; 0 once-ever graduation stamp(s) backfilled',
     'playlist_created_at_backfilled': '1',
 }
+INITIAL_STATE = (
+    "INSERT INTO rec_change_queue(kind,item,revision) VALUES ('refresh','',1)",
+    'INSERT INTO rec_preparation VALUES (1,0,0)',
+    'INSERT INTO rec_group_clock VALUES (1,0)',
+    'INSERT INTO group_retention_state VALUES (1,0)',
+    "INSERT INTO rec_vibe_pending(position,group_key,revision,cursor) VALUES (1,'*',2,'')",
+)
 _migration_version = ContextVar('schema_definition_version',default=None)
 
 
@@ -71,8 +83,47 @@ def migration_definitions(version):
 
 
 def statements(*, version=None):
+    historical = _migration_version.get()
     if version is None:
-        version = _migration_version.get() or VERSION
+        version = historical if historical is not None else VERSION
+    if historical is None and version == VERSION:
+        yield from _read_statements(CURRENT_DEFINITION)
+        return
+    yield from assembled_statements(version=version)
+
+
+def seed_statements():
+    if _migration_version.get() is None:
+        yield from _read_statements(CURRENT_SEEDS)
+        return
+    # The maintenance compiler consumes canonical seed declarations rather
+    # than depending on an already generated resource.
+    quote = lambda value: "'"+value.replace("'", "''")+"'"
+    for key, value in SEED_SETTINGS.items():
+        yield 'INSERT INTO settings(key,value) VALUES ('+quote(key)+','+quote(value)+')'
+    yield from INITIAL_STATE
+
+
+def _read_statements(path):
+    pending = ''
+    for line in path.read_text(encoding='utf-8').splitlines(keepends=True):
+        if not pending and (not line.strip() or line.lstrip().startswith('--')):
+            continue
+        pending += line
+        if sqlite3.complete_statement(pending):
+            yield pending.strip()
+            pending = ''
+    if pending.strip():
+        raise MigrationError('Incomplete current schema definition: ' + path.name)
+
+
+def assembled_statements(*, version):
+    """Frozen predecessors and offline export only; current startup reads SQL.
+
+    The complete installed format also includes the independently versioned,
+    bounded regular changes. This numbered layout is not the final rebuild
+    destination version; the builder fences its entire contract by signature.
+    """
     from . import schema_transforms as transforms
     for sql in _statements(version):
         if version >= 103:
@@ -86,7 +137,7 @@ def statements(*, version=None):
 def _statements(version):
     from . import schema_transforms as transforms
     from .genre_contract import classified_definition
-    for definition in DEFINITIONS:
+    for definition in SOURCE_DEFINITIONS:
         if version < 106 and definition.name == 'schema_foreign_calendar_scopes.sql':
             continue
         if version < 101 and definition.name == 'schema_discovery_subjects.sql':
@@ -233,6 +284,11 @@ def _foreign_key_deferrals(sql):
 
 
 def _table(conn, name, sql):
+    from . import schema_inspection
+    return schema_inspection.table(conn, name, sql, lambda: _inspect_table(conn, name, sql))
+
+
+def _inspect_table(conn, name, sql):
     quoted = '"' + name.replace('"', '""') + '"'
     columns = {r[1]: (r[2].upper(), r[3], r[4], r[5], r[6]) for r in conn.execute(f'PRAGMA main.table_xinfo({quoted})')}
     grouped_keys = defaultdict(list)
@@ -267,6 +323,17 @@ def _table(conn, name, sql):
 
 
 def _schema_contract(statements):
+    from .schema_inspection import _copy_table
+
+    # Only reference DDL is cached. Every caller receives its own mappings;
+    # adjusting a predecessor's accepted owners cannot change another contract.
+    return {name: (kind, _copy_table(value) if kind == 'table' else value)
+            for name, (kind, value) in _reference_contract(tuple(statements)).items()}
+
+
+@lru_cache(maxsize=16)
+def _reference_contract(statements):
+    """Private reference observations, keyed by the complete ordered SQL."""
     reference = sqlite3.connect(':memory:')
     try:
         for sql in statements:
@@ -287,12 +354,9 @@ def contract():
 
 @lru_cache(maxsize=1)
 def _normalized_vibe_contract():
-    from . import vibe_versions
-    tables = []
-    for sql in statements():
-        match = re.match(r'\s*CREATE TABLE (measurements|predictions|recording_vibes)\b', sql, re.I)
-        if match:
-            tables.append(vibe_versions.transform(sql, match[1]))
+    from . import destination_schema
+    tables = [sql for sql in destination_schema.statements()
+              if re.match(r'\s*CREATE TABLE (measurements|predictions|recording_vibes)\b', sql, re.I)]
     return _schema_contract(tables)
 
 
@@ -311,12 +375,8 @@ def bootstrap(conn, registry, now, *, validation=None):
         conn.execute(sql)
     from yt_playlist.core import genre_identity
     genre_identity.seed_catalog(conn)
-    conn.executemany('INSERT INTO settings(key,value) VALUES (?,?)', SEED_SETTINGS.items())
-    conn.execute("INSERT INTO rec_change_queue(kind,item,revision) VALUES ('refresh','',1)")
-    conn.execute('INSERT INTO rec_preparation VALUES (1,0,0)')
-    conn.execute('INSERT INTO rec_group_clock VALUES (1,0)')
-    conn.execute('INSERT INTO group_retention_state VALUES (1,0)')
-    conn.execute("INSERT INTO rec_vibe_pending(position,group_key,revision,cursor) VALUES (1,'*',2,'')")
+    for sql in seed_statements():
+        conn.execute(sql)
     conn.executemany('INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)',
                      [(m.version, m.name, now) for m in registry[:VERSION]])
     from yt_playlist.core import group_progress
@@ -325,7 +385,11 @@ def bootstrap(conn, registry, now, *, validation=None):
 
 
 def validate(conn, *, foreign_keys=True, data=True):
-    _validate(conn, contract(), VERSION, foreign_keys=foreign_keys, data=data)
+    from . import destination_schema, vibe_versions
+
+    expected = (_schema_contract(destination_schema.statements(normalized=vibe_versions.normalized(conn)))
+                if destination_schema.complete(conn) else contract())
+    _validate(conn, expected, VERSION, foreign_keys=foreign_keys, data=data)
 
 
 def _validate(conn, expected_contract, version, *, replaced=frozenset(), foreign_keys=True, data=True):
@@ -344,10 +408,14 @@ def _validate(conn, expected_contract, version, *, replaced=frozenset(), foreign
     objects = {r[0]: (r[1], r[2]) for r in conn.execute(
         "SELECT name,type,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")}
     file_vibe_guards = {}
+    from . import recommendation_revalidations
+    if recommendation_revalidations.available(conn):
+        recommendation_revalidations.validate(conn)
+        file_vibe_guards.update(recommendation_revalidations.guards())
     if 'schema_changes' in objects and conn.execute(
             "SELECT 1 FROM schema_changes WHERE version=16 AND name='file_owned_vibe_guards'").fetchone():
         from . import vibe_provenance
-        file_vibe_guards = dict(vibe_provenance.guards())
+        file_vibe_guards.update(vibe_provenance.guards())
     if 'schema_changes' in objects and conn.execute(
             "SELECT 1 FROM schema_changes WHERE name='continuing_historical_policy_attribution'").fetchone():
         from . import policy_history
@@ -448,17 +516,22 @@ def _validate(conn, expected_contract, version, *, replaced=frozenset(), foreign
         for name in ('history_items', 'history_snapshots', 'legacy_listening_observations'):
             if name in objects:
                 raise MigrationError(f'Retired capture structure remains: {name}')
-        from .schema_transforms import entity_names
+        account = 'account_id' if version >= 103 else 'identity_id'
         capture_check = ('SELECT 1 FROM listening_observations o JOIN listening_capture_receipts c '
-                        'ON c.id=o.capture_id WHERE o.identity_id<>c.identity_id '
+                        f'ON c.id=o.capture_id WHERE o.{account}<>c.{account} '
                         'OR o.first_observed_at IS NOT c.captured_at OR o.last_observed_at IS NOT c.captured_at '
                         "OR o.source_day IS NOT date(c.captured_at,'unixepoch') "
                         "OR o.day IS NOT date(c.captured_at,'unixepoch') LIMIT 1")
-        if data and conn.execute(entity_names(capture_check) if version>=103 else capture_check).fetchone():
+        if data and conn.execute(capture_check).fetchone():
             raise MigrationError('Historical capture receipt does not match its observation')
 
 
 def _validate_data(conn,version=VERSION):
+    account = 'account_id' if version >= 103 else 'identity_id'
+    scope = 'playlist_scope_id' if version >= 103 else 'scope_ref'
+    scope_key = 'id' if version >= 103 else 'ref'
+    provider = 'provider_playlist_id' if version >= 103 else 'provider_id'
+    playlist_provider = 'provider_playlist_id' if version >= 103 else 'ytm_playlist_id'
     checks = (
         ('Invalid generated-play policy',
          'SELECT 1 FROM play_events WHERE is_generated IS NOT NULL AND is_generated NOT IN (0,1) LIMIT 1'),
@@ -468,12 +541,12 @@ def _validate_data(conn,version=VERSION):
          'SELECT 1 FROM play_events pe WHERE NOT EXISTS (SELECT 1 FROM play_event_sources s WHERE s.event_id=pe.id) LIMIT 1'),
         ('Invalid retained playlist membership',
          'SELECT 1 FROM playlists p LEFT JOIN playlist_membership_refs m ON m.id=p.id '
-         'WHERE m.id IS NULL OR m.scope_ref IS NOT p.scope_ref OR m.identity_id IS NOT p.identity_id LIMIT 1'),
+         f'WHERE m.id IS NULL OR m.{scope} IS NOT p.{scope} OR m.{account} IS NOT p.{account} LIMIT 1'),
         ('Invalid playlist scope ownership',
-         'SELECT 1 FROM playlists p WHERE NOT EXISTS (SELECT 1 FROM playlist_scopes s WHERE s.ref=p.scope_ref '
-         'AND s.provider_id=p.ytm_playlist_id AND ((s.kind=\'account\' AND s.identity_id=p.identity_id '
-         "AND s.provider_id IN ('LM','SE')) OR (s.kind='shared' AND s.identity_id IS NULL "
-         "AND s.provider_id NOT IN ('LM','SE')))) LIMIT 1"),
+         f'SELECT 1 FROM playlists p WHERE NOT EXISTS (SELECT 1 FROM playlist_scopes s WHERE s.{scope_key}=p.{scope} '
+         f'AND s.{provider}=p.{playlist_provider} AND ((s.kind=\'account\' AND s.{account}=p.{account} '
+         f"AND s.{provider} IN ('LM','SE')) OR (s.kind='shared' AND s.{account} IS NULL "
+         f"AND s.{provider} NOT IN ('LM','SE')))) LIMIT 1"),
         ('Colliding playlist positions',
          'SELECT 1 FROM playlist_tracks GROUP BY playlist_id,position HAVING COUNT(*)>1 LIMIT 1'),
         ('Invalid playlist position',
@@ -490,9 +563,6 @@ def _validate_data(conn,version=VERSION):
          'OR NOT EXISTS(SELECT 1 FROM artist_provider_ids WHERE artist_id=r.artist_id) LIMIT 1'),
     )
     for message, sql in checks:
-        if version>=103:
-            from .schema_transforms import entity_names
-            sql = entity_names(sql)
         if conn.execute(sql).fetchone():
             raise MigrationError(message)
     for table in ('artist_scans', 'discovered_artists', 'rec_artist_similar'):

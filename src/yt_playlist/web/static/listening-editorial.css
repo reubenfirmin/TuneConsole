@@ -64,19 +64,21 @@
 .le-format-key b { font-weight:400; color:var(--dim); }
 .le-rating-songs { margin:1.5rem 0 0; }
 .le-rating-caption { color:var(--dim); font-size:var(--type-sm); margin:0 0 .5rem; }
-.le-rating-songs table { width:100%; table-layout:fixed; border-collapse:collapse; font-size:var(--type-sm); }
+.le-rating-songs table { width:100%; border-collapse:collapse; font-size:var(--type-sm); }
 .le-rating-songs th,.le-rating-songs td { padding:.65rem .25rem; border-bottom:1px solid var(--border); }
 .le-rating-songs thead th { color:var(--dim); font-size:var(--type-xs); font-weight:500; text-transform:none; letter-spacing:normal; }
-.le-rating-songs th:first-child { width:64%; text-align:left; }
+.le-rating-songs th:first-child { text-align:left; }
 .le-rating-songs tbody th { font-weight:500; white-space:normal; overflow-wrap:anywhere; }
-.le-rating-songs td,.le-rating-songs th:not(:first-child) { text-align:right; font-variant-numeric:tabular-nums; }
+.le-rating-songs td,.le-rating-songs th:not(:first-child) { width:1%; white-space:nowrap; text-align:right; }
+.le-rating-marks { display:flex; align-items:center; justify-content:flex-end; gap:.85rem; }
+.le-rating-mark { display:inline-flex; align-items:center; gap:.3rem; color:var(--text); }
+.le-rating-mark svg { display:block; width:1.25rem; height:1.25rem; flex-shrink:0; fill:currentColor; }
+.le-rating-mark-hearts { color:var(--danger); }
+.le-rating-mark-clears { color:var(--dim); }
+.le-rating-count { color:var(--text); font-variant-numeric:tabular-nums; }
 .listening-edition .le-rating-songs a { display:inline; }
 .le-rating-artist,.le-rating-songs time { display:block; color:var(--dim); font-weight:400; font-size:var(--type-xs); }
 .le-rating-other th { color:var(--dim); }
-@media(max-width:700px) {
-  .le-rating-songs th:first-child { width:55%; }
-  .le-rating-songs th,.le-rating-songs td { padding-inline:.15rem; }
-}
 .le-subject-key { display:flex; flex-wrap:wrap; gap:.6rem 1.25rem; margin-top:.5rem; padding-inline:1.5rem; }
 .le-subject-key span { display:inline-flex; align-items:center; gap:.5rem; font-size:.8rem; }
 .le-subject-key i { width:.65rem; height:.65rem; background:var(--le-ink); flex-shrink:0; }

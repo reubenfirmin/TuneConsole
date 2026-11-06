@@ -38,7 +38,8 @@ def test_delivery_and_reconnect_render_current_authoritative_row(store, scope):
 
     async def scenario():
         response = await endpoint(request, job.id)
-        assert "started" in await anext(response.body_iterator)
+        first = json.loads((await anext(response.body_iterator)).splitlines()[0][6:])
+        assert first == {"type": "info", "text": "Checking song details…"}
         # These succeed after the connection opens and before the enrichment event is delivered.
         store.tracks.set_track_title(entry, "Edited title")
         store.tracks.set_track_artist(entry, "Edited artist")

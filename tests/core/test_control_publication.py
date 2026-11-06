@@ -1,4 +1,5 @@
 """Verified control selection stays coherent with continuing installed writers."""
+from contextlib import closing
 import json
 import sqlite3
 
@@ -40,6 +41,7 @@ def test_publication_changes_runtime_reads_on_existing_and_reopened_connections(
             assert other.settings.get_setting('rec_selection_live_run') == ''
         expected_sources = {key: value for key, value in sources.items()
                             if (key == preparation.ALBUM_KEY) == (name == 'album-controls')}
+        served = {key: other.settings.get_setting(key) for key in expected_sources}
         assert dict(store.conn.execute(f'SELECT source,raw_value FROM {publication.ORIGINALS} WHERE name=?', (name,))) == expected_sources
         regular.validate(other.conn)
     finally:
@@ -48,6 +50,7 @@ def test_publication_changes_runtime_reads_on_existing_and_reopened_connections(
     try:
         reopened.init_schema(defer_metadata=True)
         assert publication.selected(reopened.conn, name) == revision
+        assert {key: reopened.settings.get_setting(key) for key in served} == served
     finally:
         reopened.conn.close()
 
@@ -61,7 +64,7 @@ def test_old_writes_invalidate_selection_until_new_revision_publishes(installed,
     publication.publish(store.conn, name, revision=revision)
     key = preparation.ALBUM_KEY if name == 'album-controls' else 'rec_selection_active_run'
     raw = json.dumps({'until': 999, 'values': {'novelty': .8}, 'genres': ['Control Alias']}) if name == 'album-controls' else '000999'
-    with sqlite3.connect(store._db_path) as old_writer:
+    with closing(sqlite3.connect(store._db_path)) as old_writer, old_writer:
         old_writer.execute('UPDATE settings SET value=? WHERE key=?', (raw, key))
     assert publication.selected(store.conn, name) is None
     # Direct helpers also handle selection changing after available() returned.

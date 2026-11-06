@@ -11,6 +11,53 @@ from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_rea
 
 
 class ModelSelectionRepo(Repo):
+    @snapshot_read
+    def retained_pair_artifacts(self):
+        protected = ({row[0] for row in self.conn.execute('SELECT artifact FROM model_pair_contexts')}
+                     if self._store._model_projections else set())
+        surfaces = [row[0] for row in self.conn.execute(
+            "SELECT surface FROM rec_proposals WHERE surface LIKE 'model_pair:%'")]
+        return protected, surfaces
+
+    @snapshot_read
+    def comparison_constraints(self):
+        from yt_playlist.core import taste_axes
+        values = [tuple(row) for row in self.conn.execute(
+            "SELECT key,value FROM settings WHERE key LIKE 'rec_param:%' "
+            "OR key IN ('album_feedback','rec_cooc_weighting') ORDER BY key")]
+        standing = [tuple(row) for row in self.conn.execute(
+            taste_axes.projection(self.conn, 'rec_lean', 'axis,value') + ' ORDER BY axis')]
+        return values, standing
+
+    @synchronized
+    def retire_product_trial(self, now, reason):
+        """Retire only the still-active legacy trial, preserving held evidence."""
+        with self.conn:
+            self.conn.execute('UPDATE rec_model_selection_runs SET result_json=result_json WHERE 0')
+            current = self._store.rec_proposals.get_proposals('model_live_comparison') or {}
+            if current.get('phase') not in ('preparing', 'observing'):
+                return
+            run = self.selection_run(current['run_id'])
+            if run:
+                run.update(status='retained', phase='complete', reason=reason, ended_at=now)
+                self.publish_selection(run['id'], json.dumps(run), None, run['previous'])
+            current.update(phase='retained', reason=reason, ended_at=now)
+            self._store.rec_proposals.publish_prepared_home(json.dumps(current), now, surface='model_live_comparison')
+            self._store.settings.publish_values({'rec_selection_live_run': ''})
+            monitor = self._store.rec_proposals.get_proposals('model_listening_monitor')
+            if monitor:
+                self._store.rec_proposals.publish_prepared_home(json.dumps({**monitor, 'complete': True}),
+                                                               now, surface='model_listening_monitor')
+
+    @synchronized
+    def retire_model_display(self):
+        """Invalidate selected-model output in the caller's guarded transaction."""
+        if not self.conn.in_transaction:
+            raise RuntimeError('Model display retirement requires an outer transaction')
+        self.conn.execute("DELETE FROM rec_proposals WHERE surface IN ('home_choice','mode_bundles','fresh_pool')")
+        from yt_playlist.core.recommendation_invalidation import clear_model_display
+        clear_model_display(self.conn)
+
     @lookup_read
     def next_daily_at(self):
         state = (recommendation_work.read(self.conn, 'daily_model_schedule')

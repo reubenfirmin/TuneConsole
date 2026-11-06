@@ -95,7 +95,7 @@
 .album-tuning-genres input:checked + span,.album-genres-all[aria-pressed="true"] { background:var(--accent-soft); color:var(--text); border-color:var(--accent); }
 .album-tuning-genres input:focus-visible + span { outline:2px solid var(--accent); outline-offset:3px; }
 .album-tuning-scope { margin:1.5rem 0 0; font-size:.7rem; color:var(--dim); }
-.album-tuning-error { color:var(--danger); }
+.album-tuning-status { color:var(--dim); }
 @container albums (max-width:44rem) {
   .album-choice { grid-template-columns:minmax(0,1fr); gap:1.5rem; padding:1.5rem; }
   .album-sleeve { width:100%; padding:.5rem; }

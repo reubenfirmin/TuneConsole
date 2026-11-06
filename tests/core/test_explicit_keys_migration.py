@@ -1,4 +1,5 @@
 """Key enforcement, stable feedback IDs, and atomic parent-table replacement."""
+from contextlib import closing
 import json
 import sqlite3
 
@@ -17,20 +18,19 @@ def upgrade(conn, migration=UPGRADE):
 
 
 @pytest.fixture
-def predecessor(tmp_path):
-    conn = sqlite3.connect(tmp_path / 'keys.db')
-    conn.row_factory = sqlite3.Row
-    conn.execute('PRAGMA foreign_keys=ON')
-    migrate(conn, registry=registry.MIGRATIONS[:65])
-    conn.executemany('INSERT INTO recordings(id,identity_key,title,artist) VALUES (?,?,?,?)',
-                     [(17, 'first|artist', 'First', 'Artist'), (18, 'second|artist', 'Second', 'Artist')])
-    conn.execute('INSERT INTO rec_mood(rowid,created_at,direction,keys) VALUES (22,100,1,?)',
-                 (json.dumps(['first|artist', 'unknown|artist', 'second|artist']),))
-    conn.execute('INSERT INTO rec_mood(rowid,created_at,direction,keys) VALUES (23,100,-2,?)',
-                 (json.dumps(['second|artist']),))
-    conn.commit()
-    yield conn
-    conn.close()
+def predecessor(tmp_path, _pristine_installed_schema):
+    with closing(sqlite3.connect(tmp_path / 'keys.db')) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        _pristine_installed_schema(65).backup(conn)
+        conn.executemany('INSERT INTO recordings(id,identity_key,title,artist) VALUES (?,?,?,?)',
+                         [(17, 'first|artist', 'First', 'Artist'), (18, 'second|artist', 'Second', 'Artist')])
+        conn.execute('INSERT INTO rec_mood(rowid,created_at,direction,keys) VALUES (22,100,1,?)',
+                     (json.dumps(['first|artist', 'unknown|artist', 'second|artist']),))
+        conn.execute('INSERT INTO rec_mood(rowid,created_at,direction,keys) VALUES (23,100,-2,?)',
+                     (json.dumps(['second|artist']),))
+        conn.commit()
+        yield conn
 
 
 def test_rebuild_preserves_cascade_children_payloads_rowids_and_extensions(predecessor):
@@ -96,7 +96,7 @@ def test_mood_ids_order_membership_unknowns_and_restart(predecessor):
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute('DELETE FROM recordings WHERE id=17')
     conn.rollback()
-    with sqlite3.connect(path) as reopened:
+    with closing(sqlite3.connect(path)) as reopened, reopened:
         assert mood.recent(reopened, 200)[0] == (100,-2,['second|artist'])
         reopened.execute('PRAGMA foreign_keys=ON')
         reopened.execute('DELETE FROM mood_events')
@@ -338,7 +338,7 @@ def test_startup_rechecks_history_after_releasing_reservation(predecessor):
                 # reservation gap required to disable FK actions.
                 upgrade(conn)
             return result
-    with sqlite3.connect(path, factory=RacingConnection) as racing:
+    with closing(sqlite3.connect(path, factory=RacingConnection)) as racing, racing:
         racing.execute('PRAGMA foreign_keys=ON')
         upgrade(racing)
         assert racing.execute('PRAGMA foreign_keys').fetchone()[0] == 1

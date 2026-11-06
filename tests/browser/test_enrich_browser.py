@@ -1,13 +1,14 @@
 """Enrichment counts navigate to useful details and update through the real HTMX poll."""
 from playwright.sync_api import expect
+from tests.enrichment_support import complete_entries
 import pytest
 
 
 def _seed(store):
     first = store.tracks.upsert_track("v1", "Checked song", "First artist", None, 200)
     second = store.tracks.upsert_track("v2", "Queued song", "Second artist", None, 200)
-    store.tracks.set_track_enrichment(first, "Rock", "1999")
-    store.enrichment_queue.mark_enriched([first], 1.0)
+    store.enrichment.apply_provider_fields(first, 'musicbrainz', {'genre': 'Rock', 'year': '1999'})
+    complete_entries(store, [first], 1.0)
     store.enrichment.upsert_conflict(first, "genre", [{"provider": "musicbrainz", "value": "Rock"},
                                            {"provider": "discogs", "value": "Pop"}])
     return first, second
@@ -55,7 +56,7 @@ def test_counts_advance_without_reloading(live_app, store, page):
     page.goto(f"{live_app}/enrich")
     status = page.locator(".enrich-status-card")
     expect(page.locator('.metric[href="/enrich/queue"] .v')).to_have_text("1")
-    store.enrichment_queue.mark_enriched([second], 1.0)
+    complete_entries(store, [second], 1.0)
     expect(page.locator('.metric[href="/enrich/queue"] .v')).to_have_text("0", timeout=6000)
     expect(page.locator('.metric[href="/enrich/processed"] .v')).to_have_text("100%")
     expect(page.get_by_text("Caught up", exact=False)).to_be_visible()
@@ -76,7 +77,7 @@ def test_counts_advance_without_reloading(live_app, store, page):
     expect(page.get_by_role("cell", name="Re-enrichment", exact=True)).to_have_count(2)
     track = store.tracks.catalog_subject(first)
     store.enrichment_state.record_enrichment_attempt(track["identity_key"], "musicbrainz", {}, now=10.0)
-    store.enrichment_queue.mark_enriched([first], 10.0)
+    complete_entries(store, [first], 10.0)
     page.goto(f"{live_app}/enrich")
     expect(page.locator('.metric[href="/enrich/queue"] .v')).to_have_text("1")
     expect(page.locator('.metric[href="/enrich/processed"] .v')).to_have_text("50%")

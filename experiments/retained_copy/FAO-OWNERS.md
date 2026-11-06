@@ -30,6 +30,7 @@ the existing domain snapshot fence protect active consumers from collection.
 | Musical profiles | existing recording/source head, digest, version, publication time; typed file head with publication identity and logical size | immutable publication chunk, at most 128 profiles | active heads durable; superseded publications 30 days from captured ctime, after snapshots release |
 | Embeddings | canonical recording/artist subject, space/basis/dimensions/order and publication | immutable bounded binary chunk with exact float32 bytes | current and required model bases durable; unreferenced publications 30 days from ctime |
 | Recovery and pending operations | typed operation/phase/target/availability | existing domain owner | durable while needed for recovery or pending work; age alone never authorizes removal |
+| Listening retention inventory | reconstructible `.retention-inventory` metadata beside immutable evidence | listening evidence owner; FAO atomic cache, with file identities rechecked each turn | one entry per inventoried evidence file; completed scans remove stale entries; never contains model arrays or authorizes deletion independently |
 | Samples and required models | sample/model version and exact identity | existing sample/model owner | durable while required inputs; no startup refetch/retrain |
 | Historical policy configuration | compact attribution identity and shared-base closure | existing policy identity | useful replay bodies 180 days from original publication mtime; disposable unused configurations deleted |
 | Cold legacy originals | domain manifests and exact kind/source identity; online ambiguity/redirect/scope guards stay SQL | domain-specific journal | useful diagnostics 180 days from original mtime; paid/user/unknown-scope recovery durable; obsolete originals require verified disposition |
@@ -140,11 +141,28 @@ delivery and playlist backups, pass through FAO. SQLite custody and schema/code,
 TOML credentials, external network/zip streams, OS diagnostics and coordination
 files are the explicit non-asset boundaries.
 
-Database replacement also has an explicit offline whole-root custody boundary
-in `db_rebuild.files.stage` and `_move`. With application handles drained, these
-operations preserve complete original directories for rollback, including lock
-files and superseded publications; they do not decode or republish individual
-assets. Copying referenced live bodies and validating a candidate use FAO.
+Bundled schema resources have exact reader boundaries: `schema_admission.reference`
+loads the frozen `installed_v079.json` schema contract;
+`schema_definition._statements` reads the packaged SQL definitions; and
+`schema_transforms.saved_output_definitions` reads the packaged recommendation
+settings schema. These are application code resources. Other file readers in
+those modules still require their own classification or FAO access.
+
+Current database replacement keeps installed file roots in place. Private SQL
+candidates and retained originals use `db_rebuild.files.borrow`, preserving file
+identity and continuing publication through those same roots. Only SQL is staged.
+The `_move` boundary remains for installation and rollback of persisted older
+`file_roots` plans, with application handles drained. It preserves complete
+directories, including locks and superseded publications. Required file
+verification uses FAO.
+
+The current build and install share SQLite verification in
+`core/db_rebuild/sqlite_checks.py`. The older policy-cleanup rehearsal and SQL-policy
+repair worker have been removed. Domain export/restore tests use
+`tests/file_custody_support.py` to create disposable snapshots without migration,
+policy cleanup or installation. Playback-inbox backup machinery is research-only
+under `experiments/retained_copy`; production capture, replay, receipts and
+observation collection remain in their application owners.
 
 Renewing an immutable artifact's retention lease uses `fao.touch`, which updates
 its saved logical modification time while preserving exact content and captured
@@ -155,12 +173,12 @@ a failed renewal leaves the previous artifact intact.
 Explicit resumable preparation is available as:
 
 ```
-uv run python -m yt_playlist.core.preparation.file_bodies DATABASE --domain profiles --batches 10
-uv run python -m yt_playlist.core.preparation.file_bodies DATABASE --domain embeddings --batches 10
-uv run python -m yt_playlist.core.preparation.file_bodies DATABASE --domain vibe_provenance --batches 10
-uv run python -m yt_playlist.core.preparation.file_bodies DATABASE --domain legacy_journals --batches 10
-uv run python -m yt_playlist.core.preparation.file_bodies DATABASE --domain policy_history --batches 10
-uv run python -m yt_playlist.core.preparation.file_bodies DATABASE --domain compression --batches 10 --assets MANAGED_ASSET_TREE
+uv run python -m yt_playlist.core.preparation DATABASE --domain profiles --batches 10
+uv run python -m yt_playlist.core.preparation DATABASE --domain embeddings --batches 10
+uv run python -m yt_playlist.core.preparation DATABASE --domain vibe_provenance --batches 10
+uv run python -m yt_playlist.core.preparation DATABASE --domain legacy_journals --batches 10
+uv run python -m yt_playlist.core.preparation DATABASE --domain policy_history --batches 10
+uv run python -m yt_playlist.core.preparation DATABASE --domain compression --batches 10 --assets MANAGED_ASSET_TREE
 ```
 
 Compression defaults to 32 MiB logical bytes per tick. Use `--logical-bytes`
@@ -193,6 +211,92 @@ before publication. Only prepared rows and atomic file renames enter the SQL
 publisher. Allocation/current/cohort revisions and the observed physical chunk
 identity reject stale work. Abandoned staged files release their leases and
 are removed on cancellation or a rejected publication.
+
+## Shared vibe model candidate (#819)
+
+`repos/vibe_models.py` owns all new SQL, including a small typed
+`prediction_model_generations(prediction_id PK, generation BLOB(32))` reference
+and its generation index. Parameters and input edges never enter that table.
+The `core/vibe_model_files.py` adapter performs physical FAO operations only.
+Regular change 31 creates bounded DDL and invalidation triggers, without fitting
+or converting populated data. Installed `album_tracks` and current occurrence
+owners have separate trigger/query paths; compatibility remains in place.
+
+Each immutable `vibe-models/HH/SHA256.json` contains one original-only training
+manifest, exact measurement/configuration identities, canonical credits and
+specific genres, unambiguous album identities, source/version groups, fitted
+variance components, diagnostics, and a packed conditional Gaussian posterior.
+Formats 2 and 3 store sparse effect precision and conditional effect means instead of
+a dense recording Cholesky triangle. Format 1 remains readable during continuing
+preparation. Artifacts remain bounded at 16 MiB; input capture is byte-bounded
+and has a 32,768-recording sentinel instead of the old dense 1,024-row ceiling.
+Fitting still admits 128 MiB of accounted working data and a ten-second
+cooperative work budget. Symbolic minimum-degree elimination bounds graph and
+factor fill before numeric factorization, using the same ordering throughout
+optimization. These limits do not establish measured RSS or a hard interruption
+deadline inside BLAS. Oversized or nonconvergent fits defer without sampling or
+deleting useful heads.
+
+The candidate jointly conditions baseline, individual artists, genre,
+artist/genre interactions, album and source effects. Variance components use
+marginal maximum likelihood with the existing numeric bounds; central finite
+differences evaluate the same Gaussian marginal likelihood through the sparse
+mixed-model equations. The optimizer permits at most 100 iterations within the
+unchanged ten-second cooperative budget. Fewer than four originals
+use an explicit prior. One measurement per recording cannot identify classifier
+noise separately from real track variation. The residual retains both; known
+replicate noise can be supplied separately. Source/version grouping does not
+establish provider-specific reliability or remove shared classifier bias.
+Hyperparameter uncertainty is omitted by the conditional plug-in posterior.
+Suitability is a continuous mean, not an independent vote or calibrated
+probability. Returned scores are clipped to [0,1].
+
+Format 3 predictions average the fitted source/version effects over their
+canonical-original recording frequencies. The unspecified target source is
+not treated as a new, zero-effect classifier. This finite empirical mixture
+does not identify a source-free human suitability scale or remove shared bias.
+Latent-mean variance includes covariance of the weighted source mean;
+new-track variance also includes the mixture's conditional source variance
+and between-source mean variation. Neither target measurement nor target
+source selects the mixture. Formats 1 and 2 retain their original readers and
+prediction semantics. A supplied but unseen artist/genre identity uses its
+new-group prior, with an interval; missing genre/album groups retain their
+prior variance. If both artist and genre are absent, the existing explicit
+heuristic fallback remains. No new SQL source kind or migration is introduced.
+
+For this candidate, `support` means mean input coverage multiplied by the
+fractional reduction in latent-mean variance. It is neither suitability nor a
+new-track confidence interval. A compact calculation receipt stores artists,
+generation, latent-mean variance and new-track variance; new-track variance adds
+the fitted between-track/noise residual and source-mixture variation. The existing SQL `variance` column
+remains unset for joint predictions. `recordings` counts the whole shared fit,
+not an independent effective sample size. Existing source kinds describe
+available artist/genre conditioning, rather than a selected exclusive cohort.
+
+Fit artifacts are staged and verified off the request path on a consistent
+snapshot. Files become durable before guarded SQL heads. Bounded score batches
+retain their actual generation and exact calculation identity; unchanged means
+with changed originals still receive new receipts. A capture loads one posterior
+at a time. Product score readers use SQL and do not read these files or fit.
+Missing/broken current heads queue repair while retaining useful old scores;
+ordinary startup and failed fitting do not demand a full successful refit.
+
+Current heads and ready calculation receipts protect model generations.
+Deliberately expired history returns unavailable before reading its model;
+missing required bytes are corruption. Collection examines at most sixteen raw
+entries per normal turn (hard maximum 128), retains unreferenced generations
+for thirty days from saved ctime, and uses reader/build leases plus an SQL
+writer reservation. Failed publications may leave collectible durable orphans.
+The shared file-owner inventory includes models in backup, restore and rebuild
+fences. Cold provenance expansion resolves the shared manifest when requested;
+rebuild publication preserves compact receipts instead of per-track graphs.
+
+Production qualification is intentionally empty in
+`rec/vibe_joint_preparation.py`. Controlled test fixtures explicitly enable the
+candidate; they do not qualify it. Populate its configuration-to-report mapping
+only after the frozen #819 statistical, lifecycle and resource gates have
+independent passing evidence. Until then the existing policy remains active.
+This is a candidate source handoff, not an accepted model or measured saving.
 
 ## Cold archive journal (#697)
 

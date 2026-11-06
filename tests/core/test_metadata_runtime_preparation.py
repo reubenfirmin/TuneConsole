@@ -3,6 +3,7 @@ import json
 import time
 
 import pytest
+from tests.metadata_provenance_support import metadata_provenance
 
 from yt_playlist.core import catalog, fao, metadata_legacy, metadata_native, metadata_runtime, metadata_runtime_files
 from yt_playlist.core.metadata_observations import MetadataObservation
@@ -10,9 +11,7 @@ from yt_playlist.core.preparation import metadata_runtime as preparation
 from yt_playlist.core.store import Store
 
 
-def seeded(tmp_path):
-    store = Store(tmp_path / 'old.db')
-    store.init_schema()
+def seeded(store):
     entry = store.tracks.upsert_track('video', 'Song', 'Artist', None, 200)
     now = time.time()
     store.enrichment.apply_provider_fields(entry, 'a', {'genre':'Jazz','bpm':120}, providers=('a',))
@@ -27,20 +26,19 @@ def seeded(tmp_path):
     return store, entry
 
 
-def run(store, path):
+def run(store, path, *, batch_size=1):
     for _ in range(100):
-        result = preparation.step(store.conn, path, batch_size=1)
+        result = preparation.step(store.conn, path, batch_size=batch_size)
         if result['complete']:
             return result
     raise AssertionError('Preparation failed to finish')
 
 
-def test_native_source_reads_shared_delivery_once_and_checks_each_observation(tmp_path, monkeypatch):
+def test_native_source_reads_shared_delivery_once_and_checks_each_observation(file_backed_store, monkeypatch):
     from yt_playlist.core import metadata_deliveries
     from yt_playlist.core.activity import WorkBudgetExceeded
 
-    store = Store(tmp_path / 'shared.db')
-    store.init_schema()
+    store = file_backed_store
     try:
         entry = store.tracks.upsert_track('video', 'Song', 'Artist', None, 200)
         store.enrichment_state.record_metadata_observations(entry, 'native', [
@@ -133,10 +131,10 @@ def test_file_batch_joins_writers_when_document_preparation_fails(store, monkeyp
     assert not store.conn.in_transaction
 
 
-def test_failed_batch_joins_file_writers_before_rolling_back_heads(tmp_path, monkeypatch):
+def test_failed_batch_joins_file_writers_before_rolling_back_heads(file_backed_store, monkeypatch):
     from threading import Event, Lock
 
-    store, entry = seeded(tmp_path)
+    store, entry = seeded(file_backed_store)
     try:
         for number in range(3):
             store.enrichment_state.record_metadata_observations(entry, 'native-' + str(number), [
@@ -197,8 +195,8 @@ def test_file_batch_preserves_the_callers_cancellation_scope(store):
     assert not path.exists()
 
 
-def test_preparation_preserves_real_reader_outputs_queues_and_reopens(tmp_path):
-    store, entry = seeded(tmp_path)
+def test_preparation_preserves_real_reader_outputs_queues_and_reopens(file_backed_store, tmp_path):
+    store, entry = seeded(file_backed_store)
     path = tmp_path / 'progress.json'
     try:
         # An imported decision has an unknown time and need not be the current
@@ -213,27 +211,34 @@ def test_preparation_preserves_real_reader_outputs_queues_and_reopens(tmp_path):
         native_before = metadata_native.source_values(store.conn, key)
         queues = {name:list(map(tuple, store.conn.execute('SELECT * FROM '+name))) for name in
                   ('rec_change_queue','rec_content_pending','rec_musical_pending','enrichment_provider_jobs')}
-        result = run(store, path)
+        # This check exercises exact conversion and restart, rather than the
+        # separately covered one-row checkpoint/replay boundary.
+        result = run(store, path, batch_size=128)
         assert result['counts']['choices'] == 2
         assert not metadata_runtime.active(store.conn)
         preparation.activate(store.conn, path)
         assert [tuple(row) for row in store.conn.execute('SELECT * FROM catalog_tracks ORDER BY id')] == catalog_before
         assert metadata_native.source_values(store.conn, key) == native_before
         assert store.enrichment_reports.genre_provenance(entry) == genre_before
-        decisions = store.enrichment_reports.metadata_provenance(entry)['decisions']
+        decisions = metadata_provenance(store, entry)['decisions']
         assert len(decisions) == 4
         assert any(row['source'] == 'legacy' and row['chosen_at'] is None and row['value_json'] == 'null' for row in decisions)
         for name, before in queues.items():
             assert list(map(tuple, store.conn.execute('SELECT * FROM '+name))) == before
+        store.conn.close()
+        store = Store(file_backed_store._db_path)
         store.init_schema()
         assert metadata_runtime.active(store.conn)
+        assert metadata_native.source_values(store.conn, key) == native_before
+        assert store.enrichment_reports.genre_provenance(entry) == genre_before
+        assert metadata_provenance(store, entry)['decisions'] == decisions
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
     finally:
         store.conn.close()
 
 
-def test_committed_batch_with_lost_progress_can_be_replayed(tmp_path):
-    store, _ = seeded(tmp_path)
+def test_committed_batch_with_lost_progress_can_be_replayed(file_backed_store, tmp_path):
+    store, _ = seeded(file_backed_store)
     path = tmp_path / 'progress.json'
     try:
         run(store, path)
@@ -256,8 +261,8 @@ def test_committed_batch_with_lost_progress_can_be_replayed(tmp_path):
 @pytest.mark.parametrize('damage', ('native_value', 'native_provenance', 'native_missing_field', 'native_extra_field',
                                    'choice_null', 'choice_scope', 'choice_time', 'alternatives', 'conflict',
                                    'attribution', 'choice_head', 'extra_choice', 'freshness'))
-def test_activation_rejects_semantic_changes_even_with_valid_checksums(tmp_path, damage):
-    store, entry = seeded(tmp_path)
+def test_activation_rejects_semantic_changes_even_with_valid_checksums(file_backed_store, tmp_path, damage):
+    store, entry = seeded(file_backed_store)
     path = tmp_path/'progress.json'
     try:
         run(store, path)
@@ -316,10 +321,10 @@ def test_activation_rejects_semantic_changes_even_with_valid_checksums(tmp_path,
         store.conn.close()
 
 
-def test_cutover_verifies_without_writer_reservation_and_fences_concurrent_updates(tmp_path, monkeypatch):
+def test_cutover_verifies_without_writer_reservation_and_fences_concurrent_updates(file_backed_store, tmp_path, monkeypatch):
     from yt_playlist.core.preparation import metadata_runtime_verification
     from yt_playlist.core.db_handles import connect
-    store, entry = seeded(tmp_path)
+    store, entry = seeded(file_backed_store)
     path = tmp_path/'progress.json'
     try:
         run(store, path)
@@ -327,7 +332,7 @@ def test_cutover_verifies_without_writer_reservation_and_fences_concurrent_updat
         def concurrent(conn, state):
             verify(conn, state)
             # This must commit while verification still owns its read snapshot.
-            other = connect(tmp_path/'old.db')
+            other = connect(store._db_path)
             try:
                 with other:
                     other.execute("INSERT INTO settings(key,value) VALUES ('concurrent-cutover-check','saved')")
@@ -342,8 +347,8 @@ def test_cutover_verifies_without_writer_reservation_and_fences_concurrent_updat
         store.conn.close()
 
 
-def test_continuing_installed_writes_refuse_stale_activation(tmp_path):
-    store, entry = seeded(tmp_path)
+def test_continuing_installed_writes_refuse_stale_activation(file_backed_store, tmp_path):
+    store, entry = seeded(file_backed_store)
     path = tmp_path / 'progress.json'
     try:
         preparation.step(store.conn, path, batch_size=1)
@@ -358,9 +363,8 @@ def test_continuing_installed_writes_refuse_stale_activation(tmp_path):
         store.conn.close()
 
 
-def test_preparation_retains_newer_identical_native_delivery_freshness(tmp_path):
-    store = Store(tmp_path/'native.db')
-    store.init_schema()
+def test_preparation_retains_newer_identical_native_delivery_freshness(file_backed_store, tmp_path):
+    store = file_backed_store
     try:
         entry = store.tracks.upsert_track('video', 'Song', 'Artist', None, 200)
         observation = MetadataObservation('mood_party', .8, 'recording', 'native-id', 'prediction',

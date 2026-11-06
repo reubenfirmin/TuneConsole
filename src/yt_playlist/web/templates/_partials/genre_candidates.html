@@ -1,15 +1,16 @@
-<div class="modal-backdrop" x-data="{ open: true }" x-show="open" x-cloak x-transition.opacity
-     @click="open = false" @keydown.escape.window="open = false">
+<div class="modal-backdrop" x-data='genreDialog({{ track.track_id }}, {{ (track.current or "")|tojson }})'
+     x-show="open" x-cloak x-transition.opacity
+     @click="close()" @keydown.escape.window="close()" @app-page-leaving.window="close()">
   <div class="modal genre-candidates" @click.stop x-transition.scale.origin.center>
     <h3>Genre for &ldquo;{{ track.title }}&rdquo;</h3>
     <p class="section-note genre-track-artist">{{ track.artist }}</p>
-    <form class="genre-picker" hx-post="/track/{{ track.track_id }}/genre-candidates" hx-swap="none"
-          x-data='genreDialog({{ track.track_id }}, {{ (track.current or "")|tojson }})'>
+    <form class="genre-picker" @submit.prevent="apply()">
+      <div class="genre-suggestions" x-ref="suggestions">
       {% if track.options %}
       <fieldset class="genre-option-list">
         {% for option in track.options %}
         <label class="genre-option" :class="{ selected: choice === {{ option.value|tojson }} }">
-          <input type="radio" x-model="choice" value="{{ option.value }}">
+          <input type="radio" x-model="choice" value="{{ option.value }}" :disabled="saving">
           <span class="genre-option-value">{{ option.value }}</span>
           <span class="genre-providers">
             {% for provider in option.providers %}<small>{{ provider }}</small>{% endfor %}
@@ -22,7 +23,7 @@
       <div class="genre-empty-state">
         <span>No genre suggestions yet.</span>
         <button type="button" class="genre-lookup" aria-label="Look up genre metadata"
-                title="Look up genre metadata" @click="startLookup()" :disabled="lookupRunning">
+                title="Look up genre metadata" @click="startLookup()" :disabled="lookupRunning || saving">
           <span class="spinner" x-show="lookupRunning" x-cloak></span>
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
                x-show="!lookupRunning"
@@ -32,6 +33,7 @@
         </button>
       </div>
       {% endif %}
+      </div>
       <div class="genre-lookup-progress" x-show="lookupRunning || lookupFinished" x-cloak>
         <div class="enrich-bar"><i :style="`width:${lookupPct}%`"></i></div>
         <span class="enrich-status" x-text="lookupStatus"></span>
@@ -41,22 +43,24 @@
         <div class="ginput-wrap">
           <input id="genre-custom-{{ track.track_id }}" class="ginput" type="text" maxlength="80"
                  x-ref="override" x-model="choice" autocomplete="off" placeholder="Type or choose a genre"
+                 :disabled="saving"
                  @input="filterGenres()" @focus="filterGenres()" @keydown.escape="overriding = false">
           <div class="genre-suggest" x-show="genreSuggestions.length" x-cloak>
             <template x-for="genre in genreSuggestions" :key="genre">
-              <button type="button" class="genre-opt" @click="choice = genre; genreSuggestions = []"
+              <button type="button" class="genre-opt" :disabled="saving" @click="choice = genre; genreSuggestions = []"
                       x-text="genre"></button>
             </template>
           </div>
         </div>
       </div>
       <input type="hidden" name="genre" :value="choice">
+      <p class="section-note" x-show="saveStatus" x-text="saveStatus" x-cloak role="status"></p>
       <div class="modal-actions">
-        <button type="button" class="genre-override-link" x-show="!overriding" @click="openOverride()">
+        <button type="button" class="genre-override-link" :disabled="saving" x-show="!overriding" @click="openOverride()">
           Override
         </button>
-        <button type="button" class="btn-ghost" @click="open = false">Cancel</button>
-        <button type="submit" class="btn-primary" :disabled="!choice.trim()">Apply genre</button>
+        <button type="button" class="btn-ghost" @click="close()">Cancel</button>
+        <button type="submit" class="btn-primary" :disabled="saving || !choice.trim()">Apply genre</button>
       </div>
     </form>
   </div>

@@ -4,7 +4,6 @@ from itertools import combinations as original_combinations
 from fastapi.testclient import TestClient
 import pytest
 
-from yt_playlist.core.store import Store
 from yt_playlist.library import analysis
 from yt_playlist.repos.models import CleanupPreferences, Playlist, PlaylistMemberships
 from yt_playlist.web.app import create_app
@@ -78,9 +77,8 @@ def test_sparse_disjoint_memberships_have_no_candidate_pairs():
     assert state.relationships(0.5) == ([], [])
 
 
-def test_memberships_preferences_and_upload_kinds_share_a_snapshot(tmp_path, monkeypatch):
-    store = Store(tmp_path / 'cleanup.db')
-    store.init_schema()
+def test_memberships_preferences_and_upload_kinds_share_a_snapshot(file_backed_store, monkeypatch):
+    store = file_backed_store
     try:
         iid = store.accounts.upsert_account('main', 'cred', None, True)
         a = store.playlists.upsert_playlist(iid, 'A', 'A', 1, '', 1)

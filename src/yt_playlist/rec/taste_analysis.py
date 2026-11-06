@@ -2,7 +2,6 @@
 the Home fingerprint, and per-playlist facets/diversity. A leaf below scoring (imports no scoring)."""
 import math
 
-from yt_playlist.util import genre_map
 from yt_playlist.rec import mix_tuning, rec_params, transient
 
 
@@ -44,6 +43,7 @@ def taste_fingerprint(store, now, *, prepared=None) -> dict:
     fgain = rec_params.get_param(store, "facet_gain")
     fmin = rec_params.get_param(store, "facet_mult_min")
     fmax = rec_params.get_param(store, "facet_mult_max")
+    family_members = store.genres.family_members(bd['families'])
 
     def _live(axis, effective):
         """Where the live transient model puts this axis right now: effective x facet multiplier,
@@ -59,7 +59,7 @@ def taste_fingerprint(store, now, *, prepared=None) -> dict:
         minus any the user hid, minus any that already carry a lean: a leaned/added subgenre is
         promoted to its own top-level bar, so it never shows in both places."""
         out = []
-        for sub in genre_map.subgenres_of(fam,conn=store.conn):
+        for sub in family_members.get(fam, ()):
             ax = f"genre:{sub}"
             if sub == fam or ax in hidden or ax in leans:
                 continue
@@ -138,10 +138,11 @@ def playlist_facets(store, playlist_id) -> dict:
     dao = store.rec_query
     meta = store.rec_query.tracks_by_keys(keys)
     genres, decades = dao.track_genres(keys), dao.track_decades(keys)
+    genre_axes = store.genres.feature_axes(genres.values())
     fam_keys, era_keys = {}, {}
     for k in keys:
         if k in genres:
-            fam_keys.setdefault(genre_map.family(genres[k],conn=store.conn), []).append(k)
+            fam_keys.setdefault(genre_axes.get(genres[k], ('', None))[0], []).append(k)
         if k in decades:
             era_keys.setdefault(decades[k], []).append(k)
     return {
@@ -188,8 +189,9 @@ def taste_breadth(store, *, genre_plays=None) -> dict:
             return taste_breadth(reader, genre_plays=genre_plays)
     fams: dict = {}
     dist = store.rec_query.genre_play_distribution() if genre_plays is None else genre_plays
+    axes = store.genres.feature_axes(dist)
     for genre, c in dist.items():
-        family = genre_map.family(genre,conn=store.conn)
+        family = axes.get(genre, ('', None))[0]
         fams[family] = fams.get(family, 0) + c
     total = sum(fams.values())
     if total == 0 or len(fams) <= 1:

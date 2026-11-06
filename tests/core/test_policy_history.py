@@ -10,6 +10,35 @@ from yt_playlist.core.store import Store
 from tests.rec.test_policy_storage import _publish
 
 
+def test_candidate_scan_is_off_writer_and_new_operational_owner_is_rechecked(file_backed_store, monkeypatch):
+    store = file_backed_store
+    store.rec_ledger.record_serving_policy('candidate', {'exact': True}, 1)
+    store.rec_ledger.record_served_impressions('old', 'home', [
+        {'key': 'song', 'rank': 1, 'model_version': 'candidate'}], 10000)
+    original = owner.candidates
+    observed = []
+
+    def select(conn, now, limit):
+        assert not store._lock.held_by_current_thread
+        assert conn is not store.conn
+        result = original(conn, now, limit)
+        observed.extend(result)
+        # A new prepared owner races selection. Archiving must inspect current
+        # ownership again rather than deleting from the earlier snapshot alone.
+        store.rec_proposals.put_proposals('home_choice',
+            {'tracks': [{'pool_policy': 'candidate'}]}, now)
+        return result
+
+    monkeypatch.setattr(owner, 'candidates', select)
+    assert store.rec_ledger.maintain_policy_history(10000) == 0
+    assert observed == ['candidate']
+    assert store.rec_ledger.policy_configuration('candidate') == {'exact': True}
+    assert store.conn.execute('SELECT 1 FROM recommendation_policies WHERE version=?',
+                              ('candidate',)).fetchone()
+    assert not store.conn.execute('SELECT 1 FROM recommendation_policy_history').fetchone()
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
 def test_impression_only_history_keeps_exact_shared_configuration_and_compact_identity(store, tmp_path, monkeypatch):
     rows,base = _publish(store,1,('history','operational'),{'weights':{'rock':1.23456789},'original':'retain exactly'})
     historical,live = rows[0][0],rows[1][0]

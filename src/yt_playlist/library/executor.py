@@ -3,6 +3,7 @@ import json
 import logging
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, asdict
+from yt_playlist.core.action_errors import ActionInputError
 from yt_playlist.util.matching import fuzzy_ratio, normalize, track_artist
 from yt_playlist.util.retry import with_retry
 from yt_playlist.library.playlist_backups import backup_playlist
@@ -26,6 +27,12 @@ from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 
 logger = logging.getLogger(__name__)
 
+class _MissingRequiredTracks(ActionInputError):
+    """A verified contents conflict, separate from provider diagnostics."""
+    def __init__(self, count):
+        self.count = count
+        super().__init__('merge_missing_required', count=count)
+
 @dataclass
 class Resolution:
     identity_key: str
@@ -45,6 +52,10 @@ class PlannedExec:
     plan: MergePlan
     mode: str
     source_provider_playlist_id: str
+
+def _require_distinct_playlists(source, target):
+    if source.playlist_scope_id == target.playlist_scope_id:
+        raise ActionInputError('playlist_same')
 
 def serialize_plan(plan, mode, source_provider_playlist_id, source_title=None, target_title=None):
     params = {"source": plan.source_playlist_id, "target": plan.target_playlist_id,
@@ -67,6 +78,8 @@ def store_plan(store, plan, mode, source_provider_playlist_id, now) -> int:
     # capture titles now so the action log can name the playlists even after one is pruned
     src = store.playlists.get_playlist(plan.source_playlist_id)
     tgt = store.playlists.get_playlist(plan.target_playlist_id)
+    if mode == "delete" and src is not None and tgt is not None:
+        _require_distinct_playlists(src, tgt)
     params_json, plan_json = serialize_plan(
         plan, mode, source_provider_playlist_id,
         src.title if src else None, tgt.title if tgt else None)
@@ -121,10 +134,14 @@ def _verify_and_delete(store, source_playlist_id, source_client, target_client, 
                        action_id, locked=False, target_locked=False) -> str:
     source = store.playlists.get_playlist(source_playlist_id)
     if source is None:
-        raise ValueError("source playlist no longer exists")
+        raise ActionInputError('playlist_missing')
+    # A second account's saved membership is still the same remote object.
+    # Content verification cannot establish an independent surviving copy.
+    if source.provider_playlist_id == target_ytm:
+        raise ActionInputError('playlist_kept')
     with nullcontext() if target_locked else claim_playlist_deletion(store, source):
         if pending_deletion(store, source) is not None:
-            raise ValueError("This playlist already has a saved deletion. Recheck it in the Action Log.")
+            raise ActionInputError('playlist_deletion_pending')
         return _verify_claimed_and_delete(
             store, source_playlist_id, source_client, target_client, target_ytm, now,
             retained_video_ids=retained_video_ids, excluded_video_ids=excluded_video_ids,
@@ -153,8 +170,7 @@ def _verify_claimed_and_delete(store, source_playlist_id, source_client, target_
                          "Refusing to delete. Re-sync and try again.")
     missing = required - target_keys
     if missing:
-        raise ValueError(f"The kept playlist is missing {len(missing)} required track(s). "
-                         "Refusing to delete the source. Re-sync and check again.")
+        raise _MissingRequiredTracks(len(missing))
     backup_path = backup_playlist(store, source_playlist_id, now, source_client,
                                   snapshot=source_snapshot)
     if backups is not None:
@@ -200,26 +216,35 @@ def apply_result(store, clients, playlist_ids, result_video_ids, keep, now, *, r
     """
     pls = [store.playlists.get_playlist(pid) for pid in playlist_ids]
     if any(p is None for p in pls):
-        raise ValueError("a playlist no longer exists")
+        raise ActionInputError('playlist_missing')
     if len(pls) < 2:
-        raise ValueError("need at least two playlists")
+        raise ActionInputError('merge_unavailable')
+    by_scope = {}
+    for playlist in pls:
+        previous = by_scope.get(playlist.playlist_scope_id)
+        if previous is not None:
+            _require_distinct_playlists(previous, playlist)
+        by_scope[playlist.playlist_scope_id] = playlist
 
     def client_for(pl):
         c = clients.get(pl.account_id)
         if c is None:
-            raise ValueError("no client for that identity")
+            raise ActionInputError('playlist_account_disconnected')
         return c
 
     keep_all = (str(keep) == "all")
-    keepers = pls if keep_all else [p for p in pls if p.id == int(keep)]
+    try:
+        keep_id = None if keep_all else int(keep)
+    except (ValueError, TypeError):
+        raise ActionInputError('merge_keeper_required') from None
+    keepers = pls if keep_all else [p for p in pls if p.id == keep_id]
     if not keepers:
-        raise ValueError("keep must be 'all' or one of the playlists")
+        raise ActionInputError('merge_keeper_required')
     # YouTube auto-manages system playlists (Liked Music, Episodes for Later) and rejects every
     # added track. Merging *into* one would silently add nothing yet still delete the source. Refuse.
     sysk = next((p for p in keepers if p.provider_playlist_id in SYSTEM_PLAYLIST_IDS), None)
     if sysk is not None:
-        raise ValueError(f"can't merge into “{sysk.title}”. YouTube manages that playlist and won't "
-                         "accept added tracks. Pick a different playlist to keep.")
+        raise ActionInputError('merge_system_keeper')
     droppers = [] if keep_all else [p for p in pls if p.id != int(keep)]
     result_video_ids = list(dict.fromkeys(v for v in result_video_ids if v))
     retained = set(result_video_ids)
@@ -234,8 +259,7 @@ def apply_result(store, clients, playlist_ids, result_video_ids, keep, now, *, r
     # Publish complete keeper backups before any membership or positional write.
     # These stay separate from deleted-source backups: Undo restores each keeper
     # through its conflict-aware keeper step rather than creating another playlist.
-    from yt_playlist.core import action_work
-    owned = action_work.available(store.conn)
+    owned = store.actions.has_durable_targets()
     if owned:
         for pl,entry in zip(keepers,restored):
             snapshot = _remote_snapshot(client_for(pl),pl.provider_playlist_id)
@@ -342,7 +366,10 @@ def apply_result(store, clients, playlist_ids, result_video_ids, keep, now, *, r
                 action_id=action_id, locked=True,target_locked=owned)
             summary["deleted"].append(pl.title)
     except Exception as e:
-        _record({"partial": True, "error": str(e)})  # partial merges must remain undoable
+        extra = {"partial": True, "error": str(e)}
+        if isinstance(e, _MissingRequiredTracks):
+            extra["missing_required"] = e.count
+        _record(extra)  # partial merges must remain undoable
         raise
     else:
         _record()
@@ -387,7 +414,7 @@ def copy_or_move_playlist(store, playlist_id, target_account_id, source_client, 
     store.playlists.set_playlist_tracks(db_pid, tids)
     store.playlists.ensure_playlist_thumbnail(db_pid)
     retain_addition_snapshot(store, db_pid, addition, now)
-    deleted, delete_error = False, None
+    deleted, delete_error, missing_required = False, None, None
     backups = []
     undo = capture_copy(target_client, new_pid, target_account_id,
                       [v for v in video_ids if v not in skipped],
@@ -401,6 +428,7 @@ def copy_or_move_playlist(store, playlist_id, target_account_id, source_client, 
                              "deleted": deleted, "added": added, "skipped": len(skipped),
                              "unresolved": unresolved, "addition": addition.diagnostics(),
                              "partial": bool(addition.failure), "delete_error": delete_error,
+                             "missing_required": missing_required,
                              "source_backup": backups[0] if backups else None})
         if action_id is None:
             action_id = store.actions.record_action(
@@ -423,6 +451,8 @@ def copy_or_move_playlist(store, playlist_id, target_account_id, source_client, 
         except Exception as e:  # noqa: BLE001
             logger.warning("move: keeping source %s: %s", src.provider_playlist_id, e)
             delete_error = str(e) or type(e).__name__
+            if isinstance(e, _MissingRequiredTracks):
+                missing_required = e.count
     _record_move()
     addition.finish()
     return {"added": added, "skipped": len(skipped), "unresolved": unresolved, "deleted": deleted,
@@ -432,9 +462,9 @@ def forget_empty_playlist(store, playlist_id, now, *, reason="user_requested") -
     """Drop only an empty local membership, leaving YouTube and durable curation untouched."""
     pl = store.playlists.get_playlist(playlist_id)
     if pl is None:
-        raise ValueError("playlist no longer exists")
+        raise ActionInputError('playlist_missing')
     if pl.provider_playlist_id in SYSTEM_PLAYLIST_IDS:
-        raise ValueError(f"“{pl.title}” is a system playlist and can't be removed")
+        raise ActionInputError('playlist_system_removal')
     store.playlists.remove_playlist(playlist_id, require_empty=True)
     store.actions.record_action(
         REMOVE_LOCAL_PLAYLIST,
@@ -446,7 +476,7 @@ def delete_empty_playlist(store, playlist_id, client, now) -> str | None:
     """Claim the target, then confirm emptiness before backing up and deleting it."""
     pl = store.playlists.get_playlist(playlist_id)
     if pl is None:
-        raise ValueError("playlist no longer exists")
+        raise ActionInputError('playlist_missing')
     with claim_playlist_deletion(store, pl):
         return _delete_empty_playlist(store, playlist_id, client, now)
 
@@ -460,9 +490,9 @@ def _delete_empty_playlist(store, playlist_id, client, now):
     """
     pl = store.playlists.get_playlist(playlist_id)
     if pl is None:
-        raise ValueError("playlist no longer exists")
+        raise ActionInputError('playlist_missing')
     if pl.provider_playlist_id in SYSTEM_PLAYLIST_IDS:
-        raise ValueError(f"“{pl.title}” is a system playlist and can't be deleted")
+        raise ActionInputError('playlist_system_removal')
     resumed = resume_pending_deletion(store, pl, client, now)
     if resumed is not None:
         return resumed
@@ -475,7 +505,7 @@ def _delete_empty_playlist(store, playlist_id, client, now):
         forget_empty_playlist(store, playlist_id, now, reason="remote_missing")
         return None
     if snapshot["tracks"]:
-        raise ValueError(f"“{pl.title}” isn't empty anymore ({len(snapshot['tracks'])} tracks). Re-sync first")
+        raise ActionInputError('playlist_not_empty')
     backup_path = backup_playlist(store, playlist_id, now, client, snapshot=snapshot)
     logger.warning("deleting empty playlist %s (backup at %s)", pl.provider_playlist_id, backup_path)
     delete_backed_up(store, pl, client, backup_path, now, kind=DELETE_EMPTY)
@@ -516,14 +546,14 @@ def add_tracks_to_playlist(store, playlist_id, tracks, client, now, after_video_
     left at the end. Returns counts."""
     pl = store.playlists.get_playlist(playlist_id)
     if pl is None:
-        raise ValueError("playlist no longer exists")
+        raise ActionInputError('playlist_missing')
     if pl.provider_playlist_id in SYSTEM_PLAYLIST_IDS:
-        raise ValueError("can't add tracks to a system playlist")
+        raise ActionInputError('playlist_regular_required')
     items = [t for t in tracks if t.get("videoId")]
     if not items:
-        raise ValueError("no tracks to add")
+        raise ActionInputError('playlist_tracks_required')
     if after_video_id and after_video_id not in {t["video_id"] for t in store.charts.playlist_tracks_detail(playlist_id)}:
-        raise ValueError("the original track is no longer in this playlist")
+        raise ActionInputError('playlist_song_missing')
     handles = {}
     addition = account_additions(add_items_resilient, client, pl.provider_playlist_id,
                                  [t["videoId"] for t in items], set_video_ids=handles,
@@ -579,12 +609,12 @@ def rename_playlist(store, playlist_id, title, client, now) -> dict:
     """Rename a playlist on YouTube and in the store."""
     pl = store.playlists.get_playlist(playlist_id)
     if pl is None:
-        raise ValueError("playlist no longer exists")
+        raise ActionInputError('playlist_missing')
     if pl.provider_playlist_id in SYSTEM_PLAYLIST_IDS:
-        raise ValueError("system playlists can't be renamed")
+        raise ActionInputError('playlist_regular_required')
     title = (title or "").strip()
     if not title:
-        raise ValueError("name can't be empty")
+        raise ActionInputError('playlist_name_required')
     confirm_playlist_write(
         lambda: client.edit_playlist(pl.provider_playlist_id, title=title),
         lambda: _remote_snapshot(client, pl.provider_playlist_id),
@@ -600,9 +630,9 @@ def remove_track(store, playlist_id, video_id, client, now) -> dict:
     by LikedMusic.remove (an unlike), so by here a system playlist is always a hard error."""
     pl = store.playlists.get_playlist(playlist_id)
     if pl is None:
-        raise ValueError("playlist no longer exists")
+        raise ActionInputError('playlist_missing')
     if pl.provider_playlist_id in SYSTEM_PLAYLIST_IDS:
-        raise ValueError("can't remove tracks from a system playlist")
+        raise ActionInputError('playlist_regular_required')
     tracks = _remote_snapshot(client, pl.provider_playlist_id)["tracks"]
     index = next((i for i, track in enumerate(tracks) if track["videoId"] == video_id), None)
     if index is None or not tracks[index].get("setVideoId"):
@@ -680,8 +710,7 @@ def execute_planned(store, action_id, clients, now) -> None:
     tgt_pl = store.playlists.get_playlist(plan.target_playlist_id)
     if src_pl is None or tgt_pl is None:
         raise ValueError("source/target playlist no longer exists")
-    if plan.source_playlist_id == plan.target_playlist_id:
-        raise ValueError("source and target must differ")
+    _require_distinct_playlists(src_pl, tgt_pl)
     _verify_and_delete(
         store, plan.source_playlist_id, clients[src_pl.account_id], clients[tgt_pl.account_id],
         tgt_pl.provider_playlist_id, now, action_id=action_id)

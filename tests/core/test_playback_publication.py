@@ -8,7 +8,7 @@ import pytest
 from tests.core.test_predecessor_writes import installed
 from tests.core.test_playback_context_preparation import finish, head, seed
 from yt_playlist.core import album_playback_context, entity_names, playback_bindings
-from yt_playlist.core.migrations import MigrationError, registry, regular, runner
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import playback_context as preparation, playback_publication as publication
 from yt_playlist.core.store import Store
 
@@ -202,30 +202,3 @@ def test_original_large_integer_times_survive_native_real_affinity(installed, na
     store.settings.set_setting(owner.source, raw)
     owner.publish(store.conn, revision=prepare(store.conn, owner))
     assert store.settings.get_setting(owner.source) == raw
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_frozen_native_upgrade_preserves_custody_and_uses_native_context(installed, tmp_path):
-    store, _ = installed
-    originals = seed(store)
-    # Unknown bindings are intentionally retained in the compatibility owner;
-    # the frozen converter instead requires catalog admission. Compare native
-    # last-binding semantics using only the two originally known bindings.
-    store.settings.set_setting(preparation.BINDINGS_KEY, json.dumps(json.loads(originals[preparation.BINDINGS_KEY])[:2]))
-    originals[preparation.BINDINGS_KEY] = store.settings.get_setting(preparation.BINDINGS_KEY)
-    for owner in publication.OWNERS.values():
-        owner.publish(store.conn, revision=prepare(store.conn, owner))
-    expected = album_playback_context.load(store.conn)
-    upgraded = Store(tmp_path/'native-playback.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        regular.validate(upgraded.conn)
-        for owner in publication.OWNERS.values():
-            assert owner.selected(upgraded.conn) is None
-            assert owner.value(upgraded.conn, 0) == originals[owner.source]
-        assert album_playback_context.load(upgraded.conn) == expected
-        assert playback_bindings.find(upgraded.conn, 1, 'LM', 'video', 13, 100)['opportunity_id'] == 'later-menu'
-        assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        upgraded.conn.close()

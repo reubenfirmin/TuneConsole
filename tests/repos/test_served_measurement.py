@@ -1,8 +1,8 @@
 """#113 rendered recommendation opportunities and causal-ish outcome attribution."""
 
 import pytest
+from tests.enrichment_support import seed_discovered_enrichment
 
-from yt_playlist.rec.home_cards import _record_served_cards
 from yt_playlist.rec import measurement, scorecard
 from tests.conftest import seed_catalog_track
 
@@ -145,12 +145,10 @@ def test_outcome_window_includes_its_exact_boundaries(store, offset, played):
     assert score["played"] == played
 
 
-def test_individual_offers_record_final_order_and_trace_without_home_theme_exposure(store):
+def test_individual_offers_record_final_order_and_trace(store):
     protos = [{"lane": "explore", "mode_id": 7, "ranker": "ppr",
                "recipe": {"model": "mode"},
                "tracks": [{"key": "a|x"}, {"key": "b|y"}]}]
-    _record_served_cards(store, protos, 100)
-    assert store.conn.execute('SELECT count(*) FROM rec_served_impressions').fetchone()[0] == 0
     for key, title, artist in [('a|x', 'A', 'X'), ('b|y', 'B', 'Y')]:
         seed_catalog_track(store, key, title, artist, video_id=key)
     measurement.record_offers(store, 'radio', [{'items': protos[0]['tracks'], 'lane': 'explore',
@@ -190,7 +188,7 @@ def test_coverage_conversion_and_variety_use_immutable_serving_metadata(store):
     assert score["by_ownership"]["cold"]["conversion"] == 1
     assert score["by_surface"]["home"]["unique_artists"] == 2
     # Enrichment and ownership change later, but not the historical cohort/slices.
-    store.discovery.set_discovered_enrichment("cold|new artist", "Folk", "2000")
+    seed_discovered_enrichment(store, "cold|new artist", "Folk", "2000")
     adopted = store.tracks.upsert_track("cold", "Cold", "New artist", None, 200)
     store.playlists.set_playlist_tracks(pid, [tid, adopted])
     assert scorecard.recommendation_scorecard(store, 90, 105) == score

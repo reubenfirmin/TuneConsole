@@ -9,14 +9,17 @@ import json
 import logging
 import uuid
 from collections import Counter
+from dataclasses import dataclass
 from itertools import permutations
 
 import numpy as np
 
 from yt_playlist.core.activity import WorkClosing, check_stopping
+from yt_playlist.core.policy_config import BASE_FIELD
 from yt_playlist.core.db_revisions import column_group_reads
 from yt_playlist.core.work_diagnostics import work_span
 from yt_playlist.repos.rec_proposals import encode_proposals
+from yt_playlist.repos.policy_storage import PolicyCapacityFull
 from yt_playlist.rec import (embedding_vectors as vectors, experiments, home_themes, home_vibe, layers, mode_eval, rec_params, surfaces,
                              taste_modes, transient, measurement, negative, vibe_pools)
 from yt_playlist.util import genre_map
@@ -40,6 +43,10 @@ RANKING_CHURN_TABLES = frozenset({
     "metadata_observations",
     "discovery_memberships", "entry_artists", "track_artists", "playlists", "playlist_items", "playlist_provenance",
     "play_events", "player_events", "listening_observations",
+    # Listening views join the event's retained calendar and source owners.
+    # Live capture, overlapping imports, reprojection and source removal update
+    # these companions too; they belong to the same pinned playback evidence.
+    "play_event_calendar", "play_event_sources",
 })
 
 _PPR_TAIL = 1 << 30    # sort sentinel: a candidate absent from the PPR ranking sorts after all ranked ones
@@ -115,6 +122,17 @@ def prepare_bundles(store, now) -> dict | None:
     under UI locks; serving checks current eligibility before offering cached candidates.
     """
     measurement.maintain_storage(store, now)
+    with store._lock:
+        deferred = store.__dict__.pop('_deferred_bundles', None)
+    if deferred is not None:
+        # The admitted plan is bounded and fully materialized. Its snapshot has
+        # no open reader or retained file lock; the original guard still decides
+        # whether it can publish. Recheck quota without repeating the ranking.
+        if deferred.snapshot.is_current(allow_stale_tables=RANKING_CHURN_TABLES):
+            published = deferred.publish(store)
+            return deferred.payload if published is not None else None
+        # Changed strict inputs can produce a smaller batch that already fits.
+        # Never make that work wait for an obsolete plan's headroom.
     with store.read_snapshot() as snapshot:
         from yt_playlist.rec import candidate_refresh
         with column_group_reads(snapshot.store, "recordings", "catalog"):
@@ -145,26 +163,67 @@ def _publish_typed_bundles(store, snapshot, payload, fresh, policies, settings, 
     The caller still owns the preparation snapshot. Its reader is released
     before staging, and a late conflict leaves the last useful heads intact.
     """
-    from yt_playlist.rec import bundle_storage
+    if not snapshot.is_current(allow_stale_tables=RANKING_CHURN_TABLES):
+        return None
     version = policies.generation_policy()
-    rows, bases = list(policies.rows.values()), list(policies.bases.values())
-    prepared = bundle_storage.prepare(snapshot.store.conn, payload, fresh,
-        external_key='bundle:' + uuid.uuid4().hex, policy_version=version,
-        input_revision=snapshot.store.prepared_content.serial(), created_at=now, pending_policies=rows)
+    # Comparison with derived output must not become a ranking dependency:
+    # staging this very plan writes those tables. Exact immutable rows are read
+    # separately, then their complete policy closure is owned by the claim.
+    with store.read_view() as previous:
+        prepared = snapshot.store.recommendations.prepare_bundles(payload, fresh,
+            external_key='bundle:' + uuid.uuid4().hex, policy_version=version,
+            input_revision=snapshot.store.prepared_content.serial(), created_at=now,
+            pending_policies=policies.rows.values(), previous=previous.recommendations)
+        selected = {version, *(slot.pool.policy_version for slot in prepared.slots),
+                    *(slot.revalidated_policy for slot in prepared.slots if slot.revalidated)}
+        rows = [row for key, row in policies.rows.items() if key in selected]
+        bases = {}
+        for row in rows:
+            base = json.loads(row[1]).get(BASE_FIELD)
+            if base is not None:
+                bases[base] = policies.bases[base]
+        old_rows, old_bases = previous.recommendations.captured_policies(selected - policies.rows.keys())
+        rows.extend(old_rows)
+        bases.update((row[0], row) for row in old_bases)
     snapshot.release_reader()
-    build = store.recommendations.claim(prepared, policies=rows, bases=bases)
-    store.recommendations.stage(prepared, build)
-    selected = {slot.surface for slot in prepared.slots} | {output.surface for output in prepared.outputs}
-    absent = sorted({'home', 'fresh', 'radio', *('vibe:' + preset for preset in home_vibe.PRESETS)} - selected)
+    return _DeferredBundles(prepared, snapshot, rows, list(bases.values()), settings, now, payload).publish(store)
 
-    def publish():
-        store.recommendations.publish(build, now)
-        if absent:
-            store.conn.execute('DELETE FROM recommendation_heads WHERE surface IN (' +
-                               ','.join('?' for _ in absent) + ')', absent)
-        store.settings.publish_values(settings)
 
-    return build.generation_id if snapshot.publish(publish, allow_stale_tables=RANKING_CHURN_TABLES) else None
+@dataclass
+class _DeferredBundles:
+    prepared: object
+    snapshot: object
+    rows: list
+    bases: list
+    settings: dict
+    now: float
+    payload: dict
+
+    def publish(self, store):
+        def current():
+            return self.snapshot.is_current(allow_stale_tables=RANKING_CHURN_TABLES)
+        if not current():
+            return None
+        try:
+            build = store.recommendations.claim(self.prepared, policies=self.rows, bases=self.bases)
+        except PolicyCapacityFull:
+            # Keep only one unclaimed plan. SQL retirement progress is durable;
+            # restarting simply recalculates once from the then-current inputs.
+            with store._lock:
+                store._deferred_bundles = self
+            raise
+        if not store.recommendations.stage(self.prepared, build, still_current=current):
+            return None
+        selected = ({slot.surface for slot in self.prepared.slots}
+                    | {output.surface for output in self.prepared.outputs})
+        absent = sorted({'home', 'fresh', 'radio', *('vibe:' + preset for preset in home_vibe.PRESETS)} - selected)
+
+        def publish():
+            store.recommendations.publish(build, self.now, retire_surfaces=absent)
+            store.settings.publish_values(self.settings)
+
+        return (build.generation_id
+                if self.snapshot.publish(publish, allow_stale_tables=RANKING_CHURN_TABLES) else None)
 
 
 def _calculate_bundles(store, now, policies):
@@ -319,17 +378,6 @@ def _build_temporal(store, payload, mode_ids, C, lkeys, LV, cap, *, years, year_
     payload.setdefault("all", {})["temporal"] = allt
 
 
-def artist_cap(items, max_per) -> list:
-    """Drop items beyond max_per per artist, preserving order."""
-    seen, out = {}, []
-    for d in items:
-        a = d.get("artist", "")
-        seen[a] = seen.get(a, 0) + 1
-        if seen[a] <= max_per:
-            out.append(d)
-    return out
-
-
 def _tilt_key(d, leans):
     """A light, vector-free transient score for ordering within a bucket: the track's genre lean
     multiplier (centered on 1.0). Higher sorts first."""
@@ -406,7 +454,8 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=(), mod
     legacy cards)."""
     preset = preparation['vibe_rank'].preset if preparation is not None else home_vibe.current(store, now)
     if preset:
-        return vibe_pools.assemble(store, now, preset, epoch,
+        from yt_playlist.rec import vibe_serving
+        return vibe_serving.assemble(store, now, preset, epoch,
                                    include_genres=include_genres, avoid_genres=avoid_genres)
     if getattr(store, '_recommendation_files', False):
         from yt_playlist.rec import stored_home
@@ -559,8 +608,9 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=(), mod
                     inputs['checked_keys'].update(unchecked)
                 inputs['full_pools'][surf] = home_themes.resolved_genres(store, list(unique.values()))
             pool = inputs['full_pools'][surf]
+            axes = store.genres.feature_axes({d.get('genre') for d in pool})
             full_pools[surf] = [d for d in pool if d.get("artist") not in muted
-                                and genre_map.family(d.get("genre"),conn=store.conn) not in avoid_genres]
+                                and axes.get(d.get('genre'), ('', None))[0] not in avoid_genres]
         return full_pools[surf]
 
     def _card_for(surf, mid, ranker, ppr_pos):
@@ -583,7 +633,8 @@ def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=(), mod
             family = mode_families.get(mid)
             order = ordering(ranker, ppr_pos, extra)
             if family:
-                distance = lambda d: genre_map.family_distance(family, genre_map.family(d.get("genre"),conn=store.conn))
+                axes = store.genres.feature_axes({d.get('genre') for d in extra})
+                distance = lambda d: genre_map.family_distance(family, axes.get(d.get('genre'), ('', None))[0])
                 # Exhaust the SAME family across the whole library before adding close neighbors.
                 # Never fill a soul mix with unrelated electronic tracks just because both were selected.
                 extra = [d for d in extra if d.get("genre") and distance(d) <= 0.5]

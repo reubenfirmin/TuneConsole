@@ -8,6 +8,7 @@ from playwright.sync_api import expect
 import uvicorn
 
 from tests.browser_fixtures import _free_port
+from tests.live_server import LiveServer
 from tests.conftest import FakeClient
 from yt_playlist.core import playback_feedback
 from yt_playlist.web.app import create_app
@@ -59,17 +60,13 @@ def convert_while_serving(store, request, directory, monkeypatch, migration, rep
     maintenance = ctx.storage_maintenance
     server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=_free_port(),
                                          lifespan='off', log_level='warning'))
-    thread = threading.Thread(target=server.run, daemon=True)
+    owner = None
     foreground = ThreadPoolExecutor(1)
     page = request.getfixturevalue('page')
     try:
         started = time.monotonic()
         maintenance.start()
-        thread.start()
-        deadline = time.monotonic() + 10
-        while not server.started:
-            assert time.monotonic() < deadline
-            time.sleep(.02)
+        owner = LiveServer(server, startup_timeout=10)
         report['http_ready_seconds'] = time.monotonic() - started
         client = TestClient(app, base_url='http://127.0.0.1')
         started = time.monotonic()
@@ -90,7 +87,8 @@ def convert_while_serving(store, request, directory, monkeypatch, migration, rep
         assert client.post('/sync').status_code == 503
         playing()
         page.goto(f'http://127.0.0.1:{server.config.port}/', wait_until='domcontentloaded')
-        expect(page.locator('#storage-maintenance')).to_have_text('Updating library storage; browsing and playback remain available.')
+        expect(page.locator('#storage-maintenance')).to_have_text(
+            'Optimizing app storage; some recommendations are temporarily unavailable.')
         expect(page.locator('#home-mode-cards .gen-card-body').first).to_be_visible()
         page.screenshot(path=str(directory / 'metadata-startup-pending.png'), full_page=True)
         page.goto(f'http://127.0.0.1:{server.config.port}/track/{track["video_id"]}',
@@ -108,7 +106,7 @@ def convert_while_serving(store, request, directory, monkeypatch, migration, rep
             elapsed = time.monotonic() - started
             assert result.status == 200 and result.json() == {'ok': True, 'error': ''}
             expect(button).to_have_attribute('aria-pressed', 'false' if desired == 'INDIFFERENT' else 'true')
-            expect(page.locator('.track-detail-error')).to_be_hidden()
+            expect(page.locator('.track-detail-status')).to_be_hidden()
             assert elapsed < 3
             observations.append({'status': desired, 'seconds': elapsed})
         playing()
@@ -138,8 +136,11 @@ def convert_while_serving(store, request, directory, monkeypatch, migration, rep
         return converted[0]
     finally:
         maintenance.stop()
-        maintenance.join(30)
-        server.should_exit = True
-        if thread.ident is not None:
-            thread.join(10)
-        foreground.shutdown(wait=True, cancel_futures=True)
+        try:
+            maintenance.join(30)
+        finally:
+            try:
+                if owner is not None:
+                    owner.close()
+            finally:
+                foreground.shutdown(wait=True, cancel_futures=True)

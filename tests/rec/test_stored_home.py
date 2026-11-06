@@ -1,5 +1,6 @@
 """Ordinary Home cards preserve complete opportunities without a bundle read."""
 from copy import deepcopy
+from tests.derived_rating_support import seed_dislike
 import numpy as np
 import pytest
 
@@ -63,7 +64,7 @@ def test_real_initial_import_prepares_and_serves_home_before_modes_without_legac
     catalog = next(proto for proto in result.protos if proto['lane'] == 'explore')
     assert len(catalog['tracks']) >= 4 and catalog.get('mode_id') is None
     disliked = catalog['tracks'][0]['key']
-    store.rec_model.record_dislike(disliked, until=None, now=1002)
+    seed_dislike(store, disliked, until=None, now=1002)
     refreshed = home_prepared.cards(store, prepared, 1002, service(store), record=False)
     assert all(track['key'] != disliked for proto in refreshed.protos for track in proto['tracks'])
 
@@ -98,7 +99,8 @@ def test_unmodeled_genre_selection_reaches_complete_tail_with_bounded_pages(fres
 
 @pytest.mark.parametrize('share', [0, .5, 1])
 @pytest.mark.parametrize('steering', [False, True], ids=['neutral', 'penalized'])
-def test_real_typed_assembly_matches_complete_legacy_opportunities_and_experiment_evidence(fresh, share, steering):
+def test_real_typed_assembly_matches_complete_legacy_opportunities_and_experiment_evidence(
+        fresh, share, steering, monkeypatch):
     store, _ = fresh
     with store.conn:
         store.conn.execute("UPDATE youtube_items SET album='',mb_year='1980'")
@@ -120,15 +122,26 @@ def test_real_typed_assembly_matches_complete_legacy_opportunities_and_experimen
             angle = index / 260 * np.pi / 2
             vectors.append((f'fresh-{index}', np.array([np.cos(angle), np.sin(angle)], dtype=np.float32).tobytes()))
         store.rec_model.replace_rec_vectors(vectors)
-        store.rec_model.record_dislike('one', 1000, 10)
+        seed_dislike(store, 'one', 1000, 10)
     store.rec_proposals.put_proposals('mode_bundles', value, 10)
     store._recommendation_files = False
     try:
         expected = mode_surfaces.assemble_cards(store, 10, 0, mode_order=[1, 2, 3, 4])
     finally:
         store._recommendation_files = True
+    selected = []
+    original = RecommendationPublicationsRepo.selected_candidates
+
+    def hydrate(self, surface, selections, **kwargs):
+        selected.append(selections)
+        return original(self, surface, selections, **kwargs)
+
+    monkeypatch.setattr(RecommendationPublicationsRepo, 'selected_candidates', hydrate)
     actual = mode_surfaces.assemble_cards(store, 10, 0, mode_order=[1, 2, 3, 4])
     assert len(actual) == 4 and keys(actual) == keys(expected)
+    assert len(selected) == sum(1 + bool(card.get('counterfactual')) for card in actual)
+    assert all(sum(len(keys) for _, _, keys in batch) == 12 for batch in selected)
+    assert any(len(batch) > 1 for batch in selected)  # Selected rows include real backfill.
     for old, new in zip(expected, actual):
         assert new['experiment'] == old['experiment']
         assert [track['key'] for track in new['counterfactual']['tracks']] == [
@@ -185,12 +198,17 @@ def test_first_unavailable_page_and_current_eligibility_do_not_hide_the_remainin
     publish_bundle(store, {'1': {'wheelhouse': tracks}, '_meta': {'full_pools': True}})
     with store.conn:
         store.conn.execute('UPDATE youtube_items SET available=0 WHERE recording_id<131')
-    store.rec_model.record_dislike('fresh-128', 100, 10)
+        store.conn.execute("UPDATE youtube_items SET title='corrected ' || title,duration_s=241 "
+                           'WHERE recording_id>=131')
+        store.conn.execute('UPDATE recordings SET bpm=123 WHERE id>=131')
+    seed_dislike(store, 'fresh-128', 100, 10)
     forbid_legacy(monkeypatch)
     cards = mode_surfaces.assemble_cards(store, 10, 0, mode_order=[1])
     selected = [int(track['key'].removeprefix('fresh-')) for track in cards[0]['tracks']]
     assert len(selected) == 12 and len(set(selected)) == 12
     assert all(129 <= index < 260 for index in selected)
+    assert all(track['title'] == f"corrected {track['key']} title"
+               and track['duration'] == 241 and track['bpm'] == 123 for track in cards[0]['tracks'])
 
 
 def test_whole_considered_bucket_is_excluded_from_later_card_backfill(fresh, monkeypatch):
@@ -211,12 +229,9 @@ def test_failed_hydration_releases_reader_retention_and_private_scratch_files(fr
     store, _ = fresh
     modes(store, [(1, 'rock-classic')])
     publish_bundle(store, {'1': {'wheelhouse': candidates(store)}, '_meta': {'full_pools': True}})
-    original = RecommendationPublicationsRepo.candidate_page
     def fail(self, *args, **kwargs):
-        if kwargs.get('limit') == 1:
-            raise RuntimeError('controlled hydration failure')
-        return original(self, *args, **kwargs)
-    monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_page', fail)
+        raise RuntimeError('controlled hydration failure')
+    monkeypatch.setattr(RecommendationPublicationsRepo, 'selected_candidates', fail)
     rec_params.set_param(store, 'modes_album_cap', 12)
     with pytest.raises(RuntimeError, match='controlled hydration'):
         mode_surfaces.assemble_cards(store, 10, 0, mode_order=[1])

@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-from tests.core.test_legacy_radio_upgrade import installed_radio
 from yt_playlist.core import collection_recovery, radio_storage
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import radio_session as preparation
@@ -24,7 +23,7 @@ def header(conn):
     return conn.execute('SELECT * FROM prepared_radio_sessions WHERE generation=?', (generation,)).fetchone()
 
 
-def test_queue_batches_preserve_session_wire_order_and_continuing_writes(tmp_path):
+def test_queue_batches_preserve_session_wire_order_and_continuing_writes(tmp_path, installed_radio):
     store, state, raw = installed_radio(tmp_path / 'radio.db')
     history = list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
     try:
@@ -66,7 +65,7 @@ def test_queue_batches_preserve_session_wire_order_and_continuing_writes(tmp_pat
         store.conn.close()
 
 
-def test_source_edit_during_file_publication_cannot_publish_stale_queue(tmp_path, monkeypatch):
+def test_source_edit_during_file_publication_cannot_publish_stale_queue(tmp_path, monkeypatch, installed_radio):
     store, state, _ = installed_radio(tmp_path / 'racing.db')
     second = Store(store._db_path)
     publish = preparation._publish_encoded
@@ -96,7 +95,7 @@ def test_source_edit_during_file_publication_cannot_publish_stale_queue(tmp_path
         store.conn.close()
 
 
-def test_interruption_resumes_committed_batch_and_failure_needs_explicit_retry(tmp_path, monkeypatch):
+def test_interruption_resumes_committed_batch_and_failure_needs_explicit_retry(tmp_path, monkeypatch, installed_radio):
     store, state, raw = installed_radio(tmp_path / 'interrupted.db')
     publish = preparation._publish_encoded
     try:
@@ -134,7 +133,7 @@ def test_interruption_resumes_committed_batch_and_failure_needs_explicit_retry(t
         store.conn.close()
 
 
-def test_missing_identity_stays_unresolved_and_catalog_edits_reconcile(tmp_path):
+def test_missing_identity_stays_unresolved_and_catalog_edits_reconcile(tmp_path, installed_radio):
     store, state, _ = installed_radio(tmp_path / 'unresolved.db')
     try:
         state.pop('episode_id')
@@ -162,7 +161,7 @@ def test_missing_identity_stays_unresolved_and_catalog_edits_reconcile(tmp_path)
         store.conn.close()
 
 
-def test_large_queue_installation_and_commits_stay_bounded_with_serving_views(tmp_path):
+def test_large_queue_installation_and_commits_stay_bounded_with_serving_views(tmp_path, installed_radio):
     setup, state, _ = installed_radio(tmp_path / 'large.db')
     state['tracks'] = [state['tracks'][0]] * 1100
     state['initial_tracks'], state['pending'] = [], None
@@ -187,7 +186,7 @@ def test_large_queue_installation_and_commits_stay_bounded_with_serving_views(tm
 
 
 @pytest.mark.parametrize('present,raw', [(False, None), (True, None), (True, 'null'), (True, '')])
-def test_absent_and_null_sessions_do_not_invent_an_active_episode(tmp_path, present, raw):
+def test_absent_and_null_sessions_do_not_invent_an_active_episode(tmp_path, installed_radio, present, raw):
     store, _, _ = installed_radio(tmp_path / 'empty.db')
     try:
         with store.conn:

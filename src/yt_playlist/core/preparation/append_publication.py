@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 from .. import fao
 
-from .. import append_work, collection_recovery, playlist_recipe_state, radio_checkpoint, radio_storage
+from .. import append_work, collection_recovery, playlist_recipe_state, radio_storage
 from ..evidence_ledger import canonical
 from ..schema_contract import MigrationError
 from . import append_operations as preparation, document_plan
@@ -78,84 +78,6 @@ OWNERS = {name:MappedPublication(name, preparation.JOBS[name], preparation.table
     for name in preparation.SOURCES}
 
 
-def selected_operation(conn, name, source):
-    owner = OWNERS[name]
-    stage = owner.selected(conn)
-    header = owner.capture(conn, stage, str(source)) if stage is not None else None
-    return header if header is not None and header['operation_present'] else None
-
-
-def sequence(conn, name, header, role, index=0):
-    return [row[0] for row in conn.execute('SELECT video_id_snapshot FROM '+preparation.table(name, 'items')+
-        ' WHERE source=? AND preparation_revision=? AND role=? AND list_position=? ORDER BY position',
-        (header['source'], header['preparation_revision'], role, index))]
-
-
-def apply_tv(conn, source, value):
-    if not isinstance(value, dict) or append_work.available(conn):
-        return value
-    name = 'tv_native' if playlist_recipe_state.available(conn) else 'tv_legacy'
-    header = selected_operation(conn, name, source)
-    if header is None:
-        return value
-    checkpoint = collection_recovery.read(*(header[key] for key in ('recovery_filename', 'recovery_digest', 'recovery_bytes')),
-        kind='tv-append', owner=header['source'])
-    checkpoint.update(request_id=header['request_id'], state=header['state'])
-    if 'at' in checkpoint:
-        checkpoint['at'] = header['started_at']
-    for bit, role in enumerate(('before', 'additions', 'items')):
-        if header['role_mask'] & (1 << bit):
-            videos = sequence(conn, name, header, role)
-            checkpoint[role] = videos if role == 'before' else [
-                {**item, 'video_id':video} for item, video in zip(checkpoint[role], videos, strict=True)]
-    value.update(tv_stream=header['stream_token'], tv_refill=checkpoint)
-    return value
-
-
-def apply_radio(conn, source, value):
-    if not isinstance(value, dict) or append_work.available(conn):
-        return value
-    name = 'radio_native' if radio_storage.available(conn) else 'radio_legacy'
-    header = selected_operation(conn, name, source)
-    if header is None:
-        return value
-    captured = collection_recovery.read(*(header[key] for key in ('recovery_filename', 'recovery_digest', 'recovery_bytes')),
-        kind='radio-session', owner=header['source'])
-    append = header['kind'] == 'append'
-    operation = captured if append else captured['replacement']
-    fields = (('pending_sent', 'sent'), ('pending_started_at', 'started_at')) if append else (
-        ('waiting_at', 'started_at'), ('slot', 'slot'))
-    for field, column in fields:
-        if field in operation:
-            operation[field] = bool(header[column]) if field == 'pending_sent' else header[column]
-    receipt = operation.get('pending_result' if append else 'receipt')
-    if receipt is not None:
-        for field, column in (('status', 'receipt_status'), ('videoId', 'receipt_video_id_snapshot'), ('setVideoId', 'receipt_handle_snapshot')):
-            if field in receipt:
-                receipt[field] = header[column]
-    if append:
-        if operation.get('pending') is not None:
-            operation['pending']['video_id'] = header['adding_video_id_snapshot']
-        for field in ('pending', 'pending_sent', 'pending_started_at', 'pending_result'):
-            if field in operation:
-                value[field] = operation[field]
-        return value
-    if 'choice_id' in operation:
-        operation['choice_id'] = radio_checkpoint.project_choice(operation['choice_id'], header['choice_id'])
-    if 'allowed' in operation:
-        operation['allowed'] = [sequence(conn, name, header, 'allowed', index) for index in range(header['allowed_count'])]
-    for role in ('confirmed', 'waiting', 'play_prefix', 'excluded'):
-        if role in operation and operation[role] is not None:
-            operation[role] = sequence(conn, name, header, role)
-    if 'proposed' in operation:
-        operation['proposed'] = [{**item, 'video_id':video} for item, video in
-            zip(operation['proposed'], sequence(conn, name, header, 'proposed'), strict=True)]
-    if operation.get('adding') is not None:
-        operation['adding']['video_id'] = header['adding_video_id_snapshot']
-    value['replacement'] = operation
-    return value
-
-
 def repair(name, conn, source):
     if conn.in_transaction:
         raise MigrationError('Append file recovery requires an idle connection')
@@ -179,43 +101,8 @@ def validate_installed(conn):
 
 
 def main(argv=None):
-    import argparse
-    from contextlib import closing
-    from dataclasses import asdict
-    import json
-    import sqlite3
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('job', choices=tuple(OWNERS))
-    parser.add_argument('database', type=Path)
-    action = parser.add_mutually_exclusive_group()
-    action.add_argument('--publish-stage', type=int)
-    action.add_argument('--repair-source')
-    parser.add_argument('--batches', type=int, default=1)
-    parser.add_argument('--batch-size', type=int, default=128)
-    args = parser.parse_args(argv)
-    if not 1 <= args.batches <= 128:
-        parser.error('--batches requires 1 to 128 batches')
-    owner = OWNERS[args.job]
-    try:
-        from ..db_handles import connect
-        with closing(connect(args.database.resolve().as_uri()+'?mode=rw', uri=True, timeout=.1)) as conn:
-            conn.row_factory = sqlite3.Row
-            conn.execute('PRAGMA foreign_keys=ON')
-            if args.publish_stage is not None:
-                owner.publish(conn, stage=args.publish_stage)
-                print(json.dumps({'job':args.job, 'selected':owner.selected(conn)}))
-            elif args.repair_source is not None:
-                repair(args.job, conn, args.repair_source)
-                print(json.dumps({'job':args.job, 'repaired':args.repair_source}))
-            else:
-                for _ in range(args.batches):
-                    stage = owner.step(conn, batch_size=args.batch_size)
-                    if stage.complete:
-                        break
-                print(json.dumps(asdict(stage)))
-    except (MigrationError, sqlite3.Error, ValueError, OSError) as exc:
-        parser.exit(1, f'Append publication failed: {exc}\n')
-    return 0
+    from .publication_cli import main as run
+    return run(OWNERS, __doc__, argv, label='Append', repair=repair)
 
 
 if __name__ == '__main__':

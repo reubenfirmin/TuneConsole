@@ -3,7 +3,7 @@ import argparse
 from pathlib import Path
 import time
 
-from .. import vibe_provenance as owner, vibe_history
+from .. import vibe_provenance as owner
 from ..db_writes import atomic_write
 
 
@@ -13,13 +13,7 @@ def prepare(store, *, limit=128):
 
 
 def maintain(store, now):
-    if not owner.available(store.conn):
-        return 0
-    with atomic_write(store):
-        expired = owner.maintain(store.conn, now)
-    retired = vibe_history.maintain(store, now)
-    owner.collect(store.conn, now)
-    return expired + retired
+    return store.retention.maintain_prediction_provenance(now)
 
 
 def main():

@@ -2,16 +2,17 @@
 import pytest
 
 from tests.conftest import seed_catalog_track
+from tests.store_fixture_support import initialize_consumer
 from yt_playlist.core.store import Store
 from yt_playlist.rec import home_cards, home_prepared
 
 
 @pytest.fixture
-def browser_store(tmp_path):
+def browser_store(tmp_path, _pristine_current_schema):
     """Exercise live serving and background writes through installed WAL readers."""
     database = Store(tmp_path / 'home.db')
     try:
-        database.init_schema()
+        initialize_consumer(database, _pristine_current_schema)
         yield database
     finally:
         database.conn.close()
@@ -28,6 +29,18 @@ def returning_listener(store, *formats, now=1):
             episodes[format] = max(1, episodes.get(format, 0))
     store.rec_proposals.put_proposals('listening_choices', {'home_format': usage}, now)
     store.settings.set_setting('onboard_setup_complete', '1')
+
+
+def prepared_client(store, now=1000):
+    """Create the ordinary HTTP app after restoring genuinely prepared Home."""
+    from fastapi.testclient import TestClient
+    from tests.conftest import FakeClient
+    from yt_playlist.web.app import create_app
+
+    assert home_prepared._valid(store.rec_proposals.get_proposals(home_prepared.SURFACE))
+    identity = store.accounts.upsert_account('main', 'cred', None, True)
+    return TestClient(create_app(store, lambda: {identity: FakeClient()}, now_fn=lambda: now),
+                      base_url='http://127.0.0.1')
 
 
 def publish_menu(store, now=1000, *, prefix='prepared', count=4, tracks_per_card=4,

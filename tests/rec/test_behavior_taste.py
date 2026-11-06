@@ -1,4 +1,7 @@
 """Listening is the fallback for libraries without playlist, album or choice contexts."""
+import sqlite3
+from unittest.mock import Mock
+
 import numpy as np
 import pytest
 
@@ -6,18 +9,20 @@ from yt_playlist.rec import scoring
 from yt_playlist.rec.scoring import _behavior_centroid
 
 
-def test_behavior_centroid_from_played_tracks(monkeypatch, store):
-    M = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]], dtype=np.float32)
+def test_behavior_centroid_uses_flat_modeled_membership(monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail('Behavior centroid consumes repository results without SQLite')
+    monkeypatch.setattr(sqlite3, 'connect', forbidden)
+    store = Mock(spec_set=['rec_query'])
+    store.rec_query = Mock(spec_set=['play_counts'])
+    M = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, -1.0]], dtype=np.float32)
     idx = {"a|x": 0, "b|y": 1, "c|z": 2}
-    monkeypatch.setattr(store.rec_query, "play_counts", lambda: {"a|x": 5, "b|y": 1}, raising=False)
+    store.rec_query.play_counts.return_value = {}
+    assert _behavior_centroid(store, M, idx) is None
+    store.rec_query.play_counts.return_value = {"a|x": 5, "b|y": 1, "unmodeled|other": 100}
     c = _behavior_centroid(store, M, idx)
     assert c is not None and abs(np.linalg.norm(c) - 1.0) < 1e-6
-    assert c[0] > 0 and c[1] > 0                       # blends the two played tracks (c|z unplayed, excluded)
-
-
-def test_behavior_centroid_none_when_nothing_played(monkeypatch, store):
-    monkeypatch.setattr(store.rec_query, "play_counts", lambda: {}, raising=False)
-    assert _behavior_centroid(store, np.eye(2, dtype=np.float32), {"a|x": 0, "b|y": 1}) is None
+    np.testing.assert_allclose(c, [2 ** -.5, 2 ** -.5])
 
 
 @pytest.mark.parametrize('source', ['playlist', 'album', 'choice'])

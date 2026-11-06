@@ -10,6 +10,21 @@ import pytest
 from yt_playlist.web.app import create_app
 
 
+@pytest.fixture(scope='module')
+def home_contention_template(_pristine_current_schema):
+    from tests.onboarding_support import publish_personal_mix
+    from tests.prepared_fixture_support import prepared_template
+    from tests.test_growth_journey import early_journey
+
+    def build(source):
+        early_journey(source)
+        publish_personal_mix(source)
+
+    # Earn readiness once; each form still mutates its own SQL and file copy.
+    with prepared_template(_pristine_current_schema, build) as template:
+        yield template
+
+
 @pytest.mark.parametrize('path,data', [
     ('/home/fresh-pool', {'include_genres': 'unknown'}),
     ('/home/library-pool', {'lane': 'wheelhouse', 'epoch': '-1'}),
@@ -20,6 +35,10 @@ from yt_playlist.web.app import create_app
     ('/home/steer', {'axis': 'genre:house', 'weight': '1.2'}),
     ('/home/fingerprint/add', {'axis': 'genre:house'}),
     ('/home/fingerprint/remove', {'axis': 'genre:house'}),
+    ('/home/format', {'panel': 'directions'}),
+    ('/home/format', {'panel': 'radio'}),
+    ('/home/format', {'format': 'radio'}),
+    ('/home/growth/format', {'format': 'radio'}),
     ('/home/generate', {'tracks': '[]'}),
     ('/clusters/save', {'keep_keys': '[]'}),
     ('/overlaps/suppress-many', {'pairs': '[["PLA","PLB"]]'}),
@@ -33,23 +52,30 @@ from yt_playlist.web.app import create_app
     ('/play', {'url': 'https://music.youtube.com/watch?v=song'}),
     ('/now-playing/rate', {'action': 'like', 'videoId': 'song'}),
     ('/road_trip/recipes', {'name': 'Trip', 'artists': '[]', 'genres': '[]'}),
+    ('/road_trip/recipes', {'id': 'existing', 'own_pct': '20', 'familiarity_pct': '80'}),
     ('/road_trip/draft/1/tilt', {'party': 'theirs', 'axis': 'genre:house', 'share': '50'}),
     ('/road_trip/draft/1/tilt/v2', {'party': 'theirs', 'axis': 'genre:house', 'share': '50'}),
     ('/road_trip/draft/1/unpin', {'party': 'theirs', 'axis': 'genre:house'}),
-    ('/road_trip/draft/1/mix', {'their_pct': '50'}),
     ('/road_trip/draft/1/save', {}),
 ])
-def test_forms_wait_for_database_outside_event_loop(store, monkeypatch, path, data):
+def test_forms_wait_for_database_outside_event_loop(store, monkeypatch, request, path, data):
+    existing_draft = data.get('id') == 'existing'
+    if existing_draft:
+        from tests.web.test_road_trip_routes import _recipe, _recipe_form, _stub_pools
+        from yt_playlist.rec import road_trip
+        store.accounts.upsert_account('main', 'cred', None, True)
+        _stub_pools(monkeypatch, store)
+        rid = _recipe(store, artists=[])
+        draft = road_trip.start_draft(store, store.road_trip.get_road_trip_recipe(rid), 1000, seed=7)
+        store.road_trip.save_road_trip_draft(rid, {**draft, 'revision': 'contention-fixture'}, 1000)
+        data = _recipe_form(store, rid, own_pct=20, familiarity_pct=80)
     guarded_home = path.startswith('/home/') and path != '/home/generate'
     if guarded_home:
         if path == '/home/vibe':
             from tests.test_growth_destinations import publish_full_journey
             publish_full_journey(store)
         else:
-            from tests.onboarding_support import publish_personal_mix
-            from tests.test_growth_journey import early_journey
-            early_journey(store)
-            publish_personal_mix(store)
+            request.getfixturevalue('home_contention_template').restore(store)
     app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
     monkeypatch.setattr(app.state.ctx.bridge, 'send_control', lambda frame, *, intent: True)
     if guarded_home:
@@ -89,7 +115,10 @@ def test_forms_wait_for_database_outside_event_loop(store, monkeypatch, path, da
             finally:
                 release.set()
                 result = await asyncio.wait_for(request, 5)
-            assert result.status_code in (200, 400)
+            expected = ((204,) if path == '/home/format' and data == {'panel': 'directions'} else
+                        (409,) if path in ('/home/format', '/home/growth/format') else
+                        (200, 400))
+            assert result.status_code in expected
             if path == '/play':
                 assert result.json()['ok'] is True
 
@@ -99,6 +128,11 @@ def test_forms_wait_for_database_outside_event_loop(store, monkeypatch, path, da
         release.set()
         holder.join(1)
     assert not holder.is_alive()
+    if existing_draft:
+        for state in (store.road_trip.get_road_trip_recipe(rid),
+                      store.road_trip.get_road_trip_draft(rid)):
+            assert state['own_pct'] == 20 and state['familiarity_pct'] == 80
+        assert store.road_trip.get_road_trip_draft(rid)['seed'] == 7
 
 
 def test_road_trip_metadata_lookup_does_not_block_async_requests(store, monkeypatch):
@@ -184,8 +218,17 @@ def test_cluster_save_keeps_event_loop_responsive_throughout(store, monkeypatch,
             finally:
                 release.set()
                 result = await asyncio.wait_for(request, 5)
-            assert result.status_code == 200 and 'Saved' in result.text
+            assert result.status_code == 200
+            assert len(client.created) == 1
+            ytm = client.created[0][0]
+            playlist = store.playlists.get_playlist_for_account(iid, ytm)
+            assert playlist is not None and playlist.track_count == 1
+            assert f'data-generated-playlist="{ytm}"' in result.text
+            assert f'window.location.assign("/playlist/{playlist.id}")' in result.text
             assert result.headers['HX-Trigger'] == 'cluster-saved'
+            assert client.added == [(ytm, ['v1'])]
+            assert [(track[0], track[1]) for track in store.playlists.get_playlist_tracks_with_meta(
+                playlist.id)] == [(key, 'v1')]
 
     asyncio.run(exercise())
     assert len(client.created) == 1

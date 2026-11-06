@@ -1,5 +1,6 @@
 """Genre endpoints must escape style clusters and remain reversible during playback."""
 import numpy as np
+from tests.enrichment_support import seed_enrichment
 import pytest
 
 from tests.radio_session_support import poc, play
@@ -13,6 +14,10 @@ from yt_playlist.web import radio_session
 
 @pytest.fixture
 def genre_pools(store):
+    return store._fixture_genre_pools
+
+
+def seed_genre_pools(store, *, publish=True):
     # All four nearest neighbours of the seed are Electronic. Other genres are
     # prepared and playable but deliberately lie outside that neighbourhood.
     genres = ["Electronic"] * 5 + ["Synthwave", "Jazz", "Rock", "Ambient"]
@@ -29,13 +34,14 @@ def genre_pools(store):
             tid = store.tracks.upsert_track(video, video, f"Artist {video}", "", 200)
             with store.conn:
                 store.conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'fixture',NULL)",(tid,))
-            store.tracks.set_track_enrichment(tid, label, "2001")
+            seed_enrichment(store, tid, label, "2001")
             key = store.tracks.catalog_subject(tid)["identity_key"]
             rows.append(dict(key=key, video_id=video, title=video, artist=f"Artist {video}", genre=label))
         pools[mid] = rows
         bundles[mid] = {"wheelhouse": rows}
     store.modes.replace_modes(modes, retired_ids=[], now=1)
-    publish_bundles(store,bundles,now=1)
+    if publish:
+        publish_bundles(store,bundles,now=1)
     return pools
 
 

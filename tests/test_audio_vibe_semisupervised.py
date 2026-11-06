@@ -8,7 +8,7 @@ import pytest
 
 from experiments.audio_lab_tools import robust_vibes as robust, semisupervised_vibes as semi, train_vibes as trainer
 from tests.test_audio_vibe_model import examples, excerpts
-from yt_playlist.rec import audio_vibe_model as model, audio_vibe_preview as heuristic
+from yt_playlist.rec import audio_vibe_model as model, audio_vibe_prediction as heuristic
 
 
 def unlabeled_examples():

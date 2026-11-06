@@ -18,26 +18,29 @@ from yt_playlist.web.routes.home_access import guard
 
 
 def playlist_items(store, pid, *, artwork=True):
-    playlist = store.playlists.get_playlist(pid)
-    recipe = store.playlist_recipes.get_recipe(playlist.playlist_scope_id) if playlist else None
-    if not isinstance(recipe, dict) or recipe.get('media') != 'video':
-        return None
-    metadata = {t['video_id']: t for t in recipe.get('videos', [])}
-    tracks = store.charts.playlist_tracks_detail(pid)
-    items = [{**metadata.get(t['video_id'], {}), **t,
-                       'duration': t.get('duration') or metadata.get(t['video_id'], {}).get('duration', 0),
-                       'likeStatus': 'LIKE' if t.get('liked') else 'INDIFFERENT'}
-                      for t in tracks if t.get('video_id') and t.get('available') != 0]
-    if not artwork:
+    # Keep membership, saved metadata and photography on the same committed
+    # view. Each repository/artwork lookup can reuse this one bounded reader.
+    with store.read_view() as reader:
+        playlist = reader.playlists.get_playlist(pid)
+        recipe = reader.playlist_recipes.get_recipe(playlist.playlist_scope_id) if playlist else None
+        if not isinstance(recipe, dict) or recipe.get('media') != 'video':
+            return None
+        metadata = {t['video_id']: t for t in recipe.get('videos', [])}
+        tracks = reader.charts.playlist_tracks_detail(pid)
+        items = [{**metadata.get(t['video_id'], {}), **t,
+                           'duration': t.get('duration') or metadata.get(t['video_id'], {}).get('duration', 0),
+                           'likeStatus': 'LIKE' if t.get('liked') else 'INDIFFERENT'}
+                          for t in tracks if t.get('video_id') and t.get('available') != 0]
+        if not artwork:
+            return playlist, items
+        # Read artist photography only; optional provider work belongs to the worker.
+        art = {name: tv_artwork.images(reader, name) for name in
+               {t.get('source_artist') or t['artist'] for t in items}}
+        for item in items:
+            images, prepared = art[item.get('source_artist') or item['artist']]
+            item['artist_art'] = images
+            item['artist_art_pending'] = not prepared
         return playlist, items
-    # Read artist photography only; optional provider work belongs to the worker.
-    art = {name: tv_artwork.images(store, name) for name in
-           {t.get('source_artist') or t['artist'] for t in items}}
-    for item in items:
-        images, prepared = art[item.get('source_artist') or item['artist']]
-        item['artist_art'] = images
-        item['artist_art_pending'] = not prepared
-    return playlist, items
 
 
 def build(ctx):

@@ -3,11 +3,6 @@ from copy import copy
 from collections import Counter, defaultdict
 
 from yt_playlist.rec.ordering import _field, attach_genres
-from yt_playlist.util import genre_map
-
-
-def other_genres(store, items, avoid):
-    return matching_genres(store, items, avoid=avoid)
 
 
 def matching_genres(store, items, *, include=(), avoid=()):
@@ -22,9 +17,10 @@ def matching_genres(store, items, *, include=(), avoid=()):
     # Bundles can predate enrichment. Rendering gives library genres precedence, so
     # filter those same genres on copies instead of changing the cached candidates.
     items = resolved_genres(store, items)
+    axes = store.genres.feature_axes({_field(item, 'genre') for item in items})
     return [item for item in items if _field(item, "genre")
-            and genre_map.family(_field(item, "genre"),conn=store.conn) not in avoid
-            and (not include or genre_map.family(_field(item, "genre"),conn=store.conn) in include)]
+            and axes[_field(item, 'genre')][0] not in avoid
+            and (not include or axes[_field(item, 'genre')][0] in include)]
 
 
 def resolved_genres(store, items):
@@ -70,10 +66,14 @@ def genre_options(store, *, genre_plays=None, bundles=None):
     if not items:
         items = list(by_artist.values())
     families = defaultdict(Counter)
+    counts = Counter()
     for item in items:
         genre = (item.get("genre") or (by_artist.get(item.get("artist")) or {}).get("genre") or "").strip().lower()
         if genre:
-            families[genre_map.family(genre,conn=store.conn)][genre] += 1
+            counts[genre] += 1
+    axes = store.genres.feature_axes(counts)
+    for genre, count in counts.items():
+        families[axes[genre][0]][genre] = count
     return _genre_options(store, families, genre_plays)
 
 
@@ -81,8 +81,9 @@ def _genre_options(store, families, genre_plays):
     dist = store.rec_query.genre_play_distribution() if genre_plays is None else genre_plays
     plays = {g.lower(): count for g, count in dist.items()}
     family_plays = Counter()
+    axes = store.genres.feature_axes(plays)
     for genre, count in plays.items():
-        family_plays[genre_map.family(genre,conn=store.conn)] += count
+        family_plays[axes.get(genre, ('', None))[0]] += count
     # Put the user's most-listened-to families first, with their familiar subgenre as the label.
     # With no listening history, candidate depth is more useful than the taxonomy's alphabet.
     options = [{"family": family,
@@ -121,6 +122,7 @@ def _stored_genre_options(store, genre_plays):
                 counts[genre] += 1
     # Resolve identities once per distinct label. A large account can repeat
     # the same genre in thousands of candidates and exhaust every worker slice.
+    axes = store.genres.feature_axes(counts)
     for genre, count in counts.items():
-        families[genre_map.family(genre,conn=store.conn)][genre] = count
+        families[axes[genre][0]][genre] = count
     return _genre_options(store, families, genre_plays)

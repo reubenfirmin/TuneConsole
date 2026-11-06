@@ -38,10 +38,14 @@
         <tr>
           <td><span class="tag amber">{{ identities[p.account_id] }}</span>
               {{ pllink(p.provider_playlist_id, p.title, p.track_count) }}</td>
-          <td class="cell-actions">
+          <td class="cell-actions" x-data="actionOutcome('keep-outcome-{{ p.id }}')"
+              @htmx:before-request.camel="start()" @htmx:after-request.camel="settle($event)"
+              @app-page-leaving.window="saveRecovery($event)" @app-page-changed.window="restoreRecovery($event)">
             <button type="button" class="cta"
                     hx-post="/dupe/keep-one" hx-vals='{"keep": {{ p.id }}}' hx-indicator="closest .card"
                     title="Keep this copy, delete the rest">Keep this one</button>
+            <span id="keep-outcome-{{ p.id }}" x-ref="outcome" class="action-outcome muted small" role="status"></span>
+            <span class="action-outcome muted small" x-show="failedAction" x-cloak>Cleanup isn't complete. Review Actions before trying again.</span>
           </td>
         </tr>
       {% endfor %}

@@ -1,3 +1,6 @@
+import json
+import time
+
 import pytest
 from tests.visual_support import capture
 from playwright.sync_api import expect
@@ -8,7 +11,7 @@ from yt_playlist.rec import group_preparation, group_serving
 
 
 @pytest.mark.parametrize('width', [1440])
-def test_music_groups_are_prominent_searchable_and_used_by_home(live_app, store, page, width):
+def test_music_groups_are_prominent_searchable_and_used_by_home(live_app, store, page, width, record_property):
     from tests.test_group_home import library
     from tests.home_fixture_support import returning_listener
     from yt_playlist.rec import home_prepared
@@ -37,10 +40,40 @@ def test_music_groups_are_prominent_searchable_and_used_by_home(live_app, store,
     expect(section.get_by_role('heading', name='House', exact=True)).to_be_visible()
     capture(section, path=f'/tmp/tuneconsole-139-live-groups-{width}.png')
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    page.goto(live_app + '/home/cards')
-    # The fragment's actual generated recipe contains graph attribution.
-    assert head['generation'] in page.content()
-    assert 'musical-group' in page.content()
+    pending, failures, documents = {}, [], []
+    def requested(request):
+        pending[request] = {'url': request.url, 'type': request.resource_type}
+    def finished(request):
+        pending.pop(request, None)
+    def failed(request):
+        failures.append({**pending.pop(request, {'url': request.url}), 'failure': request.failure})
+    def responded(response):
+        if response.request.resource_type == 'document':
+            documents.append({'url': response.url, 'status': response.status})
+    handlers = {'request': requested, 'requestfinished': finished,
+                'requestfailed': failed, 'response': responded}
+    for event, handler in handlers.items():
+        page.on(event, handler)
+    started = time.monotonic()
+    try:
+        # The server-rendered fragment is usable once parsed. Its external
+        # poster images need not finish before recipe attribution can be read.
+        response = page.goto(live_app + '/home/cards', wait_until='domcontentloaded', timeout=10000)
+        assert response is not None and response.status == 200
+        cards = page.locator('#home-mode-cards')
+        expect(cards).to_be_visible()
+        recipes = cards.locator('[data-recipe]')
+        expect(recipes.first).to_be_attached()
+        actual = [json.loads(value) for value in recipes.evaluate_all(
+            "elements => elements.map(element => element.dataset.recipe)")]
+        assert actual and all(recipe['group_generation'] == head['generation']
+                              and recipe['model'] == 'musical-group' for recipe in actual)
+    finally:
+        record_property('home_fragment_navigation', json.dumps({
+            'seconds': time.monotonic() - started, 'documents': documents,
+            'pending': list(pending.values()), 'failed': failures}))
+        for event, handler in handlers.items():
+            page.remove_listener(event, handler)
     assert not errors
 
 

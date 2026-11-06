@@ -1,10 +1,14 @@
 """Temporary suppression expiry restores original rankings without refitting."""
+from contextlib import closing
 import logging
 from types import SimpleNamespace
 
 import pytest
 
-from tests.rec.test_candidate_refresh import candidate, library, no_fit, refresh
+from tests.candidate_timing_support import candidate_costs, candidate_prefix_costs
+from tests.rec.test_model_refresh import refresh_costs
+from tests.rec.test_candidate_refresh import candidate, candidate_library_template, no_fit, refresh
+from tests.store_fixture_support import initialize_consumer
 from yt_playlist.core.store import Store
 from yt_playlist.rec import candidate_refresh, embedding_training as embed
 from yt_playlist.rec.rec_worker import RecWorker
@@ -16,8 +20,8 @@ def snooze(store, key, until=3000.1, now=2100):
     assert candidate(store, key) is None
 
 
-def test_expiry_restores_candidate_without_source_edit_or_fitting(store, monkeypatch):
-    key = library(store)
+def test_expiry_restores_candidate_without_source_edit_or_fitting(store, monkeypatch, candidate_library_template):
+    key = candidate_library_template.restore(store)
     snooze(store, key)
     vectors = store.rec_model.get_rec_vectors()
     monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
@@ -30,8 +34,9 @@ def test_expiry_restores_candidate_without_source_edit_or_fitting(store, monkeyp
 
 
 @pytest.mark.parametrize('permanent', [False, True])
-def test_old_deadline_respects_renewal_and_permanent_blocks(store, monkeypatch, permanent):
-    key = library(store)
+def test_old_deadline_respects_renewal_and_permanent_blocks(
+        store, monkeypatch, permanent, candidate_library_template):
+    key = candidate_library_template.restore(store)
     snooze(store, key)
     store.rec_model.record_feedback('for_you', key, 'dismiss' if permanent else 'not_now',
                                    until=None if permanent else 4000, now=2500)
@@ -44,8 +49,9 @@ def test_old_deadline_respects_renewal_and_permanent_blocks(store, monkeypatch, 
 
 
 @pytest.mark.parametrize('removed', [False, True])
-def test_expiry_preserves_unavailable_and_removed_sources(store, monkeypatch, removed):
-    key = library(store)
+def test_expiry_preserves_unavailable_and_removed_sources(
+        store, monkeypatch, removed, candidate_library_template):
+    key = candidate_library_template.restore(store)
     snooze(store, key)
     with store.conn:
         if removed:
@@ -61,13 +67,13 @@ def test_expiry_preserves_unavailable_and_removed_sources(store, monkeypatch, re
     assert candidate(store, key) is None
 
 
-def test_expiry_survives_restart(tmp_path, monkeypatch):
+def test_expiry_survives_restart(tmp_path, monkeypatch, _pristine_current_schema, candidate_library_template):
     path = tmp_path / 'expiry.db'
     store = Store(path)
-    store.init_schema()
-    key = library(store)
-    snooze(store, key)
-    store.conn.close()
+    with closing(store.conn):
+        initialize_consumer(store, _pristine_current_schema)
+        key = candidate_library_template.restore(store)
+        snooze(store, key)
     monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
     store = Store(path)
     try:
@@ -79,8 +85,8 @@ def test_expiry_survives_restart(tmp_path, monkeypatch):
         store.conn.close()
 
 
-def test_idle_worker_notices_expiry(store, monkeypatch):
-    key = library(store)
+def test_idle_worker_notices_expiry(store, monkeypatch, candidate_library_template):
+    key = candidate_library_template.restore(store)
     snooze(store, key)
     worker = RecWorker(SimpleNamespace(store=store, now_fn=lambda: 3100,
         logger=logging.getLogger(__name__)), enabled=False)

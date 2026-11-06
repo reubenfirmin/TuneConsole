@@ -10,16 +10,15 @@ import math
 import re
 import socket
 import threading
-import time
 
 import pytest
 import uvicorn
 from playwright.sync_api import expect
 
-from yt_playlist.core.store import Store
 from yt_playlist.core import paths
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
+from tests.live_server import LiveServer
 
 pytestmark = pytest.mark.browser
 
@@ -33,12 +32,11 @@ def _free_port():
 
 
 @pytest.fixture
-def live_pl_data(tmp_path, monkeypatch):
+def live_pl_data(tmp_path, monkeypatch, store):
     # Delete backs up to disk first; isolate its data directory without changing the environment.
     monkeypatch.setattr(paths, "data_dir", lambda: tmp_path)
 
-    s = Store(":memory:")
-    s.init_schema()
+    s = store
     iid = s.accounts.upsert_account("Main", "cred", None, True)
     a = s.playlists.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
     b = s.playlists.upsert_playlist(iid, "PLB", "Beta", 1, "h", 1.0)
@@ -53,13 +51,8 @@ def live_pl_data(tmp_path, monkeypatch):
 
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    while not server.started:
-        time.sleep(0.02)
-    yield {"base": f"http://127.0.0.1:{port}", "store": s, "identity": iid}
-    server.should_exit = True
-    thread.join(timeout=5)
+    with LiveServer(server):
+        yield {"base": f"http://127.0.0.1:{port}", "store": s, "identity": iid}
 
 
 @pytest.fixture
@@ -161,11 +154,10 @@ class _SlowDeleteClient(FakeClient):
 
 
 @pytest.fixture
-def live_slow_delete_app(tmp_path, monkeypatch):
+def live_slow_delete_app(tmp_path, monkeypatch, store):
     monkeypatch.setattr(paths, "data_dir", lambda: tmp_path)
 
-    s = Store(":memory:")
-    s.init_schema()
+    s = store
     iid = s.accounts.upsert_account("Main", "cred", None, True)
     a = s.playlists.upsert_playlist(iid, "PLA", "Alpha", 1, "h", 1.0)
     b = s.playlists.upsert_playlist(iid, "PLB", "Beta", 1, "h", 1.0)
@@ -177,20 +169,12 @@ def live_slow_delete_app(tmp_path, monkeypatch):
 
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
+    owner = LiveServer(server)
     try:
-        deadline = time.monotonic() + 10
-        while not server.started:
-            assert thread.is_alive() and time.monotonic() < deadline, 'Delete server did not start'
-            time.sleep(0.02)
         yield f"http://127.0.0.1:{port}", client
     finally:
         client.release.set()
-        server.should_exit = True
-        thread.join(timeout=5)
-        assert not thread.is_alive(), 'Delete server did not stop'
-        s.conn.close()
+        owner.close()
 
 
 def test_delete_shows_spinner_while_batch_is_in_flight(live_slow_delete_app, page):
@@ -297,7 +281,7 @@ def test_shift_selection_uses_clicked_occurrence_of_duplicate(recent_pl_app, pag
     expect(page.locator(".pl-actionbar")).to_contain_text("5 selected")  # three new rows, 303, Alpha
 
 
-@pytest.mark.parametrize("width", [1280])
+@pytest.mark.parametrize("width", [1040, 1280, 1920])
 def test_recent_and_generated_layout_and_promotion(recent_pl_app, page, width, tmp_path):
     from datetime import datetime, timezone
     page.set_viewport_size({"width": width, "height": 900})
@@ -349,7 +333,7 @@ def test_no_recent_playlists_hides_the_section(live_pl_app, page):
     expect(page.get_by_role("region", name="New playlists")).to_be_hidden()
 
 
-@pytest.mark.parametrize('width', [1280])
+@pytest.mark.parametrize('width', [1040, 1280, 1920])
 def test_new_playlist_distinguishes_creation_from_its_own_listening(live_pl_data, page, width):
     from datetime import datetime, timezone
     from types import SimpleNamespace
@@ -371,6 +355,13 @@ def test_new_playlist_distinguishes_creation_from_its_own_listening(live_pl_data
     expect(row.locator('.pl-activity')).to_have_attribute('aria-label', '0 playlist listening sessions (partial listens count)')
     if width > 720:
         expect(row.locator('.lastcol')).to_have_text('No recorded listen')
+        # A contained cell can still split an ordinary word across two lines.
+        assert row.locator('.lastcol').evaluate('''el => {
+            const node = el.firstChild, start = node.textContent.indexOf('recorded');
+            const word = document.createRange();
+            word.setStart(node, start); word.setEnd(node, start + 'recorded'.length);
+            return word.getClientRects().length === 1;
+        }''')
         assert row.locator('.lastcol').evaluate('''el => {
             const text = document.createRange(); text.selectNodeContents(el);
             return text.getBoundingClientRect().right <= el.getBoundingClientRect().right;

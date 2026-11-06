@@ -1,5 +1,5 @@
 """Legitimate worker failure survives every grouping progress owner."""
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import replace
 import hashlib
 import json
@@ -42,6 +42,19 @@ def history(conn):
 def current_group_store(tmp_path):
     with installed(tmp_path / 'current.db', 107) as store:
         yield store
+
+
+@pytest.fixture
+def pre_group_store(tmp_path, _pristine_installed_schema):
+    store = Store(tmp_path / 'pre-group-progress.db')
+    try:
+        _pristine_installed_schema(107).backup(store.conn)
+        # A genuine installed prefix before regular change 2 adopted progress.
+        regular.migrate(store.conn, changes=regular.CHANGES[:1])
+        store._bind_repositories()
+        yield store
+    finally:
+        store.conn.close()
 
 
 @pytest.mark.parametrize('version', [93, 107])
@@ -97,21 +110,15 @@ def test_explicit_conversion_retains_failed_phase_without_rewriting_frozen_schem
             reopened.conn.close()
 
 
-def test_native_adoption_keeps_old_sql_writers_and_rollback_compatible(current_group_store):
-    store = current_group_store
+def test_native_adoption_keeps_old_sql_writers_and_rollback_compatible(pre_group_store):
+    store = pre_group_store
     with store.conn:
         store.conn.execute("INSERT INTO group_preparation_state(singleton,phase,reported_at,reason) VALUES (1,'ready',10,'old')")
-    # Simulate the pre-change installed owner, using its untouched frozen DDL.
-    with store.conn:
-        for name, _ in group_progress.definitions(store.conn):
-            if name != group_progress.TABLE:
-                store.conn.execute('DROP TRIGGER ' + name)
-        store.conn.execute('DROP TABLE ' + group_progress.TABLE)
     before = history(store.conn)
     regular.migrate(store.conn)
     assert group_preparation.status(store) == {'phase': 'ready', 'at': 10, 'reason': 'old'}
     group_preparation.report(store, 'failed', 20, reason='new failure')
-    with sqlite3.connect(store._db_path) as old_writer:
+    with closing(sqlite3.connect(store._db_path)) as old_writer, old_writer:
         old_writer.execute("UPDATE group_preparation_state SET phase='deferred',reported_at=30,reason='old writer'")
     assert group_preparation.status(store) == {'phase': 'deferred', 'at': 30, 'reason': 'old writer'}
     store.conn.execute('BEGIN IMMEDIATE')
@@ -159,7 +166,9 @@ def test_old_prepared_and_published_progress_can_upgrade_without_rewriting_gener
         next_revision = finish(job, store.conn).prepared_revision
         publication.publish(store.conn, 'group-checkpoints', revision=next_revision)
         assert group_preparation.status(store) == {'phase': 'failed', 'at': 20, 'reason': 'provider failure'}
-        assert json.loads(publication.read(store.conn, 'group-checkpoints', revision, key, None)) == json.loads(original)
+        retained = store.conn.execute(f'SELECT digest,raw_value FROM {publication.ORIGINALS} '
+            'WHERE name=? AND revision=? AND source=?', ('group-checkpoints', revision, key)).fetchone()
+        assert tuple(retained) == (digest, original)
         assert [tuple(row) for row in store.conn.execute(f'SELECT * FROM {publication.LEGACY_PROGRESS}')] == old_rows
         with pytest.raises(sqlite3.IntegrityError, match='future cleanup'), store.conn:
             store.conn.execute(f'DELETE FROM {publication.PROGRESS_V2}')

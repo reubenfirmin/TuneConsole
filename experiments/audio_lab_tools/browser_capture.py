@@ -25,7 +25,14 @@ from .reference_pipeline import examples, maximum_delta, process_sample
 from .runtime_snapshot import ensure
 
 WORK = RUN / 'browser-capture'
-CAPTURE_FILES = ('audio_preview_capture.js', 'audio_preview_frame.js', 'audio_preview_frame.html')
+CAPTURE_FILES = ('audio_capture.js', 'audio_capture_frame.js', 'audio_capture_frame.html')
+
+
+def capture_files(directory):
+    """New snapshots use production names; frozen older snapshots keep their bytes."""
+    if (directory / CAPTURE_FILES[0]).is_file():
+        return CAPTURE_FILES
+    return ('audio_preview_capture.js', 'audio_preview_frame.js', 'audio_preview_frame.html')
 
 
 def evaluate_js(cdp, source, context=None):
@@ -54,8 +61,8 @@ def prepare_extension(directory):
         'host_permissions': ['https://music.youtube.com/*'],
         'background': {'service_worker': 'audit_background.js'},
         'content_security_policy': {'extension_pages': "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"},
-        'web_accessible_resources': [{'resources': ['audio_preview_frame.html'], 'matches': ['https://music.youtube.com/*']}],
-        'content_scripts': [{'matches': ['https://music.youtube.com/*'], 'js': ['audio_preview_capture.js'], 'run_at': 'document_idle'}]})
+        'web_accessible_resources': [{'resources': ['audio_capture_frame.html'], 'matches': ['https://music.youtube.com/*']}],
+        'content_scripts': [{'matches': ['https://music.youtube.com/*'], 'js': ['audio_capture.js'], 'run_at': 'document_idle'}]})
     (destination / 'audit_background.js').write_text('chrome.runtime.onMessage.addListener(() => {});\n')
     return destination, files, worker
 
@@ -160,7 +167,7 @@ def browser_sample(playwright, directory, audio, identifier, *, prepare=prepare_
           return {encoded:btoa(encoded),samples:auditModelPCM,decoded:auditDecoded.map(pcm=>({rate:pcm.sampleRate,
             channels:pcm.numberOfChannels,length:pcm.length,erased:Array.from({length:pcm.numberOfChannels},(_,i)=>pcm.getChannelData(i).every(v=>v===0)).every(Boolean)})),
             released:auditStreams.every(stream=>stream.getTracks().every(track=>track.readyState==='ended')),
-            frame_removed:!document.querySelector('iframe[src*=audio_preview_frame]')};
+            frame_removed:!document.querySelector('iframe[src*=audio_capture_frame],iframe[src*=audio_preview_frame]')};
         })()""", isolated)
         if network:
             raise ValueError('Capture audit attempted external network access: ' + repr(network))

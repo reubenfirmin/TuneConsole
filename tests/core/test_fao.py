@@ -1,9 +1,11 @@
 """Independent file contract checks, including old plain formats and failures."""
 import bz2
 from contextlib import contextmanager
+from functools import wraps
 import hashlib
 import os
 from pathlib import Path
+import shutil
 import time
 
 import pytest
@@ -262,12 +264,35 @@ def test_restore_rejects_entire_inventory_and_cleans_private_bytes(tmp_path, fai
     assert not list(restored.rglob('.fao-pending-*'))
 
 
-def test_restore_bounds_open_streams_across_large_inventory(tmp_path, monkeypatch):
+def test_restore_bounds_open_streams_across_large_inventory(tmp_path, monkeypatch, record_property):
+    phase, totals = 'source', {}
+
+    def timed(name, operation):
+        @wraps(operation)
+        def call(*args, **kwargs):
+            key = phase + '_' + name
+            wall, cpu = time.perf_counter(), time.thread_time()
+            try:
+                return operation(*args, **kwargs)
+            finally:
+                values = totals.setdefault(key, [0, 0.0, 0.0])
+                values[0] += 1
+                values[1] += time.perf_counter() - wall
+                values[2] += time.thread_time() - cpu
+        return call
+
+    for owner, name in ((fao, '_write'), (fao, 'copy'), (fao, '_hash'), (fao, '_sync'),
+                        (os, 'fsync'), (shutil, 'rmtree')):
+        monkeypatch.setattr(owner, name, timed(name, getattr(owner, name)))
     root, backup, restored = (tmp_path / name for name in ('source', 'backup', 'restored'))
     sources = [root / (str(i) + '.json') for i in range(40)]
+    started = time.perf_counter()
     for source in sources:
         fao.write_bytes(source, source.name.encode())
+    record_property('source_seconds', time.perf_counter() - started)
+    phase, started = 'export', time.perf_counter()
     manifest = fao.export(root, sources, backup)
+    record_property('export_seconds', time.perf_counter() - started)
     original = fao.open_reader
     active = maximum = 0
 
@@ -284,10 +309,19 @@ def test_restore_bounds_open_streams_across_large_inventory(tmp_path, monkeypatc
 
     monkeypatch.setattr(fao, 'open_reader', counted)
     targets = [restored / path.name for path in sources]
+    phase, started = 'restore', time.perf_counter()
     fao.restore(restored, manifest, expected=targets)
-    assert maximum <= 3 and active == 0
+    record_property('restore_seconds', time.perf_counter() - started)
+    assert 0 < maximum <= 3 and active == 0
+    phase, started = 'readback', time.perf_counter()
     assert [fao.read_bytes(path) for path in targets] == [path.name.encode() for path in targets]
+    record_property('readback_seconds', time.perf_counter() - started)
     assert not list(restored.glob('.fao-restore-*'))
+    record_property('maximum_live_readers', maximum)
+    for name, (calls, wall, cpu) in sorted(totals.items()):
+        record_property(name + '_calls', calls)
+        record_property(name + '_wall_s', wall)
+        record_property(name + '_thread_cpu_s', cpu)
 
 
 def test_export_manifest_matches_copied_bytes_when_producer_is_replaced(tmp_path, monkeypatch):

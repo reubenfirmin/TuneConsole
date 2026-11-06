@@ -10,6 +10,7 @@ Needs a (free) Last.fm API key: set $LASTFM_API_KEY, or `lastfm_api_key = "..."`
 import logging
 import re
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
+from yt_playlist.core import provider_queries
 from yt_playlist.integrations.base import IntegrationUnavailable
 from yt_playlist.integrations.lastfm import LastFmIAO, TIMEOUT_S
 from yt_playlist.providers import descriptive_tags, genres
@@ -18,7 +19,6 @@ from yt_playlist.providers.base import EnrichmentResult
 from yt_playlist.util import net
 
 name = "lastfm"
-manages_availability = True
 
 logger = logging.getLogger(__name__)
 
@@ -43,12 +43,11 @@ def tripped() -> bool:
     return not _iao.availability().ready(_iao.now())
 
 
-def reset() -> None:
-    """A new enrichment batch must not erase a shared cooldown or cached evidence."""
-
-
 def probe(track, store=None, key=None) -> EnrichmentResult:
     """Read-only lookup: genre (and a year-ish tag/page year). Empty if no API key."""
+    reason = provider_queries.deferred_reason(name, track)
+    if reason:
+        return EnrichmentResult(name, deferred_reason=reason)
     key = key or api_key(store)
     if not key:
         return EnrichmentResult("lastfm", {})
@@ -129,6 +128,8 @@ def enrich(title, artist, key, *, observations=None):
     """Return (genre, year) from Last.fm. One track.getInfo gives the tags (genre, via the whitelist)
     and the canonical page URL; the release year is read off that page's metadata (Last.fm exposes it
     as primary metadata, not in the API). Genre falls back to artist tags; year to a year-like tag."""
+    if not provider_queries.lastfm_ready(title, artist):
+        return (None, None)
     common = {"api_key": key, "format": "json", "autocorrect": "1"}
     try:
         info = _get({"method": "track.getinfo", "artist": artist, "track": title, **common})

@@ -6,7 +6,7 @@ from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core import artist_credits, legacy_evidence
 from yt_playlist.core.artist_keys import canonical_id, lookup
 from yt_playlist.core.discovery_sources import reconcile_artist as reconcile_discovery_artist
-from yt_playlist.rec import artist_state
+from yt_playlist.repos import artist_state
 from yt_playlist.util.matching import normalize
 
 

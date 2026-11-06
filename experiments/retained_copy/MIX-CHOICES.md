@@ -11,6 +11,9 @@ event and observation times, withdrawal targets, scores/prediction receipts and
 assignment receipts keep their existing meanings and lifetimes. Mix evidence
 does not own recordings, recipes, track features, group versions, ancestry or
 group generations. Playlist/session owners continue to own playback tracks.
+The menu envelope can also freeze its explicitly displayed Vibe preset. Confirmed
+choice/playback uses that small purpose marker for earned access, without adding
+recipe or recording precision. Old menus without it do not invent historical use.
 
 Mix learning consumes these broad descriptors. It never creates a track-vector
 centroid, including by finding today's tracks with matching genres. A historical

@@ -1,5 +1,6 @@
 """Engineering contracts for shared consumers, not a listening-quality verdict."""
 from copy import deepcopy
+from tests.derived_rating_support import seed_dislike
 import json
 import logging
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ import pytest
 
 from tests.conftest import seed_catalog_track
 from tests.musical_support import prepare_profiles, prepare_vibes
+from tests.prepared_fixture_support import prepared_template, roots
 from tests.recommendation_support import publish_bundles
 from yt_playlist.core import catalog
 from yt_playlist.util import genre_map
@@ -20,8 +22,7 @@ from yt_playlist.rec import (fresh_pool, home_cards, home_prepared, home_vibe, l
 pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
 
 
-@pytest.fixture
-def opportunities(store):
+def _prepare_opportunities(store):
     pools = {}
     for lane in ('library', 'fresh'):
         items = []
@@ -39,14 +40,27 @@ def opportunities(store):
                                                        genre, '2000', None, 1, audio=audio)
             items.append(item)
         pools[lane] = items
+    # Prepare profiles before the sole publication; prepare_vibes would publish
+    # these same ordinary pools a second time after their initial publication.
+    prepare_profiles(store)
     publish_bundles(store, {
         '0': {'wheelhouse': pools['library'][:40], 'fresh': pools['fresh'][:40]},
         'all': {'wheelhouse': pools['library'], 'explore': pools['library'], 'fresh': pools['fresh']},
-        '_meta': {'full_pools': True, 'comfort_pool': 0}}, 1000)
-    prepare_vibes(store)
+        '_meta': {'full_pools': True, 'comfort_pool': 0}}, 1000, vibes=True)
     with mix_tuning.adjusting_vibe(store, 1000):
         store.settings.set_setting(home_vibe.SETTING, 'relax')
     return pools
+
+
+@pytest.fixture(scope='module')
+def opportunities_template(_pristine_current_schema):
+    with prepared_template(_pristine_current_schema, _prepare_opportunities) as template:
+        yield template
+
+
+@pytest.fixture
+def opportunities(store, opportunities_template):
+    return opportunities_template.restore(store)
 
 
 def test_fit_precedes_mode_heads_within_explicit_genres_in_every_cached_fallback(store, opportunities, monkeypatch):
@@ -87,7 +101,36 @@ def test_fit_precedes_mode_heads_within_explicit_genres_in_every_cached_fallback
             assert (value, support) == (fit['score'], fit['support'])
 
 
-def test_prepared_profile_stamp_survives_a_new_profile_until_menu_publication(store, opportunities):
+def test_prepared_profile_stamp_survives_a_new_profile_until_menu_publication(
+        store, opportunities, opportunities_template, file_backed_store):
+    template = opportunities_template
+    second = file_backed_store
+    other_pools = template.restore(second)
+    keys = [item['key'] for items in opportunities.values() for item in items]
+    original_profiles = template.source.musical_profiles.by_keys(keys)
+    heads = template.source.recommendations.heads()
+    for target in (store, second):
+        assert target.musical_profiles.by_keys(keys) == original_profiles
+        assert target.recommendations.heads() == heads
+        assert target.conn.execute('PRAGMA foreign_key_check').fetchall() == []
+    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert opportunities == other_pools == template.result
+    assert store._fixture_bundle_payload == second._fixture_bundle_payload == template.bundles
+
+    # All retained owners must be copied, including profile evidence and typed
+    # publication bodies. SQL-only backups and hard links are not private.
+    destinations = [roots(target.conn) for target in (store, second)]
+    copied = []
+    for name, directory in template.files.items():
+        for source in directory.rglob('*'):
+            if source.is_file():
+                paths = [source, *(owned[name] / source.relative_to(directory) for owned in destinations)]
+                expected = source.read_bytes()
+                assert all(path.read_bytes() == expected for path in paths)
+                assert len({(path.stat().st_dev, path.stat().st_ino) for path in paths}) == 3
+                copied.append((paths, expected))
+    assert copied
+
     # Candidate pools resolve current catalog/profile owners (#486). The
     # immutable output is the published Home menu (#487), not a new pick from
     # that pool. Exercise the actual publication and serving boundary.
@@ -130,6 +173,19 @@ def test_prepared_profile_stamp_survives_a_new_profile_until_menu_publication(st
     profiles = musical_character.load(store, [t['key'] for t in refreshed])
     assert all(t['musical']['digest'] == profiles[t['key']]['digest'] for t in refreshed)
 
+    # The real profile edit and replacement publication above affect only this
+    # consumer. Returned payloads and managed files must be private as well.
+    opportunities['library'][0]['title'] = 'Private returned payload'
+    store._fixture_bundle_payload['all']['wheelhouse'][0]['title'] = 'Private bundle'
+    copied[0][0][1].write_bytes(b'Private file mutation')
+    assert other_pools == template.result
+    for target in (template.source, second):
+        assert target.musical_profiles.by_keys(keys) == original_profiles
+        assert target.recommendations.heads() == heads
+        assert target._fixture_bundle_payload == template.bundles
+    for paths, expected in copied:
+        assert paths[0].read_bytes() == paths[2].read_bytes() == expected
+
 
 def test_selected_genre_has_reserved_candidates_beyond_the_global_vibe_head(store):
     items = []
@@ -162,7 +218,7 @@ def test_unknown_intensity_stays_neutral_and_weaker_than_a_known_endpoint_fit():
 def test_live_and_reused_offers_preserve_current_explicit_exclusions(store, opportunities):
     pool = vibe_pools.candidates(store, 'relax', 'wheelhouse')
     first, second, third = pool[:3]
-    store.rec_model.record_dislike(first['key'], 2000, 1000)
+    seed_dislike(store, first['key'], 2000, 1000)
     store.rec_model.set_weight(f"genre:{genre_map.family('Metal')}", 0, lo=0, now=1000)
     tid = store.tracks.track_ids_for_videos([second['video_id']])[second['video_id']]
     with store.conn:

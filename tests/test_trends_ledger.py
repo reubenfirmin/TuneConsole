@@ -7,18 +7,15 @@ that turned 2 real plays of one track into 14.
 """
 import pytest
 
-from yt_playlist.core.store import Store
 
 DAY = 86400
 
 
 @pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    s.conn.execute("INSERT INTO accounts(id, label, credential_ref, is_master) VALUES (1,'me','c.json',1)")
-    s.conn.commit()
-    return s
+def store(store):
+    store.conn.execute("INSERT INTO accounts(id, label, credential_ref, is_master) VALUES (1,'me','c.json',1)")
+    store.conn.commit()
+    return store
 
 
 def _playlist(store, pid, ytm, title, group=None, ident=1):
@@ -54,20 +51,6 @@ def _artist_counts(store,counts):
 def _artist_names(store):
     labels = store.trends.artist_labels()
     return {labels[aid] for aid in store.trends.catalog_artists()}
-
-
-# --- Task 1.1: generated_ytm_ids ------------------------------------------------------------------
-
-def test_generated_ytm_ids_returns_only_the_generated_group(store):
-    _playlist(store, 1, "PL_gen", "Radio: Techno", group="Generated")
-    _playlist(store, 2, "PL_own", "My mixtape")
-    _playlist(store, 3, "PL_alb", "Some album", group="Albums")
-    assert store.trends.generated_ytm_ids() == {"PL_gen"}
-
-
-def test_generated_ytm_ids_empty_when_no_generated_playlists(store):
-    _playlist(store, 1, "PL_own", "My mixtape")
-    assert store.trends.generated_ytm_ids() == set()
 
 
 # --- Task 1.2: has_play_ledger --------------------------------------------------------------------
@@ -214,13 +197,3 @@ def test_catalog_artists_skips_blank_artists(store):
     _track(store, 1, "a", "")
     _in_playlist(store, 1, 1)
     assert store.trends.catalog_artists() == set()
-
-
-def test_catalog_track_keys_mirrors_catalog_artists(store):
-    _playlist(store, 1, "PL_own", "Mine")
-    _playlist(store, 2, "PL_gen", "Radio", group="Generated")
-    _track(store, 1, "owned", "A")
-    _track(store, 2, "suggested", "B")
-    _in_playlist(store, 1, 1)
-    _in_playlist(store, 2, 2)
-    assert store.trends.catalog_track_keys() == {"owned"}

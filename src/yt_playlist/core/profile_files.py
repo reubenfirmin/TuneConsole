@@ -15,6 +15,9 @@ KINDS = {'recording': ('rec_musical_profiles', 'identity_key', 'recording_profil
          'source': ('rec_musical_source_profiles', 'source_key', 'source_profile_files', 'source_key')}
 _COLLECTIONS = OrderedDict()
 _COLLECTION_LOCK = RLock()
+_CHUNK_BYTES = 16 * 1024 * 1024
+_CHUNKS = OrderedDict()
+_CHUNK_LOCK = RLock()
 
 
 class _Collection:
@@ -126,20 +129,43 @@ def _identity(conn, kind, key):
     return row[0]
 
 
+def _physical_identity(path):
+    value = path.stat()
+    return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+
+
 def _chunk(conn, kind, publication, cache):
     identity = kind, publication
     if cache is not None and identity in cache:
         return cache[identity]
     path = directory(conn) / relative(kind, publication)
-    if isinstance(cache, Cache) and fao.stat(path).logical_bytes > cache.remaining:
-        raise WorkBudgetExceeded('Musical-profile page exceeds decompression work budget')
-    encoded = fao.read_bytes(path, max_bytes=MAX_BYTES)
+    physical = _physical_identity(path)
+    identity_key = (str(path), publication, physical)
+    encoded = None
+    if isinstance(cache, Cache):
+        with _CHUNK_LOCK:
+            encoded = _CHUNKS.get(identity_key)
+            if encoded is not None:
+                _CHUNKS.move_to_end(identity_key)
+        logical = len(encoded) if encoded is not None else fao.stat(path).logical_bytes
+        if logical > cache.remaining:
+            raise WorkBudgetExceeded('Musical-profile page exceeds decompression work budget')
+    if encoded is None:
+        encoded = fao.read_bytes(path, max_bytes=MAX_BYTES)
+        if hashlib.sha256(encoded).digest() != publication:
+            raise fao.CorruptFile('Musical-profile chunk differs from its publication')
+        # Retain only immutable verified bytes, never decoded mutable profiles.
+        # A changed/missing file is checked again even when its SQL head stayed
+        # the same. Ordinary single-record reads do not fill this page cache.
+        if isinstance(cache, Cache) and _physical_identity(path) == physical:
+            with _CHUNK_LOCK:
+                _CHUNKS[identity_key] = encoded
+                while sum(map(len, _CHUNKS.values())) > _CHUNK_BYTES or len(_CHUNKS) > 128:
+                    _CHUNKS.popitem(last=False)
     if isinstance(cache, Cache):
         cache.remaining -= len(encoded)
         if cache.remaining < 0:
             raise WorkBudgetExceeded('Musical-profile page exceeds decompression work budget')
-    if hashlib.sha256(encoded).digest() != publication:
-        raise fao.CorruptFile('Musical-profile chunk differs from its publication')
     value = json.loads(encoded)
     if (not isinstance(value, dict) or set(value) != {'format', 'kind', 'profiles'}
             or value['format'] != 'musical-profile-1' or value['kind'] != kind
@@ -187,6 +213,51 @@ def read(conn, kind, key, *, cache=None, max_bytes=MAX_BYTES):
             or hashlib.sha256(value['body'].encode()).hexdigest() != row[2]):
         raise fao.CorruptFile('Musical profile differs from its exact head')
     return value['body']
+
+
+def read_page(conn, kind, keys, *, max_bytes=MAX_BYTES):
+    """Resolve exact heads together and decode each immutable chunk once.
+
+    Keep the same logical and decompression bounds as individual profile reads.
+    Grouping by publication also avoids evicting and reopening the same chunk
+    when identity-key order interleaves several publications.
+    """
+    keys = list(dict.fromkeys(keys))
+    if len(keys) > 512:
+        raise ValueError('Musical profile page exceeds 512 identities')
+    if not keys:
+        return {}
+    table, column, marker, subject = KINDS[kind]
+    marks = ','.join('?' for _ in keys)
+    if available(conn):
+        owner = 'r.id' if kind == 'recording' else 'p.source_key'
+        join = 'JOIN recordings r ON r.identity_key=p.identity_key ' if kind == 'recording' else ''
+        rows = conn.execute(f'SELECT p.{column},p.payload,p.version,p.digest,{owner},'
+            f'h.publication,h.byte_size FROM {table} p {join}'
+            f'LEFT JOIN {marker} h ON h.{subject}={owner} WHERE p.{column} IN ({marks}) '
+            'ORDER BY h.publication', keys).fetchall()
+    else:
+        rows = conn.execute(f'SELECT {column},payload,version,digest,NULL,NULL,NULL '
+            f'FROM {table} WHERE {column} IN ({marks})', keys).fetchall()
+    sizes = []
+    for key, raw, version, digest, identity, publication, byte_size in rows:
+        if not raw and publication is None:
+            raise fao.CorruptFile('Required musical-profile file head is missing')
+        sizes.append(len(raw.encode()) if raw else byte_size)
+    if sum(sizes) > max_bytes:
+        raise WorkBudgetExceeded('Musical profile page exceeds byte budget')
+    cache, result = Cache(), {}
+    for key, raw, version, digest, identity, publication, byte_size in rows:
+        if not raw:
+            value = _chunk(conn, kind, publication, cache).get(str(identity))
+            if (not isinstance(value, dict) or set(value) != {'body', 'version', 'digest'}
+                    or not isinstance(value['body'], str) or (value['version'], value['digest']) != (version, digest)
+                    or len(value['body'].encode()) != byte_size
+                    or hashlib.sha256(value['body'].encode()).hexdigest() != digest):
+                raise fao.CorruptFile('Musical profile differs from its exact head')
+            raw = value['body']
+        result[key] = json.loads(raw)
+    return result
 
 
 def publish(conn, kind, values):

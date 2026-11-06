@@ -73,6 +73,41 @@ def test_cache_identity_tracks_payload_and_requested_fields_and_keeps_only_one(m
     assert len(calls) == 5  # A failed parse cannot replace the previous good value.
 
 
+@pytest.mark.parametrize('format', ['plain', 'v1', 'v2'])
+def test_stable_projection_is_cached_detached_and_replaced_with_its_document(format):
+    cache = json_cache.DecodeCache()
+    tracks = [{'key': str(i), 'description': 'evidence ' * 1500,
+               'musical': {'source': i}} for i in range(8)]
+    calls = []
+    def project(value):
+        calls.append(True)
+        return {'picked': value['all']['wheelhouse'][:2]}
+    old = _encoded(format, {'all': {'wheelhouse': tracks}})
+    first = cache.decode(old, project=project, cache_projection=True)
+    first['picked'][0]['musical']['source'] = 'local edit'
+    assert cache.decode(old, project=project, cache_projection=True) == {'picked': tracks[:2]}
+    assert len(calls) == 1
+    new = _encoded(format, {'all': {'wheelhouse': tracks[1:]}})
+    assert cache.decode(new, project=project, cache_projection=True) == {'picked': tracks[1:3]}
+    assert len(calls) == 2
+
+
+def test_profile_free_v2_documents_are_detached_and_reject_dangling_references():
+    value = {'tracks': [{'key': str(i), 'order': {'relax': [i, i / 1000]},
+                         'supported': ['relax']} for i in range(2000)]}
+    encoded = json_cache.encode(value)
+    assert json.loads(encoded)[json_cache.MARKER] == json_cache.FORMAT
+    cache = json_cache.DecodeCache()
+    first = cache.decode(encoded)
+    first['tracks'][0]['order']['relax'].append('local edit')
+    assert cache.decode(encoded) == json_cache.decode(encoded) == value
+    dangling = json.dumps({json_cache.MARKER: json_cache.FORMAT,
+        'json': json_cache._pack('{"tracks":[{"musical":{"profile":0}}]}'),
+        'profiles': json_cache._pack('[]')})
+    with pytest.raises(ValueError, match='Invalid compressed recommendation cache profile'):
+        json_cache.decode(dangling)
+
+
 @pytest.mark.parametrize('group_pools', [False, True])
 def test_logical_budget_counts_each_copy_and_keeps_exact_detached_profiles(group_pools):
     profile = {'captured': ['東京\\\"' * 300], 'provenance': {'source': 'original'}}

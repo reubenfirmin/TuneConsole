@@ -76,7 +76,8 @@ function generationRestoreReturn() {
   } catch (_) {}
 }
 document.addEventListener('DOMContentLoaded', generationRestoreReturn);
-document.addEventListener('htmx:afterSettle', generationRestoreReturn);
+// SPA swaps settle before Alpine initializes the new board's focus scope.
+document.addEventListener('htmx:afterSettle', () => Alpine.nextTick(generationRestoreReturn));
 
 function generationContext(node) {
   const payload = node.querySelector('.gen-card-body');
@@ -114,25 +115,54 @@ function generationUnresolved(node, key) {
   return false;
 }
 
+function generationCard(element) {
+  return element.closest('.gen-card, .starter-mix, .artist-first-set, .rt-draft');
+}
+
+function generationRestoreUnresolved() {
+  document.querySelectorAll('[hx-post="/home/generate"]').forEach(button => {
+    const node = generationCard(button);
+    if (!node) return;
+    const key = generationKey(node);
+    let unresolved = false;
+    try { unresolved = generationUnresolved(node, key); } catch (_) {}
+    if (!unresolved) return;
+    const existing = generationWindows.get(node.id);
+    if (existing?.node === node && existing.key === key && node.dataset.generationPending && !existing.uncertain) return;
+    const record = existing?.key === key ? existing : {
+      key, context: generationContext(node), token: crypto.randomUUID(), sent: true
+    };
+    record.node = node;
+    generationWindows.set(node.id, record);
+    generationFailure(record);
+  });
+}
+document.addEventListener('DOMContentLoaded', generationRestoreUnresolved);
+document.addEventListener('htmx:afterSettle', generationRestoreUnresolved);
+
 function generationFailure(record) {
-  delete record.node.dataset.generationPending;
   record.uncertain = true;
-  const detail = 'We couldn’t confirm playback of “' + record.context.title +
-    '”. This mix may already be in your YouTube Music library.';
-  let note = record.node.querySelector('[data-generation-error]');
-  if (!note) {
-    note = document.createElement('p');
-    note.className = 'section-note';
-    note.dataset.generationError = '';
-    note.setAttribute('role', 'alert');
-    record.node.append(note);
+  // A card can now show a deliberately different selection. A late failure
+  // still belongs to its original popup, not the newer card or request.
+  if (!record.key || generationKey(record.node) === record.key) {
+    delete record.node.dataset.generationPending;
+    const detail = 'We couldn’t confirm playback of “' + record.context.title +
+      '”. This mix may already be in your YouTube Music library.';
+    let note = record.node.querySelector('[data-generation-error]');
+    if (!note) {
+      note = document.createElement('p');
+      note.className = 'section-note';
+      note.dataset.generationError = '';
+      note.setAttribute('role', 'alert');
+      record.node.append(note);
+    }
+    note.replaceChildren(document.createTextNode(detail + ' '));
+    const link = document.createElement('a');
+    link.href = 'https://music.youtube.com/search?q=' + encodeURIComponent(record.context.name);
+    link.target = '_blank'; link.rel = 'noopener'; link.textContent = 'Find this mix on YouTube Music';
+    note.append(link);
+    record.node.querySelectorAll('[hx-post="/home/generate"]').forEach(button => { button.disabled = true; });
   }
-  note.replaceChildren(document.createTextNode(detail + ' '));
-  const link = document.createElement('a');
-  link.href = 'https://music.youtube.com/search?q=' + encodeURIComponent(record.context.name);
-  link.target = '_blank'; link.rel = 'noopener'; link.textContent = 'Find this mix on YouTube Music';
-  note.append(link);
-  record.node.querySelectorAll('[hx-post="/home/generate"]').forEach(button => { button.disabled = true; });
   try {
     const tab = record.tab;
     if (tab && !tab.closed) {
@@ -148,9 +178,13 @@ function generationFailure(record) {
 // the individual request so a later click cannot close another mix's window.
 function genOpenYT(id) {
   const node = document.getElementById(id);
-  const existing = generationWindows.get(id);
-  if (existing?.sent) { generationFailure(existing); return; }
   const key = generationKey(node);
+  const existing = generationWindows.get(id);
+  if (existing?.sent && existing.key === key) {
+    existing.node = node;
+    generationFailure(existing);
+    return;
+  }
   let unresolved = false;
   try { unresolved = generationUnresolved(node, key); } catch (_) {}
   const record = {node, key, context: generationContext(node), token: crypto.randomUUID(), sent: unresolved, uncertain: unresolved};
@@ -187,7 +221,7 @@ function genOpenYT(id) {
 }
 
 document.addEventListener('htmx:configRequest', event => {
-  if (event.detail.path !== '/home/generate') return;
+  if (event.detail.path !== '/home/generate' && !/^\/road_trip\/draft\/\d+\/save$/.test(event.detail.path)) return;
   const record = Array.from(generationWindows.values()).find(item => item.node.contains(event.detail.elt));
   if (record) event.detail.parameters.launch_id = record.token;
 });
@@ -195,13 +229,29 @@ document.addEventListener('htmx:configRequest', event => {
 // HTMX delivers this before following HX-Redirect, without replacing the mix.
 document.addEventListener('generated-playlist-saved', event => {
   // Keep the spoke loader open while the destination is still loading.
-  window.addEventListener('pagehide', () => {
+  const complete = () => {
+    window.removeEventListener('pagehide', complete);
+    window.removeEventListener('app-page-changed', complete);
     genComplete(event.detail.launch_id, event.detail.playlist, false, false, true);
-  }, {once: true});
+  };
+  window.addEventListener('pagehide', complete, {once: true});
+  window.addEventListener('app-page-changed', complete, {once: true});
 });
 
 document.addEventListener('htmx:beforeRequest', event => {
   if (event.detail.requestConfig?.path !== '/home/generate') return;
+  const node = generationCard(event.detail.elt);
+  // Check durable unresolved identity independently of click handlers and old
+  // DOM ownership. Reconnect can replace the card before its settle callbacks.
+  if (node) {
+    let unresolved = false;
+    try { unresolved = generationUnresolved(node, generationKey(node)); } catch (_) {}
+    if (unresolved) {
+      event.preventDefault();
+      generationRestoreUnresolved();
+      return;
+    }
+  }
   const record = Array.from(generationWindows.values()).find(item => item.node.contains(event.detail.elt));
   if (!record) return;
   if (record.sent) { event.preventDefault(); generationFailure(record); return; }
@@ -233,15 +283,23 @@ function genComplete(token, playlist, error, uncertain = false, redirecting = fa
     } else {
       try { sessionStorage.removeItem(record.key); } catch (_) {}
       try { sessionStorage.removeItem('tc-mix-launch:' + token); } catch (_) {}
-      try { sessionStorage.removeItem('tc-mix-return'); } catch (_) {}
+      try {
+        const previous = JSON.parse(sessionStorage.getItem('tc-mix-return'));
+        const previousKey = previous && 'tc-generation:' + previous.id + ':' +
+          JSON.stringify(previous.tracks.map(track => track.video_id).sort());
+        if (!previous || previousKey === record.key) sessionStorage.removeItem('tc-mix-return');
+      } catch (_) {}
     }
     try { if (record.tab && !record.tab.closed) record.tab.close(); } catch (_) {}
     if (record.popupUrl) URL.revokeObjectURL(record.popupUrl);
-    generationWindows.delete(record.node.id);
-  } else {
+    if (generationWindows.get(record.node.id) === record) generationWindows.delete(record.node.id);
+    if (window.__ytTab === record.tab) window.__ytTab = null;
+  } else if (!token && !Array.from(generationWindows.values()).some(item => item.tab === window.__ytTab)) {
+    // Clusters also uses this receipt with its untokened loading window.
+    // An unmatched mix token must never close another selection's popup.
     try { if (window.__ytTab && !window.__ytTab.closed) window.__ytTab.close(); } catch (_) {}
+    window.__ytTab = null;
   }
-  window.__ytTab = null;
   if (playlist && !error) {
     try { sessionStorage.setItem('tc-generated-playback', JSON.stringify({playlist, at: Date.now(), redirecting})); } catch (_) {}
     window.dispatchEvent(new Event('generated-playback-pending'));

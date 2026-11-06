@@ -1,14 +1,11 @@
 """Adaptive group choices over indexed immutable memberships and bounded pages."""
 from collections import Counter
 from contextlib import contextmanager
-from pathlib import Path
-import sqlite3
-from tempfile import TemporaryDirectory
 
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.rec import group_roots, home_vibe, mode_surfaces, musical_character, rec_params
 from yt_playlist.rec.eligibility import home_exclusions
-from yt_playlist.util import genre_map
+from yt_playlist.repos.group_ordering import GroupOrderingRepo
 
 
 def pages(reader, generation, version, lane):
@@ -59,23 +56,13 @@ def selection(store, generation, now):
 
 @contextmanager
 def selection_reader(reader, generation, now):
-    with TemporaryDirectory(prefix='tuneconsole-group-cards-') as directory:
-        conn = sqlite3.connect(Path(directory) / 'ordering.db')
-        try:
-            conn.row_factory = sqlite3.Row
-            conn.execute('PRAGMA cache_size=-1024')
-            conn.execute('PRAGMA temp_store=FILE')
-            conn.execute('PRAGMA mmap_size=0')
-            conn.execute('CREATE TABLE ordering(rank INTEGER PRIMARY KEY,key TEXT,artist TEXT,album TEXT,'
-                         'bucket INTEGER,taste REAL,fit REAL)')
-            yield Selection(reader, generation, now, conn)
-        finally:
-            conn.close()
+    with GroupOrderingRepo.open() as ordering:
+        yield Selection(reader, generation, now, ordering)
 
 
 class Selection:
-    def __init__(self, reader, generation, now, conn):
-        self.reader, self.generation, self.now, self.conn = reader, generation, now, conn
+    def __init__(self, reader, generation, now, ordering):
+        self.reader, self.generation, self.now, self.ordering = reader, generation, now, ordering
         self.preset = home_vibe.current(reader, now)
         self.muted = reader.rec_model.muted_artists()
         self.weights = reader.rec_model.get_weights(now=now)
@@ -83,9 +70,10 @@ class Selection:
 
     def eligible(self, page, lane, epoch, include, avoid, seen, meta):
         blocked = home_exclusions(self.reader, [track['key'] for track in page], self.now)
+        axes = self.reader.genres.feature_axes({track.get('genre') or '' for track in page})
         for track in page:
             genre = track.get('genre') or ''
-            family, subgenre = genre_map.family(genre,conn=self.reader.conn), genre_map.subgenre(genre,conn=self.reader.conn)
+            family, subgenre = axes.get(genre, ('', None))
             if (track.get('_radio_fresh') or track['key'] in seen or track['key'] in blocked
                     or track.get('artist') in self.muted
                     or self.weights.get(f'genre:{family}', 1) == 0
@@ -111,7 +99,7 @@ class Selection:
             if album:
                 albums[album] += 1
 
-        self.conn.execute('DELETE FROM ordering')
+        self.ordering.clear()
         for page in pages(self.reader, self.generation, version, lane):
             eligible = list(self.eligible(page, lane, epoch, include, avoid, seen, meta))
             if not self.preset:
@@ -130,19 +118,16 @@ class Selection:
                     rows.append((track['pool_rank'], track['key'], track.get('artist') or '',
                         track.get('album') or '', -round((fit - .5) / home_vibe.FIT_STEP),
                         -home_vibe.taste_score(track), fit))
-                self.conn.executemany('INSERT INTO ordering VALUES (?,?,?,?,?,?,?)', rows)
+                self.ordering.add(rows)
         if not self.preset:
             return selected
-        cursor = self.conn.execute('SELECT * FROM ordering ORDER BY bucket,taste,fit DESC,rank')
-        while batch := cursor.fetchmany(128):
-            check_cancellable_work()
-            for row in batch:
-                if artists[row['artist']] >= artist_cap or row['album'] and albums[row['album']] >= album_cap:
-                    continue
-                track = self.reader.recommendations.candidate_page('home', 'all', lane,
-                    generation=self.generation, after=row['rank'] - 1, limit=1)['tracks'][0]
-                track['serving_context']['vibe_affinity'] = row['fit']
-                accept(track)
-                if len(selected) == limit:
-                    return selected
+        for row in self.ordering.ranked():
+            if artists[row['artist']] >= artist_cap or row['album'] and albums[row['album']] >= album_cap:
+                continue
+            track = self.reader.recommendations.candidate_page('home', 'all', lane,
+                generation=self.generation, after=row['rank'] - 1, limit=1)['tracks'][0]
+            track['serving_context']['vibe_affinity'] = row['fit']
+            accept(track)
+            if len(selected) == limit:
+                return selected
         return selected

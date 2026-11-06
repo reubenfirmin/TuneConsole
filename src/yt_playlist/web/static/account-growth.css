@@ -1,27 +1,12 @@
-/* Release the page entrance transform so fixed notices anchor to the viewport. */
+/* Release the page entrance transform after the animation finishes. */
 main.page-home { animation-fill-mode:backwards; }
-#account-health-slot:empty { display:none; }
-.account-health { display:flex; flex-direction:column; align-items:flex-start; gap:8px; padding:16px 0; margin:12px 0 0; border-top:1px solid var(--border); color:var(--dim); font-size:.75rem; text-align:left; }
-.growth-health-name { display:flex; gap:8px; }
-.growth-health-name > strong { font-weight:600; }
-.growth-health-name > span { display:none; }
-.growth-health-progress { display:flex; align-items:center; flex-wrap:wrap; gap:6px 10px; }
-.growth-health-progress > div { display:flex; gap:6px; align-items:baseline; }
-.growth-health-progress > div > span { display:none; }
-.growth-health-progress strong { font-size:inherit; font-weight:600; }
-.growth-health-progress > span { color:var(--dim); }
-.growth-health-progress progress { width:80px; height:5px; accent-color:var(--accent); border:0; border-radius:10px; overflow:hidden; }
-.growth-health-progress progress::-webkit-progress-bar { background:var(--border); }
-.growth-health-progress progress::-webkit-progress-value { background:var(--accent); border-radius:10px; }
-.growth-health-link { display:flex; align-items:center; gap:6px; padding:4px 0; border:0; color:var(--dim); font-size:inherit; white-space:nowrap; }
-.growth-health-link .growth-star { width:18px; height:18px; }
 .growth-star { width:28px; height:28px; display:block; flex:none; }
 .growth-tab { position:relative; min-width:48px; display:flex; justify-content:flex-start; }
 .growth-tab > .growth-star { color:var(--dim); transition:color .3s; }
 .growth-tab.has-new > .growth-star { color:var(--amber); filter:drop-shadow(0 0 6px color-mix(in srgb,var(--amber) 55%,transparent)); }
 .growth-tab.is-twinkling > .growth-star { animation:growth-twinkle .6s ease-in-out 3; transform-origin:70% 35%; }
 @keyframes growth-twinkle { 50% { transform:rotate(14deg) scale(1.25); filter:drop-shadow(0 0 10px var(--amber)); } }
-.growth-unlock-notice { position:fixed; z-index:30; right:24px; bottom:24px; width:min(380px,calc(100vw - 32px)); max-height:65dvh; overflow:auto; border:1px solid color-mix(in srgb,var(--amber) 55%,var(--border)); border-radius:16px; background:var(--surface-card); box-shadow:0 16px 60px var(--shadow-ink); padding:22px; text-align:left; animation:growth-toast-in .35s ease-out; }
+.growth-unlock-notice { position:relative; max-width:90rem; margin:0 auto 24px; border:1px solid color-mix(in srgb,var(--amber) 55%,var(--border)); border-radius:16px; background:var(--surface-card); box-shadow:0 16px 60px var(--shadow-ink); padding:22px; text-align:left; animation:growth-toast-in .35s ease-out; }
 @keyframes growth-toast-in { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:none; } }
 .growth-unlock-copy,.growth-home-invite { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
 .growth-unlock-copy > .growth-star { width:32px; height:32px; color:var(--amber); }
@@ -78,7 +63,7 @@ main.page-home { animation-fill-mode:backwards; }
 .landmark-light { filter:brightness(.65) saturate(.8); pointer-events:none; transition:filter .25s; }
 .landmark-art { pointer-events:none; }
 .landmark-hit { fill:transparent; stroke:transparent; stroke-width:3px; stroke-linejoin:round; }
-.landmark-art.is-ready .landmark-light,.landmark-art.is-explored .landmark-light { filter:brightness(1.15) saturate(1.15); }
+.landmark-art.is-ready .landmark-light,.landmark-art.is-explored .landmark-light,.landmark-art.is-connected .landmark-light { filter:brightness(1.15) saturate(1.15); }
 .landmark-art.is-ready .landmark-halo { opacity:.32; }
 .landmark-art.is-explored .landmark-halo { fill:var(--festival-route); opacity:.3; }
 .landmark-art.is-lit .landmark-light { filter:brightness(1.45) saturate(1.2); }
@@ -86,8 +71,7 @@ main.page-home { animation-fill-mode:backwards; }
 .landmark-sign { fill:var(--festival-text); paint-order:stroke fill; stroke:var(--festival-sign-border); stroke-width:5px; stroke-linejoin:round; pointer-events:visiblePainted; }
 .landmark-label { font-size:23px; font-weight:750; letter-spacing:.01em; }
 .landmark-hint { font-size:17px; opacity:.85; }
-.festival-destination[role=button] .landmark-label { text-decoration:underline; text-decoration-color:var(--festival-link-decoration); text-underline-offset:6px; }
-.festival-destination:is(:hover,:focus-visible) .landmark-label { fill:var(--festival-link-hover); filter:drop-shadow(0 0 3px var(--festival-glow)) drop-shadow(0 0 7px var(--festival-glow-soft)); text-decoration-color:var(--festival-link-hover); }
+.festival-destination:is(:hover,:focus-visible) .landmark-label { fill:var(--festival-link-hover); filter:drop-shadow(0 0 3px var(--festival-glow)) drop-shadow(0 0 7px var(--festival-glow-soft)); }
 .growth-new { fill:var(--festival-new); font-size:17px; font-weight:850; letter-spacing:.12em; }
 .growth-dialog { width:min(540px,calc(100% - 32px)); max-height:calc(100dvh - 48px); overflow:auto; padding:38px; border:1px solid color-mix(in srgb,var(--amber) 40%,var(--border)); border-radius:22px; background:var(--surface-card); color:var(--text); box-shadow:0 20px 90px var(--festival-dialog-shadow); text-align:left; }
 .growth-dialog[open] { animation:growth-toast-in .25s ease-out; }
@@ -113,12 +97,6 @@ body main.page-home:has(.festival-intro), body:not(:has(.page-clusters)) main.pa
   body main.page-home:has(.festival-intro) { width:calc(100% - 13.5rem); margin-inline:13.5rem 0; }
   body:not(:has(.page-clusters)) main.page-home:has(.home-dashboard.is-unlocks) { width:calc(100% - 13.5rem); margin-inline:13.5rem 0; }
 }
-@media(max-width:65rem) {
-  .topbar:has(#account-health-slot:not(:empty)) { flex-wrap:wrap; }
-  #account-health-slot { flex-basis:100%; grid-column:1 / -1; }
-  .account-health { flex-direction:row; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; padding:8px 0 0; margin:0; }
-  .growth-health-name { display:none; }
-}
 @media(max-width:64.999rem) {
   body:has(.festival-intro) > .global-now-playing-slot { position:sticky; top:calc(var(--setup-banner-height,0px) + var(--app-topbar-height,0px)); z-index:4; background:var(--bg); }
 }
@@ -135,13 +113,8 @@ body main.page-home:has(.festival-intro), body:not(:has(.page-clusters)) main.pa
   .festival-intro-copy { padding:18px 16px 24px; }
   .festival-intro-copy h1 { font-size:1.8rem; }
   .festival-intro-copy .arrival-progress { font-size:.82rem; }
-  .account-health { justify-content:space-between; gap:10px; font-size:.7rem; }
-  .growth-health-progress { gap:7px; }
-  .growth-health-progress progress { width:48px; }
-  .growth-health-link { font-size:0; }
-  .growth-health-link .growth-star { width:22px; height:22px; }
   .growth-format-options { grid-template-columns:minmax(0,1fr); }
-  .growth-unlock-notice { bottom:100px; right:16px; max-height:55dvh; padding:18px; }
+  .growth-unlock-notice { padding:18px; }
   .growth-map-tools { padding:16px; align-items:flex-start; }
   .page-home .home-dashboard.is-unlocks > .dash-navigation { padding:8px 12px 0; }
   .growth-map-tools .btn-ghost { padding:3px 0; font-size:.8rem; }

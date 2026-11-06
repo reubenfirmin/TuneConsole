@@ -1,8 +1,10 @@
 import sqlite3
+from functools import wraps
+import time
 
 import pytest
 
-from yt_playlist.core import catalog
+from yt_playlist.core import artists, catalog, db_handles, fao, metadata_deliveries
 from yt_playlist.core.store import Store
 from yt_playlist.library.playlist_metadata import content_hash
 
@@ -24,10 +26,37 @@ def _videos(store, pid):
 
 
 @pytest.mark.parametrize("size", [8, 1024])
-def test_append_writes_only_new_catalog_and_membership(store, monkeypatch, size):
+def test_append_writes_only_new_catalog_and_membership(store, monkeypatch, size, record_property):
+    phase, costs = 'initial', {}
+
+    def timed(owner, attribute, name):
+        operation = getattr(owner, attribute)
+
+        @wraps(operation)
+        def call(*args, **kwargs):
+            wall, cpu = time.perf_counter(), time.thread_time()
+            try:
+                return operation(*args, **kwargs)
+            finally:
+                values = costs.setdefault((phase, name), [0, 0.0, 0.0])
+                values[0] += 1
+                values[1] += time.perf_counter() - wall
+                values[2] += time.thread_time() - cpu
+        monkeypatch.setattr(owner, attribute, call)
+
+    for owner, attribute, name in (
+            (catalog, 'upsert', 'catalog'), (artists, 'observe', 'artist_evidence'),
+            (metadata_deliveries, 'capture_state', 'metadata_delivery'),
+            (db_handles.Cursor, '_run', 'sql_cursor'),
+            (db_handles.Connection, 'commit', 'commit'), (fao, '_write', 'artifact_write')):
+        timed(owner, attribute, name)
     pid = _playlist(store)
     tracks = [_track(i) for i in range(size)]
+    started = time.perf_counter()
     store.playlists.publish_confirmed_tracks(pid, "Radio", tracks, 2)
+    record_property('initial_publication_seconds', time.perf_counter() - started)
+    assert costs[('initial', 'catalog')][0] == size
+    phase = 'append'
     with store.conn:
         store.conn.execute("CREATE TEMP TABLE publication_writes(kind TEXT)")
         for operation in ["INSERT", "DELETE", "UPDATE"]:
@@ -40,7 +69,9 @@ def test_append_writes_only_new_catalog_and_membership(store, monkeypatch, size)
     monkeypatch.setattr(catalog, "upsert", observed)
     expected = [t["video_id"] for t in tracks]
     tracks.append(_track(size))
+    started = time.perf_counter()
     store.playlists.publish_confirmed_tracks(pid, "Radio", tracks, 3, expected_prefix=expected)
+    record_property('append_publication_seconds', time.perf_counter() - started)
     assert calls == [f"v{size}"]
     assert [r[0] for r in store.conn.execute("SELECT kind FROM publication_writes")] == ["INSERT"]
     assert _videos(store, pid) == [t["video_id"] for t in tracks]
@@ -48,6 +79,11 @@ def test_append_writes_only_new_catalog_and_membership(store, monkeypatch, size)
     assert playlist.track_count == size + 1
     assert playlist.content_hash == content_hash(store.playlists.get_playlist_track_keys(pid))
     assert store.playlists.is_quarantined_playlist("RADIO")
+    # Inclusive phase timers overlap. SQL counters are diagnostic cursor calls.
+    for (phase_name, name), (count, wall, cpu) in sorted(costs.items()):
+        record_property(f'{phase_name}_{name}_calls', count)
+        record_property(f'{phase_name}_{name}_wall_s', wall)
+        record_property(f'{phase_name}_{name}_thread_cpu_s', cpu)
 
 
 @pytest.mark.parametrize("incremental", [False, True])
@@ -123,6 +159,35 @@ def test_membership_failure_cannot_publish_metadata_or_catalog(store):
     assert store.playlists.get_playlist(pid) == before
     assert _videos(store, pid) == ["v0"]
     assert not store.conn.execute("SELECT 1 FROM youtube_items WHERE video_id='v1'").fetchone()
+
+
+@pytest.mark.parametrize("incremental", [False, True])
+def test_late_membership_batch_failure_rolls_back_prior_batches(store, incremental):
+    pid = _playlist(store)
+    store.playlists.publish_confirmed_tracks(pid, "Radio", [_track(0)], 2)
+    before = store.playlists.get_playlist(pid)
+    retained = {table: list(map(tuple, store.conn.execute(f'SELECT * FROM {table} ORDER BY 1')))
+                for table in ('youtube_items', 'recordings', 'catalog_entries')}
+    tracks = [_track(i) for i in range(131)]
+    with store.conn:
+        store.conn.execute("CREATE TEMP TRIGGER reject_late_membership BEFORE INSERT ON playlist_items "
+                           "WHEN NEW.video_id='v130' BEGIN SELECT RAISE(ABORT,'late membership failure'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="late membership failure"):
+        store.playlists.publish_confirmed_tracks(
+            pid, "Changed", tracks, 3, expected_prefix=["v0"] if incremental else None)
+    assert not store.conn.in_transaction
+    assert store.playlists.get_playlist(pid) == before
+    assert _videos(store, pid) == ["v0"]
+    assert {table: list(map(tuple, store.conn.execute(f'SELECT * FROM {table} ORDER BY 1')))
+            for table in retained} == retained
+    with store.conn:
+        store.conn.execute("DROP TRIGGER reject_late_membership")
+    store.playlists.publish_confirmed_tracks(
+        pid, "Changed", tracks, 3, expected_prefix=["v0"] if incremental else None)
+    assert _videos(store, pid) == [track['video_id'] for track in tracks]
+    playlist = store.playlists.get_playlist(pid)
+    assert (playlist.title, playlist.track_count) == ("Changed", len(tracks))
+    assert playlist.content_hash == content_hash(store.playlists.get_playlist_track_keys(pid))
 
 
 @pytest.mark.parametrize("incremental", [False, True])

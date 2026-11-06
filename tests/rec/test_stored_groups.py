@@ -1,5 +1,6 @@
 """Adaptive Home follows indexed memberships without copying global candidate bags."""
 from copy import deepcopy
+from tests.derived_rating_support import seed_dislike
 from dataclasses import replace
 
 import pytest
@@ -98,7 +99,7 @@ def test_rare_group_seeks_its_complete_tail_without_hydrating_unrelated_candidat
         tracks = selected.tracks(version, 'explore', 0, (), (), set(), 2, 2, {})
     assert [track['key'] for track in tracks] == [f'fresh-{index}' for index in range(248, 260)]
     assert reads == [(version, 12, 128)]
-    store.rec_model.record_dislike('fresh-248', None, 1101)
+    seed_dislike(store, 'fresh-248', None, 1101)
     with store.conn:
         store.conn.execute("UPDATE youtube_items SET available=0 WHERE recording_id=252")
     with stored_groups.selection(store, generation, 1102) as selected:

@@ -171,7 +171,7 @@ def test_failure_interrupt_missing_plan_retry_and_new_regular_ddl(installed, mon
     job = preparation.JOBS[name]
     job.install(store.conn)
     publish = policy_documents._publish_encoded
-    def fail(*args):
+    def fail(*args, age=None):
         assert not store.conn.in_transaction
         raise OSError('controlled append file failure')
     monkeypatch.setattr(policy_documents, '_publish_encoded', fail)
