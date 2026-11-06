@@ -197,8 +197,8 @@ def training_manifest(conn, vibe, limit=32768, max_bytes=8 * 1024 * 1024):
     return result
 
 
-def receipt(generation, artists, mean_variance, new_track_variance):
-    return files.receipt(generation, artists, mean_variance, new_track_variance)
+def receipt(generation, artists, mean_variance, new_track_variance, *, conditioning=None):
+    return files.receipt(generation, artists, mean_variance, new_track_variance, conditioning=conditioning)
 
 
 def is_receipt(value):
@@ -246,7 +246,8 @@ def publish_receipts(conn, values, *, stage_receipts, load_manifest):
         for artist in artists:
             if type(artist) is not int or not conn.execute('SELECT 1 FROM artists WHERE id=?', (artist,)).fetchone():
                 raise ValueError('Unknown conditioning artist')
-        if receipt != files.receipt(generation, artists, receipt['mean_variance'], receipt['new_track_variance']):
+        if receipt != files.receipt(generation, artists, receipt['mean_variance'], receipt['new_track_variance'],
+                                    conditioning=receipt.get('conditioning')):
             raise ValueError('Invalid shared model receipt')
         root_measurements(conn, model['inputs'])
         previous = linked(conn, pid)

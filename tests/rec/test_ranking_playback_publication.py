@@ -14,7 +14,8 @@ from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles
 from tests.rec.test_model_refresh import seed
 from yt_playlist.core import db_handles, fao, listening
-from yt_playlist.rec import bundle_storage, discover, home_prepared, measurement, mode_surfaces, surfaces
+from yt_playlist.rec import (bundle_storage, candidate_refresh, discover, home_prepared,
+                             measurement, mode_surfaces, surfaces)
 
 
 def seed_discoveries(store):
@@ -42,7 +43,9 @@ def playback_library(store):
     store.rec_model.replace_rec_content_vectors([
         ('song 000|artist 0', np.array([1., 0.], dtype=np.float32).tobytes())])
     bundle, fresh = completed_rankings(store)
-    publish_bundles(store, bundle, now=2000, fresh=fresh)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(measurement, 'serving_policy', completed_policy)
+        publish_bundles(store, bundle, now=2000, fresh=fresh)
     assert store.recommendations.page('home', 'all', 'temporal')
     assert store.recommendations.page('home', 'all', 'wheelhouse')
     assert store.recommendations.page('fresh', 'all', 'fresh')
@@ -62,6 +65,12 @@ def completed_rankings(reader, now=None, policies=None):
     return {'all': lanes, '_meta': {'full_pools': True}}, lanes['fresh']
 
 
+def completed_policy(reader, now, ranker='lane'):
+    # Fingerprinting every model and listening signal belongs to measurement's
+    # own tests. Keep real policy identities, files and publication here.
+    return 'fixture', {'ranker': ranker, 'source': 'playback-publication-fixture'}
+
+
 @pytest.fixture(scope='module')
 def playback_library_template(_pristine_current_schema):
     with prepared_template(_pristine_current_schema, playback_library) as template:
@@ -74,7 +83,12 @@ def library(file_backed_store, playback_library_template, monkeypatch):
     # Policy retirement has its own real maintenance owners in
     # test_policy_storage; it is below this coordination check.
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', completed_rankings)
+    monkeypatch.setattr(measurement, 'serving_policy', completed_policy)
     monkeypatch.setattr(measurement, 'maintain_storage', lambda *args, **kwargs: True)
+    # Captured preference fingerprints have independent coverage in
+    # test_candidate_refresh. These checks own publication and its schema fence.
+    monkeypatch.setattr(candidate_refresh, 'prepared_settings',
+                        lambda reader, now: {'rec_candidate_preferences': 'captured-fixture-inputs'})
     return file_backed_store
 
 
@@ -281,14 +295,16 @@ def test_default_snapshot_publication_still_rejects_listening_projection_changes
 
 
 def test_playback_keeps_arriving_while_real_rankers_finish(file_backed_store, monkeypatch, record_property):
-    from yt_playlist.rec import model_refresh
+    from yt_playlist.rec import model_refresh, vibe_pools
 
     library = file_backed_store
-    seed(library, distinct_albums=True)
+    # Retain the actual 80-recording admission floor for fitted taste modes.
+    # Multiple-mode fitting has its own model-refresh checks.
+    seed(library, distinct_albums=True, track_count=80, mode_count=1)
     seed_discoveries(library)
     assert not library.recommendations.heads()
     assert model_refresh.rebuild(library, 2000) is not None
-    assert len(library.rec_query.library_keys()) == 96
+    assert len(library.rec_query.library_keys()) == 80
     modes = library.modes.list_modes(active_only=True)
     assert modes
     record_property('full_library_mode_count', len(modes))
@@ -317,6 +333,9 @@ def test_playback_keeps_arriving_while_real_rankers_finish(file_backed_store, mo
                 break
 
     monkeypatch.setattr(surfaces, 'for_you', while_playing)
+    # This independent control runs actual Home/Fresh rankers while playback
+    # advances. Vibe family production is covered in test_vibe_pool_reads.
+    monkeypatch.setattr(vibe_pools, 'prepare', lambda *args: None)
     started, cpu = time.monotonic(), time.thread_time()
     with ranking_phases(library, monkeypatch, record_property) as timed, ThreadPoolExecutor(1) as playback:
         calculate = mode_surfaces._calculate_bundles

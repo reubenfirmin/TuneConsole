@@ -6,13 +6,13 @@ from yt_playlist.repos.base import Repo, synchronized
 
 class ArtistSimilarityRepo(Repo):
     @synchronized
-    def cached_similar(self, artist, now, ttl_days=14):
-        """Cached Last.fm similar-artist list, or None if missing/expired."""
+    def cached_similar(self, artist, *, fetched_since):
+        """Return evidence meeting the caller's explicit freshness bound."""
         from yt_playlist.core import artists
         aid = artists.lookup(self.conn,artist)
         row = self.conn.execute(
             "SELECT payload, fetched_at FROM rec_artist_similar WHERE artist_id=?", (aid,)).fetchone()
-        if row is None or row["fetched_at"] is None or now - row["fetched_at"] > ttl_days * 86400:
+        if row is None or row["fetched_at"] is None or row['fetched_at'] < fetched_since:
             return None
         return json.loads(row["payload"])
 

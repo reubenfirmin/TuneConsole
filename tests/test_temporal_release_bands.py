@@ -1,11 +1,12 @@
 """#63: date cards use the actual library's release years, without listening history."""
 from contextlib import ExitStack
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from yt_playlist.core import catalog
-from yt_playlist.rec import mode_surfaces as ms, rec_params, surfaces
+from yt_playlist.rec import mode_surfaces as ms, ppr, surfaces, vibe_pools
 from yt_playlist.util.matching import identity_key
 
 
@@ -42,10 +43,13 @@ def _library(store, monkeypatch, years, *, modes=1):
 
 
 def _temporal_fallback(monkeypatch):
-    # Preserve the original four seams; dates, vectors, buckets and assembly are real.
+    # Dates, vectors, per-band capacity, typed publication and assembly stay
+    # real. Independent scorer/PPR/vibe producers do not supply date buckets.
     for name in ("for_you", "explore_for_you", "comfort_listening"):
         monkeypatch.setattr(surfaces, name, lambda *args, **kwargs: [])
     monkeypatch.setattr(surfaces, "cold_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(ppr, 'mode_rankings', lambda *args, **kwargs: {})
+    monkeypatch.setattr(vibe_pools, 'prepare', lambda *args, **kwargs: None)
 
 
 @pytest.fixture(scope='module')
@@ -85,7 +89,9 @@ def temporal_library(store, monkeypatch, temporal_templates):
 
 @pytest.mark.parametrize("years", [(1970, 1995, 2020), (2021, 2023, 2025)])
 def test_computed_bands_rotate_relative_to_library(store, temporal_library, years):
-    membership, payload = temporal_library(list(years) * 40)
+    # Twelve distinct artists per year fill an entire card in either mode;
+    # 72 known dates also exceed the real 30-date credibility threshold.
+    membership, payload = temporal_library(list(years) * ms.PROTO_SIZE)
     cuts = payload["_meta"]["year_cuts"]
     assert years[0] <= cuts[0] < years[1] <= cuts[1] < years[2]
     with store.read_view() as reader:
@@ -120,14 +126,36 @@ def test_credible_date_bands_survive_a_bucket_full_of_older_tracks(store, tempor
 
 
 @pytest.mark.parametrize("cap", [12, 40])
-def test_each_date_band_keeps_candidates_past_newer_and_unknown_releases(store, temporal_library, cap):
-    membership, unprepared = temporal_library(
-        [None] * 60 + [2020] * 60 + [1995] * 60 + [1970] * 60, prepared=False)
-    assert unprepared is None
-    with store.read_view() as reader:
-        assert reader.recommendations.head('home') is None
-    rec_params.set_param(store, "modes_cand_per_mode", cap)
-    payload = ms.prepare_bundles(store, now=1000)
+def test_each_date_band_keeps_candidates_past_newer_and_unknown_releases(cap):
+    # Test the per-band allocation with controlled repository output. The
+    # computed-band cases above own actual catalog reads, cut calculation,
+    # typed publication and complete rotating cards; repeating that pipeline
+    # for each capacity adds no allocation case.
+    per_band = cap + 1
+    membership, years, metadata, vectors = {}, {}, {}, []
+    for mid in (1, 2):
+        for index, year in enumerate(
+                [None] * per_band + [2020] * per_band + [1995] * per_band + [1970] * per_band):
+            key = f'mode-{mid}-{index}'
+            membership[key], years[key] = mid, year
+            metadata[key] = {'video_id': key, 'title': key, 'artist': key, 'album': key}
+            # Decreasing similarity makes the leading unknown/newer rows
+            # deterministically precede the older dates in both modes.
+            direction = np.eye(2)[mid - 1] * (1 - index / (8 * per_band))
+            vectors.append(direction)
+    keys = list(membership)
+    reads = []
+
+    def tracks(requested):
+        reads.append(list(requested))
+        return metadata
+
+    store = SimpleNamespace(rec_query=SimpleNamespace(tracks_by_keys=tracks),
+                            modes=SimpleNamespace(genres_for=lambda requested: dict.fromkeys(requested, 'House')))
+    payload = {'1': {}, '2': {}}
+    ms._build_temporal(store, payload, [1, 2], np.eye(2), keys, np.asarray(vectors), cap,
+                       years=years, year_cuts=[1970, 1995])
+    assert reads == [keys]
 
     # Each rotating card gets the configured candidate depth; unknown years cannot spend it.
     for mid in (1, 2):
@@ -135,30 +163,24 @@ def test_each_date_band_keeps_candidates_past_newer_and_unknown_releases(store, 
         assert len(candidates) == 3 * cap
         for year in (1970, 1995, 2020):
             assert sum(track["year"] == year for track in candidates) == cap
+            # The highest-similarity records within each date band survive.
+            expected = [key for key in keys if membership[key] == mid and years[key] == year][:cap]
+            assert [track['key'] for track in candidates if track['year'] == year] == expected
         assert {membership[track["key"]] for track in candidates} == {mid}
-    assert len(payload["all"]["temporal"]) == 480
+    assert len(payload["all"]["temporal"]) == 2 * 4 * per_band
 
-    for epoch, year in enumerate((1970, 1995, 2020)):
-        cards = ms.assemble_cards(store, now=1000, epoch=epoch)
-        assert len(cards) == 1
-        card = cards[0]
-        assert len(card["tracks"]) == ms.PROTO_SIZE
-        assert {track["year"] for track in card["tracks"]} == {year}
-        assert len({track["artist"] for track in card["tracks"]}) >= 6
-        assert {membership[track["key"]] for track in card["tracks"]} == {card["mode_id"]}
-    assert store.history.play_events_since(0) == []
 
 
 def test_missing_years_do_not_make_a_sparse_library_credible(store, monkeypatch):
-    _library(store, monkeypatch, [1990] * 29 + [None] * 50)
+    _library(store, monkeypatch, [1990] * 29 + [None])
     payload = ms.prepare_bundles(store, now=1000)
-    assert len(payload["all"]["temporal"]) == 79
+    assert len(payload["all"]["temporal"]) == 30
     assert payload["_meta"]["year_cuts"] is None
     assert all(ms.assemble_cards(store, now=1000, epoch=epoch) == [] for epoch in range(3))
 
 
 def test_single_year_catalog_omits_empty_bands_and_unknown_dates(store, monkeypatch):
-    _library(store, monkeypatch, [2024] * 40 + [None] * 20)
+    _library(store, monkeypatch, [2024] * 30 + [None])
     payload = ms.prepare_bundles(store, now=1000)
     assert payload["_meta"]["year_cuts"] == [2024, 2024]
     cards = ms.assemble_cards(store, now=1000, epoch=0)

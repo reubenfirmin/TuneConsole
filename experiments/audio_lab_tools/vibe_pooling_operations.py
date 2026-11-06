@@ -14,6 +14,7 @@ from pathlib import Path
 import resource
 import threading
 import time
+import zipfile
 
 import numpy as np
 
@@ -61,12 +62,21 @@ def foreground(store, keys):
 @contextmanager
 def serving_guards(foreground_thread):
     original_fit, original_read = model.fit, vibe_models.read
-    calls = {'foreground_fits': 0, 'foreground_model_reads': 0}
+    calls = {'foreground_fits': 0, 'foreground_model_reads': 0, 'fits': []}
     def fit(*args, **kwargs):
         if threading.get_ident() == foreground_thread:
             calls['foreground_fits'] += 1
             raise AssertionError('Foreground score read attempted fitting')
-        return original_fit(*args, **kwargs)
+        started = time.monotonic()
+        observation = {'vibe': args[1], 'originals': len(args[0]), 'outcome': 'deferred'}
+        try:
+            value = original_fit(*args, **kwargs)
+            observation['outcome'] = 'ready' if value else 'empty'
+            observation['accounted_memory_bytes'] = value['diagnostics']['accounted_memory_bytes'] if value else 0
+            return value
+        finally:
+            observation['seconds'] = time.monotonic() - started
+            calls['fits'].append(observation)
     def read(*args, **kwargs):
         if threading.get_ident() == foreground_thread:
             calls['foreground_model_reads'] += 1
@@ -84,7 +94,9 @@ def phase(store, keys, candidate, *, seconds, turns):
                                  if candidate else {})
     started, samples, first_useful = time.monotonic(), [], None
     observations, progress = [], []
+    first_cycle = None
     def background():
+        nonlocal first_cycle
         # Same single background worker and refresh request in each phase.
         # Candidate fitting is the intended extra work, never a foreground call.
         with atomic_write(store):
@@ -99,6 +111,10 @@ def phase(store, keys, candidate, *, seconds, turns):
                 return {'outcome': 'complete', 'turns': turn}
             kind = 'model-eligible' if preparation.due(store) else 'content-and-scores'
             changed = worker.capture(1000)
+            if first_cycle is None and candidate and all(
+                    preparation.current(store, value := preparation.state(store, vibe))
+                    and value.get('outcome') == 'ready' for vibe in preparation.VIBES):
+                first_cycle = time.monotonic() - started
             progress.append({'kind': kind, 'changed': bool(changed), 'seconds': time.monotonic() - at})
         return {'outcome': 'bounded-incomplete', 'turns': turns}
     with serving_guards(threading.get_ident()) as calls, ThreadPoolExecutor(max_workers=1) as pool:
@@ -116,6 +132,7 @@ def phase(store, keys, candidate, *, seconds, turns):
         outcome = work.result()
     return {**outcome, 'wall_seconds': time.monotonic() - started,
             'foreground': summary(samples), 'first_existing_useful_seconds': first_useful,
+            'first_ready_model_cycle_seconds': first_cycle,
             'observed_content': observations, 'guards': calls, 'background_turns': progress,
             'model_states': {vibe: preparation.state(store, vibe) for vibe in preparation.VIBES},
             'score_work_remaining': bool(store.vibe_predictions.pending())}
@@ -138,8 +155,15 @@ def run(output, *, seconds=180., turns=1000):
         'code': {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in (
             'experiments/audio_lab_tools/vibe_pooling_operations.py',
             'src/yt_playlist/rec/vibe_joint_model.py', 'src/yt_playlist/rec/vibe_joint_preparation.py',
+            'src/yt_playlist/rec/progressive.py',
             'src/yt_playlist/rec/vibe_preparation.py', 'src/yt_playlist/repos/vibe_predictions.py',
             'src/yt_playlist/repos/vibe_models.py', 'src/yt_playlist/core/vibe_model_files.py')}}
+    with zipfile.ZipFile(output.parent / 'source.zip', 'x', zipfile.ZIP_DEFLATED) as archive:
+        for name, digest in report['code'].items():
+            raw = (ROOT / name).read_bytes()
+            if hashlib.sha256(raw).hexdigest() != digest:
+                raise ValueError('Operational source changed before archive')
+            archive.writestr(name, raw)
     store = Store(database)
     try:
         store.init_schema()
@@ -163,11 +187,16 @@ def run(output, *, seconds=180., turns=1000):
             'FROM prediction_model_generations GROUP BY generation')]
         report['foreign_key_failures'] = [tuple(row) for row in store.conn.execute('PRAGMA foreign_key_check')]
         baseline, candidate = report['baseline'], report['candidate']
-        report['foreground_point_gate'] = (candidate['foreground']['p95_ms']
+        report['observed_foreground_limit'] = (candidate['foreground']['p95_ms']
             <= baseline['foreground']['p95_ms'] * 1.1 + 2)
+        models_ready = all(value.get('outcome') == 'ready' for value in candidate['model_states'].values())
+        report['foreground_point_gate'] = (report['observed_foreground_limit']
+            if baseline['outcome'] == candidate['outcome'] == 'complete' and models_ready else None)
         report['peak_process_rss_bytes'] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
         report['seconds'] = time.monotonic() - started
         report['operational_acceptance'] = False
+        report['source_pins_unchanged'] = all(hashlib.sha256((ROOT / name).read_bytes()).hexdigest() == digest
+                                             for name, digest in report['code'].items())
         report['remaining'] = ['fresh-user first useful output', 'installed-format continuing writes',
             'actual-generation retention/collection and independent restore', 'refresh physical I/O/write amplification',
             'independent model-quality qualification and full Home request acceptance']

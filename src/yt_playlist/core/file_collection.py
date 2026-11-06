@@ -5,12 +5,38 @@ import json
 import os
 from pathlib import Path
 from threading import RLock
+import time
 
 from . import fao
-from .evidence_ledger import canonical
+from .activity import check_cancellable_work
+from .evidence_ledger import _mkdir, canonical
 
 _CURSORS = OrderedDict()
 _LOCK = RLock()
+
+
+@contextmanager
+def retained_reader(root):
+    """Retain files from before a SQL snapshot until its last file read.
+
+    A shared lease keeps collection from pruning files still referenced by an
+    older WAL snapshot. Closing the handle releases it after process exit too.
+    """
+    root = Path(root)
+    # Acquire even for an empty owner: its first publication and collection
+    # must not race a reader that already pinned an absent-directory snapshot.
+    _mkdir(root)
+    with (root / '.readers.lock').open('a+b') as lock:
+        while True:
+            check_cancellable_work()
+            unlock = fao._try_file_lock(lock, exclusive=False)
+            if unlock is not None:
+                break
+            time.sleep(0.025)
+        try:
+            yield
+        finally:
+            unlock()
 
 
 def walk_entries(root, *, pending=False, directories=False, max_depth=None):

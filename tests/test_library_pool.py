@@ -4,18 +4,37 @@ import re
 import threading
 import time
 
-from tests.test_home_other_genres import seed_genres
-from tests.test_mode_cards_route import _client as _home_client
-from tests.home_fixture_support import returning_listener
+import pytest
+
+from tests.test_home_other_genres import _client as _home_client, seed_genres
+from tests.rec.test_home_prepared import one_menu_per_attempt
+from tests.home_fixture_support import home_routes_only, returning_listener
+from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles
 from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.rec import library_pool, mode_surfaces, surfaces
+from yt_playlist.rec import home_cards, library_pool, mode_surfaces, surfaces
 from yt_playlist.util.matching import identity_key
 
 
-def _client(store):
+@pytest.fixture(autouse=True)
+def library_routes(home_routes_only, one_menu_per_attempt, monkeypatch):
+    # Jobs, requests and pool filtering stay real. Audit diagnostics have their
+    # separate payload and HTTP contracts in test_home_audit.
+    monkeypatch.setattr(home_cards.HomeCards, 'audit', lambda *args, **kwargs: None)
+
+
+@pytest.fixture(scope='module')
+def genre_candidates_template(_pristine_current_schema):
+    # These job cases request three families and consume a completed sibling
+    # card. Other genre families and twenty candidates per lane add no state.
+    with prepared_template(_pristine_current_schema, lambda source: seed_genres(
+            source, genres=['Jazz', 'Techno', 'Trance'], tracks_per_lane=4)) as template:
+        yield template
+
+
+def _client(store, *, prepare=True):
     returning_listener(store, 'mixes')
-    return _home_client(store)
+    return _home_client(store, prepare=prepare)
 
 
 def two_ready_cards(store, monkeypatch, *, bundles=None):
@@ -108,27 +127,46 @@ def test_catalog_skeleton_click_ranks_once_preserves_genres_and_survives_restart
     assert len(calls) == 1
 
 
-def test_empty_and_failed_library_builds_stop_polling_and_offer_retry(store, monkeypatch, genre_candidates):
-    def fail(*args, **kwargs):
-        raise RuntimeError("provider internals")
-    for prepare in (lambda *a: None, fail):
-        monkeypatch.setattr(library_pool, "prepare", prepare)
-        client = _client(store)
-        response = client.post("/home/library-pool", data={"lane": "comfort", "epoch": "0"})
-        match = re.search(r'hx-get="/home/library-pool/(\d+)"', response.text)
-        if match:
-            for _ in range(200):
-                response = client.get(f"/home/library-pool/{match[1]}")
-                if 'aria-busy="false"' in response.text:
-                    break
-                time.sleep(.01)
-        assert 'aria-label="Build comfort listening"' in response.text
-        assert 'hx-trigger="every 2s"' not in response.text
-        assert "provider internals" not in response.text
+@pytest.mark.parametrize('failed', [False, True], ids=['empty', 'failed'])
+def test_empty_and_failed_library_builds_stop_polling_and_offer_retry(store, monkeypatch, failed):
+    from yt_playlist.web.jobs import SyncJobs
+
+    finished = threading.Event()
+    finish = SyncJobs._finish
+    def notify_finished(jobs, job):
+        finish(jobs, job)
+        finished.set()
+    monkeypatch.setattr(SyncJobs, '_finish', notify_finished)
+    def prepare(*args, **kwargs):
+        if failed:
+            raise RuntimeError("provider internals")
+    monkeypatch.setattr(library_pool, "prepare", prepare)
+    # An explicit empty-lane job needs neither candidate generation nor an
+    # already prepared menu. Its terminal fragment is the behavior under test.
+    client = _client(store, prepare=False)
+    response = client.post("/home/library-pool", data={"lane": "comfort", "epoch": "0"})
+    assert response.status_code == 200
+    assert finished.wait(1), 'Library-pool worker did not complete'
+    match = re.search(r'hx-get="/home/library-pool/(\d+)"', response.text)
+    if match:
+        response = client.get(f"/home/library-pool/{match[1]}")
+    assert response.status_code == 200
+    assert 'aria-label="Build comfort listening"' in response.text
+    assert 'hx-trigger="every 2s"' not in response.text
+    assert "provider internals" not in response.text
 
 
-def test_library_pool_rejects_invalid_requests(store, genre_candidates):
-    client = _client(store)
+def test_library_pool_rejects_invalid_requests(store, monkeypatch):
+    from yt_playlist.web.routes.home_views import HomeViews
+
+    # Request validation consumes the prepared option list. Pool production is
+    # below that boundary; invalid requests must never start it.
+    monkeypatch.setattr(HomeViews, 'prepared', lambda *args: {'genre_options': [
+        {'family': 'jazz', 'label': 'jazz'}]})
+    def unexpected(*args, **kwargs):
+        raise AssertionError('Invalid input started a library-pool job')
+    monkeypatch.setattr(library_pool, 'prepare', unexpected)
+    client = _client(store, prepare=False)
     for data in ({"lane": "unknown", "epoch": "0"}, {"lane": "explore", "epoch": "-1"},
                  {"lane": "explore", "epoch": "x"},
                  {"lane": "explore", "epoch": "0", "include_genres": ["unknown"]},
@@ -154,33 +192,38 @@ def test_temporal_pool_keeps_its_date_band_and_live_feedback(store, genre_candid
     assert [t["year"] for t in library_pool.pick(store, 3, parameters)] == [1995, 2010]
 
 
-def test_catalog_build_reaches_unmodeled_library_beyond_other_genres(store):
-    # A large library need not have vectors for every track. The requested genre is deep in
-    # the catalog, and sibling cards already use some of it; neither condition makes it empty.
-    keys = []
-    # Keep every repository write, but publish the fixture as one committed input
-    # before candidate preparation or the explicit job can read it.
+def test_catalog_build_reaches_unmodeled_library_beyond_other_genres(store, monkeypatch):
+    # This coordinator must request the whole catalog before genre filtering.
+    # The scorer honors its limit, so a regression to the default 300-item head
+    # loses every Jazz row. Real unmodeled scoring is owned by
+    # test_explore.test_catalog_includes_owned_tracks_without_model_coverage;
+    # click/rejoin/render/restart is owned by the skeleton-click case above.
+    rows, keys = [], []
     with atomic_write(store):
         for i in range(340):
             title, artist = f"Song {i}", f"Artist {i}"
-            tid = store.tracks.upsert_track(f"v{i}", title, artist, None, None)
-            store.tracks.set_track_genre(tid, "Jazz" if i >= 310 else "Techno")
-            keys.append(identity_key(title, artist))
-    parameters = {"lane": "explore", "epoch": "0", "include_genres": ["jazz"],
-                  "exclude_keys": json.dumps(keys[310:322])}
-    # Ordinary Home waits for candidate dependencies; model the worker's pass
-    # before exercising the explicit library-pool request.
-    assert mode_surfaces.prepare_bundles(store, 1000) is not None
-    with _client(store) as client:
-        response = client.post("/home/library-pool", data=parameters)
-        for _ in range(200):
-            match = re.search(r'hx-get="(/home/library-pool/\d+)"', response.text)
-            if not match:
-                break
-            response = client.get(match[1])
-            time.sleep(.01)
-    assert response.status_code == 200
-    assert response.text.count('class="gen-row"') == 12
-    assert "Not enough matching songs" not in response.text
-    for title in re.findall(r'data-title="Song (\d+)"', response.text):
-        assert 322 <= int(title) < 340
+            key = identity_key(title, artist)
+            genre = 'Jazz' if i >= 310 else 'Techno'
+            # Only matching candidates need SQL metadata in this unit. The
+            # complete library inventory is the controlled DAO result below.
+            if i >= 310:
+                tid = store.tracks.upsert_track(f"v{i}", title, artist, None, None)
+                store.tracks.set_track_genre(tid, genre)
+            keys.append(key)
+            rows.append(surfaces.ForYouItem(title, artist, '', f'v{i}', None,
+                                           0, '', key=key, genre=genre))
+    monkeypatch.setattr(type(store.rec_query), 'library_keys', lambda self: set(keys))
+    limits = []
+    def score(reader, now, limit):
+        limits.append(limit)
+        return rows[:limit]
+    monkeypatch.setattr(surfaces, 'explore_for_you', score)
+    parameters = {'lane': 'explore', 'epoch': 0, 'include_genres': ['jazz'], 'avoid_genres': []}
+
+    library_pool.prepare(store, 1000, parameters)
+    result = library_pool.pick(store, 1000, parameters, exclude_keys=keys[310:322])
+
+    assert limits == [340]
+    assert len(result) >= 12
+    assert {track['key'] for track in result} == set(keys[322:])
+    assert all(track['genre'] == 'Jazz' for track in result)

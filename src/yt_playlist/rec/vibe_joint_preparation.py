@@ -13,6 +13,9 @@ VIBES = (*home_vibe.PRESETS, *INTENSITY_CHANNELS)
 # lifecycle and resource gates have independent evidence. Map configuration
 # hashes to the accepted report hash; a successful fit alone cannot qualify it.
 QUALIFICATIONS = {}
+# Under continuing upstream work, finish one bounded eight-channel cycle and
+# allow upstream capture to progress before admitting another cycle.
+BACKLOG_INTERVAL = 60
 
 
 def config_identity():
@@ -38,6 +41,28 @@ def due(store):
                for vibe in VIBES)
 
 
+def active(store):
+    """Continue a partially published revision before changing its originals."""
+    if not qualified():
+        return False
+    states = [state(store, vibe) for vibe in VIBES]
+    published = [value for value in states if current(store, value)]
+    attempted = max((value.get('attempted_at', 0) for value in published), default=0)
+    # A stream of stale publication guards must eventually return the worker
+    # to ordinary fair source turns, even when no further model can publish.
+    return (0 < len(published) < len(states)
+            and time.time() < attempted + len(VIBES) * 10)
+
+
+def admitted(store, *, waiting):
+    if not due(store):
+        return False
+    if not waiting or active(store):
+        return True
+    attempted = max(state(store, vibe).get('attempted_at', 0) for vibe in VIBES)
+    return time.time() >= attempted + BACKLOG_INTERVAL
+
+
 def _refresh_ready(store, vibe):
     # Coalesce one score pass after this revision's model turns have settled,
     # including channels that deferred rather than published a replacement.
@@ -45,7 +70,7 @@ def _refresh_ready(store, vibe):
 
 
 def step(store, *, seconds=10, memory_bytes=model.MEMORY_BYTES):
-    """Admit one vibe after original capture drains. Last-good heads survive."""
+    """Fit one current-original snapshot. Last-good heads survive deferral."""
     if not qualified():
         return False
     now = time.time()
@@ -68,6 +93,7 @@ def step(store, *, seconds=10, memory_bytes=model.MEMORY_BYTES):
                 generation, staged = reader.vibe_predictions.stage_joint_model(value) if value else ('', None)
                 refresh = _refresh_ready(reader, vibe)
                 outcome = {'revision': revision, 'configuration': configuration,
+                           'attempted_at': now,
                            'outcome': 'ready' if value else 'empty',
                            'wall_seconds': time.time() - now,
                            'recordings': len(rows),
@@ -85,6 +111,7 @@ def step(store, *, seconds=10, memory_bytes=model.MEMORY_BYTES):
             # at a bounded cadence rather than making startup wait for a fit.
             outcome = {
                 'revision': revision, 'configuration': configuration, 'outcome': 'deferred',
+                'attempted_at': now,
                 'reason': str(exc), 'attempts': attempts, 'retry_at': now + (60 if attempts < 3 else 900)}
             refresh = not current(store, previous) and _refresh_ready(store, vibe)
             store.vibe_predictions.defer_joint_model(vibe, outcome, refresh)

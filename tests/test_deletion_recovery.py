@@ -41,7 +41,7 @@ def test_first_backup_syncs_directory_ancestors_and_file_before_intent_and_delet
     backups = home / 'backups'
     monkeypatch.setenv('YT_PLAYLIST_HOME', str(home))
     synced = set()
-    fsync = playlist_backups.os.fsync
+    fsync = fao.os.fsync
 
     def observe(fd):
         info = os.fstat(fd)
@@ -53,7 +53,7 @@ def test_first_backup_syncs_directory_ancestors_and_file_before_intent_and_delet
         else:
             synced.add('file')
 
-    monkeypatch.setattr(playlist_backups.os, 'fsync', observe)
+    monkeypatch.setattr(fao.os, 'fsync', observe)
     record_action = store.actions.record_action
 
     def record(*args, **kwargs):
@@ -81,7 +81,7 @@ def test_parent_sync_failure_prevents_delete_and_retry_resyncs_existing_director
     backups = home / 'backups'
     target = home if ancestor == 'data' else home.parent
     monkeypatch.setenv('YT_PLAYLIST_HOME', str(home))
-    fsync = playlist_backups.os.fsync
+    fsync = fao.os.fsync
     attempt = 'initial'
     events = []
 
@@ -96,7 +96,7 @@ def test_parent_sync_failure_prevents_delete_and_retry_resyncs_existing_director
             return
         return fsync(fd)
 
-    monkeypatch.setattr(playlist_backups.os, 'fsync', fail_once)
+    monkeypatch.setattr(fao.os, 'fsync', fail_once)
     record_action = store.actions.record_action
 
     def record_after_resync(*args, **kwargs):

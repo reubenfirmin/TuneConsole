@@ -580,3 +580,69 @@ def test_provider_backlog_cannot_starve_vibe_bootstrap_or_dependency_fanout(file
     assert after > before
     assert store.musical_profiles.pending()
     drain(store, batch=2)
+
+
+def test_continuing_backlog_completes_a_model_cycle_across_worker_restart(file_backed_store, monkeypatch):
+    from yt_playlist.core import vibe_model_files
+    store = file_backed_store
+    monkeypatch.setattr(vibe_joint_preparation, 'QUALIFICATIONS', {})
+    track(store, 'cycle-original')
+    track(store, 'cycle-target')
+    capture(store, 'cycle-original')
+    drain(store)
+    monkeypatch.setattr(vibe_joint_preparation, 'QUALIFICATIONS',
+        {vibe_joint_preparation.config_identity(): 'controlled-backlog-fixture'})
+    monkeypatch.setattr(store.prepared_content, 'has_pending', lambda: True)
+    monkeypatch.setattr(store.musical_profiles, 'pending', lambda: True)
+    source_turns, fits_seen = [], []
+    original_fit = joint.fit
+    def source_step(*args, **kwargs):
+        assert not vibe_joint_preparation.active(store)
+        source_turns.append(True)
+        return True
+    def fit(rows, vibe, **kwargs):
+        fits_seen.append(vibe)
+        return original_fit(rows, vibe, **kwargs)
+    monkeypatch.setattr(musical_preparation, 'source_step', source_step)
+    monkeypatch.setattr(joint, 'fit', fit)
+    worker = Preparation(store)
+    for _ in range(4):
+        worker.capture(1000)
+        if fits_seen:
+            break
+    assert len(fits_seen) == 1
+    assert vibe_joint_preparation.active(store)
+    started = vibe_joint_preparation.state(store, fits_seen[0])['attempted_at']
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(vibe_joint_preparation.time, 'time',
+            lambda: started + len(vibe_joint_preparation.VIBES) * 10 + 1)
+        # Repeated failed snapshot publications cannot reserve the worker
+        # indefinitely. An abandoned cycle returns to ordinary fair turns.
+        assert not vibe_joint_preparation.active(store)
+    # Durable per-channel state resumes after a worker restart. Our source
+    # worker cannot change originals between the remaining seven admissions.
+    source_before = len(source_turns)
+    worker = Preparation(store)
+    for _ in range(len(vibe_joint_preparation.VIBES) - 1):
+        assert worker.capture(1000)
+    assert len(source_turns) == source_before
+    assert fits_seen == list(vibe_joint_preparation.VIBES)
+    assert not vibe_joint_preparation.active(store)
+    assert all(vibe_joint_preparation.state(store, vibe)['outcome'] == 'ready'
+               for vibe in vibe_joint_preparation.VIBES)
+    assert store.vibe_predictions.pending() is not None
+    # New input revision during a backlog keeps the published heads and gives
+    # upstream work a full cadence before starting another expensive cycle.
+    heads = {v: store.settings.get_setting(vibe_model_files.HEAD_PREFIX + v)
+             for v in vibe_joint_preparation.VIBES}
+    attempted = max(vibe_joint_preparation.state(store, v)['attempted_at']
+                    for v in vibe_joint_preparation.VIBES)
+    revision = int(store.settings.get_setting(vibe_model_files.REVISION) or 0)
+    store.settings.set_setting(vibe_model_files.REVISION, str(revision + 1))
+    monkeypatch.setattr(vibe_joint_preparation.time, 'time', lambda: attempted + 1)
+    assert not vibe_joint_preparation.admitted(store, waiting=True)
+    assert vibe_joint_preparation.admitted(store, waiting=False)
+    assert heads == {v: store.settings.get_setting(vibe_model_files.HEAD_PREFIX + v)
+                     for v in vibe_joint_preparation.VIBES}
+    monkeypatch.setattr(vibe_joint_preparation.time, 'time', lambda: attempted + 61)
+    assert vibe_joint_preparation.admitted(store, waiting=True)

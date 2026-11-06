@@ -23,6 +23,7 @@ from threadpoolctl import threadpool_limits
 from yt_playlist.core.activity import WorkBudgetExceeded, check_stopping, work_budget
 from yt_playlist.rec import home_vibe, vibe_joint_model as joint, vibe_prediction as baseline
 from . import vibe_pooling_evaluation as evaluation, vibe_pooling_labels as labels
+from . import vibe_pooling_derivatives as derivatives
 
 FORMAT = 'metadata-pooling-development-1'
 CODE_FILE = 'experiments/audio_lab_tools/vibe_pooling_metadata.py'
@@ -35,7 +36,8 @@ RECIPE = {'prior': 'learned full masked production heuristic covariate',
 
 
 def identity():
-    return {**labels.identity(), CODE_FILE: evaluation.digest(Path(__file__).read_bytes())}
+    return {**labels.identity(), CODE_FILE: evaluation.digest(Path(__file__).read_bytes()),
+        'experiments/audio_lab_tools/vibe_pooling_derivatives.py': evaluation.digest(Path(derivatives.__file__).read_bytes())}
 
 
 def frozen_inputs(source):
@@ -72,7 +74,7 @@ def load(path):
 
 
 @contextmanager
-def design_context():
+def design_context(*, fixed_offset=False):
     """Scope the experimental design, including the posterior's reconstruction."""
     original_design, original_terms, original_factor = joint._design, joint.terms, joint._factor
 
@@ -84,6 +86,8 @@ def design_context():
 
     def design(rows):
         matrix, features, kinds = original_design(rows)
+        if fixed_offset:
+            return matrix, features, kinds
         prior = csr_matrix(np.asarray([row['metadata_prior'] - .5 for row in rows])[:, None])
         return hstack((matrix, prior), format='csr'), [*features, ('baseline', 'metadata-prior')], [*kinds, 'baseline']
 
@@ -102,7 +106,9 @@ def design_context():
         joint._design, joint.terms, joint._factor = original_design, original_terms, original_factor
 
 
-def fit(rows, vibe):
+def fit(rows, vibe, *, fixed_offset=False, analytic_gradient=False, finite_gradient='3-point'):
+    if finite_gradient not in ('2-point', '3-point'):
+        raise ValueError('Unknown finite-difference gradient')
     rows = joint.unique(rows)
     count = len(rows)
     base_bytes = len(joint.canonical(rows)) * 4 + count * 2048 + 8 * 1024 * 1024
@@ -114,7 +120,13 @@ def fit(rows, vibe):
         raise ValueError('Invalid development observation')
     with threadpool_limits(limits=1):
         design, features, kinds = joint._design(rows)
+        if (('baseline', 'metadata-prior') in features) == fixed_offset:
+            raise ValueError('Metadata design and response offset disagree')
         order, fill, accounted = joint._ordering(design, base_bytes, joint.MEMORY_BYTES)
+        if analytic_gradient:
+            accounted += derivatives.working_bytes(*design.shape)
+            if accounted > joint.MEMORY_BYTES:
+                raise WorkBudgetExceeded('Marginal derivative workspace exceeds fitting admission')
         design, kinds = design[:, order], [kinds[index] for index in order]
         groups = joint.COMPONENTS[:-1]
         names, offset = (*groups, 'residual_provider', 'residual_audio'), len(groups)
@@ -122,7 +134,7 @@ def fit(rows, vibe):
         active = [index for index, present in enumerate(
             [kind in kinds for kind in groups] + [bool(np.any(families == index)) for index in (offset, offset + 1)]) if present]
         kind_ids = np.asarray([-1 if kind == 'baseline' else groups.index(kind) for kind in kinds])
-        response = np.asarray([row['score'] - .5 for row in rows])
+        response = np.asarray([row['score'] - (row['metadata_prior'] if fixed_offset else .5) for row in rows])
         provider = families == offset
         support = np.asarray([math.log(row['support']) for row in rows])
         center = float(support[provider].mean()) if np.any(provider) else 0.
@@ -133,7 +145,7 @@ def fit(rows, vibe):
             probability = np.clip((variances[families] - 1e-5) / (.25 - 1e-5), 1e-9, 1 - 1e-9)
             return 1e-5 + (.25 - 1e-5) * expit(logit(probability) + slope * support)
 
-        def posterior(variances, slope):
+        def posterior(variances, slope, *, gradient=False):
             check_stopping()
             prior = np.where(kind_ids < 0, joint.BASELINE_VARIANCE, variances[np.maximum(kind_ids, 0)])
             diagonal = residuals(variances, slope) + noise
@@ -145,16 +157,23 @@ def fit(rows, vibe):
             loss = .5 * (response @ (response / diagonal) - rhs @ mean + np.log(diagonal).sum()
                 + np.log(prior).sum() + np.log(factor.U.diagonal()).sum() + count * np.log(2 * np.pi))
             check_stopping()
+            if gradient:
+                derivative = derivatives.gradient(design, factor, mean, response, diagonal, kind_ids,
+                    variances, families, support, residuals(variances, slope))
+                return float(loss), derivative
             return precision, mean, float(loss)
 
         def objective(parameters):
             variances = np.zeros(len(names))
             variances[active] = np.exp(parameters[:-1])
+            if analytic_gradient:
+                loss, derivative = posterior(variances, parameters[-1], gradient=True)
+                return loss, np.r_[derivative[active], derivative[-1]]
             return posterior(variances, parameters[-1])[2]
 
         initial = [joint.INITIAL[name] if name in groups else joint.INITIAL['residual'] for name in names]
         parameters = [*np.log([initial[index] for index in active]), 0.]
-        result = minimize(objective, parameters, method='L-BFGS-B', jac='3-point',
+        result = minimize(objective, parameters, method='L-BFGS-B', jac=True if analytic_gradient else finite_gradient,
             bounds=[(math.log(1e-5), math.log(.25))] * len(active) + [(-10., 10.)],
             options={'maxiter': 100, 'ftol': 1e-9, 'finite_diff_rel_step': 1e-5})
         if not result.success:
@@ -170,6 +189,8 @@ def fit(rows, vibe):
         'precision': {'indptr': joint._encoded(precision.indptr, '<i4'),
             'indices': joint._encoded(precision.indices, '<i4'), 'values': joint._encoded(precision.data, '<f8')},
         'diagnostics': {'development_only': True, 'method': 'marginal-maximum-likelihood',
+            'fixed_metadata_offset': fixed_offset,
+            'gradient': 'exact bounded-column marginal derivative' if analytic_gradient else finite_gradient,
             'iterations': int(result.nit), 'negative_log_likelihood': loss, 'recordings': count,
             'accounted_memory_bytes': accounted, 'effects': len(features), 'factor_nonzeros': fill,
             'residual_by_family': dict(zip(names[offset:], map(float, variances[offset:]))),
@@ -177,19 +198,22 @@ def fit(rows, vibe):
             'uncertainty': 'conditional-on-fitted-variance-components', 'noise_identified': False}}
 
 
-def predict(posterior, row, *, residual_variance=None, fallback_mean=None, population=None):
+def predict(posterior, row, *, residual_variance=None, fallback_mean=None, population=None,
+            measurement_components=('source',)):
     if row['recording'] in posterior.recordings:
         raise ValueError('Target measurement was not hidden')
     vector = np.zeros(len(posterior.features))
     vector[posterior.features['baseline', 'intercept']] = 1.
-    vector[posterior.features['baseline', 'metadata-prior']] = row['metadata_prior'] - .5
+    fixed_offset = posterior.value['diagnostics'].get('fixed_metadata_offset', False)
+    if not fixed_offset:
+        vector[posterior.features['baseline', 'metadata-prior']] = row['metadata_prior'] - .5
     for name, value in row.get('covariates', {}).items():
         if not math.isfinite(value):
             raise ValueError('Nonfinite development covariate')
         vector[posterior.features['baseline', name]] = value
     missing = 0.
     for kind in joint.COMPONENTS[:-1]:
-        if kind == 'source':
+        if kind in measurement_components:
             continue
         pairs = joint.terms(row, kind)
         if not pairs:
@@ -212,19 +236,25 @@ def predict(posterior, row, *, residual_variance=None, fallback_mean=None, popul
     with threadpool_limits(limits=1):
         for (source, support, noise), count in population.items():
             conditional = vector.copy()
-            index = posterior.features.get(('source', source))
             absent = missing
-            if index is not None:
-                conditional[index] = 1.
-            elif len({item['source'] for item in posterior.rows}) > 1:
-                absent += posterior.variances['source']
+            for kind in measurement_components:
+                terms = joint.terms({**row, 'source': source}, kind)
+                if not terms:
+                    absent += posterior.variances[kind]
+                for name, weight in terms:
+                    index = posterior.features.get((kind, name))
+                    if index is None:
+                        if kind != 'source' or len({item['source'] for item in posterior.rows}) > 1:
+                            absent += posterior.variances[kind] * weight * weight
+                    else:
+                        conditional[index] = weight
             family = 'residual_audio' if source.startswith('audio_measurement/') else 'residual_provider'
             residual = diagnostics['residual_by_family'][family]
             probability = np.clip((residual - 1e-5) / (.25 - 1e-5), 1e-9, 1 - 1e-9)
             centered = math.log(support) - diagnostics['provider_log_support_center'] if family == 'residual_provider' else 0.
             residual = (residual_variance(diagnostics, source, support) if residual_variance is not None
                 else 1e-5 + (.25 - 1e-5) * expit(logit(probability) + diagnostics['support_slope'] * centered))
-            means.append(float(.5 + conditional @ posterior.mean))
+            means.append(float((row['metadata_prior'] if fixed_offset else .5) + conditional @ posterior.mean))
             variances.append(max(0., float(absent + conditional @ posterior.factor.solve(conditional))) + residual + noise)
             probabilities.append(count / total)
     means, variances, probabilities = map(np.asarray, (means, variances, probabilities))

@@ -23,7 +23,7 @@ def test_historical_production_comparison_reports_formats_and_pause_without_over
         'challenger': current['challenger'], 'grid': []}
     current['run_id'] = store.model_selection.start_selection(0, run)
     store.rec_proposals.put_proposals(product.SURFACE, current, 0)
-    report = favorable(store, current)
+    report = favorable(current)
     run.update(status='retained', reason='Historical menu comparison completed.', product_report=report)
     store.model_selection.save_selection(current['run_id'], run)
     page.set_viewport_size({'width': width, 'height': 1000})

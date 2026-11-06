@@ -76,15 +76,22 @@ def measurement_ids(value):
     return [row['measurement'] for row in value['inputs']]
 
 
-def receipt(generation, artists, mean_variance, new_track_variance):
+def receipt(generation, artists, mean_variance, new_track_variance, *, conditioning=None):
     relative(generation)
     if (not isinstance(mean_variance, (int, float)) or not isinstance(new_track_variance, (int, float))
             or not 0 <= mean_variance <= new_track_variance < float('inf')):
         raise ValueError('Invalid joint vibe uncertainty')
-    return {'generation': generation, 'artists': sorted(set(artists)),
-            'mean_variance': mean_variance, 'new_track_variance': new_track_variance}
+    value = {'generation': generation, 'artists': sorted(set(artists)),
+             'mean_variance': mean_variance, 'new_track_variance': new_track_variance}
+    if conditioning is not None:
+        if (not isinstance(conditioning, dict) or set(conditioning) != {'genre', 'album'}
+                or any(item is not None and (not isinstance(item, str) or not item)
+                       for item in conditioning.values()) or len(canonical(conditioning)) > 2048):
+            raise ValueError('Invalid joint target conditioning')
+        value['conditioning'] = dict(conditioning)
+    return value
 
 
 def is_receipt(value):
-    return isinstance(value, dict) and set(value) == {
-        'generation', 'artists', 'mean_variance', 'new_track_variance'}
+    fields = {'generation', 'artists', 'mean_variance', 'new_track_variance'}
+    return isinstance(value, dict) and set(value) in (fields, fields | {'conditioning'})

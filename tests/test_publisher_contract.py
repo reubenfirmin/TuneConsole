@@ -347,12 +347,18 @@ class Registry:
             {"Location": self.location if stage == 1 else self.next_location} if stage in (1, 2) else {})
 
 
+@pytest.mark.parametrize("next_location", [
+    "/v2/owner/repo/blobs/uploads/next?_state=updated%2Bstate%2Fvalue",
+    "/v2/owner/repo/blobs/upload/next?_state=updated%2Bstate%2Fvalue"])
 @pytest.mark.parametrize("location", [
     "/v2/owner/repo/blobs/uploads/disposable?opaque=do-not-print-upload",
-    "https://ghcr.io/v2/owner/repo/blobs/uploads/disposable?opaque=do-not-print-upload"])
-def test_registry_transfers_blob_and_completes_the_updated_session(monkeypatch, capsys, location):
+    "https://ghcr.io/v2/owner/repo/blobs/uploads/disposable?opaque=do-not-print-upload",
+    "/v2/owner/repo/blobs/upload/disposable?opaque=do-not-print-upload",
+    "https://ghcr.io/v2/owner/repo/blobs/upload/disposable?opaque=do-not-print-upload"])
+def test_registry_transfers_blob_and_completes_the_updated_session(monkeypatch, capsys, location, next_location):
     registry = Registry(monkeypatch)
     registry.location = location
+    registry.next_location = next_location
     release_services.registry_permissions("ghcr.io/owner/repo")
     token, upload, transfer, complete = registry.requests
     assert urllib.parse.parse_qs(urllib.parse.urlsplit(token.full_url).query) == {
@@ -375,6 +381,25 @@ def test_registry_transfers_blob_and_completes_the_updated_session(monkeypatch, 
     assert "token request: HTTP 200" in output
     assert "upload initiation: HTTP 202" in output
     assert "blob transfer: HTTP 202" in output
+    assert "upload completion: HTTP 201" in output
+    assert "do-not-print" not in output
+
+
+def test_registry_completes_ghcr_singular_upload_without_query(monkeypatch, capsys):
+    # GHCR's POST and PATCH responses use /blobs/upload/<session>, with no query:
+    # https://gist.github.com/shizhMSFT/b77f2d7f993268a1bdd45a7462866906
+    registry = Registry(monkeypatch)
+    registry.location = registry.next_location = (
+        "/v2/owner/repo/blobs/upload/do-not-print-session")
+    release_services.registry_permissions("ghcr.io/owner/repo")
+    _, upload, transfer, complete = registry.requests
+    assert upload.method == "POST"
+    assert transfer.method == "PATCH" and transfer.data == b"{}"
+    assert transfer.full_url == "https://ghcr.io" + registry.location
+    assert complete.method == "PUT" and complete.data == b""
+    assert complete.full_url == transfer.full_url + "?" + urllib.parse.urlencode({
+        "digest": "sha256:" + hashlib.sha256(b"{}").hexdigest()})
+    output = capsys.readouterr().out
     assert "upload completion: HTTP 201" in output
     assert "do-not-print" not in output
 
@@ -418,9 +443,14 @@ def test_registry_requires_acceptance_and_confirmed_completion(monkeypatch, stag
     ("http://ghcr.io/v2/owner/repo/blobs/uploads/do-not-print-path", "unexpected-scheme"),
     ("https://do-not-print-host.invalid/v2/owner/repo/blobs/uploads/disposable", "unexpected-authority"),
     ("/v2/owner/repo/manifests/do-not-print-path", "unexpected-upload-path"),
+    ("/v2/owner/repo/blobs/uploading/do-not-print-path", "unexpected-upload-path"),
+    ("/v2/owner/repo/blobs/upload-do-not-print-path", "unexpected-upload-path"),
     ("/v2/other/do-not-print-repo/blobs/uploads/disposable", "unexpected-repository-path"),
+    ("/v2/other/do-not-print-repo/blobs/upload/disposable", "unexpected-repository-path"),
     ("/v2/owner/repo/blobs/uploads/", "missing-session-path"),
     ("/v2/owner/repo/blobs/uploads/?opaque=do-not-print-query", "missing-session-path"),
+    ("/v2/owner/repo/blobs/upload/", "missing-session-path"),
+    ("/v2/owner/repo/blobs/upload/?opaque=do-not-print-query", "missing-session-path"),
     ("/v2/owner/repo/blobs/uploads/disposable#do-not-print-fragment", "unexpected-fragment"),
     ("https://[do-not-print-host/path", "malformed-location"),
     ("https://do-not-print-host\uff0f.invalid/path", "malformed-location"),

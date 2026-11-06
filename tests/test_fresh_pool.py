@@ -8,10 +8,20 @@ import pytest
 
 from tests.test_home_other_genres import seed_genres
 from tests.test_mode_cards_route import _client as current_client
-from tests.home_fixture_support import prepared_client, returning_listener
+from tests.home_fixture_support import home_routes_only, prepared_client, returning_listener
+from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
 from yt_playlist.rec import embedding_vectors as embed, fresh_pool, mode_surfaces, road_trip_candidates, surfaces
 from yt_playlist.util.matching import identity_key
+
+
+@pytest.fixture(autouse=True)
+def fresh_routes(monkeypatch, home_routes_only, one_menu_per_attempt):
+    from yt_playlist.rec import home_cards
+
+    # Fresh selection, jobs and publication stay real. Audit history has its
+    # own contract checks and is independent of these discovery workflows.
+    monkeypatch.setattr(home_cards.HomeCards, 'audit', lambda *args, **kwargs: None)
 
 
 def _client(store, now=1000.0):
@@ -91,13 +101,16 @@ def test_populate_searches_each_selected_genre_and_keeps_only_new_matching_songs
     assert len(store.discovery.get_discovered_tracks()) == 3
 
 
-def test_populate_respects_genres_to_avoid(store, monkeypatch, genre_candidates):
+def test_populate_respects_genres_to_avoid(store, monkeypatch):
+    # Population consumes genre choices, not prepared model/candidate pools.
+    monkeypatch.setattr(fresh_pool.home_themes, 'genre_options', lambda s: [
+        {'family': genre, 'label': genre} for genre in ('jazz', 'techno', 'house', 'dnb')])
     requested = []
     monkeypatch.setattr(road_trip_candidates, "genre_artists", lambda s, genre, limit: requested.append(genre) or [])
     monkeypatch.setattr(embed, "build_discovered_content_vectors", lambda s: None)
     ctx = SimpleNamespace(store=store, client_provider=lambda: {1: object()}, now_fn=lambda: 1000)
     fresh_pool.populate(ctx, avoid_genres=["jazz", "techno"])
-    assert requested and not set(requested) & {"jazz", "techno"}
+    assert set(requested) == {'house', 'dnb'}
 
 
 def test_selected_fresh_mix_balances_all_three_genres_and_requires_missing_families(store):

@@ -55,7 +55,7 @@ def _seed(store, n_modes=4):
     def items(prefix):
         return [{"key": f"{prefix}{i}", "video_id": "v", "title": f"{prefix}{i}", "artist": f"{prefix}art{i}",
                  "album": "", "thumbnail": None, "plays": 0, "reason": "", "lane": "", "genre": "house"}
-                for i in range(20)]
+                for i in range(13)]
     payload = {str(m): {} for m in range(1, n_modes + 1)}
     for surf in ms.CARD_SURFACES:
         for m in range(1, n_modes + 1):
@@ -258,9 +258,14 @@ def test_full_buckets_do_not_pin_a_theme_to_one_framing(store, assembly_subjects
         for surf in ms.CARD_SURFACES:
             payload[str(mid)][surf] = payload[str(mid)][surf][:12]
     _publish(store, payload, subjects_ready=True)
-    menus = [ms.assemble_cards(store, now=10.0, epoch=e) for e in range(30)]
+    # Assignment must honor every selected priority even when mode 1 has an
+    # extra candidate. Check each possible leading theme directly; sampling's
+    # posterior and deterministic RNG have independent mode-selection tests.
+    order = [1, 2, 3, 4]
+    menus = [ms.assemble_cards(store, now=10.0, epoch=e,
+                              mode_order=order[e:] + order[:e]) for e in range(4)]
     wheelhouse = [next(c["mode_id"] for c in cards if c["lane"] == "wheelhouse") for cards in menus]
-    assert len(set(wheelhouse)) >= 3
+    assert set(wheelhouse) == {1, 2, 3, 4}
     assert all(len(cards) == 4 for cards in menus)
     assert all(len({c['mode_id'] for c in cards}) == 4 for cards in menus)
     assert all(len(c["tracks"]) == 12 for cards in menus for c in cards)
@@ -398,19 +403,23 @@ def test_thin_mix_uses_close_neighbors_but_never_avoided_or_unrelated_genres(sto
                "_meta": {"full_pools": True}}
     _publish(store, payload)
 
-    cards = ms.assemble_cards(store, 10.0, 0, include_genres=["soul-funk"], avoid_genres=["jazz"])
+    cards = ms.assemble_cards(store, 10.0, 0, avoid_genres=["jazz"])
 
     assert len(cards) == 1 and cards[0]["lane"] == lane
     tracks = cards[0]["tracks"]
     assert len(tracks) == len({d["key"] for d in tracks}) == 12
     assert [d["genre"] for d in tracks] == ["Soul"] * 6 + ["Blues"] * 6
     head = store.recommendations.head('home')
+    focused = ms.assemble_cards(store, 10.0, 0, include_genres=['soul-funk'], avoid_genres=['jazz'])
+    assert len(focused) == 1 and focused[0]['lane'] == lane
+    assert [track['genre'] for track in focused[0]['tracks']] == ['Soul'] * 6
+    assert store.recommendations.head('home') == head
     with store.conn:
         changed = store.conn.execute("UPDATE genre_catalog SET family_key='jazz' WHERE key='blues'")
         assert changed.rowcount == 1
     # A new request resolves the changed taxonomy, even for the same accepted
     # pools and raw labels. The explicit avoided family still wins.
-    refreshed = ms.assemble_cards(store, 11.0, 0, include_genres=['soul-funk'], avoid_genres=['jazz'])
+    refreshed = ms.assemble_cards(store, 11.0, 0, avoid_genres=['jazz'])
     assert len(refreshed) == 1
     assert [track['genre'] for track in refreshed[0]['tracks']] == ['Soul'] * 6
     assert store.recommendations.head('home') == head

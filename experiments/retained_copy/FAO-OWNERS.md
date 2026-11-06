@@ -288,11 +288,15 @@ heuristic fallback remains. No new SQL source kind or migration is introduced.
 For this candidate, `support` means mean input coverage multiplied by the
 fractional reduction in latent-mean variance. It is neither suitability nor a
 new-track confidence interval. A compact calculation receipt stores artists,
-generation, latent-mean variance and new-track variance; new-track variance adds
+generation, target genre/album conditioning, latent-mean variance and new-track variance; new-track variance adds
 the fitted between-track/noise residual and source-mixture variation. The existing SQL `variance` column
 remains unset for joint predictions. `recordings` counts the whole shared fit,
 not an independent effective sample size. Existing source kinds describe
 available artist/genre conditioning, rather than a selected exclusive cohort.
+Existing receipts without target conditioning remain readable and writable
+during compatibility preparation. New runtime receipts include it, so changing
+the target album creates a distinct calculation even when scores and variances
+are unchanged. This metadata stays in FAO rather than new SQL contributor rows.
 
 Fit artifacts are staged and verified off the request path on a consistent
 snapshot. Files publish atomically before guarded SQL heads. Bounded score batches

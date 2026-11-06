@@ -8,6 +8,19 @@ from yt_playlist.rec import home_cache, home_cards, home_prepared
 
 
 @pytest.fixture
+def home_routes_only(monkeypatch):
+    """Keep real Home HTTP handling without constructing unrelated routers."""
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, home
+
+    monkeypatch.setattr(webapp, 'build_all',
+                        lambda ctx: [app_update.build(ctx), audio_preview.build(ctx), home.build(ctx)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
+
+
+@pytest.fixture
 def browser_store(tmp_path, _pristine_current_schema):
     """Exercise live serving and background writes through installed WAL readers."""
     database = Store(tmp_path / 'home.db')

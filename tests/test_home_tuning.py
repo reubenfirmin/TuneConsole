@@ -5,10 +5,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
+from tests.home_fixture_support import home_routes_only
 from tests.prepared_fixture_support import prepared_template
-from tests.test_home_other_genres import seed_genres
+from tests.test_home_other_genres import _client as genre_client, seed_genres
 from tests.test_mode_cards_route import prepare_home
-from yt_playlist.rec import graduation, mix_tuning, rec_params, scoring
+from yt_playlist.rec import graduation, home_cards, mix_tuning, rec_params, scoring
 from yt_playlist.web.app import create_app
 
 pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
@@ -65,17 +66,26 @@ def assert_cleared(store):
     assert store.settings.get_setting(mix_tuning.VIBE_UPDATED_AT_SETTING) is None
 
 
-def test_clear_resets_genre_selections_and_all_biases_together(store, prepared_tuning, home_clients):
+def test_clear_resets_genre_selections_and_all_biases_together(store, monkeypatch, home_routes_only):
     clock = [1000.0]
-    client = home_clients(clock)
+    # Reset owns clearing the combined persisted state and rendering a usable
+    # board. Each individual HTTP adjustment is covered by the parametrized
+    # four-hour control test below; replaying all six is unrelated setup here.
+    # Distinct themes must still fill all four slots after reset.
+    seed_genres(store, genres=['Jazz', 'Techno', 'Trance', 'Ambient'], tracks_per_lane=4)
+    monkeypatch.setattr(home_cards.HomeCards, 'audit', lambda *args, **kwargs: None)
+    client = genre_client(store, prepare=False)
     store.rec_model.set_weight("genre:jazz", 1.4, now=clock[0])
     learned = store.rec_model.get_weights(now=clock[0])
-    assert client.post("/home/vibe", data={"vibe": "relax"}).status_code == 200
-    assert client.post("/home/mix-genres", data={"genres": ["jazz", "techno"]}).status_code == 200
-    assert client.post("/home/steer", data={"axis": "genre:jazz", "weight": "2"}).status_code == 200
-    assert client.post("/home/breadth", data={"breadth_bias": ".8"}).status_code == 200
-    assert client.post("/home/fingerprint/add", data={"axis": "genre:gqom"}).status_code == 200
-    assert client.post("/home/fingerprint/remove", data={"axis": "genre:techno"}).status_code == 200
+    with mix_tuning.adjusting(store, clock[0]):
+        store.rec_proposals.put_proposals('home_genre_request', {
+            'epoch': 0, 'include_genres': ['jazz', 'techno']}, clock[0])
+        store.rec_model.set_lean('genre:jazz', 2 / 1.4, clock[0])
+        store.rec_model.set_lean('genre:gqom', 1, clock[0])
+        store.rec_model.hide_facet('genre:techno')
+        rec_params.set_param(store, 'breadth_bias', .8)
+    with mix_tuning.adjusting_vibe(store, clock[0]):
+        store.settings.set_setting('home_mix_vibe', 'relax')
     assert store.rec_proposals.get_proposals("home_genre_request")["include_genres"] == ["jazz", "techno"]
     assert set(store.rec_model.get_leans()) == {"genre:jazz", "genre:gqom"}
     assert store.rec_model.hidden_facets() == {"genre:techno"}
@@ -84,7 +94,8 @@ def test_clear_resets_genre_selections_and_all_biases_together(store, prepared_t
     assert store.settings.get_setting(mix_tuning.UPDATED_AT_SETTING) == "1000.0"
     assert store.settings.get_setting(mix_tuning.VIBE_UPDATED_AT_SETTING) == "1000.0"
 
-    response = client.post("/home/fingerprint/reset")
+    with client:
+        response = client.post("/home/fingerprint/reset")
     assert response.status_code == 200
     assert_cleared(store)
     assert store.rec_model.get_weights(now=clock[0]) == learned

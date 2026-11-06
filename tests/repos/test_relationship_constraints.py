@@ -9,6 +9,7 @@ from yt_playlist.core.migrations import Migration,MigrationError,migrate
 from yt_playlist.core.migrations import registry,v025_relationships
 from yt_playlist.core.store import Store
 from yt_playlist.core import legacy_evidence
+from tests.prepared_fixture_support import historical_template
 
 
 def upgrade_relationship_fixture(store):
@@ -42,9 +43,24 @@ def installed_v24(tmp_path, v24_template):
         store.conn.close()
 
 
-def test_populated_upgrade_reconciles_order_and_retains_unknown_evidence(installed_v24):
-    store = installed_v24
-    upgrade_relationship_fixture(store)
+@pytest.fixture(scope='module')
+def upgraded_relationship_template(v24_template):
+    # Build the actual populated upgrade once. Current repository behavior does
+    # not need to replay the same historical conversions for every assertion.
+    with closing(sqlite3.connect(v24_template)) as predecessor:
+        with historical_template(predecessor, upgrade_relationship_fixture,
+                                 database=':memory:') as template:
+            yield template
+
+
+@pytest.fixture
+def upgraded_relationships(store, upgraded_relationship_template):
+    upgraded_relationship_template.restore(store)
+    return store
+
+
+def test_populated_upgrade_reconciles_order_and_retains_unknown_evidence(upgraded_relationships):
+    store = upgraded_relationships
     assert [(r['track_id'],r['position']) for r in store.conn.execute(
         'SELECT * FROM playlist_tracks WHERE playlist_id=1 ORDER BY position')]==[(3,0),(1,1),(2,2)]
     assert store.conn.execute('SELECT position FROM playlist_items WHERE playlist_id=2').fetchone()[0]==9
@@ -136,9 +152,8 @@ def test_invalid_direct_writes_are_rejected(installed_v24):
     assert not accepted, f'Invalid writes unexpectedly succeeded: {accepted}'
 
 
-def test_retained_history_survives_membership_removal_and_mode_refresh(installed_v24):
-    store = installed_v24
-    upgrade_relationship_fixture(store)
+def test_retained_history_survives_membership_removal_and_mode_refresh(upgraded_relationships):
+    store = upgraded_relationships
     store.history.record_play_event(1,'a|artist','a',100,playlist_ytm_id='PL')
     store.player_events.record_player_event(1,'track_exit','a',190,200,'PL',None,101)
     before = (store.history.play_events_since(0), store.player_events.player_events_since(0))
@@ -180,10 +195,9 @@ def test_indexes_support_the_affected_queries(store):
         assert index in plan,(sql,plan)
 
 
-def test_unknown_legacy_modes_cannot_become_feedback_for_a_new_mode(installed_v24):
+def test_unknown_legacy_modes_cannot_become_feedback_for_a_new_mode(upgraded_relationships):
     from tests.mode_fixtures import seed_modes
-    store = installed_v24
-    upgrade_relationship_fixture(store)
+    store = upgraded_relationships
     seed_modes(store,999)
     assert store.modes.impression_counts()=={7:1}
     assert store.modes.pick_counts()=={7:1}

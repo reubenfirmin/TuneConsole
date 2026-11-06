@@ -13,6 +13,9 @@ from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.db_diagnostics import DiagnosticConnection
 from yt_playlist.core import evidence_ledger, file_owners
 from yt_playlist.core.work_diagnostics import MaintenanceDiagnostics
+from yt_playlist.controllers.wikipedia_cards import WikipediaCards
+from yt_playlist.controllers.artist_similarity import ArtistSimilarity
+from yt_playlist.controllers.player_events import PlayerEvents
 from yt_playlist.core.priority import RequestPriority, ServingLock
 from yt_playlist.core import collection_recovery, group_documents, metadata_delivery_files, metadata_runtime_files, policy_documents, recommendation_outputs, served_facts
 # Store owns the connection, schema lifecycle, and explicitly named repositories.
@@ -277,7 +280,7 @@ class Store:
         self.recommendations = RecommendationPublicationsRepo(self)
         self.rec_signals = RecSignalsRepo(self)
         self.playlist_recipes = PlaylistRecipesRepo(self)
-        self.artist_similarity = ArtistSimilarityRepo(self)
+        self.artist_similarity = ArtistSimilarity(ArtistSimilarityRepo(self))
         self.rec_refresh = RecRefreshRepo(self)
         self.prepared_content = PreparedContentRepo(self)
         self.musical_profiles = MusicalProfilesRepo(self)
@@ -285,14 +288,14 @@ class Store:
         self.charts = ChartsRepo(self)
         self.tracks = TrackRepo(self)
         self.playlists = PlaylistRepo(self)
-        self.player_events = PlayerEventsRepo(self)
+        self.player_events = PlayerEvents(PlayerEventsRepo(self))
         self.discovery = DiscoveryRepo(self)
         self.search = SearchRepo(self)
         self.enrichment = EnrichmentRepo(self)
         self.enrichment_queue = EnrichmentQueueRepo(self)
         self.enrichment_reports = EnrichmentReportsRepo(self)
         self.enrichment_state = EnrichmentStateRepo(self)
-        self.wiki = WikiRepo(self)
+        self.wiki = WikipediaCards(WikiRepo(self))
         self.modes = ModesRepo(self)
         self.taste_groups = (CompactTasteGroupsRepo if self._compact_group_files else TasteGroupsRepo)(self)
         self.trends = TrendsRepo(self)

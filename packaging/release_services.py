@@ -63,7 +63,9 @@ def registry_upload_location(request, response, name):
     except (TypeError, ValueError):
         # URL parsing errors can include the auth-bearing Location itself.
         raise RegistryPreflightError("upload location validation: malformed-location") from None
-    upload_prefix = f"/v2/{name}/blobs/uploads/"
+    # GHCR returns singular /upload/<session> although initiation uses /uploads/.
+    # Keep both upload routes scoped to the exact repository and HTTPS authority.
+    upload_prefixes = (f"/v2/{name}/blobs/uploads/", f"/v2/{name}/blobs/upload/")
     reason = None
     if target.scheme != "https":
         reason = "unexpected-scheme"
@@ -73,9 +75,9 @@ def registry_upload_location(request, response, name):
         reason = "unexpected-fragment"
     elif not target.path.startswith(f"/v2/{name}/"):
         reason = "unexpected-repository-path"
-    elif not target.path.startswith(upload_prefix):
+    elif not target.path.startswith(upload_prefixes):
         reason = "unexpected-upload-path"
-    elif target.path == upload_prefix:
+    elif target.path in upload_prefixes:
         reason = "missing-session-path"
     if reason:
         query = "present" if target.query else "absent"

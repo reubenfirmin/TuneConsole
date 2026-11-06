@@ -10,6 +10,10 @@ from experiments.audio_lab_tools import vibe_pooling_transfer as transfer
 from experiments.audio_lab_tools import vibe_pooling_pairs as pairs
 from experiments.audio_lab_tools import vibe_pooling_source_assignment as source_assignment
 from experiments.audio_lab_tools import vibe_pooling_ranking as ranking
+from experiments.audio_lab_tools import vibe_pooling_selection as selection
+from experiments.audio_lab_tools import vibe_pooling_offset as offset
+from experiments.audio_lab_tools import vibe_pooling_source_genre as source_genre
+from experiments.audio_lab_tools import vibe_pooling_derivatives as derivatives
 
 
 def test_recovers_metadata_gradient_for_wholly_unseen_artist():
@@ -41,6 +45,96 @@ def test_recovers_metadata_gradient_for_wholly_unseen_artist():
         with pytest.raises(ValueError, match='not hidden'):
             metadata.predict(posterior, {**rows[0], 'artists': [999]})
     assert (joint._design, joint.terms, joint._factor) == (original_design, original_terms, original_factor)
+
+
+def test_fixed_offset_preserves_metadata_gradient_and_learns_shared_correction():
+    rows = []
+    for artist in range(1, 5):
+        for prior in (.2, .4, .6, .8):
+            for source in ('provider_measurement/control', 'audio_measurement/control'):
+                rows.append({'recording': len(rows) + 1, 'measurement': len(rows) + 1,
+                    'artists': [artist], 'genre': 'control', 'album': None, 'source': source,
+                    'score': prior + .04 + (artist - 2.5) * .01,
+                    'support': .8, 'metadata_prior': prior})
+    original = joint._design, joint.terms, joint._factor
+    with offset.design_context():
+        posterior = joint.Posterior(offset.fit(rows, 'relax'))
+        assert ('baseline', 'metadata-prior') not in posterior.features
+        predictions = []
+        for prior in (.2, .8):
+            score, interval = metadata.predict(posterior, {'recording': 1001, 'artists': [999],
+                'genre': 'control', 'album': None, 'metadata_prior': prior})
+            assert score == pytest.approx(prior + .04, abs=.01)
+            assert interval[0] < score < interval[1]
+            predictions.append(score)
+        assert predictions[1] - predictions[0] == pytest.approx(.6, abs=1e-12)
+        with pytest.raises(ValueError, match='not hidden'):
+            metadata.predict(posterior, rows[0])
+        with pytest.raises(ValueError, match='design and response offset disagree'):
+            metadata.fit(rows, 'relax')
+    assert (joint._design, joint.terms, joint._factor) == original
+
+
+def test_source_by_genre_bias_is_shared_instead_of_independent_song_noise():
+    rows = []
+    for genre in range(6):
+        for artist in range(1, 5):
+            for family, sign in (('audio', -1), ('provider', 1)):
+                for prior in (.3, .5, .7):
+                    rows.append({'recording': len(rows) + 1, 'measurement': len(rows) + 1,
+                        'artists': [artist], 'genre': str(genre), 'album': None,
+                        'source': family + '_measurement/control', 'support': .8, 'metadata_prior': prior,
+                        'score': prior + .15 * sign * (-1 if genre % 2 else 1) + (artist - 2.5) * .005})
+    original = joint._design, joint.terms, joint._factor, joint.COMPONENTS, joint.INITIAL
+    with source_genre.design_context():
+        value = source_genre.fit(rows, 'relax')
+        assert value['variances']['source_genre'] > .01
+        assert max(value['diagnostics']['residual_by_family'].values()) < .001
+        posterior = joint.Posterior(value)
+        for genre in ('0', '1'):
+            score, interval = source_genre.predict(posterior, {'recording': 1001, 'artists': [999],
+                'genre': genre, 'album': None, 'metadata_prior': .6})
+            assert score == pytest.approx(.6, abs=.02)
+            assert interval[0] < .45 and interval[1] > .75
+    assert (joint._design, joint.terms, joint._factor, joint.COMPONENTS, joint.INITIAL) == original
+
+
+def test_exact_marginal_gradient_matches_dense_observation_likelihood():
+    from scipy.sparse import csr_matrix, csc_matrix
+    from scipy.sparse.linalg import splu
+    from scipy.special import expit, logit
+    rng = np.random.default_rng(819)
+    matrix = rng.normal(size=(13, 7))
+    kinds = np.asarray([-1, -1, 0, 0, 1, 1, 1])
+    families = np.asarray([2, 3] * 6 + [2])
+    supports = np.where(families == 2, rng.normal(size=13), 0.)
+    response, noise = rng.normal(size=13), rng.uniform(0, .01, size=13)
+    parameters = np.r_[np.log([.04, .02, .03, .07]), -.8]
+    def inputs(parameters):
+        variances = np.exp(parameters[:-1])
+        prior = np.where(kinds < 0, .25, variances[np.maximum(kinds, 0)])
+        probability = (variances[families] - 1e-5) / (.25 - 1e-5)
+        residual = 1e-5 + (.25 - 1e-5) * expit(logit(probability) + parameters[-1] * supports)
+        return variances, prior, residual
+    def loss(parameters):
+        _variances, prior, residual = inputs(parameters)
+        covariance = np.diag(residual + noise) + (matrix * prior) @ matrix.T
+        return .5 * (np.linalg.slogdet(covariance)[1]
+            + response @ np.linalg.solve(covariance, response) + len(response) * np.log(2 * np.pi))
+    variances, prior, residual = inputs(parameters)
+    diagonal = residual + noise
+    precision = (matrix.T / diagonal) @ matrix + np.diag(1 / prior)
+    factor = splu(csc_matrix(precision))
+    mean = factor.solve(matrix.T @ (response / diagonal))
+    actual = derivatives.gradient(csr_matrix(matrix), factor, mean, response, diagonal,
+        kinds, variances, families, supports, residual)
+    steps = np.eye(len(parameters)) * 1e-5
+    expected = np.asarray([(loss(parameters + step) - loss(parameters - step)) / 2e-5 for step in steps])
+    assert actual == pytest.approx(expected, abs=2e-7, rel=2e-7)
+    covariance, leverage = derivatives.inverse_diagonals(csr_matrix(matrix), factor)
+    inverse = np.linalg.inv(precision)
+    assert covariance == pytest.approx(np.diag(inverse), abs=1e-12)
+    assert leverage == pytest.approx(np.diag(matrix @ inverse @ matrix.T), abs=1e-12)
 
 
 def test_dimensions_transfer_when_scalar_heuristic_contains_no_information():
@@ -95,6 +189,41 @@ def test_descriptor_reserved_predictions_require_exact_prospective_seal(tmp_path
     with pytest.raises(ValueError, match='prospective candidate seal|differs from its seal'):
         transfer.run(protocol, output, 'unseen', 0, 'relax', 'reserved', candidate_seal)
     assert not output.exists()
+
+
+@pytest.mark.parametrize('changed', ('human-original', 'dropped-original', 'numeric-conditioning', 'fold'))
+def test_transfer_capture_rejects_human_leakage_and_changed_holdouts(tmp_path, changed):
+    from copy import deepcopy
+    source, candidate = tmp_path / 'labels.json', tmp_path / 'candidate.json'
+    profile = {'content': {'library': {'genre': 'ambient'}, 'discovered': None},
+               'sources': [], 'overrides': {}, 'truncated': False}
+    originals = [{'recording': recording, 'artists': [recording], 'genre': 'ambient',
+                  'album': None, 'score': .4, 'support': 1., 'measurement': recording,
+                  'source': 'audio_measurement/control'} for recording in (1, 2)]
+    common = {'criteria': transfer.evaluation.CRITERIA, 'candidate': joint.configuration(),
+              'profile_mask': transfer.evaluation.PROFILE_MASK}
+    humans = {**common, 'format': transfer.labels.FORMAT, 'label_policy': transfer.labels.LABEL_POLICY,
+              'human_targets': [{'recording': 2}], 'metadata': {'1': {}, '2': {}},
+              'assignments': {str(i): {'cluster': f'artist:{i}', 'known': i, 'unseen': i} for i in (1, 2)},
+              'profile_inputs': {'1': deepcopy(profile), '2': deepcopy(profile)},
+              'rows': {vibe: deepcopy(originals) for vibe in transfer.home_vibe.PRESETS}}
+    fitted = {**common, 'format': metadata.FORMAT, 'human_recordings_excluded': [2],
+              'assignments': {'1': deepcopy(humans['assignments']['1'])},
+              'profile_inputs': {'1': deepcopy(profile)},
+              'rows': {vibe: [deepcopy(originals[0])] for vibe in transfer.home_vibe.PRESETS}}
+    if changed == 'human-original':
+        fitted['rows']['relax'].append(deepcopy(originals[1]))
+    elif changed == 'dropped-original':
+        fitted['rows']['relax'] = []
+    elif changed == 'numeric-conditioning':
+        fitted['profile_inputs']['1']['overrides']['energy'] = .9
+    else:
+        fitted['assignments']['1']['unseen'] = 4
+    source.write_text(json.dumps(humans))
+    fitted['source_sha256'] = transfer.evaluation.digest(source.read_bytes())
+    candidate.write_text(json.dumps(fitted))
+    with pytest.raises(ValueError, match='Human recording|every nonhuman original|observations leaked|folds changed'):
+        transfer.inputs(source, candidate, 'metadata')
 
 
 def test_correlated_recording_blocks_match_independent_dense_covariance():
@@ -191,3 +320,33 @@ def test_cluster_weighted_ranking_matches_explicit_whole_cluster_resampling():
     with pytest.raises(ValueError, match='Duplicate target'):
         ranking.within_model_metrics([{'fold': 0, 'outcome': 'complete', 'rows': rows},
                                      {'fold': 1, 'outcome': 'complete', 'rows': rows}])
+
+
+def test_new_fold_protocol_keeps_connected_collaborations_wholly_unseen():
+    rows = [{'recording': 1, 'artists': [1]}, {'recording': 2, 'artists': [1, 2]},
+            {'recording': 3, 'artists': [2]}, {'recording': 4, 'artists': [3]}]
+    original = selection.evaluation.assignments(rows)
+    changed = selection.fold_assignment(original)
+    assert {changed[str(i)]['unseen'] for i in (1, 2, 3)} == {changed['1']['unseen']}
+    assert len({changed[str(i)]['cluster'] for i in (1, 2, 3)}) == 1
+    assert changed == selection.fold_assignment(dict(reversed(list(original.items()))))
+    assert changed == selection.fold_assignment(changed)
+    plan = {'rows': {'relax': rows}, 'assignments': changed}
+    hidden = selection.expected_targets(plan, 'unseen', changed['1']['unseen'], 'relax')
+    assert {1, 2, 3} <= hidden.keys()
+    # A known-artist target needs a different measured song in its artist group.
+    plan['assignments'] = {'1': {'known': 0}, '2': {'known': 1},
+                           '3': {'known': 1}, '4': {'known': 0}}
+    assert selection.expected_targets(plan, 'known', 0, 'relax').keys() == {1}
+
+
+def test_single_model_human_transfer_excludes_both_partitions_artist_components():
+    humans = {'human_targets': [{'recording': 1, 'partition': 'development'},
+                               {'recording': 4, 'partition': 'reserved'}],
+              'assignments': {'1': {'cluster': 'shared'}, '2': {'cluster': 'shared'},
+                              '3': {'cluster': 'shared'}, '4': {'cluster': 'reserved'},
+                              '5': {'cluster': 'reserved'}, '6': {'cluster': 'other'}}}
+    assert transfer.hidden_recordings(humans, 'single-model', 'unseen', 0) == {1, 2, 3, 4, 5}
+    assert transfer.hidden_recordings(humans, 'single-model', 'known', 0) == set()
+    with pytest.raises(ValueError, match='only fold zero'):
+        transfer.hidden_recordings(humans, 'single-model', 'unseen', 1)

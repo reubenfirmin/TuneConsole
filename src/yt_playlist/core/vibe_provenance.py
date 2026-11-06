@@ -182,6 +182,13 @@ def _read(conn, pid, load, installed, model_load=None):
         return None
     value = load(pid).get(str(pid))
     if vibe_model_files.is_receipt(value):
+        try:
+            normalized = vibe_model_files.receipt(value['generation'], value['artists'], value['mean_variance'],
+                value['new_track_variance'], conditioning=value.get('conditioning'))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise fao.CorruptFile('Invalid shared model receipt conditioning') from exc
+        if normalized != value:
+            raise fao.CorruptFile('Invalid shared model receipt conditioning')
         if (len(canonical(value)) != row[1] or hashlib.sha256(canonical(value)).digest() != row[0]
                 or vibe_models.linked(conn, pid) != value['generation']):
             raise fao.CorruptFile('Required shared model receipt is missing or corrupt')

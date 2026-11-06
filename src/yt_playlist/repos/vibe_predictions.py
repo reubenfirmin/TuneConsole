@@ -127,7 +127,11 @@ class VibePredictionsRepo(Repo):
                                     'SELECT 1 FROM artists WHERE id=?', (artist,)).fetchone():
                                 raise ValueError('Unknown conditioning artist')
                             validated_artists.add(artist)
-                        receipt = vibe_model_files.receipt(model, artists, fit['mean_variance'], fit['new_track_variance'])
+                        conditioning = fit.get('conditioning')
+                        receipt = vibe_model_files.receipt(model, artists, fit['mean_variance'], fit['new_track_variance'],
+                                                           conditioning=conditioning)
+                        if conditioning is not None and conditioning['genre'] != track['genre']:
+                            raise ValueError('Joint target genre differs from publication conditioning')
                         stamp = track['version'] + '/' + fit['model_version']
                         if (old and old['prediction_id'] is not None and old['source'] == source
                                 and old['score'] == fit['score'] and old['support'] == fit['support']

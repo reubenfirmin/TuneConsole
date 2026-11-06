@@ -1,5 +1,5 @@
 """Read archived policy evidence without depending on its retention writer."""
-from yt_playlist.core import file_paths, policy_documents
+from yt_playlist.core import file_collection, file_paths
 from . import fao, file_map
 from .policy_config import BASE_FIELD
 
@@ -21,7 +21,7 @@ def document(conn, version):
     row = conn.execute('SELECT state FROM recommendation_policy_history WHERE version=?', (version,)).fetchone()
     if row is None or row[0] == 'expired':
         return None
-    with policy_documents.retained_reader(directory(conn)):
+    with file_collection.retained_reader(directory(conn)):
         value = file_map.get(directory(conn), head(conn), version)
     if value is None or value.get('state') != 'archived':
         raise fao.CorruptFile('Required historical policy is missing')

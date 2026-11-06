@@ -4,10 +4,10 @@ import re
 
 import numpy as np
 import pytest
-from fastapi import APIRouter
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
+from tests.home_fixture_support import home_routes_only
 from tests.prepared_fixture_support import prepared_template
 from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
@@ -29,26 +29,21 @@ def genre_candidates_template(_pristine_current_schema):
 
 
 @pytest.fixture(autouse=True)
-def genre_routes(monkeypatch, one_menu_per_attempt):
-    from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, home
-
-    # Keep the real Home routes, views, templates and application request
-    # handling. These cases do not exercise the other resource routers.
-    monkeypatch.setattr(webapp, 'build_all',
-                        lambda ctx: [app_update.build(ctx), audio_preview.build(ctx), home.build(ctx)])
-    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
-    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
+def genre_routes(monkeypatch, home_routes_only, one_menu_per_attempt):
+    # Diagnostic history rereads every displayed track, independently of genre
+    # steering. Its real payload/metadata contracts live in test_home_audit.
+    monkeypatch.setattr(home.HomeCards, 'audit', lambda *args, **kwargs: None)
 
 
-def _client(store, now=1000.0):
+def _client(store, now=1000.0, *, prepare=True):
     from yt_playlist.web.app import create_app
 
     identity = store.accounts.upsert_account('main', 'cred', None, True)
     # Genre steering consumes candidate pools and one completed mix menu.
     # Independent discovery/revisit summaries and twelve alternative menus
     # have separate preparation owners in test_home_prepared.
-    assert home_prepared.prepare_mixes(store, now) is not None
+    if prepare:
+        assert home_prepared.prepare_mixes(store, now) is not None
     return TestClient(create_app(store, lambda: {identity: FakeClient()},
                                 now_fn=lambda: now, background_work=False),
                       base_url='http://127.0.0.1')
@@ -122,7 +117,7 @@ def test_no_alternative_genres_keeps_usable_mixes_and_explains(store, genre_cand
 
 
 def test_invalid_genre_request_does_not_advance_rotation(store):
-    client = _client(store)
+    client = _client(store, prepare=False)
     for value in ["broken", "null", '"jazz"', "[]", "[4]", '[""]', "{}"]:
         assert client.post("/home/other-genres", data={"genres": value}).status_code == 400
     assert home._epoch(store, "cards") == 0
@@ -147,6 +142,7 @@ def test_other_genres_never_backfills_the_previous_genres(store, genre_candidate
     avoid = {genre_map.family(g) for g in ["Techno", "Trance", "Indie Rock", "Ambient", "Classical"]}
     cards = mode_surfaces.assemble_cards(store, 1000, 1, avoid_genres=avoid)
     assert cards
+    assert all(len(card['tracks']) >= 4 for card in cards)
     assert all(t["genre"] == "Jazz" for c in cards for t in c["tracks"])
 
 
@@ -227,25 +223,38 @@ def test_chosen_genres_filter_backfill_and_keep_mode_attribution(store, genre_ca
     publish_bundles(store, bundles, 1.0)
     cards = mode_surfaces.assemble_cards(store, 1000, 1, include_genres={"techno"})
     assert cards
+    assert all(len(card['tracks']) >= 4 for card in cards)
     assert all(c["mode_id"] == 1 for c in cards)
     assert all(t["genre"] == "Techno" for c in cards for t in c["tracks"])
 
 
-def test_chosen_genres_validate_before_advancing_the_menu(store, genre_candidates):
-    client = _client(store)
+def test_chosen_genres_validate_before_advancing_the_menu(store, monkeypatch):
+    from yt_playlist.web.routes.home_views import HomeViews
+
+    # Validation consumes available options; candidate production and menu
+    # preparation are independent lower-layer work. Keep real HTTP validation
+    # and verify it cannot change the actual rotation or saved request.
+    monkeypatch.setattr(HomeViews, 'prepared', lambda *args: {'genre_options': [
+        {'family': 'jazz', 'label': 'jazz'}, {'family': 'techno', 'label': 'techno'}]})
+    client = _client(store, prepare=False)
     for genres in [[], [""], ["not-available"], ["jazz", "not-available"], ["jazz"] * 101]:
         assert client.post("/home/mix-genres", data={"genres": genres}).status_code == 400
     assert home._epoch(store, "cards") == 0
     assert store.rec_proposals.get_proposals("home_genre_request") is None
 
 
-def test_chosen_genres_keep_a_fresh_skeleton_when_the_pool_cannot_fill_a_mix(store, genre_candidates):
-    bundles = genre_candidates
+def test_chosen_genres_keep_a_fresh_skeleton_when_the_pool_cannot_fill_a_mix(store):
+    # Four Techno tracks per lane keep the usual menu usable. The requested
+    # Jazz pool remains genuinely underfilled without preparing four unused
+    # genre families or duplicate candidate tracks.
+    bundles = seed_genres(store, genres=['Jazz', 'Techno'], tracks_per_lane=4)
     for lane in mode_surfaces.CARD_SURFACES:
         bundles["0"][lane] = bundles["0"][lane][:1]
         bundles["all"][lane] = [t for t in bundles["all"][lane] if t["genre"] != "Jazz"]
     publish_bundles(store, bundles, 1.0)
-    response = _client(store).post("/home/mix-genres", data={"genres": ["jazz"]})
+    client = _client(store)
+    assert 'techno' in offered(client.get('/home/cards'))
+    response = client.post("/home/mix-genres", data={"genres": ["jazz"]})
     assert response.status_code == 200
     assert 'id="gen-fresh"' in response.text and 'class="fresh-pool-art"' in response.text
     assert 'hx-post="/home/fresh-pool"' in response.text

@@ -15,7 +15,7 @@ import uuid
 from yt_playlist.core.activity import check_stopping, work_budget, WorkBudgetExceeded
 from yt_playlist.core import embeddings
 from yt_playlist.rec import content_model, group_preparation, musical_preparation, rec_params, taste_modes
-from yt_playlist.rec import vibe_preparation
+from yt_playlist.rec import vibe_preparation, vibe_joint_preparation
 from yt_playlist.repos.rec_model import VectorChanges
 from yt_playlist.util import genre_catalog
 
@@ -240,6 +240,12 @@ class Preparation:
         # The audit is periodic even without new catalog writes. A lost queue
         # entry cannot permanently strand an otherwise healthy installation.
         self.repair(now)
+        # A bounded model cycle uses one accepted-original revision. Do not
+        # interleave our own source captures between its per-channel fits.
+        # External changes still invalidate each guarded snapshot normally.
+        if vibe_joint_preparation.active(self.store):
+            return vibe_preparation.step(self.store, self.batch,
+                seconds=self.budget.fit_seconds, memory_bytes=self.budget.memory_bytes)
         # Alternate source fan-out and recording captures. Each admission gets
         # one time budget, and continual source updates cannot starve recordings.
         if self._source_turn:

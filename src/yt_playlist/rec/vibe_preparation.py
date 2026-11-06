@@ -35,11 +35,13 @@ def due(store):
 
 def step(store, batch=32, *, seconds=10, memory_bytes=vibe_joint_model.MEMORY_BYTES):
     store.vibe_predictions.ensure_version(version())
+    waiting = store.prepared_content.has_pending() or store.musical_profiles.pending()
+    if vibe_joint_preparation.admitted(store, waiting=waiting):
+        if vibe_joint_preparation.step(store, seconds=seconds, memory_bytes=memory_bytes):
+            return True
     if store.vibe_predictions.fanout(batch):
         return True
-    if store.prepared_content.has_pending() or store.musical_profiles.pending():
-        return False
-    return vibe_joint_preparation.step(store, seconds=seconds, memory_bytes=memory_bytes)
+    return False
 
 
 def measured(inputs, sources, selected, overrides):
@@ -216,7 +218,8 @@ def recordings(reader, rows, musical, *, source_inputs=None):
                 estimate = estimates.get(key)
                 if estimate:
                     profile['vibes']['fits'][vibe] = {**estimate, 'generation': generation,
-                                                      'model_version': vibe_joint_model.VERSION}
+                        'model_version': vibe_joint_model.VERSION,
+                        'conditioning': {'genre': track['genre'], 'album': albums.get(key)}}
             elif (vibe in retained.get(key, {}) and not (
                     vibe_joint_preparation.current(reader, state := vibe_joint_preparation.state(reader, vibe))
                     and state.get('outcome') == 'empty')):

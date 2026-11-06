@@ -81,7 +81,7 @@ class Revisions:
         self.schema_version = conn.execute('PRAGMA main.schema_version').fetchone()[0]
         self.tables = set()
         self.views = {r[0] for r in conn.execute(
-            "SELECT name FROM main.sqlite_schema WHERE type='view'")}
+            "SELECT name FROM main.sqlite_schema WHERE type='view'").fetchall()}
         conn.execute("CREATE TEMP TABLE IF NOT EXISTS snapshot_revisions ("
                      "table_name TEXT NOT NULL, record_key TEXT NOT NULL, revision INTEGER NOT NULL,"
                      "PRIMARY KEY(table_name,record_key)) WITHOUT ROWID")
@@ -89,7 +89,8 @@ class Revisions:
                                 "AND name NOT LIKE 'sqlite_%'").fetchall():
             name = row[0]
             self.tables.add(name)
-            columns = [r[1] for r in conn.execute(f"PRAGMA main.table_xinfo({_identifier(name)})")]
+            columns = [r[1] for r in conn.execute(
+                f"PRAGMA main.table_xinfo({_identifier(name)})").fetchall()]
             changed = " OR ".join(f"OLD.{_identifier(c)} IS NOT NEW.{_identifier(c)}"
                                   for c in columns)
             key_changed = " OR ".join(f"OLD.{_identifier(c)} IS NOT NEW.{_identifier(c)}"

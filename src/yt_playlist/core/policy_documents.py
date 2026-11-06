@@ -7,10 +7,9 @@ from contextlib import contextmanager
 from itertools import chain, groupby
 from pathlib import Path
 import tempfile
-import time
 
-from .activity import check_cancellable_work
-from .evidence_ledger import _mkdir, canonical
+from .evidence_ledger import canonical
+from .file_collection import retained_reader
 from .policy_config import BASE_FIELD
 from . import fao
 from .fao import _try_file_lock
@@ -36,32 +35,6 @@ def directory(conn, memory_key=None):
     if memory_key is None:
         memory_key = getattr(conn, '_policy_memory_key', f'{os.getpid()}-{id(conn)}')
     return root_for_database(None, memory_key)
-
-
-@contextmanager
-def retained_reader(root):
-    """Hold before pinning a DB snapshot, until its last policy file read finishes.
-
-    SQLite's writer reservation protects files being published. This separate
-    shared lock protects files referenced by older WAL snapshots after their
-    current rows have been pruned. Process exit releases the lock automatically.
-    """
-    root = Path(root)
-    # Even an empty policy store needs its lock before the SQL snapshot starts.
-    # Otherwise a first publisher followed by pruning can race a reader which
-    # observed an absent directory, leaving that reader's snapshot without files.
-    _mkdir(root)
-    with (root / '.readers.lock').open('a+b') as lock:
-        while True:
-            check_cancellable_work()
-            unlock = _try_file_lock(lock, exclusive=False)
-            if unlock is not None:
-                break
-            time.sleep(0.025)
-        try:
-            yield
-        finally:
-            unlock()
 
 
 def publish(root, configuration):

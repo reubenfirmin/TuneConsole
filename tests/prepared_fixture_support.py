@@ -194,6 +194,7 @@ def historical_template(pristine, seed, *, database, logical_coordinates=()):
             pristine.backup(source.conn)
             source._bind_repositories()
             result = seed(source)
+            cleanup_memory_files(source, roots(source.conn))
             template = capture_template(source, result, logical_coordinates=logical_coordinates)
         yield template
 

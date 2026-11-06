@@ -32,7 +32,7 @@ def evidence(store):
     return pid, mids, artist, recordings[2]
 
 
-def shared_receipt(store, mids, artist):
+def shared_receipt(store, mids, artist, *, conditioning=None):
     from yt_playlist.rec import vibe_joint_model as joint
     rows = [{'recording': store.conn.execute('SELECT recording_id FROM measurements WHERE id=?', (mid,)).fetchone()[0],
              'measurement': mid, 'artists': [artist], 'genre': None, 'album': None,
@@ -47,7 +47,7 @@ def shared_receipt(store, mids, artist):
     finally:
         if staged:
             staged.close()
-    return vibe_model_files.receipt(generation, [artist], .01, .05), value
+    return vibe_model_files.receipt(generation, [artist], .01, .05, conditioning=conditioning), value
 
 
 def test_partial_conversion_exact_reuse_and_failed_publication(store, monkeypatch):
@@ -112,12 +112,13 @@ def test_batch_read_preserves_mixed_lineage_and_bounds_schema_and_file_reads(sto
         list(owner.read_many(reader.conn, [ready,other_chunk]))
 
 
-@pytest.mark.parametrize('shared_model', [False, True])
+@pytest.mark.parametrize('shared_model', [False, True, 'conditioned'])
 def test_current_protection_expiry_snapshot_and_independent_restore(store, tmp_path, shared_model):
     pid, mids, artist, rid = evidence(store)
     inputs, expected = mids, {'inputs': mids, 'artists': [artist]}
+    conditioning = {'genre': None, 'album': '42'} if shared_model == 'conditioned' else None
     if shared_model:
-        inputs, value = shared_receipt(store, mids, artist)
+        inputs, value = shared_receipt(store, mids, artist, conditioning=conditioning)
         expected = {**inputs, 'inputs': mids}
     with atomic_write(store):
         owner.publish_many(store.conn, [(pid, inputs, [artist])])
@@ -134,7 +135,7 @@ def test_current_protection_expiry_snapshot_and_independent_restore(store, tmp_p
         fao.write(model_path, b'broken model')
         with pytest.raises(fao.CorruptFile):
             owner.read(store.conn, pid)
-        repaired, _value = shared_receipt(store, mids, artist)
+        repaired, _value = shared_receipt(store, mids, artist, conditioning=conditioning)
         assert repaired == inputs
         assert owner.read(store.conn, pid) == expected
     assert vibe_history.maintain(store, 200 * DAY) == 0
@@ -194,6 +195,40 @@ def test_current_protection_expiry_snapshot_and_independent_restore(store, tmp_p
         assert not copied.conn.execute('PRAGMA foreign_key_check').fetchall()
     finally:
         copied.conn.close()
+
+
+def test_changed_target_album_gets_distinct_receipt_when_numeric_result_is_unchanged(store):
+    from yt_playlist.rec import vibe_joint_model as joint
+
+    legacy_pid, mids, artist, rid = evidence(store)
+    legacy_receipt, _value = shared_receipt(store, mids, artist)
+    with atomic_write(store):
+        owner.publish_many(store.conn, [(legacy_pid, legacy_receipt, [artist])])
+    key = store.tracks.identity_key_for_video('target')
+    track = {'evidence': None, 'artist': json.dumps([artist]), 'genre': None, 'version': 'basis'}
+    fit = {'generation': legacy_receipt['generation'], 'model_version': joint.VERSION,
+           'score': .5, 'support': 1., 'source': 'artist', 'recordings': 2,
+           'mean_variance': .01, 'new_track_variance': .05}
+
+    def publish(album):
+        resolved = {key: {'relax': {**fit, 'conditioning': {'genre': None, 'album': album}}}}
+        with store.read_snapshot() as snapshot:
+            prepared = snapshot.store.vibe_predictions.prepare_publication({key: track}, resolved, [], 10)
+            try:
+                assert snapshot.publish(lambda: store.vibe_predictions.publish_prepared(prepared))
+            finally:
+                prepared.close()
+        return store.conn.execute("SELECT prediction_id,score,support FROM recording_vibes "
+                                  "WHERE recording_id=? AND vibe='relax'", (rid,)).fetchone()
+
+    first, second = publish('first'), publish('second')
+    assert tuple(first)[1:] == tuple(second)[1:] == (.5, 1.)
+    assert first[0] != second[0]
+    assert publish('second')[0] == second[0]
+    assert owner.read(store.conn, first[0])['conditioning'] == {'genre': None, 'album': 'first'}
+    assert owner.read(store.conn, second[0])['conditioning'] == {'genre': None, 'album': 'second'}
+    assert owner.read(store.conn, legacy_pid) == {**legacy_receipt, 'inputs': mids}
+    assert store.conn.execute('SELECT count(*) FROM prediction_inputs').fetchone()[0] == 0
 
 
 def test_original_subject_validation_and_ids_survive_retirement(store):
