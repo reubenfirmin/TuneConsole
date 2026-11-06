@@ -435,7 +435,7 @@ def reset_derived(store):
 
 
 def startup(database, seconds):
-    from tests.bench_svd_background import _backup_library
+    from tests.library_image_fixtures import benchmark_library
     from yt_playlist.core.activity import cancellable_work
     from yt_playlist.core.store import Store
     from yt_playlist.rec import audio_vibe_model, musical_preparation, progressive, vibe_preparation
@@ -450,7 +450,7 @@ def startup(database, seconds):
     save(target / 'report.json', report)
     with tempfile.TemporaryDirectory(prefix='private-', dir=target) as temporary, MonkeyPatch.context() as patch:
         path = Path(temporary) / 'library.db'
-        report['backup'] = _backup_library(Path(database), path)
+        path, report['backup'] = benchmark_library(Path(database), path)
         def no_network(*args, **kwargs):
             raise AssertionError('Offline experiment attempted a network connection')
         patch.setattr(socket.socket, 'connect', no_network)

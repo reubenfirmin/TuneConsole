@@ -11,7 +11,8 @@ import resource
 import sys
 import time
 
-from tests.bench_svd_background import _backup_library, _saved_library_source
+from tests.bench_svd_background import _saved_library_source
+from tests.library_image_fixtures import benchmark_library
 from tests.repos.test_private_analytics import OPERATIONS
 from yt_playlist.core.activity import work_budget
 from yt_playlist.core.store import Store
@@ -20,8 +21,9 @@ from yt_playlist.core.store import Store
 def test_actual_library_private_analytics_match_owned_connection_and_allow_writes(tmp_path):
     path = tmp_path / 'library.db'
     source = _saved_library_source()
+    path, backup = benchmark_library(source, path)
     report = {'source': str(source), 'python': sys.version,
-              'backup': _backup_library(source, path), 'queries': []}
+              'backup': backup, 'queries': []}
     store = Store(path)
     store.init_schema()
     wal = Path(str(path) + '-wal')

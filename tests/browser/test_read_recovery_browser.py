@@ -13,6 +13,7 @@ from tests.browser_fixtures import _free_port
 from tests.live_server import LiveServer
 from yt_playlist.core.activity import WorkBudgetExceeded, work_budget
 from yt_playlist.web.app import create_app
+from yt_playlist.web.routes import audio_preview
 
 
 @pytest.fixture
@@ -42,6 +43,9 @@ def recovery_app(file_backed_store, monkeypatch):
     # Recovery pages must keep the same heartbeat that prevents a packaged
     # backend from deciding its UI has closed after a plain error document.
     monkeypatch.setenv('YT_PLAYLIST_EXIT_ON_IDLE', '1')
+    # This journey exercises preview navigation and retained feedback, not model
+    # inference. CI does not install the optional audio model bundle.
+    monkeypatch.setattr(audio_preview, 'available', lambda: True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1, background_work=False)
 
     @app.get('/test-fragment')

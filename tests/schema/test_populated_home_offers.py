@@ -11,6 +11,7 @@ from yt_playlist.core.migrations import current, v080_metadata_evidence
 from yt_playlist.core.migrations import migrate, registry, regular
 from yt_playlist.core.store import Store
 from tests.schema.actual_library import copy_readonly_library
+from tests.library_image_fixtures import report_file
 
 
 def test_actual_completed_library_preserves_offer_history(request, tmp_path, monkeypatch):
@@ -21,7 +22,7 @@ def test_actual_completed_library_preserves_offer_history(request, tmp_path, mon
     custody = json.loads((source.parent / 'metadata-conversion.json').read_text())
     assert custody['interruption_rollback_verified'] and len(custody['copied_domains']) == 7
     target, capture = tmp_path / 'home-offers.db', {}
-    copy_readonly_library(source, target, monkeypatch, capture)
+    target = copy_readonly_library(source, target, monkeypatch, capture)
     assert capture['source_version'] == 82
     store = Store(target)
     try:
@@ -66,7 +67,7 @@ def test_actual_completed_library_preserves_offer_history(request, tmp_path, mon
             regular.validate(reopened.conn)
         finally:
             reopened.conn.close()
-        report = Path(request.config.rootpath) / 'build/test-reports/implementation1137-home-offers-actual.json'
+        report = report_file(Path(request.config.rootpath) / 'build/test-reports/implementation1137-home-offers-actual.json')
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(json.dumps({
             'status': 'passed', 'isolated_target': str(target), 'recordings': recordings,

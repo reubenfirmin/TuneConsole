@@ -19,7 +19,7 @@ def test_actual_collection_documents_upgrade_and_restart(request,tmp_path,monkey
     source = Path(option).resolve(strict=True)
     target = tmp_path/'collection-documents.db'
     custody = {}
-    copy_readonly_library(source,target,monkeypatch,custody)
+    target = copy_readonly_library(source,target,monkeypatch,custody)
     assert custody['source_version']==95, 'Supply a genuine schema-95 historical donor'
     store = Store(target)
     try:

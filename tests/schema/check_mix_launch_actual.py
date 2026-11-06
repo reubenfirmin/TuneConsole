@@ -15,6 +15,7 @@ import uvloop
 from tests.conftest import FakeClient, _track
 from tests.core.check_startup_background_actual import check
 from tests.schema.actual_library import copy_readonly_library
+from tests.library_image_fixtures import report_file
 
 
 class OfferedMixes(HTMLParser):
@@ -169,7 +170,7 @@ def exercise_retained_mix(path):
         report.update(status='failed', error=repr(exc))
         raise
     finally:
-        Path('/tmp/tuneconsole-649-actual-retention.json').write_text(json.dumps(report, indent=2) + '\n')
+        report_file('/tmp/tuneconsole-649-actual-retention.json').write_text(json.dumps(report, indent=2) + '\n')
         store.conn.close()
 
 
@@ -179,7 +180,7 @@ def test_actual_library_mix_launch(request, tmp_path, monkeypatch):
         pytest.skip('Supply a read-only source for an isolated actual-library replay')
     source = Path(option).resolve(strict=True)
     destination = tmp_path / 'tuneconsole-mix.db'
-    report_path = Path('/tmp/tuneconsole-634-actual-copy.json')
+    report_path = report_file('/tmp/tuneconsole-634-actual-copy.json')
     report = {'source': str(source), 'source_access': 'SQLite mode=ro; files read only',
               'python': sys.version, 'status': 'copying', 'source_hashes': {}}
     for name in ('web/routes/home_generation.py', 'web/routes/home.py', 'web/static/playlist-generation.js',
@@ -187,13 +188,13 @@ def test_actual_library_mix_launch(request, tmp_path, monkeypatch):
         path = Path(__file__).resolve().parents[2] / 'src/yt_playlist' / name
         report['source_hashes'][name] = hashlib.sha256(path.read_bytes()).hexdigest()
     try:
-        copy_readonly_library(source, destination, monkeypatch, report)
+        destination = copy_readonly_library(source, destination, monkeypatch, report)
         report['status'] = 'running'
         report_path.write_text(json.dumps(report, indent=2) + '\n')
         policy = asyncio.get_event_loop_policy()
         try:
             asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-            uvloop.run(check(destination, Path('/tmp/tuneconsole-634-actual-launch.json'),
+            uvloop.run(check(destination, report_file('/tmp/tuneconsole-634-actual-launch.json'),
                              launch_mix=exercise_mix, check_ownership=True))
         finally:
             asyncio.set_event_loop_policy(policy)

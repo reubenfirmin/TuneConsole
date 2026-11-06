@@ -222,7 +222,15 @@ def test_slow_vibe_request_closes_dialog_and_keeps_ready_mixes_usable(
     expect(feedback).to_be_in_viewport()
     expect(page.locator('#home-vibe-feedback')).to_have_count(1)
     assert len(pending) == 1
-    pending[0].continue_()
+    focused = card.element_handle()
+    with page.expect_response(lambda response: response.url.endswith('/home/vibe/status')
+                              and response.json().get('phase') == 'ready'):
+        pending[0].continue_()
+    # Completed preparation must preserve the open mix and its save target.
+    assert card.evaluate('(card, previous) => card === previous', focused)
+    expect(card).to_have_class(re.compile(r'\bis-focused\b'))
+    expect(card.get_by_role('button', name='Save and play this mix', exact=True)).to_be_enabled()
+    card.get_by_role('button', name='Back to all mixes', exact=True).click()
     expect(page.locator('#home-mode-cards')).to_have_attribute('data-vibe', 'relax')
     expect(feedback).to_have_attribute('data-state', 'ready')
 
@@ -263,16 +271,28 @@ def test_vibe_respects_genre_focus_through_clear_and_expiry(prepared_vibe_app, s
     expect(dialog.get_by_role('checkbox', name='jazz', exact=True)).to_be_checked()
     expect(dialog.locator('#home-genre-count')).to_have_text('1 genre in the mix.')
     dialog.get_by_role('tab', name='Vibe', exact=True).click()
-    dialog.get_by_role('radio', name='Take it as it comes', exact=True).check()
-    expect(row).to_have_attribute('data-vibe', '')
+    previous_board = row.element_handle()
+    with page.expect_response(lambda response: response.url.endswith('/home/vibe/status')
+                              and response.json().get('vibe') == ''
+                              and response.json().get('phase') == 'waiting'):
+        dialog.get_by_role('radio', name='Take it as it comes', exact=True).check()
+    assert store.settings.get_setting(home_vibe.SETTING) is None
+    # This measured input has only two ordinary Jazz lanes. Clearing is saved,
+    # while the existing complete Jazz board remains usable until more are ready.
+    assert row.evaluate('(row, previous) => row === previous', previous_board)
+    expect(row.locator('.gen-card')).to_have_count(4)
+    expect(page.locator('#home-vibe-feedback')).to_have_attribute('data-state', 'waiting')
+    page.get_by_role('button', name='Change vibe', exact=True).click()
+    expect(dialog.get_by_role('radio', name='Take it as it comes', exact=True)).to_be_checked()
     expect(page.locator('.fp-tuning-dot')).to_be_visible()  # The independent Jazz focus remains active.
     vibe_dot = page.locator('#fp-vibe-tab .fp-tab-dot')
     expect(vibe_dot).to_have_js_property('hidden', True)
     expect(vibe_dot).not_to_be_visible()
     assert row.locator('[data-genres]').evaluate_all(
         'els => els.length > 0 && els.every(el => JSON.parse(el.dataset.genres).every(g => g.toLowerCase() === "jazz"))')
-    page.get_by_role('button', name='Change vibe', exact=True).click()
-    dialog.get_by_role('radio', name='Relax', exact=True).check()
+    with page.expect_response('**/home/vibe') as selected:
+        dialog.get_by_role('radio', name='Relax', exact=True).check()
+    expect(row).to_have_attribute('data-vibe-request', selected.value.headers['x-home-vibe-request'])
     expect(row).to_have_attribute('data-vibe', 'relax')
     store.rec_model.set_lean('genre:techno', 1.6, 1)
     store.settings.set_setting(mix_tuning.VIBE_UPDATED_AT_SETTING, str(1 - mix_tuning.TTL_S))

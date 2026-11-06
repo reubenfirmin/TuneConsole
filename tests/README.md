@@ -136,5 +136,85 @@ Historical comparisons and saved-library investigations live in
 ./experiments/run.py investigate bench_fair_queue.py -s
 ```
 
-Use isolated copies or read-only snapshots for actual-library evidence.
+Use the shared local library manager for actual-library evidence.
 The [runtime findings](runtime-review.md) summarize the historical cost review.
+
+### Local actual-library workspaces
+
+[`scripts/test-library.py`](../scripts/test-library.py) captures SQLite and its
+owned file domains once, verifies and freezes the baseline, then creates private
+Btrfs snapshots for local checks. Every container sees its selected library at
+`/library/state.db`; file coordinates are relocated only during preparation.
+Normal runs have no donor mount. Ordinary pytest and GitHub CI do not invoke
+this backend or require its tools, image or mount.
+
+The host needs Btrfs tools, rootless Podman and the cached Playwright Python base
+image named in `scripts/library-tests.Containerfile`. Prepare and mount once:
+
+```sh
+python3 scripts/test-library-image-poc.py --prepare-image
+sudo bash scripts/test-library-image-poc-mount.sh
+```
+
+The mount helper is for the user to inspect and run under the privileged-command
+policy in AGENTS.md. It mounts a new sparse image file inside `build/`; it does
+not reformat the host filesystem. Do not repeat setup on an already mounted
+volume. Build the local dependency image from `uv.lock`, then capture once:
+
+```sh
+python3 scripts/test-library.py build-runtime
+python3 scripts/test-library.py prepare
+python3 scripts/test-library.py list
+```
+
+Preparation reads the source through a read-only connection and file-lifetime
+fences. A second container restores and checks every SQL file coordinate without
+access to the donor. Concurrent preparation requests share a source lock.
+`prepare` reuses the current generation; only `prepare --refresh` captures newer
+data. `--source PATH` selects another source. A dependency-lock change requires
+an explicit `build-runtime` before further runs.
+
+Run focused pytest files or node ids through the manager. Collection shares the
+frozen baseline read-only; each selected test gets its own writable snapshot and
+container. The explicit plugin supplies a `managed_library` fixture. Existing
+actual-library helpers and benchmark adapters reuse that path in managed runs:
+
+```sh
+python3 scripts/test-library.py run -- pytest tests/schema/check_radio_launch_actual.py --schema-source-db=/library/state.db -s
+python3 scripts/test-library.py run --readonly -- python3 -c 'import sqlite3; print(sqlite3.connect("file:/library/state.db?mode=ro", uri=True).execute("select count(*) from recordings").fetchone())'
+```
+
+Python checks can import `tests.library_image_fixtures.managed_database()`.
+Use `run --baseline ID` or `run --schema VERSION` to select a retained generation;
+the selection stays pinned across all selected tests, even during refresh.
+Scripts must write retained artifacts to `/reports`; the host destination is
+chosen with `run --report PATH`, or defaults to `build/test-reports/library-images`.
+Console output, per-run receipts and pytest JUnit reports are retained there.
+Disposable workspaces and process-local temporary files are removed after their
+containers stop, on both passing and failing runs.
+
+Refresh retains the newest two generations plus current generations for other
+sources and any active pins. Preview and remove abandoned runs or older unpinned
+generations with:
+
+```sh
+python3 scripts/test-library.py gc
+python3 scripts/test-library.py gc --delete
+```
+
+For an individual abandoned `build/library-image-poc/volume/workspaces/ID`, use
+`./scripts/test-artifacts-cleanup.py PATH` and then `--delete PATH`. Cleanup checks
+the manager receipt and lifetime lease; it stops only that orphan's own container
+before deleting its snapshot. Active owners and pinned generations are protected.
+Baselines are retained inputs, outside `.pytest_cache`, and must be removed only
+through the manager. Reports are outside the volume.
+
+Ordinary synthetic fixtures and CI retain their existing copy behavior. Tests of
+export/recovery and explicit paired-copy experiments retain those operations
+because the copy or restore is part of what they measure. Do not replace their
+subjects with an already restored library.
+
+The separate `scripts/test-library-image-poc.py` measures first-write extent
+sharing with representative sidecars. Its disposable `proof-*` directories use
+the same stable artifact cleanup command. When finished with the local volume,
+the user can unmount it with `sudo umount -- build/library-image-poc/volume`.

@@ -1,12 +1,49 @@
 """Function-scoped radio controller fixture with deterministic playlist I/O."""
 import json
 import time
+from contextlib import contextmanager
+from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from yt_playlist.library import playlist_generated
 from yt_playlist.web import radio_session
 from yt_playlist.web.radio_session import PlaylistRadio
+
+
+@pytest.fixture
+def memory_checkpoint_files(monkeypatch):
+    """Mock checkpoint file I/O beneath real encoding and SQLite publication.
+
+    File custody/recovery contracts stay in core/test_radio_publication.py and
+    core/test_radio_choice_persistence.py. Controllers need detached bytes,
+    including reload after replacement, without a durable file for each save.
+    """
+    from yt_playlist.core import collection_recovery, fao
+
+    files = {}
+    original_reader = fao.open_reader
+
+    def publish(root, encoded, digest, *, age=None):
+        filename = str(Path(root) / digest[:2] / (digest + '.json'))
+        files[filename] = bytes(encoded)
+        return filename
+
+    @contextmanager
+    def reader(path, *args, **kwargs):
+        encoded = files.get(str(path))
+        if encoded is None:
+            with original_reader(path, *args, **kwargs) as stream:
+                yield stream
+        else:
+            with BytesIO(encoded) as stream:
+                stream.info = None
+                yield stream
+
+    monkeypatch.setattr(collection_recovery, '_publish_encoded', publish)
+    monkeypatch.setattr(fao, 'open_reader', reader)
+    return files
 
 
 def seed_pool(store):
@@ -58,6 +95,15 @@ class Playlist:
 
 @pytest.fixture
 def poc(monkeypatch, store):
+    pool = (seed_pool(store) if hasattr(store, '_fixture_intensity')
+            else store._fixture_radio_pool)
+    with radio_controller(monkeypatch, store, pool) as state:
+        yield state
+
+
+@contextmanager
+def radio_controller(monkeypatch, store, pool):
+    """Exercise the real controller with explicit catalog inputs and playlist I/O."""
     remote, frames, workers = Playlist(), [], []
     identity = store.accounts.upsert_account("main", "ref", None, True)
     from yt_playlist.core.bridge import Bridge
@@ -96,11 +142,6 @@ def poc(monkeypatch, store):
     controller = PlaylistRadio(ctx)
     ctx.radio = controller
     monkeypatch.setattr(controller.work, "start_thread", lambda *args, **kw: workers.append((args, kw)))
-    # The intensity fixture deliberately replaces the ordinary catalog with a
-    # larger genre seed. Add our pool to that state instead of overwriting it.
-    pool = (seed_pool(store) if hasattr(store, '_fixture_intensity')
-            else store._fixture_radio_pool)
-
     class Candidates:
         def __init__(self, store, now, tuning=None, *, now_source=None, comparison=None):
             self.store = store

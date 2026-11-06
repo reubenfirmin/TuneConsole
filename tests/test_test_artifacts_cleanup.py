@@ -32,6 +32,28 @@ def test_only_recognized_review_snapshots_are_eligible(cleanup):
             cleanup.validate_path(path)
 
 
+def test_managed_cleanup_delegates_lifetime_checks_and_rejects_baselines(cleanup, monkeypatch):
+    volume = cleanup.REPOSITORY / 'build/library-image-poc/volume'
+    workspace = volume / 'workspaces' / ('a' * 32)
+    workspace.mkdir(parents=True)
+    for path in (volume, workspace.parent, volume / 'baselines' / ('b' * 32)):
+        path.mkdir(parents=True, exist_ok=True)
+        with pytest.raises(ValueError):
+            cleanup.validate_path(path)
+    monkeypatch.setattr(cleanup, 'managed_cleanup', lambda *args, **kwargs: [])
+    assert cleanup.main(['--delete', str(workspace)]) == 1
+    assert workspace.is_dir()
+    def recover(path, *, delete):
+        if delete:
+            path.rmdir()
+        return [str(path)]
+    monkeypatch.setattr(cleanup, 'managed_cleanup', recover)
+    assert cleanup.main([str(workspace)]) == 0
+    assert workspace.is_dir()
+    assert cleanup.main(['--delete', str(workspace)]) == 0
+    assert not workspace.exists()
+
+
 def test_a_live_file_reference_blocks_private_snapshot_cleanup(cleanup):
     path = cleanup.REPOSITORY/'build'/'review748-example'
     path.mkdir()
@@ -189,3 +211,46 @@ def test_registered_unreadable_owner_and_pid_reuse(cleanup, tmp_path, observed_s
     assert 'owner process 1326' in cleanup.blocker(base, [owner])
     owner.start = '9999'
     assert cleanup.blocker(base, [owner]) is None
+
+
+def test_image_cleanup_accepts_only_individual_proof_workspaces(cleanup):
+    volume = cleanup.REPOSITORY / 'build/library-image-poc/volume'
+    proof = volume / 'proof-abcd1234'
+    proof.mkdir(parents=True)
+    assert cleanup.validate_path(proof)[0] == proof
+    with pytest.raises(ValueError):
+        cleanup.validate_path(volume)
+    unknown = volume / 'important'
+    unknown.mkdir()
+    with pytest.raises(ValueError):
+        cleanup.validate_path(unknown)
+
+
+def test_image_cleanup_does_not_thaw_a_live_baseline(cleanup, monkeypatch):
+    proof = cleanup.REPOSITORY / 'build/library-image-poc/volume/proof-abcd1234'
+    baseline = proof / 'baseline'
+    baseline.mkdir(parents=True)
+    active = cleanup.Process(os.getpid() + 100, '1', ('python',), (str(baseline / 'state.db'),))
+    monkeypatch.setattr(cleanup, 'processes', lambda: [active])
+    calls = []
+    monkeypatch.setattr(cleanup.subprocess, 'run', lambda *args, **kwargs: calls.append(args))
+    assert cleanup.main(['--delete', str(proof)]) == 1
+    assert baseline.is_dir() and calls == []
+
+
+def test_image_cleanup_thaws_only_before_deleting_disposable_subvolumes(cleanup, monkeypatch):
+    proof = cleanup.REPOSITORY / 'build/library-image-poc/volume/proof-abcd1234'
+    baseline = proof / 'baseline'
+    baseline.mkdir(parents=True)
+    (baseline / 'state.db').write_bytes(b'disposable')
+    monkeypatch.setattr(cleanup, 'processes', lambda: [])
+    calls = []
+    monkeypatch.setattr(cleanup.subprocess, 'run', lambda args, **kwargs: calls.append(args))
+    assert cleanup.main([str(proof)]) == 0
+    assert calls == [] and baseline.is_dir()
+    assert cleanup.main(['--delete', str(proof)]) == 0
+    assert calls == [
+        ['btrfs', 'property', 'set', '-ts', str(baseline), 'ro', 'false'],
+        ['btrfs', 'subvolume', 'delete', str(baseline)],
+    ]
+    assert not proof.exists()

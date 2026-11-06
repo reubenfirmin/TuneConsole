@@ -42,8 +42,8 @@ def fake_result():
 
 
 def fake_extension(page, fail_capture=False, result=None, initially_stale=False):
-    # Controlled source/transport for card tests. The installed-extension cases
-    # below independently establish document-free lifetime and native capture.
+    # Controlled source/transport for card tests. Sample replies are synthetic;
+    # the real collection worker, storage, delivery and card UI remain active.
     owner_source = (EXT / 'worker/audio_sampler.js').read_text() + '\n' + (
         EXT / 'worker/audio_collection.js').read_text()
     page.add_init_script('(() => {\n' + owner_source + '\n' + '''
@@ -142,10 +142,6 @@ def wait_samples(page, count, timeout=15000):
 
 
 
-
-
-# Source native inference is independently exercised by natural_offset below;
-# packaged bytes also prove no-app delivery, restart and disabled-rating safety.
 
 
 def seed_samples(store, count=3, **changes):

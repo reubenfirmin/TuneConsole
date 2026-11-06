@@ -12,6 +12,7 @@ import time
 import pytest
 
 from tests.schema.actual_library import copy_readonly_library
+from tests.library_image_fixtures import report_file
 from yt_playlist.core import radio_storage
 from yt_playlist.core.activity import check_cancellable_work, work_budget
 from yt_playlist.core.store import Store
@@ -32,7 +33,7 @@ def test_actual_library_background_writers_remain_useful_and_serve_reads(request
         pytest.skip('Supply a read-only source for an isolated SQL and file copy')
     path = Path(option).resolve(strict=True)
     destination = tmp_path / 'isolated.db'
-    report_path = Path('/tmp/tuneconsole-677-actual.json')
+    report_path = report_file('/tmp/tuneconsole-677-actual.json')
     report = {'source': str(path), 'source_access': 'SQLite mode=ro; files read only',
               'python': sys.version, 'sqlite': sqlite3.sqlite_version, 'status': 'copying',
               'latencies_seconds': {}, 'workers': {}, 'source_hashes': {}}
@@ -42,7 +43,7 @@ def test_actual_library_background_writers_remain_useful_and_serve_reads(request
         report['source_hashes'][name] = hashlib.sha256(source.read_bytes()).hexdigest()
     store = None
     try:
-        copy_readonly_library(path, destination, monkeypatch, report)
+        destination = copy_readonly_library(path, destination, monkeypatch, report)
         store = Store(destination)
         store.init_schema(defer_metadata=True)
         before = {table: fingerprint(store.conn, table) for table in ('recordings', 'play_events')}

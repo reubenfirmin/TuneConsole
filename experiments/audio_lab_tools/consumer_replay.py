@@ -16,7 +16,8 @@ import sys
 import time
 
 from experiments.investigations.bench_musical_character import _catalog, _lookup_evidence, _vector_digest
-from tests.bench_svd_background import _backup_library, _saved_library_source
+from tests.bench_svd_background import _saved_library_source
+from tests.library_image_fixtures import benchmark_library
 from tests.musical_evaluation_support import coverage, holdouts, listening_packet
 from yt_playlist.core.activity import cancellable_work
 from yt_playlist.core.store import Store
@@ -35,7 +36,7 @@ def evaluate(temporary, patch, *, publication_seconds, diagnostics=None, warm_sa
     output = Path(os.environ['TUNECONSOLE_MUSICAL_REPORT_DIR'])
     output.mkdir(mode=0o700)
     destination = temporary / 'musical-library.db'
-    report = _backup_library(_saved_library_source(), destination)
+    destination, report = benchmark_library(_saved_library_source(), destination)
     destination.chmod(0o600)
     def no_network(*args, **kwargs):
         raise AssertionError('Consumer diagnostic attempted a network connection')

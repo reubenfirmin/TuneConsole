@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from tests.schema.actual_library import copy_readonly_library
+from tests.library_image_fixtures import report_file
 from yt_playlist.core import fao
 from yt_playlist.core.store import Store
 from yt_playlist.rec import musical_character
@@ -34,7 +35,7 @@ def test_actual_library_tuning(request, tmp_path, monkeypatch):
     output = request.config.getoption('--radio-tuning-report')
     if not source or not output:
         pytest.skip('Supply --schema-source-db and --radio-tuning-report for this opt-in profile')
-    report_path = Path(output).resolve()
+    report_path = report_file(output).resolve()
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report = {'python': sys.version, 'source': source, 'source_access': 'read-only copy',
               'provider': 'forbidden; fresh playback presence controlled', 'sources': {}}
@@ -66,7 +67,7 @@ def test_actual_library_tuning(request, tmp_path, monkeypatch):
     with monkeypatch.context() as capture:
         capture.setattr(os, 'fsync', lambda _fd: None)
         capture.setattr(fao, 'copy', copy_bytes)
-        copy_readonly_library(Path(source).resolve(strict=True), destination, capture, report)
+        destination = copy_readonly_library(Path(source).resolve(strict=True), destination, capture, report)
     report['copy_seconds'] = time.perf_counter() - started
     store = Store.open_current(destination)
     try:

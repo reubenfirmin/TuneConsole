@@ -10,6 +10,10 @@ from yt_playlist.core.db_rebuild import job
 
 
 def copy_readonly_library(path, destination, monkeypatch, report):
+    from tests.library_image_fixtures import managed_database
+    managed = managed_database(path, report)
+    if managed is not None:
+        return managed
     original_budget = evidence_ledger.EvidenceLedger._budget
 
     @contextmanager
@@ -67,3 +71,4 @@ def copy_readonly_library(path, destination, monkeypatch, report):
                 source.rollback()
         with copied:
             custody.restore_files(copied, manifests)
+    return destination

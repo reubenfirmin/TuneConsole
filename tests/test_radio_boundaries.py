@@ -49,7 +49,7 @@ def test_legacy_flags_have_explicit_migration_precedence(changes, phase):
 
 @pytest.mark.parametrize("version", [1, 2])
 @pytest.mark.parametrize("replacement", [False, True])
-def test_restart_checks_an_uncertain_write_before_sending_another(poc, version, replacement):
+def test_restart_checks_an_uncertain_write_before_sending_another(poc, monkeypatch, version, replacement):
     c, remote, *_ = poc
     with c.launch_request('restorable-launch') as cancelled:
         c.start(cancelled=cancelled)
@@ -92,14 +92,23 @@ def test_restart_checks_an_uncertain_write_before_sending_another(poc, version, 
     assert restored.session.tracks[0]["video_id"] == "v1"
     if version == 1:
         # Cancel can reach a restarted process while another launch already
-        # owns admission. Deferred restoration must honor the old owner's
-        # receipt without cancelling that new request.
+        # owns admission. Persist the old owner's cancellation without
+        # restoring its playback or cancelling that new request.
         deferred = PlaylistRadio(c.ctx)
         with deferred.launch_request('pending-new-launch') as pending:
             deferred.stop(launch_id='restorable-launch')
             assert deferred.session is None and not pending.is_set()
+
+            def cancelled_read(*args, **kwargs):
+                pytest.fail('Restored a cancelled launch through a remote playlist read')
+
+            monkeypatch.setattr(remote, 'get_playlist', cancelled_read)
             deferred.join()
-            assert deferred.session.stopped_by_user and not pending.is_set()
+            assert deferred.session is None and not pending.is_set()
+            checkpoint = deferred.persistence.load()
+            assert checkpoint['launch_id'] == 'restorable-launch'
+            assert checkpoint['stopped'] and checkpoint['phase'] == Phase.STOPPED
+            assert len(remote.adds) == before + 1
     else:
         restored.stop(launch_id='restorable-launch')
         assert restored.session.stopped_by_user

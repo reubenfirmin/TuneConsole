@@ -7,10 +7,10 @@ tests/bench_choice_evaluation.py; this check covers Home retention independently
 """
 import json
 from pathlib import Path
-import shutil
 import time
 
-from tests.bench_svd_background import _backup_library, _saved_library_source
+from tests.bench_svd_background import _saved_library_source
+from tests.library_image_fixtures import benchmark_library
 from yt_playlist.core.activity import work_budget
 from yt_playlist.core.store import Store
 from yt_playlist.rec import (choice_evidence as choices, candidate_refresh,
@@ -25,10 +25,7 @@ def inventory(ledger):
 
 def test_actual_library_report_refresh_and_unanswered_retirement_keep_full_menus(tmp_path):
     source, path = _saved_library_source(), tmp_path / 'library.db'
-    _backup_library(source, path)
-    evidence = Path(str(source) + '.evidence')
-    if evidence.exists():
-        shutil.copytree(evidence, Path(str(path) + '.evidence'))
+    path, backup = benchmark_library(source, path)
     store = Store(path)
     store.init_schema()
     try:
@@ -71,6 +68,7 @@ def test_actual_library_report_refresh_and_unanswered_retirement_keep_full_menus
         assert attempts[-1] == home_prepared.MAX_MENUS
         assert {menu['epoch'] for menu in payload['menus']} == set(range(home_prepared.MAX_MENUS))
         print(json.dumps({'menus_per_history_cycle': attempts, 'target': home_prepared.MAX_MENUS,
+                          'backup': backup,
                           'unchanged_generation': generation, 'pools_unchanged': True,
                           'candidate_preferences_unchanged': True,
                           'controlled_clock': now, 'source': str(source)}), flush=True)

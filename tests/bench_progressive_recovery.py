@@ -18,7 +18,8 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.bench_svd_background import _backup_library, _saved_library_source
+from tests.bench_svd_background import _saved_library_source
+from tests.library_image_fixtures import benchmark_library
 from yt_playlist.core import embeddings, embedding_files
 from yt_playlist.core.db_diagnostics import PublicationTimings
 from yt_playlist.core.db_revisions import Revisions
@@ -142,7 +143,7 @@ def _capture(preparation, scenario, now, report, costs):
 @pytest.mark.parametrize('scenario', ['saved', 'cold-and-growing'])
 def test_actual_library_basis_recovery(tmp_path, scenario, request):
     path = tmp_path / 'library.db'
-    backup = _backup_library(_saved_library_source(), path)
+    path, backup = benchmark_library(_saved_library_source(), path)
     (tmp_path / 'backup.json').write_text(json.dumps({'scenario': scenario, **backup}, indent=2) + '\n')
     try:
         child = subprocess.run([sys.executable, '-m', 'tests.bench_progressive_recovery', str(path), scenario],

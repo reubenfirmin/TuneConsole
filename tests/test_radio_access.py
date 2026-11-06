@@ -6,13 +6,13 @@ from tests.enrichment_support import complete_entries, complete_discovered
 from tests.conftest import seed_catalog_track
 from tests.onboarding_support import publish_personal_mix
 from tests.test_growth_journey import early_journey
-from yt_playlist.rec import account_growth, home_prepared
+from yt_playlist.rec import account_growth, home_cache, home_prepared
 
 
 @pytest.mark.parametrize('case, expected', [
     ('empty', False), ('missing_foundation', False), ('missing_albums', False),
     ('missing_discover', False), ('missing_mixes', False), ('missing_seeds', False),
-    ('incomplete_coverage', False), ('ready', True), ('prior_radio', True),
+    ('incomplete_coverage', False), ('ready', True), ('mix_feedback', True), ('prior_radio', True),
     ('prior_tv', True), ('prior_vibes', True), ('excluded_seed', False),
 ])
 def test_radio_access_matches_journey_and_preserves_earned_access(store, monkeypatch, case, expected):
@@ -36,6 +36,10 @@ def test_radio_access_matches_journey_and_preserves_earned_access(store, monkeyp
         elif case == 'missing_discover':
             store.rec_proposals.put_proposals(home_prepared.DISCOVERY_SURFACE, {}, 1000)
         elif case == 'missing_mixes':
+            home_cache.put(store, 'home_tuned', {}, 1000)
+        elif case == 'mix_feedback':
+            # Feedback is consumed by the next preparation; it does not remove
+            # the complete menu that currently grants access to Radio.
             seed_dislike(store, mixes[0]['key'], until=None, now=1000)
         elif case == 'missing_seeds':
             radio['seeds'] = []

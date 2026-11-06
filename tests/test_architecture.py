@@ -20,8 +20,13 @@ def _modules():
             for p in (SOURCE / "yt_playlist").rglob("*.py")}
 
 
+@cache
+def _import_nodes(tree):
+    return tuple(node for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom)))
+
+
 def _imports(tree, module=None):
-    for node in ast.walk(tree):
+    for node in _import_nodes(tree):
         if isinstance(node, ast.Import):
             yield from (alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
@@ -40,7 +45,7 @@ def _flat_repository_references(tree, methods):
     stores = {"store", "db", "store2", "ctx.store", "self.store", "self.ctx.store"}
     constructors = {"Store", "yt_playlist.core.store.Store"}
     forwarded_methods = methods - {"get"}
-    for node in ast.walk(tree):
+    for node in _import_nodes(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "yt_playlist.core.store":
             constructors.update(a.asname or a.name for a in node.names if a.name == "Store")
 
@@ -49,8 +54,9 @@ def _flat_repository_references(tree, methods):
         if isinstance(node, ast.Name):
             return node.id
         if isinstance(node, ast.Attribute) and isinstance(node.value, (ast.Name, ast.Attribute)):
-            return f"{reference(node.value)}.{node.attr}"
-        return ast.unparse(node)
+            parent = reference(node.value)
+            return f"{parent}.{node.attr}" if parent is not None else None
+        return None
 
     def is_store(node, stores):
         return ((isinstance(node, (ast.Name, ast.Attribute)) and reference(node) in stores)
@@ -59,16 +65,22 @@ def _flat_repository_references(tree, methods):
                     and node.slice.value == "store"))
 
     def scope_references(scope, inherited):
-        local, nested, pending = [], [], list(ast.iter_child_nodes(scope))
+        assignments, attributes, patches, nested = [], [], [], []
+        pending = list(ast.iter_child_nodes(scope))
         while pending:
             node = pending.pop()
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 nested.append(node)
             else:
-                local.append(node)
+                if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    assignments.append(node)
+                elif isinstance(node, ast.Attribute) and node.attr in forwarded_methods:
+                    attributes.append(node)
+                elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                      and node.func.attr == 'setattr'):
+                    patches.append(node)
                 pending.extend(ast.iter_child_nodes(node))
         aliases = set(inherited)
-        assignments = [node for node in local if isinstance(node, (ast.Assign, ast.AnnAssign))]
         while True:
             before = len(aliases)
             for node in assignments:
@@ -77,11 +89,11 @@ def _flat_repository_references(tree, methods):
                     aliases.update(reference(t) for t in targets if isinstance(t, (ast.Name, ast.Attribute)))
             if len(aliases) == before:
                 break
-        for node in local:
-            if isinstance(node, ast.Attribute) and node.attr in forwarded_methods and is_store(node.value, aliases):
+        for node in attributes:
+            if is_store(node.value, aliases):
                 yield node.lineno, ast.unparse(node)
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "setattr" and len(node.args) > 1
+        for node in patches:
+            if (len(node.args) > 1
                     and isinstance(node.args[1], ast.Constant) and node.args[1].value in methods):
                 target = node.args[0]
                 if (isinstance(target, ast.Call) and isinstance(target.func, ast.Name)

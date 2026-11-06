@@ -18,7 +18,8 @@ import time
 
 import pytest
 
-from tests.bench_svd_background import _backup_library, _saved_library_source
+from tests.bench_svd_background import _saved_library_source
+from tests.library_image_fixtures import benchmark_library
 from yt_playlist.core.numerics import limit_native_threads
 from yt_playlist.core.store import Store
 from yt_playlist.rec import (album_choices, choice_evidence, daily_model_selection,
@@ -29,7 +30,7 @@ def test_saved_library_album_menu_frontier(tmp_path):
     """Audit the revised album policy on a disposable copy, without live exposure."""
     from yt_playlist.rec import album_tuning
     backup = tmp_path / 'library.db'
-    report = _backup_library(_saved_library_source(), backup)
+    backup, report = benchmark_library(_saved_library_source(), backup)
     limit_native_threads()
     store = Store(backup)
     store.init_schema()
@@ -64,7 +65,7 @@ def test_saved_library_separate_home_preparation_budgets(tmp_path, caplog):
     from yt_playlist.rec import home_prepared
     caplog.set_level(logging.DEBUG, logger='yt_playlist.rec.home_prepared')
     backup = tmp_path / 'library.db'
-    report = _backup_library(_saved_library_source(), backup)
+    backup, report = benchmark_library(_saved_library_source(), backup)
     limit_native_threads()
     store = Store(backup)
     store.init_schema()
@@ -107,7 +108,7 @@ def test_saved_library_separate_home_preparation_budgets(tmp_path, caplog):
 
 def test_saved_library_choice_evaluation_cost_and_coverage(tmp_path):
     backup = tmp_path / 'library.db'
-    report = _backup_library(_saved_library_source(), backup)
+    backup, report = benchmark_library(_saved_library_source(), backup)
     report['source'] = str(_saved_library_source())
     command = [sys.executable, '-m', 'tests.bench_choice_evaluation', str(backup)]
     try:

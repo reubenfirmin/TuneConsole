@@ -6,7 +6,7 @@ import pytest
 from tests.quiet_pool_support import DIAGNOSTIC, quiet_pool
 from yt_playlist.core.action_errors import ActionInputError
 from yt_playlist.core.activity import WorkClosing
-from yt_playlist.rec import fresh_pool
+from yt_playlist.rec import candidate_refresh, fresh_pool
 from yt_playlist.web.jobs import start_fresh_pool
 
 
@@ -43,8 +43,22 @@ def test_fresh_failure_preserves_menu_genres_and_requires_explicit_retry(quiet_p
     assert http.post('/home/fresh-pool', data={'include_genres': ['jazz']}).status_code == 200
     assert ctx.work.wait(5)
     recovered = ctx.jobs.latest('fresh_pool', parameters)
-    assert recovered.id != job.id and recovered.done and not recovered.error
+    assert recovered.id != job.id and not recovered.error
+    if boundary == 'prepare':
+        # The failed calculation consumed this hourly admission. Retry starts
+        # discovery once and joins the next real preparation publication.
+        assert recovered.outcome == 'waiting' and not recovered.done
+        waiting = http.get(f'/home/fresh-pool/{recovered.id}')
+        assert 'hx-trigger="every 2s"' in waiting.text and DIAGNOSTIC not in waiting.text
+        assert 'Not enough matching songs yet' not in waiting.text
+        assert http.post('/home/fresh-pool', data={'include_genres': ['jazz']}).status_code == 200
+        assert ctx.work.wait(5)
+        assert ctx.jobs.latest('fresh_pool', parameters) is recovered
+        assert case.calls == [parameters, parameters]
+        assert len(case.calculations) == 1
+        assert fresh_pool.prepare(case.store, ctx.now_fn() + candidate_refresh.CHECK_INTERVAL_S) is not None
     result = http.get(f'/home/fresh-pool/{recovered.id}')
+    assert recovered.done and not recovered.error
     assert 'Not enough matching songs yet' in result.text and DIAGNOSTIC not in result.text
     assert 'hx-trigger="every 2s"' not in result.text
     assert case.calls == [parameters, parameters] and len(case.refreshes) == 1

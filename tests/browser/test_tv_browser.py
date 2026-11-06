@@ -103,7 +103,7 @@ def tv_ui(store, live_app, page, monkeypatch):
 def test_tv_uses_prepared_pool_without_preview_and_shared_controls_own_video(page, live_app, tv_ui, width):
     searches, api_loads = tv_ui
     # Hold continuation at the network boundary so this checks Reset against the
-    # initial saved draw. The stream tests exercise confirmed refill history.
+    # initial saved draw. This journey does not establish refill history.
     page.route('**/home/tv/playlist/*/refill',
                lambda route: route.fulfill(status=202, json={'preparing': True}))
     page.set_viewport_size({'width': width, 'height': 1000})

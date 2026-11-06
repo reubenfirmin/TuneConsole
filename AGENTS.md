@@ -77,6 +77,14 @@
 
 # Test coordination
 
+- Local checks against the actual library use `python3 scripts/test-library.py`
+  to prepare a shared immutable baseline and acquire a private writable snapshot.
+  See `tests/README.md` for setup, refresh, generation selection and cleanup.
+  Do not repeat SQLite backup or domain export/restore for ordinary implementation
+  checks. Explicit export/recovery tests still exercise those operations.
+  Read-only inspections can use the frozen baseline directly through the manager.
+  This backend is opt-in locally: ordinary pytest and GitHub CI keep their normal
+  fixtures and do not require Btrfs, Podman or a mounted library image.
 - Mobile and phone support are out of scope. Do not test phone viewports,
   mobile-device emulation or phone-only layouts. Preserve useful desktop and
   TV behavior checks when removing phone variants.

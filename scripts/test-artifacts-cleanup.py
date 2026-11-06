@@ -15,8 +15,10 @@ after that owner stops and no process references the directory.
 For workspaces with a recorded owner, unrelated unreadable desktop processes do
 not veto cleanup. Live owners, observed references and unreadable test jobs still
 block. Unregistered legacy directories retain the conservative process check.
-Reports should live beside a disposable workspace, never inside it. This command
-does not kill processes, acquire the suite lock, or delete shared lock files.
+Reports should live beside a disposable workspace, never inside it. Managed
+library workspaces use their manager's leases and receipts; only an orphan's
+own container is stopped before deleting its snapshot. Other cleanup never
+kills processes. This command does not acquire or delete suite locks.
 """
 import argparse
 from dataclasses import dataclass
@@ -26,6 +28,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import subprocess
 import sys
 
 MARKER = '.tuneconsole-test-artifact.json'
@@ -45,6 +48,38 @@ def private_build_workspace(path):
 def private_fixture_workspace(path):
     return (path.parent == REPOSITORY / 'build' / 'pytest'
             and re.fullmatch(r'run-(?:sqlite-)?[1-9][0-9]*-[0-9a-f]{32}', path.name) is not None)
+
+
+def private_image_workspace(path):
+    return (path.parent == REPOSITORY / 'build/library-image-poc/volume'
+            and re.fullmatch(r'proof-[a-z0-9_]{8}', path.name) is not None)
+
+
+def managed_image_workspace(path):
+    return (path.parent == REPOSITORY / 'build/library-image-poc/volume/workspaces'
+            and UUID.fullmatch(path.name) is not None)
+
+
+def managed_cleanup(path, *, delete):
+    sys.path.insert(0, str(REPOSITORY))
+    from library_image import Manager
+    return Manager(path.parent.parent).collect(workspace=path.name, delete=delete)
+
+
+def remove_workspace(path):
+    if private_image_workspace(path):
+        # A frozen PoC baseline cannot be recursively unlinked. All users have
+        # been checked by blocker() before thawing these disposable subvolumes.
+        children = list(path.iterdir())
+        for child in children:
+            if child.is_dir() and (child.is_symlink() or child.name not in ('baseline', 'a', 'b')):
+                raise ValueError('unexpected directory in image PoC workspace')
+        for child in children:
+            if child.is_dir():
+                for operation in (['property', 'set', '-ts', str(child), 'ro', 'false'],
+                                  ['subvolume', 'delete', str(child)]):
+                    subprocess.run(['btrfs', *operation], check=True, capture_output=True, text=True)
+    shutil.rmtree(path)
 
 
 @dataclass
@@ -98,7 +133,8 @@ def validate_path(value, *, registering=False):
     if path == Path('/tmp') or path == REPOSITORY / '.pytest_cache':
         raise ValueError('shared parent directory')
     if not (path.is_relative_to('/tmp') or path.is_relative_to(REPOSITORY / '.pytest_cache')
-            or private_build_workspace(path) or private_fixture_workspace(path)):
+            or private_build_workspace(path) or private_fixture_workspace(path) or private_image_workspace(path)
+            or managed_image_workspace(path)):
         raise ValueError('outside supported temporary workspace locations')
     for component in (path, *path.parents):
         if component.is_symlink():
@@ -119,7 +155,8 @@ def validate_path(value, *, registering=False):
     workspace = (path.name.startswith(('runtime-', 'negative-runtime-', 'fixtures'))
                  and any(p.name.startswith('tuneconsole-review') for p in path.parents))
     workspace |= path.parent == Path('/tmp') and path.name.startswith('tuneconsole-') and 'workspace' in path.name
-    workspace |= private_build_workspace(path) or private_fixture_workspace(path)
+    workspace |= (private_build_workspace(path) or private_fixture_workspace(path) or private_image_workspace(path)
+                  or managed_image_workspace(path))
     pytest_run = path.parent.name.startswith('pytest-of-') and bool(re.fullmatch(r'pytest-\d+', path.name))
     new_workspace = registering and (path.is_relative_to(REPOSITORY / '.pytest_cache')
         or any(p.name.startswith('tuneconsole-') for p in (path, *path.parents) if p.parent == Path('/tmp')))
@@ -218,6 +255,14 @@ def main(argv=None):
     for value in args.paths:
         try:
             path, original = validate_path(value, registering=args.register)
+            if managed_image_workspace(path):
+                if args.register:
+                    raise ValueError('Library manager owns this workspace receipt')
+                actions = managed_cleanup(path, delete=args.delete)
+                if not actions or (args.delete and path.exists()):
+                    raise ValueError('Managed workspace is active or its lifetime lease is still held')
+                print(f'{"DELETED" if args.delete else "WOULD RECOVER"} {path}')
+                continue
             if args.register:
                 register(path, args.owner_pid, processes())
                 print(f'REGISTERED {path} owner={args.owner_pid}')
@@ -236,11 +281,11 @@ def main(argv=None):
                 reason = blocker(path, processes())
                 if reason:
                     raise ValueError(reason)
-                shutil.rmtree(path)
+                remove_workspace(path)
                 print(f'DELETED {path}')
             else:
                 print(f'WOULD DELETE {path}')
-        except (OSError, ValueError, KeyError) as error:
+        except (OSError, ValueError, KeyError, RuntimeError, subprocess.CalledProcessError) as error:
             print(f'SKIP {value}: {error}')
             failed = True
     return int(failed)

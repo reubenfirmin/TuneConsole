@@ -51,7 +51,7 @@ def test_export_restores_all_annotation_revisions_and_paid_results_independently
         return original_mkdir(directory)
     with monkeypatch.context() as capture:
         capture.setattr(evidence_ledger, '_mkdir', forbid_source_directory_write)
-        copy_readonly_library(source, readonly_copy, capture, {})
+        readonly_copy = copy_readonly_library(source, readonly_copy, capture, {})
     snapshot = custody.snapshot_library(source, tmp_path / 'export')
     manifests = snapshot['manifests']
     assert hashlib.sha256(source.read_bytes()).hexdigest() == original_hash

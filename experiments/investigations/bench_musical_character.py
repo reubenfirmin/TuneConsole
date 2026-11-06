@@ -19,7 +19,8 @@ import sys
 import tempfile
 import time
 
-from tests.bench_svd_background import _backup_library, _saved_library_source
+from tests.bench_svd_background import _saved_library_source
+from tests.library_image_fixtures import benchmark_library
 from tests.musical_evaluation_support import coverage, holdouts, listening_packet
 from yt_playlist.core.activity import cancellable_work, check_cancellable_work
 from yt_playlist.core.numerics import limit_native_threads
@@ -80,7 +81,7 @@ def test_saved_catalog_musical_character_audit(tmp_path, monkeypatch):
         output.mkdir(mode=0o700)  # refuse to overwrite or combine evaluation runs
     output.chmod(0o700)
     destination = tmp_path / 'musical-library.db'
-    report = _backup_library(_saved_library_source(), destination)
+    destination, report = benchmark_library(_saved_library_source(), destination)
     destination.chmod(0o600)
     def no_network(*args, **kwargs):
         raise AssertionError('The offline musical audit attempted a network connection')

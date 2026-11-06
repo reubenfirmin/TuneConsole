@@ -28,6 +28,7 @@
         <filter id="festival-glow"><feGaussianBlur stdDeviation="9"/></filter>
         <filter id="festival-path-light" filterUnits="userSpaceOnUse" x="0" y="0" width="1536" height="1024"><feGaussianBlur stdDeviation="2"/></filter>
         <filter id="festival-cutout-edge"><feGaussianBlur stdDeviation="1.3"/></filter>
+        <filter id="festival-foreground-edge"><feGaussianBlur stdDeviation="0.45"/></filter>
         {% include '_partials/festival_trail_mask.svg' %}
         {% for stop in growth.nodes %}<mask id="festival-{{ stop.id }}" maskUnits="userSpaceOnUse" x="0" y="0" width="1536" height="1024"><path fill="white" d="{{ stop.shape }}" filter="url(#festival-cutout-edge)"/></mask>{% endfor %}
       </defs>

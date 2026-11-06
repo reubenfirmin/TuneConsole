@@ -2,6 +2,7 @@
 from pathlib import Path
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 import threading
 
 import pytest
@@ -32,7 +33,12 @@ def test_generation_backlog_cannot_starve_orphan_pools(recommendations, monkeypa
     first = publish(store, plan(store))
     publish(store, plan(store, 'second'))
     abandoned = orphan(store)
-    monkeypatch.setattr(publication, 'CLEANUP_ROWS', 1)
+    # Pass the collector budgets explicitly: function defaults were bound when
+    # the module loaded, so replacing CLEANUP_ROWS cannot constrain this turn.
+    monkeypatch.setattr(publication, 'cleanup_generations',
+                        partial(publication.cleanup_generations, row_limit=1))
+    monkeypatch.setattr(publication, 'cleanup_pools',
+                        partial(publication.cleanup_pools, row_limit=1))
     before = list(map(tuple, store.conn.execute('SELECT * FROM recommendation_candidates WHERE pool_id<>?', (abandoned,))))
     assert store.recommendations.cleanup()
     assert store.conn.execute('SELECT status FROM recommendation_generations WHERE id=?',
@@ -194,7 +200,10 @@ def test_sql_turns_checkpoint_committed_prefixes_after_releasing_the_serving_loc
     publish(store, plan(store))
     publish(store, plan(store, 'second'))
     abandoned = orphan(store)
-    monkeypatch.setattr(publication, 'CLEANUP_ROWS', 1)
+    monkeypatch.setattr(publication, 'cleanup_generations',
+                        partial(publication.cleanup_generations, row_limit=1))
+    monkeypatch.setattr(publication, 'cleanup_pools',
+                        partial(publication.cleanup_pools, row_limit=1))
     checkpoints = []
 
     def checkpoint(path):

@@ -18,7 +18,7 @@ def test_actual_action_history_and_unknown_deletions_survive_upgrade(request,tmp
     source = Path(option).resolve(strict=True)
     target = tmp_path/'action-work.db'
     custody = {}
-    copy_readonly_library(source,target,monkeypatch,custody)
+    target = copy_readonly_library(source,target,monkeypatch,custody)
     assert custody['source_version']==95, 'Supply a genuine schema-95 historical donor'
     store = Store(target)
     try:

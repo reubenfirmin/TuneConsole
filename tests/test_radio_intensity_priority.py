@@ -1,14 +1,11 @@
 """Requested intensity can change a stream's style without widening genre intent."""
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
-from tests.musical_support import prepare_profiles, prepare_vibes
-from tests.prepared_fixture_support import prepared_template
-from tests.test_radio_catalog import catalog_track
-from tests.test_radio_genres import genre_pools, seed_genre_pools
-from tests.radio_session_support import poc, play
-from tests.recommendation_support import publish_bundles
+from tests.radio_candidate_support import intensity_inputs
+from tests.radio_session_support import memory_checkpoint_files, radio_controller, play
 from yt_playlist.core import catalog
 from yt_playlist.rec import embedding_vectors, musical_character, radio_tuning
 from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, RadioCandidates
@@ -21,53 +18,67 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 
-@pytest.fixture(scope='module')
-def intensity_template(_pristine_current_schema):
-    with prepared_template(_pristine_current_schema, seed_distant_chill) as template:
-        yield template
-
-
 @pytest.fixture
-def store(store, request):
-    # poc and other consumers add their own state after this private restore.
-    if 'distant_chill' in request.fixturenames:
-        store._fixture_intensity = request.getfixturevalue('intensity_template').restore(store)
-    return store
-
-
-@pytest.fixture
-def distant_chill(store):
-    return store._fixture_intensity
-
-
-@pytest.fixture
-def intensity_store(file_backed_store, intensity_template):
-    # The complete direction calculation opens many bounded readers. Give it
-    # real WAL readers instead of repeatedly copying an in-memory database.
-    file_backed_store._fixture_intensity = intensity_template.restore(file_backed_store)
-    return file_backed_store
-
-
-def seed_distant_chill(store):
-    pools = seed_genre_pools(store, publish=False)
-    # A complete ordinary pool of unsuitable music hides the useful tail.
-    for i in range(110):
-        pools['9'].append(catalog_track(store, f'tail-{i}', label='Ambient')[0])
-    quiet = pools['9'][-110:]
-    quiet_keys = {track['key'] for track in quiet}
-    tracks = [track for rows in pools.values() for track in rows]
-    entries = store.tracks.track_ids_for_videos([track['video_id'] for track in tracks])
+def intensity_controller(store, intensity_inputs, monkeypatch, memory_checkpoint_files):
+    # Controller/persistence/HTTP behavior uses a real small database. Prepared
+    # recommendation inputs are controlled below RadioCandidates, as above.
+    # Four six-song directions need 24 quiet alternatives. The separate refill
+    # contract above owns exhausting more than a complete 96-song lookahead.
+    intensity_inputs.pools['9'][:] = intensity_inputs.pools['9'][:12 + 24]
+    # Two loud Electronic styles leave 24 alternatives after initial playback;
+    # the quiet Ambient style distinguishes retuning across the genre boundary.
+    # Neighbour policy has its own nine-style cases above.
+    for mode in list(intensity_inputs.pools):
+        if mode not in {'1', '2', '9'}:
+            del intensity_inputs.pools[mode]
+            del intensity_inputs.modes[mode]
+    tracks = [track for rows in intensity_inputs.pools.values() for track in rows]
     with store.conn:
-        for track in tracks:
-            tid = entries[track['video_id']]
-            catalog.choose_field(store.conn, tid, 'energy', .04 if track['key'] in quiet_keys else .96)
-    bundles = {mid: {'wheelhouse': rows[:12]} for mid, rows in pools.items()}
-    bundles['all'] = {'wheelhouse': [t for rows in pools.values() for t in rows]}
-    bundles['_radio'] = {'generation': None, 'space': '',
-                         'members': {mid: [t['key'] for t in rows] for mid, rows in pools.items()}}
-    prepare_profiles(store)
-    publish_bundles(store, bundles, vibes=True)
-    return pools, quiet
+        store.conn.executemany('INSERT INTO recordings(id,identity_key,title,artist,unresolved_genre) VALUES (?,?,?,?,?)',
+            [(i, t['key'], t['title'], t['artist'], t['genre']) for i, t in enumerate(tracks, 1)])
+        store.conn.executemany('INSERT INTO youtube_items(video_id,recording_id,title,artist) VALUES (?,?,?,?)',
+            [(t['video_id'], i, t['title'], t['artist']) for i, t in enumerate(tracks, 1)])
+        store.conn.executemany('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
+            [(i, i, t['video_id']) for i, t in enumerate(tracks, 1)])
+        store.conn.executemany("INSERT INTO library_memberships VALUES (?,'observed',1)",
+            [(i,) for i in range(1, len(tracks) + 1)])
+    with radio_controller(monkeypatch, store, tracks) as state:
+        entries = {t['video_id']: i for i, t in enumerate(tracks, 1)}
+
+        def known_track(conn, video, *args, **kwargs):
+            assert conn is store.conn
+            return entries[video]
+
+        # Metadata ingestion is below these controller checks; its real atomic
+        # publication contracts are covered in repos/test_confirmed_playlist.py.
+        monkeypatch.setattr(catalog, 'upsert', Mock(spec=catalog.upsert, side_effect=known_track))
+
+        def candidates(_store, *args, **kwargs):
+            assert _store is store
+            result = RadioCandidates(intensity_inputs.store, *args, **kwargs)
+            # Candidate scoring is the lower-layer policy tested above. These
+            # controller checks consume controlled, measured candidate results
+            # and keep real direction composition, playback and persistence.
+            if result.tuning['energy'] == 0 and result.tuning['theme'] != 1:
+                offered = intensity_inputs.pools['9'][12:]
+            else:
+                offered = [track for track in tracks
+                           if track['genre'] == 'Electronic']
+
+            def next_track(history, *, excluded=(), **kwargs):
+                used = {track['video_id'] for track in history} | set(excluded)
+                track = next((track for track in offered if track['video_id'] not in used), None)
+                if track is not None:
+                    result.retain([track])
+                return track
+
+            result.next_track = Mock(spec=RadioCandidates.next_track, side_effect=next_track)
+            result.direction_anchor = Mock(spec=RadioCandidates.direction_anchor,
+                side_effect=lambda history, anchors, **kwargs: next_track(history + anchors, **kwargs))
+            return result
+
+        monkeypatch.setattr(radio_session, 'RadioCandidates', candidates)
+        yield state
 
 
 def candidate(store, **tuning):
@@ -75,9 +86,9 @@ def candidate(store, **tuning):
 
 
 @pytest.mark.parametrize('theme', [0, .5, 1])
-def test_intensity_escapes_styles_within_the_genre_constraint_and_relabels_each_stream(intensity_store, monkeypatch, request, theme):
-    store = intensity_store
-    pools, quiet = store._fixture_intensity
+def test_intensity_escapes_styles_within_the_genre_constraint_and_relabels_each_stream(intensity_inputs, monkeypatch, request, theme):
+    store = intensity_inputs.store
+    pools, quiet = intensity_inputs.pools, intensity_inputs.quiet
     assert len(quiet) == 110 > CLUSTER_POOL_LIMIT
     seed = pools['1'][0]
     c = candidate(store, theme=theme, comfort=1)
@@ -110,9 +121,9 @@ def test_intensity_escapes_styles_within_the_genre_constraint_and_relabels_each_
     assert max(reads) <= CLUSTER_POOL_LIMIT
 
 
-def test_intensity_refills_the_suitable_style_beyond_one_lookahead(intensity_store, request):
-    store = intensity_store
-    pools, quiet = store._fixture_intensity
+def test_intensity_refills_the_suitable_style_beyond_one_lookahead(intensity_inputs, request):
+    store = intensity_inputs.store
+    pools, quiet = intensity_inputs.pools, intensity_inputs.quiet
     c, history = candidate(store, theme=.5), [pools['1'][0]]
     request.addfinalizer(c.close)
     for _ in quiet:
@@ -120,43 +131,49 @@ def test_intensity_refills_the_suitable_style_beyond_one_lookahead(intensity_sto
         assert track and musical_character.intensity(track) == .04
         history.append(track)
     assert {t['key'] for t in history[1:]} == {t['key'] for t in quiet}
+    full_reads = [used for mid, limit, used in intensity_inputs.reads
+                  if mid == '9' and limit == CLUSTER_POOL_LIMIT]
+    assert len(full_reads) >= 2
+    assert max(len(used) for used in full_reads) > CLUSTER_POOL_LIMIT
 
 
-def test_equally_suitable_current_style_is_kept_and_midpoint_still_pins(store, distant_chill):
-    pools, quiet = distant_chill
+def test_equally_suitable_current_style_is_kept_and_midpoint_still_pins(intensity_inputs, request):
+    store = intensity_inputs.store
+    pools = intensity_inputs.pools
     seed = pools['1'][0]
     neutral = candidate(store, energy=.5)
+    request.addfinalizer(neutral.close)
     assert neutral.cluster_for(neutral.next_track([seed])) == '1'
     local = pools['1'][1]
-    tid = store.tracks.track_ids_for_videos([local['video_id']])[local['video_id']]
-    with store.conn:
-        catalog.choose_field(store.conn, tid, 'energy', .04)
-    prepare_vibes(store)
+    intensity_inputs.profiles[local['key']]['dimensions']['intensity']['value'] = .04
     c = candidate(store, theme=.5)
+    request.addfinalizer(c.close)
     assert c.next_track([seed])['key'] == local['key']
     # Once the current style has no remaining fit, only that stream changes.
     assert c.cluster_for(c.next_track([seed, local], target=seed)) == '9'
 
 
-def test_explicit_genre_mute_cannot_be_escaped_for_intensity(store, distant_chill):
-    pools, quiet = distant_chill
+def test_explicit_genre_mute_cannot_be_escaped_for_intensity(intensity_inputs, request):
+    store = intensity_inputs.store
+    pools, quiet = intensity_inputs.pools, intensity_inputs.quiet
     c = candidate(store)
-    store.rec_model.set_weight('genre:ambient', 0, lo=0, now=1000)
+    request.addfinalizer(c.close)
+    intensity_inputs.weights['genre:ambient'] = 0
     pick = c.next_track([pools['1'][0]])
     assert pick and pick['genre'] != 'Ambient'
     assert not c._allowed(quiet[0])
 
 
-def test_unindexed_fully_themed_genre_pin_allows_style_switch_inside_genre(store, genre_pools):
-    pools = genre_pools
+def test_unindexed_fully_themed_genre_pin_allows_style_switch_inside_genre(intensity_inputs, request):
+    store, pools = intensity_inputs.store, intensity_inputs.pools
+    intensity_inputs.indexed = False
     for mid, rows in pools.items():
         for track in rows:
-            tid = store.tracks.track_ids_for_videos([track['video_id']])[track['video_id']]
-            with store.conn:
-                catalog.choose_field(store.conn, tid, 'energy', .04 if mid in ('5', '9') else .96)
+            intensity_inputs.profiles[track['key']]['dimensions']['intensity']['value'] = (
+                .04 if mid in ('5', '9') else .96)
     # Style 9 is also quiet, but its Ambient genre is outside this pinned request.
-    prepare_vibes(store)
     c = candidate(store)
+    request.addfinalizer(c.close)
     pick = c.next_track([pools['1'][0]])
     assert pick['genre'] == 'Electronic'
     assert c.cluster_for(pick) == '5'
@@ -164,10 +181,12 @@ def test_unindexed_fully_themed_genre_pin_allows_style_switch_inside_genre(store
 
 @pytest.mark.parametrize('energy', [0, .5, 1])
 @pytest.mark.parametrize('path', ['next', 'alternative', 'continuation'])
-def test_indexed_fully_themed_pins_genre_across_all_selection_paths(store, distant_chill, energy, path):
-    pools, quiet = distant_chill
+def test_indexed_fully_themed_pins_genre_across_all_selection_paths(intensity_inputs, request, energy, path):
+    store = intensity_inputs.store
+    pools, quiet = intensity_inputs.pools, intensity_inputs.quiet
     seed = pools['1'][0]
     c = candidate(store, energy=energy)
+    request.addfinalizer(c.close)
     assert c.cluster_members
     if path == 'next':
         tracks = [c.next_track([seed], target=quiet[0], current=seed)]
@@ -182,24 +201,24 @@ def test_indexed_fully_themed_pins_genre_across_all_selection_paths(store, dista
     assert all(not RadioPolicy.genre_mismatch(view, history, track) for track in tracks)
 
 
-def test_indexed_genre_pin_follows_playback_instead_of_an_old_style_anchor(store, distant_chill):
-    pools, quiet = distant_chill
+def test_indexed_genre_pin_follows_playback_instead_of_an_old_style_anchor(intensity_inputs, request):
+    store = intensity_inputs.store
+    pools, quiet = intensity_inputs.pools, intensity_inputs.quiet
     seed, playing = pools['1'][0], pools['7'][0]
     c = candidate(store, energy=.5)
+    request.addfinalizer(c.close)
     tracks = [c.next_track([seed, playing, quiet[0]], target=seed, current=playing),
               c.direction_anchor([seed, playing], [seed])]
     tracks += RadioDirections(c, seed).continue_sequence([seed, playing], [quiet[0]], seed, ())
     assert tracks and all(track and track['genre'] == playing['genre'] for track in tracks)
 
 
-def test_indexed_intensity_can_switch_styles_inside_the_pinned_genre(store, distant_chill):
-    pools, _quiet = distant_chill
+def test_indexed_intensity_can_switch_styles_inside_the_pinned_genre(intensity_inputs, request):
+    store, pools = intensity_inputs.store, intensity_inputs.pools
     for track in pools['5']:
-        tid = store.tracks.track_ids_for_videos([track['video_id']])[track['video_id']]
-        with store.conn:
-            catalog.choose_field(store.conn, tid, 'energy', .04)
-    prepare_vibes(store)
+        intensity_inputs.profiles[track['key']]['dimensions']['intensity']['value'] = .04
     c = candidate(store)
+    request.addfinalizer(c.close)
     seed = pools['1'][0]
     pick = c.next_track([seed], current=seed)
     assert pick['genre'] == seed['genre']
@@ -208,10 +227,11 @@ def test_indexed_intensity_can_switch_styles_inside_the_pinned_genre(store, dist
 
 
 @pytest.mark.parametrize('energy', [0, .5, 1])
-def test_indexed_genre_pin_never_spills_on_exhaustion_or_unknown_genre(store, distant_chill, energy):
-    pools, _quiet = distant_chill
+def test_indexed_genre_pin_never_spills_on_exhaustion_or_unknown_genre(intensity_inputs, request, energy):
+    store, pools = intensity_inputs.store, intensity_inputs.pools
     seed = pools['1'][0]
     c = candidate(store, energy=energy)
+    request.addfinalizer(c.close)
     excluded = {track['video_id'] for rows in pools.values() for track in rows if track['genre'] == seed['genre']}
     assert c.next_track([seed], excluded=excluded) is None
     assert c.direction_anchor([seed], [], excluded=excluded) is None
@@ -219,10 +239,9 @@ def test_indexed_genre_pin_never_spills_on_exhaustion_or_unknown_genre(store, di
 
 
 @pytest.mark.parametrize('theme', [.5, 1])
-def test_live_retune_respects_genre_without_restarting_current_playback(poc, distant_chill, monkeypatch, theme):
-    controller, remote, frames, _, _ = poc
-    pools, quiet = distant_chill
-    monkeypatch.setattr(radio_session, 'RadioCandidates', RadioCandidates)
+def test_live_retune_respects_genre_without_restarting_current_playback(intensity_controller, intensity_inputs, theme):
+    controller, remote, frames, _, _ = intensity_controller
+    pools = intensity_inputs.pools
     assert controller.start(pools['1'][0]['video_id'])['ok']
     play(controller, remote.ids[0])
     playlist, before_frames = controller.session.playlist, list(frames)
@@ -249,10 +268,9 @@ def test_live_retune_respects_genre_without_restarting_current_playback(poc, dis
 
 
 @pytest.mark.parametrize('restored', [False, True])
-def test_real_tuning_route_replans_measured_candidates_and_persists_controls(poc, distant_chill, monkeypatch, restored):
-    controller, remote, frames, *_ = poc
-    pools, _ = distant_chill
-    monkeypatch.setattr(radio_session, 'RadioCandidates', RadioCandidates)
+def test_real_tuning_route_replans_measured_candidates_and_persists_controls(intensity_controller, intensity_inputs, monkeypatch, restored):
+    controller, remote, frames, *_ = intensity_controller
+    pools = intensity_inputs.pools
     # Controlled earned access, with the production access guard and route.
     controller.ctx.store.rec_proposals.put_proposals(
         'listening_choices', {'home_format': {'vibe_episodes': 1}}, 1234)

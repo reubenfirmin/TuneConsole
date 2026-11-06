@@ -1,12 +1,10 @@
 import sqlite3
-from functools import wraps
-import time
 
 import pytest
 
-from yt_playlist.core import artists, catalog, db_handles, fao, metadata_deliveries
-from yt_playlist.core.store import Store
+from yt_playlist.core import catalog
 from yt_playlist.library.playlist_metadata import content_hash
+from yt_playlist.util.matching import identity_key
 
 
 def _track(i, **extra):
@@ -25,38 +23,38 @@ def _videos(store, pid):
         "SELECT video_id FROM playlist_items WHERE playlist_id=? ORDER BY position", (pid,))]
 
 
+def _existing_prefix(store, pid, tracks):
+    """Build the large precondition directly; the small case tests initial publication.
+
+    Catalog insertion and multi-batch rollback have separate real owners below.
+    This case measures appending one confirmed upload to an existing sequence.
+    """
+    rows = [(index + 1, identity_key(track['title'], track['artist']), track)
+            for index, track in enumerate(tracks)]
+    with store.conn:
+        store.conn.executemany('INSERT INTO recordings(id,identity_key,title,artist) VALUES (?,?,?,?)',
+            [(rid, key, track['title'], track['artist']) for rid, key, track in rows])
+        store.conn.executemany('INSERT INTO youtube_items(video_id,recording_id,title,artist,album) '
+            'VALUES (?,?,?,?,?)', [(track['video_id'], rid, track['title'], track['artist'], track['album'])
+                                  for rid, _, track in rows])
+        store.conn.executemany('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
+            [(rid, rid, track['video_id']) for rid, _, track in rows])
+        store.conn.executemany("INSERT INTO library_memberships VALUES (?,'observed',2)",
+            [(rid,) for rid, _, _ in rows])
+        store.conn.executemany('INSERT INTO playlist_items VALUES (?,?,?)',
+            [(pid, track['video_id'], index) for index, track in enumerate(tracks)])
+        store.conn.execute('UPDATE playlists SET track_count=?,content_hash=?,last_seen=2 WHERE id=?',
+            (len(tracks), content_hash([key for _, key, _ in rows]), pid))
+
+
 @pytest.mark.parametrize("size", [8, 1024])
-def test_append_writes_only_new_catalog_and_membership(store, monkeypatch, size, record_property):
-    phase, costs = 'initial', {}
-
-    def timed(owner, attribute, name):
-        operation = getattr(owner, attribute)
-
-        @wraps(operation)
-        def call(*args, **kwargs):
-            wall, cpu = time.perf_counter(), time.thread_time()
-            try:
-                return operation(*args, **kwargs)
-            finally:
-                values = costs.setdefault((phase, name), [0, 0.0, 0.0])
-                values[0] += 1
-                values[1] += time.perf_counter() - wall
-                values[2] += time.thread_time() - cpu
-        monkeypatch.setattr(owner, attribute, call)
-
-    for owner, attribute, name in (
-            (catalog, 'upsert', 'catalog'), (artists, 'observe', 'artist_evidence'),
-            (metadata_deliveries, 'capture_state', 'metadata_delivery'),
-            (db_handles.Cursor, '_run', 'sql_cursor'),
-            (db_handles.Connection, 'commit', 'commit'), (fao, '_write', 'artifact_write')):
-        timed(owner, attribute, name)
+def test_append_writes_only_new_catalog_and_membership(store, monkeypatch, size):
     pid = _playlist(store)
     tracks = [_track(i) for i in range(size)]
-    started = time.perf_counter()
-    store.playlists.publish_confirmed_tracks(pid, "Radio", tracks, 2)
-    record_property('initial_publication_seconds', time.perf_counter() - started)
-    assert costs[('initial', 'catalog')][0] == size
-    phase = 'append'
+    if size == 8:
+        store.playlists.publish_confirmed_tracks(pid, "Radio", tracks, 2)
+    else:
+        _existing_prefix(store, pid, tracks)
     with store.conn:
         store.conn.execute("CREATE TEMP TABLE publication_writes(kind TEXT)")
         for operation in ["INSERT", "DELETE", "UPDATE"]:
@@ -69,9 +67,7 @@ def test_append_writes_only_new_catalog_and_membership(store, monkeypatch, size,
     monkeypatch.setattr(catalog, "upsert", observed)
     expected = [t["video_id"] for t in tracks]
     tracks.append(_track(size))
-    started = time.perf_counter()
     store.playlists.publish_confirmed_tracks(pid, "Radio", tracks, 3, expected_prefix=expected)
-    record_property('append_publication_seconds', time.perf_counter() - started)
     assert calls == [f"v{size}"]
     assert [r[0] for r in store.conn.execute("SELECT kind FROM publication_writes")] == ["INSERT"]
     assert _videos(store, pid) == [t["video_id"] for t in tracks]
@@ -79,11 +75,6 @@ def test_append_writes_only_new_catalog_and_membership(store, monkeypatch, size,
     assert playlist.track_count == size + 1
     assert playlist.content_hash == content_hash(store.playlists.get_playlist_track_keys(pid))
     assert store.playlists.is_quarantined_playlist("RADIO")
-    # Inclusive phase timers overlap. SQL counters are diagnostic cursor calls.
-    for (phase_name, name), (count, wall, cpu) in sorted(costs.items()):
-        record_property(f'{phase_name}_{name}_calls', count)
-        record_property(f'{phase_name}_{name}_wall_s', wall)
-        record_property(f'{phase_name}_{name}_thread_cpu_s', cpu)
 
 
 @pytest.mark.parametrize("incremental", [False, True])
@@ -105,33 +96,29 @@ def test_confirmed_publication_rolls_back_all_changes(store, monkeypatch, increm
     assert not store.conn.execute("SELECT 1 FROM youtube_items WHERE video_id='v1'").fetchone()
 
 
-def test_other_connection_sees_only_complete_publication(tmp_path, monkeypatch):
-    path = tmp_path / 'publication.db'
-    store = Store(path)
-    try:
-        store.init_schema()
-        pid = _playlist(store)
-        tracks = [_track(0)]
-        store.playlists.publish_confirmed_tracks(pid, "Radio", tracks, 2)
-        original = catalog.upsert
-        with sqlite3.connect(path) as reader:
-            def observed(conn, video, *args, **kwargs):
-                result = original(conn, video, *args, **kwargs)
-                assert reader.execute("SELECT title,track_count FROM playlists WHERE id=?",
-                                      (pid,)).fetchone() == ("Radio", 1)
-                assert reader.execute("SELECT video_id FROM playlist_items WHERE playlist_id=? ORDER BY position",
-                                      (pid,)).fetchall() == [("v0",)]
-                assert reader.execute("SELECT 1 FROM youtube_items WHERE video_id='v1'").fetchone() is None
-                return result
-            monkeypatch.setattr(catalog, "upsert", observed)
-            store.playlists.publish_confirmed_tracks(pid, "Changed", [*tracks, _track(1)], 3,
-                                                    expected_prefix=["v0"])
+def test_other_connection_sees_only_complete_publication(file_backed_store, monkeypatch):
+    store = file_backed_store
+    path = store._db_path
+    pid = _playlist(store)
+    tracks = [_track(0)]
+    store.playlists.publish_confirmed_tracks(pid, "Radio", tracks, 2)
+    original = catalog.upsert
+    with sqlite3.connect(path) as reader:
+        def observed(conn, video, *args, **kwargs):
+            result = original(conn, video, *args, **kwargs)
             assert reader.execute("SELECT title,track_count FROM playlists WHERE id=?",
-                                  (pid,)).fetchone() == ("Changed", 2)
+                                  (pid,)).fetchone() == ("Radio", 1)
             assert reader.execute("SELECT video_id FROM playlist_items WHERE playlist_id=? ORDER BY position",
-                                  (pid,)).fetchall() == [("v0",), ("v1",)]
-    finally:
-        store.conn.close()
+                                  (pid,)).fetchall() == [("v0",)]
+            assert reader.execute("SELECT 1 FROM youtube_items WHERE video_id='v1'").fetchone() is None
+            return result
+        monkeypatch.setattr(catalog, "upsert", observed)
+        store.playlists.publish_confirmed_tracks(pid, "Changed", [*tracks, _track(1)], 3,
+                                                expected_prefix=["v0"])
+        assert reader.execute("SELECT title,track_count FROM playlists WHERE id=?",
+                              (pid,)).fetchone() == ("Changed", 2)
+        assert reader.execute("SELECT video_id FROM playlist_items WHERE playlist_id=? ORDER BY position",
+                              (pid,)).fetchall() == [("v0",), ("v1",)]
 
 
 def test_stale_prefix_and_metadata_changes_reconcile_fully(store):
