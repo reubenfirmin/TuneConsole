@@ -768,7 +768,9 @@ def test_first_new_score_and_reopened_home_do_not_require_joint_fit(
         reopened.conn.close()
 
 
-def test_continuing_backlog_completes_a_model_cycle_across_worker_restart(file_backed_store, monkeypatch):
+@pytest.mark.parametrize('last_deferred', [False, True])
+def test_continuing_backlog_completes_a_model_cycle_across_worker_restart(
+        file_backed_store, monkeypatch, last_deferred):
     from yt_playlist.core import vibe_model_files
     store = file_backed_store
     monkeypatch.setattr(vibe_joint_preparation, 'QUALIFICATIONS', {})
@@ -788,6 +790,9 @@ def test_continuing_backlog_completes_a_model_cycle_across_worker_restart(file_b
         return True
     def fit(rows, vibe, **kwargs):
         fits_seen.append(vibe)
+        if last_deferred and vibe == vibe_joint_preparation.VIBES[-1]:
+            from yt_playlist.core.activity import WorkBudgetExceeded
+            raise WorkBudgetExceeded('Controlled final-channel deferral during a continuing backlog')
         return original_fit(rows, vibe, **kwargs)
     monkeypatch.setattr(musical_preparation, 'source_step', source_step)
     monkeypatch.setattr(joint, 'fit', fit)
@@ -820,9 +825,31 @@ def test_continuing_backlog_completes_a_model_cycle_across_worker_restart(file_b
     assert len(source_turns) == source_before
     assert fits_seen == list(vibe_joint_preparation.VIBES)
     assert not vibe_joint_preparation.active(store)
-    assert all(vibe_joint_preparation.state(store, vibe)['outcome'] == 'ready'
+    assert all(vibe_joint_preparation.state(store, vibe)['outcome'] ==
+               ('deferred' if last_deferred and vibe == vibe_joint_preparation.VIBES[-1] else 'ready')
                for vibe in vibe_joint_preparation.VIBES)
     assert store.vibe_predictions.pending() is not None
+    assert vibe_joint_preparation.scoring(store)
+    with monkeypatch.context() as expired:
+        expired.setattr(vibe_joint_preparation.time, 'time',
+            lambda: max(vibe_joint_preparation.state(store, vibe)['attempted_at']
+                        for vibe in vibe_joint_preparation.VIBES) + len(vibe_joint_preparation.VIBES) * 10 + 1)
+        assert not vibe_joint_preparation.scoring(store)
+    # A restart after the last model publication must deliver an actual
+    # generation-linked score before returning to the continuing source stream.
+    worker.close()
+    worker = Preparation(store)
+    heads = [head for vibe in vibe_joint_preparation.VIBES
+             if (head := store.settings.get_setting(vibe_model_files.HEAD_PREFIX + vibe))]
+    for _ in range(40):
+        worker.capture(1000)
+        assert len(source_turns) == source_before
+        if store.vibe_predictions.has_joint_scores(heads):
+            break
+    else:
+        pytest.fail('Completed model cycle was invalidated before publishing any useful scores')
+    assert not vibe_joint_preparation.scoring(store)
+    worker.close()
     # New input revision during a backlog keeps the published heads and gives
     # upstream work a full cadence before starting another expensive cycle.
     heads = {v: store.settings.get_setting(vibe_model_files.HEAD_PREFIX + v)
@@ -838,6 +865,10 @@ def test_continuing_backlog_completes_a_model_cycle_across_worker_restart(file_b
                      for v in vibe_joint_preparation.VIBES}
     monkeypatch.setattr(vibe_joint_preparation.time, 'time', lambda: attempted + 61)
     assert vibe_joint_preparation.admitted(store, waiting=True)
+    with store.conn:
+        store.conn.execute('DELETE FROM recording_vibes WHERE prediction_id IS NOT NULL')
+    assert store.conn.execute('SELECT 1 FROM prediction_model_generations').fetchone()
+    assert not store.vibe_predictions.has_joint_scores([head for head in heads.values() if head])
 
 
 @pytest.mark.parametrize('interruption', ['close', 'stale', 'deadline', 'pause'])

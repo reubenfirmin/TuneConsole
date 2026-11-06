@@ -11,7 +11,6 @@ import pytest
 from yt_playlist.core import home_outputs, listening_outputs, recommendation_outputs
 from yt_playlist.core.migrations import current, migrate, registry, v090_listening_outputs, v091_home_outputs
 from yt_playlist.core.store import Store
-from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
 
 
 def test_actual_outputs_keep_exact_bytes_roots_paid_results_and_restart(request, tmp_path):
@@ -69,7 +68,7 @@ def test_actual_outputs_keep_exact_bytes_roots_paid_results_and_restart(request,
                 assert store.conn.execute('SELECT p.built_at FROM home_display_heads h '
                     'JOIN home_display_publications p ON p.id=h.publication_id WHERE h.surface=?', (surface,)).fetchone()[0] == at
             else:
-                assert ListeningAnalyticsRepo(store).encoded(surface) == raw
+                assert store.listening_analytics.encoded(surface) == raw
                 kind = 'listening_chunk' if surface.startswith('listening_chunk:') else surface
                 key = surface.removeprefix('listening_chunk:') if kind == 'listening_chunk' else ''
                 assert store.conn.execute('SELECT built_at FROM listening_output_files WHERE surface=? AND chunk_key=?',
@@ -86,7 +85,7 @@ def test_actual_outputs_keep_exact_bytes_roots_paid_results_and_restart(request,
             reopened.init_schema()
             for surface, (raw, _) in original.items():
                 actual = (home_outputs.encoded(reopened.conn, surface) if surface in home_outputs.SURFACES
-                          else ListeningAnalyticsRepo(reopened).encoded(surface))
+                          else reopened.listening_analytics.encoded(surface))
                 assert actual == raw
             assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchall()
         finally:

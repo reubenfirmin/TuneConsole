@@ -232,6 +232,19 @@ class VibePredictionsRepo(Repo):
                 or self.conn.execute('SELECT group_key,revision,cursor FROM rec_vibe_pending ORDER BY position LIMIT 1').fetchone())
 
     @synchronized
+    def has_joint_scores(self, generations):
+        """Indexed acknowledgement that a current model cycle reached scoring."""
+        if not generations:
+            return False
+        if len(generations) > 8:
+            raise ValueError('Joint score acknowledgement exceeds the channel bound')
+        marks = ','.join('?' for _ in generations)
+        return self.conn.execute('SELECT 1 FROM prediction_model_generations g '
+            'JOIN predictions p ON p.id=g.prediction_id '
+            'JOIN recording_vibes v ON v.recording_id=p.recording_id AND v.vibe=p.vibe AND v.prediction_id=p.id '
+            f'WHERE g.generation IN ({marks}) LIMIT 1', [bytes.fromhex(value) for value in generations]).fetchone() is not None
+
+    @synchronized
     def fanout(self, limit=32):
         worked, remaining = False, limit
         with self.conn:

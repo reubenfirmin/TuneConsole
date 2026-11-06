@@ -13,6 +13,7 @@ from yt_playlist.library import live_plays, ratings
 from yt_playlist.rec import listening_analytics as analytics, maintenance
 from yt_playlist.rec.choice_capture import CaptureQueue
 from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
+from yt_playlist.rec.listening_policy import PLAYER_KINDS
 from yt_playlist.web.app import create_app
 
 NOW = datetime(2026, 10, 24, 12, tzinfo=timezone.utc).timestamp()
@@ -46,7 +47,7 @@ def test_empty_generation_and_serving_never_calculate(store, monkeypatch):
         assert client.get('/charts/listening-data').status_code == 202
         payload = analytics.build(store, NOW)
         assert payload['rows'] == []
-        encoded = ListeningAnalyticsRepo(store).encoded()
+        encoded = store.listening_analytics.encoded()
         monkeypatch.setattr(analytics, 'calculate', lambda *a: pytest.fail('calculated on request'))
         response = client.get('/charts/listening-data')
         assert response.status_code == 200 and response.text == encoded
@@ -89,7 +90,7 @@ def test_discovery_baseline_excludes_the_initial_capture_and_survives_partitioni
     store.history.record_play_event(iid, 'a', 'va', NOW-86400)
     payload = analytics.build(store, NOW)
     assert payload['discovery_from'] == '2026-09-27'
-    assert ListeningAnalyticsRepo(store).prepared()['discovery_from'] == '2026-09-27'
+    assert store.listening_analytics.prepared()['discovery_from'] == '2026-09-27'
     assert payload['catalog']['baseline-0']['cohort']['first'] == '2026-08-25'
 
 
@@ -124,7 +125,7 @@ def test_publication_uses_compact_manifest_and_preserves_inflight_previous_chunk
     iid=seed(store)
     store.history.record_play_event(iid,'a','va',NOW-100)
     payload=analytics.build(store,NOW)
-    repo=ListeningAnalyticsRepo(store)
+    repo=store.listening_analytics
     manifest=repo.prepared()
     assert 'rows' not in manifest and 'catalog' not in manifest
     assert len(repo.encoded().encode())<32768
@@ -170,7 +171,7 @@ def test_worker_schedules_telemetry_separately_and_throttles_it(store, monkeypat
     iid = seed(store)
     worker = worker_for(store, monkeypatch, [NOW])
     tick(worker)
-    assert ListeningAnalyticsRepo(store).encoded()
+    assert store.listening_analytics.encoded()
     assert not worker.projections.active
     event(store, iid, 'tick', NOW-30, 0)
     worker.projections.poll()
@@ -193,7 +194,7 @@ def test_worker_schedules_telemetry_separately_and_throttles_it(store, monkeypat
 def test_conflicting_sources_keep_last_good_and_scans_require_private_reader(store, monkeypatch):
     iid = seed(store)
     assert analytics.build(store, NOW)
-    encoded = ListeningAnalyticsRepo(store).encoded()
+    encoded = store.listening_analytics.encoded()
     original = analytics.calculate
 
     def conflict(reader, now):
@@ -204,7 +205,7 @@ def test_conflicting_sources_keep_last_good_and_scans_require_private_reader(sto
 
     monkeypatch.setattr(analytics, 'calculate', conflict)
     assert analytics.build(store, NOW) is None
-    assert ListeningAnalyticsRepo(store).encoded() == encoded
+    assert store.listening_analytics.encoded() == encoded
     with pytest.raises(RuntimeError, match='private worker snapshot'):
         list(ListeningAnalyticsRepo(store).catalog_rows())
 
@@ -215,7 +216,7 @@ def test_snapshot_scans_are_bounded_and_cancellable(store, monkeypatch):
         store.conn.executemany('INSERT INTO player_events(account_id,kind,video_id,position,at) VALUES (?,?,?,?,?)',
             [(iid, 'tick', 'va', n, NOW-1000+n) for n in range(600)])
     with store.read_snapshot() as snapshot:
-        batches = list(ListeningAnalyticsRepo(snapshot.store).player(NOW))
+        batches = list(ListeningAnalyticsRepo(snapshot.store).player(NOW, kinds=PLAYER_KINDS))
         assert [len(batch) for batch in batches] == [256,256,88]
         repo = ListeningAnalyticsRepo(snapshot.store)
         connection, lock = repo.conn, repo._lock
@@ -252,7 +253,7 @@ def test_snapshot_scans_are_bounded_and_cancellable(store, monkeypatch):
         repo._lock = Guard()
         with monkeypatch.context() as instrument:
             instrument.setattr(snapshot.store, 'conn', CheckedConnection())
-            stream = repo.player(NOW)
+            stream = repo.player(NOW, kinds=PLAYER_KINDS)
             assert len(next(stream)) == 256
             assert not state['locked']  # Consumer calculation must run outside the guard.
 

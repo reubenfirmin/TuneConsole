@@ -1,5 +1,5 @@
 """Summary dependencies and configuration composed from database facts."""
-from yt_playlist.repos.listening_analytics import PLAYER_KINDS
+from yt_playlist.rec.listening_policy import PLAYER_KINDS
 
 CATALOG = {'recordings', 'youtube_items', 'catalog_entries', 'library_memberships',
            'entry_field_choices', 'metadata_choice_heads', 'metadata_runtime_choices',

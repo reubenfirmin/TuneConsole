@@ -38,6 +38,11 @@ def process_io():
             for key, value in (line.split(':', 1),)}
 
 
+def queues(store):
+    return {name: store.conn.execute('SELECT count(*) FROM ' + name).fetchone()[0]
+            for name in ('rec_content_pending', 'rec_musical_pending', 'rec_vibe_pending')}
+
+
 def storage(store):
     objects = dict(store.conn.execute('SELECT s.name,sum(d.pgsize) FROM sqlite_schema s '
         'JOIN dbstat d ON d.name=s.name WHERE s.tbl_name IN ('
@@ -110,6 +115,7 @@ def phase(store, keys, candidate, *, seconds, turns, request_idle):
     observations, progress = [], []
     first_cycle, first_score = None, None
     io_before = process_io()
+    queue_before = queues(store)
     def background():
         with store.priority.background(check_stopping):
             return background_work()
@@ -163,6 +169,7 @@ def phase(store, keys, candidate, *, seconds, turns, request_idle):
             'foreground': summary(samples), 'first_existing_useful_seconds': first_useful,
             'first_ready_model_cycle_seconds': first_cycle,
             'first_generation_score_seconds': first_score,
+            'queue_before': queue_before, 'queue_after': queues(store),
             'process_io_delta': {key: value - io_before[key] for key, value in process_io().items()},
             'observed_content': observations, 'guards': calls, 'background_turns': progress,
             'model_states': {vibe: preparation.state(store, vibe) for vibe in preparation.VIBES},
@@ -228,6 +235,8 @@ def run(output, *, seconds=180., turns=1000, request_idle=.1):
         models_ready = all(value.get('outcome') == 'ready' for value in candidate['model_states'].values())
         report['foreground_point_gate'] = (report['observed_foreground_limit']
             if baseline['outcome'] == candidate['outcome'] == 'complete' and models_ready else None)
+        report['candidate_cycle_delivered_scores'] = (candidate['first_ready_model_cycle_seconds'] is not None
+                                                     and candidate['first_generation_score_seconds'] is not None)
         report['peak_process_rss_bytes'] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
         report['seconds'] = time.monotonic() - started
         report['operational_acceptance'] = False

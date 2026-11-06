@@ -7,7 +7,8 @@ import threading
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import admitted_installed as installed
+from tests.core.test_predecessor_writes import installed as unadmitted_installed
 from tests.core.test_recipe_membership_preparation import seed, finish, head
 from yt_playlist.core import recipe_memberships
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -29,9 +30,9 @@ def ready(conn):
     pytest.fail('Recipe publication did not stage')
 
 
-@pytest.mark.parametrize('installed', [79,88], indirect=True)
-def test_selected_membership_matches_native_and_keeps_sources_and_pinned_reads(installed,tmp_path):
-    store, _ = installed
+@pytest.mark.parametrize('unadmitted_installed', [79,88], indirect=True)
+def test_selected_membership_matches_native_and_keeps_sources_and_pinned_reads(unadmitted_installed,tmp_path):
+    store, _ = unadmitted_installed
     original = seed(store,LISTS)
     with store.conn:
         store.conn.execute("UPDATE genre_catalog SET name='Canonical known' WHERE key='known'")
@@ -39,7 +40,8 @@ def test_selected_membership_matches_native_and_keeps_sources_and_pinned_reads(i
     history = list(map(tuple,store.conn.execute('SELECT * FROM schema_migrations')))
     upgraded = Store(tmp_path/'native-recipe.db')
     try:
-        with store.read_view() as pinned:
+        with store.read_snapshot() as snapshot:
+            pinned = snapshot.store
             assert pinned.road_trip.get_road_trip_recipe(1)['genres']==LISTS['genres']
             stage=ready(store.conn)
             publication.OWNER.publish(store.conn,stage=stage)

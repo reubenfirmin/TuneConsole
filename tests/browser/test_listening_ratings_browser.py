@@ -18,7 +18,6 @@ def listening_enabled(monkeypatch):
 
 @pytest.mark.parametrize('width', [1440])
 def test_confirmed_choices_show_songs_and_reconcilable_totals(store, live_app, page, width, tmp_path):
-    from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
 
     iid = store.accounts.get_master_account().id
     store.settings.set_setting('listening_timezone', 'UTC')
@@ -36,7 +35,7 @@ def test_confirmed_choices_show_songs_and_reconcilable_totals(store, live_app, p
         for offset, status in enumerate(statuses, start=1):
             ratings.record_confirmed(store, iid, video, status, at-(len(statuses)-offset)*100)
     listening_analytics.build(store, NOW)
-    story = ListeningAnalyticsRepo(store).prepared('listening_edition')['stories'][0]
+    story = store.listening_analytics.prepared('listening_edition')['stories'][0]
     assert story['family'] == 'rating_actions'
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
@@ -145,7 +144,6 @@ def test_current_genre_preferences_and_known_start_share_are_visible(store, live
 
 def test_qualified_reading_rotates_to_a_different_analysis_without_moving_the_current_page(store, page, monkeypatch, request):
     from yt_playlist.web import app as webapp
-    from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
 
     clock = [NOW]
     create = webapp.create_app
@@ -168,7 +166,7 @@ def test_qualified_reading_rotates_to_a_different_analysis_without_moving_the_cu
             seed_catalog_track(store, key, name+' New song '+str(i), name, video_id=key)
             store.history.record_play_event(1, key, key, NOW-(2+i%3)*86400-i*100)
     listening_analytics.build(store, NOW)
-    repo = ListeningAnalyticsRepo(store)
+    repo = store.listening_analytics
     first = repo.prepared('listening_edition')
     assert first['stories'][0]['family'] == 'deeper'
     assert len({s['family'] for s in first['stories']}) == len(first['stories'])
@@ -179,7 +177,7 @@ def test_qualified_reading_rotates_to_a_different_analysis_without_moving_the_cu
     for capture in captures:
         capture.run()
     with store.read_snapshot() as snapshot:
-        assert 'family:deeper' in ListeningAnalyticsRepo(snapshot.store).impressions()
+        assert 'family:deeper' in snapshot.store.listening_analytics.impressions()
     seed_catalog_track(store, 'rating', 'Other song', 'Other artist', video_id='rating')
     for i in range(90):
         at = NOW-(i%3)*86400-i*100
@@ -204,14 +202,13 @@ def test_sparse_rating_capture_keeps_four_useful_visible_analyses(store, live_ap
     from tests.rec.test_listening_editions import Repo
     from tests.rec.test_listening_ratings import mixed_evidence
     from yt_playlist.rec import listening_editions
-    from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
 
     payload = mixed_evidence()
     # Production partitions chronological rows. Keep every observation while
     # giving this assembled fixture the same ordering as the real calculator.
     payload['rows'].sort(key=lambda row: row[0])
     edition = listening_editions.prepare(payload, Repo(), NOW)
-    repo = ListeningAnalyticsRepo(store)
+    repo = store.listening_analytics
     chunks, manifest = listening_analytics.partition({**payload, 'schema': 2, 'built_at': NOW})
     from yt_playlist.core import listening_outputs
     if store._listening_files:

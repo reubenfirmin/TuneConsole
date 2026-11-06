@@ -6,7 +6,8 @@ import threading
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import admitted_installed as installed
+from tests.core.test_predecessor_writes import installed as unadmitted_installed
 from tests.core.test_discovery_owner_preparation import seed
 from tests.core.test_discovery_artist_publication import ready as artist_ready
 from yt_playlist.core import artists, collection_recovery
@@ -147,14 +148,15 @@ def test_origin_aliases_fold_and_keep_exact_contributions(installed):
     assert {json.loads(row['source_snapshot'])['source'] for row in retained} == {'artist_start:UC-first', 'artist_start:UC-second'}
 
 
-@pytest.mark.parametrize('installed', [79, 93], indirect=True)
-def test_selected_readers_use_one_generation_and_writes_reconcile_without_losing_visits(installed):
-    store, _ = installed
+@pytest.mark.parametrize('unadmitted_installed', [79, 93], indirect=True)
+def test_selected_readers_use_one_generation_and_writes_reconcile_without_losing_visits(unadmitted_installed):
+    store, _ = unadmitted_installed
     _, aid, _, _ = seed(store)
     other = Store(store._db_path)
     try:
         other.init_schema(defer_metadata=True)
-        with other.read_view() as pinned:
+        with other.read_snapshot() as snapshot:
+            pinned = snapshot.store
             assert pinned.discovery.get_discovered_artists()[0]['offered_count'] == 9
             owner, stage = ready(store.conn)
             owner.publish(store.conn, stage=stage)

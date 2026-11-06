@@ -224,26 +224,18 @@ def test_feedback_writer_prefix_has_private_sql_and_evidence(
 
 @pytest.mark.parametrize('installed', [79, 93, 107], indirect=True)
 def test_failed_feedback_sql_does_not_emit_response_and_retry_keeps_withdrawals_unique(installed, monkeypatch):
-    store, version = installed
+    store, _ = installed
     store.accounts.upsert_account('Main', 'main.json', None, True)
     choice_evidence.issue(store, 'albums', [{'id': 'release'}], 0, context={}, opportunity_id='offer')
     album_feedback.set_feedback(store, 'release', 'more', 1, 'offer')
     before = album_feedback_storage.original(store.conn)
     responses = store.rec_ledger.evidence().records('response')
     with monkeypatch.context() as patch:
-        if version < 96:
-            original = SettingsRepo.set_setting
-            def fail(repo, key, value):
-                original(repo, key, value)
-                if key == 'album_feedback':
-                    raise OSError('controlled feedback SQL failure')
-            patch.setattr(SettingsRepo, 'set_setting', fail)
-        else:
-            original = album_feedback_storage.replace
-            def fail(*args, **kwargs):
-                original(*args, **kwargs)
-                raise OSError('controlled feedback SQL failure')
-            patch.setattr(album_feedback_storage, 'replace', fail)
+        original = AlbumFeedbackRepo._save_intents
+        def fail(repo, intents):
+            original(repo, intents)
+            raise OSError('controlled feedback SQL failure')
+        patch.setattr(AlbumFeedbackRepo, '_save_intents', fail)
         with pytest.raises(OSError, match='controlled feedback SQL failure'):
             album_feedback.set_feedback(store, 'release', 'known', 2, 'offer')
     assert album_feedback_storage.original(store.conn) == before

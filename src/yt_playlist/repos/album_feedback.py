@@ -6,7 +6,7 @@ from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core.db_revisions import setting_reads
 from yt_playlist.core.db_writes import atomic_write, reserved_write
 from yt_playlist.core.published_documents import ALBUM_FEEDBACK
-from yt_playlist.repos.base import Repo, lookup_read, snapshot_read
+from yt_playlist.repos.base import Repo, lookup_read
 
 
 class AlbumFeedbackRepo(Repo):
@@ -21,7 +21,7 @@ class AlbumFeedbackRepo(Repo):
     def uses_rows(self):
         return album_feedback_storage.available(self.conn)
 
-    @snapshot_read
+    @lookup_read
     def original_facts(self):
         with setting_reads(self._store, ('album_feedback',)):
             if album_feedback_storage.available(self.conn):

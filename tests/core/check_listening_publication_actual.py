@@ -10,7 +10,6 @@ from yt_playlist.core import recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import listening_outputs as preparation, listening_publication as publication
 from yt_playlist.core.store import Store
-from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
 
 
 def fingerprint(conn, owner):
@@ -124,7 +123,7 @@ def check(actual_path, fixture_path, report_path):
         with second._lock:
             second.conn.set_authorizer(deny_source)
             try:
-                assert {surface:ListeningAnalyticsRepo(second).encoded(surface) for surface in documents} == documents
+                assert {surface:second.listening_analytics.encoded(surface) for surface in documents} == documents
                 assert {surface:second.rec_proposals._proposal_json(surface) for surface in documents} == documents
             finally:
                 second.conn.set_authorizer(None)
@@ -132,7 +131,7 @@ def check(actual_path, fixture_path, report_path):
         def after(self, connection, identity):
             result = verify(self, connection, identity)
             with second.conn:
-                ListeningAnalyticsRepo(second).publish('{"text":"Continuing edition"}', 200, 'listening_edition')
+                second.listening_analytics.publish('{"text":"Continuing edition"}', 200, 'listening_edition')
             return result
         type(publication.OWNER).verify = after
         try:
@@ -151,7 +150,7 @@ def check(actual_path, fixture_path, report_path):
         header = publication.OWNER.capture(store.conn, current.id, 'listening_analytics')
         captured = {owner:list(map(tuple, store.conn.execute('SELECT * FROM '+owner))) for owner in (preparation.HEAD,preparation.REFS)}
         Path(header['filename']).unlink()
-        assert ListeningAnalyticsRepo(second).encoded() is None
+        assert second.listening_analytics.encoded() is None
         started = time.monotonic()
         second.init_schema(defer_metadata=True)
         report['regular_admission_missing_file_seconds'] = time.monotonic()-started
@@ -160,7 +159,7 @@ def check(actual_path, fixture_path, report_path):
         publish('recovered-file', current)
         def write():
             with second.conn:
-                ListeningAnalyticsRepo(second).publish('{"text":"Continuing actual writer"}', 300, 'listening_edition')
+                second.listening_analytics.publish('{"text":"Continuing actual writer"}', 300, 'listening_edition')
         _, report['compatible_source_writer'] = timed(write)
         assert publication.OWNER.selected(store.conn) is None
         publish_file = files.publish

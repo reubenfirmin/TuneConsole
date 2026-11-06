@@ -7,7 +7,8 @@ import threading
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import admitted_installed as installed
+from tests.core.test_predecessor_writes import installed as unadmitted_installed
 from tests.core.test_discovery_owner_preparation import seed
 from yt_playlist.core import collection_recovery, policy_documents
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -33,9 +34,9 @@ def ready(conn, size=8):
     pytest.fail('Discovery explanation fixture did not stage')
 
 
-@pytest.mark.parametrize('installed', [79, 85, 86, 100], indirect=True)
-def test_selected_files_keep_installed_identity_counters_genres_and_preopened_readers(installed):
-    store, _ = installed
+@pytest.mark.parametrize('unadmitted_installed', [79, 85, 86, 100], indirect=True)
+def test_selected_files_keep_installed_identity_counters_genres_and_preopened_readers(unadmitted_installed):
+    store, _ = unadmitted_installed
     _, aid, _, _ = seed(store)
     with store.conn:
         if publication.owner(store.conn).name == 'artists_legacy':
@@ -48,7 +49,8 @@ def test_selected_files_keep_installed_identity_counters_genres_and_preopened_re
     other = Store(store._db_path)
     try:
         other.init_schema(defer_metadata=True)
-        with other.read_view() as pinned:
+        with other.read_snapshot() as snapshot:
+            pinned = snapshot.store
             assert pinned.discovery.get_discovered_artists() == expected
             owner, stage = ready(store.conn)
             owner.publish(store.conn, stage=stage)

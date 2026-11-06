@@ -48,12 +48,15 @@ def _merge(store, account, memberships, client, now):
 @pytest.mark.parametrize('already_converted',[False,True],ids=['pre98','converted98'])
 @pytest.mark.parametrize('remote_present',[True,False],ids=['present','absent'])
 def test_imported_pending_requires_readback_before_keeper_writes(tmp_path,monkeypatch,
-                                                               already_converted,remote_present):
+                                                               already_converted,remote_present,
+                                                               _pristine_installed_schema):
     monkeypatch.setenv('YT_PLAYLIST_HOME',str(tmp_path/'home'))
     path = tmp_path/'actions.db'
     store = Store(path)
     try:
-        migrate(store.conn,registry=registry.MIGRATIONS[:97])
+        # Replay the empty historical prefix once; every case still publishes
+        # its own real backup, interrupted intent and optional buggy cutover.
+        _pristine_installed_schema(97).backup(store.conn)
         store._bind_repositories()
         account = legacy_account(store)
         memberships = [legacy_playlist(store,account,remote) for remote in ('SOURCE','KEEP')]
@@ -162,12 +165,13 @@ def test_imported_pending_requires_readback_before_keeper_writes(tmp_path,monkey
         store.conn.close()
 
 
-def test_current_unsent_intent_survives_repair_and_admits_keeper_write(tmp_path,monkeypatch):
+def test_current_unsent_intent_survives_repair_and_admits_keeper_write(tmp_path,monkeypatch,
+                                                                  _pristine_installed_schema):
     monkeypatch.setenv('YT_PLAYLIST_HOME',str(tmp_path/'home'))
     path = tmp_path/'unsent.db'
     store = Store(path)
     try:
-        migrate(store.conn,registry=registry.MIGRATIONS[:106])
+        _pristine_installed_schema(106).backup(store.conn)
         store._bind_repositories()
         account = store.accounts.upsert_account('Owner','owner.json',None,True)
         memberships = [store.playlists.upsert_playlist(account,remote,remote,2,'',1)

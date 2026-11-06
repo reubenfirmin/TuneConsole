@@ -10,6 +10,35 @@ from yt_playlist.core.migrations import runner
 from yt_playlist.core.store import Store
 
 
+@pytest.fixture
+def admitted_installed(request, tmp_path, _admitted_installed_schema):
+    """Private publication input after real admission, without repeating startup.
+
+    The installed fixture below retains reopen/admission ownership. Publication
+    consumers retain their actual SQL, files, revision guards and final format
+    validation; no mutable Store or file is shared between cases.
+    """
+    version = request.param
+    template, revisions = _admitted_installed_schema(version)
+    store = Store(tmp_path / 'installed.db')
+    try:
+        template.restore(store)
+        for name in ('_schema_compatibility', '_rebuild_source_version', '_schema_recovery_pending'):
+            setattr(store, name, getattr(template.source, name))
+        assert store._rebuild_source_version is None
+        store._bind_repositories()
+        assert store.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal'
+        store._snapshot_revisions = revisions.bind_revisions(store.conn)
+        history = [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')]
+        yield store, version
+        assert [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')] == history
+        with closing(sqlite3.connect(store._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
+            reader.row_factory = sqlite3.Row
+            runner.validate_version(reader, version)
+    finally:
+        store.conn.close()
+
+
 @pytest.fixture(params=[79, 93, 102, 107])
 def installed(request, tmp_path, _pristine_installed_schema):
     path = tmp_path / 'installed.db'

@@ -54,6 +54,29 @@ def active(store):
             and time.time() < attempted + len(VIBES) * 10)
 
 
+def scoring(store):
+    """Give a completed model cycle bounded time to publish useful scores.
+
+    Current generation references are the durable acknowledgement, so restarting
+    the worker between the last fit and score publication cannot lose this turn.
+    A corpus with no eligible targets eventually returns to source work.
+    """
+    if not qualified():
+        return False
+    states = [state(store, vibe) for vibe in VIBES]
+    if (not all(current(store, value) and value.get('outcome') in ('ready', 'empty', 'deferred') for value in states)
+            or time.time() >= max(value.get('attempted_at', 0) for value in states) + len(VIBES) * 10):
+        return False
+    generations = [store.settings.get_setting(files.HEAD_PREFIX + vibe)
+                   for vibe, value in zip(VIBES, states) if value['outcome'] == 'ready']
+    try:
+        for generation in generations:
+            files.relative(generation)
+    except ValueError:
+        return False  # Ordinary recording preparation owns missing-head repair.
+    return bool(generations) and not store.vibe_predictions.has_joint_scores(generations)
+
+
 def admitted(store, *, waiting):
     if not due(store):
         return False

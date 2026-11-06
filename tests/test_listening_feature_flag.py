@@ -6,7 +6,6 @@ import pytest
 
 from yt_playlist.core.features import listening_charts_enabled
 from yt_playlist.rec import maintenance
-from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
 from yt_playlist.web.app import create_app
 
 
@@ -20,8 +19,8 @@ def test_flag_defaults_on_and_respects_explicit_values(monkeypatch, value, enabl
 
 def test_disabled_routes_assets_and_cached_tabs_are_hidden(store, monkeypatch):
     monkeypatch.setenv('YT_PLAYLIST_LISTENING_CHARTS','0')
-    ListeningAnalyticsRepo(store).publish(json.dumps({'available':True}), 1)
-    ListeningAnalyticsRepo(store).publish(json.dumps({'available':True,'stories':[]}),1,'listening_edition')
+    store.listening_analytics.publish(json.dumps({'available':True}), 1)
+    store.listening_analytics.publish(json.dumps({'available':True,'stories':[]}),1,'listening_edition')
     with TestClient(create_app(store, lambda: {}), base_url='http://127.0.0.1') as client:
         charts = client.get('/charts')
         assert charts.status_code == 200
@@ -41,7 +40,7 @@ def test_disabled_routes_assets_and_cached_tabs_are_hidden(store, monkeypatch):
 
 def test_enabled_analytics_is_the_last_chart_tab(store, monkeypatch):
     monkeypatch.setenv('YT_PLAYLIST_LISTENING_CHARTS', '1')
-    ListeningAnalyticsRepo(store).publish(json.dumps({'available':True}), 1)
+    store.listening_analytics.publish(json.dumps({'available':True}), 1)
     with TestClient(create_app(store, lambda: {})) as client:
         charts = client.get('/charts').text
         assert charts.index('Playlists</button>') < charts.index('Listening analytics</button>')
@@ -52,7 +51,7 @@ def test_enabled_analytics_is_the_last_chart_tab(store, monkeypatch):
 
 def test_editorial_is_the_charts_home_and_never_an_application_home_tab(store,monkeypatch):
     monkeypatch.setenv('YT_PLAYLIST_LISTENING_CHARTS','1')
-    ListeningAnalyticsRepo(store).publish(json.dumps({'available':True,'id':'edition','stories':[]}),1,'listening_edition')
+    store.listening_analytics.publish(json.dumps({'available':True,'id':'edition','stories':[]}),1,'listening_edition')
     with TestClient(create_app(store,lambda:{})) as client:
         charts=client.get('/charts').text
         assert "view: 'home'" in charts

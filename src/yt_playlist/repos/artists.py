@@ -1,17 +1,49 @@
 """Canonical artist references, ordered credits, and name lookup for display boundaries."""
+from contextlib import contextmanager
+
 from yt_playlist.core import artists
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read
 
 
 class ArtistRepo(Repo):
+    @contextmanager
+    def transaction(self):
+        with self._lock:
+            with self.conn.atomic(join=True):
+                # Reserve before selecting a missing identity shared by competing writers.
+                self.conn.execute('UPDATE artists SET name=name WHERE 0')
+                yield
+
     @synchronized
     def resolve(self, value):
         return artists.lookup(self.conn,value)
 
     @synchronized
-    def ensure_artist(self, name, *, provider=None, provider_id=None):
-        with self.conn:
-            return artists.ensure(self.conn,name,provider=provider,provider_id=provider_id)
+    def provider_id(self, provider, provider_id):
+        row = self.conn.execute('SELECT artist_id FROM artist_provider_ids WHERE provider=? AND provider_id=?',
+                                (provider, provider_id)).fetchone()
+        return artists.canonical_id(self.conn, row[0]) if row else None
+
+    @synchronized
+    def provisional_id(self, name):
+        redirects = self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='artist_redirects'").fetchone()
+        row = self.conn.execute('SELECT id FROM artists WHERE provisional=1 AND name=? ' +
+            ('AND NOT EXISTS(SELECT 1 FROM artist_redirects d WHERE d.retired_id=artists.id) ' if redirects else '') +
+            'ORDER BY id LIMIT 1', (name,)).fetchone()
+        return row[0] if row else None
+
+    @synchronized
+    def create(self, name, *, provisional):
+        return self.conn.execute('INSERT INTO artists(name,provisional) VALUES (?,?)',
+                                  (name, int(provisional))).lastrowid
+
+    @synchronized
+    def add_provider(self, identity, provider, provider_id):
+        self.conn.execute('INSERT INTO artist_provider_ids VALUES (?,?,?)', (provider, provider_id, identity))
+
+    @synchronized
+    def add_alias(self, identity, name, source):
+        self.conn.execute('INSERT OR IGNORE INTO artist_aliases VALUES (?,?,?)', (identity, name, source))
 
     @synchronized
     def get_artist(self, value):

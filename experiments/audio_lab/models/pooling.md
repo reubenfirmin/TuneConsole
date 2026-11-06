@@ -275,7 +275,7 @@ The bounded warm-library rehearsal preserved existing useful scores across
 not establish candidate latency or startup acceptance. Raw results and the
 assessment are in `build/test-reports/implementation819-operations-20261106/`.
 
-The final bounded rehearsal froze 1,492 source/configuration files and uses
+The earlier format-three rehearsal froze 1,492 source/configuration files and uses
 production request/background priority and the same 100ms request cadence in
 both phases. All eight product models became ready in 37.31s; the first
 generation-linked scores appeared in 41.53s. Two model cycles published 448

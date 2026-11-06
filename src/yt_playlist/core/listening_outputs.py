@@ -125,6 +125,13 @@ def publish(conn, publication):
     for surface, key, encoded in publication.outputs:
         check_cancellable_work()
         durable.append((surface, key, *files.publish(files.directory(conn), encoded), times[surface, key]))
+    return register(conn, publication, durable, keep_previous=True)
+
+
+def register(conn, publication, durable, *, keep_previous):
+    """Persist supplied display references; the caller has already written files."""
+    if not conn.in_transaction:
+        raise ValueError('Listening publication requires its SQL transaction')
     # No SQL owner changes until every admitted file is durable.
     identity = conn.execute('INSERT INTO listening_output_publications(schema_version,generation_key,timezone, built_at,'
         'input_revision,revision_reason,output_count,chunk_count) VALUES (?,?,?,?,?,?,?,?) RETURNING id',
@@ -139,7 +146,7 @@ def publish(conn, publication):
     current = conn.execute("SELECT publication_id FROM listening_output_heads WHERE slot='current'").fetchone()
     conn.execute('DELETE FROM listening_output_heads')
     conn.execute("INSERT INTO listening_output_heads VALUES ('current',?)", (identity,))
-    if current:
+    if current and keep_previous:
         conn.execute("INSERT INTO listening_output_heads VALUES ('previous',?)", (current[0],))
     for (retired,) in conn.execute('SELECT id FROM listening_output_publications WHERE id NOT IN '
                                   '(SELECT publication_id FROM listening_output_heads)').fetchall():

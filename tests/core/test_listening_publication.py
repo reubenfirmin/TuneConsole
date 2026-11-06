@@ -13,7 +13,6 @@ from yt_playlist.core import recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import listening_outputs as preparation, listening_publication as publication
 from yt_playlist.core.store import Store
-from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
 
 
 def prepared(conn, size=128):
@@ -53,7 +52,7 @@ def test_preopened_readers_use_exact_verified_files_and_match_native(installed, 
             try:
                 for surface, raw in documents.items():
                     assert preopened.rec_proposals._proposal_json(surface) == raw
-                    assert ListeningAnalyticsRepo(preopened).encoded(surface) == raw
+                    assert preopened.listening_analytics.encoded(surface) == raw
                     assert preopened.rec_proposals.get_proposals(surface) == native.rec_proposals.get_proposals(surface)
                     assert preopened.rec_proposals.has_proposals(surface)
             finally:
@@ -144,7 +143,7 @@ def test_long_edition_bounded_resume_snapshot_continuing_writer_and_custody(inst
     with store.read_snapshot() as snapshot:
         assert snapshot.store.rec_proposals._proposal_json('listening_edition') == documents['listening_edition']
         with store.conn:
-            ListeningAnalyticsRepo(store).publish('{"text":"Continuing result"}', 200, 'listening_edition')
+            store.listening_analytics.publish('{"text":"Continuing result"}', 200, 'listening_edition')
         assert snapshot.store.rec_proposals._proposal_json('listening_edition') == documents['listening_edition']
         assert not snapshot.publish(lambda:None)
     record_property('continuing_writer_snapshot_seconds', time.perf_counter() - started)

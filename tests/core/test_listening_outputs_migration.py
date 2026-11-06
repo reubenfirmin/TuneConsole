@@ -6,10 +6,10 @@ import sqlite3
 import pytest
 
 from yt_playlist.core import listening_outputs as owner, recommendation_outputs as files
+from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.migrations import migrate, registry, v090_listening_outputs
 from yt_playlist.core.migrations.runner import MigrationError
 from yt_playlist.core.store import Store
-from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
 
 
 def bundle(label='one'):
@@ -46,6 +46,7 @@ def predecessor(tmp_path, _pristine_installed_schema, record_property):
 def cutover(store):
     migrate(store.conn, registry=registry.MIGRATIONS)
     store._bind_repositories()
+    store._snapshot_revisions = Revisions(store.conn)
 
 
 def seed(store):
@@ -62,7 +63,7 @@ def seed(store):
 def test_cutover_preserves_exact_chunk_bytes_index_times_and_previous_files(predecessor):
     values = seed(predecessor)
     cutover(predecessor)
-    repo = ListeningAnalyticsRepo(predecessor)
+    repo = predecessor.listening_analytics
     assert {surface: repo.encoded(surface) for surface in values} == values
     assert not predecessor.conn.execute("SELECT 1 FROM rec_proposals WHERE surface LIKE 'listening_%'").fetchone()
     assert [row[0] for row in predecessor.conn.execute('SELECT built_at FROM listening_output_files ORDER BY built_at')] == [100, 101, 102, 103]
@@ -91,20 +92,21 @@ def test_outer_rollback_and_file_failure_preserve_the_last_good_publication(pred
     with pytest.raises(OSError), predecessor.conn.atomic():
         owner.publish(predecessor.conn, plan)
     assert list(predecessor.conn.iterdump()) == before
-    assert {surface: ListeningAnalyticsRepo(predecessor).encoded(surface) for surface in values} == values
+    assert {surface: predecessor.listening_analytics.encoded(surface) for surface in values} == values
 
 
 def test_two_generation_retention_and_pinned_reader_collection(predecessor):
     values = seed(predecessor)
     cutover(predecessor)
     first_key = json.loads(values['listening_analytics'])['chunks'][0]['key']
-    with predecessor.read_view() as pinned:
-        assert ListeningAnalyticsRepo(pinned).encoded('listening_chunk:' + first_key)
+    with predecessor.read_snapshot() as snapshot:
+        pinned = snapshot.store
+        assert pinned.listening_analytics.encoded('listening_chunk:' + first_key)
         for label in ('two', 'three'):
             with predecessor.conn.atomic():
                 owner.publish(predecessor.conn, owner.prepare(*bundle(label), 200, input_revision=12))
-        assert ListeningAnalyticsRepo(predecessor).encoded('listening_chunk:' + first_key) is None
-        assert ListeningAnalyticsRepo(pinned).encoded('listening_chunk:' + first_key)
+        assert predecessor.listening_analytics.encoded('listening_chunk:' + first_key) is None
+        assert pinned.listening_analytics.encoded('listening_chunk:' + first_key)
         assert files.collect_orphans(predecessor.conn) == 0
     assert files.collect_orphans(predecessor.conn) >= 3
     assert predecessor.conn.execute('SELECT count(*) FROM listening_output_publications').fetchone()[0] == 2
@@ -115,7 +117,7 @@ def test_backup_restore_includes_both_retained_editions(predecessor, tmp_path):
     cutover(predecessor)
     with predecessor.conn.atomic():
         owner.publish(predecessor.conn, owner.prepare(*bundle('two'), 200, input_revision=12))
-    expected = {surface: ListeningAnalyticsRepo(predecessor).encoded(surface) for surface in owner.SURFACES}
+    expected = {surface: predecessor.listening_analytics.encoded(surface) for surface in owner.SURFACES}
     with predecessor.conn.atomic():
         manifest = files.export(predecessor.conn, tmp_path / 'backup')
     restored = Store(tmp_path / 'restored.db')
@@ -123,7 +125,7 @@ def test_backup_restore_includes_both_retained_editions(predecessor, tmp_path):
         predecessor.conn.backup(restored.conn)
         files.restore(restored.conn, manifest)
         restored._bind_repositories()
-        assert {surface: ListeningAnalyticsRepo(restored).encoded(surface) for surface in owner.SURFACES} == expected
+        assert {surface: restored.listening_analytics.encoded(surface) for surface in owner.SURFACES} == expected
         assert all(str(row[0]).startswith(str(files.directory(restored.conn)))
                    for row in restored.conn.execute('SELECT filename FROM listening_output_files'))
     finally:
@@ -141,7 +143,7 @@ def test_unavailable_chunk_is_a_cache_miss(predecessor, damage):
         target.unlink()
     else:
         target.write_text('damaged')
-    assert ListeningAnalyticsRepo(predecessor).encoded('listening_chunk:' + key) is None
+    assert predecessor.listening_analytics.encoded('listening_chunk:' + key) is None
 
 
 @pytest.mark.parametrize('raw', ['{"value":NaN}', '{"value":Infinity}', '{"value":1e999}'])

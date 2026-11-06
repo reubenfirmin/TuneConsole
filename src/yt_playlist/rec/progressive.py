@@ -272,6 +272,15 @@ class Preparation:
         if vibe_joint_preparation.active(self.store):
             return vibe_preparation.step(self.store, self.batch,
                 seconds=self.budget.fit_seconds, memory_bytes=self.budget.memory_bytes, joint_step=self._joint_step)
+        if vibe_joint_preparation.scoring(self.store):
+            # The cycle's refresh fan-out must reach a recording batch before
+            # our next source write invalidates its newly published models.
+            # Existing generation references acknowledge delivery across a
+            # restart; one useful batch returns us to ordinary fair source turns.
+            self.store.vibe_predictions.fanout(self.batch)
+            pending = self.store.prepared_content.pending(self.batch)
+            if pending:
+                return self._start_capture(pending, now)
         # Alternate source fan-out and recording captures. Each admission gets
         # one time budget, and continual source updates cannot starve recordings.
         if self._source_turn:
@@ -290,6 +299,9 @@ class Preparation:
         if not pending:
             return vibe_preparation.step(self.store, self.batch,
                 seconds=self.budget.fit_seconds, memory_bytes=self.budget.memory_bytes, joint_step=self._joint_step)
+        return self._start_capture(pending, now)
+
+    def _start_capture(self, pending, now):
         self._capturing_pending = pending
         self._capturing_kind = 'recordings'
         self._capturing_expires_at = (time.monotonic() + self.budget.capture_seconds

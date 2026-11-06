@@ -1,4 +1,5 @@
 """Genuine installed naming cutover, stable identifiers and external formats."""
+from contextlib import ExitStack
 import json
 import sqlite3
 
@@ -8,7 +9,9 @@ from yt_playlist.core import entity_names, genre_identity, playlist_scopes, sche
 from yt_playlist.core.migrations import current, registry, migrate, Migration, MigrationError
 from yt_playlist.core.migrations import v103_entity_names
 from yt_playlist.core.migrations.v103_entity_names import COLUMNS, transform
+from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.store import Store
+from tests.prepared_fixture_support import capture_template
 from tests.regular_schema_support import admit_regular_schema
 
 
@@ -20,19 +23,41 @@ def rows(conn):
     return result
 
 
-def test_installed_names_upgrade_preserves_all_rows_ids_and_matches_fresh(tmp_path):
-    store = Store(tmp_path/'installed.db')
+@pytest.fixture(scope='module')
+def names_predecessor_template(tmp_path_factory):
+    root = tmp_path_factory.mktemp('names-predecessor')
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('YT_PLAYLIST_HOME', str(root / 'app-home'))
+        source = installed_predecessor(root / 'source.db')
+        try:
+            template = capture_template(source, None)
+        except BaseException:
+            source.conn.close()
+            raise
     try:
-        for sql in current.statements(version=102):
-            store.conn.execute(sql)
-        genre_identity.seed_catalog(store.conn)
-        store.conn.executemany('INSERT INTO settings VALUES (?,?)',current.SEED_SETTINGS.items())
-        store.conn.executemany('INSERT INTO schema_migrations VALUES (?,?,1)',
-                              [(m.version,m.name) for m in registry.MIGRATIONS[:102]])
-        store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (3,'Main','credential',1),(4,'Other','credential',0)")
-        store.conn.execute("INSERT INTO playlist_scopes(ref,provider_id,identity_id,kind) VALUES ('@account:3:LM','LM',3,'account'),('PL','PL',NULL,'shared')")
-        store.conn.execute("INSERT INTO playlist_membership_refs(id,scope_ref,identity_id) VALUES (55,'@account:3:LM',3),(100,'PL',4)")
-        store.conn.execute("INSERT INTO playlists(id,identity_id,ytm_playlist_id,scope_ref,title) VALUES (55,3,'LM','@account:3:LM','Liked Music')")
+        yield template
+    finally:
+        source.conn.close()
+
+
+@pytest.fixture
+def legacy_names(names_predecessor_template):
+    with ExitStack() as resources:
+        def restore(path):
+            store = Store(path)
+            resources.callback(store.conn.close)
+            names_predecessor_template.restore(store)
+            return store
+
+        yield restore
+
+
+def test_installed_names_upgrade_preserves_all_rows_ids_and_matches_fresh(tmp_path, legacy_names):
+    store = legacy_names(tmp_path/'installed.db')
+    try:
+        store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (4,'Other','credential',0)")
+        store.conn.execute("INSERT INTO playlist_scopes(ref,provider_id,identity_id,kind) VALUES ('PL','PL',NULL,'shared')")
+        store.conn.execute("INSERT INTO playlist_membership_refs(id,scope_ref,identity_id) VALUES (100,'PL',4)")
         store.conn.execute("INSERT INTO cleanup_ignored VALUES ('PL','empty',1)")
         store.conn.execute("INSERT INTO suppressed_overlaps VALUES ('@account:3:LM','PL',2)")
         store.conn.execute("INSERT INTO overlap_kept VALUES ('@account:3:LM','PL',3)")
@@ -112,6 +137,9 @@ def test_pretyped_album_context_keeps_historical_document_and_current_account_fi
 
 def installed_predecessor(path):
     store = Store(path)
+    # The predecessor is one fixture, not a separate durable publication for
+    # each of its hundreds of DDL statements. The tested cutover commits itself.
+    store.conn.execute('BEGIN IMMEDIATE')
     for sql in current.statements(version=102):
         store.conn.execute(sql)
     genre_identity.seed_catalog(store.conn)
@@ -126,8 +154,9 @@ def installed_predecessor(path):
     return store
 
 
-def test_interrupted_rename_rolls_back_schema_rows_and_history(tmp_path):
-    store = installed_predecessor(tmp_path/'interrupted.db')
+def test_interrupted_rename_rolls_back_schema_rows_and_history(tmp_path, legacy_names):
+    path = tmp_path/'interrupted.db'
+    store = legacy_names(path)
     try:
         before = list(store.conn.iterdump())
         def interrupted(conn,context):
@@ -136,17 +165,25 @@ def test_interrupted_rename_rolls_back_schema_rows_and_history(tmp_path):
         with pytest.raises(MigrationError,match='interrupted naming cutover'):
             migrate(store.conn,registry=(*registry.MIGRATIONS[:102],Migration(103,'entity_names',interrupted)))
         assert list(store.conn.iterdump())==before
-        migrate(store.conn, registry=registry.MIGRATIONS)
-        store.init_schema()
-        current.validate(store.conn)
     finally:
         store.conn.close()
+    # Retry the naming owner after a real disk reopen. Full current admission
+    # and downstream repository writes remain in the populated owner above.
+    reopened = Store(path)
+    try:
+        migrate(reopened.conn, registry=registry.MIGRATIONS[:103])
+        validate_version(reopened.conn, 103)
+        assert tuple(reopened.conn.execute('SELECT id,label FROM accounts').fetchone()) == (3, 'Main')
+        assert tuple(reopened.conn.execute('SELECT id,account_id,provider_playlist_id FROM playlists').fetchone()) == (55, 3, 'LM')
+        assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchall()
+    finally:
+        reopened.conn.close()
 
 
-def test_predecessor_keeps_read_projections_and_physical_writers_after_regular_ddl(tmp_path):
+def test_predecessor_keeps_read_projections_and_physical_writers_after_regular_ddl(tmp_path, legacy_names):
     from yt_playlist.core import entity_names
     from yt_playlist.core.storage_maintenance import StorageMaintenance
-    setup = installed_predecessor(tmp_path/'deferred.db')
+    setup = legacy_names(tmp_path/'deferred.db')
     setup.conn.execute('PRAGMA journal_mode=WAL')
     setup.conn.close()
     store = Store(tmp_path/'deferred.db')
@@ -181,10 +218,10 @@ def test_predecessor_keeps_read_projections_and_physical_writers_after_regular_d
         store.conn.close()
 
 
-def test_runtime_reconciles_installed_accounts_without_changing_wire_names(tmp_path,monkeypatch):
+def test_runtime_reconciles_installed_accounts_without_changing_wire_names(tmp_path,monkeypatch,legacy_names):
     from yt_playlist.core.runtime import Runtime
     from yt_playlist.core.setup import write_config
-    setup = installed_predecessor(tmp_path/'runtime.db')
+    setup = legacy_names(tmp_path/'runtime.db')
     setup.conn.close()
     config = tmp_path/'config.toml'
     write_config([{'id':3,'label':'Main','credential_ref':'credential','is_master':True}],config)
@@ -202,8 +239,8 @@ def test_runtime_reconciles_installed_accounts_without_changing_wire_names(tmp_p
         store.conn.close()
 
 
-def test_installed_custom_sql_moves_with_its_owners_without_losing_literals(tmp_path):
-    store = installed_predecessor(tmp_path/'custom.db')
+def test_installed_custom_sql_moves_with_its_owners_without_losing_literals(tmp_path, legacy_names):
+    store = legacy_names(tmp_path/'custom.db')
     try:
         store.conn.execute('CREATE TABLE installed_receipts(account_id INTEGER REFERENCES identities(id),message TEXT)')
         store.conn.execute("INSERT INTO installed_receipts VALUES (3,'identity_id')")
@@ -211,8 +248,8 @@ def test_installed_custom_sql_moves_with_its_owners_without_losing_literals(tmp_
         store.conn.execute("CREATE TRIGGER installed_label AFTER UPDATE OF label ON identities "
                            "BEGIN UPDATE installed_receipts SET message=NEW.label WHERE account_id=NEW.id; END")
         store.conn.commit()
-        migrate(store.conn, registry=registry.MIGRATIONS)
-        store.init_schema()
+        migrate(store.conn, registry=registry.MIGRATIONS[:103])
+        validate_version(store.conn, 103)
         assert [tuple(row) for row in store.conn.execute('SELECT * FROM installed_accounts')]==[(3,'Main')]
         assert store.conn.execute('SELECT message FROM installed_receipts').fetchone()[0]=='identity_id'
         with store.conn:

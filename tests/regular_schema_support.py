@@ -33,6 +33,7 @@ CHANGE_NAMES = (
     'shared_vibe_model_generations',
     'bounded_embedding_basis_guards',
     'durable_initial_tv_launches',
+    'masked_vibe_metadata_guards',
 )
 
 
@@ -52,7 +53,7 @@ def admit_regular_schema(store, *, clock=1234):
     before = captured(conn)
     assert 'schema_changes' not in before
     assert tuple(change.name for change in regular.CHANGES) == CHANGE_NAMES
-    assert tuple(change.version for change in regular.CHANGES) == tuple(range(1, 34))
+    assert tuple(change.version for change in regular.CHANGES) == tuple(range(1, 35))
     assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] in (103, 107)
     definitions = dict(conn.execute('SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL'))
     allowed = {'schema_changes': regular.HISTORY_SQL,
@@ -75,6 +76,7 @@ def admit_regular_schema(store, *, clock=1234):
         vibe_models.schema(conn),
         embedding_files.bounded_basis_guards(),
         tv_launch_state.definitions(conn),
+        vibe_models.metadata_guards(conn),
     ):
         allowed.update(declarations)
     for sql in (*credit_retention.statements(), *mode_retention.statements(),

@@ -24,10 +24,8 @@ class PristineSchema(sqlite3.Connection):
 
     def capture_revisions(self, revisions):
         assert not revisions.conn.execute('SELECT 1 FROM temp.snapshot_revisions').fetchone()
-        statements = [sql.replace('CREATE ', 'CREATE TEMP ', 1) for sql, in
-                      revisions.conn.execute(
-                          "SELECT sql FROM sqlite_temp_schema WHERE sql IS NOT NULL "
-                          "ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END,name")]
+        statements = [sql.replace('CREATE ', 'CREATE TEMP ', 1)
+                      for _, _, sql in revision_definitions(revisions.conn)]
         self._revision_script = 'BEGIN;\n' + ';\n'.join(statements) + ';\nCOMMIT;'
         self._revision_state = deepcopy({name: value for name, value in vars(revisions).items()
                                          if name != 'conn'})

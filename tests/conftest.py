@@ -417,6 +417,28 @@ def _pristine_installed_schema(tmp_path_factory):
 
 
 @pytest.fixture(scope='session')
+def _admitted_installed_schema(tmp_path_factory, _pristine_installed_schema):
+    """Admission is setup for publication consumers, owned separately in startup tests."""
+    from tests.prepared_fixture_support import prepared_template
+
+    root = tmp_path_factory.mktemp('admitted-installed-schemas')
+    templates = {}
+    with ExitStack() as resources:
+        def template(version):
+            if version not in templates:
+                admitted = resources.enter_context(prepared_template(
+                    _pristine_installed_schema(version), lambda source: None,
+                    database=root / f'{version}.db'))
+                revisions = resources.enter_context(closing(sqlite3.connect(
+                    ':memory:', factory=PristineSchema)))
+                revisions.capture_revisions(admitted.source._snapshot_revisions)
+                templates[version] = admitted, revisions
+            return templates[version]
+
+        yield template
+
+
+@pytest.fixture(scope='session')
 def legacy_owner_schema(tmp_path_factory):
     """Preserve the exact empty v92/v98 builders used by owner cutover tests."""
     from tests.core.test_collection_state_migration import installed_92

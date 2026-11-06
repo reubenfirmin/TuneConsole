@@ -106,12 +106,11 @@ def build(ctx) -> APIRouter:
     async def listening_impressions(request: Request):
         if not listening_enabled:
             return Response(status_code=404)
-        from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
         try:
             body = await request.json()
         except ValueError:
             return Response(status_code=400)
-        edition = ListeningAnalyticsRepo(store).prepared('listening_edition') or {}
+        edition = store.listening_analytics.prepared('listening_edition') or {}
         if not isinstance(body, dict) or body.get('edition') != edition.get('id'):
             return Response(status_code=204)
         ids = body.get('stories', [])
@@ -124,7 +123,7 @@ def build(ctx) -> APIRouter:
             signatures.add('hero:' + stories[0]['id'])
         capture = getattr(store, 'choice_capture', None)
         if signatures and capture is not None:
-            capture.enqueue('listening editorial exposure', ListeningAnalyticsRepo(store).record_impressions,
+            capture.enqueue('listening editorial exposure', store.listening_analytics.record_impressions,
                             signatures, now_fn())
         return Response(status_code=204)
 
@@ -132,8 +131,7 @@ def build(ctx) -> APIRouter:
     def listening_data():
         if not listening_enabled:
             raise HTTPException(404)
-        from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
-        encoded = ListeningAnalyticsRepo(store).encoded()
+        encoded = store.listening_analytics.encoded()
         if encoded is None:
             return JSONResponse({'status': 'preparing'}, status_code=202,
                                 headers={'Cache-Control': 'no-store'})
@@ -143,10 +141,9 @@ def build(ctx) -> APIRouter:
     def listening_chunk(key: str):
         if not listening_enabled:
             raise HTTPException(404)
-        from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
         if len(key) != 24 or any(c not in '0123456789abcdef' for c in key):
             raise HTTPException(404)
-        encoded = ListeningAnalyticsRepo(store).encoded('listening_chunk:' + key)
+        encoded = store.listening_analytics.encoded('listening_chunk:' + key)
         if encoded is None:
             raise HTTPException(404, 'This generation has changed. Reload the selection.')
         return Response(encoded, media_type='application/json',
@@ -172,12 +169,11 @@ def build(ctx) -> APIRouter:
 
     @router.get("/charts")
     def charts_page(request: Request):
-        from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
         requested = request.query_params.get('view')
         if not listening_enabled and requested in ('home', 'analytics'):
             return RedirectResponse('/charts', status_code=303)
-        available = listening_enabled and (ListeningAnalyticsRepo(store).prepared() or {}).get('available', False)
-        edition = (ListeningAnalyticsRepo(store).prepared('listening_edition') or {}) if listening_enabled else {}
+        available = listening_enabled and (store.listening_analytics.prepared() or {}).get('available', False)
+        edition = (store.listening_analytics.prepared('listening_edition') or {}) if listening_enabled else {}
         if requested == 'home' and not edition.get('available'):
             return RedirectResponse('/charts', status_code=303)
         initial = requested if requested in ('home','analytics','songs','artists','genres','years','albums','playlists') else (

@@ -35,6 +35,8 @@ from yt_playlist.controllers.enrichment_queue import EnrichmentQueue
 from yt_playlist.controllers.enrichment_reports import EnrichmentReports
 from yt_playlist.controllers.album_descriptions import AlbumDescriptions
 from yt_playlist.controllers.album_feedback import AlbumFeedback
+from yt_playlist.controllers.listening_analytics import ListeningAnalytics
+from yt_playlist.controllers.artists import Artists
 from yt_playlist.controllers.playback_feedback import PlaybackFeedback
 from yt_playlist.controllers.recommendation_ledger import RecommendationLedger
 from yt_playlist.core.priority import RequestPriority, ServingLock
@@ -277,13 +279,17 @@ class Store:
             read_original)
         self.radio_catalog = RadioCatalogRepo(self)
         self.summary_inputs = SummaryInputs(SummaryInputsRepo(self), self.settings)
-        self.listening_analytics = ListeningAnalyticsRepo(self)
+        from yt_playlist.core.preparation.listening_outputs import read_original as read_listening
+        self.listening_analytics = ListeningAnalytics(ListeningAnalyticsRepo(self),
+            partial(recommendation_outputs.publish,
+                    recommendation_outputs.root_for_database(self._db_path, self._evidence_key)),
+            recommendation_outputs.read, read_listening)
         self.group_evidence = GroupEvidenceRepo(self)
         self.playback_feedback = PlaybackFeedback(PlaybackFeedbackRepo(self),
             getattr(self, '_evidence_source', self)._playback_feedback, self)
         self.actions = ActionRepo(self)
         self.audio_vibes = AudioVibesRepo(self)
-        self.artists = ArtistRepo(self)
+        self.artists = Artists(ArtistRepo(self))
         self.accounts = AccountRepo(self)
         self.history = HistoryRepo(self)
         self.collection = CollectionRepo(self)
