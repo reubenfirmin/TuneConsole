@@ -1,19 +1,11 @@
 """A durable, coalesced notification that recommendation inputs changed."""
 from yt_playlist.repos.base import Repo, synchronized
 
-VERSION = "1"
-
-
 class RecRefreshRepo(Repo):
     @synchronized
     def revision(self):
         row = self.conn.execute("SELECT revision FROM rec_change_queue WHERE kind='refresh' AND item=''").fetchone()
         return row[0] if row else None
-
-    @synchronized
-    def has_pending_changes(self):
-        return (self.revision() is not None
-                or self._store.settings.get_setting("rec_refresh_version") != VERSION)
 
     @synchronized
     def enqueue(self):

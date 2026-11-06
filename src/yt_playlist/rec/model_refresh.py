@@ -13,7 +13,7 @@ from yt_playlist.core.db_revisions import column_group_reads
 from yt_playlist.rec import (artist_model, content_model, embedding_training as training,
                              embedding_vectors as vector_reads, rec_params, taste_modes)
 from yt_playlist.util import genre_catalog
-from yt_playlist.repos.rec_refresh import VERSION
+from yt_playlist.controllers.recommendation_refresh import VERSION
 
 
 class MemoryBudgetExceeded(RuntimeError):

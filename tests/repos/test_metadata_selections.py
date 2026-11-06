@@ -11,38 +11,60 @@ from yt_playlist.providers.waterfall import TrackSink, run_waterfall
 from tests.test_waterfall import FakeProv
 from tests.historical_support import upgrade_fixture
 from tests.metadata_provenance_support import metadata_provenance
+from tests.prepared_fixture_support import historical_template
+
+
+@pytest.fixture(scope='module')
+def duplicate_decisions_template(_pristine_installed_schema):
+    def build(source):
+        subjects = {}
+        for reverse in (False, True):
+            for values in (('Rock', 'Pop'), ('Rock', '')):
+                offset = len(subjects) * 10
+                first, second = 3 + offset, 7 + offset
+                video = f'duplicate-{offset}'
+                rows = [(first, values[0], 10), (second, values[1], 20)]
+                if reverse:
+                    rows.reverse()
+                for track, value, at in rows:
+                    source.conn.execute('INSERT INTO tracks(id,identity_key,video_id,title,artist,genre) '
+                        'VALUES (?,?,?,?,?,?)', (track, f'key-{track}', video, 'Song', 'Artist', value))
+                    source.conn.execute('INSERT INTO enrichment_conflict(track_id,field,candidates,resolved,'
+                        'resolved_value,updated_at) VALUES (?,\'genre\',\'[]\',1,?,?)', (track, value, at))
+                subjects[reverse, values] = (video, second)
+        source.conn.commit()
+        # One genuine populated replay contains four independent conflicts.
+        # Each parameter restores its own SQL/files before resolving its case.
+        upgrade_fixture(source)
+        return {case: (source.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?',
+                                          (video,)).fetchone()[0], alias)
+                for case, (video, alias) in subjects.items()}
+
+    with historical_template(_pristine_installed_schema(7), build, database=':memory:') as template:
+        yield template
 
 
 @pytest.mark.parametrize('values', [('Rock','Pop'),('Rock','')])
 @pytest.mark.parametrize('reverse', [False,True])
-def test_duplicate_legacy_decisions_reconcile_without_arbitrary_winner(legacy_store, values, reverse):
-    s = legacy_store
-    rows = [(3,values[0],10),(7,values[1],20)]
-    if reverse:
-        rows.reverse()
-    for track,value,at in rows:
-        s.conn.execute('INSERT INTO tracks(id,identity_key,video_id,title,artist,genre) '
-                       'VALUES (?,?,?,?,?,?)', (track,f'key-{track}','same-video','Song','Artist',value))
-        s.conn.execute('INSERT INTO enrichment_conflict(track_id,field,candidates,resolved,'
-                       'resolved_value,updated_at) VALUES (?,?,?,1,?,?)',
-                       (track,'genre','[]',value,at))
-    s.conn.commit()
-    upgrade_fixture(s)
-    assert s.tracks.get_track_enrichment(3)[0] == ''
-    detail = s.enrichment_reports.enrichment_conflict_detail(3,'genre')
+def test_duplicate_legacy_decisions_reconcile_without_arbitrary_winner(store, duplicate_decisions_template, values, reverse):
+    s = store
+    entry, alias = duplicate_decisions_template.restore(s)[reverse, values]
+    assert s.tracks.get_track_enrichment(entry)[0] == ''
+    detail = s.enrichment_reports.enrichment_conflict_detail(entry,'genre')
     assert {o['value'] for o in detail['options']} >= set(values)
-    conflict = s.conn.execute('SELECT resolved,resolved_value FROM enrichment_conflict').fetchone()
+    conflict = s.conn.execute('SELECT resolved,resolved_value FROM enrichment_conflict WHERE track_id=?', (entry,)).fetchone()
     assert tuple(conflict) == (0,None)
-    assert s.conn.execute('SELECT COUNT(*) FROM entry_field_choices').fetchone()[0] == 0
+    assert s.conn.execute('SELECT COUNT(*) FROM entry_field_choices WHERE entry_id=?', (entry,)).fetchone()[0] == 0
     choices = s.conn.execute('SELECT value_json,chosen_at FROM metadata_decisions '
-                             'WHERE legacy_ref IS NOT NULL ORDER BY chosen_at').fetchall()
+                             'WHERE entry_id=? AND legacy_ref IS NOT NULL ORDER BY chosen_at', (entry,)).fetchall()
     assert [(json.loads(r[0]),r[1]) for r in choices] == [(values[0],10),(values[1],20)]
-    before = metadata_provenance(s, 3)
+    before = metadata_provenance(s, entry)
     s.init_schema()
-    assert metadata_provenance(s, 3) == before
-    s.enrichment.resolve_conflict(7,'genre',values[1],now=30)
-    assert s.tracks.get_track_enrichment(3)[0] == values[1]
-    assert tuple(s.conn.execute('SELECT resolved,resolved_value FROM enrichment_conflict').fetchone()) == (1,values[1])
+    assert metadata_provenance(s, entry) == before
+    s.enrichment.resolve_conflict(alias,'genre',values[1],now=30)
+    assert s.tracks.get_track_enrichment(entry)[0] == values[1]
+    assert tuple(s.conn.execute('SELECT resolved,resolved_value FROM enrichment_conflict WHERE track_id=?',
+                               (entry,)).fetchone()) == (1,values[1])
     assert not s.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 

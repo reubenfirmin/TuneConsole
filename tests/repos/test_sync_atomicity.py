@@ -16,15 +16,13 @@ def test_failed_sync_publication_rolls_back_result_and_freshness(installed, monk
     before = store.sync.state()
     before_stamp = store.settings.get_setting('last_sync_at')
     if sync_state.available(store.conn):
-        original = sync_state.write
+        original = sync_state.write_prepared
         def fail(conn, *args, **kwargs):
             original(conn, *args, **kwargs)
             raise RuntimeError('publication interrupted')
-        monkeypatch.setattr(sync_state, 'write', fail)
+        monkeypatch.setattr(sync_state, 'write_prepared', fail)
     else:
-        original = store.settings.publish_values
         def fail(*args, **kwargs):
-            original(*args, **kwargs)
             raise RuntimeError('publication interrupted')
         monkeypatch.setattr(store.settings, 'publish_values', fail)
     with pytest.raises(RuntimeError, match='publication interrupted'):

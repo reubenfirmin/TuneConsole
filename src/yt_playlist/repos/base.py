@@ -28,16 +28,6 @@ from yt_playlist.core.db_diagnostics import database_operation
 #     Do not "fix" this tier by quarantining it: that deletes the only non-circular signal we have.
 GENERATED_GROUP = "Generated"
 
-# Prefer the main account's recorded rating, including confirmed writes before LM has synced.
-# Otherwise use cached Liked Music membership. The outer query must alias tracks as `t`.
-LIKED_EXISTS = ("COALESCE((SELECT r.status='LIKE' FROM item_ratings r "
-                "JOIN accounts i ON i.id=r.account_id WHERE i.active=1 AND i.is_master=1 "
-                "AND r.video_id=t.video_id), EXISTS(SELECT 1 FROM playlist_tracks lpt "
-                "JOIN playlists lpl ON lpl.id = lpt.playlist_id "
-                "JOIN tracks lt ON lt.id = lpt.track_id "
-                "WHERE lpl.provider_playlist_id = 'LM' AND lt.video_id = t.video_id))")
-
-
 def _refresh_listening_reads(owner):
     store = getattr(owner, '_store', owner)
     if getattr(store, '_schema_compatibility', False) and not getattr(store, '_read_only', False):

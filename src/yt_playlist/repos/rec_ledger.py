@@ -7,10 +7,9 @@ import json
 
 from yt_playlist.core import album_playback_context, entity_names, playback_bindings, served_facts
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
-from yt_playlist.repos.scorecard_attribution import Attribution
+from yt_playlist.repos.scorecard_attribution import ScorecardFacts
 from yt_playlist.repos import policy_storage
 
-RESPONSE_RETAIN_DAYS = 90
 RETENTION_BATCH_SIZE = 256
 POLICY_RETENTION_CURSOR = 'rec_policy_retention_cursor'
 
@@ -131,14 +130,13 @@ class RecLedgerRepo(Repo):
         """Join the snapshot publisher's transaction without committing proposals early."""
         policy_storage.publish(self.conn, rows, bases, enforce_budget=True)
 
-    @snapshot_read
+    @synchronized
     def policy_configuration(self, version):
         return policy_storage.configuration(self.conn, version)
 
-    @snapshot_read
-    def scorecard_inputs(self, start, end, outcome_window_h=24,
-                         impression_id=None, experiments_only=False):
-        """Detach one coherent live impression range and its historical outcome ownership."""
+    @synchronized
+    def scorecard_impressions(self, start, end, *, impression_id, experiments_only):
+        """Detach impressions in the supplied report range."""
         live = served_facts.expression(self.conn, 'policy_kind', "COALESCE(json_extract(provenance,'$.policy_kind'),'live')")
         comparison = served_facts.expression(self.conn, 'comparison_id', "json_extract(provenance,'$.experiment.comparison_id')")
         columns = '*'
@@ -159,12 +157,13 @@ class RecLedgerRepo(Repo):
             for row in impressions:
                 if row['id'] in facts:
                     row['provenance'] = json.dumps(served_facts.reporting_trace(facts[row['id']]))
-        horizon = max(0.0, float(outcome_window_h)) * 3600.0
-        attribution = Attribution(self.conn, {r['identity_key'] for r in impressions}, start, end, horizon)
-        return impressions, attribution
+        return impressions
 
-    @snapshot_read
-    def served_recommendation_inputs(self, impression_id):
+    def scorecard_facts(self):
+        return ScorecardFacts(self._store)
+
+    @synchronized
+    def served_recommendation_facts(self, impression_id):
         row = self.conn.execute(
             "SELECT i.* FROM rec_served_impressions i WHERE i.id=?",
             (impression_id,)).fetchone()
@@ -189,14 +188,10 @@ class RecLedgerRepo(Repo):
             result['configuration_status'] = 'available' if result['configuration'] is not None else 'missing'
         pool = result["provenance"].get("pool_policy")
         result["pool_configuration"] = policy_storage.configuration(self.conn, str(pool)) if pool else None
-        inputs = (None if result["provenance"].get("policy_kind") == "counterfactual" else
-                  self.scorecard_inputs(result["served_at"], result["served_at"] + 1,
-                                        impression_id=impression_id))
-        return result, inputs
+        return result
 
-    @snapshot_read
-    def experiment_inputs(self, start, end, mature_end):
-        inputs = self.scorecard_inputs(start, mature_end, experiments_only=True)
+    @synchronized
+    def experiment_shadows(self, start, end):
         ranker = served_facts.expression(self.conn, 'ranker', "json_extract(provenance,'$.ranker')")
         comparison = served_facts.expression(self.conn, 'comparison_id', "json_extract(provenance,'$.experiment.comparison_id')")
         kind = served_facts.expression(self.conn, 'policy_kind', "json_extract(provenance,'$.policy_kind')")
@@ -205,7 +200,7 @@ class RecLedgerRepo(Repo):
             "FROM rec_served_impressions WHERE served_at>=? AND served_at<? "
             f"AND {kind}='counterfactual' GROUP BY ranker",
             (start, end)).fetchall()
-        return inputs, [dict(r) for r in shadows]
+        return [dict(r) for r in shadows]
 
     # --- #113 served recommendation -> observed outcome ledger -------------------------------
     @synchronized
@@ -219,45 +214,15 @@ class RecLedgerRepo(Repo):
         with self.conn:
             policy_storage.publish(self.conn, rows, bases, enforce_budget=True)
 
-    def record_recommendation_outcomes(self, event_id, kind, keys, now, generated=False) -> None:
-        if kind not in {"open", "start", "save", "promotion"}:
-            raise ValueError("unsupported recommendation response")
-        rows = [(event_id, kind, key, now, int(generated)) for key in set(keys) if key]
-        self._insert_recommendation_outcomes(rows)
-        self._prune_response_batch(now - RESPONSE_RETAIN_DAYS * 86400)
-
     @synchronized
-    def _insert_recommendation_outcomes(self, rows):
+    def insert_recommendation_outcomes(self, rows):
         self.conn.executemany(
             "INSERT OR IGNORE INTO rec_response_events(event_id,kind,identity_key,at,is_generated) "
             "VALUES (?,?,?,?,?)", rows)
         self.conn.commit()
 
-    def record_served_impressions(self, request_id, surface, items, now, prune_before=None, *,
-                                  policies=(), bases=()) -> None:
-        """Persist final live order or an explicitly marked counterfactual replay.
-
-        ``items`` are dictionaries containing lane/key/rank plus optional mode_id, score and
-        provenance. The request/rank uniqueness key makes an HTMX retry idempotent. Instrumentation
-        is fail-open at route call sites. Retention catches up in bounded batches,
-        releasing the serving lock between insertion and each cleanup transaction.
-        """
-        rows = []
-        for item in items:
-            key = item.get("identity_key") or item.get("key")
-            if not key:
-                continue
-            rows.append((request_id, surface, item.get("lane") or "", item.get("mode_id"), key,
-                         int(item["rank"]), item.get("score"), item.get("model_version") or "unknown",
-                         json.dumps(item.get("provenance") or {}, sort_keys=True), now))
-        self._insert_served_impressions(rows, policies=policies, bases=bases)
-        if prune_before is not None:
-            self._prune_impression_batch(prune_before)
-            self._prune_response_batch(prune_before)
-            self._prune_policy_batch(prune_before)
-
     @synchronized
-    def _insert_served_impressions(self, rows, *, policies=(), bases=()):
+    def insert_served_impressions(self, rows, *, policies, bases, versions):
         with self.conn:
             policy_storage.publish(self.conn, policies, bases)
             if rows:
@@ -268,10 +233,6 @@ class RecLedgerRepo(Repo):
                         "INSERT OR IGNORE INTO rec_served_impressions("
                         "request_id,surface,lane,mode_id,identity_key,rank,score,model_version,provenance,served_at) "
                         "VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
-                versions = []
-                for row in rows:
-                    pool = json.loads(row[8]).get('pool_policy')
-                    versions.extend((row[7], str(pool) if pool is not None else None))
                 policy_storage.refresh_references(self.conn, versions)
 
     @synchronized
@@ -312,11 +273,11 @@ class RecLedgerRepo(Repo):
         return {r["lane"]: r["c"] for r in rows}
 
     @synchronized
-    def maintain_impressions(self, now):
+    def maintain_impressions(self, now, *, before):
         """Bounded idle maintenance; readers defer file retirement without waiting."""
         if not served_facts.available(self.conn):
-            self._prune_impression_batch(now - RESPONSE_RETAIN_DAYS * 86400)
-            self._prune_response_batch(now - RESPONSE_RETAIN_DAYS * 86400)
+            self._prune_impression_batch(before)
+            self._prune_response_batch(before)
             return
         from yt_playlist.core import policy_documents
         root = served_facts.directory(self.conn)
@@ -329,7 +290,6 @@ class RecLedgerRepo(Repo):
                 with self.conn:
                     self.conn.execute('BEGIN IMMEDIATE')
                     served_facts.expire(self.conn, now)
-                before = now - RESPONSE_RETAIN_DAYS * 86400
                 expired = [r[0] for r in self.conn.execute('SELECT id FROM rec_served_impressions '
                     'WHERE served_at<? ORDER BY served_at,id LIMIT ?', (before, RETENTION_BATCH_SIZE))]
                 self._prune_impression_batch(before)
@@ -353,15 +313,15 @@ class RecLedgerRepo(Repo):
                     "SELECT item_key,views,last_shown FROM rec_impressions WHERE surface='into_recently'")}
 
     @synchronized
-    def record_story_views(self, subjects, now) -> bool:
-        """Collapse fragment replacements, retries and repeated visits within six hours."""
+    def record_story_views(self, subjects, now, *, surface, cooldown_s) -> bool:
+        """Increment views only after the caller's supplied cooldown."""
         changed = False
-        for subject in set(subjects):
+        for subject in subjects:
             cursor = self.conn.execute(
                 "INSERT INTO rec_impressions(surface,item_key,views,last_shown) "
-                "VALUES ('into_recently',?,1,?) ON CONFLICT(surface,item_key) DO UPDATE "
+                "VALUES (?,?,1,?) ON CONFLICT(surface,item_key) DO UPDATE "
                 "SET views=rec_impressions.views+1,last_shown=excluded.last_shown "
-                "WHERE rec_impressions.last_shown<=excluded.last_shown-21600", (subject, now))
+                "WHERE rec_impressions.last_shown<=excluded.last_shown-?", (surface, subject, now, cooldown_s))
             changed |= cursor.rowcount > 0
         self.conn.commit()
         return changed
@@ -394,20 +354,9 @@ class RecLedgerRepo(Repo):
         return row["views"] if row else 0
 
     @synchronized
-    def refresh_card(self, card, cap, now) -> None:
-        """Refresh button: jump a Home card to the START of its NEXT rotation epoch (a fresh, unseen
-        slice) and reset its view clock there, so it holds the new slice for the next `cap` views.
-        epoch = (views-1)//cap, so landing at (epoch+1)*cap+1 advances one epoch and resets the clock."""
-        cap = max(1, cap)
-        row = self.conn.execute(
-            "SELECT views FROM rec_impressions WHERE surface='card' AND item_key=?", (card,)).fetchone()
-        cur = row["views"] if row else 0
-        # current epoch is (cur-1)//cap; jump to the first view of the next epoch: (epoch+1)*cap + 1
-        new_views = (max(0, cur - 1) // cap + 1) * cap + 1
-        if row:
-            self.conn.execute("UPDATE rec_impressions SET views=?, last_shown=? "
-                              "WHERE surface='card' AND item_key=?", (new_views, now, card))
-        else:
-            self.conn.execute("INSERT INTO rec_impressions(surface,item_key,views,last_shown) "
-                              "VALUES('card',?,?,?)", (card, new_views, now))
+    def set_card_views(self, card, views, now) -> None:
+        """Persist the view count calculated inside the caller's write unit."""
+        self.conn.execute("INSERT INTO rec_impressions(surface,item_key,views,last_shown) "
+                          "VALUES('card',?,?,?) ON CONFLICT(surface,item_key) DO UPDATE "
+                          "SET views=excluded.views,last_shown=excluded.last_shown", (card, views, now))
         self.conn.commit()

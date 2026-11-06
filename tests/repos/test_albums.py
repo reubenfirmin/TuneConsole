@@ -173,7 +173,6 @@ def test_recording_reassociation_preserves_release_relationships(store):
 
 def test_recap_uses_all_release_relationships_without_inventing_playback_context(store):
     from yt_playlist.rec.recap_metrics import month_bounds,profile
-    from yt_playlist.repos.recap import RecapRepo
 
     iid = store.accounts.upsert_account('me','c',None,True)
     keys = []
@@ -182,7 +181,7 @@ def test_recap_uses_all_release_relationships_without_inventing_playback_context
         store.tracks.upsert_track(str(i),f'Song {i}','Artist','Other',10,album_browse_id=f'other-{i}')
         keys.append(store.tracks.catalog_subject(entry)['identity_key'])
     since,until = month_bounds('2026-09')
-    data = RecapRepo(store).snapshot(since,until)
+    data = store.recap.snapshot(since,until)
     assert all(data['meta'][k]['album_browse_ids']=={'release',f'other-{i}'} for i,k in enumerate(keys))
     assert all(data['meta'][k]['album_browse_id'] is None for k in keys)
     events = [dict(account_id=iid,source='live',identity_key=k,played_at=since+i*60) for i,k in enumerate(keys)]

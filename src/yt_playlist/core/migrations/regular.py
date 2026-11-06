@@ -418,6 +418,16 @@ def _validate_tv_launches(conn):
     tv_launch_state.validate(conn)
 
 
+def _install_joint_metadata_guards(conn, context):
+    from yt_playlist.repos import vibe_models
+    vibe_models.install_metadata_guards(conn, context)
+
+
+def _validate_joint_metadata_guards(conn):
+    from yt_playlist.repos import vibe_models
+    vibe_models.validate_metadata_guards(conn)
+
+
 CHANGES = (
     Change(1, 'independent_playback_feedback_receipts', _install_receipts, validate_receipts),
     Change(2, 'group_preparation_failure_progress', _install_group_progress, _validate_group_progress),
@@ -452,6 +462,7 @@ CHANGES = (
     Change(31, 'shared_vibe_model_generations', _install_joint_vibes, _validate_joint_vibes),
     Change(32, 'bounded_embedding_basis_guards', _install_embedding_basis_guards, _validate_embedding_basis_guards),
     Change(33, 'durable_initial_tv_launches', _install_tv_launches, _validate_tv_launches),
+    Change(34, 'masked_vibe_metadata_guards', _install_joint_metadata_guards, _validate_joint_metadata_guards),
 )
 
 

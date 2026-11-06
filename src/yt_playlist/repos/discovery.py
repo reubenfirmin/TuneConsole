@@ -525,12 +525,16 @@ class DiscoveryRepo(Repo):
             "JOIN recordings r ON r.id=e.recording_id WHERE e.video_id=?", (video_id,))]
 
     @snapshot_read
-    def discovered_tracks_by_keys(self, keys, *, available_only=False) -> dict:
+    def discovered_tracks_by_keys(self, keys, *, available_only=False, metadata_only=False) -> dict:
         keys = list(keys)
         if not keys:
             return {}
         qs = ",".join("?" * len(keys))
         available = " AND available IS NOT 0" if available_only else ""
+        if metadata_only:
+            return {r['identity_key']: dict(r) for r in self.conn.execute(
+                'SELECT identity_key,genre,year FROM ' + read_owners(self.conn).relation('discovered_tracks')
+                + f' WHERE identity_key IN ({qs})' + available, keys)}
         return {r["identity_key"]: self._dtrack_row(r) for r in self.conn.execute(
             f"SELECT {_DTRACK_PROJECTION} FROM {read_owners(self.conn).relation('discovered_tracks')} "
             f"WHERE identity_key IN ({qs})" + available, keys)}

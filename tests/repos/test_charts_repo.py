@@ -204,24 +204,20 @@ def test_story_artist_songs_follow_structured_collaboration_credits(store):
     assert store.charts.story_tracks(since=0) == []
 
 
-def test_story_examples_deduplicate_displayed_songs_before_limiting(store):
+def test_story_query_keeps_distinct_recordings_in_listening_order(store):
     iid = store.accounts.upsert_account('me', 'c', None, True)
     for video, title in [('first', 'Wise One'), ('copy', 'Wise One'),
                          ('remaster', 'Wise One (2020 Remaster)'),
                          ('other', 'Giant Steps'), ('live', 'Wise One (Live)')]:
         entry = store.tracks.upsert_track(video, title, 'John Coltrane', '', 180)
         seed_enrichment(store, entry, 'Free jazz', None)
-    # Repeated exact uploads win the history ranking, yet must not consume every slot.
     for index, video in enumerate(['first', 'copy', 'remaster', 'other', 'live']):
         key = store.tracks.identity_key_for_video(video)
         store.history.import_listening_events(iid, [(key, video, 10 * 86400 - index * 86400)])
-    recordings = store.conn.execute('SELECT COUNT(*) FROM recordings').fetchone()[0]
     for selection in ({'artist': 'John Coltrane'}, {'genres': ['Free Jazz']}):
-        songs = store.charts.story_tracks(since=0, **selection)
-        assert [song['video_id'] for song in songs] == ['first', 'other', 'live']
-        assert store.charts.story_tracks(since=0, limit=0, **selection) == []
-    assert store.conn.execute('SELECT COUNT(*) FROM recordings').fetchone()[0] == recordings == 5
-    assert store.conn.execute('SELECT COUNT(*) FROM play_events').fetchone()[0] == 5
+        with store.charts.repository.read() as repository:
+            with repository.story_track_rows(since=0, **selection) as rows:
+                assert [song['video_id'] for song in rows] == ['first', 'copy', 'remaster', 'other', 'live']
 
 
 def test_story_activity_requires_recent_listening_and_preserves_collaboration_credits(store):

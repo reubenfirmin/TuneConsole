@@ -145,6 +145,17 @@ infer complete human quality from the partial outputs. Source archives and
 protocols are in `implementation819-source-genre-human-single-model-20261106/`
 and `implementation819-source-genre-exact-gradient-human-20261106/`.
 
+Forward finite differences and reuse of identical symbolic sparse geometry
+completed all twelve source/genre fits in 2.45–6.79s. This resolves the observed
+fit deferrals, not human transfer: Focus retrieval at ten remains 3/11 to 1/11
+known and 4/18 to 1/18 unseen; Cruise falls from 6/22 to 4/22 known and 6/35 to
+3/35 unseen. Reject adoption and preserve the reserve. The cache contains only
+symbolic ordering, rechecks each caller's memory admission and never retains a
+posterior or fitted parameters. Protocol SHA256:
+`0984b6c6463cdd8f9c3cf8973d169dba89c400cf802c9b48d8bd7021583c412f`.
+Reports and frozen sources:
+`build/test-reports/implementation819-source-genre-forward-human-20261106/`.
+
 The current product-format candidate's separate categorical evaluation excludes
 all human recordings from fitting. It scored 45 known-artist and 85 unseen-artist
 development targets. Observed-positive top-choice coverage improved from 24.4%
@@ -215,6 +226,33 @@ The bounded warm-library rehearsal preserved existing useful scores across
 180-second phase; no joint model fitted. Its similar p95 timings therefore do
 not establish candidate latency or startup acceptance. Raw results and the
 assessment are in `build/test-reports/implementation819-operations-20261106/`.
+
+The final bounded rehearsal froze 1,492 source/configuration files and uses
+production request/background priority and the same 100ms request cadence in
+both phases. All eight product models became ready in 37.31s; the first
+generation-linked scores appeared in 41.53s. Two model cycles published 448
+prediction versions referencing sixteen generations. The cache remained at 75,056 rows and
+every serving probe retained 600 ranked results and 128 score/overlay results.
+Foreground p95 was 64.34ms baseline and 64.89ms candidate; neither foreground
+path fitted or loaded a model. Both 180-second phases remained incomplete,
+so this is bounded-progress evidence, not the completed-refresh latency gate
+or fresh-user startup acceptance. Each fit used all 3,441 originals and
+2.74–3.58s, with 55.7–55.9 MB accounted data; process peak RSS was 194.4 MB.
+Candidate-phase SQL/index growth was 483,328 bytes, including continuing
+measurement preparation, and sixteen retained model files occupied 5,257,869
+bytes. Kernel process counters record 225,374,208 written bytes during that
+phase; workload progress and cache effects differ, so this does not isolate
+model write amplification. Exact sources, I/O counters and database/WAL sizes:
+`build/test-reports/implementation819-frozen-idle-cleanup-operations-20261106/`.
+
+Score preparation reconstructs one posterior per bounded worker admission.
+Only bounded target estimates and the guarded snapshot survive between turns;
+publication and queue acknowledgement occur after the complete batch. Close,
+deadline expiry and stale publication release the snapshot and file-reader
+leases, leaving the durable queue for retry. Maintenance polling also closes
+idle expired batches and batches paused for storage work, serialized with any
+active capture. A symbolic geometry cache avoids
+repeating ordering work without retaining numerical posterior state.
 
 The separate `experiments.audio_lab_tools.vibe_pooling_artifacts` module uses
 the same manager invocation with `/reports/artifacts.json`. It deliberately

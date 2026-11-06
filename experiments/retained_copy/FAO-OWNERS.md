@@ -302,7 +302,11 @@ Fit artifacts are staged and verified off the request path on a consistent
 snapshot. Files publish atomically before guarded SQL heads. Bounded score batches
 retain their actual generation and exact calculation identity; unchanged means
 with changed originals still receive new receipts. A capture loads one posterior
-at a time. Product score readers use SQL and do not read these files or fit.
+per bounded worker turn, retaining only target estimates and one guarded snapshot
+between turns. Its pending queue is acknowledged only on final publication.
+Shutdown, storage pauses and batch expiry close idle snapshots and file-reader
+leases; cancellation and stale publication leave the durable queue for retry.
+Product score readers use SQL and do not read these files or fit.
 Missing/broken current heads queue repair while retaining useful old scores;
 ordinary startup and failed fitting do not demand a full successful refit.
 

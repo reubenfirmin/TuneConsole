@@ -9,7 +9,6 @@ import threading
 import pytest
 
 from tests.conftest import seed_catalog_track
-from tests.test_growth_destinations import finish_full_journey
 from tests.test_onboarding_routes import _client
 from yt_playlist.core import catalog
 from yt_playlist.rec import account_growth, rec_params
@@ -49,17 +48,28 @@ def invalidate(store, tracks, condition):
 
 
 @pytest.mark.parametrize('condition', ['unavailable', 'overlong'])
-def test_cached_radio_offer_agrees_across_http_bootstrap_and_direct_growth(store, condition, full_journey_prefix):
-    full_journey_prefix.restore(store)
+def test_cached_radio_offer_agrees_across_http_bootstrap_and_direct_growth(store, condition, monkeypatch):
+    # Radio eligibility is the subject. Completed earlier stops and an available
+    # TV queue are lower-layer inputs; their real producers and unlock order
+    # have independent owners in test_growth_readiness/test_growth_destinations.
+    from yt_playlist.rec import growth_readiness, onboarding_outputs, tv
+
+    monkeypatch.setattr(onboarding_outputs, 'prepared_mixes_ready', lambda *a, **kw: True)
+    for name in ('foundation', 'albums', 'discover'):
+        monkeypatch.setattr(growth_readiness, name, lambda *a, **kw: True)
+    monkeypatch.setattr(tv, 'queue', lambda *a, **kw: [{} for _ in range(tv.QUEUE_SIZE)])
     _, client = _client(store)
-    finish_full_journey(store)
     tracks = seeds(store)
+    # First sounds remains playable when every old offer becomes ineligible.
+    # Its admission must not accidentally become the reason Radio is blocked.
+    seed_catalog_track(store, 'keeper|artist', 'Keeper', 'Artist', video_id='keeper', duration_s=180)
     complete_entries(store, [row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1000)
     offer = {'menu_id': 'original-radio-menu', 'tracks': tracks}
     encoded = json.dumps(offer)
     store.settings.set_setting('radio_seed_offer', encoded)
     controller = client.app.state.ctx.radio
-    assert client.get('/home/growth').json()['ready_formats']['radio']
+    initial = client.get('/home/growth').json()
+    assert initial['ready_formats']['radio'] and initial['ready_areas']['tv']
     assert len(controller.bootstrap()['seeds']) == 4
     invalidate(store, tracks[:1], condition)
     assert len(controller.bootstrap()['seeds']) == 3

@@ -2,6 +2,7 @@
 import sqlite3
 
 import pytest
+from tests.prepared_fixture_support import historical_template
 
 from yt_playlist.core import choice_learning_state as owner
 from yt_playlist.core.migrations import migrate, registry, v093_choice_learning
@@ -32,13 +33,36 @@ def interests():
             'album_track_days': {'release': {'song|artist': 2}}, 'interest_version': 'effective'}
 
 
-def test_registered_cutover_preserves_values_unknowns_subjects_and_restart(predecessor):
-    store = predecessor
-    store.tracks.upsert_track('video', 'Song', 'Artist', 'Album', 100, album_browse_id='release')
+@pytest.fixture(scope='module')
+def upgraded_learning_template(_pristine_installed_schema):
+    from tests.group_support import publish, recordings
+
+    def build(store):
+        store.tracks.upsert_track('video', 'Song', 'Artist', 'Album', 100, album_browse_id='release')
+        store.rec_proposals.put_proposals('choice_interests', interests(), None)
+        store.rec_proposals.put_proposals('choice_bandit', {'rows': [{'mode_id': 99, 'estimate': .5}], 'expires_at': None}, None)
+        head = publish(store, recordings([('Jazz', 16, .2)]), now=10)
+        group = head['groups'][0]
+        value = {'policy': 'compiled-statistics', 'generation': head['generation'], 'at': 11,
+                 'rows': [{'group_id': group['group_id'], 'version': group['version'], 'estimate': .6,
+                           'shared_from': None, 'menus': ['opportunity']}], 'excluded': {'unseen': 0}}
+        store.rec_proposals.put_proposals('group_choice_bandit', value, 11)
+        upgrade(store)
+        return {'head': head, 'group': group, 'group_estimates': value}
+
+    with historical_template(_pristine_installed_schema(92), build, database=':memory:') as template:
+        yield template
+
+
+@pytest.fixture
+def upgraded_learning(file_backed_store, upgraded_learning_template):
+    upgraded_learning_template.restore(file_backed_store)
+    return file_backed_store
+
+
+def test_registered_cutover_preserves_values_unknowns_subjects_and_restart(upgraded_learning):
+    store = upgraded_learning
     original = interests()
-    store.rec_proposals.put_proposals('choice_interests', original, None)
-    store.rec_proposals.put_proposals('choice_bandit', {'rows': [{'mode_id': 99, 'estimate': .5}], 'expires_at': None}, None)
-    upgrade(store)
     assert store.rec_proposals.get_proposals('choice_interests') == original
     assert store.rec_proposals.get_proposals('choice_bandit') == {'rows': [{'mode_id': 99, 'estimate': .5}], 'expires_at': None}
     assert [tuple(row) for row in store.conn.execute('SELECT raw_key,recording_id IS NOT NULL,resolution_reason '
@@ -47,7 +71,8 @@ def test_registered_cutover_preserves_values_unknowns_subjects_and_restart(prede
     assert store.conn.execute('SELECT album_id FROM choice_interest_contexts').fetchone()[0] is not None
     assert store.conn.execute('SELECT album_id FROM choice_album_interests').fetchone()[0] is not None
     assert tuple(store.conn.execute('SELECT resolved_mode_id,resolution_reason FROM choice_mode_estimates').fetchone()) == (None, 'missing_mode')
-    assert all(row[0] is None for row in store.conn.execute('SELECT built_at FROM choice_learning_publications'))
+    assert all(row[0] is None for row in store.conn.execute(
+        "SELECT built_at FROM choice_learning_publications WHERE surface IN ('choice_interests','choice_bandit')"))
     assert not store.conn.execute("SELECT 1 FROM rec_proposals WHERE surface IN ('choice_bandit','group_choice_bandit','choice_interests')").fetchone()
     reopened = Store(store._db_path)
     try:
@@ -58,16 +83,9 @@ def test_registered_cutover_preserves_values_unknowns_subjects_and_restart(prede
         reopened.conn.close()
 
 
-def test_historical_group_estimates_keep_values_without_pinning_snapshots(predecessor):
-    from tests.group_support import publish, recordings
-    store = predecessor
-    head = publish(store, recordings([('Jazz', 16, .2)]), now=10)
-    group = head['groups'][0]
-    value = {'policy': 'compiled-statistics', 'generation': head['generation'], 'at': 11,
-             'rows': [{'group_id': group['group_id'], 'version': group['version'], 'estimate': .6,
-                       'shared_from': None, 'menus': ['opportunity']}], 'excluded': {'unseen': 0}}
-    store.rec_proposals.put_proposals('group_choice_bandit', value, 11)
-    upgrade(store)
+def test_historical_group_estimates_keep_values_without_pinning_snapshots(upgraded_learning, upgraded_learning_template):
+    store = upgraded_learning
+    head, group, value = (upgraded_learning_template.result[name] for name in ('head', 'group', 'group_estimates'))
     assert store.rec_proposals.get_proposals('group_choice_bandit') == value
     assert not store.conn.execute('SELECT 1 FROM choice_learning_group_roots').fetchone()
     # #688 retains the historical numerical result without requiring its group
@@ -90,8 +108,8 @@ def test_interrupted_cutover_leaves_original_rows_and_schema(predecessor):
     assert list(predecessor.conn.iterdump()) == before
 
 
-def test_publication_rollback_and_snapshot_invalidation_follow_typed_inputs(predecessor):
-    upgrade(predecessor)
+def test_publication_rollback_and_snapshot_invalidation_follow_typed_inputs(upgraded_learning):
+    predecessor = upgraded_learning
     predecessor.rec_proposals.put_proposals('choice_interests', interests(), 10)
     with predecessor.read_snapshot() as snapshot:
         assert snapshot.store.rec_proposals.get_proposals('choice_interests') == interests()
@@ -103,13 +121,13 @@ def test_publication_rollback_and_snapshot_invalidation_follow_typed_inputs(pred
     assert predecessor.rec_proposals.get_proposals('choice_interests') == interests()
     predecessor.rec_proposals.put_proposals('choice_interests', replacement, 12)
     assert not snapshot.publish(lambda: pytest.fail('Published from stale learning inputs'))
-    assert predecessor.conn.execute('SELECT count(*) FROM choice_learning_publications').fetchone()[0] == 1
+    assert predecessor.conn.execute("SELECT count(*) FROM choice_learning_publications WHERE surface='choice_interests'").fetchone()[0] == 1
 
 
-def test_sql_enforces_surface_subject_and_immutable_published_inputs(predecessor):
-    upgrade(predecessor)
+def test_sql_enforces_surface_subject_and_immutable_published_inputs(upgraded_learning):
+    predecessor = upgraded_learning
     predecessor.rec_proposals.put_proposals('choice_interests', interests(), 10)
-    identity = predecessor.conn.execute('SELECT publication_id FROM choice_learning_heads').fetchone()[0]
+    identity = predecessor.conn.execute("SELECT publication_id FROM choice_learning_heads WHERE surface='choice_interests'").fetchone()[0]
     commands = [
         ("INSERT INTO rec_proposals VALUES ('choice_interests','{}',1)", ()),
         ('INSERT INTO choice_learning_heads VALUES (?,?)', ('choice_bandit', identity)),

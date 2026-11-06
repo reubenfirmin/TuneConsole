@@ -6,7 +6,6 @@ import pytest
 
 from yt_playlist.rec import trend_rollups, trend_payload, trend_statistics as stats
 from yt_playlist.rec.recap_metrics import month_bounds, profile
-from yt_playlist.repos.recap import RecapRepo
 
 
 @pytest.mark.parametrize("zones", [
@@ -39,7 +38,7 @@ def test_recap_podium_personality_and_details_share_account_calendar(store, zone
     assert review["listen_days"] == 3
     pers = next(b for b in payload["story"]["beats"] if b["kind"] == "personality")
     assert pers["axes"]["rhythm"] == 1
-    data = RecapRepo(store).snapshot(since, until)
+    data = store.recap.snapshot(since, until)
     assert len(data["plays"]) == review["plays"]
     measured = profile(month, data["plays"], data["meta"], data["spans"], [])
     assert measured.plays == review["plays"] and measured.days == review["listen_days"]
@@ -57,6 +56,6 @@ def test_shared_playlist_creation_uses_the_earliest_observers_calendar(store):
         store.history.record_play_event(iid, key, "v", created, source_timezone=zone)
         store.playlists.upsert_playlist(iid, "shared", "Shared", index + 2, "hash", created,
                                         created_at=created + index * 3600)
-    playlists = RecapRepo(store).snapshot(*month_bounds("2026-03"))["playlists"]
+    playlists = store.recap.snapshot(*month_bounds("2026-03"))["playlists"]
     assert playlists == [{"provider_playlist_id": "shared", "title": "Shared",
                           "created_at": created, "track_count": 3, "day": "2026-03-31"}]

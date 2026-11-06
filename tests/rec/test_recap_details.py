@@ -5,7 +5,6 @@ import pytest
 
 from yt_playlist.rec.recap_details import build, new_this_month, screens
 from yt_playlist.rec.recap_metrics import baselines, month_bounds, profile
-from yt_playlist.repos.recap import RecapRepo
 from yt_playlist.util.matching import identity_key
 
 
@@ -248,7 +247,7 @@ def test_repo_excludes_generated_plays_and_requires_real_playlist_dates(store):
             store.playlists.mark_generated_playlist(ytm)
     _exact(store,1,'real',since+1,'real')
     _exact(store,1,'generated',since+2,'generated')
-    material = RecapRepo(store).snapshot(since, until)
+    material = store.recap.snapshot(since, until)
     assert [p["identity_key"] for p in material["plays"]] == ["real"]
     assert [p["provider_playlist_id"] for p in material["playlists"]] == ["real"]
     assert build(store, "2026-09") == []  # one play is not a recap highlight
@@ -274,7 +273,7 @@ def test_new_playlist_counts_do_not_multiply_copies_or_attribute_song_matches(st
     for day in range(3):
         for play in range(2):
             _exact(store, 1, 'song', since + day * 86400 + play * 300 + 100, 'real')
-    material = RecapRepo(store).snapshot(since, until)
+    material = store.recap.snapshot(since, until)
     beat = new_this_month(material, '2026-09')
     playlists = next(g for g in beat['groups'] if g['label'] == 'Playlists')
     assert playlists["total"] == 1
@@ -298,7 +297,7 @@ def test_repo_preserves_true_counts_with_video_variants_and_coarse_familiarity(s
     store.history.record_history_plays(1, since - 86400, [key], source_timezone="UTC")
     store.history.import_listening_events(1, [(key, None, since + i * 3600) for i in range(4)],
                                          source_timezone="UTC")
-    material = RecapRepo(store).snapshot(since, until)
+    material = store.recap.snapshot(since, until)
     assert len(material["plays"]) == 4
     assert material["first"][key] == since - 86400 + 43200  # a coarse date, not an exact midnight play
 

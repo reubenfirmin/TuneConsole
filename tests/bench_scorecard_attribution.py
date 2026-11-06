@@ -18,7 +18,7 @@ from yt_playlist.core import db_diagnostics
 from yt_playlist.rec import scorecard
 from yt_playlist.core.activity import cancellable_work
 from yt_playlist.core.store import Store
-from yt_playlist.repos.scorecard_attribution import VIDEO
+from yt_playlist.rec.scorecard_attribution import VIDEO
 
 
 START = 1_800_000_000

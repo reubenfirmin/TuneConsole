@@ -14,7 +14,9 @@ from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.rec import (experiments, group_roots, home_themes, layers, mode_eval,
                              negative, rec_params, transient)
 from yt_playlist.rec.eligibility import home_exclusions
-from yt_playlist.repos.home_selection import CandidateFilter, HomeInputRepo, HomeSelectionRepo
+from yt_playlist.controllers.home_selection import HomeSelection
+from yt_playlist.rec.home_selection_policy import CandidateFilter
+from yt_playlist.repos.home_selection import HomeInputRepo, HomeSelectionRepo
 
 LANES = ('wheelhouse', 'explore', 'fresh', 'comfort', 'temporal')
 
@@ -258,7 +260,8 @@ def _assemble(reader, generation, now, epoch, avoid, include, mode_order, prepar
     if not modes:
         return []
     leans = preparation['leans'] if preparation is not None else transient.facet_leans(reader, now)
-    with HomeSelectionRepo.open() as ordering:
+    with HomeSelectionRepo.open() as repository:
+        ordering = HomeSelection(repository)
         selection = Selection(reader, generation, now, leans, ordering,
                               (preparation or {}).get('metadata_inputs'))
         return _cards(selection, modes, framing, leans, epoch, avoid, include, mode_order)

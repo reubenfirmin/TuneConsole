@@ -6,7 +6,7 @@ destination resource, covering both numbered and regular histories. The numbered
 SQL resource remains the baseline for explicit historical replay and export.
 """
 from collections import Counter, defaultdict
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
@@ -124,19 +124,30 @@ def assembled_statements(*, version):
     bounded regular changes. This numbered layout is not the final rebuild
     destination version; the builder fences its entire contract by signature.
     """
+    # Repeated historical validations share the same shipped text. Read it for
+    # the key so a changed definition cannot reuse an older compiled layout.
+    definitions = tuple((path, path.read_text()) for path in _source_definitions(version))
+    yield from _assembled_statements(version, definitions, DEFINITION)
+
+
+@lru_cache(maxsize=32)
+def _assembled_statements(version, definitions, baseline):
     from . import schema_transforms as transforms
-    for sql in _statements(version):
+
+    result = []
+    for sql in _statements(version, definitions=definitions, baseline=baseline):
         if version >= 103:
             sql = transforms.entity_names(sql)
-        yield transforms.domain_contracts(sql) if version >= 104 else sql
+        result.append(transforms.domain_contracts(sql) if version >= 104 else sql)
     if version >= 105:
         from .frozen_share_contract import fences
-        yield from fences()
+        result.extend(fences())
+    return tuple(result)
 
 
-def _statements(version):
+def _source_definitions(version):
     from . import schema_transforms as transforms
-    from .genre_contract import classified_definition
+
     for definition in SOURCE_DEFINITIONS:
         if version < 106 and definition.name == 'schema_foreign_calendar_scopes.sql':
             continue
@@ -171,8 +182,20 @@ def _statements(version):
             continue
         if version < 86 and definition.name == 'schema_genre_classifications.sql':
             continue
+        yield definition
+
+
+def _statements(version, *, definitions=None, baseline=None):
+    from . import schema_transforms as transforms
+    from .genre_contract import classified_definition
+
+    if definitions is None:
+        definitions = ((path, path.read_text()) for path in _source_definitions(version))
+    if baseline is None:
+        baseline = DEFINITION
+    for definition, text in definitions:
         pending = ''
-        for line in definition.read_text().splitlines(keepends=True):
+        for line in text.splitlines(keepends=True):
             pending += line
             if sqlite3.complete_statement(pending):
                 if definition.name=='schema_radio_policy_roots.sql' and re.match(
@@ -182,7 +205,7 @@ def _statements(version):
                 sql = classified_definition(pending) if version >= 86 else pending
                 sql = transforms.taste_axes(sql) if version >= 88 else sql
                 sql = transforms.recipe_memberships(sql) if version >= 89 else sql
-                if definition == DEFINITION:
+                if definition == baseline:
                     sql = transforms.collection_state(sql) if version >= 94 else sql
                     sql = transforms.collection_documents(sql) if version >= 97 else sql
                     sql = transforms.action_work(sql) if version >= 98 else sql
@@ -347,12 +370,24 @@ def _reference_contract(statements):
         for sql in statements:
             reference.execute(sql)
         return {
-            name: (kind, _table(reference, name, sql) if kind == 'table' else _tokens(sql))
+            name: (kind, _reference_table(name, sql) if kind == 'table' else _tokens(sql))
             for name, kind, sql in reference.execute(
                 "SELECT name,type,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'").fetchall()
         }
     finally:
         reference.close()
+
+
+@lru_cache(maxsize=1024)
+def _reference_table(name, sql):
+    """An unchanged reference table has the same declared constraints in every layout.
+
+    Only shipped CREATE TABLE text is reused here. Live database observations
+    still belong to their connection's admission session.
+    """
+    with closing(sqlite3.connect(':memory:')) as reference:
+        reference.execute(sql)
+        return _inspect_table(reference, name, sql)
 
 
 @lru_cache(maxsize=1)

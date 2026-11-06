@@ -14,7 +14,7 @@ def record_next(store, identity, video, position, duration, playlist, now):
 
 
 def _apply(store, row):
-    """Apply one finite observation under the caller's atomic SQLite unit."""
+    """Project one observation before the controller records its receipt."""
     from yt_playlist.library import live_plays, player_events, rating_projection
     body, identity, now = Inbox.body(row), row['account_id'], row['observed_at']
     if row['kind'] == 'rating':
@@ -30,7 +30,7 @@ def _apply(store, row):
         return True
     ctx = SimpleNamespace(store=store, rec_worker=None)
     if row['kind'] == 'player':
-        return player_events.persist_player_event(ctx, body, now, identity)
+        return player_events.persist_player_event(ctx, body, now, identity, capture_id=row['capture_id'])
     return live_plays.persist_play_event(ctx, body, now, identity, inline_analytics=True)
 
 

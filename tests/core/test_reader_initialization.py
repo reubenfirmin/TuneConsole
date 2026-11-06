@@ -54,7 +54,7 @@ def test_new_readers_detect_committed_feature_tables_and_ignore_views(tmp_path):
                 writer.execute('DROP VIEW album_feedback')
                 writer.execute('CREATE TABLE album_feedback(value)')
                 writer.execute('CREATE TABLE legacy_catalog_evidence(value)')
-            # An existing reader keeps its pinned schema and feature flags.
+            # Feature flags are detected when this reader is opened.
             assert not before._collection_files and not before._legacy_files
         with store.read_view() as after:
             assert after._collection_files and after._legacy_files
@@ -100,12 +100,14 @@ def test_supported_installed_layouts_keep_private_read_projections(
         store.settings.set_setting('reader-layout-probe', 'current')
         store.tracks.upsert_track('reader-layout-video', 'Reader layout', 'Artist', None, None)
         with store.read_view() as reader:
+            assert not reader.conn.in_transaction
             for name in ('_collection_files', '_compact_group_files', '_recommendation_files',
                          '_metadata_files', '_legacy_files'):
                 assert getattr(reader, name) == getattr(store, name)
             assert reader.settings.get_setting('reader-layout-probe') == 'current'
             assert reader.conn.execute('SELECT title FROM tracks WHERE video_id=?',
                                        ('reader-layout-video',)).fetchone()[0] == 'Reader layout'
+            assert not reader.conn.in_transaction
     finally:
         store.conn.close()
 

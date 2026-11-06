@@ -38,7 +38,7 @@ def read(root, generation):
     try:
         value = json.loads(raw)
         rows = value['inputs']
-        if (value['format'] not in (1, 2, 3) or not isinstance(value['vibe'], str) or not isinstance(rows, list)
+        if (value['format'] not in (1, 2, 3, 4) or not isinstance(value['vibe'], str) or not isinstance(rows, list)
                 or not rows or len(rows) > (1024 if value['format'] == 1 else 32768)
                 or len({row['recording'] for row in rows}) != len(rows)
                 or len({row['measurement'] for row in rows}) != len(rows)
@@ -84,9 +84,13 @@ def receipt(generation, artists, mean_variance, new_track_variance, *, condition
     value = {'generation': generation, 'artists': sorted(set(artists)),
              'mean_variance': mean_variance, 'new_track_variance': new_track_variance}
     if conditioning is not None:
-        if (not isinstance(conditioning, dict) or set(conditioning) != {'genre', 'album'}
-                or any(item is not None and (not isinstance(item, str) or not item)
-                       for item in conditioning.values()) or len(canonical(conditioning)) > 2048):
+        if (not isinstance(conditioning, dict)
+                or set(conditioning) not in ({'genre', 'album'}, {'genre', 'album', 'metadata_prior'})
+                or any(conditioning[key] is not None and (not isinstance(conditioning[key], str) or not conditioning[key])
+                       for key in ('genre', 'album'))
+                or 'metadata_prior' in conditioning and (type(conditioning['metadata_prior']) not in (int, float)
+                    or not math.isfinite(conditioning['metadata_prior']) or not 0 <= conditioning['metadata_prior'] <= 1)
+                or len(canonical(conditioning)) > 2048):
             raise ValueError('Invalid joint target conditioning')
         value['conditioning'] = dict(conditioning)
     return value

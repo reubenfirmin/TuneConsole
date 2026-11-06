@@ -271,7 +271,6 @@ def slides(beats):
 
 
 def build(store, month):
-    from yt_playlist.repos.recap import RecapRepo
     since, _ = month_bounds(shift_month(month, -6))
     _, until = month_bounds(month)
-    return screens(RecapRepo(store).snapshot(since, until), month)
+    return screens(store.recap.snapshot(since, until), month)

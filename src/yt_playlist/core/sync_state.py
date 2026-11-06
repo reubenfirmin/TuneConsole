@@ -105,6 +105,18 @@ def _resources(result):
 
 
 def write(conn,result,now,*,last_success=None):
+    _write_cursors(conn, result)
+    reference = collection_recovery.publish(conn,'library-sync',1,result)
+    _write_attempt(conn, result, now, reference, last_success)
+
+
+def write_prepared(conn,result,now,*,reference,last_success=None):
+    """Persist supplied progress and an already published recovery reference."""
+    _write_cursors(conn, result)
+    _write_attempt(conn, result, now, reference, last_success)
+
+
+def _write_cursors(conn, result):
     if not isinstance(result,dict) or result.get('status') not in STATUSES:
         raise ValueError('Unsupported sync result; original retained')
     conn.execute('UPDATE sync_attempts SET revision=revision WHERE 0')
@@ -124,7 +136,10 @@ def write(conn,result,now,*,last_success=None):
             conn.execute('INSERT INTO sync_cursors(account_id,provider,collection,playlist_scope_id,revision,'
                 'cursor,phase,updated_at,last_success_at,failures,retry_at) VALUES (?,\'youtube\',?,?,1,?,?,?,?,?,?)',
                 (account_id,collection,scope,*values))
-    filename,digest,size = collection_recovery.publish(conn,'library-sync',1,result)
+
+
+def _write_attempt(conn, result, now, reference, last_success):
+    filename,digest,size = reference
     conn.execute('INSERT INTO sync_attempts(id,revision,phase,outcome,started_at,finished_at,last_success_at,'
         'recovery_filename,recovery_digest,recovery_bytes) VALUES (1,1,?,?,?,?,?,?,?,?) '
         'ON CONFLICT(id) DO UPDATE SET revision=revision+1,phase=excluded.phase,outcome=excluded.outcome,finished_at=excluded.finished_at,'

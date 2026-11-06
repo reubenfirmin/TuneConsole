@@ -86,6 +86,7 @@ class RecWorker:
         """Notice committed changes from live playback and external import writers."""
         while not self._stop.wait(0.5):
             try:
+                self._release_idle_preparation()
                 self.ctx.store.maintenance_diagnostics.flush()
                 self._poll_album_feedback()
                 self._poll_evidence_storage()
@@ -102,6 +103,16 @@ class RecWorker:
                 self._poll_tv()
             except Exception:
                 self.ctx.logger.warning('recommendation change polling failed', exc_info=True)
+
+    def _release_idle_preparation(self):
+        # Storage pauses stop admissions, so an idle snapshot cannot wait for
+        # the next capture to release its WAL view and file-reader leases.
+        # Never close a generator while another thread is advancing it.
+        if self.model_lock.acquire(blocking=False):
+            try:
+                self.preparation.expire_capture(paused=not self._accepting())
+            finally:
+                self.model_lock.release()
 
     def _poll_album_feedback(self):
         from yt_playlist.rec import album_feedback
@@ -206,6 +217,7 @@ class RecWorker:
         if any(thread.is_alive() for thread in self._threads):
             raise RuntimeError("Recommendation worker did not stop")
         self._threads.clear()
+        self.preparation.close()
         from yt_playlist.rec import group_roots
         group_roots.close_retention(self.ctx.store)
         self.ctx.store.retention.close()

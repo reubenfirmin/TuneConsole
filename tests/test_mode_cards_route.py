@@ -8,16 +8,18 @@ from fastapi.testclient import TestClient
 from yt_playlist.rec import home_prepared, journeys, mode_surfaces
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, seed_catalog_track
-from tests.home_fixture_support import prepared_client
+from tests.home_fixture_support import home_routes_only, prepared_client, publish_menu
+from tests.mode_fixtures import seed_modes
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
 
-pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'home_routes_only')
 
 
 def _client(store, now=1000.0):
     iid = store.accounts.upsert_account("main", "cred", None, True)
     prepare_home(store, now)
-    return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
+    return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now,
+                                 background_work=False),
                       base_url="http://127.0.0.1")
 
 
@@ -57,9 +59,15 @@ def _seed_bundles(store):
     return payload
 
 
-def test_cards_route_renders_mode_cards(store, mode_cards_home_template):
-    mode_cards_home_template.restore(store)
-    with prepared_client(store) as client:
+def test_cards_route_renders_mode_cards(store, home_routes_only):
+    seed_modes(store, 1, 2)
+    payload = publish_menu(store, prefix='song', count=2, mode_ids=(1, 2))
+    # A discovery inside a mix must not acquire individual track exposure when
+    # only the mix descriptor becomes visible. Keep this assertion nonempty.
+    track = payload['menus'][0]['protos'][0]['tracks'][0]
+    store.discovery.upsert_discovered_track(track['key'], track['video_id'], track['title'],
+        track['artist'], '', None, track['genre'], None, None, 1000)
+    with prepared_client(store, background_work=False) as client:
         r = client.get("/home/cards")
         assert r.status_code == 200
         assert "Song" in r.text
@@ -79,7 +87,8 @@ def test_cards_route_renders_mode_cards(store, mode_cards_home_template):
     assert len(responses) == 1 and responses[0]['kind'] == 'visible'
     assert responses[0]['option_id'] == recipes[0]['option_id']
     assert not store.conn.execute('SELECT 1 FROM rec_served_impressions').fetchone()
-    assert all(row['offered_count'] == 0 for row in store.discovery.get_discovered_tracks())
+    discoveries = store.discovery.get_discovered_tracks()
+    assert discoveries and all(row['offered_count'] == 0 for row in discoveries)
 
 
 def test_mix_choice_capture_failure_keeps_playable_cards_and_logs(
@@ -94,7 +103,7 @@ def test_mix_choice_capture_failure_keeps_playable_cards_and_logs(
         raise OSError('controlled mix-choice capture failure')
 
     monkeypatch.setattr(choice_evidence, 'present', unavailable)
-    with prepared_client(store) as client:
+    with prepared_client(store, background_work=False) as client:
         response = client.get('/home/cards')
     assert len(calls) == 1 and calls[0][0] == 'mixes'
     assert calls[0][1] and all(option['id'] for option in calls[0][1])
@@ -112,7 +121,7 @@ def test_mix_regeneration_submits_and_closes_the_requesting_views_offer(store, m
     from html import unescape
     from yt_playlist.rec import choice_evidence
     mode_cards_home_template.restore(store)
-    with prepared_client(store) as client:
+    with prepared_client(store, background_work=False) as client:
         first = client.get('/home/cards')
         match = re.search(r'hx-vals=\'([^\']*opportunity_id[^\']*)\'', first.text)
         assert match, 'Regeneration must send the ID from the rendered recipe'
@@ -132,7 +141,7 @@ def test_mode_card_recipe_carries_a_journey(store, mode_cards_home_template):
     # the Flow lever (parity with the per-lane _carded cards). Regression: the mode-card recipe was
     # just {"model": "mode", "mode_id": N} with no journey, so the saved playlist showed no Flow.
     mode_cards_home_template.restore(store)
-    with prepared_client(store) as client:
+    with prepared_client(store, background_work=False) as client:
         r = client.get("/home/cards")
     assert r.status_code == 200
     recipes = [json.loads(m.replace("&#34;", '"').replace("&quot;", '"'))

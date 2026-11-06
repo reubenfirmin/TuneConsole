@@ -38,7 +38,7 @@ class PreparedContentRepo(Repo):
             (revision, revision)).fetchone()[0]
 
     @synchronized
-    def capture(self, pending):
+    def capture(self, pending, *, mask_numeric=False):
         """Read only these identities and declare every dependent base-table key.
 
         Counter keys match the TEMP write triggers, including both sides of a
@@ -80,10 +80,10 @@ class PreparedContentRepo(Repo):
             cols = self._store.rec_query.AUDIO_COLS
             sel = ','.join(f'MIN({c}) AS {c}' for c in cols)
             where = ' OR '.join(f'{c} IS NOT NULL' for c in cols)
-            audio = {r['identity_key']: {c: r[c] for c in cols if r[c] not in (None, '')}
+            audio = {} if mask_numeric else {r['identity_key']: {c: r[c] for c in cols if r[c] not in (None, '')}
                      for r in self.conn.execute(f'SELECT identity_key,{sel} FROM tracks '
                          f'WHERE identity_key IN ({qs}) AND ({where}) GROUP BY identity_key', keys)}
-            discovered = self._store.discovery.discovered_tracks_by_keys(keys)
+            discovered = self._store.discovery.discovered_tracks_by_keys(keys, metadata_only=mask_numeric)
             previous = dict(self.conn.execute(
                 'SELECT r.identity_key,p.digest FROM prepared_recording_inputs p '
                 f'JOIN recordings r ON r.id=p.recording_id WHERE r.identity_key IN ({qs})', keys))

@@ -10,7 +10,9 @@ import pytest
 from yt_playlist.core.activity import WorkClosing, cancellable_work
 from yt_playlist.repos import group_ordering, home_selection
 from yt_playlist.repos.group_ordering import GroupOrderingRepo
-from yt_playlist.repos.home_selection import CandidateFilter, HomeInputRepo, HomeSelectionRepo
+from yt_playlist.controllers.home_selection import HomeSelection
+from yt_playlist.rec.home_selection_policy import CandidateFilter, query
+from yt_playlist.repos.home_selection import HomeInputRepo, HomeSelectionRepo
 
 
 @pytest.mark.parametrize('repo_type', [GroupOrderingRepo, HomeSelectionRepo, HomeInputRepo])
@@ -35,7 +37,7 @@ def test_private_disk_storage_closes_and_removes_files(tmp_path, monkeypatch, re
                 rows.close()
             elif repo_type is HomeSelectionRepo:
                 repo.add_candidates([(7, 1, 'a', 'Artist', '', 'jazz', 1, 2000, 1, 0, 1)])
-                rows = repo.ranked(CandidateFilter(7))
+                rows = repo.ranked(query(CandidateFilter(7)))
                 assert next(rows)['key'] == 'a'
                 rows.close()
             else:
@@ -65,7 +67,7 @@ def test_ordered_cursor_checks_cancellation_at_the_next_page(repo_type):
         else:
             repo.add_candidates([(7, i, str(i), '', '', 'jazz', 1, 2000, 1, 0, 1)
                                  for i in range(300)])
-            rows = repo.ranked(CandidateFilter(7))
+            rows = repo.ranked(query(CandidateFilter(7)))
         assert [next(rows)['key'] for _ in range(128)] == [str(i) for i in range(128)]
         stopped = False
         with cancellable_work(lambda: stopped):
@@ -78,7 +80,8 @@ def test_ordered_cursor_checks_cancellation_at_the_next_page(repo_type):
 
 
 def test_home_filtering_steering_and_seen_keys_share_the_same_candidate_set():
-    with HomeSelectionRepo.open() as repo:
+    with HomeSelectionRepo.open() as repository:
+        repo = HomeSelection(repository)
         repo.add_candidates([
             (7, 0, 'a', 'A', '', 'jazz', 1, 1980, 1, 0, 1),
             (7, 1, 'b', 'B', '', 'jazz', 1, 2000, 1, 0, 0),

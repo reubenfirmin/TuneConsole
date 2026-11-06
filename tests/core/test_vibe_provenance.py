@@ -197,7 +197,8 @@ def test_current_protection_expiry_snapshot_and_independent_restore(store, tmp_p
         copied.conn.close()
 
 
-def test_changed_target_album_gets_distinct_receipt_when_numeric_result_is_unchanged(store):
+@pytest.mark.parametrize('prior', [False, True])
+def test_changed_target_conditioning_gets_distinct_receipt_when_numeric_result_is_unchanged(store, prior):
     from yt_playlist.rec import vibe_joint_model as joint
 
     legacy_pid, mids, artist, rid = evidence(store)
@@ -210,8 +211,11 @@ def test_changed_target_album_gets_distinct_receipt_when_numeric_result_is_uncha
            'score': .5, 'support': 1., 'source': 'artist', 'recordings': 2,
            'mean_variance': .01, 'new_track_variance': .05}
 
-    def publish(album):
-        resolved = {key: {'relax': {**fit, 'conditioning': {'genre': None, 'album': album}}}}
+    def conditioning(value):
+        return {'genre': None, 'album': None, 'metadata_prior': value} if prior else {'genre': None, 'album': value}
+
+    def publish(value):
+        resolved = {key: {'relax': {**fit, 'conditioning': conditioning(value)}}}
         with store.read_snapshot() as snapshot:
             prepared = snapshot.store.vibe_predictions.prepare_publication({key: track}, resolved, [], 10)
             try:
@@ -221,12 +225,13 @@ def test_changed_target_album_gets_distinct_receipt_when_numeric_result_is_uncha
         return store.conn.execute("SELECT prediction_id,score,support FROM recording_vibes "
                                   "WHERE recording_id=? AND vibe='relax'", (rid,)).fetchone()
 
-    first, second = publish('first'), publish('second')
+    first_value, second_value = (.2, .8) if prior else ('first', 'second')
+    first, second = publish(first_value), publish(second_value)
     assert tuple(first)[1:] == tuple(second)[1:] == (.5, 1.)
     assert first[0] != second[0]
-    assert publish('second')[0] == second[0]
-    assert owner.read(store.conn, first[0])['conditioning'] == {'genre': None, 'album': 'first'}
-    assert owner.read(store.conn, second[0])['conditioning'] == {'genre': None, 'album': 'second'}
+    assert publish(second_value)[0] == second[0]
+    assert owner.read(store.conn, first[0])['conditioning'] == conditioning(first_value)
+    assert owner.read(store.conn, second[0])['conditioning'] == conditioning(second_value)
     assert owner.read(store.conn, legacy_pid) == {**legacy_receipt, 'inputs': mids}
     assert store.conn.execute('SELECT count(*) FROM prediction_inputs').fetchone()[0] == 0
 

@@ -394,10 +394,10 @@ class RecProposalsRepo(Repo):
 
     def put_proposals(self, surface, data, now=None) -> None:
         """Materialize a surface's proposals as JSON (the rec worker writes; routes read last-good)."""
-        self._put_proposals_json(surface, encode_proposals(surface, data), now)
+        self.put_encoded(surface, encode_proposals(surface, data), now)
 
     @synchronized
-    def _put_proposals_json(self, surface, encoded, now):
+    def put_encoded(self, surface, encoded, now):
         with self.conn:
             proposal_storage.publish(self._store, surface, encoded, now, standalone=True)
 

@@ -58,8 +58,7 @@ def begin_attempt(store, now):
 
 def finish_attempt(store, result, now, *, expected_revision=None):
     """Failed attempts must not refresh successful timestamps, including individual resources."""
-    return store.sync.finish_attempt(now, expected_revision=expected_revision,
-                                    calculate=lambda previous: stamp_result(result, previous, now))
+    return store.sync.finish_attempt(now, result, expected_revision=expected_revision)
 
 
 def stamp_result(result, previous, now):

@@ -42,8 +42,8 @@ def inputs(source, candidate, recipe):
                         'source-genre': source_genre.FORMAT}.get(recipe)
     if (recipe not in RECIPES or humans['format'] != labels.FORMAT or fitted['format'] != candidate_format
             or humans['label_policy'] != labels.LABEL_POLICY
+            or humans['candidate'] != fitted['candidate']
             or any(value['criteria'] != evaluation.CRITERIA
-                   or value['candidate'] != joint.configuration()
                    or value['profile_mask'] != evaluation.PROFILE_MASK for value in (humans, fitted))):
         raise ValueError('Incompatible categorical capture or metadata candidate')
     if fitted['source_sha256'] != evaluation.digest(source.read_bytes()):

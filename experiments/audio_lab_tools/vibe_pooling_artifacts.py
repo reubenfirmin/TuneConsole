@@ -17,27 +17,30 @@ import zipfile
 from tests.file_custody_support import export_owner, restore_owner
 from yt_playlist.core import fao, vibe_provenance
 from yt_playlist.core.store import Store
+from yt_playlist.rec import home_vibe, musical_preparation
 from yt_playlist.rec import vibe_joint_model as model, vibe_joint_preparation as preparation, vibe_preparation
 from yt_playlist.repos import vibe_models
 from .vibe_pooling_operations import storage
 
 
-def run(output):
+def run(output, *, all_vibes=False):
     database = Path(os.environ.get('TUNECONSOLE_TEST_LIBRARY', ''))
     if (os.environ.get('TUNECONSOLE_IMAGE_RUN') != '1' or database != Path('/library/state.db')
             or output.parent.resolve() != Path('/reports')):
         raise ValueError('Use test-library.py with a private writable snapshot and /reports output')
     original_qualification, started = preparation.QUALIFICATIONS, time.monotonic()
     report = {'candidate_selected': False, 'operational_acceptance': False,
-        'limits': ['Controlled warm-corpus Relax fit, bypassing ordinary pending-work scheduling.',
+        'limits': ['Controlled warm-corpus fit, bypassing ordinary pending-work scheduling.',
             'Actual target metadata and originals; no human quality evaluation.',
             'One bounded batch is not full-corpus refresh, physical I/O or retention acceptance.',
             'Restore covers model and provenance domains only; SQL backup is explicit recovery evidence.']}
+    report['all_vibes'] = all_vibes
     sources = ('experiments/audio_lab_tools/vibe_pooling_artifacts.py',
         'experiments/audio_lab_tools/vibe_pooling_operations.py', 'tests/file_custody_support.py',
         'src/yt_playlist/core/vibe_model_files.py', 'src/yt_playlist/core/vibe_provenance.py',
         'src/yt_playlist/repos/vibe_models.py', 'src/yt_playlist/repos/vibe_predictions.py',
-        'src/yt_playlist/rec/vibe_joint_model.py', 'src/yt_playlist/rec/vibe_joint_preparation.py')
+        'src/yt_playlist/rec/vibe_joint_model.py', 'src/yt_playlist/rec/vibe_joint_calibrated.py',
+        'src/yt_playlist/rec/musical_preparation.py', 'src/yt_playlist/rec/vibe_joint_preparation.py')
     repository = Path(__file__).resolve().parents[2]
     report['code'] = {}
     with zipfile.ZipFile(output.parent / 'source.zip', 'x', zipfile.ZIP_DEFLATED) as archive:
@@ -52,8 +55,12 @@ def run(output):
         report['before'] = storage(store)
         preparation.QUALIFICATIONS = {preparation.config_identity(): 'isolated-artifact-rehearsal'}
         at = time.monotonic()
-        assert preparation.step(store)
+        for _ in range(len(preparation.VIBES) if all_vibes else 1):
+            assert preparation.step(store)
         report['fit_and_publication_seconds'] = time.monotonic() - at
+        if all_vibes:
+            report['model_states'] = {vibe: preparation.state(store, vibe) for vibe in preparation.VIBES}
+            assert all(value.get('outcome') == 'ready' for value in report['model_states'].values())
         state = preparation.state(store, 'relax')
         report['state'] = state
         if state.get('outcome') != 'ready':
@@ -69,10 +76,16 @@ def run(output):
         posterior = model.Posterior(value)
         tracks, resolved = {}, {}
         albums = store.vibe_predictions.joint_albums([row[0] for row in candidates])
+        priors = {}
+        for start in range(0, len(candidates), 32):
+            _keys, captured = store.vibe_predictions.joint_profile_rows([row[1] for row in candidates[start:start + 32]])
+            for key, payload, _version, _digest in musical_preparation.masked_recordings(store, captured):
+                priors[key] = home_vibe.heuristic_affinity(json.loads(payload), 'relax') if payload is not None else .5
         for row in candidates:
             key, recording, artist, genre = row
             assert recording not in manifest
-            estimate = posterior.predict(json.loads(artist), genre, album=albums.get(key), recording=recording)
+            estimate = posterior.predict(json.loads(artist), genre, album=albums.get(key), recording=recording,
+                                         metadata_prior=priors[key])
             if estimate is None:
                 continue
             tracks[key] = {'evidence': None, 'artist': artist, 'genre': genre,
@@ -80,7 +93,7 @@ def run(output):
             resolved[key] = {vibe: {'retain': True} for vibe, in store.conn.execute(
                 'SELECT vibe FROM recording_vibes WHERE recording_id=?', (recording,))}
             resolved[key]['relax'] = {**estimate, 'generation': generation, 'model_version': model.VERSION,
-                'conditioning': {'genre': genre, 'album': albums.get(key)}}
+                'conditioning': {'genre': genre, 'album': albums.get(key), 'metadata_prior': priors[key]}}
         assert len(tracks) >= 20
         def publish():
             with store.read_snapshot() as snapshot:
@@ -124,6 +137,36 @@ def run(output):
         finally:
             staged.close()
         assert fao.read(path).bytes == raw
+        generations = {vibe: store.settings.get_setting(vibe_models.HEAD_PREFIX + vibe)
+                       for vibe in (preparation.VIBES if all_vibes else ('relax',))}
+        report['required_models'] = {vibe: {'generation': identity,
+            'sha256': hashlib.sha256(fao.read(model_root / vibe_models.relative(identity)).bytes).hexdigest()}
+            for vibe, identity in generations.items()}
+        if all_vibes:
+            orphan = {**value, 'diagnostics': {**value['diagnostics'], 'unpublished_rehearsal': True}}
+            orphan_id, staged = store.vibe_predictions.stage_joint_model(orphan)
+            try:
+                staged.publish()
+            finally:
+                staged.close()
+            orphan_path = model_root / vibe_models.relative(orphan_id)
+            collection_at = fao.read(orphan_path).info.ctime_ns / 1e9 + 40 * 86400
+            with store.read_view() as reader:
+                assert reader.vibe_predictions.joint_model(generation)['vibe'] == 'relax'
+                assert vibe_models.collect(store.conn, collection_at, limit=1) == 0
+                assert orphan_path.exists()
+            removed, calls = 0, 0
+            while orphan_path.exists() and calls < 1024:
+                amount = vibe_models.collect(store.conn, collection_at, limit=1)
+                assert amount <= 1
+                removed += amount
+                calls += 1
+            assert removed == 1 and not orphan_path.exists()
+            assert all((model_root / vibe_models.relative(identity)).is_file()
+                       for identity in generations.values())
+            report['bounded_collection'] = {'limit': 1, 'calls': calls, 'removed': removed,
+                'required_generations_preserved': len(generations), 'active_reader_prevented_collection': True,
+                'age': 'controlled forty-day collection clock; live file ages unchanged'}
         pid = next(iter(first_ids.values()))
         expected = vibe_provenance.read(store.conn, pid)
         recording = next(recording for recording, prediction in first_ids.items() if prediction == pid)
@@ -155,6 +198,10 @@ def run(output):
                 raise AssertionError('Restore succeeded without required model')
             restore_owner(restored.conn, 'vibe-models', vibe_models, models)
             assert vibe_provenance.read(restored.conn, pid) == expected
+            for vibe, required in report['required_models'].items():
+                restored_value = vibe_models.read(restored.conn, required['generation'])
+                assert restored_value['vibe'] == vibe
+                assert hashlib.sha256(model.canonical(restored_value)).hexdigest() == required['sha256']
             assert not restored.conn.execute('PRAGMA foreign_key_check').fetchone()
             report['independent_domain_restore'] = True
             report['restored_input_count'] = len(expected['inputs'])
@@ -180,5 +227,6 @@ def run(output):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('output', type=Path)
+    parser.add_argument('--all-vibes', action='store_true')
     args = parser.parse_args()
-    run(args.output)
+    run(args.output, all_vibes=args.all_vibes)

@@ -73,12 +73,21 @@ def test_taste_controls_survive_topic_switches_and_reload(live_app, store, page)
     expect(slider).to_be_visible()
     expect(slider).to_have_value("0.5")
 
-    # A reset refreshes the whole page; its topic must remain open.
+    # A reset replaces the page content; its topic must remain open.
     page.get_by_role("tab", name="Experiment", exact=True).click()
     page.get_by_role("tab", name="Starting point", exact=True).click()
     page.get_by_role("button", name="Reset all settings", exact=True).click()
-    with page.expect_navigation():
+    previous_content = page.locator('#app-page').element_handle()
+    # Navigation API refreshes fetch and replace <main> without a document
+    # navigation. The old controls must disappear before we touch the new ones.
+    with page.expect_response(lambda r: urlsplit(r.url).path == '/taste/reset-all'
+                              and r.request.method == 'POST') as reset, \
+            page.expect_response(lambda r: urlsplit(r.url).path == '/taste'
+                                 and r.request.method == 'GET') as refreshed:
         page.get_by_role("dialog").get_by_role("button", name="Confirm", exact=True).click()
+    assert reset.value.status == 200 and reset.value.headers['hx-refresh'] == 'true'
+    assert refreshed.value.status == 200
+    previous_content.wait_for_element_state('hidden')
     expect(page.get_by_role("tab", name="Experiment", exact=True)).to_have_attribute("aria-selected", "true")
     expect(page.get_by_role("heading", name="Your starting point", exact=True)).to_be_visible()
     page.get_by_role("tab", name="Recommendations", exact=True).click()

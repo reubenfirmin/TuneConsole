@@ -1,5 +1,6 @@
 """Bounded catalog pages and upload metadata for Radio sessions."""
-from yt_playlist.repos.base import LIKED_EXISTS, Repo, lookup_read
+from yt_playlist.library.rating_policy import LIKED_EXISTS
+from yt_playlist.repos.base import Repo, lookup_read
 
 _METADATA = ('t.identity_key AS key,t.video_id,t.title,t.artist,t.album,t.album_browse_id,t.thumbnail,'
              't.duration_s AS duration,t.genre,t.mb_year AS year,t.available,t.bpm,t.energy,t.danceability')

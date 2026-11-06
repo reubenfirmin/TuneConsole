@@ -1,10 +1,12 @@
 """ChartsRepo: play-history statistics for the charts / artist / playlist UI pages
 (most-played songs and artists, per-playlist listen stats, and per-track detail views).
 """
-from yt_playlist.repos.base import LIKED_EXISTS, Repo, synchronized, snapshot_read
+from contextlib import contextmanager
+
+from yt_playlist.library.rating_policy import LIKED_EXISTS
+from yt_playlist.repos.base import Repo, synchronized, snapshot_read
 from yt_playlist.core import artists
 from yt_playlist.core.catalog_query import playable_tracks_sql
-from yt_playlist.util.matching import recording_title
 
 # Per-identity category expression for the non-playlist ticker dimensions. Each picks one
 # representative value per identity_key (dup uploads of the same song collapse to one), and
@@ -68,13 +70,13 @@ class ChartsRepo(Repo):
 
     @synchronized
     def album_labels(self):
-        return {f'@album:{r[0]}':r[1] or 'Album' for r in self.conn.execute(
+        return {f'@album:{r[0]}':r[1] for r in self.conn.execute(
             "SELECT a.id,a.title FROM albums a JOIN album_primary_provider_ids p ON p.album_id=a.id AND p.provider='youtube'")}
 
     @synchronized
     def playlist_labels(self):
         """Playlist titles are presentation labels; local IDs retain account scope."""
-        return {f'@playlist:{r[0]}': r[1] or 'Playlist' for r in self.conn.execute(
+        return {f'@playlist:{r[0]}': r[1] for r in self.conn.execute(
             "SELECT id,title FROM playlists")}
 
     @snapshot_read
@@ -160,36 +162,17 @@ class ChartsRepo(Repo):
         return {r["pid"]: (r["last"], r["cnt"]) for r in rows}
 
     @snapshot_read
-    def get_playlist_playback_stats(self) -> dict:
+    def get_playlist_playback_stats(self, *, policy) -> dict:
         """Actual playlist listening: {pid: (last_observed_playback, sessions)}.
 
-        A session can be partial. It ends when playback changes context or no
-        playing observation arrives for thirty minutes. Track changes, duplicate
-        reports and player ticks within that session do not add more listens.
-        Only explicit, account-matched playback context qualifies, at or after
-        known creation. Undated member-song history cannot backfill a session.
+        The caller supplies observation, normalization and session rules. The
+        query resolves account-scoped playlist references and aggregates them.
         """
-        rows = self.conn.execute("""
+        rows = self.conn.execute(f"""
             WITH observations AS (
-                SELECT account_id,played_at at,playlist_ytm_id context FROM play_events
-                UNION
-                SELECT account_id,at,playlist_ytm_id FROM player_events
-                WHERE video_id IS NOT NULL
-                AND CASE WHEN json_valid(payload) THEN
-                    COALESCE(json_extract(payload,'$.muted'),0)=0
-                    AND COALESCE(json_extract(payload,'$.tabMuted'),0)=0
-                    AND COALESCE(json_extract(payload,'$.paused'),0)=0
-                    AND COALESCE(json_extract(payload,'$.volume'),1)>0
-                    ELSE 1 END
-                AND (
-                    (kind='tick' AND position>0) OR
-                    (kind='state' AND CASE WHEN json_valid(payload)
-                        THEN json_extract(payload,'$.state') END='playing'))
+                {policy.observations}
             ), normalized AS (
-                SELECT account_id,at,CASE
-                    WHEN context LIKE 'RDAMPL%' THEN substr(context,7)
-                    WHEN context LIKE 'VL%' THEN substr(context,3)
-                    ELSE context END context FROM observations
+                SELECT account_id,at,{policy.context} context FROM observations
             ), playlist_contexts AS MATERIALIZED (
                 -- Index the two accepted context keys once. An OR in the
                 -- join scans every playlist in the account per observation.
@@ -207,10 +190,9 @@ class ChartsRepo(Repo):
                     LAG(at) OVER sequence previous_at FROM attributed
                 WINDOW sequence AS (PARTITION BY account_id ORDER BY at,pid)
             )
-            SELECT pid,MAX(at) last,SUM(CASE WHEN previous IS NOT pid
-                OR at-previous_at>1800 THEN 1 ELSE 0 END) sessions
+            SELECT pid,MAX(at) last,SUM(CASE WHEN {policy.starts_session} THEN 1 ELSE 0 END) sessions
             FROM ordered WHERE pid IS NOT NULL GROUP BY pid
-        """).fetchall()
+        """, {'gap_seconds': policy.gap_seconds}).fetchall()
         return {r['pid']: (r['last'], r['sessions']) for r in rows}
 
     @snapshot_read
@@ -335,22 +317,23 @@ class ChartsRepo(Repo):
             "GROUP BY t.artist ORDER BY pl DESC, t.artist LIMIT 1", genres).fetchone()
         return {"artist": row["artist"], "thumbnail": row["thumb"]} if row else None
 
-    @snapshot_read
-    def story_tracks(self, *, since, artist=None, genres=(), limit=3) -> list[dict]:
-        """Playable examples for one story, favoring the listener's recent song choices.
+    @contextmanager
+    def story_track_rows(self, *, since, artist=None, genres=()):
+        """Stream ordered candidates for a controller-owned bounded read."""
+        with self._lock:
+            rows = self._story_track_rows(since=since, artist=artist, genres=genres)
+            try:
+                yield (dict(row) for row in rows) if rows is not None else iter(())
+            finally:
+                if rows is not None:
+                    rows.close()
 
-        The worker calls this on its private snapshot. Scope history reads to the
-        matching songs, and use the library projection to collapse upload aliases.
-        Identical displayed titles/credits appear once even when their catalog
-        identities are unresolved; that presentation rule does not merge evidence.
-        Artist credits include collaborations; genres are exact stored labels.
-        """
-        if limit <= 0:
-            return []
+    @synchronized
+    def _story_track_rows(self, *, since, artist, genres):
         if artist:
             aid = artists.lookup(self.conn, artist)
             if aid is None:
-                return []
+                return None
             selection = (f'EXISTS (SELECT 1 FROM tracks credit JOIN {self.entry_artists_table} ta ON ta.entry_id=credit.id '
                          'WHERE credit.identity_key=t.identity_key AND ta.artist_id=?)')
             params = [aid]
@@ -358,8 +341,8 @@ class ChartsRepo(Repo):
             selection = 't.genre IN (' + ','.join('?' for _ in genres) + ')'
             params = list(genres)
         else:
-            return []
-        rows = self.conn.execute(
+            return None
+        return self.conn.execute(
             'WITH plays AS MATERIALIZED (SELECT CAST(identity_key AS TEXT) identity_key, '
             'COUNT(*) FILTER (WHERE day_ts>=?) recent_plays,MAX(day_ts) last_played '
             'FROM listening_days GROUP BY identity_key) '
@@ -369,16 +352,6 @@ class ChartsRepo(Repo):
             f'WHERE {selection} AND t.title<>\'\' '
             'ORDER BY recent_plays DESC,last_played DESC,LOWER(t.title),t.identity_key',
             [since, *params])
-        songs, seen = [], set()
-        for row in rows:
-            display = recording_title(row['title']), recording_title(row['artist'])
-            if display in seen:
-                continue
-            seen.add(display)
-            songs.append(dict(row))
-            if len(songs) >= limit:
-                break
-        return songs
 
     @snapshot_read
     def playlist_tracks_detail(self, playlist_id) -> list[dict]:

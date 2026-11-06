@@ -2,23 +2,17 @@
 from yt_playlist.core import mood, taste_axes
 from yt_playlist.repos.base import Repo, synchronized
 
-MOOD_EVENT_CAP = 200
-
-
 class RecSignalsRepo(Repo):
     @synchronized
-    def record_mood(self, keys, direction, now, prune_before=None) -> None:
-        """Log a mood signal (seed keys + ±direction). Bounded by age (via prune_before, if set)
-        and by count (only the newest MOOD_EVENT_CAP rows are kept). When prune_before is set,
-        rows with created_at < prune_before are deleted in the same transaction. Read by recent_mood_events."""
-        mood.record(self.conn, keys, direction, now, cap=MOOD_EVENT_CAP, prune_before=prune_before)
+    def record_mood(self, keys, direction, now, *, cap, prune_before=None) -> None:
+        """Persist a signal and prune to the caller's explicit bounds atomically."""
+        mood.record(self.conn, keys, direction, now, cap=cap, prune_before=prune_before)
         self.conn.commit()
 
     @synchronized
-    def recent_mood_events(self, limit=None) -> list:
+    def recent_mood_events(self, limit) -> list:
         """Recent mood events, newest-first: [(created_at, direction, [keys])]. Persistent, recency is
         the caller's concern (interaction-rank weighting), not a time window."""
-        limit = MOOD_EVENT_CAP if limit is None else limit
         return mood.recent(self.conn, limit)
 
     @synchronized

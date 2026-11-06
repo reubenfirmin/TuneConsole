@@ -3,6 +3,8 @@ from yt_playlist.repos.cluster_evidence import ConnectionEvidence
 from yt_playlist.util import genre_map
 from yt_playlist.util.years import decade
 
+MAX_EVIDENCE_PLAYLIST = 120
+
 
 def _join_names(names, total):
     if not names:

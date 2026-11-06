@@ -396,6 +396,17 @@ class VibePredictionsRepo(Repo):
         return vibe_models.training_manifest(self.conn, vibe, limit)
 
     @synchronized
+    def joint_profile_rows(self, recordings):
+        """A bounded batch of raw profile inputs, never prepared target scores."""
+        if not 0 < len(recordings) <= 32:
+            raise ValueError('Joint masked profile capture requires a bounded batch')
+        keys = dict(self.conn.execute('SELECT id,identity_key FROM recordings WHERE id IN ('
+                    + ','.join('?' for _ in recordings) + ')', recordings))
+        if set(keys) != set(recordings):
+            raise ValueError('Joint masked profile requires each original recording')
+        return keys, self._store.prepared_content.capture([(key, 0) for key in keys.values()], mask_numeric=True)
+
+    @synchronized
     def joint_albums(self, keys):
         ids = {key:row[0] for key in keys for row in self.conn.execute(
             'SELECT id FROM recordings WHERE identity_key=?', (key,))}

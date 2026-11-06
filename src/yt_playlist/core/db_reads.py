@@ -94,7 +94,7 @@ def read_view(source, make_reader, *, tracked=False, seconds=...):
                     try:
                         snapshot = tracked_view.enter_context(read_snapshot(
                             source, make_reader, memo=source._foreground_read_memo,
-                            wait_for_writer=source._db_path is None))
+                            wait_for_writer=source._db_path is None, read_transaction=False))
                     except SnapshotBusy:
                         pass
                     else:
@@ -103,7 +103,7 @@ def read_view(source, make_reader, *, tracked=False, seconds=...):
             reader = make_reader()
             if source._db_path is None:
                 # In-memory fixtures have no shared database file. Production
-                # file readers pin WAL state without copying database pages.
+                # file readers use ordinary committed reads without copying pages.
                 with source._lock:
                     if source.conn.in_transaction:
                         raise RuntimeError('Cannot copy uncommitted changes for analytics')
@@ -111,13 +111,9 @@ def read_view(source, make_reader, *, tracked=False, seconds=...):
                         progress=lambda *_: check_cancellable_work())
                     reader._bind_repositories()
             reader.conn.execute('PRAGMA query_only=ON')
-            if not reader.conn.in_transaction:
-                reader.conn.execute('BEGIN')
-            reader.conn.execute('SELECT 1 FROM sqlite_schema LIMIT 1').fetchone()
             # A composed Home response revisits the same readiness checks.
-            # This pinned, read-only view cannot change underneath them. Keep
-            # detached results only for its lifetime, with the same small entry
-            # bound as background snapshot memoization.
+            # Reuse detached results for this request, without requiring all
+            # reporting queries to share a database transaction.
             memo = OrderedDict()
             def calculate(name, prepare):
                 if name in memo:

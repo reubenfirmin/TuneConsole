@@ -8,6 +8,7 @@ import pytest
 from tests.prepared_fixture_support import prepared_template, roots
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core import embedding_files
+from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
 from yt_playlist.rec import daily_model_selection as daily, model_selection, model_setup
 from yt_playlist.util.matching import identity_key
@@ -32,26 +33,28 @@ def daily_catalog_template(_pristine_current_schema):
 
 def _seed_catalog(store):
     now = 200 * daily.DAY
-    account = store.accounts.upsert_account('main', 'cred', None, True)
-    entries = [store.tracks.upsert_track(str(i), f'Song{i:03d}', 'Artist', None, None,
-               created_at=-200 * daily.DAY) for i in range(160)]
-    keys = [store.tracks.identity_key_for_video(str(i)) for i in range(160)]
-    videos = {key: str(i) for i, key in enumerate(keys)}
-    for offset in (0, 80):
-        playlist = store.playlists.upsert_playlist(account, f'PL{offset}', 'Old curation', 80, 'old', -100 * daily.DAY)
-        store.playlists.set_playlist_tracks(playlist, entries[offset:offset + 80])
-    for key in keys[:20]:
-        store.history.record_play_event(account, key, videos[key], -100 * daily.DAY)
+    with atomic_write(store):
+        account = store.accounts.upsert_account('main', 'cred', None, True)
+        entries = [store.tracks.upsert_track(str(i), f'Song{i:03d}', 'Artist', None, None,
+                   created_at=-200 * daily.DAY) for i in range(160)]
+        keys = [store.tracks.identity_key_for_video(str(i)) for i in range(160)]
+        videos = {key: str(i) for i, key in enumerate(keys)}
+        for offset in (0, 80):
+            playlist = store.playlists.upsert_playlist(account, f'PL{offset}', 'Old curation', 80, 'old', -100 * daily.DAY)
+            store.playlists.set_playlist_tracks(playlist, entries[offset:offset + 80])
+        for key in keys[:20]:
+            store.history.record_play_event(account, key, videos[key], -100 * daily.DAY)
     return dict(now=now, account=account, keys=keys, videos=videos)
 
 
 def _seed_library(store):
-    value = _seed_catalog(store)
-    now, account, keys, videos = (value[name] for name in ('now', 'account', 'keys', 'videos'))
-    for index, key in enumerate(keys[20:80]):
-        store.history.record_play_event(account, key, videos[key], now - 30 * daily.DAY + (index // 2) * daily.DAY + 100)
-    assert set(map(tuple, store.conn.execute('SELECT identity_key,video_id FROM play_event_subjects'))) == {
-        (key, videos[key]) for key in keys[:80]}
+    with atomic_write(store):
+        value = _seed_catalog(store)
+        now, account, keys, videos = (value[name] for name in ('now', 'account', 'keys', 'videos'))
+        for index, key in enumerate(keys[20:80]):
+            store.history.record_play_event(account, key, videos[key], now - 30 * daily.DAY + (index // 2) * daily.DAY + 100)
+        assert set(map(tuple, store.conn.execute('SELECT identity_key,video_id FROM play_event_subjects'))) == {
+            (key, videos[key]) for key in keys[:80]}
     original = [(key, np.array([1., 0.], dtype=np.float32).tobytes()) for key in keys]
     store.rec_model.replace_rec_vectors(original)
     store.settings.set_setting('rec_dim', '2')

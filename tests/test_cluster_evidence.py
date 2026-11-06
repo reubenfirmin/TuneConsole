@@ -105,6 +105,7 @@ def test_shared_album_and_same_account_day_are_grounded_separately(store):
     store.history.record_history_plays(other, 43200, [(path, 'Today')], source_timezone='UTC')
     evidence = store.cluster_evidence.connection(child, [path])
     assert evidence.album == AlbumNeighbor('Album', 'Artist')
+    assert evidence.same_artist == 'Artist'
     assert not evidence.same_day
     store.history.record_history_plays(iid, 43201, [(path, 'Today')], source_timezone='UTC')
     assert store.cluster_evidence.connection(child, [path]).same_day

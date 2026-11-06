@@ -239,7 +239,7 @@ class Shard:
         temporary.replace(self.path)
 
 
-def verify(reports, suite, total=2):
+def _measure(reports, suite, total, *, diagnostic=False):
     reports = sorted(reports, key=lambda report: report["index"])
     if total not in SHARD_COUNTS or len(reports) != total or [report["index"] for report in reports] != list(range(1, total + 1)):
         raise ValueError(f"{suite}: all {total} isolated shard reports are required")
@@ -251,7 +251,7 @@ def verify(reports, suite, total=2):
         if (report.get("schema"), report["suite"], report["total"], report["revision"], report["expected"], report["file_owners"]) != (
                 2, suite, total, reports[0]["revision"], original, reports[0]["file_owners"]):
             raise ValueError(f"{suite}: shard normal collections, file plans or source revisions differ")
-        if report.get("exitstatus") != 0:
+        if report.get("exitstatus") not in ((0, 1) if diagnostic else (0,)):
             raise ValueError(f"{suite}: shard {report['index']} did not pass")
         if report.get('active') or report.get('journal_incomplete'):
             raise ValueError(f"{suite}: shard {report['index']} has incomplete journal work")
@@ -265,17 +265,18 @@ def verify(reports, suite, total=2):
             raise ValueError(f"{suite}: cases and their phases must execute exactly once, without retries")
         for phases in report["tests"].values():
             if (not {"setup", "teardown"} <= phases.keys()
-                    or ("call" not in phases and phases["setup"]["outcome"] != "skipped")):
+                    or ("call" not in phases and phases["setup"]["outcome"] not in
+                        ({"skipped", "failed"} if diagnostic else {"skipped"}))):
                 raise ValueError(f"{suite}: interrupted test did not complete its phases")
             if (not phases.keys() <= {"setup", "call", "teardown"}
-                    or any(phase["outcome"] not in {"passed", "skipped"}
+                    or any(phase["outcome"] not in ({"passed", "skipped", "failed"} if diagnostic else {"passed", "skipped"})
                            or not math.isfinite(phase["seconds"]) or phase["seconds"] < 0 for phase in phases.values())):
                 raise ValueError(f"{suite}: failed phase or invalid timing in shard report")
         executed.extend(report["executions"])
     if Counter(executed) != Counter(original):
         raise ValueError(f"{suite}: shards must execute every collected case exactly once")
     elapsed_seconds = sum(report["elapsed_seconds"] for report in reports)
-    if suite == "browser" and elapsed_seconds > BROWSER_BUDGET_SECONDS:
+    if not diagnostic and suite == "browser" and elapsed_seconds > BROWSER_BUDGET_SECONDS:
         raise ValueError(f"browser: aggregate pytest elapsed time {elapsed_seconds:.3f}s "
                          f"exceeds the {BROWSER_BUDGET_SECONDS}s total budget")
     return {"suite": suite, "revision": reports[0]["revision"], "shards": total, "cases": len(original),
@@ -295,13 +296,79 @@ def verify(reports, suite, total=2):
                       for name in reports[0]["file_owners"]}}
 
 
+def verify(reports, suite, total=2):
+    """Accept passing, exactly-once coverage and enforce the browser budget."""
+    return _measure(reports, suite, total)
+
+
+def refresh_baseline(reports, run, total=4):
+    """Use complete diagnostic receipts as estimates, never passing coverage.
+
+    This explicit maintenance path can consume a failed run. The normal CI
+    verifier and successful-workflow artifact selection remain unchanged.
+    """
+    if {report['suite'] for report in reports} != {'unit', 'browser'}:
+        raise ValueError('Baseline refresh requires both unit and browser receipts')
+    measured = {suite: _measure([row for row in reports if row['suite'] == suite],
+                                suite, total, diagnostic=True)
+                for suite in ('unit', 'browser')}
+    if measured['unit']['revision'] != measured['browser']['revision']:
+        raise ValueError('Baseline suites must use the same source revision')
+    collections = {suite: set(next(row['expected'] for row in reports if row['suite'] == suite))
+                   for suite in ('unit', 'browser')}
+    if collections['unit'] & collections['browser']:
+        raise ValueError('Baseline suites must have disjoint case collections')
+    return {
+        'schema': 1,
+        'source': 'Complete, consistent, exactly-once CI setup/call/teardown receipts. '
+                  'Diagnostic partition estimates only; failures are retained below. '
+                  'This is not passing coverage, budget acceptance or a measured speedup.',
+        'run': run,
+        'revision': measured['unit']['revision'],
+        'refreshed_at': datetime.now(timezone.utc).isoformat(),
+        'failed_cases': sorted(node for row in reports for node, phases in row['tests'].items()
+                               if any(phase['outcome'] == 'failed' for phase in phases.values())),
+        'measurements': {suite: {key: result[key] for key in
+                                ('cases', 'case_digest', 'shards', 'shard_seconds', 'phase_seconds')}
+                         for suite, result in measured.items()},
+        **{suite: result['files'] for suite, result in measured.items()},
+    }
+
+
+def baseline_json(result):
+    # Keep measured files to one line each so weight changes remain reviewable.
+    text = json.dumps({key: value for key, value in result.items()
+                       if key not in ('unit', 'browser')}, indent=2)[:-2]
+    for suite in ('unit', 'browser'):
+        rows = ',\n'.join('    ' + json.dumps(name) + ': ' + json.dumps(row, separators=(',', ':'))
+                          for name, row in sorted(result[suite].items()))
+        text += ',\n  ' + json.dumps(suite) + ': {\n' + rows + '\n  }'
+    return text + '\n}\n'
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
-    parser.add_argument("suite", choices=("unit", "browser"))
+    parser.add_argument("suite", choices=("unit", "browser", "baseline"))
     parser.add_argument("--total", type=int, choices=SHARD_COUNTS, default=4)
+    parser.add_argument("--run", help="Source CI run URL (required for an explicit baseline refresh)")
+    parser.add_argument("--output", type=Path, help="Destination for the explicit diagnostic baseline")
     args = parser.parse_args()
+    if (args.suite == 'baseline') != bool(args.run and args.output):
+        parser.error('baseline requires --run and --output; coverage verification accepts neither')
+    if args.suite != 'baseline' and (args.run or args.output):
+        parser.error('--run and --output are only for baseline refresh')
     reports = [load_report(path) for path in args.directory.rglob("shard.json")]
+    if args.suite == 'baseline':
+        result = refresh_baseline(reports, args.run, args.total)
+        args.output.write_text(baseline_json(result))
+        print(json.dumps({suite: {'cases': result['measurements'][suite]['cases'],
+                                  'files': len(result[suite]),
+                                  'estimated_seconds': partition(
+                                      next(row['expected'] for row in reports if row['suite'] == suite),
+                                      result[suite], args.total)[1]}
+                          for suite in ('unit', 'browser')}, indent=2))
+        raise SystemExit(0)
     result = verify([report for report in reports if report["suite"] == args.suite], args.suite, args.total)
     print(json.dumps(result, indent=2))
     output = args.directory / f"{args.suite}-timings.json"

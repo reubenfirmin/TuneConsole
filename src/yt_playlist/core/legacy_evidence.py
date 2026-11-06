@@ -15,6 +15,7 @@ import tempfile
 
 from .activity import check_cancellable_work
 from .evidence_ledger import canonical
+from .file_collection import collector
 from . import policy_documents
 from .legacy_evidence_contract import (FORMAT, MAX_BYTES, DOMAINS, SUBJECTS,
     subjects as _subjects, header as _header, valid_digest as _digest, read as _read)
@@ -331,26 +332,21 @@ def collect_orphans(conn):
     if conn.in_transaction:
         raise ValueError('Archive cleanup needs its own writer reservation')
     root = directory(conn)
-    policy_documents._mkdir(root)
     conn.execute('BEGIN IMMEDIATE')
     try:
-        with (root / '.readers.lock').open('a+b') as lock:
-            unlock = policy_documents._try_file_lock(lock, exclusive=True)
-            if unlock is None:
+        with collector(root) as acquired:
+            if not acquired:
                 conn.rollback()
                 return 0
-            try:
-                removed = 0
-                for domain, table in DOMAINS.items():
-                    present = conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?',(table,)).fetchone()
-                    for path in (root / domain).glob('*/*.json'):
-                        check_cancellable_work()
-                        if not present or not conn.execute(f'SELECT 1 FROM {table} WHERE filename=? LIMIT 1', (str(path),)).fetchone():
-                            removed += fao.delete(path, missing_ok=True)
-                conn.commit()
-                return removed
-            finally:
-                unlock()
+            removed = 0
+            for domain, table in DOMAINS.items():
+                present = conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?',(table,)).fetchone()
+                for path in (root / domain).glob('*/*.json'):
+                    check_cancellable_work()
+                    if not present or not conn.execute(f'SELECT 1 FROM {table} WHERE filename=? LIMIT 1', (str(path),)).fetchone():
+                        removed += fao.delete(path, missing_ok=True)
+            conn.commit()
+            return removed
     except BaseException:
         conn.rollback()
         raise

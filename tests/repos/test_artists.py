@@ -130,13 +130,14 @@ def test_populated_upgrade_retains_literal_credit_state_and_feedback_without_bac
 
 
 @pytest.mark.parametrize('existing_references', ['none','album','both'])
-def test_installed_v21_upgrades_references_atomically(tmp_path, monkeypatch, existing_references):
+def test_installed_v21_upgrades_references_atomically(
+        tmp_path, monkeypatch, existing_references, _pristine_installed_schema):
     from yt_playlist.core.migrations import registry
     from yt_playlist.core.migrations.runner import validate_catalog
 
     path = tmp_path / 'installed.db'
     s = Store(path)
-    migrate(s.conn,registry=MIGRATIONS[:21])
+    _pristine_installed_schema(21).backup(s.conn)
     aid = s.conn.execute("INSERT INTO artists(name,provisional) VALUES ('Artist',1)").lastrowid
     s.conn.execute("INSERT INTO artist_aliases VALUES (?, 'Artist', 'legacy_credit')", (aid,))
     s.conn.execute("INSERT INTO discovered_albums(browse_id,artist,title,found_at) VALUES ('release','Artist','Album',1)")
@@ -167,18 +168,22 @@ def test_installed_v21_upgrades_references_atomically(tmp_path, monkeypatch, exi
     monkeypatch.setattr(registry,'MIGRATIONS',MIGRATIONS)
     s.conn.close()
     s = Store(path)
-    migrate(s.conn, registry=MIGRATIONS)
-    s.init_schema()
-    assert s.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == MIGRATIONS[-1].version
+    # Each installed draft needs its own real v22 rollback/reopen/retry. Later
+    # credit conversion and current Store admission belong to the populated
+    # end-to-end upgrade above, rather than another three full suffix replays.
+    migrate(s.conn, registry=MIGRATIONS[:22])
+    assert s.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 22
     assert s.conn.execute('SELECT artist_id FROM discovered_albums').fetchone()[0] == aid
     assert s.conn.execute("SELECT item_key,kind,artist_id,target_type FROM rec_feedback WHERE surface='artist'").fetchone()[:] == (
         'Artist','mute',aid,'artist')
     assert s.conn.execute("SELECT item_key,kind,artist_id FROM rec_feedback WHERE surface='for_you'").fetchone()[:] == (
         'song|artist','less',None)
-    assert s.conn.execute("SELECT artist_id,shown_at FROM discovery_impressions WHERE artist_id IS NOT NULL").fetchone()[:] == (aid,4)
+    assert s.conn.execute("SELECT item_id,shown_at FROM discovery_visible_impressions WHERE kind='artist'").fetchone()[:] == (str(aid),4)
+    validate_catalog(s.conn, 22)
     assert not s.conn.execute('PRAGMA foreign_key_check').fetchall()
     before = list(s.conn.iterdump())
-    s.init_schema()
+    migrate(s.conn, registry=MIGRATIONS[:22])
     assert list(s.conn.iterdump()) == before
     assert not (tmp_path / 'backups').exists()
     assert s.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+    s.conn.close()

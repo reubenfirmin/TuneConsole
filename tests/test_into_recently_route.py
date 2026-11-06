@@ -111,7 +111,7 @@ def test_genre_without_article_image_has_text_layout_instead_of_album_art(store,
 
 def test_worker_prepares_three_matching_song_cards_and_request_uses_only_the_cache(store, monkeypatch):
     from tests.conftest import seed_catalog_track
-    from yt_playlist.repos.charts import ChartsRepo
+    from yt_playlist.controllers.charts import Charts
 
     subject = {'kind': 'genre', 'subject': 'genre:dub techno', 'display': 'dub techno'}
     for i in range(4):
@@ -127,7 +127,7 @@ def test_worker_prepares_three_matching_song_cards_and_request_uses_only_the_cac
     def forbidden(*a, **kw):
         raise AssertionError('The request must not select or rank story songs')
 
-    monkeypatch.setattr(ChartsRepo, 'story_tracks', forbidden)
+    monkeypatch.setattr(Charts, 'story_tracks', forbidden)
     response = _fragment_client(store).get('/test/story-fragment')
     assert [song['title'] for song in response.context['cards'][0]['songs']] == ['Song 0', 'Song 1', 'Song 2']
     assert response.text.count('class="into-song"') == 3
@@ -140,7 +140,7 @@ def test_worker_prepares_three_matching_song_cards_and_request_uses_only_the_cac
 
 def test_worker_connects_genre_and_artist_articles_using_recorded_credits(store, monkeypatch):
     from tests.conftest import seed_catalog_track
-    from yt_playlist.repos.rec_query import RecQueryRepo
+    from yt_playlist.controllers.recommendation_query import RecommendationQuery
 
     subjects = [{'kind': kind, 'subject': f'{kind}:{name}', 'display': name} for kind, name in [
         ('artist', 'Rrose'), ('artist', 'Slowdive'), ('genre', 'minimal'),
@@ -161,7 +161,7 @@ def test_worker_connects_genre_and_artist_articles_using_recorded_credits(store,
     def forbidden(*a, **kw):
         raise AssertionError('Connections must be prepared by the worker')
 
-    monkeypatch.setattr(RecQueryRepo, 'artist_genre_years_for', forbidden)
+    monkeypatch.setattr(RecommendationQuery, 'artist_genre_years_for', forbidden)
     response = _fragment_client(store).get('/test/story-fragment')
     assert [[c['display'] for c in group] for group in response.context['groups']] == [
         ['Rrose', 'minimal'], ['shoegaze', 'Slowdive'], ['Tin Man']]

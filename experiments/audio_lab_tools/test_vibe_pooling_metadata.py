@@ -14,6 +14,7 @@ from experiments.audio_lab_tools import vibe_pooling_selection as selection
 from experiments.audio_lab_tools import vibe_pooling_offset as offset
 from experiments.audio_lab_tools import vibe_pooling_source_genre as source_genre
 from experiments.audio_lab_tools import vibe_pooling_derivatives as derivatives
+from experiments.audio_lab_tools import vibe_pooling_runtime as runtime
 
 
 def test_recovers_metadata_gradient_for_wholly_unseen_artist():
@@ -350,3 +351,58 @@ def test_single_model_human_transfer_excludes_both_partitions_artist_components(
     assert transfer.hidden_recordings(humans, 'single-model', 'known', 0) == set()
     with pytest.raises(ValueError, match='only fold zero'):
         transfer.hidden_recordings(humans, 'single-model', 'unseen', 1)
+
+
+def test_runtime_comparison_uses_product_fit_and_excludes_connected_targets(tmp_path, monkeypatch):
+    rows = [{'recording': i, 'measurement': i, 'artists': [1 + (i - 1) // 4],
+             'genre': 'ambient', 'album': None, 'source': 'provider_measurement/control',
+             'score': .55 + i / 200, 'support': .8} for i in range(1, 25)]
+    profile = {'content': {'library': {'genre': 'ambient', 'year': None, 'audio': {}},
+                           'discovered': None}, 'sources': [], 'overrides': {}, 'truncated': False}
+    plan = {'format': runtime.FORMAT, 'code': runtime.identity(), 'selection': runtime.POLICY,
+        'criteria': runtime.evaluation.CRITERIA, 'candidate': joint.configuration(),
+        'profile_mask': runtime.evaluation.PROFILE_MASK, 'human_targets': [],
+        'human_recordings_excluded': [99],
+        'assignments': selection.fold_assignment(runtime.evaluation.assignments(rows)),
+        'profile_inputs': {str(row['recording']): profile for row in rows},
+        'rows': {vibe: rows for vibe in runtime.home_vibe.PRESETS}}
+    path, output = tmp_path / 'plan.json', tmp_path / 'result.json'
+    path.write_text(json.dumps(plan))
+    fitted, original = [], joint.fit
+    def fit(training, vibe):
+        fitted.extend(training)
+        return original(training, vibe, fixed=joint.INITIAL)
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError('Runtime comparison used a detached research fitter')
+    monkeypatch.setattr(joint, 'fit', fit)
+    monkeypatch.setattr(metadata, 'fit', forbidden)
+    fold = plan['assignments']['1']['unseen']
+    runtime.evaluation.run(path, output, 'unseen', fold, 'relax', plan_loader=runtime.load)
+    report = json.loads(output.read_text())
+    assert report['outcome'] == 'complete'
+    assert {row['recording'] for row in report['rows']} == {
+        row['recording'] for row in rows
+        if plan['assignments'][str(row['recording'])]['unseen'] == fold}
+    assert fitted and not {artist for row in fitted for artist in row['artists']}.intersection(
+        artist for row in rows if row['recording'] in {r['recording'] for r in report['rows']}
+        for artist in row['artists'])
+    assert all(row['interval90'] is not None for row in report['rows'])
+    plan['rows']['relax'] = [{**rows[0], 'recording': 99}, *rows[1:]]
+    path.write_text(json.dumps(plan))
+    with pytest.raises(ValueError, match='Human recording entered'):
+        runtime.load(path)
+    plan['rows']['relax'] = rows
+    plan['profile_inputs']['1']['content']['library']['audio'] = {'mood_relaxed': .9}
+    path.write_text(json.dumps(plan))
+    with pytest.raises(ValueError, match='observations leaked'):
+        runtime.load(path)
+
+
+def test_selection_summary_reports_the_loaded_candidate_policy(tmp_path):
+    path, output = tmp_path / 'plan.json', tmp_path / 'summary.json'
+    plan = {'selection': runtime.POLICY}
+    path.write_text(json.dumps(plan))
+    report = selection.summarize(path, [], output, plan_loader=lambda _: plan)
+    assert report['selection'] == runtime.POLICY
+    assert report['failed_gates'] == ['incomplete campaign']
+    assert not report['complete']

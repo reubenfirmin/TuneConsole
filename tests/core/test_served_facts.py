@@ -9,7 +9,7 @@ import pytest
 from yt_playlist.core import fao, policy_documents, served_facts as facts
 from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.rec import scorecard
-from yt_playlist.repos.rec_ledger import RESPONSE_RETAIN_DAYS
+from yt_playlist.controllers.recommendation_ledger import RESPONSE_RETAIN_DAYS
 
 
 def offer(store, request, at=100, *, shadow=False, controlled=True):

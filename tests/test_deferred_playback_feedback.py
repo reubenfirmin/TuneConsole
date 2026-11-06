@@ -262,7 +262,7 @@ def test_replay_receipt_survives_crash_after_main_commit_before_inbox_ack(librar
         resumed.conn.close()
 
 
-def test_partial_repository_writes_roll_back_with_the_receipt_and_retry(library, monkeypatch):
+def test_partial_projection_keeps_its_event_and_retries_without_duplicating_it(library, monkeypatch):
     store, main, _, _, _ = library
     capture = playback_feedback.capture(store, 'player', main, {
         'kind': 'next', 'videoId': 'known', 'position': 20, 'duration': 180}, 100)
@@ -275,11 +275,12 @@ def test_partial_repository_writes_roll_back_with_the_receipt_and_retry(library,
     monkeypatch.setattr(playback_feedback, '_apply', interrupted)
     with pytest.raises(RuntimeError, match='before receipt'):
         playback_feedback.drain(store)
-    assert store.conn.execute('SELECT count(*) FROM player_events').fetchone()[0] == 0
+    assert store.conn.execute('SELECT count(*) FROM player_events').fetchone()[0] == 1
     assert store.conn.execute('SELECT count(*) FROM playback_feedback_receipts').fetchone()[0] == 0
     assert playback_feedback.inbox(store).pending() == 1
     monkeypatch.setattr(playback_feedback, '_apply', apply)
     assert playback_feedback.drain(store) == 1
+    assert store.conn.execute('SELECT count(*) FROM player_events').fetchone()[0] == 1
     assert store.conn.execute('SELECT capture_id FROM playback_feedback_receipts').fetchone()[0] == capture
 
 

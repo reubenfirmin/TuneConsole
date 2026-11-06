@@ -24,6 +24,7 @@ from yt_playlist.repos import vibe_evaluation
 
 ROOT = Path(__file__).resolve().parents[2]
 CODE = ('src/yt_playlist/rec/vibe_joint_model.py', 'src/yt_playlist/rec/vibe_prediction.py',
+        'src/yt_playlist/rec/vibe_joint_calibrated.py', 'src/yt_playlist/rec/vibe_joint_preparation.py',
         'src/yt_playlist/rec/musical_profiles.py', 'src/yt_playlist/rec/home_vibe.py',
         'src/yt_playlist/rec/musical_preparation.py', 'src/yt_playlist/rec/vibe_preparation.py',
         'src/yt_playlist/repos/musical_profiles.py', 'src/yt_playlist/repos/prepared_content.py',
@@ -126,16 +127,19 @@ def masked_profile(value):
     raw = json.dumps(value['content'], sort_keys=True, separators=(',', ':'), allow_nan=False)
     rows = [('target', 0, raw, None, True)]
     inputs = {'target': (value['sources'], value['overrides'], value['truncated'])}
-    _key, payload, _version, _digest = musical_preparation.recordings(None, rows, inputs=inputs)[0]
+    _key, payload, _version, _digest = musical_preparation.masked_recordings(None, rows, inputs=inputs)[0]
     return json.loads(payload) if payload is not None else None
 
 
-def run(path, output, stratum, fold, vibe):
-    plan, started = load_plan(path), time.monotonic()
+def run(path, output, stratum, fold, vibe, *, plan_loader=load_plan):
+    plan, started = plan_loader(path), time.monotonic()
     allocation, originals = plan['assignments'], plan['rows'][vibe]
     hidden = {int(key) for key, value in allocation.items() if value[stratum] == fold}
     human_ids = {row['recording'] for row in plan['human_targets']}
-    train = [row for row in originals if row['recording'] not in hidden | human_ids]
+    prepared = [{**row, 'metadata_prior': home_vibe.heuristic_affinity(
+        profile, vibe) if (profile := masked_profile(plan['profile_inputs'][str(row['recording'])])) is not None else .5}
+        for row in originals]
+    train = [row for row in prepared if row['recording'] not in hidden | human_ids]
     target = [row for row in originals if row['recording'] in hidden]
     # Human targets are never observations; their original measurements remain
     # hidden even in folds where another song is the measurement target.
@@ -178,11 +182,12 @@ def run(path, output, stratum, fold, vibe):
         fallback = home_vibe.heuristic_affinity(profile, vibe)
         old = baseline.resolve({vibe:fallback}, None, [(key,stats[key]) for key in baseline.groups(artist,row['genre'])
                                                      if key in stats])['fits'][vibe]['score']
-        estimate = posterior.predict(row['artists'], row['genre'], album=row['album'], recording=row['recording']) if posterior else None
+        estimate = posterior.predict(row['artists'], row['genre'], album=row['album'], recording=row['recording'],
+                                     metadata_prior=fallback) if posterior else None
         score = estimate['score'] if estimate else old
         variance = estimate['new_track_variance'] if estimate else None
-        interval = [max(0.,score-1.6448536269514722*math.sqrt(variance)),
-                    min(1.,score+1.6448536269514722*math.sqrt(variance))] if variance is not None else None
+        interval = (estimate.get('interval90') or [max(0.,score-1.6448536269514722*math.sqrt(variance)),
+                    min(1.,score+1.6448536269514722*math.sqrt(variance))]) if variance is not None else None
         result['rows'].append({'recording': row['recording'], 'cluster': allocation[str(row['recording'])]['cluster'],
             'source': row['source'], 'truth': row['score'], 'baseline': old, 'candidate': score,
             'interval90': interval, 'mean_variance': estimate['mean_variance'] if estimate else None,

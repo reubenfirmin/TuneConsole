@@ -1,8 +1,15 @@
-"""Bounded storage-retention turns for the background maintenance service."""
-from yt_playlist.repos.base import Repo
+"""Coordinate bounded storage maintenance and file-protection lifetimes."""
 
 
-class RetentionRepo(Repo):
+class Retention:
+    def __init__(self, database):
+        self._store = database
+        self._lock = database._lock
+
+    @property
+    def conn(self):
+        return self._store.conn
+
     # Each established owner controls its own writer admission, file fences and
     # iterator lifetime. Do not hold the serving lock across a complete turn.
     def maintain_managed_files(self, now):

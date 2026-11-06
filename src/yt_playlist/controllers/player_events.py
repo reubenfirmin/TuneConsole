@@ -1,4 +1,6 @@
 """Listening interpretations composed from raw persisted player events."""
+import json
+
 from yt_playlist.library.listen_derive import classify_exit, skip_blackouts, SKIP_HISTORY_DAYS
 
 
@@ -7,7 +9,12 @@ class PlayerEvents:
         self.repository = repository
 
     def record_player_event(self, account_id, kind, video_id, position, duration,
-                            playlist_ytm_id, payload, at):
+                            playlist_ytm_id, payload, at, *, capture_id=None):
+        if capture_id is not None:
+            payload = json.dumps({**json.loads(payload or '{}'), 'capture_id': capture_id})
+            return self.repository.record_player_event(
+                account_id, kind, video_id, position, duration, playlist_ytm_id, payload, at,
+                capture_id=capture_id)
         return self.repository.record_player_event(
             account_id, kind, video_id, position, duration, playlist_ytm_id, payload, at)
 

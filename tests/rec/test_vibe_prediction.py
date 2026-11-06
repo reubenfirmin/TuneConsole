@@ -284,6 +284,66 @@ def test_audio_wins_then_joint_artist_and_subgenre_then_sparse_fallback(store, q
     assert musical_character.intensity({'musical': compact[other_style]}) > .8
 
 
+def test_masked_metadata_refits_after_categorical_changes_without_learning_own_numeric_fields(store, qualified_candidate):
+    entry, own = track(store, 'metadata-original')
+    _entry, target = track(store, 'metadata-target')
+    capture(store, 'metadata-original')
+    drain(store)
+
+    def current():
+        value = store.vibe_predictions.joint_model(store.settings.get_setting('rec_vibe_joint_head_relax'))
+        assert value['format'] == 4 and len(value['inputs']) == 1
+        return value['inputs'][0], value
+
+    original, first = current()
+    with store.conn:
+        catalog.choose_field(store.conn, entry, 'energy', .99)
+    drain(store)
+    numeric, _value = current()
+    assert numeric['metadata_prior'] == original['metadata_prior']
+    assert numeric['metadata_profile_digest'] == original['metadata_profile_digest']
+    with store.conn:
+        catalog.choose_field(store.conn, entry, 'genre', 'Detroit Techno')
+    drain(store)
+    categorical, changed = current()
+    assert categorical['metadata_prior'] != original['metadata_prior']
+    assert categorical['metadata_profile_digest'] != original['metadata_profile_digest']
+    assert changed != first
+    assert fits(store, own)['relax']['source'] == 'audio_measurement'
+    assert fits(store, target)['relax']['source'] == 'artist_genre'
+    prediction, = store.conn.execute('SELECT v.prediction_id FROM recording_vibes v JOIN recordings r '
+        "ON r.id=v.recording_id WHERE r.identity_key=? AND v.vibe='relax'", (target,)).fetchone()
+    assert 'metadata_prior' in vibe_provenance.read(store.conn, prediction)['conditioning']
+    revision = store.settings.get_setting('rec_vibe_joint_revision')
+    # A derived profile publication and queue admission cannot feed back into
+    # fitting. The replay has exactly the same raw inputs and current originals.
+    with store.conn:
+        store.conn.execute('INSERT INTO rec_content_pending(identity_key) VALUES (?)', (target,))
+    drain(store)
+    assert store.settings.get_setting('rec_vibe_joint_revision') == revision
+
+
+def test_symbolic_cache_rechecks_memory_and_distinguishes_equal_size_graphs(monkeypatch):
+    from scipy.sparse import csr_matrix
+
+    monkeypatch.setattr(joint, '_ORDERING_CACHE', None)
+    first = csr_matrix([[1., 1., 0.], [1., 0., 1.]])
+    expected = joint._ordering(first, 1000, joint.MEMORY_BYTES)
+    with monkeypatch.context() as cached:
+        cached.setattr(joint.heapq, 'heapify', lambda *_: pytest.fail('Repeated symbolic elimination'))
+        # Weights and observation values do not change precision sparsity.
+        assert joint._ordering(first * .5, 2000, joint.MEMORY_BYTES) == (
+            expected[0], expected[1], expected[2] + 1000)
+        with pytest.raises(joint.WorkBudgetExceeded, match='sparse fill'):
+            joint._ordering(first, 2000, expected[2])
+    # Shape and nonzero count alone cannot identify the elimination graph.
+    second = csr_matrix([[1., 1., 1.], [1., 0., 0.]])
+    actual = joint._ordering(second, 1000, joint.MEMORY_BYTES)
+    monkeypatch.setattr(joint, '_ORDERING_CACHE', None)
+    assert actual == joint._ordering(second, 1000, joint.MEMORY_BYTES)
+    assert actual[1] != expected[1]
+
+
 def test_replays_are_one_recording_partial_runs_do_not_replace_complete_and_annotations_never_seed(store, qualified_candidate):
     _tid, one = track(store, 'one')
     _tid, two = track(store, 'two')
@@ -366,6 +426,77 @@ def test_changed_measurement_and_subgenre_retract_old_cohort_and_notify_without_
     drain(store, batch=1)
     assert fits(store, target)['relax']['source'] == 'artist'
     assert fits(store, own)['relax']['source'] == 'audio_measurement'
+
+
+@pytest.mark.parametrize('installed_version', [79, 98, 107])
+def test_installed_writes_survive_deferred_fit_restart_correction_and_retraction(
+        tmp_path, _pristine_installed_schema, monkeypatch, qualified_candidate, installed_version):
+    """Exercise genuine installed layouts, rather than the current empty schema."""
+    from yt_playlist.core import vibe_model_files
+    from yt_playlist.repos import vibe_models
+
+    path = tmp_path / 'installed.db'
+    store = Store(path)
+    original_fit = joint.fit
+    try:
+        _pristine_installed_schema(installed_version).backup(store.conn)
+        store.init_schema()
+        history = [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations')]
+        tid, own = track(store, 'one')
+        _tid, target = track(store, 'target')
+        capture(store, 'one')
+        def deferred(*_args, **_kwargs):
+            raise joint.WorkBudgetExceeded('controlled initial fit deferral')
+        with monkeypatch.context() as patch:
+            patch.setattr(joint, 'fit', deferred)
+            drain(store, batch=1).close()
+        assert fits(store, own)['relax']['source'] == 'audio_measurement'
+        fallback = fits(store, target)['relax']
+        # Older layouts may still be preparing specific genre identities.
+        # Their available artist evidence must remain useful meanwhile.
+        assert fallback['source'] in {'artist', 'artist_genre'} and fallback['score'] > .5
+        assert not store.conn.execute('SELECT 1 FROM prediction_model_generations').fetchone()
+
+        # Retry eligibility is controlled explicitly, without advancing global
+        # clocks or treating the deliberately deferred model as ready.
+        for vibe in vibe_joint_preparation.VIBES:
+            store.settings.delete_setting(vibe_model_files.STATE_PREFIX + vibe)
+        drain(store, batch=1).close()
+        before = fits(store, target)['relax']
+        prediction = store.conn.execute('SELECT v.prediction_id FROM recording_vibes v '
+            'JOIN recordings r ON r.id=v.recording_id WHERE r.identity_key=? AND v.vibe=?',
+            (target, 'relax')).fetchone()[0]
+        assert vibe_models.linked(store.conn, prediction)
+        assert vibe_provenance.read(store.conn, prediction)['inputs']
+        assert before['score'] > .5
+        store.conn.close()
+        store = Store(path)
+        with monkeypatch.context() as patch:
+            patch.setattr(joint, 'fit', lambda *_a, **_k: pytest.fail('Restart refitted the model'))
+            store.init_schema()
+            patch.setattr(vibe_models, 'read', lambda *_a, **_k: pytest.fail('Serving loaded a model'))
+            assert fits(store, target)['relax'] == before
+            assert store.vibe_predictions.fit_scores([target], 'relax') == {target: before['score']}
+        assert joint.fit is original_fit
+        capture(store, 'one', calm=False)
+        drain(store, batch=1).close()
+        assert fits(store, target)['relax']['score'] < before['score']
+        assert fits(store, own)['relax']['source'] == 'audio_measurement'
+        with store.conn:
+            catalog.choose_field(store.conn, tid, 'genre', 'Detroit Techno')
+        drain(store, batch=1).close()
+        assert fits(store, target)['relax']['source'] == 'artist'
+        assert store.conn.execute('SELECT genre FROM tracks WHERE id=?', (tid,)).fetchone()[0] == 'Detroit Techno'
+        with store.conn:
+            store.conn.execute('DELETE FROM sample_attributes')
+        drain(store, batch=1).close()
+        assert fits(store, target)['relax']['source'] == 'heuristic'
+        assert not store.conn.execute('SELECT 1 FROM recording_vibes WHERE measurement_id IS NOT NULL').fetchone()
+        assert store.conn.execute('SELECT 1 FROM measurements').fetchone()
+        assert [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations')] == history
+        assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+    finally:
+        store.conn.close()
 
 
 @pytest.mark.parametrize('failure', [vibe_preparation.WorkBudgetExceeded, fao.FileBudgetExceeded, fao.FileChanged])
@@ -646,3 +777,120 @@ def test_continuing_backlog_completes_a_model_cycle_across_worker_restart(file_b
                      for v in vibe_joint_preparation.VIBES}
     monkeypatch.setattr(vibe_joint_preparation.time, 'time', lambda: attempted + 61)
     assert vibe_joint_preparation.admitted(store, waiting=True)
+
+
+@pytest.mark.parametrize('interruption', ['close', 'stale', 'deadline', 'idle-pause', 'idle-deadline'])
+def test_joint_score_turns_release_posteriors_and_retry_unpublished_work(
+        file_backed_store, qualified_candidate, monkeypatch, interruption):
+    import weakref
+    from yt_playlist.core import file_collection
+    from yt_playlist.rec import progressive
+    from yt_playlist.repos import vibe_models
+
+    store = file_backed_store
+    track(store, 'sliced-original')
+    entry, target = track(store, 'sliced-target')
+    capture(store, 'sliced-original')
+    drain(store)
+    before = [tuple(row) for row in store.conn.execute(
+        'SELECT * FROM recording_vibes WHERE recording_id='
+        '(SELECT id FROM recordings WHERE identity_key=?) ORDER BY vibe', (target,))]
+    with store.conn:
+        store.conn.execute('INSERT INTO rec_content_pending(identity_key) VALUES (?)', (target,))
+    worker = Preparation(store)
+    posteriors, original = [], vibe_joint_preparation.posterior
+
+    def load(reader, vibe):
+        assert not any(reference() is not None for reference in posteriors)
+        prepared = original(reader, vibe)
+        if prepared:
+            posteriors.append(weakref.ref(prepared[1]))
+        return prepared
+
+    monkeypatch.setattr(vibe_joint_preparation, 'posterior', load)
+    for _ in range(5):
+        worker.capture(1000)
+        if posteriors:
+            break
+    assert len(posteriors) == 1
+    assert worker._capturing is not None and worker.due(1000)
+    assert all(reference() is None for reference in posteriors)
+    assert not worker.fit(1000)
+    assert store.prepared_content.has_pending()
+    with file_collection.collector(vibe_models.directory(store.conn)) as admitted:
+        assert not admitted
+    if interruption == 'close':
+        worker.close()
+    elif interruption == 'deadline':
+        with monkeypatch.context() as expired:
+            expired.setattr(progressive.time, 'monotonic', lambda: worker._capturing_expires_at + 1)
+            assert not worker.capture(1000)
+        assert worker._capturing is None
+    elif interruption.startswith('idle-'):
+        import threading
+        from types import SimpleNamespace
+        from yt_playlist.rec.rec_worker import RecWorker
+
+        runtime = SimpleNamespace(model_lock=threading.RLock(), preparation=worker,
+                                  _accepting=lambda: not store.activity_paused)
+        held, release = threading.Event(), threading.Event()
+
+        def in_flight():
+            with runtime.model_lock:
+                held.set()
+                assert release.wait(5)
+
+        running = threading.Thread(target=in_flight)
+        running.start()
+        try:
+            assert held.wait(5)
+            with monkeypatch.context() as idle:
+                if interruption == 'idle-pause':
+                    store.activity_paused = True
+                else:
+                    idle.setattr(progressive.time, 'monotonic', lambda: worker._capturing_expires_at + 1)
+                # Polling never closes a concurrently advancing generator.
+                RecWorker._release_idle_preparation(runtime)
+                assert worker._capturing is not None
+                release.set()
+                running.join(5)
+                assert not running.is_alive()
+                # No capture is resumed: the maintenance poll releases leases.
+                RecWorker._release_idle_preparation(runtime)
+                assert worker._capturing is None
+        finally:
+            release.set()
+            running.join(5)
+            store.activity_paused = False
+    else:
+        with store.conn:
+            catalog.choose_field(store.conn, entry, 'genre', 'Detroit Techno')
+        for _ in range(len(vibe_joint_preparation.VIBES)):
+            count = len(posteriors)
+            assert not worker.capture(1000)
+            assert len(posteriors) - count <= 1
+            if worker._capturing is None:
+                break
+        assert worker._capturing is None
+    assert store.prepared_content.has_pending()
+    assert before == [tuple(row) for row in store.conn.execute(
+        'SELECT * FROM recording_vibes WHERE recording_id='
+        '(SELECT id FROM recordings WHERE identity_key=?) ORDER BY vibe', (target,))]
+    with file_collection.collector(vibe_models.directory(store.conn)) as admitted:
+        assert admitted
+    # A new worker starts again from the durable queue, never a partial score
+    # set or a retained dense posterior. Every admission loads at most one.
+    worker = Preparation(store)
+    for _ in range(100):
+        if (not store.prepared_content.has_pending() and not musical_preparation.due(store)
+                and not vibe_preparation.due(store)):
+            break
+        count = len(posteriors)
+        worker.capture(1000)
+        assert len(posteriors) - count <= 1
+    else:
+        pytest.fail('Interrupted score preparation did not converge')
+    assert not store.prepared_content.has_pending()
+    assert all(reference() is None for reference in posteriors)
+    assert fits(store, target)['relax']['source'] == ('artist' if interruption == 'stale' else 'artist_genre')
+    worker.close()

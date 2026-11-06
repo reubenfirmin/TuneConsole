@@ -5,7 +5,7 @@ from copy import deepcopy
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
-from tests.home_fixture_support import publish_menu, returning_listener
+from tests.home_fixture_support import home_routes_only, publish_menu, returning_listener
 from yt_playlist.rec import home_cache, home_cards, home_prepared
 from yt_playlist.web.app import create_app
 from yt_playlist.web.routes.home import ROTATING_CARDS
@@ -81,13 +81,26 @@ def test_failed_home_visit_does_not_advance_only_some_cards(file_backed_store, m
         card: 0 for card in ROTATING_CARDS}
 
 
-def test_prepared_albums_and_stories_arrive_in_the_home_document(file_backed_store):
-    from tests.test_growth_destinations import publish_full_journey
-    from yt_playlist.rec import album_choices, album_tuning, choice_evidence
+def test_prepared_albums_and_stories_arrive_in_the_home_document(file_backed_store, home_routes_only):
+    from tests.onboarding_support import publish_personal_album
+    from yt_playlist.rec import album_choices, album_tuning, choice_evidence, into_recently
 
     store = file_backed_store
     client = client_for(store)
-    publish_full_journey(store)
+    # This composition check consumes completed albums/articles for a returning
+    # listener. Model fitting and the first-use journey have their own owners.
+    publish_personal_album(store, count=2)
+    returning_listener(store, 'vibes', now=1000)
+    song = {'key': 'album track|artist', 'video_id': 'album-track',
+            'title': 'Album track', 'artist': 'Artist'}
+    store.rec_proposals.put_proposals(into_recently.SURFACE, {
+        'schema': into_recently.SCHEMA, 'built_at': 1000, 'cards': [
+            {'kind': 'artist', 'subject': f'artist:Artist {index}',
+             'display': f'Artist {index}', 'title': f'Artist {index}',
+             'extract': 'A complete prepared article.', 'thumbnail': '/static/icon.png',
+             'url': 'https://en.wikipedia.org/wiki/Jazz', 'color': '#4269aa',
+             'seed': index, 'genre': 'Jazz', 'depth': 0, 'songs': [song]}
+            for index in range(3)]}, 1000)
     store.settings.set_setting('home_format', 'albums')
     with client:
         home = client.get('/')

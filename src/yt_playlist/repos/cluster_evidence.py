@@ -6,7 +6,7 @@ choose explanation kinds, rank explanations, or construct surface responses.
 from dataclasses import dataclass
 from yt_playlist.core import embedding_files, genre_identity
 
-from yt_playlist.repos.base import GENERATED_GROUP, Repo, synchronized
+from yt_playlist.repos.base import Repo, synchronized
 from yt_playlist.repos.playlist_eligibility import QUARANTINED_PLAYLIST_IDS_SQL
 from yt_playlist.util.matching import search_squash
 
@@ -61,11 +61,11 @@ class SeedMatches:
 
 class ClusterEvidenceRepo(Repo):
     @synchronized
-    def connection(self, key, path_keys, *, max_playlist=120) -> ConnectionEvidence:
+    def connection(self, key, path_keys, *, max_playlist, exclude_quarantined, generated_group) -> ConnectionEvidence:
         """Relationships to distinct other tracks, without interpreting the facts.
 
-        Catch-all and quarantined playlists cannot support a shared-playlist
-        relationship. Listening-day evidence proves a shared account/day only.
+        The caller supplies playlist size and quarantine criteria.
+        Listening-day evidence proves a shared account/day only.
         All fields are detached from SQLite before the lock is released.
         """
         path = [k for k in dict.fromkeys(path_keys) if k and k != key]
@@ -80,6 +80,7 @@ class ClusterEvidenceRepo(Repo):
             "ON LOWER(TRIM(t2.artist))=LOWER(TRIM(t1.artist)) "
             f"WHERE t1.identity_key=? AND TRIM(t1.artist)<>'' AND t2.identity_key IN ({qs}) LIMIT 1",
             [key, *path]).fetchone()
+        quarantine = f'AND cp.pid NOT IN ({QUARANTINED_PLAYLIST_IDS_SQL})' if exclude_quarantined else ''
         playlists = self.conn.execute(
             "SELECT cp.pid pid,t.artist artist FROM "
             "(SELECT DISTINCT pt.playlist_id pid FROM playlist_tracks pt "
@@ -88,8 +89,8 @@ class ClusterEvidenceRepo(Repo):
             f"WHERE t.identity_key IN ({qs}) "
             "AND cp.pid NOT IN (SELECT playlist_id FROM playlist_tracks "
             "                   GROUP BY playlist_id HAVING COUNT(*)>?) "
-            f"AND cp.pid NOT IN ({QUARANTINED_PLAYLIST_IDS_SQL})",
-            [key, *path, max_playlist, GENERATED_GROUP]).fetchall()
+            + quarantine,
+            [key, *path, max_playlist, *([generated_group] if exclude_quarantined else [])]).fetchall()
         album = self.conn.execute(
             f"SELECT a.title al,t2.artist ar FROM tracks t1 JOIN {self.album_tracks_table} a1 ON a1.entry_id=t1.id "
             f"JOIN {self.album_tracks_table} a2 ON a2.album_id=a1.album_id JOIN albums a ON a.id=a1.album_id "
@@ -115,7 +116,7 @@ class ClusterEvidenceRepo(Repo):
             path_families=tuple(genre_identity.family(self.conn, r['genre']) for r in genres))
 
     @synchronized
-    def seed_matches(self, query, *, limit=8) -> SeedMatches:
+    def seed_matches(self, query, *, limit, generated_group) -> SeedMatches:
         """Vector-backed groups and songs, with database relevance order intact.
 
         Normalization is shared with searchnorm(): punctuation, whitespace, and
@@ -138,7 +139,7 @@ class ClusterEvidenceRepo(Repo):
             "FROM playlists p JOIN playlist_tracks pt ON pt.playlist_id=p.id "
             f"JOIN tracks t ON t.id=pt.track_id JOIN {vectors} rv ON rv.recording_id=t.recording_id AND rv.space='collaborative' "
             f"WHERE searchnorm(p.title) LIKE ? AND p.id NOT IN ({QUARANTINED_PLAYLIST_IDS_SQL}) "
-            "GROUP BY p.id ORDER BY n DESC LIMIT ?", (like, GENERATED_GROUP, limit)).fetchall()
+            "GROUP BY p.id ORDER BY n DESC LIMIT ?", (like, generated_group, limit)).fetchall()
         songs = self.conn.execute(
             "SELECT MIN(t.title) title,MIN(t.artist) artist,t.identity_key key "
             f"FROM tracks t JOIN {vectors} rv ON rv.recording_id=t.recording_id AND rv.space='collaborative' "

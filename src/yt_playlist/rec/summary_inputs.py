@@ -1,5 +1,5 @@
 """Cheap source revision fingerprints shared by summary workers and readers."""
-from yt_playlist.repos.summary_inputs import DEPENDENCIES, SURFACES
+from yt_playlist.controllers.summary_inputs import DEPENDENCIES, SURFACES
 
 
 def inputs(store, kind, now):

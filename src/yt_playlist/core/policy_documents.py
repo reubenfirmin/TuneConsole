@@ -189,14 +189,8 @@ def read_many(references, *, with_age=False):
                 yield (value,stream.info) if with_age else value
 
 
-@contextmanager
 def _policy_read(conn, memory_key):
-    with retained_reader(directory(conn, memory_key)):
-        conn.execute('SAVEPOINT policy_files_read')
-        try:
-            yield
-        finally:
-            conn.execute('RELEASE policy_files_read')
+    return retained_reader(directory(conn, memory_key))
 
 
 def _record(version, raw, created):

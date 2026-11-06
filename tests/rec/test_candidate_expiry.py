@@ -83,17 +83,17 @@ def candidate_library_template(_pristine_current_schema, expiry_rankers):
         account = store.accounts.upsert_account('Listener', 'fixture', None, True)
         tids = [seed_catalog_track(store, f'expiry-{i}', f'Song {i}', f'Artist {i}',
                                   video_id=f'v{i}', genre=('Techno', 'Jazz', 'Rock')[i % 3])
-                for i in range(12)]
-        for i, members in enumerate((tids[:8], tids[4:])):
-            playlist = store.playlists.upsert_playlist(account, f'p{i}', f'Playlist {i}', 8, '', 1)
+                for i in range(3)]
+        for i, members in enumerate((tids[:2], tids[1:])):
+            playlist = store.playlists.upsert_playlist(account, f'p{i}', f'Playlist {i}', len(members), '', 1)
             store.playlists.set_playlist_tracks(playlist, members)
-        store.history.import_play_events(account, [(f'expiry-{i}', f'v{i}', 1000 + i) for i in range(4)])
+        store.history.import_play_events(account, [(f'expiry-{i}', f'v{i}', 1000 + i) for i in range(3)])
         # A completed fit is an input to expiry. Training itself is owned by
         # test_model_refresh; retain nonempty vectors so no-refit assertions
         # cannot pass merely because this fixture has no model.
         store.rec_model.replace_rec_vectors([
-            (f'expiry-{i}', np.array([1., (i + 1) / 12], np.float32).tobytes())
-            for i in range(12)])
+            (f'expiry-{i}', np.array([1., (i + 1) / 3], np.float32).tobytes())
+            for i in range(3)])
         refresh(store)
         rows = store.recommendations.page('home', 'all', 'wheelhouse')
         assert rows

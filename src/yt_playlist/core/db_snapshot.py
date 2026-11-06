@@ -162,7 +162,8 @@ class ReadSnapshot:
 
 
 @contextmanager
-def read_snapshot(source, make_reader, *, dependencies=None, memo=None, wait_for_writer=True):
+def read_snapshot(source, make_reader, *, dependencies=None, memo=None, wait_for_writer=True,
+                  read_transaction=True):
     # A bounded caller may declare all inputs up front. Publication rejects any
     # consumed input outside this scope, including a previously missing row.
     revision_scope = frozenset(dependencies) if dependencies is not None else None
@@ -184,7 +185,7 @@ def read_snapshot(source, make_reader, *, dependencies=None, memo=None, wait_for
                                    progress=lambda *_: check_cancellable_work())
                 reader._bind_repositories()
             else:
-                if not reader.conn.in_transaction:
+                if read_transaction and not reader.conn.in_transaction:
                     reader.conn.execute("BEGIN")
                 reader.conn.execute("SELECT 1 FROM settings LIMIT 1").fetchone()
             # External commits can race reader pinning. Only reuse results when

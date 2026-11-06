@@ -6,7 +6,7 @@ import time
 from yt_playlist.core import fao, vibe_model_files as files
 from yt_playlist.core.activity import WorkBudgetExceeded, work_budget
 from yt_playlist.core.audio_vibe_contract import INTENSITY_CHANNELS
-from yt_playlist.rec import home_vibe, vibe_joint_model as model
+from yt_playlist.rec import home_vibe, musical_preparation, musical_profiles, vibe_joint_model as model
 
 VIBES = (*home_vibe.PRESETS, *INTENSITY_CHANNELS)
 # Release qualification is deliberately empty until #819's frozen statistical,
@@ -69,6 +69,22 @@ def _refresh_ready(store, vibe):
     return all(other == vibe or current(store, state(store, other)) for other in VIBES)
 
 
+def prior_inputs(reader, rows, vibe):
+    """Attach the exact masked scalar covariate without dropping originals."""
+    result = []
+    for start in range(0, len(rows), 32):
+        batch = rows[start:start + 32]
+        keys, captured = reader.vibe_predictions.joint_profile_rows([row['recording'] for row in batch])
+        profiles = {key: (json.loads(payload) if payload is not None else None, digest)
+                    for key, payload, _version, digest in musical_preparation.masked_recordings(reader, captured)}
+        for row in batch:
+            profile, digest = profiles[keys[row['recording']]]
+            result.append({**row, 'metadata_prior': home_vibe.heuristic_affinity(profile, INTENSITY_CHANNELS.get(vibe, vibe))
+                           if profile is not None else .5,
+                           'metadata_profile_digest': digest, 'metadata_profile_version': musical_profiles.VERSION})
+    return result
+
+
 def step(store, *, seconds=10, memory_bytes=model.MEMORY_BYTES):
     """Fit one current-original snapshot. Last-good heads survive deferral."""
     if not qualified():
@@ -89,6 +105,7 @@ def step(store, *, seconds=10, memory_bytes=model.MEMORY_BYTES):
                 # Guard competing model publishers, including no prior head.
                 reader.settings.get_setting(files.HEAD_PREFIX + vibe)
                 rows = reader.vibe_predictions.joint_inputs(vibe, model.MAX_ROWS)
+                rows = prior_inputs(reader, rows, vibe)
                 value = model.fit(rows, vibe, memory_bytes=memory_bytes)
                 generation, staged = reader.vibe_predictions.stage_joint_model(value) if value else ('', None)
                 refresh = _refresh_ready(reader, vibe)

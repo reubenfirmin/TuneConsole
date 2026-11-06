@@ -1,26 +1,10 @@
 """Disk-backed candidate filtering and ordering for one Home preparation."""
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
 
 from yt_playlist.core.activity import check_cancellable_work
-from yt_playlist.util.genre_map import family_distance
-
-
-@dataclass(frozen=True)
-class CandidateFilter:
-    pool: int | None
-    year_band: int | None = None
-    years: tuple = ()
-    include: tuple = ()
-    avoid: tuple = ()
-    tagged: bool = False
-    eligible: bool = False
-    unseen: bool = False
-    excluded: tuple = ()
-    near_family: str | None = None
 
 
 class HomeSelectionRepo:
@@ -37,7 +21,8 @@ class HomeSelectionRepo:
         conn.execute('CREATE TABLE considered(card INTEGER,key TEXT,delta REAL,PRIMARY KEY(card,key)) WITHOUT ROWID')
         conn.execute('CREATE TABLE ordered(key TEXT PRIMARY KEY,delta REAL) WITHOUT ROWID')
         conn.execute('CREATE TABLE ppr(mode TEXT,key TEXT,rank INTEGER,PRIMARY KEY(mode,key)) WITHOUT ROWID')
-        conn.create_function('distance', 2, family_distance, deterministic=True)
+        conn.execute('CREATE TABLE distances(source TEXT,target TEXT,distance REAL,PRIMARY KEY(source,target)) WITHOUT ROWID')
+        conn.execute("CREATE INDEX candidate_families ON candidates(COALESCE(family,''))")
 
     @classmethod
     @contextmanager
@@ -48,31 +33,6 @@ class HomeSelectionRepo:
                 yield cls(conn)
             finally:
                 conn.close()
-
-    @staticmethod
-    def _filter(selected):
-        parts, values = ['c.pool=?'], [selected.pool]
-        if selected.year_band is not None:
-            low, high = selected.years
-            parts.append('c.year<=?' if selected.year_band == 0 else
-                         'c.year>? AND c.year<=?' if selected.year_band == 1 else 'c.year>?')
-            values.extend((low,) if selected.year_band == 0 else
-                          (low, high) if selected.year_band == 1 else (high,))
-        if selected.tagged:
-            parts.append('c.has_genre=1')
-        for items, expression in ((selected.include, 'c.family IN'), (selected.avoid, 'c.family NOT IN'),
-                                  (selected.excluded, 'c.key NOT IN')):
-            if items:
-                parts.append(expression + ' (' + ','.join('?' for _ in items) + ')')
-                values.extend(items)
-        if selected.near_family:
-            parts.append('distance(?,c.family)<=0.5')
-            values.append(selected.near_family)
-        if selected.eligible:
-            parts.append('c.eligible=1')
-        if selected.unseen:
-            parts.append('NOT EXISTS(SELECT 1 FROM seen s WHERE s.key=c.key)')
-        return ' AND '.join(parts), values
 
     def _rows(self, query, values):
         cursor = self._conn.execute(query, values)
@@ -89,34 +49,32 @@ class HomeSelectionRepo:
     def add_ppr(self, rows):
         self._conn.executemany('INSERT INTO ppr VALUES (?,?,?)', rows)
 
-    def count(self, selected):
-        predicate, values = self._filter(selected)
-        return self._conn.execute('SELECT count(*) FROM candidates c WHERE ' + predicate, values).fetchone()[0]
+    def add_distances(self, rows):
+        self._conn.executemany('INSERT OR IGNORE INTO distances VALUES (?,?,?)', rows)
 
-    def considered(self, card, selected):
-        predicate, values = self._filter(selected)
-        self._conn.execute('INSERT OR IGNORE INTO considered SELECT ?,c.key,c.delta FROM candidates c WHERE ' + predicate,
-                           (card, *values))
-        self._conn.execute('INSERT OR IGNORE INTO ordered SELECT c.key,c.delta FROM candidates c WHERE ' + predicate, values)
+    def missing_distance_families(self, source, *, limit):
+        return [row[0] for row in self._conn.execute(
+            "SELECT DISTINCT COALESCE(c.family,'') family FROM candidates c WHERE NOT EXISTS("
+            "SELECT 1 FROM distances d WHERE d.source=? AND d.target=COALESCE(c.family,'')) "
+            "ORDER BY COALESCE(c.family,'') LIMIT ?", (source, limit))]
+
+    def count(self, query):
+        return self._conn.execute('SELECT count(*) FROM candidates c WHERE ' + query.predicate, query.values).fetchone()[0]
+
+    def considered(self, card, query):
+        self._conn.execute('INSERT OR IGNORE INTO considered SELECT ?,c.key,c.delta FROM candidates c WHERE ' + query.predicate,
+                           (card, *query.values))
+        self._conn.execute('INSERT OR IGNORE INTO ordered SELECT c.key,c.delta FROM candidates c WHERE ' + query.predicate,
+                           query.values)
 
     def has_negative_ordering(self):
         return self._conn.execute('SELECT 1 FROM ordered WHERE delta<>0 LIMIT 1').fetchone() is not None
 
-    def ranked(self, selected, *, mode=None, ranker='rank', family=None, scale=1):
-        predicate, values = self._filter(selected)
-        if ranker == 'rank':
-            return self._rows('SELECT c.* FROM candidates c WHERE ' + predicate + ' ORDER BY c.rank', values)
-        if ranker not in ('ppr', 'cosine'):
-            raise ValueError('Unknown Home ordering')
-        order = 'COALESCE(p.rank,1073741824)/? - c.delta' if ranker == 'ppr' else '-c.tilt-c.delta'
-        parameters = [str(mode), *values]
-        if family:
-            order = 'distance(?,c.family),' + order
-            parameters.append(family)
-        if ranker == 'ppr':
-            parameters.append(float(scale))
-        return self._rows('SELECT c.* FROM candidates c LEFT JOIN ppr p ON p.mode=? AND p.key=c.key '
-                          'WHERE ' + predicate + ' ORDER BY ' + order + ',c.rank', parameters)
+    def ranked(self, query):
+        join = 'LEFT JOIN ppr p ON p.mode=? AND p.key=c.key ' if query.mode is not None else ''
+        values = ((query.mode,) if query.mode is not None else ()) + query.values + query.order_values
+        return self._rows('SELECT c.* FROM candidates c ' + join + 'WHERE ' + query.predicate +
+                          ' ORDER BY ' + query.order, values)
 
     def ppr_position(self, mode, key):
         row = self._conn.execute('SELECT rank FROM ppr WHERE mode=? AND key=?', (str(mode), key)).fetchone()
@@ -125,9 +83,8 @@ class HomeSelectionRepo:
     def considered_rows(self, card):
         return self._rows('SELECT key,delta FROM considered WHERE card=? ORDER BY key', (card,))
 
-    def mark_seen(self, selected, keys):
-        predicate, values = self._filter(selected)
-        self._conn.execute('INSERT OR IGNORE INTO seen SELECT c.key FROM candidates c WHERE ' + predicate, values)
+    def mark_seen(self, query, keys):
+        self._conn.execute('INSERT OR IGNORE INTO seen SELECT c.key FROM candidates c WHERE ' + query.predicate, query.values)
         self._conn.executemany('INSERT OR IGNORE INTO seen VALUES (?)', [(key,) for key in keys])
 
 

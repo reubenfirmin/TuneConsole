@@ -41,19 +41,6 @@ def _track(store, title, artist, *, genre="", xy=None):
     return k
 
 
-# --- library_genre_families -------------------------------------------------------------------
-
-
-def test_library_genre_families_lists_present_families_with_counts(store):
-    store.accounts.upsert_account("m", "c", None, True)
-    _track(store, "Goa One", "A", genre="goa trance")
-    _track(store, "Goa Two", "B", genre="psytrance")
-    _track(store, "Techno", "C", genre="acid techno")
-    fams = {f["family"]: f["n"] for f in store.rec_query.library_genre_families()}
-    assert fams.get("trance") == 2
-    assert fams.get("techno") == 1
-
-
 # --- cluster_expand allow= ---------------------------------------------------------------------
 
 def test_cluster_expand_allow_restricts_candidates(store):
@@ -86,22 +73,6 @@ def test_genres_route_lists_subgenres(store):
     subs = {g["genre"] for g in res["genres"]}
     assert "goa trance" in {s.lower() for s in subs} and "psytrance" in {s.lower() for s in subs}
     assert all(g["family"] == "trance" for g in res["genres"])     # carries its family
-
-
-def test_keys_in_genre_selection_matches_genre_or_family(store):
-    store.accounts.upsert_account("m", "c", None, True)
-    goa = _track(store, "Goa", "A", genre="goa trance")
-    psy = _track(store, "Psy", "B", genre="psytrance")
-    tek = _track(store, "Tek", "C", genre="acid techno")
-    _track(store, "Untagged", "D")
-    assert store.rec_query.keys_in_genre_selection([]) == set()
-    assert store.rec_query.keys_in_genre_selection([' ']) == set()
-    # a specific sub-genre token matches only that genre
-    assert store.rec_query.keys_in_genre_selection(["goa trance"]) == {goa}
-    # a family token matches every genre in the family
-    assert store.rec_query.keys_in_genre_selection(["trance"]) == {goa, psy}
-    # mixed tokens union
-    assert store.rec_query.keys_in_genre_selection(["goa trance", "techno"]) == {goa, tek}
 
 
 def test_expand_route_respects_allow_genres_subgenre(store):

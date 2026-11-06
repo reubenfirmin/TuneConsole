@@ -81,7 +81,7 @@ def handle_player_event(ctx, msg, now) -> bool:
     return persist_player_event(ctx, msg, now, ident)
 
 
-def persist_player_event(ctx, msg, now, ident):
+def persist_player_event(ctx, msg, now, ident, *, capture_id=None):
     """Persist an admitted observation with its original verified account."""
     store = ctx.store
     kind = (msg.get('kind') or '').strip()
@@ -99,7 +99,7 @@ def persist_player_event(ctx, msg, now, ident):
             payload["action"] = action
         payload.update({k: msg[k] for k in ("phase", "success", "httpStatus", "error") if k in msg})
     event_id = store.player_events.record_player_event(ident, kind, video_id, position, duration, playlist,
-                              json.dumps(payload) if payload else None, now)
+                              json.dumps(payload) if payload else None, now, capture_id=capture_id)
     if kind in {'track_exit', 'ended', 'bye'}:
         from yt_playlist.rec import choice_outcomes
         choice_outcomes.observe(store, ident, playlist, video_id, kind, position, duration, event_id, now)

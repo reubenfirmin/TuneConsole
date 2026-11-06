@@ -24,6 +24,7 @@ MODULES = {
     'vibe-pooling-pairs': 'vibe_pooling_pairs',
     'vibe-pooling-ranking': 'vibe_pooling_ranking',
     'vibe-pooling-selection': 'vibe_pooling_selection',
+    'vibe-pooling-runtime': 'vibe_pooling_runtime',
     'quality-round': 'quality_round',
     'focus-counts': 'focus_count_experiment',
     'focus-confirmation': 'focus_confirmation',

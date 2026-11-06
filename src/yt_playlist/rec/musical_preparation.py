@@ -57,3 +57,26 @@ def recordings(reader, rows, *, inputs=None):
         profile['sources_truncated'] = truncated
         result.append((key, profiles.canonical(profile), profiles.VERSION, profiles.digest(profile)))
     return result
+
+
+def masked_recordings(reader, rows, *, inputs=None):
+    """Prepare metadata conditioning with own observations removed before resolve.
+
+    Source scope admission must precede the repository's source/byte limits.
+    Prepared target profiles cannot be unmasked, so always start from inputs.
+    """
+    if inputs is None:
+        inputs = reader.musical_profiles.recording_inputs([row[0] for row in rows],
+                                                        source_scopes=('artist', 'release'))
+    masked, allowed = [], {}
+    for key, revision, raw, digest, different in rows:
+        content = json.loads(raw)
+        for features in content.values():
+            if features is not None:
+                features['audio'] = {}
+        sources, overrides, truncated = inputs[key]
+        if any(source['scope'] not in ('artist', 'release') for source in sources):
+            raise ValueError('Masked metadata requires source admission before source limits')
+        allowed[key] = (sources, {name: value for name, value in overrides.items() if name == 'genre'}, truncated)
+        masked.append((key, revision, json.dumps(content), digest, different))
+    return recordings(None, masked, inputs=allowed)

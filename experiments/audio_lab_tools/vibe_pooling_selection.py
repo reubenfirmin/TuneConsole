@@ -67,8 +67,8 @@ def expected_targets(plan, stratum, fold, vibe):
             and (stratum == 'unseen' or artists.intersection(row['artists']))}
 
 
-def summarize(path, results, output):
-    plan = load(path)
+def summarize(path, results, output, *, plan_loader=load):
+    plan = plan_loader(path)
     plan_hash = evaluation.digest(path.read_bytes())
     tasks, grouped = {}, defaultdict(list)
     for source in results:
@@ -99,7 +99,7 @@ def summarize(path, results, output):
     complete = tasks.keys() == expected and all(row['outcome'] == 'complete' for row in tasks.values())
     result = {'plan_sha256': plan_hash, 'complete': complete,
         'development_only': True, 'candidate_selected': False, 'statistical_qualification': False,
-        'selection': POLICY, 'failed_gates': [], 'metrics': {}}
+        'selection': plan['selection'], 'failed_gates': [], 'metrics': {}}
     if not complete:
         result['failed_gates'].append('incomplete campaign')
         evaluation.save_new(output, result)

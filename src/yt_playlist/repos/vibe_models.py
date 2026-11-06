@@ -85,6 +85,45 @@ def install_conditioning_guards(conn):
         conn.execute(sql)
 
 
+def metadata_guards(conn):
+    """Invalidate masked conditioning without depending on derived predictions.
+
+    The accepted raw inputs and source profile/link owners precede vibe scoring.
+    Listening, annotations and publication of a derived target cannot feed back
+    into this revision. These guards do not convert or scan the library.
+    """
+    bump = ("INSERT INTO settings(key,value) VALUES ('" + REVISION + "','1') "
+            "ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT);")
+    for table in ('rec_musical_source_profiles', 'rec_musical_links', 'prepared_recording_inputs'):
+        for operation in ('insert', 'update', 'delete'):
+            condition = ''
+            if table == 'prepared_recording_inputs':
+                reference = 'OLD' if operation == 'delete' else 'NEW'
+                condition = ('EXISTS(SELECT 1 FROM recording_vibes WHERE recording_id='
+                             + reference + '.recording_id AND measurement_id IS NOT NULL)')
+                if operation == 'update':
+                    condition += ' AND NEW.digest IS NOT OLD.digest'
+            elif table == 'rec_musical_source_profiles' and operation == 'update':
+                condition = 'NEW.digest IS NOT OLD.digest OR NEW.version IS NOT OLD.version'
+            name = table + '_joint_metadata_' + operation
+            yield name, (f'CREATE TRIGGER {name} AFTER {operation.upper()} ON {table} '
+                         + ('WHEN ' + condition + ' ' if condition else '') + 'BEGIN ' + bump + ' END')
+
+
+def install_metadata_guards(conn, context=None):
+    for _name, sql in metadata_guards(conn):
+        conn.execute(sql)
+
+
+def validate_metadata_guards(conn):
+    from yt_playlist.core.schema_contract import tokens
+
+    for name, sql in metadata_guards(conn):
+        row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
+        if row is None or tokens(row[0]) != tokens(sql):
+            raise ValueError('Incompatible shared vibe metadata guard: ' + name)
+
+
 def validate(conn):
     from yt_playlist.core.schema_contract import tokens
     for name, sql in schema(conn):

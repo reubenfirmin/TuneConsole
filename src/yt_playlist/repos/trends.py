@@ -1,7 +1,4 @@
 """Listening trend reads and publication of disposable canonical subject summaries."""
-from datetime import datetime
-from zoneinfo import ZoneInfo
-
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read
 
 
@@ -97,25 +94,18 @@ class TrendsRepo(Repo):
         return {r["k"]: {"energy": r["e"], "bpm": r["b"], "dance": r["d"]} for r in rows}
 
     @snapshot_read
-    def play_hours(self, since, until, exclude_generated=True, *, calendar=False) -> list:
-        """24 hour buckets of real plays. Calendar mode uses retained account-local days
-        and hours; the default uses UTC instants. Feeds the recap personality's rhythm axis."""
+    def play_hour_rows(self, since, until, exclude_generated=True, *, calendar=False):
+        """Return retained calendar instants or aggregated UTC hour counts."""
         frag, args = self._generated_filter(exclude_generated)
-        hours = [0] * 24
         if calendar:
             join, period = self._period(True)
-            for row in self.conn.execute(
+            return [dict(row) for row in self.conn.execute(
                     f"SELECT pe.played_at,c.timezone FROM play_events pe {join} WHERE {period}{frag}",
-                    [since, until, *args]):
-                hours[datetime.fromtimestamp(row[0], ZoneInfo(row[1])).hour] += 1
-            return hours
-        for r in self.conn.execute(
+                    [since, until, *args])]
+        return [dict(row) for row in self.conn.execute(
                 f"SELECT CAST(strftime('%H', pe.played_at, 'unixepoch') AS INTEGER) h, COUNT(*) c "
                 f"FROM play_events pe WHERE pe.played_at >= ? AND pe.played_at < ?{frag} GROUP BY h",
-                [since, until, *args]).fetchall():
-            if r["h"] is not None:
-                hours[r["h"]] = r["c"]
-        return hours
+                [since, until, *args])]
 
     @snapshot_read
     def ledger_artist_plays(self, since, until, exclude_generated=True, *, calendar=False) -> dict:
@@ -170,21 +160,15 @@ class TrendsRepo(Repo):
                               "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (imported,))
 
     @synchronized
-    def publish_rollup(self, rows, encoded_payload, now, imported):
-        """Write prepared output inside ReadSnapshot.publish's checked transaction. No commit."""
+    def publish_first_play(self, rows, imported):
+        """Persist a prepared SQL projection and its source markers together."""
         from yt_playlist.core import first_play, listening_summaries
-        if listening_summaries.available(self.conn):
-            listening_summaries.publish(self.conn,rows)
-        else:
-            first_play.publish_predecessor(self.conn, rows)
-        self._first_play_settings(imported)
-        if self._store._home_display_files:
-            self._store.rec_proposals.publish_prepared_home(encoded_payload, now, surface='trend_rollups')
-            return
-        self.conn.execute(
-            "INSERT INTO rec_proposals(surface,payload,built_at) VALUES ('trend_rollups',?,?) "
-            "ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload,built_at=excluded.built_at",
-            (encoded_payload, now))
+        with self.conn.atomic(join=True):
+            if listening_summaries.available(self.conn):
+                listening_summaries.publish(self.conn, rows)
+            else:
+                first_play.publish_predecessor(self.conn, rows)
+            self._first_play_settings(imported)
 
     @synchronized
     def clear_first_play(self) -> None:

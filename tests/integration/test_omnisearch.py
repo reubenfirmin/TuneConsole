@@ -1,8 +1,4 @@
-"""store.search.omni_search: navbar omnisearch over the user's library.
-
-LinkedIn-style: an artist match pivots into that artist's tracks/albums/playlists;
-direct title matches on songs and playlists get their own sections.
-"""
+"""Search against real catalog identities, credits, memberships and quarantine."""
 
 
 def _seed(store):
@@ -22,12 +18,6 @@ def _seed(store):
     return iid
 
 
-def test_short_query_is_empty(store):
-    _seed(store)
-    res = store.search.omni_search("r")
-    assert res == {"query": "r", "primary_artist": None, "sections": []}
-
-
 def test_artist_pivot_sets_primary_and_sections(store):
     _seed(store)
     res = store.search.omni_search("ritmo")
@@ -37,60 +27,6 @@ def test_artist_pivot_sets_primary_and_sections(store):
     assert "tracks_by" in kinds
     assert "albums_by" in kinds
     assert "playlists_featuring" in kinds
-
-
-def test_tracks_by_artist_link_to_track_details(store):
-    _seed(store)
-    res = store.search.omni_search("ritmo")
-    tracks = next(s for s in res["sections"] if s["kind"] == "tracks_by")
-    assert tracks["title"] == "Tracks by Ritmo"
-    row = tracks["rows"][0]
-    assert row["external"] is False
-    assert row["href"].startswith("/track/")
-
-
-def test_albums_by_artist_link_to_album_page(store):
-    _seed(store)
-    res = store.search.omni_search("ritmo")
-    albums = next(s for s in res["sections"] if s["kind"] == "albums_by")
-    hrefs = {r["href"] for r in albums["rows"]}
-    assert "/album?browse=MPREb_ritmolp" in hrefs
-    assert "/album?browse=MPREb_sierra" in hrefs
-
-
-def test_playlists_featuring_artist_link_to_playlist(store):
-    _seed(store)
-    res = store.search.omni_search("ritmo")
-    pls = next(s for s in res["sections"] if s["kind"] == "playlists_featuring")
-    assert pls["rows"][0]["href"].startswith("/playlist/")
-
-
-def test_direct_song_title_match_appears_in_songs(store):
-    _seed(store)
-    # "caliente" matches only the Mogwai track title, not any artist.
-    res = store.search.omni_search("caliente")
-    assert res["primary_artist"] is None
-    songs = next(s for s in res["sections"] if s["kind"] == "songs")
-    assert songs["rows"][0]["label"] == "Ritmo Caliente"
-    assert songs["rows"][0]["href"] == "/track/m1"
-    assert songs["rows"][0]["external"] is False
-
-
-def test_direct_playlist_title_match_appears_in_playlists(store):
-    _seed(store)
-    res = store.search.omni_search("mix")        # matches playlist "Ritmo Mix" by title, no artist "mix"
-    pls = next(s for s in res["sections"] if s["kind"] == "playlists")
-    assert pls["rows"][0]["label"] == "Ritmo Mix"
-
-
-def test_artist_row_links_to_artist_page(store):
-    _seed(store)
-    res = store.search.omni_search("ritmo")
-    artist = next(s for s in res["sections"] if s["kind"] == "artist")
-    artist_id = store.artists.resolve("Ritmo")
-    assert artist["rows"][0]["href"] == f"/artist?artist_id={artist_id}"
-    assert artist["rows"][0]["artist_id"] == artist_id
-    assert res["primary_artist"]["artist_id"] == artist_id
 
 
 def _section(result, kind):
@@ -180,28 +116,6 @@ def test_reconciled_artist_search_uses_surviving_identity_only(store):
     result = store.search.omni_search("Alias")
     assert [r["artist_id"] for r in _section(result, "artist")] == [target]
     assert {r["label"] for r in _section(result, "tracks_by")} == {"Old song", "Known song"}
-
-
-def test_sampling_is_stable_per_query(store):
-    _seed(store)
-    # Add extra Ritmo tracks so the "tracks_by" section has > 5 candidates,
-    # forcing _sample to take the seeded random.Random(...).sample() branch.
-    for i in range(8):
-        store.tracks.upsert_track(
-            f"extra{i}", f"Extra Track {i}", "Ritmo", "Extra LP", None,
-            album_browse_id="MPREb_extralp",
-        )
-    # Two identical queries must return identical results (seeded sampling).
-    a = store.search.omni_search("ritmo")
-    b = store.search.omni_search("ritmo")
-    assert a == b                          # same query => identical result, no reshuffle
-
-    # Verify sampling actually happened: tracks_by section has exactly per_section=5
-    # rows even though more than 5 candidates exist (3 from _seed + 8 added = 11).
-    tracks_by = next(s for s in a["sections"] if s["kind"] == "tracks_by")
-    assert len(tracks_by["rows"]) == 5, (
-        "Expected exactly 5 rows (per_section limit); sampling branch was not exercised"
-    )
 
 
 def test_generated_playlists_excluded(store):

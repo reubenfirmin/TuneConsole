@@ -3,20 +3,22 @@
 These queries preserve SQL ordering and bounded limits. Surface composition,
 personalized scoring and lane selection remain in rec.surfaces above persistence.
 """
-from yt_playlist.repos.base import LIKED_EXISTS, Repo, snapshot_read
-from yt_playlist.repos.rec_eligibility import exclude_ids
+from yt_playlist.library.rating_policy import LIKED_EXISTS
+from yt_playlist.repos.base import Repo, snapshot_read
+from yt_playlist.repos.rec_eligibility import exclude_ids, duration_clause
 
 
 class RecCandidatesRepo(Repo):
     @snapshot_read
-    def revisit_candidates(self, now, *, keys=None, limit=90):
+    def revisit_candidates(self, criteria, *, maximum_duration, keys=None, limit=90):
         """Quiet liked/repeated songs, including actual generated-source listening.
 
         Exact events count as plays; calendar-only imports contribute once on days
         without an exact event. Membership in a generated playlist has no effect.
         Twenty recorded plays gives a song the longer, six-month rest.
         """
-        params = {'month': now - 30*86400, 'half_year': now - 183*86400, 'limit': limit}
+        params = {'month': criteria.month, 'half_year': criteria.half_year, 'limit': limit,
+                  'repeated_plays': criteria.repeated_plays, 'long_rest_plays': criteria.long_rest_plays}
         restriction = ''
         if keys is not None:
             keys = list(dict.fromkeys(keys))
@@ -35,7 +37,7 @@ class RecCandidatesRepo(Repo):
             'MIN(t.album) album,MIN(t.video_id) video_id,MIN(t.thumbnail) thumbnail,'
             f'MAX(CASE WHEN {LIKED_EXISTS} THEN 1 ELSE 0 END) liked '
             'FROM playable_library_tracks t WHERE t.video_id IS NOT NULL AND t.video_id<>\'\' '
-            f'AND {self._store.rec_eligibility.track_length_clause("t.duration_s")}{restriction} '
+            f'AND {duration_clause("t.duration_s", maximum_duration)}{restriction} '
             'GROUP BY t.identity_key), '
             'exact_days AS MATERIALIZED (SELECT CAST(pe.identity_key AS TEXT) identity_key,pe.account_id,c.day '
             'FROM play_event_subjects pe JOIN play_event_calendar c ON c.event_id=pe.id '
@@ -50,37 +52,36 @@ class RecCandidatesRepo(Repo):
             'COUNT(*) plays,MAX(at) last_played FROM heard GROUP BY identity_key) '
             'SELECT n.*,COALESCE(h.plays,0) plays,h.last_played FROM names n '
             'LEFT JOIN totals h ON h.identity_key=n.key '
-            'WHERE (n.liked=1 OR h.plays>=2) AND (h.last_played IS NULL OR '
-            'h.last_played<=CASE WHEN h.plays>=20 THEN :half_year ELSE :month END) '
+            'WHERE (n.liked=1 OR h.plays>=:repeated_plays) AND (h.last_played IS NULL OR '
+            'h.last_played<=CASE WHEN h.plays>=:long_rest_plays THEN :half_year ELSE :month END) '
             'ORDER BY COALESCE(h.plays,0),h.last_played,n.key LIMIT :limit', params).fetchall()
         return [dict(row) for row in rows]
 
     @snapshot_read
-    def comfort_candidates(self, now, min_plays=4, recency_full_days=30, limit=50) -> list[dict]:
+    def comfort_candidates(self, now, *, min_plays, full_seconds, maximum_duration, order, limit=50) -> list[dict]:
         """High-rotation favorites, demoted by how recently they were heard."""
-        full_secs = max(1.0, recency_full_days * 86400.0)
         rows = self.conn.execute(
             "WITH plays AS (SELECT hi.identity_key,COUNT(*) c,MAX(hi.day_ts) last "
             "  FROM listening_days hi "
             "  GROUP BY hi.identity_key), "
             "     names AS (SELECT identity_key, MIN(title) title, MIN(artist) artist, "
             "               MIN(album) album, MIN(video_id) vid, MIN(thumbnail) thumb "
-            f"              FROM playable_library_tracks WHERE {self._store.rec_eligibility.track_length_clause()} GROUP BY identity_key) "
+            f"              FROM playable_library_tracks WHERE {duration_clause('duration_s', maximum_duration)} GROUP BY identity_key) "
             "SELECT n.identity_key k, n.title, n.artist, n.album, n.vid, n.thumb, "
             "       p.c plays, p.last last "
             "FROM names n JOIN plays p ON p.identity_key=n.identity_key "
             "WHERE n.title <> '' AND p.c >= :min_plays "
-            "ORDER BY p.c * min(1.0, (:now - p.last) / :full_secs) DESC, p.last ASC LIMIT :limit",
-            {"min_plays": min_plays, "now": now, "full_secs": full_secs, "limit": limit}).fetchall()
+            f'ORDER BY {order} LIMIT :limit',
+            {"min_plays": min_plays, "now": now, "full_secs": full_seconds, "limit": limit}).fetchall()
         return [{"key": r["k"], "title": r["title"], "artist": r["artist"], "album": r["album"] or "",
                  "video_id": r["vid"], "thumbnail": r["thumb"], "plays": r["plays"],
                  "last_played": r["last"]} for r in rows]
 
     @snapshot_read
-    def more_like_rotation(self, seed_limit=40, limit=40) -> list[dict]:
+    def more_like_rotation(self, *, seed_limit, limit, maximum_plays, maximum_duration, order,
+                           excluded_playlists) -> list[dict]:
         """Barely played co-members of playlists containing the most-played seeds."""
-        excl = self._store.rec_eligibility.excluded_playlist_ids()
-        seed_excl = exclude_ids("pt.playlist_id", excl)
+        seed_excl = exclude_ids('pt.playlist_id', excluded_playlists)
         rows = self.conn.execute(
             "WITH tp AS MATERIALIZED (SELECT CAST(identity_key AS TEXT) identity_key, "
             "COUNT(*) c FROM listening_days GROUP BY identity_key), "
@@ -95,17 +96,17 @@ class RecCandidatesRepo(Repo):
             "          JOIN tracks t ON t.id=pt.track_id "
             "          JOIN playable_library_tracks c ON c.recording_id=t.recording_id "
             "          LEFT JOIN tp ON tp.identity_key=t.identity_key "
-            f"          WHERE c.title<>'' AND {self._store.rec_eligibility.track_length_clause('c.duration_s')} GROUP BY t.identity_key) "
+            f"          WHERE c.title<>'' AND {duration_clause('c.duration_s', maximum_duration)} GROUP BY t.identity_key) "
             "SELECT key, title, artist, album, vid, thumb, sp, plays FROM cand "
-            "WHERE key NOT IN (SELECT k FROM seeds) AND plays<=1 "
-            "ORDER BY sp DESC, plays ASC, key LIMIT :limit",
-            {"seed_limit": seed_limit, "limit": limit}).fetchall()
+            'WHERE key NOT IN (SELECT k FROM seeds) AND plays<=:maximum_plays '
+            f'ORDER BY {order} LIMIT :limit',
+            {'seed_limit': seed_limit, 'limit': limit, 'maximum_plays': maximum_plays}).fetchall()
         return [{"key": r["key"], "title": r["title"], "artist": r["artist"], "album": r["album"] or "",
                  "video_id": r["vid"], "thumbnail": r["thumb"], "plays": r["plays"],
                  "shared_playlists": r["sp"]} for r in rows]
 
     @snapshot_read
-    def deep_cuts(self, limit=40) -> list[dict]:
+    def deep_cuts(self, *, maximum_duration, minimum_artist_plays, order, limit=40) -> list[dict]:
         """Each heavily played artist's least-played track, ordered by affinity."""
         rows = self.conn.execute(
             "WITH tp AS MATERIALIZED (SELECT CAST(identity_key AS TEXT) identity_key, "
@@ -114,21 +115,21 @@ class RecCandidatesRepo(Repo):
             "                MIN(t.album) album, MIN(t.video_id) vid, MIN(t.thumbnail) thumb, "
             "                COALESCE(MAX(tp.c),0) plays "
             "         FROM playable_library_tracks t LEFT JOIN tp ON tp.identity_key=t.identity_key "
-            f"        WHERE t.title<>'' AND t.artist<>'' AND {self._store.rec_eligibility.track_length_clause('t.duration_s')} "
+            f"        WHERE t.title<>'' AND t.artist<>'' AND {duration_clause('t.duration_s', maximum_duration)} "
             "         GROUP BY t.identity_key), "
             " ap AS (SELECT artist, SUM(plays) total FROM trk GROUP BY artist), "
             " r AS (SELECT trk.*, ap.total atot, "
             "        ROW_NUMBER() OVER (PARTITION BY trk.artist ORDER BY trk.plays ASC, trk.key) rn "
-            "       FROM trk JOIN ap ON ap.artist=trk.artist WHERE ap.total>0) "
+            '       FROM trk JOIN ap ON ap.artist=trk.artist WHERE ap.total>:minimum_artist_plays) '
             "SELECT key, title, artist, album, vid, thumb, plays, atot FROM r WHERE rn=1 "
-            "ORDER BY atot DESC, plays ASC, key LIMIT :limit",
-            {"limit": limit}).fetchall()
+            f'ORDER BY {order} LIMIT :limit',
+            {'limit': limit, 'minimum_artist_plays': minimum_artist_plays}).fetchall()
         return [{"key": r["key"], "title": r["title"], "artist": r["artist"], "album": r["album"] or "",
                  "video_id": r["vid"], "thumbnail": r["thumb"], "plays": r["plays"],
                  "artist_plays": r["atot"]} for r in rows]
 
     @snapshot_read
-    def complete_playlist(self, playlist_id, limit=20) -> list[dict]:
+    def complete_playlist(self, playlist_id, *, maximum_duration, artist_weight, order, limit=20) -> list[dict]:
         """Owned tracks fitting a playlist, ranked by artist and co-occurrence."""
         rows = self.conn.execute(
             "WITH pm AS (SELECT t.identity_key key, t.artist FROM playlist_tracks pt "
@@ -145,11 +146,11 @@ class RecCandidatesRepo(Repo):
             "          FROM tracks t JOIN playlist_tracks pt ON pt.track_id=t.id "
             "          JOIN playable_library_tracks c ON c.recording_id=t.recording_id "
             f"          WHERE t.identity_key NOT IN (SELECT key FROM pm) AND c.title<>'' "
-            f"          AND {self._store.rec_eligibility.track_length_clause('c.duration_s')} "
+            f"          AND {duration_clause('c.duration_s', maximum_duration)} "
             "          GROUP BY t.identity_key) "
             "SELECT key, title, artist, album, vid, thumb, sa, cooc FROM cand "
-            "WHERE sa=1 OR cooc>0 ORDER BY (sa*2+cooc) DESC, cooc DESC, key LIMIT :limit",
-            {"pid": playlist_id, "limit": limit}).fetchall()
+            f'WHERE sa=1 OR cooc>0 ORDER BY {order} LIMIT :limit',
+            {'pid': playlist_id, 'limit': limit, 'artist_weight': artist_weight}).fetchall()
         return [{"key": r["key"], "title": r["title"], "artist": r["artist"], "album": r["album"] or "",
                  "video_id": r["vid"], "thumbnail": r["thumb"],
                  "same_artist": bool(r["sa"]), "cooc": r["cooc"]} for r in rows]

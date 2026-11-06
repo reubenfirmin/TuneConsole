@@ -38,7 +38,9 @@ def test_proposals_policies_and_settings_share_the_outer_publication(tmp_path, f
         with store.read_snapshot() as snapshot:
             for owner in ("rec_ledger", "rec_proposals", "rec_signals",
                           "playlist_recipes", "artist_similarity"):
-                repo = getattr(snapshot.store, owner)
+                component = getattr(snapshot.store, owner)
+                repo = (component.repository if owner in ('rec_ledger', 'rec_signals', 'artist_similarity')
+                        else component)
                 assert repo.conn is snapshot.store.conn
                 assert repo._lock is snapshot.store._lock
 

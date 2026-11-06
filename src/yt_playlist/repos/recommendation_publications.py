@@ -3,7 +3,8 @@ from yt_playlist.core import recommendation_outputs, recommendation_pools, recom
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core import listening_subject_reads
 from yt_playlist.core.preparation import listening_views
-from .base import LIKED_EXISTS, Repo, lookup_read, snapshot_read, synchronized
+from yt_playlist.library.rating_policy import LIKED_EXISTS
+from .base import Repo, lookup_read, snapshot_read, synchronized
 from . import recommendation_publication as publication
 
 

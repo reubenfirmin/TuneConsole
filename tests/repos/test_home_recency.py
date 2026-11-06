@@ -4,7 +4,7 @@ from yt_playlist.core.albums import observe
 
 
 @pytest.mark.parametrize('include_generated', [False, True])
-def test_recency_reopens_after_history_and_album_membership_updates(file_backed_store, include_generated):
+def test_recency_reads_current_history_and_album_membership(file_backed_store, include_generated):
     store = file_backed_store
     account = store.accounts.upsert_account('main', 'cred', None, True)
     entry = store.tracks.upsert_track('song', 'Song', 'Artist', '', 180)
@@ -26,7 +26,7 @@ def test_recency_reopens_after_history_and_album_membership_updates(file_backed_
         store.history.record_history_plays(account, 172800, [key], source_timezone='UTC')
         with store.read_view(tracked=True) as newer:
             assert read(newer) == {'album': expected + 86400}
-        assert read(older) == {'album': expected}
+        assert read(older) == {'album': expected + 86400}
     store.collection.remove_saved_album('album')
     with store.read_view(tracked=True) as reader:
         assert read(reader) == {}

@@ -19,6 +19,7 @@ import zipfile
 import numpy as np
 
 from yt_playlist.core import file_paths
+from yt_playlist.core.activity import check_stopping
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
 from yt_playlist.rec import home_vibe, vibe_joint_model as model, vibe_joint_preparation as preparation
@@ -29,6 +30,12 @@ from yt_playlist.repos import vibe_models
 ROOT = Path(__file__).resolve().parents[2]
 OWNERS = ('recording_vibes', 'measurements', 'predictions', 'prediction_inputs',
           'prediction_artists', 'prediction_model_generations', 'prediction_provenance')
+
+
+def process_io():
+    """Linux process counters, including WAL/files and cache effects."""
+    return {key: int(value) for line in Path('/proc/self/io').read_text().splitlines()
+            for key, value in (line.split(':', 1),)}
 
 
 def storage(store):
@@ -42,7 +49,14 @@ def storage(store):
         root = file_paths.directory(store.conn, domain)
         values = [path.stat().st_size for path in root.rglob('*.json') if path.is_file()]
         files[domain] = {'files': len(values), 'bytes': sum(values), 'largest': max(values, default=0)}
-    return {'sql_objects': objects, 'sql_bytes': sum(objects.values()), 'rows': counts, 'fao': files}
+    database_files = {}
+    for suffix in ('', '-wal', '-shm'):
+        path = Path(str(store._db_path) + suffix)
+        if path.exists():
+            value = path.stat()
+            database_files[path.name] = {'bytes': value.st_size, 'allocated_bytes': value.st_blocks * 512}
+    return {'sql_objects': objects, 'sql_bytes': sum(objects.values()), 'rows': counts, 'fao': files,
+            'database_files': database_files}
 
 
 def summary(samples):
@@ -52,7 +66,7 @@ def summary(samples):
 
 def foreground(store, keys):
     """One identical bounded SQL serving workload in both phases."""
-    with store.read_view() as reader:
+    with store.priority.request(), store.read_view() as reader:
         ranked = [reader.vibe_predictions.ranked(vibe, 100) for vibe in home_vibe.PRESETS]
         scores = reader.vibe_predictions.fit_scores(keys, 'relax')
         overlays = reader.vibe_predictions.overlay({key: {} for key in keys})
@@ -89,34 +103,45 @@ def serving_guards(foreground_thread):
         model.fit, vibe_models.read = original_fit, original_read
 
 
-def phase(store, keys, candidate, *, seconds, turns):
+def phase(store, keys, candidate, *, seconds, turns, request_idle):
     preparation.QUALIFICATIONS = ({preparation.config_identity(): 'isolated-operational-rehearsal'}
                                  if candidate else {})
     started, samples, first_useful = time.monotonic(), [], None
     observations, progress = [], []
-    first_cycle = None
+    first_cycle, first_score = None, None
+    io_before = process_io()
     def background():
-        nonlocal first_cycle
+        with store.priority.background(check_stopping):
+            return background_work()
+
+    def background_work():
+        nonlocal first_cycle, first_score
         # Same single background worker and refresh request in each phase.
         # Candidate fitting is the intended extra work, never a foreground call.
         with atomic_write(store):
             store.conn.execute("INSERT OR IGNORE INTO rec_vibe_pending(group_key) VALUES ('*')")
         worker = Preparation(store)
-        for turn in range(turns):
-            if time.monotonic() - started >= seconds:
-                return {'outcome': 'bounded-incomplete', 'turns': turn}
-            at = time.monotonic()
-            if (not preparation.due(store) and not store.vibe_predictions.pending()
-                    and not store.prepared_content.has_pending() and not store.musical_profiles.pending()):
-                return {'outcome': 'complete', 'turns': turn}
-            kind = 'model-eligible' if preparation.due(store) else 'content-and-scores'
-            changed = worker.capture(1000)
-            if first_cycle is None and candidate and all(
-                    preparation.current(store, value := preparation.state(store, vibe))
-                    and value.get('outcome') == 'ready' for vibe in preparation.VIBES):
-                first_cycle = time.monotonic() - started
-            progress.append({'kind': kind, 'changed': bool(changed), 'seconds': time.monotonic() - at})
-        return {'outcome': 'bounded-incomplete', 'turns': turns}
+        try:
+            for turn in range(turns):
+                if time.monotonic() - started >= seconds:
+                    return {'outcome': 'bounded-incomplete', 'turns': turn}
+                at = time.monotonic()
+                if (not preparation.due(store) and not store.vibe_predictions.pending()
+                        and not store.prepared_content.has_pending() and not store.musical_profiles.pending()):
+                    return {'outcome': 'complete', 'turns': turn}
+                kind = 'model-eligible' if preparation.due(store) else 'content-and-scores'
+                changed = worker.capture(1000)
+                if first_score is None and candidate and store.conn.execute(
+                        'SELECT 1 FROM prediction_model_generations LIMIT 1').fetchone():
+                    first_score = time.monotonic() - started
+                if first_cycle is None and candidate and all(
+                        preparation.current(store, value := preparation.state(store, vibe))
+                        and value.get('outcome') == 'ready' for vibe in preparation.VIBES):
+                    first_cycle = time.monotonic() - started
+                progress.append({'kind': kind, 'changed': bool(changed), 'seconds': time.monotonic() - at})
+            return {'outcome': 'bounded-incomplete', 'turns': turns}
+        finally:
+            worker.close()
     with serving_guards(threading.get_ident()) as calls, ThreadPoolExecutor(max_workers=1) as pool:
         work = pool.submit(background)
         while not work.done() or len(samples) < 100:
@@ -128,24 +153,30 @@ def phase(store, keys, candidate, *, seconds, turns):
             if observed not in observations:
                 observations.append(observed)
             # Bound benchmark request pressure; both phases use the same cadence.
-            time.sleep(.01)
+            time.sleep(request_idle)
         outcome = work.result()
     return {**outcome, 'wall_seconds': time.monotonic() - started,
             'foreground': summary(samples), 'first_existing_useful_seconds': first_useful,
             'first_ready_model_cycle_seconds': first_cycle,
+            'first_generation_score_seconds': first_score,
+            'process_io_delta': {key: value - io_before[key] for key, value in process_io().items()},
             'observed_content': observations, 'guards': calls, 'background_turns': progress,
             'model_states': {vibe: preparation.state(store, vibe) for vibe in preparation.VIBES},
             'score_work_remaining': bool(store.vibe_predictions.pending())}
 
 
-def run(output, *, seconds=180., turns=1000):
+def run(output, *, seconds=180., turns=1000, request_idle=.1):
     database = Path(os.environ.get('TUNECONSOLE_TEST_LIBRARY', ''))
     if (os.environ.get('TUNECONSOLE_IMAGE_RUN') != '1' or database != Path('/library/state.db')
             or output.parent.resolve() != Path('/reports')):
         raise ValueError('Use scripts/test-library.py with a private writable snapshot and /reports output')
     original_qualification = preparation.QUALIFICATIONS
     started = time.monotonic()
+    if request_idle < 0:
+        raise ValueError('Request idle time must be nonnegative')
     report = {'candidate_selected': False, 'product_candidate': model.configuration(),
+        'request_idle_seconds': request_idle,
+        'priority': 'production request/background scopes; identical SQL workload and cadence in both phases',
         'dataset': 'private CoW snapshot selected by test-library manager',
         'limits': ['Warm existing prepared state; does not establish fresh-user startup.',
             'Product-format candidate only; detached metadata/paired recipes are not integrated.',
@@ -156,6 +187,7 @@ def run(output, *, seconds=180., turns=1000):
             'experiments/audio_lab_tools/vibe_pooling_operations.py',
             'src/yt_playlist/rec/vibe_joint_model.py', 'src/yt_playlist/rec/vibe_joint_preparation.py',
             'src/yt_playlist/rec/progressive.py',
+            'src/yt_playlist/core/priority.py',
             'src/yt_playlist/rec/vibe_preparation.py', 'src/yt_playlist/repos/vibe_predictions.py',
             'src/yt_playlist/repos/vibe_models.py', 'src/yt_playlist/core/vibe_model_files.py')}}
     with zipfile.ZipFile(output.parent / 'source.zip', 'x', zipfile.ZIP_DEFLATED) as archive:
@@ -176,9 +208,9 @@ def run(output, *, seconds=180., turns=1000):
             raise ValueError('Insufficient real prepared library content')
         report['serving_keys'] = len(keys)
         report['before'] = storage(store)
-        report['baseline'] = phase(store, keys, False, seconds=seconds, turns=turns)
+        report['baseline'] = phase(store, keys, False, seconds=seconds, turns=turns, request_idle=request_idle)
         report['after_baseline'] = storage(store)
-        report['candidate'] = phase(store, keys, True, seconds=seconds, turns=turns)
+        report['candidate'] = phase(store, keys, True, seconds=seconds, turns=turns, request_idle=request_idle)
         report['after_candidate'] = storage(store)
         report['fit_original_counts'] = {vibe: len(store.vibe_predictions.joint_inputs(vibe, model.MAX_ROWS))
                                          for vibe in preparation.VIBES}
@@ -214,5 +246,6 @@ if __name__ == '__main__':
     parser.add_argument('output', type=Path)
     parser.add_argument('--seconds', type=float, default=180.)
     parser.add_argument('--turns', type=int, default=1000)
+    parser.add_argument('--request-idle', type=float, default=.1)
     args = parser.parse_args()
-    run(args.output, seconds=args.seconds, turns=args.turns)
+    run(args.output, seconds=args.seconds, turns=args.turns, request_idle=args.request_idle)

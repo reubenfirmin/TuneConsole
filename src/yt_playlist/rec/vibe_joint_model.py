@@ -9,13 +9,14 @@ import base64
 from collections import Counter
 from functools import lru_cache
 import heapq
+import hashlib
 from importlib.metadata import version as package_version
 import json
 import math
 
 from yt_playlist.core.activity import WorkBudgetExceeded, check_stopping
 
-VERSION = 'joint-vibes-gaussian-source-mixture-3'
+VERSION = 'joint-vibes-metadata-source-mixture-4'
 MAX_ROWS = 32768
 MEMORY_BYTES = 128 * 1024 * 1024
 COMPONENTS = ('artist', 'genre', 'interaction', 'album', 'source', 'residual')
@@ -23,6 +24,9 @@ COMPONENTS = ('artist', 'genre', 'interaction', 'album', 'source', 'residual')
 # residual includes unidentified measurement noise when replicates are absent.
 INITIAL = dict(zip(COMPONENTS, (.02, .02, .01, .01, .005, .04)))
 BASELINE_VARIANCE = .25
+# Only symbolic geometry is reusable. Scores, variances, posterior factors and
+# means never enter this cache. Eight channels often share the same geometry.
+_ORDERING_CACHE = None
 
 
 def canonical(value):
@@ -35,12 +39,18 @@ def dependency_versions():
 
 
 def configuration():
+    from .vibe_joint_calibrated import RECIPE
+    from . import home_vibe, musical_profiles
+
     numpy_version, scipy_version = dependency_versions()
     return {'version': VERSION, 'numpy': numpy_version, 'scipy': scipy_version,
             'initial': dict(INITIAL), 'baseline': .5, 'baseline_variance': BASELINE_VARIANCE,
             'variance_bounds': [1e-5, .25], 'max_iterations': 100,
             'gradient': 'central-relative', 'gradient_step': 1e-5,
             'prediction_source': 'canonical-original-empirical-mixture',
+            'masked_metadata': dict(RECIPE),
+            'metadata_profile_version': musical_profiles.VERSION,
+            'metadata_heuristic_sha256': hashlib.sha256(canonical(home_vibe.PRESETS)).hexdigest(),
             'missing_groups': 'new-group-prior',
             'max_rows': MAX_ROWS, 'memory_bytes': MEMORY_BYTES}
 
@@ -73,7 +83,7 @@ def terms(row, kind):
     return [(str(value), 1.)] if value else []
 
 
-def _design(rows):
+def _design(rows, *, term_builder=None):
     from scipy.sparse import csr_matrix
 
     vocabulary, offsets, indices, values, kinds = {}, [0], [], [], []
@@ -82,7 +92,7 @@ def _design(rows):
         check_stopping()
         for kind in ('baseline', *COMPONENTS[:-1]):
             # A single source cannot identify a second intercept.
-            pairs = [('intercept', 1.)] if kind == 'baseline' else terms(row, kind)
+            pairs = [('intercept', 1.)] if kind == 'baseline' else (term_builder or terms)(row, kind)
             if kind == 'source' and not multiple_sources:
                 pairs = []
             for name, weight in pairs:
@@ -105,7 +115,24 @@ def _ordering(design, base_bytes, memory_bytes):
     until late. Numeric LU uses this exact symmetric ordering without pivoting.
     The fill bound therefore covers every variance-component iteration.
     """
+    global _ORDERING_CACHE
+    check_stopping()
     size = design.shape[1]
+    fingerprint = hashlib.sha256(str((design.shape, design.indptr.dtype.str,
+                                      design.indices.dtype.str)).encode())
+    fingerprint.update(memoryview(design.indptr))
+    fingerprint.update(memoryview(design.indices))
+    identity = fingerprint.digest()
+    cached = _ORDERING_CACHE
+    if cached is not None and cached[0] == identity:
+        _identity, order, fill, overhead = cached
+        if base_bytes + overhead > memory_bytes:
+            raise WorkBudgetExceeded('Joint vibe sparse fill exceeds the fit memory budget')
+        return list(order), fill, base_bytes + overhead
+    # Drop the previous geometry before allocating another symbolic graph.
+    _ORDERING_CACHE = cached = None
+    input_bytes = base_bytes
+    base_bytes += size * 64 + 128  # one immutable cached ordering plus copies
     graph = [set() for _ in range(size)]
     edges, fill, order = 0, size, []
 
@@ -154,6 +181,7 @@ def _ordering(design, base_bytes, memory_bytes):
                     graph[second].add(first)
             heapq.heappush(queue, (len(graph[first]), first))
             peak = max(peak, admit(len(queue)))
+    _ORDERING_CACHE = identity, tuple(order), fill, peak - input_bytes
     return order, fill, peak
 
 
@@ -186,6 +214,12 @@ def fit(rows, vibe, *, fixed=None, memory_bytes=MEMORY_BYTES):
     is not passed off as a calibrated observation precision.
     """
     rows = unique(rows)
+    if any('metadata_prior' in row for row in rows):
+        if not all('metadata_prior' in row for row in rows):
+            raise ValueError('Every calibrated original requires its masked metadata prior')
+        from . import vibe_joint_calibrated
+
+        return vibe_joint_calibrated.fit(rows, vibe, fixed=fixed, memory_bytes=memory_bytes)
     count = len(rows)
     base_bytes = len(canonical(rows)) * 4 + count * 2048 + 8 * 1024 * 1024
     if count > MAX_ROWS or base_bytes > memory_bytes:
@@ -282,7 +316,7 @@ class Posterior:
         self.legacy = _LegacyPosterior(value) if value['format'] == 1 else None
         if self.legacy is not None:
             return
-        if value['format'] not in (2, 3):
+        if value['format'] not in (2, 3, 4):
             raise ValueError('Unsupported joint vibe posterior')
         self.value, self.rows = value, unique(value['inputs'])
         self.variances = value['variances']
@@ -290,7 +324,24 @@ class Posterior:
                 or any(not math.isfinite(item) or item < 0 for item in self.variances.values())
                 or self.variances['residual'] <= 0 or len(self.rows) > MAX_ROWS):
             raise ValueError('Invalid joint vibe variance components')
-        design, features, _kinds = _design(self.rows)
+        if value['format'] == 4:
+            from . import vibe_joint_calibrated
+
+            vibe_joint_calibrated.validate_rows(self.rows)
+            self.population = vibe_joint_calibrated.population(self.rows)
+            design, features, _kinds = vibe_joint_calibrated.design(self.rows)
+            diagnostics = value['diagnostics']
+            residuals = diagnostics['residual_by_family']
+            families = {'residual_audio' if row['source'].startswith('audio_measurement/')
+                        else 'residual_provider' for row in self.rows}
+            if (set(residuals) != {'residual_audio', 'residual_provider'}
+                    or any(not math.isfinite(item) or not 0 <= item <= .25 for item in residuals.values())
+                    or any(residuals[family] <= 0 for family in families)
+                    or not math.isfinite(diagnostics['support_slope']) or abs(diagnostics['support_slope']) > 10
+                    or not math.isfinite(diagnostics['provider_log_support_center'])):
+                raise ValueError('Invalid calibrated residual model')
+        else:
+            design, features, _kinds = _design(self.rows)
         base_bytes = len(canonical(self.rows)) * 4 + len(self.rows) * 2048 + 8 * 1024 * 1024
         order, fill, _accounted = _ordering(design, base_bytes, MEMORY_BYTES)
         if value['order'] != order:
@@ -343,7 +394,7 @@ class Posterior:
                 self.source_variation = max(0., float(variance - self.source_average
                     @ self.factor.solve(self.source_average)))
 
-    def predict(self, artists, genre, *, album=None, recording=None):
+    def predict(self, artists, genre, *, album=None, recording=None, metadata_prior=None):
         import numpy as np
         from threadpoolctl import threadpool_limits
 
@@ -352,6 +403,10 @@ class Posterior:
         check_stopping()
         if recording is not None and recording in self.recordings:
             raise ValueError('Target measurement was not hidden from fitting')
+        if self.value['format'] == 4:
+            from . import vibe_joint_calibrated
+
+            return vibe_joint_calibrated.predict(self, artists, genre, album=album, metadata_prior=metadata_prior)
         known_artist = bool(self.artists.intersection(artists))
         known_genre = bool(genre) and genre in self.genres
         mixture = self.value['format'] == 3

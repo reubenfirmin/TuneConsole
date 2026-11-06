@@ -146,6 +146,21 @@ are partitioned using verified timing artifacts, falling back to
 equal normal collection exactly once. Browser jobs use the Playwright image
 pinned to `uv.lock`. Per-shard artifacts retain JUnit, timings and failure traces.
 
+When failed workflows leave the committed weights stale, explicitly refresh
+them from one run's eight downloaded shard artifacts:
+
+```sh
+python3 ci_test_shards.py evidence/ baseline --total=4 \
+  --run https://github.com/reubenfirmin/TuneConsole/actions/runs/RUN_ID \
+  --output .github/test-durations.json
+```
+
+The refresh requires complete, consistent, exactly-once receipts from both
+suites and includes all three test phases. It retains failed case IDs and prints
+the projected loads. These diagnostic estimates do not establish passing
+coverage or browser budget acceptance. Normal CI verification still requires
+passing shards; automatic artifacts come only from successful PR workflows.
+
 Compare complete, clean runs on the same revision using retained metrics:
 
 ```sh

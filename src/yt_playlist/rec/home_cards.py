@@ -17,8 +17,8 @@ from yt_playlist.rec import (arc_energy, home_audit, home_themes, home_vibe, jou
 from yt_playlist.repos.discovery import DiscoveryRepo
 from yt_playlist.repos.modes import ModesRepo
 from yt_playlist.repos.rec_model import RecModelRepo
-from yt_playlist.repos.rec_query import RecQueryRepo
-from yt_playlist.repos.rec_ledger import RecLedgerRepo
+from yt_playlist.controllers.recommendation_query import RecommendationQuery
+from yt_playlist.controllers.recommendation_ledger import RecommendationLedger
 from yt_playlist.repos.rec_proposals import RecProposalsRepo
 from yt_playlist.repos.settings import SettingsRepo
 from yt_playlist.rec.mode_selection import PROTO_SIZE, ROTATION_POOL, CARD_LABELS as _CARD_LABELS
@@ -32,8 +32,8 @@ class HomeRepositories(Protocol):
     discovery: DiscoveryRepo
     modes: ModesRepo
     rec_model: RecModelRepo
-    rec_query: RecQueryRepo
-    rec_ledger: RecLedgerRepo
+    rec_query: RecommendationQuery
+    rec_ledger: RecommendationLedger
     rec_proposals: RecProposalsRepo
     settings: SettingsRepo
 

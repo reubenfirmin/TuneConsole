@@ -3,53 +3,44 @@ import pytest
 from fastapi.testclient import TestClient
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
-from tests.recommendation_support import publish_bundles, seed_bundle_subjects
+from tests.home_fixture_support import home_routes_only, publish_menu
 
-pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'home_routes_only')
 
 
-def _seed_bundles(store):
+def _seed_modes(store):
     store.modes.replace_modes([
         {"mode_id": 1, "label": "a", "families": [["house", 1]],
          "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 80, "rep_keys": []},
         {"mode_id": 2, "label": "b", "families": [["techno", 1]],
          "centroid": np.array([0.0, 1.0], dtype=np.float32), "size": 60, "rep_keys": []},
     ], retired_ids=[], now=1.0)
-    from yt_playlist.rec import mode_surfaces as ms
-    def items(p, g):
-        return [{"key": f"{p}{i}", "video_id": f"v{p}{i}", "title": f"Song {p}{i}", "artist": f"Art {p}{i}",
-                 "album": "", "thumbnail": None, "plays": 0, "reason": "", "lane": "", "genre": g}
-                for i in range(20)]
-    payload = {"1": {}, "2": {}}
-    for surf in ms.CARD_SURFACES:
-        payload["1"][surf] = items(f"{surf}h", "house")
-        payload["2"][surf] = items(f"{surf}t", "techno")
-    seed_bundle_subjects(store, payload)
-    publish_bundles(store, payload, 1.0)
 
 
 def _client(store, now=1000.0):
     iid = store.accounts.upsert_account("main", "cred", None, True)
-    return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
+    return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now,
+                                 background_work=False),
                       base_url="http://127.0.0.1")
 
 
-def test_cards_render_logs_impressions(store, home_seed_inputs):
-    from yt_playlist.rec import home_prepared
-
-    assert home_prepared.prepare(store, 1000) is not None
+def test_cards_render_logs_impressions(store):
+    _seed_modes(store)
+    # Serving consumes a completed menu. Ranking and pool production have
+    # independent owners; real persistence and impression recording stay here.
+    publish_menu(store, count=2, mode_ids=(1, 2))
     client = _client(store)
     r = client.get("/home/cards")
     assert r.status_code == 200
     impressions = store.modes.impression_counts()
-    assert sum(impressions.values()) >= 1
+    assert impressions == {1: 1, 2: 1}
     assert "mode_id" in r.text       # the recipe carrying mode_id is embedded for Save & play
     assert client.get("/home/cards").status_code == 200
     assert store.modes.impression_counts() == impressions
 
 
 def test_generate_logs_pick(store):
-    _seed_bundles(store)
+    _seed_modes(store)
     r = _client(store).post("/home/generate", data={
         "name": "My Mix",
         "tracks": '[{"video_id": "vX", "title": "T", "artist": "A"}]',
@@ -59,7 +50,7 @@ def test_generate_logs_pick(store):
 
 
 def test_generate_no_pick_without_mode(store):
-    _seed_bundles(store)
+    _seed_modes(store)
     _client(store).post("/home/generate", data={
         "name": "M", "tracks": '[{"video_id": "vX", "title": "T", "artist": "A"}]',
         "recipe": 'null'})

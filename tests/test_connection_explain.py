@@ -7,13 +7,17 @@ bridges the two in taste space. The /clusters/explain route stitches them togeth
 mid-edge dot.
 """
 import math
+from types import SimpleNamespace
+from unittest.mock import Mock
 from tests.enrichment_support import seed_enrichment
+from tests.repository_mock_support import no_database
 
 import numpy as np
 from fastapi.testclient import TestClient
 
 from yt_playlist.rec import embed
 from yt_playlist.rec.cluster_explain import connection_reasons
+from yt_playlist.repos.cluster_evidence import ConnectionEvidence, PlaylistNeighbor
 from yt_playlist.util.matching import identity_key
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
@@ -50,14 +54,9 @@ def _playlist(store, iid, title, keys, ytm=None):
 
 # --- grounded co-occurrence reasons -------------------------------------------------------------
 
-def test_shared_playlist_names_the_co_occurring_artists(store):
-    iid = store.accounts.upsert_account("m", "c", None, True)
-    child = _track(store, "Train", "Younger Brother")
-    seed = _track(store, "Spektrum", "Ritmo")
-    other = _track(store, "Dorset", "Ott")
-    _playlist(store, iid, "Psy night", [child, seed, other])
-
-    facts = connection_reasons(store.cluster_evidence.connection(child, [seed]))
+def test_shared_playlist_names_the_co_occurring_artists(no_database):
+    facts = connection_reasons(ConnectionEvidence(
+        artist='Younger Brother', playlists=(PlaylistNeighbor(1, 'Ritmo'),)))
     assert facts, "a shared playlist should produce a fact"
     top = facts[0]
     assert top["kind"] == "playlist"
@@ -65,30 +64,22 @@ def test_shared_playlist_names_the_co_occurring_artists(store):
     assert "Ritmo" in top["text"]              # the co-occurring path artist is named
 
 
-def test_same_artist_is_reported(store):
-    store.accounts.upsert_account("m", "c", None, True)
-    a = _track(store, "Song A", "Bonobo")
-    b = _track(store, "Song B", "Bonobo")
-    facts = connection_reasons(store.cluster_evidence.connection(a, [b]))
+def test_same_artist_is_reported(no_database):
+    facts = connection_reasons(ConnectionEvidence(artist='Bonobo', same_artist='Bonobo'))
     assert any(f["kind"] == "same_artist" and "Bonobo" in f["text"] for f in facts)
 
 
-def test_genre_family_and_decade_facts(store):
-    store.accounts.upsert_account("m", "c", None, True)
-    child = _track(store, "C", "AristA", genre="psytrance", year="2003")
-    path = _track(store, "P", "Pista", genre="goa trance", year="2007")
-    facts = connection_reasons(store.cluster_evidence.connection(child, [path]))
+def test_genre_family_and_decade_facts(no_database):
+    facts = connection_reasons(ConnectionEvidence(
+        genre='psytrance', year='2003', path_genres=('goa trance',), path_years=('2007',)))
     kinds = {f["kind"] for f in facts}
     # only if the family map actually unifies these; decade must match regardless
     assert "decade" in kinds
     assert any("2000s" in f["text"] for f in facts)
 
 
-def test_no_direct_basket_returns_empty(store):
-    store.accounts.upsert_account("m", "c", None, True)
-    a = _track(store, "Lonely A", "Artist X")
-    b = _track(store, "Lonely B", "Artist Y")
-    assert connection_reasons(store.cluster_evidence.connection(a, [b])) == []
+def test_no_direct_basket_returns_empty(no_database):
+    assert connection_reasons(ConnectionEvidence()) == []
 
 
 def test_child_excluded_from_its_own_path(store):
@@ -100,34 +91,45 @@ def test_child_excluded_from_its_own_path(store):
 
 # --- embed.connection_geometry: score + bridge --------------------------------------------------
 
-def _put(store, vecs):
-    from tests.conftest import seed_catalog_track
-    for key in vecs:
-        if store.conn.execute('SELECT 1 FROM recording_aliases WHERE alias=?', (key,)).fetchone() is None:
-            seed_catalog_track(store,key,key,'Artist')
+def _vector_rows(vecs):
     rows = []
     for k, xy in vecs.items():
         v = np.asarray(xy, dtype=np.float32)
         v /= np.linalg.norm(v) + 1e-9
         rows.append((k, v.tobytes()))
-    store.rec_model.replace_rec_vectors(rows)
+    return rows
 
 
-def test_geometry_scores_against_path_centroid(store):
-    _put(store, {"c": _unit(10), "p": _unit(0), "far": _unit(170)})
+def _put(store, vecs):
+    from tests.conftest import seed_catalog_track
+    for key in vecs:
+        if store.conn.execute('SELECT 1 FROM recording_aliases WHERE alias=?', (key,)).fetchone() is None:
+            seed_catalog_track(store,key,key,'Artist')
+    store.rec_model.replace_rec_vectors(_vector_rows(vecs))
+
+
+def _vector_reader(vecs):
+    repository = Mock(spec_set=['get_rec_vectors'])
+    repository.get_rec_vectors.return_value = _vector_rows(vecs)
+    return SimpleNamespace(rec_model=repository)
+
+
+def test_geometry_scores_against_path_centroid(no_database):
+    store = _vector_reader({"c": _unit(10), "p": _unit(0), "far": _unit(170)})
     geo = embed.connection_geometry(store, "c", ["p"])
     assert geo["score"] is not None
     assert geo["score"] > 0.9                  # 10° apart -> high cosine
 
 
-def test_geometry_bridge_is_close_to_both(store):
+def test_geometry_bridge_is_close_to_both(no_database):
     # child at 80°, path at 0°; 'mid' at 40° is close to both, 'off' is close to neither.
-    _put(store, {"c": _unit(80), "p": _unit(0), "mid": _unit(40), "off": _unit(200)})
+    store = _vector_reader({"c": _unit(80), "p": _unit(0), "mid": _unit(40), "off": _unit(200)})
     geo = embed.connection_geometry(store, "c", ["p"])
     assert geo["bridge"] == "mid"
 
 
-def test_geometry_empty_before_model(store):
+def test_geometry_empty_before_model(no_database):
+    store = _vector_reader({})
     geo = embed.connection_geometry(store, "c", ["p"])
     assert geo == {"score": None, "bridge": None}
 

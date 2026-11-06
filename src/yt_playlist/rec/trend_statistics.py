@@ -1,7 +1,18 @@
 """Monthly recap statistics over account-calendar day numbers."""
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from yt_playlist.util import genre_map
+
+
+def hour_buckets(rows, *, calendar):
+    hours = [0] * 24
+    for row in rows:
+        if calendar:
+            hours[datetime.fromtimestamp(row['played_at'], ZoneInfo(row['timezone'])).hour] += 1
+        elif row['h'] is not None:
+            hours[row['h']] += row['c']
+    return hours
 
 
 def month_of(day):

@@ -37,11 +37,12 @@ def test_genre_migration_on_preexisting_db(tmp_path, request):
     assert all("genre" in r for r in rows)                       # column now present
 
 
-def test_artist_genres_dominant_per_artist(file_backed_store):
+def test_artist_genre_counts_recordings_per_genre(file_backed_store):
     s = file_backed_store
     i1 = s.tracks.upsert_track("v1", "T1", "Aphex Twin", None, None)
     i2 = s.tracks.upsert_track("v2", "T2", "Aphex Twin", None, None)
     i3 = s.tracks.upsert_track("v3", "T3", "Aphex Twin", None, None)
     s.tracks.set_track_genre(i1, "IDM"); s.tracks.set_track_genre(i2, "IDM"); s.tracks.set_track_genre(i3, "Ambient")
-    g = s.rec_query.artist_genres()
-    assert g.get("Aphex Twin") == "IDM"      # dominant (2 of 3)
+    counts = s.rec_query.repository.artist_genre_counts()
+    assert {(row['artist'], row['genre']): row['c'] for row in counts} == {
+        ('Aphex Twin', 'IDM'): 2, ('Aphex Twin', 'Ambient'): 1}

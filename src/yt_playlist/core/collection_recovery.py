@@ -60,14 +60,33 @@ def pinned_read(method):
 
 
 def publish(conn, kind, owner, value, *, age=None):
+    return publish_at(directory(conn), kind, owner, value, age=age)
+
+
+def publish_at(root, kind, owner, value, *, age=None):
     if kind not in KINDS:
         raise ValueError('Unsupported collection recovery owner')
     encoded = canonical({'format':FORMAT,'kind':kind,'owner':str(owner),'state':value})
     if len(encoded)>MAX_BYTES:
         raise ValueError('Collection recovery exceeds its byte budget')
     digest = hashlib.sha256(encoded).hexdigest()
-    filename = _publish_encoded(directory(conn),encoded,digest,age=age)
+    filename = _publish_encoded(root,encoded,digest,age=age)
     return filename,digest,len(encoded)
+
+
+class RecoveryFiles:
+    """Collection recovery files bound to a directory, without database access."""
+    def __init__(self, root):
+        self.root = root
+
+    def retained(self):
+        return policy_documents.retained_reader(self.root)
+
+    def publish(self, kind, owner, value):
+        return publish_at(self.root, kind, owner, value)
+
+    def read(self, reference, *, kind, owner):
+        return read(*reference, kind=kind, owner=owner)
 
 
 def read(filename,digest,size,*,kind,owner,with_age=False):

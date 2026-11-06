@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, call
 
 from yt_playlist.rec import stored_groups, stored_home
-from yt_playlist.repos.home_selection import CandidateFilter
+from yt_playlist.rec.home_selection_policy import CandidateFilter
 
 
 def reader():

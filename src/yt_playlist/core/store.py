@@ -16,6 +16,21 @@ from yt_playlist.core.work_diagnostics import MaintenanceDiagnostics
 from yt_playlist.controllers.wikipedia_cards import WikipediaCards
 from yt_playlist.controllers.artist_similarity import ArtistSimilarity
 from yt_playlist.controllers.player_events import PlayerEvents
+from yt_playlist.controllers.search import Search
+from yt_playlist.controllers.recommendation_refresh import RecommendationRefresh
+from yt_playlist.controllers.recommendation_candidates import RecommendationCandidates
+from yt_playlist.controllers.recommendation_eligibility import RecommendationEligibility
+from yt_playlist.controllers.recommendation_query import RecommendationQuery
+from yt_playlist.controllers.recap import Recap
+from yt_playlist.controllers.trends import Trends
+from yt_playlist.controllers.rec_signals import RecommendationSignals
+from yt_playlist.controllers.summary_inputs import SummaryInputs
+from yt_playlist.controllers.sync import LibrarySync
+from yt_playlist.controllers.charts import Charts
+from yt_playlist.controllers.readiness import Readiness
+from yt_playlist.controllers.cluster_evidence import ClusterEvidence
+from yt_playlist.controllers.playback_feedback import PlaybackFeedback
+from yt_playlist.controllers.recommendation_ledger import RecommendationLedger
 from yt_playlist.core.priority import RequestPriority, ServingLock
 from yt_playlist.core import collection_recovery, group_documents, metadata_delivery_files, metadata_runtime_files, policy_documents, recommendation_outputs, served_facts
 # Store owns the connection, schema lifecycle, and explicitly named repositories.
@@ -43,6 +58,7 @@ from yt_playlist.repos.playlists import PlaylistRepo
 from yt_playlist.repos.player_events import PlayerEventsRepo
 from yt_playlist.repos.rec_model import RecModelRepo
 from yt_playlist.repos.rec_query import RecQueryRepo
+from yt_playlist.repos.recap import RecapRepo
 from yt_playlist.repos.rec_candidates import RecCandidatesRepo
 from yt_playlist.repos.rec_eligibility import RecEligibilityRepo
 from yt_playlist.repos.rec_evidence import RecEvidenceRepo
@@ -62,7 +78,7 @@ from yt_playlist.repos.discovery import DiscoveryRepo
 from yt_playlist.repos.search import SearchRepo
 from yt_playlist.repos.settings import SettingsRepo
 from yt_playlist.repos.radio_checkpoints import RadioCheckpointRepo
-from yt_playlist.repos.retention import RetentionRepo
+from yt_playlist.controllers.retention import Retention
 from yt_playlist.repos.sync import SyncRepo
 from yt_playlist.repos.readiness import ReadinessRepo
 from yt_playlist.repos.radio_catalog import RadioCatalogRepo
@@ -171,9 +187,9 @@ class Store:
 
     @contextmanager
     def read_view(self, *, tracked=False, seconds=...):
-        """Bounded private reader, optionally tracking reusable input reads."""
+        """Bounded reporting reader without a transaction; optionally reuse tracked results."""
         if getattr(self, '_read_only', False):
-            # A composed read keeps its original WAL snapshot and file lifetime.
+            # A composed read keeps its existing connection and file lifetime.
             # Opening another reader here also repeats repository construction.
             yield self
             return
@@ -200,9 +216,6 @@ class Store:
             reader._lock = threading.RLock()
             reader._read_only = True
             reader.maintenance_diagnostics = self.maintenance_diagnostics
-            if reader._db_path is not None and getattr(reader._evidence_source,'_schema_compatibility',False):
-                reader.conn.execute('BEGIN')
-                reader.conn.execute('SELECT 1 FROM sqlite_schema LIMIT 1').fetchone()
             reader._bind_repositories()
             return reader
         except BaseException:
@@ -248,17 +261,21 @@ class Store:
         self._legacy_files = 'legacy_catalog_evidence' in tables
         self.overlaps = OverlapRepo(self)
         self.genres = GenreRepo(self)
+        self.recap = Recap(RecapRepo(self), self.genres)
         self.settings = SettingsRepo(self)
         self.radio_checkpoints = RadioCheckpointRepo(self)
-        self.retention = RetentionRepo(self)
-        self.sync = SyncRepo(self)
-        self.readiness = ReadinessRepo(self)
+        self.retention = Retention(self)
+        from yt_playlist.core.published_documents import read_original
+        self.sync = LibrarySync(SyncRepo(self), self.settings,
+            collection_recovery.RecoveryFiles(collection_recovery.root_for_database(self._db_path, self._evidence_key)),
+            read_original)
         self.radio_catalog = RadioCatalogRepo(self)
-        self.summary_inputs = SummaryInputsRepo(self)
+        self.summary_inputs = SummaryInputs(SummaryInputsRepo(self), self.settings)
         self.listening_analytics = ListeningAnalyticsRepo(self)
         self.group_evidence = GroupEvidenceRepo(self)
         self.album_feedback = AlbumFeedbackRepo(self)
-        self.playback_feedback = PlaybackFeedbackRepo(self)
+        self.playback_feedback = PlaybackFeedback(PlaybackFeedbackRepo(self),
+            getattr(self, '_evidence_source', self)._playback_feedback, self)
         self.actions = ActionRepo(self)
         self.album_descriptions = AlbumDescriptionsRepo(self)
         self.audio_vibes = AudioVibesRepo(self)
@@ -266,31 +283,32 @@ class Store:
         self.accounts = AccountRepo(self)
         self.history = HistoryRepo(self)
         self.collection = CollectionRepo(self)
-        self.cluster_evidence = ClusterEvidenceRepo(self)
+        self.cluster_evidence = ClusterEvidence(ClusterEvidenceRepo(self))
         self.rec_model = RecModelRepo(self)
         self.model_selection = ModelSelectionRepo(self)
         self.tv_preparation = TVPreparationRepo(self)
-        self.rec_query = RecQueryRepo(self)
-        self.rec_candidates = RecCandidatesRepo(self)
-        self.rec_eligibility = RecEligibilityRepo(self)
+        self.rec_eligibility = RecommendationEligibility(RecEligibilityRepo(self), self.settings)
+        self.rec_query = RecommendationQuery(RecQueryRepo(self), self.genres, self.rec_eligibility, self.artists)
+        self.readiness = Readiness(ReadinessRepo(self), self.rec_eligibility)
+        self.rec_candidates = RecommendationCandidates(RecCandidatesRepo(self), self.rec_eligibility)
         self.rec_evidence = RecEvidenceRepo(self)
-        self.rec_ledger = RecLedgerRepo(self)
+        self.rec_ledger = RecommendationLedger(RecLedgerRepo(self))
         self.rec_proposals = RecProposalsRepo(self)
         self.home_cache = HomeCacheRepo(self)
         self.recommendations = RecommendationPublicationsRepo(self)
-        self.rec_signals = RecSignalsRepo(self)
+        self.rec_signals = RecommendationSignals(RecSignalsRepo(self))
         self.playlist_recipes = PlaylistRecipesRepo(self)
         self.artist_similarity = ArtistSimilarity(ArtistSimilarityRepo(self))
-        self.rec_refresh = RecRefreshRepo(self)
+        self.rec_refresh = RecommendationRefresh(RecRefreshRepo(self), self.settings)
         self.prepared_content = PreparedContentRepo(self)
         self.musical_profiles = MusicalProfilesRepo(self)
         self.vibe_predictions = VibePredictionsRepo(self)
-        self.charts = ChartsRepo(self)
+        self.charts = Charts(ChartsRepo(self))
         self.tracks = TrackRepo(self)
         self.playlists = PlaylistRepo(self)
         self.player_events = PlayerEvents(PlayerEventsRepo(self))
         self.discovery = DiscoveryRepo(self)
-        self.search = SearchRepo(self)
+        self.search = Search(SearchRepo(self))
         self.enrichment = EnrichmentRepo(self)
         self.enrichment_queue = EnrichmentQueueRepo(self)
         self.enrichment_reports = EnrichmentReportsRepo(self)
@@ -298,7 +316,7 @@ class Store:
         self.wiki = WikipediaCards(WikiRepo(self))
         self.modes = ModesRepo(self)
         self.taste_groups = (CompactTasteGroupsRepo if self._compact_group_files else TasteGroupsRepo)(self)
-        self.trends = TrendsRepo(self)
+        self.trends = Trends(TrendsRepo(self), self.rec_proposals)
         self.road_trip = RoadTripRepo(self)
 
     @classmethod

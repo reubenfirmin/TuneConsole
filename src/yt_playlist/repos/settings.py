@@ -70,13 +70,12 @@ class SettingsRepo(Repo):
 
     @synchronized
     def publish_values(self, values):
-        """Publish serialized settings in the caller's atomic transaction."""
-        if not self.conn.in_transaction:
-            raise RuntimeError('Prepared settings require an outer transaction')
-        values = self._publish_owned(values)
-        self.conn.executemany('INSERT INTO settings(key,value) VALUES (?,?) '
-            'ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value IS NOT excluded.value',
-            values.items())
+        """Persist supplied serialized settings in this repository's write."""
+        with self.conn.atomic(join=True):
+            values = self._publish_owned(values)
+            self.conn.executemany('INSERT INTO settings(key,value) VALUES (?,?) '
+                'ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value IS NOT excluded.value',
+                values.items())
 
     @lookup_read
     def get_setting(self, key, default=None):

@@ -114,23 +114,6 @@ def test_rediscovery_batches_cards_and_shadows_without_reusing_changed_history(
     assert len(calls) == 2
 
 
-@pytest.mark.parametrize('metadata', [[], [{'genre': 'Jazz'}], [{'mb_year': '1997'}],
-    [{'genre': 'Jazz'}, {'mb_year': '1997'}, {'genre': 'House', 'mb_year': '2003'},
-     {'genre': 'Jazz', 'mb_year': '1998'}, {'mb_year': 'unknown'}, {}]])
-def test_ordering_facets_preserve_independent_genre_and_year_support(store, metadata):
-    from tests.conftest import seed_catalog_track
-    for index, fields in enumerate(metadata):
-        seed_catalog_track(store, f'facet-{index}', f'Facet {index}', 'Artist',
-                           video_id=f'facet-{index}', **fields)
-    genres, eras = store.rec_query.recipe_facet_keys()
-    expected_genres = {family: 1 for family, _ in store.genres.feature_axes(
-        fields['genre'] for fields in metadata if fields.get('genre')).values()}
-    expected_eras = {str(int(fields['mb_year']) // 10 * 10): 1 for fields in metadata
-                     if str(fields.get('mb_year', '')).isdigit()}
-    assert genres == expected_genres
-    assert eras == expected_eras
-
-
 def test_all_presets_match_full_profile_selection_and_only_open_selected_profiles(store, monkeypatch, vibe_menus):
     stored, load = vibe_pools._stored_pools, musical_character.load
     for preset in home_vibe.PRESETS:

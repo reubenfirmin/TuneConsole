@@ -16,11 +16,7 @@ def test_retry_policy_retains_nested_success_and_caps_backoff_without_a_database
         'playlists': {'status': 'partial', 'items': {
             'healthy': policy.retained(old['accounts']['1']['resources']['playlists']['items']['healthy']),
             'retry': {'status': 'failed'}}}, 'history': {'status': 'complete'}}}}, 'resources': {}}
-    repo = Mock(spec=['finish_attempt'])
-    repo.finish_attempt.side_effect = lambda now, *, expected_revision, calculate: calculate(deepcopy(old))
-    stamped = policy.finish_attempt(SimpleNamespace(sync=repo), result, 200, expected_revision=17)
-    args = repo.finish_attempt.call_args
-    assert args.args == (200,) and args.kwargs['expected_revision'] == 17
+    stamped = policy.stamp_result(result, deepcopy(old), 200)
     account = stamped['accounts']['1']
     items = account['resources']['playlists']['items']
     assert items['healthy'] == old['accounts']['1']['resources']['playlists']['items']['healthy']
