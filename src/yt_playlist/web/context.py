@@ -65,6 +65,7 @@ class Ctx:
     # flag_/clear_ helpers below so the persisted copy stays in sync.
     auth_expired: dict = field(default_factory=dict)
     rec_worker: object | None = None   # decoupled recommendation worker (set in create_app)
+    vibe_requests: object | None = None
     enrich_worker: object | None = None  # background enrichment worker (set in create_app)
     bridge: object | None = None       # shared Bridge instance the WS route and runtime read from
     radio: object | None = None        # saved-playlist Radio Session, set in create_app

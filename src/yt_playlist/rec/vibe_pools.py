@@ -60,17 +60,19 @@ def prepare(store, bundles, now, policies):
     unique = {item['key']: item for mid, bucket in bundles.items() if not mid.startswith('_')
               for items in bucket.values() for item in items if item.get('key')}
     profiles = musical_character.load(store, list(unique))
+    labels = set()
     for mid, bucket in bundles.items():
         if mid.startswith('_'):
             continue
         for lane, items in bucket.items():
+            labels.update(item.get('genre') for item in items)
             bucket[lane] = [{**item, 'musical': profiles.get(item['key'])} for item in items]
     pools = bundles.get('all', {})
     library = {item['key']: item for lane in ('explore', 'wheelhouse') for item in pools.get(lane, [])}
     menus, genre_menus = {}, {}
     # Every preset/lane sees the same taxonomy on this preparation snapshot.
-    # Resolve each exact provider label once without retaining it across builds.
-    axes = store.genres.feature_axes({item.get('genre') for item in unique.values()})
+    # A recording can have different provider labels across lanes; resolve them all.
+    axes = store.genres.feature_axes(labels)
     cuts = bundles.get('_meta', {}).get('year_cuts')
     band_pools = {}
     if cuts:

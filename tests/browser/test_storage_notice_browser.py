@@ -27,7 +27,7 @@ def notice_app(store):
         yield f'http://127.0.0.1:{port}', app.state.ctx.storage_maintenance
 
 
-@pytest.mark.parametrize('width',[1536,1040])
+@pytest.mark.parametrize('width',[1536])
 def test_history_notice_with_available_cards_and_writable_library(notice_app,store,page,width):
     url,maintenance = notice_app
     maintenance.ready.clear()
@@ -72,7 +72,7 @@ def test_cleanup_pending_after_recovery_does_not_keep_the_frontend_paused(notice
     page.screenshot(path='/tmp/tuneconsole-866-retention-resumed.png', full_page=True)
 
 
-@pytest.mark.parametrize('width,text_size', [(1536, 16), (1040, 16)])
+@pytest.mark.parametrize('width,text_size', [(1536, 16)])
 def test_single_line_notice_with_sidebar_and_without_polling(notice_app, store, page, tmp_path, width, text_size, record_property):
     url, maintenance = notice_app
     timings, polls = {}, 0

@@ -377,7 +377,7 @@ def create_app(store, client_provider, *, now_fn=time.time,
                 return PlainTextResponse("cross-origin request blocked", status_code=403)
             ctx = getattr(app.state, "ctx", None)
             playback_request = request.url.path in (
-                '/play', '/album/play', '/home/generate', '/track/like', '/now-playing/next', '/now-playing/rate', '/now-playing/toggle', '/discovery/add',
+                '/play', '/album/play', '/home/generate', '/home/generate/reconcile', '/track/like', '/now-playing/next', '/now-playing/rate', '/now-playing/toggle', '/discovery/add',
                 '/radio/start', '/radio/stop', '/radio/select', '/radio/tune', '/radio/seen',
                 '/home/tv/takeover', '/heartbeat', '/goodbye') or (
                 request.url.path.startswith('/home/tv/playlist/') and request.url.path.endswith('/event'))
@@ -401,10 +401,12 @@ def create_app(store, client_provider, *, now_fn=time.time,
             except WorkClosing as error:
                 return PlainTextResponse(str(error), status_code=503)
         try:
-            if release is not None:
-                with ctx.work.entered(release):
-                    return await call_next(request)
-            return await call_next(request)
+            with home_vibe.access_policy(lambda reader, now: account_growth.vibe_access(
+                    reader, now, app.state.ctx.radio.bootstrap(reader=reader))):
+                if release is not None:
+                    with ctx.work.entered(release):
+                        return await call_next(request)
+                return await call_next(request)
         finally:
             if release is not None:
                 release()
@@ -476,6 +478,8 @@ def create_app(store, client_provider, *, now_fn=time.time,
     app.include_router(build_bridge_route(ctx))
     from yt_playlist.rec.rec_worker import RecWorker
     ctx.rec_worker = RecWorker(ctx, enabled=background_work)
+    from yt_playlist.rec.vibe_requests import VibeRequests
+    ctx.vibe_requests = VibeRequests(ctx)
     from yt_playlist.enrich.enrich_worker import EnrichWorker
     ctx.enrich_worker = EnrichWorker(ctx)                      # drains the corpus through the waterfall
     templates.env.globals["auth_expired"] = ctx.auth_expired   # same dict; mutated during sync

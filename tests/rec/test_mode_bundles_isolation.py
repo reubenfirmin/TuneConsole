@@ -1,4 +1,4 @@
-"""Home preparation must not hold UI locks or publish results from superseded inputs."""
+"""Home preparation finishes its captured inputs without holding UI locks."""
 import asyncio
 from tests.derived_rating_support import seed_dislike
 from concurrent.futures import ThreadPoolExecutor
@@ -12,7 +12,7 @@ import pytest
 
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.store import Store
-from yt_playlist.rec import embedding_vectors as embed, measurement, mode_surfaces, surfaces
+from yt_playlist.rec import candidate_refresh, embedding_vectors as embed, measurement, mode_surfaces, surfaces
 from tests import model_support
 from tests.prepared_fixture_support import prepared_template, roots
 from tests.recommendation_support import publish_bundles
@@ -142,7 +142,7 @@ def test_ui_read_and_write_complete_while_bundle_scorer_is_still_running(
             store.conn.close()
 
 
-def test_mutation_during_calculation_preserves_saved_bundles_and_retries(database, monkeypatch):
+def test_mutation_during_calculation_finishes_and_serving_applies_current_exclusions(database, monkeypatch):
     store = database
     calculate = mode_surfaces._calculate_bundles
 
@@ -152,8 +152,10 @@ def test_mutation_during_calculation_preserves_saved_bundles_and_retries(databas
         return result
 
     monkeypatch.setattr(mode_surfaces, "_calculate_bundles", mutate)
-    assert mode_surfaces.prepare_bundles(store, 100) is None
-    _saved(store)
+    result = mode_surfaces.prepare_bundles(store, 100)
+    assert result is not None and result['all']['temporal']
+    assert store.recommendations.heads() != store._isolation_saved_heads
+    assert not mode_surfaces.assemble_cards(store, 100, 0)
     monkeypatch.setattr(mode_surfaces, "_calculate_bundles", calculate)
     assert mode_surfaces.prepare_bundles(store, 100) is not None
     assert "song|artist" not in {item['key'] for item in store.recommendations.candidate_page(
@@ -197,18 +199,31 @@ def test_build_fingerprints_models_once_and_stamps_each_pool_with_its_ranker(dat
     assert configuration['ranker'] == 'temporal'
 
 
-def test_bundle_publication_survives_unrelated_watermarks_and_policy_writes(database, monkeypatch):
+def test_bundle_publication_finishes_despite_home_views_during_calculation_and_staging(database, monkeypatch):
     calculate = mode_surfaces._calculate_bundles
 
     def write_unrelated(reader, now, policies):
         result = calculate(reader, now, policies)
         database.settings.set_setting("last-library-sync", str(now))
         database.rec_ledger.record_serving_policy("concurrent-offer", {}, now)
+        database.rec_ledger.bump_card_view('cards', now)
+        database.modes.log_impressions(1, [('wheelhouse', 1)], now)
         return result
 
+    stage = database.recommendations.stage
+    def view_while_staging(*args, **kwargs):
+        database.rec_ledger.bump_card_view('cards', 101)
+        database.modes.log_impressions(2, [('explore', 1)], 101)
+        return stage(*args, **kwargs)
+
+    monkeypatch.setattr(database.recommendations, 'stage', view_while_staging)
     monkeypatch.setattr(mode_surfaces, "_calculate_bundles", write_unrelated)
     assert mode_surfaces.prepare_bundles(database, 100) is not None
     assert database.recommendations.heads() != database._isolation_saved_heads
+    policy = database.recommendations.head('home')['policy_version']
+    assert database.rec_ledger.policy_configuration(policy)['modes']['offered'] == {}
+    assert database.modes.impression_counts() == {1: 2}
+    assert candidate_refresh.due(database, 101)
 
 
 def test_radio_and_trend_updates_do_not_discard_prepared_style_pools(database, monkeypatch):
@@ -231,7 +246,7 @@ def test_radio_and_trend_updates_do_not_discard_prepared_style_pools(database, m
     assert database.rec_proposals.get_proposals("trend_rollups") == {"updated": 100}
 
 
-def test_changed_home_genres_still_discard_prepared_style_pools(database, monkeypatch):
+def test_changed_home_genres_leave_captured_style_pools_intact_and_next_round_due(database, monkeypatch):
     calculate = mode_surfaces._calculate_bundles
 
     def change_preferences(reader, now, policies):
@@ -241,8 +256,9 @@ def test_changed_home_genres_still_discard_prepared_style_pools(database, monkey
         return result
 
     monkeypatch.setattr(mode_surfaces, "_calculate_bundles", change_preferences)
-    assert mode_surfaces.prepare_bundles(database, 100) is None
-    _saved(database)
+    assert mode_surfaces.prepare_bundles(database, 100) is not None
+    assert database.recommendations.heads() != database._isolation_saved_heads
+    assert candidate_refresh.due(database, 101)
 
 
 def test_missing_pools_publish_during_reenrichment_and_import(database, monkeypatch):
@@ -270,7 +286,7 @@ def test_missing_pools_publish_during_reenrichment_and_import(database, monkeypa
     assert database.rec_ledger.policy_configuration(policy)['ranker'] == 'temporal'
 
 
-def test_replacing_model_during_ranking_still_rejects_publication(database, monkeypatch):
+def test_replacing_model_during_ranking_keeps_the_captured_publication(database, monkeypatch):
     calculate = mode_surfaces._calculate_bundles
 
     def replace_model(reader, now, policies):
@@ -280,5 +296,6 @@ def test_replacing_model_during_ranking_still_rejects_publication(database, monk
         return result
 
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', replace_model)
-    assert mode_surfaces.prepare_bundles(database, 100) is None
-    _saved(database)
+    assert mode_surfaces.prepare_bundles(database, 100) is not None
+    assert database.recommendations.heads() != database._isolation_saved_heads
+    assert database.recommendations.pool('home', '1', 'temporal')

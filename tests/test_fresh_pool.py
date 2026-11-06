@@ -183,7 +183,11 @@ def test_prepared_fresh_tracks_honor_feedback_and_library_changes(store):
     assert fresh_pool.pick(store, 3, ["house", "techno"]) == []
 
 
-def test_fresh_slot_starts_once_rejoins_on_refresh_and_becomes_a_scoped_mix(store, monkeypatch, prepared_fresh_home):
+@pytest.mark.parametrize('deferred', [False, True])
+def test_fresh_slot_starts_once_rejoins_on_refresh_and_becomes_a_scoped_mix(store, monkeypatch, prepared_fresh_home, deferred):
+    from yt_playlist.rec import candidate_refresh
+    if deferred:
+        candidate_refresh.checked(store, 940)
     started, release = threading.Event(), threading.Event()
     calls = []
     def populate(ctx, **params):
@@ -221,6 +225,17 @@ def test_fresh_slot_starts_once_rejoins_on_refresh_and_becomes_a_scoped_mix(stor
                 "", None, track.genre, None, None, 1000)
     finally:
         release.set()
+    if deferred:
+        assert client.app.state.ctx.work.wait(20)
+        job = client.app.state.ctx.jobs.get(int(job_id))
+        assert job.outcome == 'waiting' and not job.done
+        waiting = client.get(f'/home/fresh-pool/{job_id}')
+        assert 'Not enough matching songs yet' not in waiting.text
+        assert 'hx-trigger="every 2s"' in waiting.text
+        assert not rankings
+        again = client.post('/home/fresh-pool', data={'include_genres': ['jazz', 'techno']})
+        assert _job_id(again) == job_id and len(calls) == 1
+        assert fresh_pool.prepare(store, 4540) is not None
     # This waits for the worker's real typed publication, not a page request.
     # Polling stays responsive while the background preparation is unfinished.
     deadline = time.monotonic() + 60
@@ -262,12 +277,25 @@ def test_failed_or_empty_search_stops_polling_and_allows_retry(store, monkeypatc
     assert client.get("/home/fresh-pool/999999").status_code == 404
 
 
-def test_completed_search_with_insufficient_tracks_is_retryable(store, monkeypatch, prepared_fresh_home):
+@pytest.mark.parametrize('deferred', [False, True])
+def test_completed_search_with_insufficient_tracks_is_retryable(store, monkeypatch, prepared_fresh_home, deferred):
+    from yt_playlist.rec import candidate_refresh
+    if deferred:
+        candidate_refresh.checked(store, 940)
     monkeypatch.setattr(fresh_pool, "populate", lambda *args, **kwargs: 0)
     monkeypatch.setattr(surfaces, "cold_candidates", lambda *args, **kwargs: [])
     client = prepared_client(store)
     response = client.post("/home/fresh-pool", data={"include_genres": ["jazz"]})
+    assert client.app.state.ctx.work.wait(20)
     match = re.search(r'hx-get="/home/fresh-pool/(\d+)"', response.text)
+    if deferred:
+        assert match
+        job = client.app.state.ctx.jobs.get(int(match[1]))
+        assert job.outcome == 'waiting' and not job.done
+        waiting = client.get(f'/home/fresh-pool/{job.id}')
+        assert 'Not enough matching songs yet' not in waiting.text
+        assert 'hx-trigger="every 2s"' in waiting.text
+        assert fresh_pool.prepare(store, 4540) is not None
     if match:
         for _ in range(100):
             response = client.get(f"/home/fresh-pool/{match[1]}")

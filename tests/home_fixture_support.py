@@ -4,7 +4,7 @@ import pytest
 from tests.conftest import seed_catalog_track
 from tests.store_fixture_support import initialize_consumer
 from yt_playlist.core.store import Store
-from yt_playlist.rec import home_cards, home_prepared
+from yt_playlist.rec import home_cache, home_cards, home_prepared
 
 
 @pytest.fixture
@@ -37,7 +37,7 @@ def prepared_client(store, now=1000):
     from tests.conftest import FakeClient
     from yt_playlist.web.app import create_app
 
-    assert home_prepared._valid(store.rec_proposals.get_proposals(home_prepared.SURFACE))
+    assert home_prepared._valid(home_cache.read(store, home_prepared.SURFACE))
     identity = store.accounts.upsert_account('main', 'cred', None, True)
     return TestClient(create_app(store, lambda: {identity: FakeClient()}, now_fn=lambda: now),
                       base_url='http://127.0.0.1')
@@ -67,12 +67,12 @@ def publish_menu(store, now=1000, *, prefix='prepared', count=4, tracks_per_card
         protos.append(proto)
     result = home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],
                                    None, None, [], [], home_cards._epoch(store, 'cards'), None)
-    previous = store.rec_proposals.get_proposals('home_prepared') if surface == 'home_tuned' else None
+    previous = home_cache.read(store, 'home_prepared') if surface == 'home_tuned' else None
     home_prepared.remember(store, previous, result, now)
-    payload = store.rec_proposals.get_proposals('home_tuned')
+    payload = home_cache.read(store, 'home_tuned')
     assert home_prepared._valid(payload)
     if surface != 'home_tuned':
-        store.rec_proposals.put_proposals(surface, payload, now)
-        store.rec_proposals.put_proposals('home_tuned', {}, now)
-        store.rec_proposals.put_proposals('home_choice', {}, now)
+        home_cache.put(store, surface, payload, now)
+        home_cache.put(store, 'home_tuned', {}, now)
+        home_cache.put(store, 'home_choice', {}, now)
     return payload

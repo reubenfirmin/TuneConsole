@@ -15,7 +15,7 @@ from yt_playlist.core.activity import check_cancellable_work, WorkBudgetExceeded
 from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.core import mix_choices
 from yt_playlist.rec.choice_context import context_manifest as _context_manifest, learning_context, resolve_context
-from yt_playlist.rec import group_roots, recommendation_roots
+from yt_playlist.rec import group_roots, home_cache, recommendation_roots
 
 logger = logging.getLogger(__name__)
 FORMATS = {"albums", "mixes", "radio"}
@@ -772,7 +772,8 @@ def _maintain_storage(store, now, *, required_bytes=0, protected_artifacts=()):
         if note.get('evidence'):
             protected.add(note['evidence'])
     for surface in ('album_prepared', 'home_prepared', 'home_tuned', 'home_choice'):
-        payload = store.rec_proposals.get_proposals(surface) or {}
+        payload = (home_cache.read(store, surface) if surface in home_cache.SURFACES
+                   else store.rec_proposals.get_proposals(surface)) or {}
         for field in ('context', 'choice_context', 'album_choice_context'):
             context = payload.get(field) or {}
             if context.get('artifact'):

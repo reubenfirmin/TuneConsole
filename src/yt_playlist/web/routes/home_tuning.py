@@ -4,7 +4,7 @@ import json
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
 
-from yt_playlist.rec import home_prepared, home_vibe, mix_tuning, rec_params
+from yt_playlist.rec import home_cache, home_prepared, home_vibe, mix_tuning, rec_params
 from yt_playlist.rec.home_cards import _epoch
 from yt_playlist.web.context import form_float, request_form
 from yt_playlist.web.routes.home_access import guard, vibe_selection
@@ -59,13 +59,15 @@ def build(ctx, views):
             vibe = form.get("vibe", "")
             if vibe and vibe not in home_vibe.PRESETS:
                 return Response(status_code=400)
-            with mix_tuning.adjusting_vibe(store, now):
-                if vibe:
-                    store.settings.set_setting(home_vibe.SETTING, vibe)
-                else:
-                    store.settings.delete_setting(home_vibe.SETTING)
-            with home_vibe.authorized(store, vibe):
-                return views.cards_safe(request, now)
+            accepted = ctx.vibe_requests.select(vibe, now)
+            # Preserve the mounted board and player while the worker builds.
+            return views.tuning_response(Response(headers={'HX-Reswap': 'none',
+                'X-Home-Vibe-Request': accepted['id']}), now)
+
+    @router.get('/home/vibe/status')
+    def home_vibe_status():
+        ctx.vibe_requests.resume()
+        return JSONResponse(ctx.vibe_requests.state(), headers={'Cache-Control': 'no-store'})
 
     @router.post("/home/breadth")
     def home_breadth(request: Request, form=Depends(request_form)):
@@ -163,7 +165,7 @@ def build(ctx, views):
         # This picker only needs play totals for ordering. Resolving the active
         # complete menu here repeats journey/Vibe admission while the browser
         # is already sending its explicit selection.
-        prepared = store.rec_proposals.proposal_fields(home_prepared.SURFACE, ('fingerprint',)) or {}
+        prepared = home_cache.read(store, home_prepared.SURFACE, fields=('fingerprint',)) or {}
         plays = {g.lower(): count for g, count in
                  (prepared.get("fingerprint") or {}).get("genre_plays", {}).items()}
         family_plays = {}

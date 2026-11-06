@@ -5,7 +5,6 @@ one prepared payload per request and supplies the same response metadata to the
 board and tuning routes.
 """
 from fastapi import Response
-from contextlib import nullcontext
 
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.rec import artist_start, choice_evidence, home_cards, home_prepared, home_vibe, mix_tuning, onboarding, rec_params
@@ -53,14 +52,8 @@ class HomeViews:
         record = False
         if live:
             mix_tuning.expire(store, now)
-            selection_reader = getattr(request.state, 'vibe_reader', None)
-            with (nullcontext(selection_reader) if selection_reader is not None else store.read_view()) as reader:
-                # An explicit selection replaces every offer below. Reuse its
-                # context and controls without restoring the previous offers'
-                # musical evidence; the newly selected tracks keep full inputs.
-                payload = (home_prepared.selection_context(reader, now, self.schedule)
-                           if selection_reader is not None
-                           else home_prepared.peek(reader, now, self.schedule))
+            with store.read_view() as reader:
+                payload = home_prepared.peek(reader, now, self.schedule)
                 request.state.prepared_home = payload
                 calculation = home_cards.HomeCards(reader, self.recommendations.jobs, self.ctx.logger,
                     genre_options=(payload or {}).get('genre_options'))
@@ -86,6 +79,11 @@ class HomeViews:
                 result.choice_context = {'source': 'explicit_artist_choices',
                                          'artists': first['recipe']['artists']}
         context = vars(result).copy()
+        vibe_request = self.ctx.vibe_requests.state() if self.ctx.vibe_requests else None
+        context['vibe_request'] = vibe_request
+        if vibe_request and vibe_request['phase'] in ('pending', 'waiting'):
+            context['preparing'] = True
+            context['preference_notice'] = None
         frozen_context = result.choice_context if result.choice_context is not None else (payload or {}).get('choice_context')
         if (live or record) and result.protos and frozen_context is not None:
             for proto in result.protos:
@@ -108,7 +106,8 @@ class HomeViews:
         except ValueError:
             attempt = 0
         waiting = result.preparing or (not result.protos and bool(result.slots))
-        context["prepare_attempt"] = min(10, attempt + 1) if not live and waiting else None
+        context["prepare_attempt"] = (min(10, attempt + 1) if not live and waiting
+            and not (vibe_request and vibe_request['phase'] in ('pending', 'waiting')) else None)
         # Preparation can outlast the first minute after a restart. Keep checking
         # at a bounded rate until usable offers arrive instead of stranding the
         # board after ten requests.
@@ -174,8 +173,8 @@ class HomeViews:
             raise
         except Exception:  # noqa: BLE001 - don't strand a fragment on a spinner
             self.ctx.logger.exception("home cards render failed")
-            if request.method == 'POST' and request.url.path == '/home/vibe':
-                # Keep the playable board mounted and let the visible vibe status offer a retry.
+            if request.url.path in ('/home/vibe', '/home/cards'):
+                # Keep playable cards mounted; observation can retry its read.
                 return Response(status_code=503)
             return self.templates.TemplateResponse(request, "_partials/mode_cards.html",
                                                    {"protos": [], "swap_oob": swap_oob, "status_oob": True})

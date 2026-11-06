@@ -186,7 +186,7 @@ def test_decay_and_half_life_changes_refresh_without_authoritative_edits(
     assert not candidate_refresh.due(store, now + 1)
 
 
-def test_stale_ranking_publication_does_not_mark_preferences_current(
+def test_completed_ranking_retains_captured_preferences_and_leaves_later_edits_due(
         store, monkeypatch, candidate_library_template):
     candidate_library_template.restore(store)
     store.rec_model.set_weight('genre:techno', 0.5, now=2000)
@@ -196,7 +196,11 @@ def test_stale_ranking_publication_does_not_mark_preferences_current(
         store.rec_model.set_weight('genre:techno', 1.5, now=now)
         return result
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', superseded)
-    assert mode_surfaces.prepare_bundles(store, 2000) is None
+    before = store.recommendations.head('home')['id']
+    assert mode_surfaces.prepare_bundles(store, 2000) is not None
+    assert store.recommendations.head('home')['id'] != before
+    policy = store.rec_ledger.policy_configuration(store.recommendations.head('home')['policy_version'])
+    assert policy['weights']['genre:techno'] == .5
     assert candidate_refresh.due(store, 2000)
 
 

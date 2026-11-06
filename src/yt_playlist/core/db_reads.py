@@ -1,5 +1,5 @@
 """Short-lived committed-data reads without publication revision tracking."""
-from contextlib import contextmanager, ExitStack
+from contextlib import contextmanager, ExitStack, nullcontext
 from collections import OrderedDict
 from copy import deepcopy
 import logging
@@ -73,9 +73,13 @@ def _admission(source):
 
 
 @contextmanager
-def read_view(source, make_reader, *, tracked=False):
+def read_view(source, make_reader, *, tracked=False, seconds=...):
     """Bound admission and query time; never retain a connection after the call."""
-    with work_budget(READ_SECONDS), _admission(source):
+    # Explicit worker computations may retain a snapshot while doing substantial
+    # CPU work. Their cancellation owner, rather than an HTTP read deadline,
+    # governs that lifetime. Ordinary request readers retain the default bound.
+    seconds = READ_SECONDS if seconds is ... else seconds
+    with (work_budget(seconds) if seconds is not None else nullcontext()), _admission(source):
         reader = None
         try:
             check_cancellable_work()

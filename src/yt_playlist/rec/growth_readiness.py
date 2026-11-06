@@ -5,7 +5,7 @@ ranking remain with the feature owners; reading a gate never schedules work.
 """
 import math
 
-from yt_playlist.rec import (album_choices, album_tuning, choice_evidence, fresh_pool, home_cards,
+from yt_playlist.rec import (album_choices, album_tuning, choice_evidence, fresh_pool, home_cache, home_cards,
                              home_prepared, mix_tuning)
 from yt_playlist.rec.vibe_support import supported as _supported
 
@@ -28,7 +28,8 @@ def foundation(store, now):
                                (album_choices.SURFACE, 'context')):
             if taste:
                 break
-            payload = store.rec_proposals.proposal_fields(surface, (field,)) or {}
+            payload = (home_cache.read(store, surface, fields=(field,)) if surface in home_cache.SURFACES
+                       else store.rec_proposals.proposal_fields(surface, (field,))) or {}
             try:
                 context = choice_evidence.resolve_context(store, payload.get(field) or {})
             except ValueError:

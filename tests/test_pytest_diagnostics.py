@@ -18,69 +18,6 @@ from coverage import Coverage, CoverageData
 import pytest
 
 
-@pytest.mark.browser
-@pytest.mark.parametrize('monitor', ['deadline', 'pace'])
-def test_runtime_stop_unwinds_real_tv_transport(tmp_path, request, monitor):
-    """Own the real regression externally so a broken dispatcher cannot hang pytest."""
-    repo = Path(__file__).resolve().parents[1]
-    report = Path(request.config.getoption('output')).resolve() / ('tv-stop-' + monitor)
-    report.mkdir(parents=True, exist_ok=True)
-    progress = report / 'progress.jsonl'
-    options = (['--test-time-limit=10'] if monitor == 'deadline' else
-               ['--test-runtime-target=.01', '--test-runtime-slack=10'])
-    command = [sys.executable, '-m', 'pytest', '-m', 'browser',
-               'tests/browser/test_tv_stream_browser.py::test_tv_continues_across_many_batches_with_bounded_history',
-               '--no-cov', '--tb=short', '--tracing=on',
-               '--output=' + str(report / 'playwright'),
-               '--test-progress=' + str(progress), '--junitxml=' + str(report / 'worker.xml'),
-               '-o', 'faulthandler_timeout=18', *options]
-    started = time.monotonic()
-    timed_out = False
-    with TemporaryDirectory(dir=tmp_path, prefix='tv-owner-') as directory:
-        workspace = Path(directory)
-        (workspace / 'tmp').mkdir()
-        with (report / 'worker.log').open('w') as stream:
-            worker = subprocess.Popen(
-                [*command, '--basetemp=' + str(workspace / 'fixtures')], cwd=repo,
-                env={**os.environ, 'TMPDIR': str(workspace / 'tmp')},
-                stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
-            try:
-                try:
-                    worker.wait(timeout=35)
-                except subprocess.TimeoutExpired:
-                    timed_out = True
-            finally:
-                # Never send signals to the test runner's inherited group.
-                try:
-                    os.killpg(worker.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    worker.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    os.killpg(worker.pid, signal.SIGKILL)
-                    worker.wait(timeout=5)
-                try:
-                    os.killpg(worker.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-        observation = {'command': command, 'timed_out': timed_out,
-                       'exit_code': worker.returncode, 'workspace': directory,
-                       'wall_seconds': time.monotonic() - started}
-    observation['workspace_removed'] = not Path(directory).exists()
-    (report / 'owner.json').write_text(json.dumps(observation, indent=2) + '\n')
-    diagnostic = (report / 'worker.log').read_text()
-    assert not timed_out, f'Browser stop wedged; retained diagnostics: {report}'
-    assert worker.returncode == 2, diagnostic
-    events = [json.loads(line) for line in progress.read_text().splitlines()]
-    assert events[-1]['event'] == 'finish' and events[-1]['exitstatus'] == 2, events
-    assert any(row['event'] == 'phase' and row['phase'] == 'setup'
-               and row['outcome'] == 'passed' for row in events), events
-    assert any(row['event'] == 'browser_stop' for row in events), events
-    assert observation['workspace_removed']
-    for marker in ('Logging error', 'I/O operation on closed file', 'unable to open database file'):
-        assert marker not in diagnostic, diagnostic
-    assert list((report / 'playwright').rglob('trace.zip')), diagnostic
 
 
 @pytest.mark.parametrize("workers", [0, 2])

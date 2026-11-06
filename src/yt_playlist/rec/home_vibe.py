@@ -11,6 +11,7 @@ VERSION = 'musical-vibes-5'
 FIT_STEP = .04
 _NATURAL = ContextVar('onboarding_natural_mix', default=False)
 _AUTHORIZED = ContextVar('authorized_vibe_request', default=None)
+_ACCESS = ContextVar('vibe_access_policy', default=None)
 _access = None
 
 
@@ -23,6 +24,16 @@ def configure_access(check):
     """
     global _access
     _access = check
+
+
+@contextmanager
+def access_policy(check):
+    """Use the request's live session when checking its remembered selection."""
+    token = _ACCESS.set(check)
+    try:
+        yield
+    finally:
+        _ACCESS.reset(token)
 
 
 @contextmanager
@@ -108,9 +119,10 @@ def current(store, now):
         return ''
     if same_operation:
         return value
-    if _access is None:
+    check = _ACCESS.get() or _access
+    if check is None:
         raise RuntimeError('Vibe access policy has not been configured')
-    return value if _access(store, now) else ''
+    return value if check(store, now) else ''
 
 
 def affinity(item, preset, profiles=None):

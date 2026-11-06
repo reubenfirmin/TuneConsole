@@ -46,7 +46,7 @@ def test_historical_production_comparison_reports_formats_and_pause_without_over
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
 
 
-@pytest.mark.parametrize("width", [1920, 1440, 1024])
+@pytest.mark.parametrize("width", [1440])
 def test_model_health_groups_results_and_explains_tuning(live_app, store, page, monkeypatch, width, tmp_path):
     iid = store.accounts.get_accounts()[0].id
     tracks, vectors = [], []

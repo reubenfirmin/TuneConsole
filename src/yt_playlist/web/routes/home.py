@@ -5,7 +5,7 @@ from fastapi import APIRouter, Request
 
 from yt_playlist.core import updatecheck
 from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.rec import account_growth, actions, artist_start, home_preferences, home_prepared, mix_tuning, onboarding, rec_params, tv
+from yt_playlist.rec import account_growth, actions, artist_start, home_cache, home_preferences, home_prepared, mix_tuning, onboarding, rec_params, tv
 from yt_playlist.rec.home_cards import _epoch
 from yt_playlist.rec.trend_statistics import last_complete_month
 from yt_playlist.web.routes import home_artist_start, home_board, home_discovery, home_generation, home_growth, home_onboarding, home_tuning, home_tv
@@ -60,7 +60,7 @@ def build(ctx) -> APIRouter:
         with ExitStack() as lifetime:
             with timing.measure('read_admission'):
                 reader = lifetime.enter_context(store.read_view(tracked=not paused))
-            lifetime.enter_context(reader.rec_proposals.verified_home_reads())
+            lifetime.enter_context(home_cache.verified_reads(reader))
             return render_home(request, reader, HomeViews(ctx, store=reader,
                 writer=reader if paused else store, display_only=True), now, timing)
 

@@ -12,6 +12,15 @@ from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import home_vibe, mix_tuning, mode_surfaces, musical_character, musical_profiles, rec_params
 
 
+def select_vibe(client, value, *, expected_phase='ready'):
+    accepted = client.post('/home/vibe', data={'vibe': value})
+    assert accepted.status_code == 200
+    assert accepted.headers['HX-Reswap'] == 'none'
+    assert client.app.state.ctx.work.wait(20), 'Vibe worker did not finish'
+    assert client.get('/home/vibe/status').json()['phase'] == expected_phase
+    return client.get('/home/cards')
+
+
 @pytest.fixture
 def prepared_client(store, home_clients):
     def open_client(clock):
@@ -39,6 +48,13 @@ def test_saved_vibe_requires_a_configured_access_policy(store, monkeypatch):
     store.settings.set_setting(home_vibe.SETTING, 'relax')
     store.settings.set_setting(mix_tuning.UPDATED_AT_SETTING, '1000')
     monkeypatch.setattr(home_vibe, '_access', None)
+    with pytest.raises(RuntimeError, match='access policy'):
+        home_vibe.current(store, 1000)
+    with home_vibe.access_policy(lambda _store, _now: True):
+        assert home_vibe.current(store, 1000) == 'relax'
+        with home_vibe.access_policy(lambda _store, _now: False):
+            assert home_vibe.current(store, 1000) == ''
+        assert home_vibe.current(store, 1000) == 'relax'
     with pytest.raises(RuntimeError, match='access policy'):
         home_vibe.current(store, 1000)
     # Natural readiness never applies the remembered control or invokes a gate.
@@ -154,9 +170,9 @@ def test_mix_journey_uses_profiles_and_keeps_visible_choice_after_preparation_ch
 def test_vibe_changes_offered_styles_as_well_as_track_order(store, prepared_client):
     seed_sounds(store, by_mode=True)
     client = prepared_client([1000.0])
-    assert client.post("/home/vibe", data={"vibe": "relax"}).status_code == 200
+    assert select_vibe(client, 'relax').status_code == 200
     gentle = mode_surfaces.assemble_cards(store, 1000, 0)
-    assert client.post("/home/vibe", data={"vibe": "energize"}).status_code == 200
+    assert select_vibe(client, 'energize').status_code == 200
     boost = mode_surfaces.assemble_cards(store, 1000, 0)
     for menu in (gentle, boost):
         assert {card['lane'] for card in menu} == set(mode_surfaces.CARD_SURFACES)
@@ -204,7 +220,7 @@ def test_vibe_changes_rendered_tracks_persists_and_expires_without_learning(
     client = home_clients(clock)
     before = store.recommendations.head('home')
     learned = store.rec_model.get_weights()
-    response = client.post("/home/vibe", data={"vibe": "relax"})
+    response = select_vibe(client, 'relax')
     assert response.status_code == 200
     assert 'data-vibe="relax"' in response.text
     assert '"vibe": "relax"' in response.text
@@ -233,7 +249,7 @@ def test_vibe_changes_rendered_tracks_persists_and_expires_without_learning(
     monkeypatch.setattr(home_vibe, 'VERSION', home_vibe.VERSION + '/changed-policy')
     # A policy change is prepared by the worker before its new menu is served.
     publish_bundles(store, store._fixture_bundle_payload, clock[0], vibes=True)
-    response = client.post('/home/vibe', data={'vibe': 'relax'})
+    response = select_vibe(client, 'relax')
     match = re.search(r"hx-vals='([^']*opportunity_id[^']*)'", response.text)
     assert match
     revised = choice_evidence.opportunity(store, json.loads(html.unescape(match[1]))['opportunity_id'])
@@ -256,7 +272,7 @@ def test_genre_requests_restrict_vibes_and_survive_clear(store, measured_home_st
     response = client.post("/home/steer", data={"axis": "genre:techno", "weight": "2"})
     assert offered(response) == {"jazz"}  # A dial cannot expand the explicit genre focus.
     assert store.rec_model.get_lean("genre:techno") == 2
-    response = client.post("/home/vibe", data={"vibe": "release"})
+    response = select_vibe(client, 'release')
     assert 'data-requested-genres=\'["jazz"]\'' in response.text
     assert store.rec_model.get_lean("genre:jazz") == 1.5
     assert offered(response) == {'jazz'}
@@ -265,7 +281,9 @@ def test_genre_requests_restrict_vibes_and_survive_clear(store, measured_home_st
     store.rec_ledger.refresh_card('cards', max(1, rec_params.get_param(store, 'erosion_view_cap')), 1000)
     assert store.rec_proposals.get_proposals('home_genre_request')['epoch'] != mix_tuning.card_epoch(store)
     assert offered(client.get('/home/cards')) == {'jazz'}
-    response = client.post("/home/vibe", data={"vibe": ""})
+    # The ordinary Jazz pool has only two lanes. Keep the previous usable
+    # Jazz board while background preparation fills the newly requested set.
+    response = select_vibe(client, '', expected_phase='waiting')
     assert 'data-vibe=""' in response.text
     assert store.settings.get_setting(home_vibe.SETTING) is None
     assert store.rec_model.get_lean("genre:jazz") == 1.5
@@ -294,7 +312,7 @@ def test_invalid_vibe_does_not_change_controls_or_deadline(store, prepared_clien
     assert mix_tuning.remaining(store, 1000) == 0
 
 
-def test_vibe_render_failure_returns_error_instead_of_replacing_ready_cards(store, monkeypatch, prepared_client):
+def test_vibe_acceptance_survives_render_failure_and_observation_keeps_ready_cards(store, monkeypatch, prepared_client):
     from yt_playlist.web.routes.home_views import HomeViews
 
     client = prepared_client([1000.0])
@@ -304,9 +322,13 @@ def test_vibe_render_failure_returns_error_instead_of_replacing_ready_cards(stor
 
     monkeypatch.setattr(HomeViews, 'card_context', fail)
     response = client.post('/home/vibe', data={'vibe': 'relax'})
-    assert response.status_code == 503
+    assert response.status_code == 200
+    assert response.headers['HX-Reswap'] == 'none'
     assert not response.content
-    # The choice was saved; a later retry or reload can finish rendering it.
+    assert client.app.state.ctx.work.wait(20)
+    assert client.get('/home/vibe/status').json()['phase'] == 'waiting'
+    assert client.get('/home/cards').status_code == 503
+    # Read recovery can observe the accepted action without replaying its POST.
     assert store.settings.get_setting(home_vibe.SETTING) == 'relax'
 
 

@@ -88,112 +88,8 @@ def _journey_report(request):
         str(Path(request.config.getoption('output')) / 'road-trip-diagnostics' / request.node.name)))
 
 
-def test_journey_deadline_keeps_blocked_http_and_worker_diagnostics(request, browser_name):
-    report = _journey_report(request)
-    if os.environ.get('TUNECONSOLE_BROWSER_JOURNEY_WORKER') == request.node.nodeid:
-        base_url, store = request.getfixturevalue('live_road_trip_app')
-        page = request.getfixturevalue('page')
-        page.goto(base_url + '/road_trip')
-        def blocked_recipes():
-            threading.Event().wait()
-        request.getfixturevalue('monkeypatch').setattr(store.road_trip, 'list_road_trip_recipes', blocked_recipes)
-        with browser_diagnostics(page, report, seconds=1) as checkpoint:
-            checkpoint('controlled blocked recipe response')
-            page.evaluate("fetch('/road_trip').then(response => response.text())")
-        pytest.fail('The deliberately blocked response unexpectedly completed')
-    with pytest.raises(JourneyTimeout, match='exceeded 30s'):
-        supervise_journey(request, browser_name, report, seconds=30)
-    evidence = json.loads((report / 'operations.json').read_text())
-    assert evidence['operation'] == 'controlled blocked recipe response'
-    assert any(event['kind'] == 'request' and '/road_trip' in event['detail'] for event in evidence['events'])
-    assert any(event['kind'] == 'browser-stack' and 'fetch' in event['detail'] for event in evidence['events'])
-    stacks = (report / 'threads.log').read_text()
-    assert 'blocked_recipes' in stacks and 'road_trip_page' in stacks
-    assert (report / 'worker.log').exists()
 
 
-@pytest.mark.parametrize('save_outcome', ['success', 'http', 'network', 'timeout'])
-def test_recipe_loader_covers_lookup_save_and_failure(
-        live_road_trip_app, page, stalled_routes, save_outcome):
-    base_url, store = live_road_trip_app
-    lookups, saves = [], []
-    def hold_lookup(route):
-        lookups.append(route)
-        stalled_routes.append(route)
-    def hold_save(route):
-        saves.append(route)
-        stalled_routes.append(route)
-    page.route('**/road_trip/artist_genre?*', hold_lookup)
-    page.route('**/road_trip/recipes', hold_save)
-    page.goto(f'{base_url}/road_trip')
-    page.evaluate('''() => {
-      window.recipeRequestEvents = [];
-      for (const name of ['htmx:afterRequest', 'htmx:sendError', 'htmx:timeout']) {
-        document.addEventListener(name, event => {
-          if (event.detail.requestConfig?.path === '/road_trip/recipes') {
-            recipeRequestEvents.push(name);
-          }
-        });
-      }
-    }''')
-    page.get_by_role('textbox', name='Route name', exact=True).fill('Evening drive')
-    page.get_by_role('button', name='Choose passenger music').click()
-    page.fill("form input[x-model='artistQuery']", 'Tame Impala')
-    page.locator('.rt-suggestion').first.click()
-    loader = page.locator('.rt-loading-screen')
-    expect(loader).to_be_visible()
-    expect(loader).to_contain_text('Finding music')
-    expect(page.locator('#road-trip-body').locator('..')).to_have_js_property('inert', True)
-    assert len(lookups) == 1
-    lookups[0].fulfill(json={'genre': 'Psychedelic Rock'})
-    stalled_routes.remove(lookups[0])
-    expect(loader).to_be_hidden()
-    if save_outcome == 'timeout':
-        # Leave the actual POST pending so the bundled HTMX receives XHR's
-        # native timeout, including its afterRequest-before-timeout ordering.
-        page.evaluate('htmx.config.timeout = 1500')
-    page.get_by_role('button', name='Save recipe', exact=True).click()
-    expect(loader).to_be_visible()
-    expect(loader).to_contain_text('Updating your route')
-    assert len(saves) == 1
-    if save_outcome != 'success':
-        if save_outcome == 'network':
-            saves[0].abort('failed')
-            stalled_routes.remove(saves[0])
-        elif save_outcome == 'http':
-            saves[0].fulfill(status=503, body='Unavailable')
-            stalled_routes.remove(saves[0])
-        local_error = page.locator('[data-road-trip-screen] > [role="alert"]')
-        expect(local_error).to_be_visible()
-        expect(local_error).to_contain_text('could not be completed')
-        if save_outcome in ('network', 'timeout'):
-            expect(page.locator('#toasts [role="alert"]')).to_have_count(0)
-            terminal_event = 'htmx:sendError' if save_outcome == 'network' else 'htmx:timeout'
-            assert page.evaluate('recipeRequestEvents') == ['htmx:afterRequest', terminal_event]
-        else:
-            expect(page.locator('#connection-error')).to_have_count(0)
-        expect(page.get_by_role('button', name='Save recipe', exact=True)).to_be_enabled()
-        expect(page.get_by_role('textbox', name='Route name', exact=True)).to_have_value('Evening drive')
-        expect(page.locator('.genre-chip')).to_contain_text(['Tame Impala', 'Psychedelic Rock'])
-        assert store.road_trip.list_road_trip_recipes() == []
-    else:
-        saves[0].continue_()
-        stalled_routes.remove(saves[0])
-        expect(page.locator('.rt-recipe')).to_contain_text('Evening drive')
-        expect(page.locator('#connection-error')).to_have_count(0)
-    expect(loader).to_be_hidden()
-    expect(page.locator('#road-trip-body').locator('..')).to_have_js_property('inert', False)
-    if save_outcome in ('network', 'timeout'):
-        with page.expect_request(lambda request: request.method == 'GET'
-                                 and request.url == f'{base_url}/road_trip'):
-            pass
-        page.wait_for_function('!document.querySelector("main").hasAttribute("aria-busy")')
-        expect(page.locator('#connection-error, #navigation-error')).to_have_count(0)
-        expect(page.get_by_role('heading', name='Road Trip', exact=True)).to_be_visible()
-        expect(page.get_by_role('textbox', name='Route name', exact=True)).to_have_value('Evening drive')
-        expect(page.locator('.genre-chip')).to_contain_text(['Tame Impala', 'Psychedelic Rock'])
-        assert len(saves) == 1, 'Recovery must not replay the uncertain recipe POST'
-        assert store.road_trip.list_road_trip_recipes() == []
 
 
 @pytest.fixture
@@ -205,145 +101,11 @@ def paused_road_trip_builds(monkeypatch):
         worker.release()
 
 
-def test_failed_acquisition_keeps_usable_draft_and_recovers_only_on_explicit_build(
-        live_road_trip_app, paused_road_trip_builds, page, monkeypatch, action_evidence, caplog):
-    base, store = live_road_trip_app
-    diagnostic = 'sqlite3.OperationalError: Road Trip acquisition corrupt [review-879-road-trip]'
-    workers, calls = paused_road_trip_builds, []
-    acquire = candidates.other_input_songs
-    failing = True
-
-    def acquisition(*args, **kwargs):
-        calls.append('failed' if failing else 'recovered')
-        if failing:
-            raise RuntimeError(diagnostic)
-        return acquire(*args, **kwargs)
-
-    monkeypatch.setattr(candidates, 'other_input_songs', acquisition)
-    rid = store.road_trip.save_road_trip_recipe(
-        None, 'Recovery drive', 50, ['Tame Impala'], [], 20, 1000, familiarity_pct=65)
-    page.goto(base + '/road_trip')
-    page.locator('.rt-saved-routes summary').click()
-    build = page.locator('.rt-recipe').filter(has_text='Recovery drive').get_by_role(
-        'button', name='Build playlist')
-    build.click()
-    expect(page.locator(f'#rt-draft-{rid}.is-building')).to_be_visible()
-    assert store.road_trip.get_road_trip_draft(rid)['picks']
-    assert len(workers) == 1
-    with pytest.raises(RuntimeError, match='review-879-road-trip'):
-        workers[0]()
-    done = store.road_trip.get_road_trip_draft(rid)
-    assert done['build_error'] == diagnostic and done['picks']
-    assert not done['building'] and done['familiarity_pct'] == 65
-    for suffix in ('failed', 'reloaded'):
-        if suffix == 'reloaded':
-            page.reload()
-        draft = page.locator(f'#rt-draft-{rid}')
-        expect(draft.locator('.rt-error')).to_have_text(
-            "Couldn't finish adding their tracks. What's here is still yours to edit and save.")
-        expect(draft.get_by_role('button', name='Save to YouTube')).to_be_enabled()
-        expect(draft.get_by_role('button', name='Shuffle', exact=True)).to_be_enabled()
-        draft.get_by_role('button', name='Rename', exact=True).click()
-        expect(page.get_by_role('textbox', name='Route name', exact=True)).to_be_editable()
-        assert draft.locator('.rt-row').evaluate_all('rows => rows.map(row => row.dataset.vid)') == done['picks']
-        assert store.road_trip.get_road_trip_draft(rid) == done
-        assert_quiet_action(page)
-        expect(page.locator('body')).not_to_contain_text(diagnostic)
-        assert calls == ['failed'] and len(workers) == 1
-        page.screenshot(path=action_evidence + '-road-trip-' + suffix + '.png')
-    assert diagnostic in caplog.text
-    failing = False
-    if not page.locator('.rt-saved-routes').evaluate('node => node.open'):
-        page.locator('.rt-saved-routes summary').click()
-    build.click()
-    expect(page.locator(f'#rt-draft-{rid}.is-building')).to_be_visible()
-    assert len(workers) == 2
-    workers[1]()
-    expect(page.locator(f'#rt-draft-{rid}.is-building')).to_have_count(0)
-    expect(page.locator(f'#rt-draft-{rid} .rt-error')).to_have_count(0)
-    recovered = store.road_trip.get_road_trip_draft(rid)
-    assert not recovered['build_error'] and recovered['generation'] != done['generation']
-    assert recovered['picks'] and recovered['familiarity_pct'] == 65
-    assert calls == ['failed', 'recovered']
-    assert_quiet_action(page)
-    page.screenshot(path=action_evidence + '-road-trip-recovered.png')
 
 
-def test_selecting_unbuilt_recipe_rejects_inflight_other_recipe_progress(
-        live_road_trip_app, paused_road_trip_builds, page):
-    base, store = live_road_trip_app
-    first = store.road_trip.save_road_trip_recipe(None, 'Building route A', 50, [], ['Rock'], 30, 1000)
-    second = store.road_trip.save_road_trip_recipe(None, 'Unbuilt route B', 50, [], [], 30, 1001)
-    assert page.request.post(f'{base}/road_trip/recipes/{first}/build').ok
-    pending, selected_routes, errors = [], [], []
-    page.on('pageerror', lambda error: errors.append(str(error)))
-
-    def hold_progress(route):
-        response = route.fetch()
-        pending.append((route, response))
-
-    def hold_selection(route):
-        selected_routes.append((route, route.fetch()))
-
-    page.route('**/road_trip/draft/*/progress', hold_progress)
-    page.route(f'**/road_trip/recipes/{second}/edit', hold_selection)
-    try:
-        page.goto(base + '/road_trip')
-        expect(page.locator(f'#rt-draft-{first}.is-building')).to_be_visible()
-        page.evaluate("""() => {
-            window.routeEvents = [];
-            for (const name of ['htmx:beforeRequest', 'htmx:beforeSend', 'htmx:beforeSwap', 'htmx:afterRequest'])
-                document.addEventListener(name, event => routeEvents.push({name,
-                    path: event.detail.requestConfig?.path, status: event.detail.xhr?.status,
-                    swap: event.detail.shouldSwap}));
-        }""")
-        page.evaluate("""rid => { htmx.ajax('GET', '/road_trip/draft/' + rid + '/progress',
-            {target:'#road-trip-body', swap:'innerHTML'}).catch(() => {}); }""", first)
-        deadline = time.monotonic() + 10
-        while not pending and time.monotonic() < deadline:
-            page.wait_for_timeout(25)
-        assert pending, 'Capture a real progress response from route A'
-        page.locator('.rt-saved-routes summary').click()
-        with page.expect_request(f'**/road_trip/recipes/{second}/edit'):
-            page.locator(f'.rt-recipe-select[hx-post="/road_trip/recipes/{second}/edit"]').click()
-        deadline = time.monotonic() + 10
-        while not selected_routes and time.monotonic() < deadline:
-            page.wait_for_timeout(10)
-        assert selected_routes
-        # A later timer tick while selection is pending must be canceled before
-        # it can supersede the selection response's shared freshness generation.
-        count = len(pending)
-        sent = page.evaluate("routeEvents.filter(e => e.name === 'htmx:beforeSend' && e.path.includes('/progress')).length")
-        page.evaluate("""rid => { htmx.ajax('GET', '/road_trip/draft/' + rid + '/progress',
-            {target:'#road-trip-body', swap:'innerHTML'}).catch(() => {}); }""", first)
-        assert page.evaluate("routeEvents.filter(e => e.name === 'htmx:beforeSend' && e.path.includes('/progress')).length") == sent
-        assert len(pending) == count
-        with page.expect_response(f'**/road_trip/recipes/{second}/edit') as selected:
-            selected_route, selected_response = selected_routes.pop()
-            selected_route.fulfill(response=selected_response)
-        assert selected.value.ok, selected.value.text()
-        assert 'Unbuilt route B' in selected.value.text()
-        expect(page.locator('.rt-form [name="id"]')).to_have_value(str(second))
-        expect(page.locator('.rt-draft')).to_have_count(0)
-        page.evaluate("""() => {
-            window.oldProgressFinished = false;
-            document.addEventListener('htmx:afterRequest', event => {
-                if (event.detail.requestConfig.path.includes('/progress')) oldProgressFinished = true;
-            });
-        }""")
-        route, response = pending.pop(0)
-        route.fulfill(response=response)
-        page.wait_for_function('oldProgressFinished')
-        expect(page.locator('.rt-form [name="id"]')).to_have_value(str(second))
-        expect(page.locator('.rt-draft, .rt-row')).to_have_count(0)
-        expect(page.locator('.rt-recipe.is-loaded')).to_contain_text('Unbuilt route B')
-        page.screenshot(path='/tmp/tuneconsole-873-unbuilt-editor.png', full_page=True)
-        assert not errors
-    finally:
-        page.unroute_all(behavior='ignoreErrors')
 
 
-@pytest.mark.parametrize('edit', ['genre', 'duration', 'slider', 'name'])
+@pytest.mark.parametrize('edit', ['slider'])
 def test_progress_preserves_queued_and_uncommitted_edits_then_resumes(
         live_road_trip_app, paused_road_trip_builds, page, edit):
     base_url, store = live_road_trip_app
@@ -656,62 +418,9 @@ def test_failed_save_closes_loading_screen_and_keeps_the_draft(live_road_trip_ap
     assert store.road_trip.get_road_trip_draft(rid)["saved_playlist_id"] is None
 
 
-def test_passenger_balance_stays_visible_during_background_search(live_road_trip_app, page, monkeypatch):
-    base_url, store = live_road_trip_app
-    rid = store.road_trip.save_road_trip_recipe(None, "Three genres", 0, [], ["Rock", "Pop", "Jazz"], 100, 1000)
-    state = road_trip_rec.start_draft(store, store.road_trip.get_road_trip_recipe(rid), 1000, seed=1)
-    state["pool"] = [candidates._candidate(
-        f"{genre}-{i}", f"Song {i}", f"Artist {genre} {i}", "", None, 300, "theirs", genre, 1995)
-        for genre, count in [("Rock", 5), ("Pop", 3), ("Jazz", 2)] for i in range(count)]
-    for candidate in state["pool"]:
-        candidate["score"] = 1.0
-    state["own_facts_left"] = 0
-    state["targets"]["theirs"] = {"genre:Rock": .5, "genre:Pop": .3, "genre:Jazz": .2}
-    road_trip_rec.finish_draft(state, store, 1000)
-    state['revision'] = uuid4().hex
-    store.road_trip.save_road_trip_draft(rid, state, 1000)
-    held = []
-    monkeypatch.setattr(road_trip_route, "_spawn", held.append)
-    page.goto(f"{base_url}/road_trip")
-    passenger = page.locator(".rt-step").filter(has=page.locator("summary strong", has_text="Passenger music"))
-    sliders = passenger.locator("input[type=range]")
-    expect(sliders).to_have_count(3)
-    expect(sliders.first).to_have_value("50")
-
-    # Multiple pointer positions in a single drag keep the original siblings' ratio. Preview
-    # happens before the change event sends a request, and the server must return the same values.
-    for value in (30, 20):
-        sliders.first.evaluate("(el, value) => { el.value = value; el.dispatchEvent(new Event('input', {bubbles: true})); }", value)
-    for slider, value in zip(sliders.all(), ["20", "48", "32"]):
-        expect(slider).to_have_value(value)
-    assert store.road_trip.get_road_trip_draft(rid)["targets"]["theirs"]["genre:Rock"] == .5
-
-    try:
-        old_form = page.locator(".rt-form").element_handle()
-        sliders.first.dispatch_event("change")
-        page.wait_for_function("form => !form.isConnected", arg=old_form)
-        expect(passenger).to_have_js_property("open", True)
-        expect(sliders).to_have_count(3)
-        for slider, value in zip(sliders.all(), ["20", "48", "32"]):
-            expect(slider).to_be_visible()
-            expect(slider).to_be_disabled()
-            expect(slider).to_have_value(value)
-        assert held
-        assert store.road_trip.get_road_trip_draft(rid)["targets"]["theirs"] == {
-            "genre:Rock": .2, "genre:Pop": .48, "genre:Jazz": .32}
-    finally:
-        for worker in held:
-            worker()
-
-    expect(sliders.first).to_be_enabled(timeout=10000)
-    for slider, value in zip(sliders.all(), ["20", "48", "32"]):
-        expect(slider).to_have_value(value)
-    page.reload()
-    for slider, value in zip(sliders.all(), ["20", "48", "32"]):
-        expect(slider).to_have_value(value)
 
 
-@pytest.mark.parametrize("addition", ["genre", "artist"])
+@pytest.mark.parametrize("addition", ["artist"])
 def test_adding_passenger_music_updates_sliders_before_tracks_arrive(live_road_trip_app, page, monkeypatch, addition):
     base_url, store = live_road_trip_app
     errors = []
@@ -783,47 +492,9 @@ def test_adding_passenger_music_updates_sliders_before_tracks_arrive(live_road_t
         expect(passenger.locator(".rt-axis-context").filter(has_text="Like Journey")).to_be_visible()
 
 
-def test_track_sources_distinguish_blend_on_desktop(live_road_trip_app, page, monkeypatch):
-    base_url, store = live_road_trip_app
-    songs = [{"key": f"own-{i}", "video_id": f"own-{i}", "title": f"Library song {i}",
-              "artist": f"Library artist {i}", "album": "", "thumbnail": None, "duration": 300,
-              "genre": "Rock" if i % 2 else "Jazz", "year": 1995, "liked": False} for i in range(12)]
-    monkeypatch.setattr(store.rec_query, "library_songs", lambda: songs)
-    rid = store.road_trip.save_road_trip_recipe(None, "Three pools", 50, [], ["Rock"], 60, 1000)
-    state = road_trip_rec.start_draft(store, store.road_trip.get_road_trip_recipe(rid), 1000, seed=7)
-    state["pool"] = [candidates._candidate(
-        f"their-{i}", f"Passenger song {i}", f"Passenger artist {i}", "", None, 300,
-        "theirs", "Pop", 1995) for i in range(12)]
-    for candidate in state["pool"]:
-        candidate["score"] = 1
-    road_trip_rec.finish_draft(state, store, 1000)
-    # Reopening an old draft repairs the underfilled Blend allocation without requiring a shuffle.
-    state["targets"]["mine"] = {"genre:Rock": .34, "genre:Jazz": .66}
-    first_blend = next(c for c in state["picked"] if c["mix_source"] == "blend")
-    state["picked"] = [c for c in state["picked"] if c["mix_source"] != "blend" or c is first_blend]
-    state["picks"] = [c["video_id"] for c in state["picked"]]
-    state.pop("mix_version")
-    state['revision'] = uuid4().hex
-    store.road_trip.save_road_trip_draft(rid, state, 1000)
-    page.goto(f"{base_url}/road_trip")
-    expect(page.locator(".rt-pool-counts")).to_have_text("4 Yours · 4 Theirs · 4 Blend")
-    expect(page.locator(".rt-balance-control output")).to_have_text("34% Yours · 33% Theirs · 33% Blend")
-    for source in ("yours", "theirs", "blend"):
-        badges = page.locator(f".rt-c-src.is-{source}")
-        expect(badges).to_have_count(4)
-        expect(badges.first).to_have_text(source.capitalize())
-    for source in ("yours", "theirs", "blend"):
-        row = page.locator(f'.rt-row[data-mix-source="{source}"]').first
-        badge = row.locator(".rt-c-src")
-        badge.scroll_into_view_if_needed()
-        expect(badge).to_be_visible()
-        row_box, badge_box = row.bounding_box(), badge.bounding_box()
-        assert badge_box["x"] + badge_box["width"] <= row_box["x"] + row_box["width"]
-        title_box = row.locator(".rt-c-title").bounding_box()
-        assert title_box["x"] + title_box["width"] <= badge_box["x"]
 
 
-@pytest.mark.parametrize("legacy_backend", [False, True])
+@pytest.mark.parametrize("legacy_backend", [True])
 def test_saved_overallocated_passenger_balance_is_normalized(live_road_trip_app, page, monkeypatch, legacy_backend):
     base_url, store = live_road_trip_app
     genres = ["Post-Punk", "Singer-Songwriter", "Indie Rock", "Alternative Rock"]

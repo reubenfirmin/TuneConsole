@@ -296,6 +296,16 @@ def test_album_page_renders_table_and_create_form(store):
     assert 'More like this album' not in r.text
     assert "/album/MPREb_x/share.txt" in r.text
     assert 'aria-label="Enrich"' in r.text
+    # The worker's companion is authoritative even when its tracks are absent
+    # from the serving catalog. Preserve the full sequence in the save form.
+    companion = [{'key': f'prepared-{i}', 'video_id': f'prepared-v{i}',
+                  'title': f'Prepared companion {i}', 'artist': 'Worker artist'} for i in range(12)]
+    store.rec_proposals.put_proposals('home_prepared', {
+        'album_choices': [{'browse_id': 'MPREb_x', 'companion': companion}]}, 1)
+    r = c.get('/album?browse=MPREb_x')
+    assert r.status_code == 200
+    assert r.context['companion'] == companion
+    assert 'Continue from this record · 12 tracks' in r.text
 
 
 def test_open_album_inline_keeps_the_complete_tracklist_and_simple_controls(store):

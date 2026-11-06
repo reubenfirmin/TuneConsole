@@ -8,7 +8,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from tests.radio_session_support import poc, play
-from yt_playlist.core.activity import WorkBudgetExceeded
+from yt_playlist.core import activity
+from yt_playlist.core.activity import WorkClosing
 from yt_playlist.rec import account_growth
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.web.routes import radio_session as routes
@@ -49,6 +50,17 @@ def test_a_newer_tuning_request_supersedes_a_late_plan(poc, monkeypatch):
     original = c.session.directions
     before = (list(remote.ids), list(remote.adds), list(remote.removes), list(frames))
     entered, release = threading.Event(), threading.Event()
+    admitted, admissions = threading.Event(), []
+    reserve = c.reserve_tuning
+
+    def reserved():
+        serial = reserve()
+        admissions.append(serial)
+        if len(admissions) == 2:
+            admitted.set()
+        return serial
+
+    monkeypatch.setattr(c, 'reserve_tuning', reserved)
     update = RadioDirections.update
 
     def held(*args, **kwargs):
@@ -62,14 +74,15 @@ def test_a_newer_tuning_request_supersedes_a_late_plan(poc, monkeypatch):
         first = pool.submit(c.tune, {'comfort': .1, 'theme': .5, 'energy': .5})
         try:
             assert entered.wait(3)
-            second = pool.submit(c.tune, {'comfort': .9, 'theme': .5, 'energy': .5}).result(timeout=3)
-            assert not second['ok'] and second['tune_reason'] == 'busy'
+            second = pool.submit(c.tune, {'comfort': .9, 'theme': .5, 'energy': .5})
+            assert admitted.wait(3)
             assert c.status()['menu_id'] == original.menu_id
         finally:
             release.set()
         assert not first.result(timeout=5)['ok']
-    assert c.session.directions is original
-    assert c.session.requested_direction is None
+        assert second.result(timeout=5)['ok']
+    assert c.session.directions is not original
+    assert c.persistence.load()['tuning']['comfort'] == .9
     assert (remote.ids, remote.adds, remote.removes, frames) == before
 
 
@@ -116,7 +129,7 @@ def test_selection_without_a_new_choice_keeps_tuning_admission(poc, selection):
     assert (remote.ids, remote.adds, remote.removes, frames) == before
 
 
-@pytest.mark.parametrize('failure', ['budget', 'always_changed'])
+@pytest.mark.parametrize('failure', ['cancelled', 'rebase'])
 def test_unfinished_tuning_keeps_the_last_published_candidates_and_menu(poc, monkeypatch, failure):
     c, remote, frames, *_ = poc
     assert c.start()['ok']
@@ -128,18 +141,61 @@ def test_unfinished_tuning_keeps_the_last_published_candidates_and_menu(poc, mon
     def unfinished(*args, **kwargs):
         update(*args, **kwargs)
         calls.append(1)
-        if failure == 'budget':
-            raise WorkBudgetExceeded('controlled planning deadline')
-        with c.lock:
-            c.session.metadata_revision += 1
+        if failure == 'cancelled':
+            raise WorkClosing('controlled cancellation')
+        if len(calls) <= 4:
+            with c.lock:
+                c.session.metadata_revision += 1
 
     monkeypatch.setattr(RadioDirections, 'update', unfinished)
     result = c.tune({'comfort': .1, 'theme': .9, 'energy': .2})
-    assert not result['ok']
-    assert len(calls) == (1 if failure == 'budget' else 3)
-    assert c.session.candidates is source and c.session.directions is original
-    assert c.session.requested_direction is None
+    assert result['ok'] is (failure == 'rebase')
+    assert len(calls) == (1 if failure == 'cancelled' else 5)
+    assert (c.session.candidates is source) is (failure == 'cancelled')
+    assert (c.session.directions is original) is (failure == 'cancelled')
     assert (remote.ids, remote.adds, remote.removes, frames) == before
+
+
+@pytest.mark.parametrize('save_fails', [False, True])
+def test_completed_tuning_is_durable_before_confirmation_and_same_values_repair_a_failed_save(poc, monkeypatch, save_fails):
+    c, *_ = poc
+    assert c.start()['ok']
+    play(c, 'v2')
+    values = {'comfort': .1, 'theme': .9, 'energy': .5}
+    tune, save = c.listening.tune, c.persistence.checkpoints.save
+    token = []
+
+    def published(*args, **kwargs):
+        result = tune(*args, **kwargs)
+        # Reproduce the reviewer's post-publication deadline boundary without
+        # making this test wait. No disposable deadline may skip the save.
+        token.append(activity._DEADLINE.set(time.monotonic() - 1))
+        return result
+
+    monkeypatch.setattr(c.listening, 'tune', published)
+    try:
+        if save_fails:
+            def failed(*args, **kwargs):
+                raise RuntimeError('checkpoint write failed')
+            monkeypatch.setattr(c.persistence.checkpoints, 'save', failed)
+            with pytest.raises(RuntimeError, match='checkpoint write failed'):
+                c.tune(values)
+            assert c.status()['tuning'] == values
+            assert not c.status()['tuning_confirmed']
+            assert c.persistence.load()['tuning'] != values
+            monkeypatch.setattr(c.persistence.checkpoints, 'save', save)
+        result = c.tune(values)
+        assert result['ok'] and result['tuning_confirmed']
+        assert c.persistence.load()['tuning'] == values
+        c.suspend()
+        restored = type(c)(c.ctx)
+        try:
+            assert restored.join()['tuning'] == values
+        finally:
+            restored.suspend()
+    finally:
+        for value in reversed(token):
+            activity._DEADLINE.reset(value)
 
 
 def test_new_session_during_tuning_admission_supersedes_that_apply(poc):

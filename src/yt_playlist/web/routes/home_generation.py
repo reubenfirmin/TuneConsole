@@ -3,12 +3,13 @@ import json
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
 from yt_playlist.core.accounts import client_for
 from yt_playlist.core.activity import activity_for
 from yt_playlist.library import playlist_generated, playlist_navigation
 from yt_playlist.library.playlist_writes import PlaylistAddUncertain
+from yt_playlist.library.playlist_snapshot import validate_playlist
 from yt_playlist.rec import choice_evidence, measurement
 from yt_playlist.web.context import request_form
 from yt_playlist.web.jobs import start_playlist_enrichment
@@ -19,6 +20,29 @@ def build(ctx):
     router = APIRouter()
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
     router.include_router(generated_playlist.build(ctx))
+
+    @router.post('/home/generate/reconcile')
+    def reconcile_generated(form=Depends(request_form)):
+        """Read a known destination; absence in a read never authorizes replay."""
+        try:
+            recovery = json.loads(form.get('recovery') or '{}')
+            tracks = json.loads(form.get('tracks') or '[]')
+            client = (ctx.client_provider() or {}).get(int(recovery['account_id']))
+            detail = validate_playlist(client.get_playlist(recovery['playlist'], limit=None))
+            present = {track['videoId'] for track in detail['tracks']}
+            confirmed = set(recovery['confirmed']) | present
+            rejected = set(recovery['rejected']) - present
+            unattempted = set(recovery['unattempted']) - present
+            videos = list(dict.fromkeys(track['video_id'] for track in tracks))
+            return JSONResponse({**recovery,
+                'confirmed': [video for video in videos if video in confirmed],
+                'rejected': [video for video in videos if video in rejected],
+                'unattempted': [video for video in videos if video in unattempted],
+                'uncertain': [video for video in videos
+                              if video not in confirmed | rejected | unattempted]})
+        except Exception:
+            ctx.logger.exception('could not check saved mix')
+            return JSONResponse(None)
 
     @router.post("/home/generate")
     def home_generate(request: Request, form=Depends(request_form)):
@@ -86,7 +110,12 @@ def build(ctx):
                     except Exception:  # noqa: BLE001 - logging must never break playlist creation
                         pass
             except PlaylistAddUncertain as exc:
-                result.update(error=str(exc), partial_ytm=exc.playlist_id)
+                ctx.logger.warning('generated mix additions remain unconfirmed: %s', exc)
+                result.update(error='Some songs are still unconfirmed.', partial_ytm=exc.playlist_id,
+                    save_uncertain=True, selected_tracks=tracks,
+                    addition_recovery={'account_id': account_id, 'playlist': exc.playlist_id,
+                        'confirmed': list(exc.confirmed), 'rejected': list(exc.skipped),
+                        'uncertain': list(exc.uncertain), 'unattempted': list(exc.unattempted)})
             except playlist_generated.TrackLengthLimitError as exc:
                 result.update(error=str(exc), track_length_limited=True)
             except Exception:  # noqa: BLE001 - surface a friendly card, log the detail

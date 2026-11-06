@@ -183,12 +183,39 @@ def test_generation_reader_waits_for_the_event_publication_boundary(tmp_path, mo
     assert second_ledger.get('response', 'event') == {'kind': 'choice'}
 
 
-def test_retiring_unanswered_events_advances_the_event_generation(tmp_path):
+@pytest.mark.parametrize('kind', ['expired', 'visible', 'open'])
+def test_retiring_unanswered_events_advances_the_event_generation(tmp_path, monkeypatch, kind):
+    from yt_playlist.core.activity import WorkBudgetExceeded
+    from yt_playlist.core.evidence_retirement import Retirements
     ledger = EvidenceLedger(tmp_path, byte_budget=1024 * 1024)
-    context = ledger.artifact({})
+    context = ledger.artifact({'padding': 'x' * 20000})
     ledger.put('opportunity', 'old', {'id': 'old', 'observed_at': 1, 'context': context})
     previous = ledger.generation()
-    assert ledger.maintain(2)['retired_unanswered'] == 1
+    if kind == 'expired':
+        result = ledger.maintain(2)
+    else:
+        ledger.put('response', 'passive', {'id': 'passive', 'opportunity_id': 'old',
+                                         'kind': kind, 'observed_at': 2})
+        fao.touch(ledger._path('artifact', context), mtime_ns=10**9)
+        used = sum(fao.stat(path).logical_bytes for path in tmp_path.glob('*/*/*.json'))
+        ledger.byte_budget = int(used / .95)
+        delete = fao.delete
+        def interrupted(path, **options):
+            removed = delete(path, **options)
+            if path == ledger._path('opportunity', 'old') and removed:
+                raise WorkBudgetExceeded('Deadline after offer unlink')
+            return removed
+        with monkeypatch.context() as patch:
+            patch.setattr(fao, 'delete', interrupted)
+            with pytest.raises(WorkBudgetExceeded):
+                ledger.maintain(0, orphan_before=9000, pressure_before=9000)
+        ledger = EvidenceLedger(tmp_path, ledger.byte_budget)
+        assert ledger.maintain(0, protected_opportunities={'old'})['deferred']
+        assert ledger.get('response', 'passive')
+        result = ledger.maintain(0, orphan_before=9000, pressure_before=9000)
+        assert ledger.get('response', 'passive') is None
+        assert not Retirements(tmp_path).offers and not result['deferred']
+    assert result['retired_unanswered'] == 1
     assert ledger.generation() != previous
 
 

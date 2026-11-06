@@ -382,6 +382,8 @@ def test_stale_projection_retry_does_not_refit_models_or_repeat_other_stages(sch
         worker._retry_bundles()
         assert not targets
         monkeypatch.setattr(rec_worker.time, 'monotonic', lambda: worker.jobs.retry['bundles'].retry_at + 1)
+        from yt_playlist.rec import candidate_refresh
+        worker.ctx.now_fn = lambda: 2000 + candidate_refresh.CHECK_INTERVAL_S
         worker._retry_bundles()
     targets.pop()()
     assert calls == ["full", projection, projection]
@@ -391,10 +393,13 @@ def test_stale_projection_retry_does_not_refit_models_or_repeat_other_stages(sch
 
 @pytest.mark.parametrize('failure', ['model-invalidated', 'policy-capacity', 'unexpected'])
 def test_bundle_retry_repairs_a_model_invalidated_during_preparation(store, library, monkeypatch, caplog, failure):
+    from yt_playlist.rec import candidate_refresh
     worker = _worker(store)
     prepare = mode_surfaces.prepare_bundles
     attempts = []
     clock = [100.0]
+    wall = [2000.0]
+    worker.ctx.now_fn = lambda: wall[0]
     if failure == 'policy-capacity':
         monkeypatch.setattr(rec_worker, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
 
@@ -431,7 +436,7 @@ def test_bundle_retry_repairs_a_model_invalidated_during_preparation(store, libr
         assert worker.jobs.retry['bundles'].deferrals == 1
         assert 'batch adds 1024 variants' in caplog.text
         assert not any(record.exc_info for record in caplog.records)
-        assert worker.jobs.retry['bundles'].retry_at >= clock[0] + 60
+        assert worker.jobs.retry['bundles'].retry_at >= clock[0] + candidate_refresh.CHECK_INTERVAL_S
     elif failure == 'unexpected':
         failures = [record for record in caplog.records if 'rec bundle preparation failed' in record.message]
         assert len(failures) == 1 and failures[0].exc_info[0] is RuntimeError
@@ -444,6 +449,7 @@ def test_bundle_retry_repairs_a_model_invalidated_during_preparation(store, libr
         worker._retry_bundles()
         assert len(attempts) == 1 and not worker.jobs.has('bundles')
     monkeypatch.setattr(rec_worker.time, 'monotonic', lambda: worker.jobs.retry['bundles'].retry_at + 1)
+    wall[0] += candidate_refresh.CHECK_INTERVAL_S
     with monkeypatch.context() as request_guard:
         request_guard.setattr(training, "build_vectors_from_baskets", forbidden)
         worker._refresh_bundles()

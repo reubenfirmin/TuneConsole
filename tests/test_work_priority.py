@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from threadpoolctl import threadpool_info
 
-from yt_playlist.core.activity import WorkClosing, cancellable_work, check_stopping
+from yt_playlist.core.activity import Activity, WorkClosing, cancellable_work, check_stopping
 from yt_playlist.core.numerics import limit_native_threads
 from yt_playlist.core.priority import RequestPriority, ServingLock
 from yt_playlist.web.request_priority import RequestPriorityMiddleware
@@ -267,31 +267,67 @@ def test_checkpoint_inside_serving_transaction_cannot_deadlock_foreground():
             stop.set()
 
 
-def test_response_headers_release_priority_even_for_long_lived_stream():
-    priority = RequestPriority()
-    proceeded = threading.Event()
+def test_response_headers_release_priority_even_for_long_lived_stream(file_backed_store, monkeypatch):
+    store = file_backed_store
+    priority = store.priority
+    work = Activity()
     stop = threading.Event()
+    other_entered, finish_other = asyncio.Event(), asyncio.Event()
+    waits = []
+    wait = priority._condition.wait
 
-    def maintenance():
-        with priority.background(check_stopping), cancellable_work(stop.is_set):
-            check_stopping()
-            proceeded.set()
+    def observed_wait(seconds):
+        waits.append(priority._foreground)
+        return wait(seconds)
+
+    monkeypatch.setattr(priority._condition, 'wait', observed_wait)
+
+    def calculate(expected_foreground):
+        assert priority._foreground == expected_foreground
+        with priority.background(check_stopping), cancellable_work(stop.is_set), store.read_view(seconds=None) as reader:
+            return reader.conn.execute('WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL '
+                'SELECT x+1 FROM n WHERE x<50000) SELECT SUM(x) FROM n').fetchone()[0]
+
+    def failed_calculation():
+        assert priority._foreground == 0
+        raise ValueError('worker failed')
 
     async def app(scope, receive, send):
+        if scope.get('path') == '/other':
+            other_entered.set()
+            await finish_other.wait()
+            return
+        assert priority._foreground == 1
+        assert await work.to_thread(calculate, 0) == 1250025000
+        assert not waits, 'The worker must not yield to its own waiting HTTP request'
+        assert priority._foreground == 1
+        with pytest.raises(ValueError, match='worker failed'):
+            await work.to_thread(failed_calculation)
+        assert priority._foreground == 1
+
+        other = asyncio.create_task(middleware({'type': 'http', 'path': '/other'}, None, send))
+        try:
+            await other_entered.wait()
+            assert priority._foreground == 2
+            assert await work.to_thread(calculate, 1) == 1250025000
+            assert waits and set(waits) == {1}, 'An unrelated request keeps its priority'
+            assert priority._foreground == 2
+        finally:
+            finish_other.set()
+            await other
         assert priority._foreground == 1
         await send({"type": "http.response.start", "status": 200, "headers": []})
-        with ThreadPoolExecutor(1) as pool:
-            try:
-                pool.submit(maintenance).result(2)
-            finally:
-                stop.set()
-        assert proceeded.is_set()
+        waits.clear()
+        assert await work.to_thread(calculate, 0) == 1250025000
+        assert not waits
+        assert priority._foreground == 0, 'Worker completion must not reclaim a finished response'
         await send({"type": "http.response.body", "body": b"event", "more_body": True})
 
     async def send(_):
         pass
 
-    asyncio.run(RequestPriorityMiddleware(app, priority)({"type": "http"}, None, send))
+    middleware = RequestPriorityMiddleware(app, priority)
+    asyncio.run(middleware({"type": "http"}, None, send))
     assert priority._foreground == 0
 
 

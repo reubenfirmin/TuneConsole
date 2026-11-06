@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from yt_playlist.core.work_diagnostics import work_span
-from yt_playlist.core.priority import yield_to_requests
+from yt_playlist.core.priority import waiting_for_worker, yield_to_requests
 from yt_playlist.core.work_errors import WorkBudgetExceeded
 
 _CURRENT_WORK = ContextVar("tuneconsole_activity", default=None)
@@ -125,8 +125,9 @@ class Activity:
     async def to_thread(self, target, *args, **kwargs):
         run = self.wrap(getattr(target, "__name__", "request work"), target, *args, **kwargs)
         # Cancellation of an awaiting request must not hide a still-running remote mutation.
-        task = asyncio.create_task(asyncio.to_thread(run))
-        return await asyncio.shield(task)
+        with waiting_for_worker():
+            task = asyncio.create_task(asyncio.to_thread(run))
+            return await asyncio.shield(task)
 
     def start_executor(self):
         with self._condition:

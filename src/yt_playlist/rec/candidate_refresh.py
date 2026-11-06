@@ -1,4 +1,4 @@
-"""Refresh saved rankings when preferences decay or temporary feedback expires."""
+"""Hourly admission for captured recommendation runs and their refresh inputs."""
 import hashlib
 import json
 
@@ -6,6 +6,17 @@ from yt_playlist.rec import album_feedback_state, choice_learning, home_vibe, mu
 from yt_playlist.core.mix_choices import PRECISION
 
 DECAY_TICK_S = 3600
+CHECK_INTERVAL_S = 3600
+CHECKED_AT = 'rec_candidates_checked_at'
+
+
+def check_due(store, now):
+    checked = store.settings.get_setting(CHECKED_AT)
+    return not checked or now >= float(checked) + CHECK_INTERVAL_S
+
+
+def checked(store, now):
+    store.settings.set_setting(CHECKED_AT, str(now))
 
 
 def ranking_configuration(store):
@@ -27,16 +38,18 @@ def ranking_configuration(store):
                        for spec in rec_params.PARAMS}}
 
 
-def preferences(store, now):
+def preferences(store, now, *, include_exposure=True):
+    """Exposure history refreshes rankings without invalidating Home's held menu."""
     if (store._db_path is not None and not getattr(store, '_read_only', False)
             and not store._lock.held_by_current_thread):
         with store.read_view() as reader:
-            return preferences(reader, now)
+            return preferences(reader, now, include_exposure=include_exposure)
     return store.memoized_read(('candidate-preferences', now, home_vibe.VERSION,
-                                musical_character.VERSION, PRECISION), lambda: _preferences(store, now))
+                                musical_character.VERSION, PRECISION, include_exposure),
+                               lambda: _preferences(store, now, include_exposure))
 
 
-def _preferences(store, now):
+def _preferences(store, now, include_exposure):
     ranking = ranking_configuration(store)
     records = ranking['records']
     # Decay has no source-row mutation. Refresh at most hourly while there is
@@ -51,7 +64,15 @@ def _preferences(store, now):
                      'bandit': bandit.get('state_version'),
                      'bandit_active': bandit.get('expires_at') is None or now < bandit['expires_at'],
                      'album_feedback': album_feedback_state.state(store),
+                     'models': {key: store.settings.get_setting(key) for key in
+                                ('rec_content_generation', 'rec_fit_inputs', 'rec_mode_fit_inputs')},
+                     'home': {'genre_request': store.rec_proposals.get_proposals('home_genre_request'),
+                              'vibe': store.settings.get_setting('home_mix_vibe'),
+                              'tuning_at': store.settings.get_setting('home_mix_tuning_updated_at')},
                      'decay_tick': int(now // DECAY_TICK_S) if decaying or choice_decay else None}
+    if include_exposure:
+        configuration.update(card_views=store.rec_ledger.card_views('cards'),
+                             mode_offers=store.modes.impression_counts())
     fingerprint = hashlib.sha256(json.dumps(configuration, sort_keys=True).encode()).hexdigest()
     return fingerprint
 
@@ -63,7 +84,7 @@ def due(store, now):
 
 
 def prepared_settings(reader, now):
-    """Capture alongside the rankings; failed or stale publication never marks them current."""
+    """Capture alongside the rankings, leaving later changes due for the next round."""
     deadline = reader.rec_model.next_feedback_expiry(now)
     return {'rec_candidate_preferences': preferences(reader, now),
             'rec_candidates_expire_at': str(deadline) if deadline is not None else ''}

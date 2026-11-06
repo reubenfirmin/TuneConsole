@@ -65,6 +65,7 @@
       </svg>
     </div>
     <div class="radio-directions" x-ref="directions" aria-label="Possible radio directions" @scroll.passive="measureQueues()"
+         :class="{'is-tuning': tuningWorking}" :aria-busy="tuningWorking.toString()"
          @mouseleave="hoveredSlot = null" @focusout="if (!$el.contains($event.relatedTarget)) focusedSlot = null">
       <template x-for="branch in displayDirections" :key="branch.slot">
         <section class="radio-direction" :class="{'is-active': branch.active, 'is-preview': previewSlot === branch.slot && !branch.active}"

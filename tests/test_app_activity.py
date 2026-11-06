@@ -10,11 +10,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from yt_playlist.core.activity import Activity, WorkClosing, check_stopping
+from yt_playlist.core.priority import RequestPriority
 from yt_playlist.core.update_lifecycle import acquire_restart_locks
 from yt_playlist.library import playlist_generated
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.web.app import create_app
 from yt_playlist.web.jobs import SyncJobs
+from yt_playlist.web.request_priority import RequestPriorityMiddleware
 
 
 def _ctx(store=None):
@@ -94,18 +96,22 @@ def test_sync_cooperative_stop_only_interrupts_shutdown(reason):
 
 def test_cancelled_request_keeps_running_mutation_visible():
     work = Activity()
+    priority = RequestPriority()
     started, release = threading.Event(), threading.Event()
 
     def mutate():
         started.set()
         assert release.wait(5)
 
-    async def run():
+    async def app(scope, receive, send):
+        assert priority._foreground == 1
         task = asyncio.create_task(work.to_thread(mutate))
         assert await asyncio.to_thread(started.wait, 5)
+        assert priority._foreground == 0
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+        assert priority._foreground == 1
         work.close_admission()
         try:
             assert not work.wait(0)
@@ -113,7 +119,8 @@ def test_cancelled_request_keeps_running_mutation_visible():
             release.set()
         assert await asyncio.to_thread(work.wait, 5)
 
-    asyncio.run(run())
+    asyncio.run(RequestPriorityMiddleware(app, priority)({'type': 'http'}, None, None))
+    assert priority._foreground == 0
 
 
 def test_lifespan_owns_executor_cancels_pending_work_and_supports_restart(store):

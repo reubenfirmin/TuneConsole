@@ -11,8 +11,8 @@ from copy import deepcopy
 from dataclasses import replace
 from uuid import uuid4
 
-from yt_playlist.core.activity import check_stopping
-from yt_playlist.rec import choice_evidence, choice_outcomes, measurement, musical_character
+from yt_playlist.core.activity import check_stopping, cancellable_work
+from yt_playlist.rec import choice_evidence, choice_outcomes, home_cache, measurement, musical_character
 from yt_playlist.rec.radio_candidates import POLICY_VERSION
 from yt_playlist.web.radio_playback import PlaybackObservation, PlaybackRequest, PlaybackUnavailable
 from yt_playlist.web.radio_playlist_io import PlaylistPending
@@ -195,7 +195,7 @@ class RadioListening:
         if not getattr(self.store, 'activity_paused', False):
             self.store.settings.set_setting('radio_seed_offer', json.dumps({'tracks': tracks, 'menu_id': menu_id,
                 'comparison': getattr(candidates, 'comparison', None)}))
-        context = getattr(candidates, 'choice_context', None) or (self.store.rec_proposals.get_proposals("home_prepared") or {}).get("choice_context", {})
+        context = getattr(candidates, 'choice_context', None) or (home_cache.read(self.store, 'home_prepared') or {}).get("choice_context", {})
         choice_evidence.safe_issue(self.store, "radio", [{"id": t["video_id"], "position": i + 1,
             "tracks": [t], "mode_id": t.get("_radio_mode"), "intent": "seed",
             "score": getattr(candidates, "prior", {}).get(t.get("_radio_mode"), {}).get(t["key"])}
@@ -209,7 +209,7 @@ class RadioListening:
         branches = s.directions.public([])
         if not branches:
             return
-        context = getattr(s.candidates, 'choice_context', None) or (self.store.rec_proposals.get_proposals("home_prepared") or {}).get("choice_context", {})
+        context = getattr(s.candidates, 'choice_context', None) or (home_cache.read(self.store, 'home_prepared') or {}).get("choice_context", {})
         choice_evidence.safe_issue(self.store, "radio", [{"id": branch["id"],
             "position": branch["slot"] + 1, "active": branch["active"], "tracks": branch["tracks"],
             "mode_id": (branch["tracks"] or [{}])[0].get("_radio_mode"), "intent": "direction"}
@@ -223,7 +223,8 @@ class RadioListening:
         """Rebuild the offered future without changing durable taste or observed listening."""
         with self.lock:
             requested, replacement = s.requested_direction, s.replacement
-        for attempt in range(3):
+        attempt = 0
+        while True:
             with self.lock:
                 if (not current() or s.stop.is_set() or s.directions is None
                         or s.requested_direction is not requested or s.replacement is not replacement):
@@ -242,16 +243,16 @@ class RadioListening:
                     metadata += requested['tracks']
                 if replacement:
                     metadata += replacement.proposed
-            # Rebase ordinary observation/menu changes a bounded number of
-            # times. A newer explicit action still supersedes this request.
-            check_stopping()
-            candidates.retain(deepcopy(metadata))
-            candidates.refresh_exclusions(self.now_fn())
-            planned.candidates = candidates
-            planned.blocked.difference_update(view.metadata_rejected - view.rejected)
-            planned.active = selected
-            planned.update(list(history.heard or history.tracks[:1]), [], history.transition, force=True)
-            check_stopping()
+            # Only private computation is cancellable. Its final check precedes
+            # publication, so cancellation cannot skip an accepted plan's save.
+            with cancellable_work(lambda: not current() or s.stop.is_set()), \
+                    self.store.priority.background(check_stopping):
+                candidates.retain(deepcopy(metadata))
+                candidates.refresh_exclusions(self.now_fn())
+                planned.candidates = candidates
+                planned.blocked.difference_update(view.metadata_rejected - view.rejected)
+                planned.active = selected
+                planned.update(list(history.heard or history.tracks[:1]), [], history.transition, force=True)
             with self.lock:
                 check_stopping()
                 if (not current() or s.stop.is_set() or s.requested_direction is not requested
@@ -260,7 +261,8 @@ class RadioListening:
                 if (s.candidate_view() != view or s.history_view() != history
                         or s.feedback_dirty != dirty or s.metadata_revision != metadata_revision
                         or vars(source) != vars(before)):
-                    logger.info("Radio tuning rebase: attempt=%d", attempt + 1)
+                    attempt += 1
+                    logger.info("Radio tuning rebase: attempt=%d", attempt)
                     continue
                 s.candidates, s.directions = candidates, planned
                 s.metadata_rejected.clear()
@@ -272,7 +274,6 @@ class RadioListening:
                     s.edits.queue({'slot': selected, 'tracks': list(branch['tracks']),
                                    'choice': choice if branch['tracks'] else None})
                 return True
-        return False
 
     def select(self, s, proposal_id, menu_id, video_id=None, *, intent=None):
         """Queue a validated visible choice; the observer settles saved writes later."""

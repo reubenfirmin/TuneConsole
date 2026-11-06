@@ -137,7 +137,98 @@ def test_enrichment_updates_visible_metadata_without_rejecting_a_weak_genre_prio
     assert not c.refresh_metadata([track])
 
 
-def test_cold_start_keeps_library_and_discovery_bounded(store):
+@pytest.mark.parametrize('rejection', ['feedback', 'artist', 'genre', 'overlong'])
+def test_cold_start_keeps_library_and_discovery_bounded(store, monkeypatch, rejection):
+    from fastapi.testclient import TestClient
+    from tests.conftest import FakeClient, _track
+    from tests.derived_rating_support import seed_dislike
+    from yt_playlist.core.activity import WorkClosing, cancellable_work
+    from yt_playlist.core.db_writes import atomic_write
+    from yt_playlist.web.app import create_app
+
+    account = store.accounts.upsert_account('main', 'cred', None, True)
+    playlist = store.playlists.upsert_playlist(account, 'LIBRARY', 'Library', 0, '', 1)
+    entries, expected = [], set()
+    rec_params.set_param(store, 'max_track_minutes', 5)
+    with atomic_write(store):
+        for index in range(3 * CLUSTER_POOL_LIMIT + 7):
+            prefix = index < 2 * CLUSTER_POOL_LIMIT
+            video, artist = f'cold-{index}', f'Artist {index}'
+            entry = store.tracks.upsert_track(video, video, artist, '',
+                                              9000 if prefix and rejection == 'overlong' else 180)
+            entries.append(entry)
+            key = store.tracks.identity_key_for_video(video)
+            if prefix:
+                if rejection == 'feedback':
+                    seed_dislike(store, key, until=None, now=1000)
+                elif rejection == 'artist':
+                    store.rec_model.record_feedback('for_you', 'artist:' + artist, 'mute', now=1000)
+                elif rejection == 'genre':
+                    seed_enrichment(store, entry, 'Jazz', '2001')
+            else:
+                expected.add(video)
+        store.playlists.set_playlist_tracks(playlist, entries)
+        if rejection == 'genre':
+            family = store.genres.feature_axes(['Jazz'])['Jazz'][0]
+            store.rec_model.set_weight('genre:' + family, 0, lo=0, now=1000)
+    assert store.settings.get_setting('rec_content_model') is None
+    pages, read = [], store.radio_catalog.fallback_tracks
+
+    def paged(limit, *, after=0):
+        rows = read(limit, after=after)
+        pages.append((after, [row['id'] for row in rows]))
+        assert limit == CLUSTER_POOL_LIMIT and len(rows) <= limit
+        return rows
+
+    monkeypatch.setattr(store.radio_catalog, 'fallback_tracks', paged)
+    c = candidate(store)
+    assert len(c.pools['local']) == CLUSTER_POOL_LIMIT
+    assert {t['video_id'] for t in c.pools['local']} <= expected
+    assert len({t['key'] for t in c.pools['local']}) == CLUSTER_POOL_LIMIT
+    assert len(pages) == 3 and all(len(ids) == CLUSTER_POOL_LIMIT for _, ids in pages)
+    assert [cursor for cursor, _ in pages] == [0, pages[0][1][-1], pages[1][1][-1]]
+    c.close()
+    # Exercise real seed/start routes without prepared output or a supplied pool.
+    provider = FakeClient(catalog={v: _track(v, v, f'Artist {v.split("-")[-1]}') for v in expected})
+    app = create_app(store, lambda: {account: provider}, now_fn=lambda: 100_000)
+    ctx, frames = app.state.ctx, []
+    ctx.bridge._send = lambda frame: None
+    monkeypatch.setattr(ctx.bridge, 'send_control', lambda frame, **kw: frames.append(frame) or True)
+    monkeypatch.setattr(ctx.radio.work, 'start_thread', lambda *args, **kw: None)
+    store.settings.set_setting('onboard_listening_format', 'radio')
+    try:
+        with TestClient(app, base_url='http://127.0.0.1') as client:
+            offer = client.get('/radio/seeds').json()
+            assert len(offer['tracks']) == 16
+            assert {t['video_id'] for t in offer['tracks']} <= expected
+            if rejection == 'overlong':
+                started = client.post('/radio/start', json={
+                    'video_id': offer['tracks'][0]['video_id'], 'menu_id': offer['menu_id'],
+                    'launch_id': 'cold-prefix'}).json()
+                assert started['ok']
+                assert len(provider.created) == len(provider.added) == len(frames) == 1
+                assert set(provider.added[0][1]) <= expected
+                assert client.post('/radio/stop', json={'launch_id': 'cold-prefix'}).json()['ok']
+    finally:
+        ctx.radio.suspend()
+        ctx.radio.work.stop_executor()
+    # Exhaustion walks every remaining page, then terminates with no choices.
+    for video in expected:
+        seed_dislike(store, store.tracks.identity_key_for_video(video), until=None, now=1000)
+    pages.clear()
+    c = candidate(store)
+    assert not c.pools['local'] and not c.seed_offer()
+    assert len(pages) == 4 and len(pages[-1][1]) == 7
+    c.close()
+    # Cancel after one rejected page, before admitting another page.
+    pages.clear()
+    with pytest.raises(WorkClosing), cancellable_work(lambda: bool(pages)):
+        candidate(store)
+    assert len(pages) == 1
+
+    # Retain the existing comfort/discovery mix and lookahead coverage.
+    if rejection != 'overlong':
+        return
     for i in range(110):
         store.tracks.upsert_track(f"v{i}", f"Song {i}", f"Artist {i}", "", 200)
     fresh = [dict(key=f"fresh{i}", video_id=f"f{i}", title=f"Fresh {i}", artist=f"New Artist {i}")

@@ -1,8 +1,6 @@
-"""A refresh cannot replace an eligible complete board with a thinner result."""
+"""A refresh cannot replace a worker's complete board with a thinner result."""
 from copy import deepcopy
 from tests.derived_rating_support import seed_dislike
-
-import pytest
 
 from tests.rec.test_home_prepared import prepared, service, store
 from tests.recommendation_support import publish_bundles
@@ -22,7 +20,7 @@ def thin_candidates(store):
     publish_bundles(store, thin, 1002)
 
 
-def test_partial_candidate_refresh_preserves_the_eligible_complete_board(store, prepared):
+def test_partial_candidate_refresh_preserves_the_complete_worker_board(store, prepared):
     before = home_prepared.cards(store, prepared, 1001, service(store), record=False)
     assert len(before.protos) == 4
     old_videos = {track['video_id'] for card in before.protos for track in card['tracks']}
@@ -46,25 +44,25 @@ def test_partial_candidate_refresh_preserves_the_eligible_complete_board(store, 
     assert len(home_prepared.cards(store, replacement, 1006, service(store), record=False).protos) == 4
 
 
-@pytest.mark.parametrize('reason', ['dislike', 'unavailable'])
-def test_partial_refresh_does_not_retain_an_ineligible_old_board(store, prepared, reason):
+def test_feedback_and_availability_do_not_discard_a_complete_worker_board(store, prepared):
+    # Freeze the displayed choice; an unrecorded draw has new exposure metadata
+    # and may select another worker menu after its mode evidence changes.
+    before = home_prepared.cards(store, prepared, 1000, service(store))
     keys = {track['key'] for menu in prepared['menus'] for card in menu['protos']
             if card['lane'] != 'comfort' for track in card['tracks']}
     assert keys
-    if reason == 'dislike':
-        for key in keys:
-            seed_dislike(store, key, until=None, now=1001)
-    else:
-        with store.conn:
-            store.conn.executemany('UPDATE youtube_items SET available=0 WHERE recording_id='
-                '(SELECT id FROM recordings WHERE identity_key=?)', [(key,) for key in keys])
-    assert len(home_prepared.cards(store, prepared, 1001, service(store), record=False).protos) < 4
+    for key in keys:
+        seed_dislike(store, key, until=None, now=1001)
+    with store.conn:
+        store.conn.executemany('UPDATE youtube_items SET available=0 WHERE recording_id='
+            '(SELECT id FROM recordings WHERE identity_key=?)', [(key,) for key in keys])
+    assert home_prepared.cards(store, prepared, 1001, service(store), record=False).protos == before.protos
     thin_candidates(store)
     replacement = home_prepared.prepare(store, 1003)
-    assert replacement and replacement['generation'] != prepared['generation']
-    current = home_prepared.cards(store, replacement, 1004, service(store), record=False)
-    assert len(current.protos) == 1
-    assert keys.isdisjoint(track['key'] for card in current.protos for track in card['tracks'])
+    assert replacement is None
+    current = home_prepared.cards(store, prepared, 1004, service(store), record=False)
+    assert current.protos == before.protos
+    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == prepared
 
 
 def test_first_partial_menu_is_published_without_an_existing_complete_board(store, prepared):

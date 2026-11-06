@@ -2,10 +2,26 @@
 import hashlib
 import json
 from pathlib import Path
+import socket
 from urllib.parse import urlsplit
 
 import pytest
+import uvicorn
 from playwright.sync_api import expect
+
+from tests.live_server import LiveServer
+from tests.quiet_validation_support import prepare_quiet_actions
+
+
+@pytest.fixture
+def quiet_actions_app(store, monkeypatch):
+    data = prepare_quiet_actions(store, monkeypatch)
+    with socket.socket() as listener:
+        listener.bind(('127.0.0.1', 0))
+        server = uvicorn.Server(uvicorn.Config(data['app'], host='127.0.0.1',
+            port=listener.getsockname()[1], log_level='warning'))
+        with LiveServer(server, sockets=[listener]):
+            yield {**data, 'base': f'http://127.0.0.1:{listener.getsockname()[1]}'}
 
 
 DIAGNOSTIC = 'internal-diagnostic-879: HTTP 503 transport/parser failure'

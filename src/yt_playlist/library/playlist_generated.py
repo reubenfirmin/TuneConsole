@@ -147,7 +147,7 @@ def gc_generated_playlists(store, clients, now, grace_days=None, *, retry_only=F
     return collected
 
 def create_generated_playlist(store, title, tracks, client, now, account_id=None, group=None,
-                              recipe=None, *, max_duration_s=None) -> dict:
+                              recipe=None, *, max_duration_s=None, on_created=None) -> dict:
     """Create a NEW playlist on YouTube from recommendation tracks (dicts with video_id + metadata),
     record its generated origin and quarantine until explicit adoption, and optimistically
     materialize it into the store so it shows up in the Playlists tab right away (a later sync
@@ -204,6 +204,8 @@ def create_generated_playlist(store, title, tracks, client, now, account_id=None
         # would diverge from the preview (the shuffle is seed-stable but its input differs once rows
         # are pruned). Pruning just drops rows; the survivors keep their already-good spacing.
     new_pid = client.create_playlist(title, GENERATED_DESCRIPTION)
+    if on_created is not None:
+        on_created(new_pid, title)
     recording = recording and not getattr(store, 'activity_paused', False)
     if recording:
         store.playlists.mark_generated_playlist(new_pid)

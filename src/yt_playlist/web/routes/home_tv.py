@@ -1,6 +1,7 @@
 """Serve prepared TV and materialize video playlists through the normal writer."""
 import json
 import math
+import re
 import threading
 import uuid
 
@@ -9,10 +10,9 @@ from fastapi.responses import JSONResponse
 
 from yt_playlist.core.accounts import client_for
 from yt_playlist.core.activity import activity_for
-from yt_playlist.library.playlist_generated import create_generated_playlist
 from yt_playlist.library import live_plays, player_events
-from yt_playlist.library import tv_stream
-from yt_playlist.rec import measurement, tv, tv_artwork, tv_visual
+from yt_playlist.library import tv_launch, tv_stream
+from yt_playlist.rec import tv, tv_artwork, tv_visual
 from yt_playlist.web.context import request_form
 from yt_playlist.web.routes.home_access import guard
 
@@ -83,6 +83,9 @@ def build(ctx):
         if not ready and ctx.rec_worker:
             ctx.rec_worker.trigger_tv_refresh()
         result = {'ready': ready, 'max_minutes': tv.max_minutes(ctx.store)}
+        account = next((a for a in ctx.store.accounts.get_accounts() if a.is_master), None)
+        if account and (pending := ctx.store.rec_proposals.pending_tv_launch(account.id)):
+            result['pending_launch'] = pending
         if not ready and (message := preparation_message()):
             result['message'] = message
         return result
@@ -114,9 +117,16 @@ def build(ctx):
         return status()
 
     @router.post('/home/tv/play', dependencies=[Depends(guard(ctx, 'tv'))])
-    def play():
-        items = tv.queue(ctx.store, ctx.now_fn())
-        if not items:
+    def play(form=Depends(request_form)):
+        request_id = form.get('request_id') or ''
+        if request_id and not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', request_id):
+            return JSONResponse({'pending': True}, status_code=400)
+        if not request_id:
+            account = next((a for a in ctx.store.accounts.get_accounts() if a.is_master), None)
+            request_id = (ctx.store.rec_proposals.pending_tv_launch(account.id) if account else None) or uuid.uuid4().hex
+        previous = ctx.store.rec_proposals.tv_launch(request_id)
+        items = [] if previous else tv.queue(ctx.store, ctx.now_fn())
+        if not previous and not items:
             if ctx.rec_worker:
                 ctx.rec_worker.trigger_tv_refresh()
             result = {'preparing': True}
@@ -124,23 +134,18 @@ def build(ctx):
                 result['message'] = message
             return JSONResponse(result, status_code=202)
         try:
-            account_id, client = client_for(ctx.store, ctx.client_provider())
-            recipe = {'lane': 'tv', 'media': 'video', 'max_minutes': tv.max_minutes(ctx.store),
-                      'videos': items, 'tv_stream': uuid.uuid4().hex}
-            result = activity_for(ctx).wrap('create TV playlist', create_generated_playlist,
-                ctx.store, 'TV', items, client, ctx.now_fn(), account_id, recipe=recipe,
-                max_duration_s=math.inf if recipe['max_minutes'] is None else recipe['max_minutes'] * 60)()
-            playlist, videos = playlist_items(ctx.store, result['pid'])
-            tv.record_draw(ctx.store, videos)
-            measurement.record_action(ctx.store, 'save', ctx.now_fn(), playlist_id=playlist.id,
-                                      event_id=f"generate:{result['new_ytm']}", generated=True)
-            return {'playlist_id': playlist.id, 'title': playlist.title, 'items': videos, 'stream': recipe['tv_stream']}
-        except ValueError as error:
-            return JSONResponse({'error': str(error)}, status_code=400)
+            pid, stream = activity_for(ctx).wrap('start TV session', tv_launch.start,
+                ctx.store, ctx.client_provider(), request_id, items, ctx.now_fn())()
+            playlist, videos = playlist_items(ctx.store, pid)
+            state = ctx.store.rec_proposals.tv_launch(request_id)
+            wanted = set(state['outcome']['confirmed'])
+            videos = [t for t in videos if t['video_id'] in wanted]
+            return {'playlist_id': playlist.id, 'title': playlist.title, 'items': videos, 'stream': stream}
+        except tv_stream.PendingTV:
+            return JSONResponse({'pending': True, 'request_id': request_id}, status_code=202)
         except Exception:
             ctx.logger.exception('TV playlist creation failed')
-            return JSONResponse({'error': 'Couldn’t generate the TV session. Try again shortly.'},
-                                status_code=502)
+            return JSONResponse({'pending': True, 'request_id': request_id}, status_code=202)
 
     @router.post('/home/tv/reset')
     def reset():

@@ -186,8 +186,8 @@ def test_bundles_keep_ppr_in_candidate_generation_during_pool_rebuild(store, mon
         return result
 
     monkeypatch.setattr(mode_surfaces, "_calculate_bundles", capture)
-    assert mode_surfaces.prepare_bundles(store, 100_000) is None
-    assert store.rec_proposals.get_proposals("mode_bundles") is None
+    assert mode_surfaces.prepare_bundles(store, 100_000) is not None
+    assert store.recommendations.head('home') is not None
     payload = calculated[0]
     assert payload["_ppr"]["1"][0] == keys[0]
     assert payload["_ppr"]["2"][0] == keys[1]

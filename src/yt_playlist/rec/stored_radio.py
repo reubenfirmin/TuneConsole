@@ -102,19 +102,46 @@ class PreparedRadio:
         if self.current_reader is not None:
             yield
             return
-        with self._reader() as reader:
+        with (nullcontext(self.store) if getattr(self.store, '_read_only', False)
+              else self.store.read_view(seconds=None)) as reader:
+            previous_facts = getattr(reader, '_radio_candidate_facts', None)
+            reader._radio_candidate_facts = OrderedDict()
             token = _planning_read.set(dict(owner=self, reader=reader, pages=OrderedDict(),
-                                           headings=OrderedDict(), axes=OrderedDict()))
+                                           headings=OrderedDict(), axes=OrderedDict(), facts={}))
             try:
                 yield
             finally:
                 _planning_read.reset(token)
+                reader._radio_candidate_facts = previous_facts
 
     def _cached_read(self, name, key, load, limit):
         scope = _planning_read.get()
         if scope is None or scope['owner'] is not self:
             return load()
         return _cached(scope[name], key, load, limit)
+
+    def planning_fact(self, key, load):
+        """Share snapshot facts, never history-dependent rankings, across streams."""
+        scope = _planning_read.get()
+        if scope is None or scope['owner'] is not self:
+            return load()
+        if key not in scope['facts']:
+            scope['facts'][key] = load()
+        return scope['facts'][key]
+
+    def track_facts(self, name, keys, load):
+        """Batch point reads once per recording in this planning snapshot."""
+        if self.current_reader is None:
+            return load(keys)
+        cache = self.planning_fact(name, OrderedDict)
+        missing = list(dict.fromkeys(key for key in keys if key not in cache))
+        loaded = load(missing) if missing else {}
+        for key in missing:
+            cache[key] = loaded.get(key)
+        result = {key: cache[key] for key in keys if cache[key] is not None}
+        while len(cache) > 8192:
+            cache.popitem(last=False)
+        return result
 
     def genre_axes(self, label):
         with self._reader() as reader:
@@ -136,7 +163,7 @@ class PreparedRadio:
                        include_display)
                 page = self._cached_read('pages', key, lambda: current.recommendations.candidate_page(
                     self.surface(surface), mode, purpose, generation=self.generation, after=after,
-                    limit=PAGE_SIZE, band=band, genres=genres, include_display=include_display), 32)
+                    limit=PAGE_SIZE, band=band, genres=genres, include_display=include_display), 256)
                 after = page['after']
                 for track in page['tracks']:
                     if track['key'] in used or track['video_id'] in excluded or not allowed(track):
@@ -265,7 +292,7 @@ class PreparedRadio:
             if priority is not None and loss > priority:
                 break
             found = self.tracks('radio', mode, 'membership', band=band, genres=[genre], allowed=allowed,
-                                excluded=excluded, used=used, limit=limit - len(result))
+                                excluded=excluded, used=used, limit=limit - len(result), include_display=False)
             if found:
                 priority = loss
                 result.extend(found)

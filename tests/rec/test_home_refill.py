@@ -110,7 +110,7 @@ def test_updated_set_replaces_fallback_in_same_window_and_clears_notice(store, p
 
 
 @pytest.mark.usefixtures('returning_vibe_listener')
-def test_stale_mixes_still_apply_new_dislikes(store, prepared):
+def test_stale_worker_mixes_survive_new_dislikes_until_replaced(store, prepared):
     first = home_prepared.cards(store, prepared, 1000, service(store), record=False)
     key = first.protos[0]['tracks'][0]['key']
     with mix_tuning.adjusting_vibe(store, 1001):
@@ -118,7 +118,7 @@ def test_stale_mixes_still_apply_new_dislikes(store, prepared):
     seed_dislike(store, key, until=None, now=1001)
     result = home_prepared.cards(store, home_prepared.load(store, 1002), 1002, service(store), record=False)
     assert result.protos and result.preference_notice
-    assert key not in {t['key'] for p in result.protos for t in p['tracks']}
+    assert [p['tracks'] for p in result.protos] == [p['tracks'] for p in first.protos]
 
 
 @pytest.mark.usefixtures('refill_inputs')
@@ -146,12 +146,8 @@ def test_vibe_fresh_reuses_prepared_recipe_inputs(store, monkeypatch):
     assert home.built_fresh(parameters, 1002) == expected
 
 
-@pytest.mark.parametrize('blocked_tuned,blocked_baseline,source,count', [
-    (0, 0, 'tuned', 4), (1, 0, 'baseline', 4), (4, 0, 'baseline', 4),
-    (1, 2, 'tuned', 3), (4, 4, 'tuned', 0),
-])
-def test_eligibility_chooses_usable_cache_before_recording(
-        store, monkeypatch, unlocked_home_controls, blocked_tuned, blocked_baseline, source, count):
+def test_worker_menu_is_recorded_intact_despite_later_feedback(
+        store, monkeypatch, unlocked_home_controls):
     caches = {}
     for name in ('baseline', 'tuned'):
         payload = publish_menu(store, prefix=name, modeled=True)
@@ -178,10 +174,7 @@ def test_eligibility_chooses_usable_cache_before_recording(
     for name, surface in (('baseline', home_prepared.SURFACE), ('tuned', 'home_tuned')):
         assert home_prepared._valid(caches[name])
         store.rec_proposals.put_proposals(surface, caches[name], 1001)
-    excluded = set()
-    for name, blocked in (('tuned', blocked_tuned), ('baseline', blocked_baseline)):
-        for proto in caches[name]['menus'][0]['protos'][:blocked]:
-            excluded.update(t['key'] for t in proto['tracks'])
+    excluded = keys(caches['tuned']) | keys(caches['baseline'])
     for key in excluded:
         seed_dislike(store, key, until=None, now=1002)
     impressions, scheduled = [], []
@@ -193,28 +186,29 @@ def test_eligibility_chooses_usable_cache_before_recording(
         return record_modes(protos, epoch, now)
 
     monkeypatch.setattr(home, 'record_modes', capture_modes)
-    expected = keys(caches[source]) - excluded
+    expected = keys(caches['tuned'])
     for now in (1003, 1004):
         payload = home_prepared.load(store, now, lambda: scheduled.append(True))
         assert payload == caches['tuned']
         result = home_prepared.cards(store, payload, now, home, lambda: scheduled.append(True))
-        assert len(result.protos) == count
+        assert len(result.protos) == 4
         assert {t['key'] for p in result.protos for t in p['tracks']} == expected
-        assert result.choice_context == caches[source]['choice_context']
-        assert bool(result.preference_notice) == (source == 'baseline')
-        assert result.preparing == (source == 'baseline' or count < 4)
+        assert [p['tracks'] for p in result.protos] == [p['tracks'] for p in caches['tuned']['menus'][0]['protos']]
+        assert result.choice_context == caches['tuned']['choice_context']
+        assert result.preference_notice is None
+        assert not result.preparing
         held = store.rec_proposals.get_proposals('home_choice')
-        assert held['prepared_tuning'] == caches[source]['tuning']
-        assert held['assignment']['generation'] == source
-    assert len(impressions) == (2 if count else 0)
+        assert held['prepared_tuning'] == caches['tuned']['tuning']
+        assert held['assignment']['generation'] == 'tuned'
+    assert len(impressions) == 2
     assert all({t['key'] for p in protos for t in p['tracks']} == expected
                for protos in impressions)
-    assert bool(scheduled) == bool(blocked_tuned)
+    assert not scheduled
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == caches['baseline']
 
 
 @pytest.mark.parametrize('selection', ['include', 'avoid'])
-def test_partial_genre_menu_keeps_usable_offers_before_falling_back(
+def test_partial_genre_menu_keeps_worker_offers_while_refilling(
         store, prepared, selection):
     request = ({'include_genres': ['jazz']} if selection == 'include' else
                {'avoid_genres': ['ambient', 'classical', 'rock-indie', 'techno', 'trance']})
@@ -246,8 +240,8 @@ def test_partial_genre_menu_keeps_usable_offers_before_falling_back(
     assert scheduled
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == prepared
 
-    # Exhaust the same served menu: a cached choice must stop offering dislikes,
-    # retain the baseline publication and explain the fallback on both retries.
+    # Feedback belongs to the next worker publication. Serving preserves this
+    # menu and continues requesting the missing lanes on both retries.
     for key in keys:
         seed_dislike(store, key, until=None, now=1005)
     scheduled.clear()
@@ -255,10 +249,10 @@ def test_partial_genre_menu_keeps_usable_offers_before_falling_back(
         payload = home_prepared.load(store, now)
         assert payload == tailored
         shown = home_prepared.cards(store, payload, now, service(store), lambda: scheduled.append(True))
-        assert shown.protos and shown.preparing and shown.preference_notice
+        assert shown.protos and shown.preparing and shown.preference_notice is None
         held = store.rec_proposals.get_proposals('home_choice')
-        assert held['prepared_tuning'] == prepared['tuning']
-        assert not keys & {t['key'] for p in shown.protos for t in p['tracks']}
+        assert held['prepared_tuning'] == tailored['tuning']
+        assert contents(shown.protos) == initial
     assert scheduled
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == prepared
 

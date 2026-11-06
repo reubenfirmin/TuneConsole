@@ -49,13 +49,17 @@ class ReadSnapshot:
             self.store.conn.close()
             self._reader_released = True
 
-    def publish(self, target, *, defer_checkpoint=True, allow_stale_tables=frozenset()):
+    def publish(self, target, *, defer_checkpoint=True, allow_stale_tables=frozenset(),
+                validate_inputs=True):
         """Publish atomically, then checkpoint outside the serving lock for every projection.
 
         ``defer_checkpoint=False`` retains SQLite's inline policy for diagnostic comparisons.
         Disposable rankings may explicitly tolerate changes to soft catalog/evidence inputs.
         Their serving path must recheck current eligibility. Models use the strict default;
-        external writers and schema changes always invalidate publication.
+        external writers and schema changes invalidate ordinary publication.
+        Captured recommendation outputs may set ``validate_inputs=False``:
+        source updates then belong to a later run, while replacing the database
+        or changing its schema still prevents publication to another destination.
         """
         timings = PublicationTimings()
         checkpoint = False
@@ -69,7 +73,7 @@ class ReadSnapshot:
                 changes = self.source.conn.total_changes
                 with deferred_autocheckpoint(self.source.conn,
                         defer_checkpoint and self.source._db_path is not None) as checkpoint:
-                    published = self._publish_locked(target, timings, allow_stale_tables)
+                    published = self._publish_locked(target, timings, allow_stale_tables, validate_inputs)
                 checkpoint = checkpoint and self.source.conn.total_changes != changes
             outcome = 'published' if published else 'deferred'
             return published
@@ -136,10 +140,13 @@ class ReadSnapshot:
             return False
         return True
 
-    def _publish_locked(self, target, timings, allow_stale_tables):
+    def _publish_locked(self, target, timings, allow_stale_tables, validate_inputs=True):
         conn = self.source.conn
         try:
-            if not self._inputs_current(timings, allow_stale_tables):
+            current = (self._inputs_current(timings, allow_stale_tables) if validate_inputs else
+                       getattr(self.source, '_database_generation', 0) == self._database_generation
+                       and conn.execute('PRAGMA schema_version').fetchone()[0] == self._schema)
+            if not current:
                 conn.rollback()
                 return False
             with timings.measure('writes'):

@@ -213,7 +213,7 @@ def test_discovery_publishes_usable_tiles_during_listening_updates(library, monk
 
 
 @pytest.mark.parametrize('change', ['feedback', 'preferences', 'model', 'schema', 'external-writer'])
-def test_playback_tolerance_keeps_authoritative_inputs_strict(library, monkeypatch, change):
+def test_captured_rankings_finish_despite_input_changes_but_preserve_the_schema_boundary(library, monkeypatch, change):
     calculate = mode_surfaces._calculate_bundles
     old_heads = library.recommendations.heads()
 
@@ -236,8 +236,13 @@ def test_playback_tolerance_keeps_authoritative_inputs_strict(library, monkeypat
         return result
 
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', superseded)
-    assert mode_surfaces.prepare_bundles(library, 2000) is None
-    assert library.recommendations.heads() == old_heads
+    result = mode_surfaces.prepare_bundles(library, 2000)
+    if change == 'schema':
+        assert result is None
+        assert library.recommendations.heads() == old_heads
+    else:
+        assert result is not None
+        assert library.recommendations.heads() != old_heads
     assert not library.conn.in_transaction
 
 

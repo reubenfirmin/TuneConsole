@@ -1,389 +1,186 @@
-# Recommendation application boundaries
+# Recommendations
 
-Monthly recaps use each account's retained listening calendar. `trend_statistics`
-folds account dates into monthly totals, discovery, diversity and streaks.
-`trend_payload` prepares the recap on a private snapshot reader; `recap_metrics`
-and `recap_details` measure and select its optional detail screens. `trend_rollups`
-reads quarantined inputs and publishes only `built_at` and `story`, together with
-the first-play index, through the existing source-generation check. Expensive work
-stays in background maintenance; a stale or failed publication preserves the prior
-generation. Home owns recap viewed/dismissed state. The retired Trends charts,
-weekly overlays, insight detectors, health payload and spotlight are no longer built.
+Ranking and model fitting run locally on CPU. Requests read prepared output;
+background workers fit models and publish complete generations. Failed or stale
+work preserves the last usable output.
 
-Radio's genre dial has explicit endpoints. Fully Eclectic actively chooses a
-different genre from the preceding song, favors genres heard less recently, and
-uses genre-family distance to prefer broader changes when recency ties. Fully
-Themed pins every continuation to the currently playing song's genre, including
-when that song changes during a pending edit. Missing genre metadata cannot
-satisfy a pin; an exhausted pinned genre does not spill into another genre.
-The middle retains embedding similarity and local style transitions, with
-progressive genre contrast or focus toward either end. Energy and familiarity
-rank candidates within the endpoint's genre policy.
+## Owners
 
-`radio_genres` owns genre identity and contrast independently of embeddings.
-`radio_candidates` inspects existing prepared metadata across all taste regions
-and hydrates at most four pools per endpoint pick; it never loads the library
-matrix or fits a model during a pick. `radio_directions` passes observed playback
-separately from its proposed future, so an unheard song cannot move a genre pin.
-Moving the dial rebuilds the future without restarting playback, changing the
-heard history, or permanently rejecting songs excluded by a temporary genre pin.
+| Area | Owner |
+| --- | --- |
+| Collaborative fitting | `embedding_training`: detached baskets and play-count gains into `FittedVectors` |
+| Content fitting | `content_model`: genre/audio vocabulary, normalization and model identity |
+| Committed vector reads | `embedding_vectors`: ordered `VectorSpace` values and guarded discovery re-encoding |
+| Neighbors and graph expansion | `embed`; shared normalization/blending in `vector_math` |
+| Taste | `scoring`, `transient`, `layers`; [listening-choice contract](../../../LISTENING_CHOICES_DESIGN.md) |
+| Home cards | `home_cards.HomeCards`: lanes, pools, offers, impressions and audits |
+| Home mix cache | `home_cache`: paths, compression and file lifecycle before atomic SQL head publication; `repos.home_cache`: SQL metadata and references |
+| Group mixes | `group_home`, `group_serving`, `group_learning`, `group_viz`; [group contract](../../../ADAPTIVE_TASTE_GROUPS.md) |
+| Recaps | `trend_statistics`, `trend_payload`, `recap_metrics`, `recap_details`, `trend_rollups` |
+| Response metrics | `scorecard`: detached ledger inputs, clustered intervals and experiment eligibility |
+| Model publication | `model_refresh` through persistence owners in one guarded transaction |
 
-Radio's coordinator applies lifecycle transitions and policy results.
-`radio_edits` permits one append or replacement operation plus a queued DJ
-choice. Each operation holds at most one uncertain write. `radio_mutations`
-owns their shared intent/receipt journal, transport, complete readback,
-substitution, timeout and local publication protocol. A lost reply is reconciled
-before another write is allowed. `radio_playlist_tail` plans suffix edits from
-explicit playback and candidate views; it performs no I/O. `radio_policy`
-receives candidate, history and feedback views instead of a web Session, and
-returns feedback/exclusion results for the coordinator to apply.
-`radio_persistence` retains the v2 checkpoint shape and migrates v1 flags.
-Receipt journaling updates only the current episode's operation, preserving a
-concurrent Stop and any newer queued choice. Playback observation/navigation
-and HTTP projections remain separate collaborators. `radio_launch` owns seed
-resolution, initial creation, settled initial readback and checkpoint attachment;
-only the coordinator selects the live session and navigates after persistence.
-`radio_listening` owns observed history, feedback application, visible-menu
-attribution and ephemeral direction changes. `radio_preparation` returns prepared
-candidate upgrades and detached listening samples; the coordinator rejects results
-for stopped or replaced sessions before publication. These owners receive explicit
-ports and session inputs, with no reference or callbacks to the whole controller.
-`Session` applies confirmed mutation results and preserves heard positions and
-choice credit when the server accepts an alternate upload.
+Routes compose pages and controls. They do not own recommendation policy.
+Repositories own queries and writes; they do not import recommendation policy,
+Store or web orchestration. Shared settings live in `core.recommendation_settings`.
 
-`home_cards.HomeCards` owns Home candidate assembly, lane and genre policy, pool
-selection, offered counts, served impressions and diagnostic audits. Its request
-and result dataclasses carry policy inputs and template-independent results. The
-job port admits pool work only on an explicit start request; reading cards or
-polling a pool does not start work. `web/routes/home.py` composes the page and the
-board, tuning, discovery, onboarding and generation route groups. `home_views`
-shares request-cached prepared reads and fragment presentation across those groups,
-including response headers and audit points. Recommendation policy stays outside HTTP.
-Existing rankers, recipes and recommendation surfaces remain the policy engines.
+Home mix cache writes use FAO compression and atomic replacement without fsyncs
+or write-time rereading. The service writes files before reserving the database
+writer, then switches publication heads and evidence references together. Its
+existing file-lifetime lease prevents orphan collection between those steps.
+Readers capture SQL descriptors before opening files outside the repository.
 
-Vibe selection consumes one prepared score per listening purpose. Background
-`vibe_preparation` uses the recording's own captured excerpts and selected
-provider measurements (including AcousticBrainz), then conservative predictions
-from distinct measured recordings with the same canonical artist credit set and
-specific subgenre, then artist-only or subgenre-only evidence. The original
-musical heuristic fills missing evidence. Broad genres never form prediction
-cohorts, and predictions never become measurement evidence. Home uses these
-scores directly; radio's intensity control uses the greater prepared shared
-Energize or shared Release fit, preserving comparable scales and their own
-propagation lineage. Slow forceful music can still count as intense.
+## Radio
 
-`audio_vibe_cruise` supplies Cruise suitability from the bundled PMEmo/DEAM
-native arousal/valence heads. It averages native attributes across captured
-excerpts, maps each source to moderate activation and positive valence, then
-averages the two source scores. `audio_vibe_release` averages per-excerpt clipped
-Jamendo aggression predictions. `audio_vibe_relax` averages per-excerpt clipped
-native attributes, applies fixed source mappings and combines Emotify (50%),
-Soundtracks (25%), ManyMusic (12.5%, equal natural/generated experts) and Memo
-(12.5%). Its serving aggregation is explicit; the frozen training used mean
-embeddings. `audio_vibe_uplift` uses the same serving order with separate native
-valence/happiness/joy predictors: Soundtracks 25%; DEAM, PMEmo, Jamendo human,
-Emotify, ManyMusic and Memo 12.5% each. ManyMusic again splits equally between
-natural and generated experts. The user selected this fixed blend while
-accepting the documented generated-music regression; the learned blend is not
-used. `audio_vibe_energize` uses the same per-excerpt clipping/averaging order:
-50% source-balanced arousal (DEAM, PMEmo, ManyMusic and Memo), 25% Soundtracks
-energy and 25% Emotify power. ManyMusic splits equally across natural/generated
-experts. The no-joy export omits joy and the exercise mapping; user adoption
-accepts the research tradeoffs and favors broader labeled-source coverage.
-`audio_vibe_focus` predicts the original CAL500 Reading and Studying fractions
-directly from each excerpt's embedding, clips both outputs, averages across
-excerpts and takes their equal mean. Its frozen heads use 494 labeled songs;
-the internal vibe key remains `concentrate`.
-`audio_vibe_model` retains the shared Emotify model's six-way
-classification and adds a separate `suitability` map for preparation: individual
-Cruise, Release, Relax, Uplift, Energize and Focus. These uncalibrated
-scores rank songs within a selected vibe; they never enter a mixed six-way
-maximum or the banner's classification threshold.
+The coordinator applies lifecycle transitions and policy results through explicit
+ports. Collaborators do not receive the whole controller.
 
-All six specialists default to `active`. Set `YT_PLAYLIST_AUDIO_VIBE_RELAX_MODE`,
-`YT_PLAYLIST_AUDIO_VIBE_RELEASE_MODE`, `YT_PLAYLIST_AUDIO_VIBE_CRUISE_MODE` or
-`YT_PLAYLIST_AUDIO_VIBE_UPLIFT_MODE`, `YT_PLAYLIST_AUDIO_VIBE_ENERGIZE_MODE` or
-`YT_PLAYLIST_AUDIO_VIBE_FOCUS_MODE` to
-`off` for that vibe's rollback. Cruise also retains its existing `shadow`
-diagnostic mode. The corresponding `_MODEL` setting overrides each bundled JSON
-path; an explicit empty path disables it. Environment values take precedence
-over `.env.local`. Missing, invalid or extractor-incompatible optional models
-retain that vibe's shared score and any other working specialists. Disabling
-the shared model also disables the specialists. The bounded preparation version
-includes all artifact hashes, routing modes and policy versions, so changing or
-rolling back a head refreshes existing
-captures and their propagated predictions without audio extraction or fitting.
-Incomplete playbacks retain the existing provider/heuristic fallback until a
-complete capture is available. Raw labels and experiment files are never read.
+| Owner | Responsibility |
+| --- | --- |
+| `radio_genres`, `radio_candidates`, `radio_directions` | Genre policy, bounded prepared pools and observed playback direction |
+| `radio_launch` | Seed resolution, initial playlist creation/readback and checkpoint attachment |
+| `radio_edits` | One append/replacement operation plus a queued DJ choice |
+| `radio_mutations` | Intent/receipt journal, transport, readback, timeout and reconciliation |
+| `radio_playlist_tail`, `radio_policy` | Detached edit/feedback calculations without I/O |
+| `radio_listening` | Observed history, feedback and visible-menu attribution |
+| `radio_preparation` | Candidate upgrades and detached samples; reject stopped/replaced sessions |
+| `radio_persistence` | Checkpoints, preserving concurrent Stop and newer choices |
 
-Seven relations own this data: `sample_attributes` references immutable sample
-JSON files; `measurements` retains model scores, linked through `measurement_samples`;
-`predictions` retains projected scores, with `prediction_artists` for their exact
-conditioning credits and `prediction_inputs` for original contributing measurements.
-`recording_vibes` selects current scores for serving and indexed ranking. Musical
-profile JSON contains dimensions, without duplicating these scores. Cohort
-statistics are calculated from current original measurements in the background;
-`rec_vibe_pending` pages affected recordings through the existing preparation worker.
-New measurements, metadata/credit corrections and configured model
-changes refresh dependencies without a full content-model fit. Support increases
-with distinct recordings and agreement; one useful measurement already nudges a
-prediction. Replays and multiple uploads do not add votes. Missing or incomplete
-audio retains the provider/heuristic path, and last-good profiles remain readable
-through preparation, restart and failed publication.
+A lost remote reply is reconciled before another mutation. Only confirmed uploads
+enter applied state; incomplete reads cannot authorize replay. The coordinator
+selects the live session and navigates after persistence.
 
-Migration 61 preserves prior scores and model versions. Legacy predictions have
-`lineage_complete=0`: their old JSON did not retain exact contributor IDs, so the
-migration does not invent them. Unknown historical measurement times are null.
-New predictions retain complete measurement links. Exact-video reassociation moves
-sample file references and retires obsolete measurement/sample links; original
-calculations and historical prediction inputs keep their original ownership.
+Fully Eclectic changes genre and favors less-recently heard genres. Fully Themed
+pins to the actually playing song's genre; missing metadata or an exhausted genre
+cannot satisfy that pin. Intermediate settings blend local similarity and genre
+contrast. Energy and familiarity rank within that policy. Tuning changes the
+future queue without restarting playback or turning temporary exclusions into dislikes.
 
-Human popup labels are **INTERNAL DEVELOPMENT ONLY**. They are targets for the
-local trainer and evaluation, never product preferences, per-recording overrides,
-runtime inference inputs or seeds for artist/subgenre predictions. The exported
-JSON coefficients may use both base metadata and captured audio; their feature
-normalization and regularization treat both sources equally.
+[Radio stream planning](radio-stream-planning.md) describes the four continuation
+hypotheses, shared candidate facts, Apply lifecycle and performance measurements.
 
-`group_home` assembles Home Mix tapes from the last complete versioned graph
-projection in `group_serving`; initial preparation and explicit rollback retain
-the previous path. Each offer freezes its exact definition and hierarchy for
-`group_learning`, and `group_viz` presents that same generation in Taste Model.
-See [the adaptive grouping design](../../../ADAPTIVE_TASTE_GROUPS.md) for serving,
-lineage, work budgets and isolated actual-library reproduction.
+## Vibes
 
-Initial setup offers verified library songs as soon as they arrive. Completion
-follows usable prepared mix or album offers and their required progression;
-sparse accounts can receive these offers before any taste modes are fitted.
-Feedback alone does not complete setup. Metadata coverage is reported as counts
-rather than a readiness percentage. The obsolete `onboard_coverage_min`,
-`onboard_library_min` and `onboard_feedback_min` controls are retired. Historical
-settings and checkpoints remain readable; these keys no longer affect controls
-or readiness.
+`vibe_requests` saves each explicit selection and runs one generation thread
+outside the HTTP request lifetime, without an overall generation deadline.
+New selections supersede pending work; only the current request may switch
+cache heads. Incomplete preparation keeps the previous complete board.
+The existing Vibe control observes the saved request with GET requests, including
+after reload or restart, and never replays a selection POST to recover a lost reply.
+Completed mixes wait until the listener closes an open mix before replacing it.
 
-Road-trip work has three owners:
+`vibe_preparation` uses direct capture/provider measurements, then conservative
+predictions from distinct measured recordings with matching canonical credits and
+specific subgenres. Broad genres do not form prediction cohorts. Predictions and
+repeated uploads never add measurement votes; missing evidence uses the heuristic.
 
-- `road_trip_candidates` acquires provider rows and metadata, reads eligible
-  library candidates, and ranks the acquired pool. `InputRequest` and
-  `CandidateBatch` describe one provider acquisition without changing a draft.
-- `road_trip_mix.construct` accepts a fixed `MixRequest` and explicit random
-  source, and returns allocation, ordering and shortfalls in `MixResult`. It has
-  no provider, HTTP, repository or playlist-write dependency. Shortfalls remain
-  visible while a draft is building and after final fallback fills.
-- `road_trip` owns draft creation, incremental acquisition transitions, edits,
-  normalization, quotas, rerolls and the persisted JSON shape. It applies mixer
-  results to the draft and delegates searches to the acquisition owner.
+The shared Emotify model supplies classification. Six independent specialists
+supply within-vibe suitability. Their scores are not comparable probabilities
+and never enter a mixed six-way maximum. Radio intensity retains the shared
+Energize/Release channels. Human popup labels are development targets, excluded
+from runtime preferences, inference and propagation.
 
-The road-trip routes continue to persist drafts through `repos.road_trip` and
-create playlists through `library.playlist_generated`. These boundaries do not change
-eligibility, pool budgets, duration fitting or the persisted draft format. Pool
-exhaustion behavior, including the concern in #205, remains a separate behavior
-change rather than an implicit part of this extraction.
+[Model provenance](../../../experiments/audio_lab/README.md#model-provenance)
+owns recipes, training inputs, model settings, adoption decisions and rejected
+alternatives. Optional-model failure retains that vibe's shared score and other
+working specialists. Model identity changes queue rescoring without audio
+extraction or fitting.
 
-Repositories own persistence queries and writes. They may import neutral core
-definitions and detached data models, but must not import recommendation policy,
-Store or web orchestration. Shared saved-setting definitions live in
-`core.recommendation_settings`; runtime code does not import numbered migrations.
-Historical migration definitions remain frozen.
+| Relation | Purpose |
+| --- | --- |
+| `sample_attributes` | Immutable sample-file references |
+| `measurements`, `measurement_samples` | Original scores and sampled inputs |
+| `predictions`, `prediction_artists`, `prediction_inputs` | Predictions, conditioning credits and original contributors |
+| `recording_vibes` | Current serving scores and indexed ranking |
 
-Recommendation reads have four explicit owners. `repos.rec_query` projects catalog
-metadata, content inputs and library distributions. `repos.rec_evidence` reads
-historical provenance and constructs current or cutoff training baskets on one
-pinned snapshot. `repos.rec_eligibility` shares generated-playlist quarantine,
-catch-all exclusion, feedback suppression and saved track-length rules.
-`repos.rec_candidates` retrieves bounded, ranked playable library candidates;
-`rec.surfaces` composes those sources and applies personalized lane policy.
-Each owner binds directly to the serving Store or its private snapshot. Catalog
-queries do not forward historical, eligibility or candidate methods.
+Legacy incomplete lineage remains explicit. Exact-video reassociation changes
+current sample links without rewriting historical prediction ownership.
 
-Serving persistence has explicit owners too. `repos.rec_ledger` owns rendered
-offers, responses, exposure counters, immutable serving policies and historical
-attribution inputs. Its typed `home_offer_dedup` and `home_offer_signatures`
-owners atomically deduplicate actual offers independently of prepared output.
-`repos.rec_proposals` still owns the remaining last-good prepared output;
-`repos.playlist_recipes` owns saved recipes and Clusters canvases;
-`repos.rec_signals` owns mood feedback, themes and graduation history; and
-`repos.artist_similarity` owns the Last.fm cache and canonical similarity edges.
-`rec.scorecard` calculates rates, clustered intervals and experiment eligibility
-from detached ledger inputs after the private reporting snapshot is released.
-Trace policies and outcomes are loaded on the same snapshot, preserving historical
-ownership even after catalog changes. Repositories do not import scorecard policy.
+## Road Trip and setup
 
-Bundle preparation first releases its private reader and calls
-`rec_proposals.stage_prepared_bundles`. Immutable UTF-8 chunks commit at most
-64 KiB per transaction, remaining hidden behind the previous serving heads.
-Identical retries resume their committed prefix; expired inactive builds are
-removed in bounded transactions. The first cutover retains the legacy payload
-without rewriting it. Direct legacy replacement or invalidation removes its head.
-Discovery pruning and policy retention read the active payloads.
+`road_trip_candidates` acquires and ranks eligible candidates. The pure
+`road_trip_mix.construct` accepts a fixed request and random source, returning
+allocation, ordering and shortfalls. `road_trip` owns drafts, incremental work,
+edits, quotas and persistence shape. Routes persist through `repos.road_trip`
+and create playlists through `library.playlist_generated`.
 
-Bundle publication calls `rec_ledger.publish_prepared_policies`,
-`rec_proposals.publish_prepared_bundles` and `settings.publish_values` in one
-`ReadSnapshot.publish` transaction. Only small cache references are switched in
-this transaction; none of these methods commits independently. Failure or stale
-inputs retain both last-good proposal sets and prevent partial policy publication.
+Setup offers usable songs and prepared mixes/albums as they become available;
+fitted taste modes are not a universal prerequisite. Feedback alone does not
+complete setup. Metadata coverage is a count, not a readiness percentage.
 
-`model_refresh` prepares serialized model results on a private snapshot without
-constructing SQL. Publication calls each persistence owner inside one
-`ReadSnapshot.publish` transaction: `rec_model` applies changes to its fixed vector spaces,
-`settings` writes saved values, `modes` publishes stable mode identities, and
-`rec_refresh` acknowledges the captured notification revision. These operations
-require the existing transaction and do not commit individually or accept
-arbitrary SQL. A stale snapshot publishes nothing; a failure in any owner rolls
-back the complete generation and leaves the notification pending. Fitting and
-ranking finish before the publication transaction begins.
+## Persistence and publication
 
-Playback ticks, ratings telemetry and pause events remain stored without queuing
-model refreshes. Migration v040 narrows the durable player-event notifications to
-track exits, disconnects and ended events. Skip queries track those event kinds
-separately, so telemetry cannot invalidate an unrelated ranking snapshot. Expired
-candidate pools request ranking only. Superseded model and pool calculations keep
-their retry intent with increasing delays capped at sixty seconds; ratings and
-other serving work continue during that delay. Failed calculations retain their
-separate failure backoff and the last published results.
+| Repository | Owns |
+| --- | --- |
+| `rec_query` | Catalog metadata, content inputs and distributions |
+| `rec_evidence` | Historical provenance and cutoff training baskets |
+| `rec_eligibility` | Generated-play quarantine, exclusions, feedback and length rules |
+| `rec_candidates` | Bounded ranked playable candidates |
+| `rec_ledger` | Offers, responses, deduplication, immutable policies and attribution |
+| `rec_proposals` | Last-good prepared outputs and staged bundles |
+| `playlist_recipes` | Saved recipes and Clusters canvases |
+| `rec_signals` | Mood feedback, themes and graduation |
+| `artist_similarity` | Last.fm cache and canonical similarity edges |
 
-The vector repository compares serialized bytes on the pinned reader and prepares
-upserts and removals before taking the serving lock. Identical rows remain intact,
-including their revision counters. Reading each requested output space registers it
-as a dependency, so a competing publisher invalidates the prepared changes. Library
-and artist vector loaders use their fitted key order. Discovery vectors retain their
-encoder's source order: if a delta would change that order, only that space falls
-back to replacement. Partial publication therefore preserves full replacement's
-ordering and tied scores.
+Fitting, ranking, serialization and file preparation finish outside the serving
+transaction. Bundle chunks stage in bounded commits before their heads change.
+One `ReadSnapshot.publish` transaction switches policies, bundles/settings or
+model/vector/mode generations and acknowledges the consumed revision. Persistence
+methods join that transaction; they never commit independently. A late failure
+rolls back the whole publication. Changed dependencies reject stale model fits.
+Recommendation pools finish and publish their captured snapshot while inputs
+advance. They retain the policy actually used; serving applies current eligibility.
 
-Every file-backed `ReadSnapshot.publish` temporarily defers SQLite's automatic WAL
-checkpoint, including Trends, cluster bundles, Home projections and model updates.
-The atomic commit retains the configured synchronous policy and revision triggers.
-After restoring the original checkpoint policy and releasing the serving lock, a
-private connection performs a best-effort PASSIVE checkpoint. Busy readers or writers
-can leave WAL pages for a later checkpoint. Checkpoint failure cannot turn an already
-committed generation into a failed publication. This is no hard latency bound: durable
-commit still holds the serving lock, and a later foreground commit can checkpoint if
-it wins the race with the private connection. There is no durability reduction.
-Stale, cancelled, rolled-back and unchanged publications do not request a checkpoint;
-an explicitly disabled automatic checkpoint policy remains disabled.
+Vector deltas compare serialized bytes on the pinned reader. Unchanged rows keep
+their revisions; changed spaces preserve fitted key order and tied scores.
+Discovery order changes require replacing that space.
 
-Publication diagnostics report wall and thread CPU time separately for serving-lock
-acquisition, lock ownership, writer reservation, revision capture, writes, commit and
-checkpoint. Lock ownership of at least 100 ms is reported at INFO; faster publications
-remain at DEBUG even when their checkpoint takes longer. Revision-trigger work during
-writes is included in the write stage. These timings distinguish a slow durable commit
-from checkpoint work and from foreground callers waiting for the shared connection.
+File-backed publication defers automatic WAL checkpointing until after commit
+and serving-lock release. A private connection then attempts PASSIVE checkpointing.
+Busy checkpoints retry later; checkpoint failure cannot undo a committed generation.
+Commit retains its durability policy and can still hold the lock. Diagnostics
+separate admission, writes, commit and checkpoint wall/CPU time.
 
-`tests/bench_svd_background.py` provides complete, partial and unchanged refresh probes
-with stage wall/CPU times, serving-lock holds, memory, event-loop lag and concurrent
-Home/database latency. Its matched publication comparison alternates the old atomic
-replacement and prepared changes with identical payloads, separating revision capture,
-vector writes, commit and checkpoint. Review measurements on 2026-10-23 used 22,378
-saved vector rows across five spaces and 13 modes, with all writes on disposable
-backups. Alternating matched full-payload trials held the serving lock for 862–876 ms
-with atomic replacement and 209–212 ms with prepared changes and deferred checkpointing.
-The latter spent 127–128 ms writing vectors and 80–84 ms committing; its 372–374 ms
-checkpoint ran outside the lock. A one-row change took 2–5 ms under the lock, compared
-with 90–95 ms for replacement; identical vectors took 2–4 ms rather than 891–951 ms.
+## Preparation limits
 
-The saved-library regression target is less than half the matched replacement lock
-duration for a full changed payload, with no vector writes for unchanged inputs and
-only changed rows written for an ordinary partial refresh. This target compares the
-same payload on the same machine; it is not a general foreground latency guarantee.
-An actual complete-generation probe held the lock for 58 ms, with maximum Home/database
-latencies of 125/52 ms and event-loop lag of 15 ms. Most fitted bytes were unchanged in
-that probe, so the matched full-change trials remain the stronger publication stress
-comparison. Durable commit and a racing foreground checkpoint can still limit latency.
-The earlier 250 ms full-generation threshold was not an agreed requirement.
+`progressive.Preparation` persists changed inputs and publishes content spaces
+and reconciled modes atomically. Catalog changes queue later input capture;
+prepared-input or competing-model changes reject stale fits.
 
-Those measurements covered vector generations. They do not establish latency for
-ordinary projections: later live logs showed 318–411 ms commits from Trends and cluster
-bundles, which had still used inline checkpoints. The shared publication boundary now
-covers them. `test_compare_saved_library_projection_publications` alternates inline and
-deferred checkpointing for both production builders, using fresh disposable copies of
-one frozen library and the same calculation time. It reports wall/CPU stages, memory,
-event-loop lag, Home/database latency and serving-lock holds. Review execution on
-2026-10-23 passed both cases, with four alternating trials each on a 6,143-track library.
-For bundles, the serving lock fell from 457–599 ms inline to 250–259 ms deferred;
-commit fell from 384–532 ms to 184–191 ms, with 293–294 ms of checkpoint work outside
-the lock. Maximum concurrent Home/database latency fell from 529–649/447–598 ms to
-317–322/243–259 ms. Whole-builder cost remained 18.35–18.58 s wall and 14.61–14.70 s
-thread CPU, with 339–348 MiB peak RSS and 92–114 ms maximum event-loop lag across all
-trials. This change reduces publication contention, not the underlying fitting cost.
-Trends showed no consistent latency improvement: inline/deferred lock holds were
-48/34–49 ms, with Home maxima of 56–66/48–70 ms and database maxima of 43–45/32–39 ms.
-Its builders took 0.80–0.84 s wall and 0.63–0.66 s thread CPU, with 170–173 MiB peak RSS
-and 9–16 ms maximum event-loop lag. These are matched observations, not a new hard
-latency guarantee for ordinary projections.
+| Work | Admission budget |
+| --- | --- |
+| Capture | Up to 32 recordings per five seconds; two-second cooperative budget |
+| Basis fit | Ten seconds, 32,768 rows, 128 MiB estimate; at most once per minute |
+| Complete model fit | Twenty seconds, 512 MiB estimate; at most once per minute |
+| Recommendation pool round | At most one start per 60 minutes, shared by worker and discovery jobs |
+| Detached collaborative fit cache | 64 MiB; reuse only with an exact input fingerprint |
+| Missing-input audit | Startup and every 15 minutes, at most 32 keys per slice |
 
-`tests/test_architecture.py` enforces import direction, migration separation,
-SQL-free preparation and publication ownership. Model refresh and repository
-publication tests cover model equivalence, stale inputs, coalesced notifications
-and rollback after a late publication failure. These boundaries preserve the SVD
-and item2vec implementations and ranking policy.
+Basis fitting normally needs 10% changed inputs, capped at 128 with a one-row
+floor. Complete fitting needs four evidence changes or 10% changed inputs
+(floor four, cap 128), or changed settings. Aged changes admit after 15 minutes.
+Memory/row limits and three repeated time limits defer fitting for 15 minutes;
+other transient failures retry after a minute. Deferred work retains inputs,
+checkpoints and last-good output. Estimates cover working data, not total RSS;
+native operations can finish after a cooperative deadline.
 
-`model_refresh` retains the complete collaborative and artist training lifecycle.
-`progressive.Preparation` also captures changed recordings in durable slices and
-fits the established content encoder and taste clusters from accepted inputs.
-An empty catalog waits for evidence; a sparse catalog can publish a content vector
-without waiting for providers or the clustering minimum; growing catalogs expand
-their content space and clusters while the previous results remain available.
-Each captured batch re-encodes only its recordings against the exact published
-basis, including its audio normalization. A changed basis replaces both content
-spaces and its reconciled modes atomically. Catalog writes during this fit only
-queue later capture; prepared-input or competing-model writes still reject it.
-No stale-source exception is used for model publication.
+Playback telemetry does not queue model fits. Track exits, disconnects and
+ended events retain their distinct signals. Candidate expiry requests ranking
+only. Hourly checks compare preferences, relevant Home/mode impressions and
+decay with the last captured round. An unchanged account skips ranking. Updates
+during a round belong to the next check; they never cancel or restart it. The
+check timestamp survives restart, and an active round cannot overlap another.
 
-Capture admits at most 32 recordings every five seconds, within two seconds of
-cooperative work. Hot batches halve and rotate behind other work. Basis fitting
-has a ten-second cooperative budget, a 32,768-row limit, a 128 MiB working-set
-estimate and a one-minute interval. Native operations finish before the next
-cooperative checkpoint. A basis needs ten percent changed recordings, capped at
-128 and with a one-recording floor for small catalogs. A complete model fit needs
-four explicit evidence changes or ten percent changed recordings (floor four,
-cap 128), or changed model settings. Both stages admit smaller aged changes after
-15 minutes. Complete fits retain the worker's one-minute admission interval and
-have a twenty-second cooperative budget and a 512 MiB working-set estimate checked
-before collaborative matrix construction and content encoding. Deferred work keeps its durable inputs
-and last published output; retries continue even after capture drains its queue.
-These are resource admission limits, not a claim that the entire catalog is ready.
-The encoder fills one preallocated float32 matrix; clustering reuses it and keeps
-its existing float64 arithmetic, distance chunks, seed and ordering. Decoded
-inputs are released before clustering. Admission estimates the encoding,
-clustering and publication phases separately, including cluster-member copies
-and old serialized vectors. The 128 MiB estimate covers admitted working data,
-not the application's total RSS.
+## Verification
 
-The same preparation worker audits missing, unqueued inputs at startup and every
-15 minutes, requeueing at most 32 keys per guarded slice. Existing queue revisions,
-positions and accepted inputs are preserved. Memory/row-limit failures, and time
-limits repeated three times, retry every 15 minutes without requiring new writes.
-Other transient fit failures retain the one-minute retry interval. Fit status and
-retry deadlines survive restart. Model Health polls a cheap saved-status endpoint
-and warns when these limits still prevent progress; successful basis publication
-clears the warning atomically. A retry cannot guarantee that an arbitrarily large
-library fits the unchanged limits. Input publication and basis completion have
-separate diagnostic phases so catch-up cannot hide a blocked fit.
+`tests/test_architecture.py` checks import direction, SQL-free preparation and
+publication ownership. Focused model/repository tests cover stale inputs,
+equivalence, notifications and rollback. `tests/bench_svd_background.py` measures
+full, partial and unchanged refreshes, projection publication and foreground
+availability using isolated library copies. It retains the matched full-payload
+target of less than half the replacement lock duration; historical timings are
+not current latency guarantees.
 
-The worker also retains up to 64 MiB of detached collaborative fits across deferred
-publications. A retry reads its baskets and weights again and reuses a fit only
-when their exact input fingerprint matches. This preserves SVD and SGNS objectives,
-account/recording keys and strict publication guards. Accepted content inputs survive
-restart; the bounded fit cache is disposable and is rebuilt after restart.
-
-`Preparation.status()` exposes pending/prepared counts, published vector counts,
-fit checkpoints, input fingerprints, estimated bytes and budgets. Bounded
-maintenance summaries distinguish initial/accumulated/aged evidence, hot inputs,
-bootstrap coverage, memory limits and time limits. Listener setup copy does not
-expose these diagnostics. The like-ratchet upgrade remains frozen in migration `v007_like_ratchet`.
-Isolated model builders used by algorithm and saved-format tests live in
-`tests/model_support.py`; they are not application entry points. Production
-invalidation, equivalence and atomic-publication tests exercise `model_refresh`.
-
-Embedding calculations have explicit input and result contracts. `embedding_training`
-fits sparse collaborative models from detached baskets and optional play-count gains,
-returning `FittedVectors`. `content_model` fits the shared genre/audio vocabulary from
-`ContentInputs`, encodes library and discovery rows, and owns persisted model identity.
-`embedding_vectors` reads and decodes committed generations as `VectorSpace` values;
-its discovery re-encoding retains the generation compare-and-publish check. `embed`
-owns neighbor retrieval, connection geometry and cluster expansion. Its `expand_spaces`
-calculation receives detached spaces and explicit blend/seed controls. Track and artist
-models share normalization and percentile blending through `vector_math`. Request
-adapters read existing vectors; fitting and complete publication remain in the worker's
-snapshot lifecycle. These boundaries preserve key ordering, empty-space sentinels,
-float32 output, sparse accumulation, deterministic random seeds and cancellation.
+See [test commands](../../../tests/README.md),
+[database maintenance](../core/README.md) and the
+[Charts contract](../../../LISTENING_ANALYTICS_DESIGN.md).

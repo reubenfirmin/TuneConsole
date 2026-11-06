@@ -95,14 +95,14 @@ def start_fresh_pool(ctx, parameters):
             fresh_pool.populate(ctx, **parameters,
                                 on_progress=lambda text: job.events.append({"text": text}))
             job.events.append({"text": "Preparing your fresh mix…"})
-            # Preference/offer inputs can change while a rank snapshot is being
-            # staged. Retry that guarded deferral before declaring the explicit
-            # build complete; a missing publication is not an empty result.
-            for _ in range(3):
-                if fresh_pool.prepare(ctx.store, ctx.now_fn()) is not None:
-                    break
-            else:
-                raise ActionInputError('fresh_preferences_changed')
+            head = ctx.store.recommendations.head('fresh')
+            job.result = {'generation': head['id'] if head else None, 'requested_at': ctx.now_fn()}
+            # Imported candidates join the next preparation round. Repeated
+            # clicks must not bypass its cadence or restart an active run.
+            if fresh_pool.prepare(ctx.store, ctx.now_fn()) is None:
+                job.outcome = 'waiting'
+                job.events.append({"text": "Your fresh mix is queued for the next music update."})
+                ctx.rec_worker.trigger_candidate_refresh()
             ctx.rec_worker.trigger_home_refresh(force=True)
         except Exception as e:  # noqa: BLE001
             ctx.logger.warning("Fresh pool build failed", exc_info=True)
@@ -110,7 +110,7 @@ def start_fresh_pool(ctx, parameters):
             job.validation_code = e.code if isinstance(e, ActionInputError) else None
             job.outcome = 'failed'
         finally:
-            job.done = True
+            job.done = job.outcome != 'waiting'
 
     try:
         activity_for(ctx).start_thread(run)

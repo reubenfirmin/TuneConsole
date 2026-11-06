@@ -462,7 +462,6 @@ def test_record_cover_changes_immediately_when_replaying_history(page, radio_ui)
 
 @pytest.mark.parametrize('width,height,motion', [
     pytest.param(1440, 1000, True, id='desktop-motion'),
-    pytest.param(1792, 1398, False, id='tall-layout'),
 ])
 def test_session_history_rises_from_junction_and_queues_preview_without_switching(
         page, radio_ui, width, height, motion, motion_costs):

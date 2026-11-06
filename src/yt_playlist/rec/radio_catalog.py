@@ -8,6 +8,30 @@ from itertools import islice
 from yt_playlist.rec.radio_genres import GenrePolicy
 
 
+def fallback_pool(store, allowed, *, limit):
+    """Fill a bounded cold pool from eligible library rows, past rejected pages."""
+    from yt_playlist.core.activity import check_cancellable_work
+
+    tracks, seen, after = [], set(), 0
+    while len(tracks) < limit:
+        check_cancellable_work()
+        rows = store.radio_catalog.fallback_tracks(limit, after=after)
+        check_cancellable_work()
+        if not rows:
+            break
+        after = rows[-1]['id']
+        for track in rows:
+            if track['key'] in seen or not allowed(track):
+                continue
+            seen.add(track['key'])
+            tracks.append(track)
+            if len(tracks) == limit:
+                return tracks
+        if len(rows) < limit:
+            break
+    return tracks
+
+
 def cluster_pool(store, keys, excluded, excluded_keys, allowed, *, limit):
     """Hydrate eligible recordings, scanning past stale/removed uploads in pages.
 

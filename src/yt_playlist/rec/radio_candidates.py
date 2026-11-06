@@ -75,7 +75,7 @@ def _prepared_inputs(store, *, project=None, prepared=None, blocked=(), muted=()
     """Read one committed model/pool generation; inflate after closing its reader."""
     owned = (getattr(store, '_read_only', False)
              or getattr(store._lock, 'held_by_current_thread', False))
-    with (nullcontext(store) if owned else store.read_view()) as reader:
+    with (nullcontext(store) if owned else store.read_view(seconds=None)) as reader:
         generation = reader.settings.get_setting('rec_content_generation')
         encoding_model = reader.settings.get_setting('rec_content_model')
         space = vectors.content_space_id(reader, snapshot={'model': encoding_model})
@@ -177,7 +177,7 @@ class RadioCandidates:
             if paired.get('_ranked_generation') is not None:
                 self.prepared = PreparedRadio(store, now, generation=paired['_ranked_generation'],
                                               surface_prefix=paired['_ranked_prefix'])
-                with store.read_view() as reader:
+                with store.read_view(seconds=None) as reader:
                     captured = self.prepared.capture_inputs(reader, self.modes, space, self.generation,
                                                            self.blocked, self.muted, self.tuning['comfort'])
                 bundles = self.prepared.decode_inputs(captured)
@@ -234,7 +234,7 @@ class RadioCandidates:
             # Cold start stays bounded, without another scoring pass or size gate.
             rows = bundles.get("all", {}).get("wheelhouse", [])[:CLUSTER_POOL_LIMIT]
             if not rows:
-                rows = store.radio_catalog.fallback_tracks(CLUSTER_POOL_LIMIT)
+                rows = radio_catalog.fallback_pool(store, self._allowed, limit=CLUSTER_POOL_LIMIT)
             fresh = bundles.get("all", {}).get("fresh", [])
             if not fresh and self.prepared is None:
                 fresh = store.rec_proposals.get_proposals("fresh_pool") or []
@@ -373,8 +373,10 @@ class RadioCandidates:
         return eligible
 
     def _stored_intensity_candidates(self, history, excluded, genres, styles):
-        self.refresh_exclusions()
-        self.genre_weights = self.read_store.rec_model.get_weights(now=max(self.prepared_at, self.now_sampled_at))
+        def eligibility():
+            self.refresh_exclusions()
+            return self.read_store.rec_model.get_weights(now=max(self.prepared_at, self.now_sampled_at))
+        self.genre_weights = self.prepared.planning_fact('eligibility', eligibility)
         used = {t['key'] for t in history} | self.blocked
         used.update(self.by_video[video]['key'] for video in excluded if video in self.by_video)
         energy = self.tuning['energy']
@@ -387,8 +389,8 @@ class RadioCandidates:
                                                           excluded=excluded, used=used, limit=1)
             if probe:
                 options.append((priority, position, mid))
-            elif not self.read_store.recommendations.intensity_bands(self.prepared.surface('radio'), mid, 'membership',
-                                                               generation=self.prepared.generation):
+            elif not self.prepared.planning_fact(('intensity_bands', mid), lambda: self.read_store.recommendations.intensity_bands(
+                    self.prepared.surface('radio'), mid, 'membership', generation=self.prepared.generation)):
                 # A legitimately unindexed mode keeps its bounded neutral path.
                 probe = self.prepared.tracks('radio', mid, 'membership', allowed=allowed, excluded=excluded,
                                              used=used, limit=1)
@@ -477,8 +479,9 @@ class RadioCandidates:
         if self.prepared is not None and self.prepared.generation is not None:
             for start in range(0, len(tracks), CLUSTER_POOL_LIMIT):
                 batch = tracks[start:start + CLUSTER_POOL_LIMIT]
-                scores = self.read_store.recommendations.ranks(self.prepared.surface('radio'), 'all', 'scores', [track['key'] for track in batch],
-                                                          generation=self.prepared.generation)
+                scores = self.prepared.track_facts('scores', [track['key'] for track in batch],
+                    lambda keys: self.read_store.recommendations.ranks(self.prepared.surface('radio'), 'all', 'scores', keys,
+                                                                      generation=self.prepared.generation))
                 for track in batch:
                     track['_radio_catalog_score'] = scores.get(track['key'], {}).get('score') or 0
         # Legacy saved sessions have no profile stamp. Hydrate those bounded
@@ -543,7 +546,9 @@ class RadioCandidates:
         return valid
 
     def _energy(self, tracks):
-        profiles = musical_character.load(self.read_store, [t['key'] for t in tracks])
+        keys = [track['key'] for track in tracks]
+        load = lambda keys: musical_character.load(self.read_store, keys)
+        profiles = self.prepared.track_facts('profiles', keys, load) if self.prepared is not None else load(keys)
         changed = False
         for track in tracks:
             profile = profiles.get(track['key'])

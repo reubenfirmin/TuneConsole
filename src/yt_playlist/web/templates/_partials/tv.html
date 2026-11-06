@@ -14,9 +14,9 @@
     </div>
     <div class="tv-idle" x-show="(!playerMounted || finished) && !generating">
       <span class="tv-mark" aria-hidden="true"><svg viewBox="0 0 48 48"><rect x="5" y="10" width="38" height="29" rx="5"/><path d="m19 3 5 7 5-7M21 19l10 6-10 6Z"/></svg></span>
-      <h2 x-text="error ? 'Let’s find something to watch' : 'Music worth watching'">Music worth watching</h2>
+      <h2 x-text="launchPending ? 'Your TV session' : error ? 'Let’s find something to watch' : 'Music worth watching'">Music worth watching</h2>
       <p x-text="error || 'Videos picked from your taste. Press play and see what comes on.'"></p>
-      <button type="button" class="btn btn-primary" x-show="ready || items.length || error || playerError" :disabled="starting || loading" @click="start()">Play TV</button>
+      <button type="button" class="btn btn-primary" x-show="ready || items.length || error || playerError" :disabled="starting || loading" @click="start()" x-text="launchPending ? 'Check TV session' : 'Play TV'">Play TV</button>
     </div>
   </div>
   <nav class="tv-filmstrip" x-ref="filmstrip" aria-label="TV playlist" x-show="sessionStarted && (playerMounted || finished)" x-cloak>

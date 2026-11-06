@@ -66,7 +66,7 @@ def test_real_initial_import_prepares_and_serves_home_before_modes_without_legac
     disliked = catalog['tracks'][0]['key']
     seed_dislike(store, disliked, until=None, now=1002)
     refreshed = home_prepared.cards(store, prepared, 1002, service(store), record=False)
-    assert all(track['key'] != disliked for proto in refreshed.protos for track in proto['tracks'])
+    assert [p['tracks'] for p in refreshed.protos] == [p['tracks'] for p in result.protos]
 
 
 def test_unmodeled_genre_selection_reaches_complete_tail_with_bounded_pages(fresh, monkeypatch):

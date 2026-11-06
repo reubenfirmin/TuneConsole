@@ -260,10 +260,46 @@ def test_http_result_exposes_partial_destination_and_recovery(store, monkeypatch
     assert response.status_code == 200
     if operation == "generated":
         assert "Partially saved" in response.text
-        assert "Review partial playlist" in response.text
-        assert "Action Log and recovery" in response.text
+        assert 'Your selected songs' in response.text
+        assert 'Some songs are still unconfirmed.' in response.text
+        assert 'null, true, true, false,' in response.text
         assert "window.location.assign" not in response.text
         assert "1 addition(s) remain unconfirmed" in client.get("/actions").text
+        ytm = destination.created[0][0]
+        recovery = {'account_id': identity, 'playlist': ytm, 'confirmed': ['v1'],
+                    'rejected': [], 'uncertain': ['v2'], 'unattempted': []}
+        form = {'recovery': json.dumps(recovery),
+                'tracks': json.dumps([{'video_id': t['videoId']} for t in tracks])}
+        # A lagging complete read, an incomplete read and a disconnected
+        # provider must all retain uncertainty without replaying additions.
+        read = destination.get_playlist
+        assert client.post('/home/generate/reconcile', data=form).json() == recovery
+        monkeypatch.setattr(destination, 'get_playlist', lambda *a, **kw: {'tracks': [], 'continuation': 'next'})
+        assert client.post('/home/generate/reconcile', data=form).json() is None
+        monkeypatch.setattr(destination, 'get_playlist', lambda *a, **kw: (_ for _ in ()).throw(TimeoutError()))
+        assert client.post('/home/generate/reconcile', data=form).json() is None
+        monkeypatch.setattr(destination, 'get_playlist', read)
+        destination._tracks[ytm] = tracks
+        # This check also works while writes are paused, without local changes.
+        store.activity_paused = True
+        store.conn.execute('PRAGMA query_only=ON')
+        changes = store.conn.total_changes
+        try:
+            checked = client.post('/home/generate/reconcile', data=form).json()
+            assert checked['confirmed'] == ['v1', 'v2'] and not checked['uncertain']
+            assert store.conn.total_changes == changes
+        finally:
+            store.conn.execute('PRAGMA query_only=OFF')
+            store.activity_paused = False
+        # Rejections stay separate from absence/unknown; a later positive read
+        # can establish delivery even for an earlier rejected occurrence.
+        recovery.update(confirmed=[], rejected=['v1'], uncertain=['v2'])
+        form['recovery'] = json.dumps(recovery)
+        destination._tracks[ytm] = tracks[1:]
+        checked = client.post('/home/generate/reconcile', data=form).json()
+        assert checked['rejected'] == ['v1'] and checked['confirmed'] == ['v2']
+        assert not checked['uncertain']
+        assert len(destination.created) == len(destination.added) == 1
         return
     result = response.json()
     assert result["status"] == "partial"

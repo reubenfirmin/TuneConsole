@@ -1,4 +1,4 @@
-"""Prepared offers remain disposable; exposure and current eligibility remain authoritative."""
+"""Worker-produced mixes are served intact; exposure survives disposable preparation."""
 from concurrent.futures import ThreadPoolExecutor
 from tests.derived_rating_support import seed_dislike, seed_like
 from collections import Counter
@@ -21,7 +21,7 @@ from tests.home_prepared_support import seed
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.store import Store
-from yt_playlist.rec import home_cards, home_prepared, home_themes, mix_tuning, mode_surfaces, surfaces
+from yt_playlist.rec import candidate_refresh, home_cache, home_cards, home_prepared, home_themes, mix_tuning, mode_surfaces, surfaces
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.web.app import create_app
 
@@ -74,7 +74,7 @@ def service(store):
     return home_cards.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__))
 
 
-def test_capacity_projection_preserves_menu_selection_and_eligibility(store, prepared):
+def test_capacity_projection_preserves_worker_menu_after_feedback(store, prepared):
     def selections(projected):
         with store.read_view() as reader:
             payload = home_prepared.peek(reader, 1000, readiness_only=projected)
@@ -85,8 +85,7 @@ def test_capacity_projection_preserves_menu_selection_and_eligibility(store, pre
     assert len(original) == 4
     assert selections(True) == original
     seed_dislike(store, original[0][0], until=None, now=999)
-    assert selections(True) == selections(False)
-    assert original[0][0] not in {key for tracks in selections(True) for key in tracks}
+    assert selections(True) == selections(False) == original
 
 
 def test_capacity_projection_does_not_hide_invalid_collection_data(store, prepared):
@@ -330,7 +329,7 @@ def test_missing_candidate_dependencies_keep_last_usable_home(store, prepared):
     assert home_prepared.cards(store, prepared, 1001, service(store), record=False).protos
 
 
-def test_new_skip_filters_an_already_prepared_menu_without_changing_the_heart(store, prepared):
+def test_new_skip_keeps_the_prepared_menu_and_the_heart(store, prepared):
     first = home_prepared.cards(store, prepared, 1001, service(store), record=False)
     track = next(track for proto in first.protos for track in proto['tracks'])
     iid = store.accounts.upsert_account('Main', 'credential', None, True)
@@ -339,7 +338,7 @@ def test_new_skip_filters_an_already_prepared_menu_without_changing_the_heart(st
         iid, 'next', track['video_id'], 1, 200, '', None, 1002)
     served = home_prepared.cards(store, prepared, 1003, service(store), record=False)
     assert served.protos
-    assert track['key'] not in {item['key'] for proto in served.protos for item in proto['tracks']}
+    assert [p['tracks'] for p in served.protos] == [p['tracks'] for p in first.protos]
     assert track['key'] in store.rec_model.recent_liked_keys()
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == prepared
 
@@ -376,10 +375,10 @@ def test_initial_import_can_offer_catalog_mix_before_tags_or_models(store, monke
     disliked = catalog['tracks'][0]['key']
     seed_dislike(store, disliked, until=None, now=1002)
     result = home_prepared.cards(store, prepared, 1002, service(store), record=False)
-    assert all(t['key'] != disliked for p in result.protos for t in p['tracks'])
+    assert next(p for p in result.protos if p['lane'] == 'explore')['tracks'] == catalog['tracks']
 
 
-def test_explicit_metadata_choice_during_build_preserves_last_candidate_heads(store, monkeypatch):
+def test_explicit_metadata_choice_during_build_allows_captured_candidate_heads_to_finish(store, monkeypatch):
     from yt_playlist.core import catalog
 
     entries = [store.tracks.upsert_track(f'import-{i}', f'Song {i}', f'Artist {i}', None, None)
@@ -395,12 +394,12 @@ def test_explicit_metadata_choice_during_build_preserves_last_candidate_heads(st
         return result
 
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', choose_during_calculation)
-    assert mode_surfaces.prepare_bundles(store, 1001) is None
-    assert {surface: store.recommendations.head(surface)['id'] for surface in ('home', 'fresh')} == before
+    assert mode_surfaces.prepare_bundles(store, 1001) is not None
+    assert {surface: store.recommendations.head(surface)['id'] for surface in ('home', 'fresh')} != before
     assert store.tracks.track_detail('import-0')['genre'] == 'House'
 
 
-def test_changed_artist_links_allow_preparation_but_current_canonical_mutes_still_apply(home_inputs, monkeypatch):
+def test_changed_artist_links_do_not_rewrite_the_worker_publication(home_inputs, monkeypatch):
     store = home_inputs
     store.rec_model.record_feedback('for_you', 'artist:Guest', 'mute', now=999)
     original = home_cards.HomeCards.cards
@@ -413,8 +412,8 @@ def test_changed_artist_links_allow_preparation_but_current_canonical_mutes_stil
             track = proto['tracks'][0]
             corrected.append(deepcopy(proto))
             store.tracks.upsert_track('imported', 'Imported song', 'New artist', '', None)
-            # The display credit stays unchanged; the corrected canonical artist
-            # relationship must still apply the existing mute at serving time.
+            # A changed canonical credit after selection belongs to the next
+            # worker preparation, rather than a second selection during serving.
             store.tracks.upsert_track(track['video_id'], track['title'], track['artist'], '', None,
                                       credits=[{'name': 'Guest'}])
         return result
@@ -424,9 +423,10 @@ def test_changed_artist_links_allow_preparation_but_current_canonical_mutes_stil
     assert prepared is not None
     key = corrected[0]['tracks'][0]['key']
     assert key in {t['key'] for m in prepared['menus'] for p in m['protos'] for t in p['tracks']}
-    current = home_prepared._eligible_protos(store, corrected, 1001)
-    assert current and current[0]['tracks']
-    assert key not in {t['key'] for p in current for t in p['tracks']}
+    current = home_prepared.cards(store, prepared, 1001, service(store), record=False)
+    chosen = next(menu for menu in prepared['menus']
+                  if [p['experiment_id'] for p in menu['protos']] == [p['experiment_id'] for p in current.protos])
+    assert [p['tracks'] for p in current.protos] == [p['tracks'] for p in chosen['protos']]
 
 
 def test_ordinary_home_reads_use_prepared_results_without_selection_or_analytics(store, prepared, monkeypatch):
@@ -505,20 +505,27 @@ def test_corrupt_prepared_payload_never_breaks_home_routes(store, prepared, dama
     assert scheduled
 
 
-def test_saving_all_wheelhouse_tracks_does_not_change_the_held_cards(store, prepared, monkeypatch):
+def test_saving_fresh_tracks_in_generated_playlists_does_not_truncate_worker_mixes(store, prepared, monkeypatch):
     initial = home_prepared.cards(store, prepared, 1000, service(store))
-    proto = next(p for p in initial.protos if p['lane'] == 'wheelhouse')
+    proto = next(p for p in initial.protos if p['lane'] == 'fresh')
+    assert len(proto['tracks']) == 12
+    original = deepcopy(prepared)
     iid = store.accounts.upsert_account('main', 'cred', None, True)
-    pid = store.playlists.upsert_playlist(iid, 'saved-mix', 'Saved mix', len(proto['tracks']), None, 1001)
-    tids = store.tracks.track_ids_for_videos([track['video_id'] for track in proto['tracks']])
-    store.playlists.set_playlist_tracks(pid, list(tids.values()))
+    pid = store.playlists.upsert_playlist(iid, 'saved-mix', 'Saved mix', 7, None, 1001)
+    tids = [store.tracks.upsert_track(track['video_id'], track['title'], track['artist'], '', None)
+            for track in proto['tracks'][:7]]
+    store.playlists.set_playlist_tracks(pid, tids)
     store.playlists.mark_generated_playlist('saved-mix')
+    assert {t['key'] for t in proto['tracks'][:7]} <= store.rec_eligibility.generated_only_keys()
 
     def forbidden(*args, **kwargs):
-        raise AssertionError('Serving a prepared offer must not rank the catalog')
+        raise AssertionError('Serving must not reselect or revalidate a worker-produced mix')
 
     monkeypatch.setattr(mode_surfaces, 'assemble_cards', forbidden)
     monkeypatch.setattr(surfaces, 'for_you', forbidden)
+    monkeypatch.setattr(store.rec_query, 'tracks_by_keys', forbidden)
+    monkeypatch.setattr(store.rec_eligibility, 'offer_metadata', forbidden)
+    monkeypatch.setattr(store.discovery, 'discovered_tracks_by_keys', forbidden)
     current = home_prepared.cards(store, prepared, 1002, service(store))
     assert len(current.protos) == len(current.slots) == 4
     assert {p['lane']: p['tracks'] for p in current.protos} == {
@@ -526,10 +533,12 @@ def test_saving_all_wheelhouse_tracks_does_not_change_the_held_cards(store, prep
     assert all(not (p.get('assignment') or {}).get('censored') for p in current.protos)
     keys = [t['key'] for t in proto['tracks']]
     assert not store.rec_eligibility.suppressed_candidate_keys(keys, 1002)
-    # Actual user feedback must still take effect immediately.
+    # Feedback changes future preparation, never the frozen tracks or shadows.
     seed_dislike(store, keys[0], until=None, now=1003)
     disliked = home_prepared.cards(store, prepared, 1003, service(store))
-    assert keys[0] not in {t['key'] for p in disliked.protos for t in p['tracks']}
+    assert [p['tracks'] for p in disliked.protos] == [p['tracks'] for p in initial.protos]
+    assert [p.get('counterfactual') for p in disliked.protos] == [p.get('counterfactual') for p in initial.protos]
+    assert prepared == original
 
 
 def test_cached_playlist_uses_current_title_membership_and_eligibility(store, prepared):
@@ -566,7 +575,12 @@ def test_previews_and_repeated_fragments_do_not_inflate_exposure(store, prepared
 
 def test_hold_window_keeps_the_choice_through_refill_and_new_evidence(store, prepared):
     prepared['choice_context'] = {'at': 999, 'generation': 'original-context'}
+    tuning = home_prepared.tuning_key(store, 1000)
+    ranking = candidate_refresh.preferences(store, 1000)
     first = home_prepared.cards(store, prepared, 1000, service(store))
+    assert not first.preparing
+    assert home_prepared.tuning_key(store, 1000) == tuning
+    assert candidate_refresh.preferences(store, 1000) != ranking
     ids = {p["experiment_id"] for p in first.protos}
     replacement = deepcopy(prepared)
     replacement['choice_context'] = {'at': 1001, 'generation': 'later-context'}
@@ -574,7 +588,10 @@ def test_hold_window_keeps_the_choice_through_refill_and_new_evidence(store, pre
         mode["size"] = 100000 if mode["mode_id"] not in {p.get("mode_id") for p in first.protos} else 1
     for epoch in range(20, 40):
         store.modes.log_impressions(epoch, [(str(mid), mid) for mid in range(6)], 1001)
+    store.rec_ledger.bump_card_view('cards', 1001)
+    assert home_prepared.tuning_key(store, 1002) == tuning
     held = home_prepared.cards(store, replacement, 1002, service(store))
+    assert not held.preparing
     assert {p["experiment_id"] for p in held.protos} == ids
     # Rebuilding the pool with entirely different menus must not silently reassign
     # the held decision while retaining the old propensity.
@@ -623,6 +640,7 @@ def test_visible_prepared_home_without_modes_records_exposures(store, prepared):
     assert response.status_code == 200
     assert 'id="home-feed"' in response.text
     assert 'id="onboarding-feed"' not in response.text
+    assert 'data-preparing="false"' in response.text
     shown = home_prepared.cards(store, prepared, 1000, service(store), record=False).protos
     assert len(shown) == 4
     expected = {(p["lane"], t["key"]) for p in shown for t in p["tracks"]}
@@ -637,11 +655,18 @@ def test_visible_prepared_home_without_modes_records_exposures(store, prepared):
     assert fresh
     # A displayed mix exposes its theme, not each song it might later play.
     assert offered == {key: 0 for key in offered}
+    held = store.rec_proposals.get_proposals('home_choice')
+    for path in ('/home/cards', '/home/feed', '/'):
+        repeated = client.get(path)
+        assert repeated.status_code == 200
+        assert 'data-preparing="false"' in repeated.text
+        assert all(f'data-key="{key}"' in repeated.text for _, key in expected)
+        assert store.rec_proposals.get_proposals('home_choice') == held
 
 
 @pytest.mark.parametrize("bad", [None, {}, {"schema": 999}, "bad-json"])
 def test_missing_or_corrupt_cache_queues_preparation_without_ranking(store, monkeypatch, bad):
-    monkeypatch.setattr(store.rec_proposals, "get_proposals", lambda key: bad if key == home_prepared.SURFACE else None)
+    monkeypatch.setattr(home_cache, 'read', lambda reader, key: bad if key == home_prepared.SURFACE else None)
     calls = []
     assert home_prepared.load(store, 1000, lambda: calls.append(True)) is None
     result = home_prepared.cards(store, None, 1000, service(store), lambda: calls.append(True))
@@ -654,16 +679,16 @@ def test_malformed_menu_is_discarded_and_damaged_tuned_cache_keeps_baseline(stor
     corrupt = deepcopy(prepared)
     corrupt["menus"][0]["protos"] = [None]
     assert not home_prepared._valid(corrupt)
-    original = store.rec_proposals.get_proposals
-    def get(surface):
+    original = home_cache.read
+    def get(reader, surface):
         if surface == "home_tuned":
             raise ValueError("corrupt JSON")
-        return original(surface)
-    monkeypatch.setattr(store.rec_proposals, "get_proposals", get)
+        return original(reader, surface)
+    monkeypatch.setattr(home_cache, 'read', get)
     assert home_prepared.load(store, 1001) == prepared
 
 
-def test_current_exclusions_and_removed_sources_apply_to_cached_mixes(store, prepared):
+def test_feedback_and_removed_sources_do_not_rewrite_worker_mixes(store, prepared):
     initial = home_prepared.cards(store, prepared, 1000, service(store), record=False)
     assert initial.protos
     key = initial.protos[0]["tracks"][0]["key"]
@@ -674,48 +699,17 @@ def test_current_exclusions_and_removed_sources_apply_to_cached_mixes(store, pre
                            "(SELECT e.id FROM catalog_entries e JOIN recordings r ON r.id=e.recording_id "
                            "WHERE r.identity_key=?)", (other,))
     result = home_prepared.cards(store, prepared, 1001, service(store), record=False)
-    shown = {t["key"] for p in result.protos for t in p["tracks"]}
-    assert key not in shown and other not in shown
-    assert result.protos
+    assert [p['tracks'] for p in result.protos] == [p['tracks'] for p in initial.protos]
 
 
-def test_ineligible_held_lane_recovers_from_a_refill_without_changing_other_cards(store, prepared, monkeypatch):
+def test_worker_produced_empty_slot_stays_clickable_and_polls_for_a_replacement(store, prepared):
     prepared['menus'] = [prepared['menus'][0]]
-    first = home_prepared.cards(store, prepared, 1000, service(store))
-    wheelhouse = next(p for p in first.protos if p['lane'] == 'wheelhouse')
-    for track in wheelhouse['tracks']:
-        seed_dislike(store, track['key'], until=None, now=1001)
-    replacement = deepcopy(prepared)
-    replacement['choice_context'] = {'at': 1002, 'generation': 'refilled'}
-    offer = next(p for p in replacement['menus'][0]['protos'] if p['lane'] == 'wheelhouse')
-    bundles = store._fixture_bundle_payload
-    old_keys = {t['key'] for t in wheelhouse['tracks']}
-    offer['tracks'] = [t for t in bundles['all']['wheelhouse'] if t['key'] not in old_keys][:12]
-    slot = next(s for s in replacement['menus'][0]['slots'] if s['proto']['lane'] == 'wheelhouse')
-    slot['proto'] = offer
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError('Recover from prepared cards, without ranking on Home')
-
-    monkeypatch.setattr(home_cards.HomeCards, 'cards', forbidden)
-    refreshed = home_prepared.cards(store, replacement, 1002, service(store))
-    assert len(refreshed.protos) == len(refreshed.slots) == 4
-    assert all(s['proto'] for s in refreshed.slots)
-    assert next(p for p in refreshed.protos if p['lane'] == 'wheelhouse')['tracks'] == offer['tracks']
-    assert {p['lane']: p['tracks'] for p in refreshed.protos if p['lane'] != 'wheelhouse'} == {
-        p['lane']: p['tracks'] for p in first.protos if p['lane'] != 'wheelhouse'}
-    assert all(p['assignment']['censored'] for p in refreshed.protos)
-    assert refreshed.choice_context == replacement['choice_context']
-    again = home_prepared.cards(store, replacement, 1003, service(store))
-    assert [(p['lane'], p['tracks']) for p in again.protos] == [(p['lane'], p['tracks']) for p in refreshed.protos]
-
-
-def test_lost_card_stays_a_clickable_slot_and_polls_for_a_prepared_replacement(store, prepared):
-    prepared['menus'] = [prepared['menus'][0]]
+    menu = prepared['menus'][0]
+    menu['protos'] = [p for p in menu['protos'] if p['lane'] != 'wheelhouse']
+    menu['slots'][0] = {'proto': None, 'pool': service(store).pool_view({
+        'lane': 'wheelhouse', 'epoch': menu['epoch'], 'include_genres': [], 'avoid_genres': []},
+        genre_options=prepared['genre_options'])}
     store.rec_proposals.put_proposals(home_prepared.SURFACE, prepared, 1000)
-    first = home_prepared.cards(store, prepared, 1000, service(store))
-    for track in next(p for p in first.protos if p['lane'] == 'wheelhouse')['tracks']:
-        seed_dislike(store, track['key'], until=None, now=1001)
     calls = []
     result = home_prepared.cards(store, prepared, 1001, service(store), lambda: calls.append(True))
     assert len(result.protos) == 3 and len(result.slots) == 4
@@ -774,7 +768,8 @@ def test_startup_cards_keep_polling_with_backoff_until_offers_recover(
     assert 'data-key=' in recovered.text
     if cached_placeholders:
         assignment = store.rec_proposals.get_proposals('home_choice')['assignment']
-        assert assignment['censored'] and assignment['reason'] == 'prepared_menu_repaired'
+        assert assignment['generation'] == prepared['generation']
+        assert not assignment.get('censored')
 
 
 def test_cached_discovery_honors_unavailability_and_current_tile_metadata(store, prepared):
@@ -785,7 +780,7 @@ def test_cached_discovery_honors_unavailability_and_current_tile_metadata(store,
         store.conn.execute("UPDATE youtube_items SET available=0 WHERE recording_id IN "
                            "(SELECT id FROM recordings WHERE identity_key=?)", (key,))
     cards = home_prepared.cards(store, prepared, 1001, service(store), record=False)
-    assert key not in {t["key"] for p in cards.protos for t in p["tracks"]}
+    assert [p['tracks'] for p in cards.protos] == [p['tracks'] for p in initial.protos]
     store.discovery.upsert_discovered_album("new-album", "Artist", "Album", "2020", None, 1000, genre="Jazz")
     tiles = home_prepared.prepare(store, 1001)
     assert tiles["discovery_albums"]
@@ -925,7 +920,7 @@ def test_publication_acknowledges_commit_across_cleanup_deadline(
 
         monkeypatch.setattr(store, 'read_snapshot', late_cleanup)
     else:
-        publish = store.rec_proposals.publish_prepared_home
+        publish = home_cache.publish
 
         def expire_before_commit(*args, **kwargs):
             publish(*args, **kwargs)
@@ -933,7 +928,7 @@ def test_publication_acknowledges_commit_across_cleanup_deadline(
             # cancellation check must still roll it back before commit.
             expire()
 
-        monkeypatch.setattr(store.rec_proposals, 'publish_prepared_home', expire_before_commit)
+        monkeypatch.setattr(home_cache, 'publish', expire_before_commit)
 
     result = None
     if reason == 'shutdown':
@@ -1043,13 +1038,12 @@ def test_hydrated_menus_accumulate_losslessly_and_serve_after_reopen(file_backed
         assert offer.protos
         key = offer.protos[0]['tracks'][0]['key']
         seed_dislike(reopened, key, until=None, now=1002)
-        filtered = home_prepared.cards(reopened, payload, 1002, service(reopened), record=False)
-        assert key not in {track['key'] for proto in filtered.protos for track in proto['tracks']}
-        assert filtered.protos
+        served = home_prepared.cards(reopened, payload, 1002, service(reopened), record=False)
+        assert [p['tracks'] for p in served.protos] == [p['tracks'] for p in offer.protos]
         # A failed replacement cannot hide the fully accumulated publication.
         def fail(*args, **kwargs):
             raise OSError('Controlled output-volume failure')
-        monkeypatch.setattr(home_outputs.files, 'publish', fail)
+        monkeypatch.setattr(home_cache.fao, 'write_compressed', fail)
         with pytest.raises(OSError, match='output-volume'):
             home_prepared.prepare(reopened, 1003)
         assert reopened.rec_proposals.get_proposals(home_prepared.SURFACE) == payload
@@ -1108,10 +1102,7 @@ def test_explicit_result_replaces_held_menu_without_reusing_its_random_assignmen
     explicit.protos[0]['name'] = 'Explicitly rebuilt mix'
     home_prepared.remember(store, prepared, explicit, 1001)
     # A later refill of the disposable pool must not resurrect the previous offer.
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        store.rec_proposals.publish_prepared_home(
-            json.dumps(prepared), 1002, surface='home_tuned')
+    home_cache.put(store, 'home_tuned', prepared, 1002)
     again = home_prepared.cards(store, home_prepared.load(store, 1002), 1002, service(store))
     assert again.protos[0]['name'] == 'Explicitly rebuilt mix'
     assert again.protos[0]['tracks'] == explicit.protos[0]['tracks']
@@ -1181,9 +1172,9 @@ def test_explicit_preview_round_trip_preserves_tracks_and_choice_context(
     assert again.protos[0]['counterfactual']['tracks'] == list(reversed(expected_tracks))
     assert again.choice_context == first.choice_context
     seed_dislike(store, expected_tracks[0]['key'], until=None, now=1001)
-    eligible = home_prepared.cards(store, home_prepared.load(store, 1001), 1001, service(store))
-    assert expected_tracks[0]['key'] not in {
-        track['key'] for card in eligible.protos for track in card['tracks']}
+    served = home_prepared.cards(store, home_prepared.load(store, 1001), 1001, service(store))
+    assert served.protos[0]['tracks'] == expected_tracks
+    assert served.protos[0]['counterfactual']['tracks'] == list(reversed(expected_tracks))
 
 
 def test_tuned_result_is_reused_and_expiry_restores_baseline(store, prepared):

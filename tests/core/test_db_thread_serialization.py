@@ -35,8 +35,12 @@ def test_callback_and_concurrent_bind_finish(factory, operation, tmp_path):
                     self.lock = lock
                 def __enter__(self):
                     if not self.lock.acquire(blocking=False):
-                        mark('serialized-contention')
-                        contended.set()
+                        # Observe the binder's first blocked acquisition for
+                        # the callback handshake. Execute/fetch may contend
+                        # again after the callback has already resumed.
+                        if threading.current_thread().name == 'bind' and not contended.is_set():
+                            mark('serialized-contention')
+                            contended.set()
                         self.lock.acquire()
                     return self
                 def __exit__(self, *args):

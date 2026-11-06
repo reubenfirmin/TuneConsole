@@ -142,11 +142,16 @@ class RecWorker:
         if state.dirty or self.ctx.store.rec_refresh.has_pending_changes():
             if now >= state.retry_at and self.preparation.full_due(self.ctx.now_fn()):
                 self.trigger()
+        wall_now = self.ctx.now_fn()
         if (now >= self.jobs.retry[Job.BUNDLES].retry_at
-              and (not self.ctx.store.rec_proposals.has_proposals('mode_bundles')
-                   or candidate_refresh.due(self.ctx.store, self.ctx.now_fn()))):
-            # Decay/expiry changes rankings, not model fitting inputs.
-            self._schedule(full=False, bundles=True)
+                and candidate_refresh.check_due(self.ctx.store, wall_now)):
+            # Inspect impression/preference changes only on the hourly cadence.
+            # An unchanged account needs no new generation or policy variants.
+            if (not self.ctx.store.rec_proposals.has_proposals('mode_bundles')
+                    or candidate_refresh.due(self.ctx.store, wall_now)):
+                self._schedule(full=False, bundles=True)
+            else:
+                candidate_refresh.checked(self.ctx.store, wall_now)
 
     def _poll_choices(self):
         from yt_playlist.rec import choice_evidence, daily_model_selection
@@ -225,17 +230,15 @@ class RecWorker:
                 self.ctx.logger.warning("discovery tick failed", exc_info=True)
 
     def _discover(self, now):
-        from yt_playlist.rec import discover, fresh_pool
+        from yt_playlist.rec import discover
         self._discovering = True
         try:
             limit_native_threads()
             with self.ctx.store.priority.background(check_stopping), cancellable_work(self._stop.is_set):
                 result = discover.run_discovery(self.ctx, now)
-                # The scan runs after the rebuild's earlier Home bundles. Publish the new songs now,
-                # rather than waiting for another rebuild or making a page request rank them.
+                # Discovery joins the same hourly preparation admission.
                 check_stopping()
-                fresh_pool.prepare(self.ctx.store, now)
-                self.trigger_home_refresh()
+                self.trigger_candidate_refresh()
                 return result
         finally:
             self._discovering = False
@@ -414,7 +417,7 @@ class RecWorker:
         self._schedule(full=False, ratings=True)
 
     def trigger_candidate_refresh(self):
-        """Rerank completed models after a Taste control edit, reset or restore."""
+        """Queue control changes for the next admitted preparation round."""
         self._schedule(full=False, bundles=True)
 
     def trigger_home_refresh(self, *, force=False):
@@ -440,10 +443,11 @@ class RecWorker:
 
     def _retry_bundles(self):
         """Retry a failed projection even after the learning backlog has drained."""
+        from yt_playlist.rec import candidate_refresh
         with self._lock:
             state = self.jobs.retry[Job.BUNDLES]
             due = state.dirty and time.monotonic() >= state.retry_at
-        if due:
+        if due and candidate_refresh.check_due(self.ctx.store, self.ctx.now_fn()):
             self._schedule(full=False, bundles=True)
 
     def trigger_content_update(self, keys=(), *, video_ids=()):
@@ -887,19 +891,20 @@ class RecWorker:
         return self.projections.run('trends')
 
     def _refresh_bundles(self):
-        from yt_playlist.rec import mode_surfaces
+        from yt_playlist.rec import candidate_refresh, mode_surfaces
         store = self.ctx.store
         # Model fitting can succeed while ranking fails. Keep the pool's retry
         # clock separate so it cannot stall ratings or reset its own backoff.
         with self._lock:
             state = self.jobs.retry[Job.BUNDLES]
-            if time.monotonic() < state.retry_at:
+            if (time.monotonic() < state.retry_at
+                    or not candidate_refresh.check_due(store, self.ctx.now_fn())):
                 state.dirty = True
                 return None
             state.dirty = False
             state.started(time.monotonic())
         try:
-            result = self._stage("cluster surfaces and PPR", mode_surfaces.prepare_bundles,
+            result = self._stage("cluster surfaces and PPR", mode_surfaces.prepare_scheduled,
                                  store, self.ctx.now_fn())
         except WorkClosing:
             raise
@@ -913,15 +918,14 @@ class RecWorker:
                                     'retaining published pools', state.failures, backoff, exc_info=True)
             return None
         if result is None:
-            self.ctx.logger.debug("rec mode bundles deferred: database changed during calculation")
+            self.ctx.logger.debug("rec mode bundles deferred; retaining published pools")
             with self._lock:
                 state.deferred(time.monotonic())
         else:
             with self._lock:
                 state.succeeded()
             self.ctx.logger.debug("rec rebuild: mode bundles prepared")
-            # Catch-up can publish a new pool every five seconds. Both partial
-            # and drained generations share Home's automatic preparation budget.
+            # Assemble the captured output through Home's existing worker.
             self.trigger_home_refresh()
             self._schedule(full=False, groups=True)
         return result

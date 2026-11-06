@@ -40,7 +40,8 @@ def context(store, captured, *, ledger=None):
     return result
 
 
-def replace_prepared(store, surface, data, at, *, historical=False, resolved_contexts=None, owner_prefix=None):
+def replace_prepared(store, surface, data, at, *, historical=False, resolved_contexts=None, owner_prefix=None,
+                     recommendation_generations=None):
     """Replace only this output's references in its publication transaction."""
     if (not getattr(store, '_compact_group_files', False)
             or surface not in PREPARED and not surface.startswith('model_pair:')):
@@ -56,7 +57,12 @@ def replace_prepared(store, surface, data, at, *, historical=False, resolved_con
         data = data['data']
     recommendations = recommendation_references.enabled(store)
     if recommendations:
-        recommendation_references.prepared(store.conn, kind, surface, data, owner_prefix=owner_prefix)
+        if recommendation_generations is None:
+            recommendation_references.prepared(store.conn, kind, surface, data, owner_prefix=owner_prefix)
+        else:
+            identity = (owner_prefix or 'proposal:' + surface) + ':recommendations'
+            recommendation_custody.release(store.conn, kind, identity)
+            recommendation_references.retain(store.conn, kind, identity, recommendation_generations)
     for field in FIELDS:
         identity = (owner_prefix or 'proposal:' + surface) + ':' + field
         existing = store.conn.execute('SELECT reference_digest FROM group_evidence_owners '

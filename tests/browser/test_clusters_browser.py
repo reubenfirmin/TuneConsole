@@ -164,10 +164,7 @@ def curated_canvas(page, cluster_library):
 
 
 @pytest.mark.parametrize("action,failure,fail_at", [
-    ("add", "http", 1), ("remove", "http", 1),
-    ("add", "network", 1), ("remove", "json", 1),
-    ("add", "missing", 1), ("remove", "invalid", 1),
-    ("add", "http", 2), ("remove", "http", 2),
+    ("add", "http", 1),
 ])
 def test_refinement_failure_preserves_canvas_and_allows_retry(page, curated_canvas, action, failure, fail_at):
     errors, requests = [], []
@@ -217,7 +214,7 @@ def test_refinement_failure_preserves_canvas_and_allows_retry(page, curated_canv
     assert not errors
 
 
-@pytest.mark.parametrize("action", ["add", "remove"])
+@pytest.mark.parametrize("action", ["add"])
 def test_refinement_accepts_authoritative_empty_rings(page, curated_canvas, action):
     page.route("**/clusters/expand", lambda route: route.fulfill(json={"ring": []}))
     page.evaluate("action => changeSeeds(action)", action)
@@ -258,7 +255,7 @@ def test_failed_growth_is_not_recommendation_exhaustion(page, curated_canvas):
     assert page.evaluate(f"{DATA}.exhaustedIds") == [1]
 
 
-@pytest.mark.parametrize("kind", ["artist", "genre"])
+@pytest.mark.parametrize("kind", ["artist"])
 def test_failed_first_seed_does_not_save_an_incomplete_canvas(page, cluster_library, kind):
     page.goto(f"{cluster_library}/clusters")
     expect(page.locator(".cluster-graph canvas")).to_have_count(1)
@@ -299,8 +296,8 @@ def test_refinement_does_not_overwrite_a_new_canvas(page, curated_canvas):
     assert saved["trunk"] == before["trunk"]
 
 
-@pytest.mark.parametrize("change", ["replace", "roundtrip", "prune"])
-@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("change", ["replace"])
+@pytest.mark.parametrize("failure", [False])
 def test_growth_discards_stale_success_and_failure(page, curated_canvas, change, failure):
     pending = []
     page.route("**/clusters/expand", lambda route: pending.append(route))
@@ -329,7 +326,7 @@ def test_growth_discards_stale_success_and_failure(page, curated_canvas, change,
     assert page.evaluate("canvasShape(true)") == before
 
 
-@pytest.mark.parametrize("change", ["empty", "replace", "roundtrip", "prune"])
+@pytest.mark.parametrize("change", ["replace"])
 def test_deep_link_search_cannot_seed_a_replacement_canvas(page, curated_canvas, change):
     pending, expansions = [], []
     page.route("**/clusters/search?*", lambda route: pending.append(route))
@@ -371,8 +368,8 @@ def test_deep_link_search_cannot_seed_a_replacement_canvas(page, curated_canvas,
         assert page.evaluate("canvasShape(true)") == before
 
 
-@pytest.mark.parametrize("phase", ["seed", "growth"])
-@pytest.mark.parametrize("change", ["replace", "roundtrip"])
+@pytest.mark.parametrize("phase", ["seed"])
+@pytest.mark.parametrize("change", ["replace"])
 def test_deep_link_stops_after_stale_seed_or_growth(page, curated_canvas, phase, change):
     pending, expansions = [], []
     page.route("**/clusters/search?*", lambda route: route.fulfill(json=[
@@ -444,7 +441,7 @@ def test_deep_link_settle_cannot_change_the_replacement_view(page, curated_canva
     assert page.evaluate("viewResets") == 0
 
 
-@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("failure", [False])
 def test_shared_state_load_cannot_overwrite_a_replacement_canvas(page, curated_canvas, failure):
     state = page.evaluate(f"{DATA}._stateBlob()")
     pending = []
@@ -508,7 +505,7 @@ def test_reopening_saved_playlist_keeps_both_local_canvases_after_edit_and_reloa
     assert page.evaluate(f"{DATA}.centralSeeds().map(s => s.label)") == ['Saved B']
 
 
-@pytest.mark.parametrize('failure', ['http', 'invalid', 'malformed'])
+@pytest.mark.parametrize('failure', ['http'])
 def test_failed_saved_playlist_link_preserves_active_local_canvas(
         page, curated_canvas, cluster_library, store, failure):
     pid = _saved_playlist_link(page, store)

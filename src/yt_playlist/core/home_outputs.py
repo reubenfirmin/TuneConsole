@@ -30,6 +30,7 @@ class Prepared:
     schema: int | None
     generation: str | None
     mix_regions: int
+    byte_size: int
 
 
 def prepare(surface, raw, at):
@@ -65,7 +66,8 @@ def prepare(surface, raw, at):
                   for position, start in enumerate(range(0, len(raw), part_characters)))
     if len(parts) > 128:
         raise ValueError('Home display exceeds its part count')
-    return Prepared(surface, raw, value, hashlib.sha256(raw.encode()).hexdigest(), parts, at, schema, generation, regions)
+    encoded = raw.encode()
+    return Prepared(surface, raw, value, hashlib.sha256(encoded).hexdigest(), parts, at, schema, generation, regions, len(encoded))
 
 
 def _validate_numbers(value):
@@ -189,11 +191,20 @@ def publish(conn, prepared, *, store=None, historical=False, input_revision=None
     for position, encoded in enumerate(prepared.parts):
         check_cancellable_work()
         durable.append((prepared.surface, str(position), *files.publish(files.directory(conn), encoded)))
-    policies = policy_references(prepared.value)
+    return publish_files(conn, prepared, durable, store=store, historical=historical,
+                         input_revision=input_revision)
+
+
+def publish_files(conn, prepared, durable, *, store=None, historical=False, input_revision=None,
+                  policies=None, resolved_contexts=None, recommendation_generations=None):
+    """Publish existing file descriptors and their SQL owners in one transaction."""
+    if not conn.in_transaction:
+        raise ValueError('Home display requires an outer transaction')
+    policies = policy_references(prepared.value) if policies is None else policies
     identity = conn.execute('INSERT INTO home_display_publications(surface,built_at,schema_version,generation_key,mix_regions,'
         'content_digest,total_bytes,part_count,input_revision,revision_reason,has_content) VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING id',
         (prepared.surface, prepared.built_at, prepared.schema, prepared.generation, prepared.mix_regions,
-         prepared.digest, len(prepared.raw.encode()), len(durable), input_revision,
+         prepared.digest, prepared.byte_size, len(durable), input_revision,
          'legacy_not_recorded' if historical else 'publisher_not_recorded' if input_revision is None else None,
          int(prepared.raw not in ('null', '{}')))).fetchone()[0]
     conn.executemany('INSERT INTO home_display_files(publication_id,surface,chunk_key,filename,content_digest,byte_size) '
@@ -203,7 +214,8 @@ def publish(conn, prepared, *, store=None, historical=False, input_revision=None
     elif store is not None:
         from . import prepared_references
         prepared_references.replace_prepared(store, prepared.surface, prepared.value, prepared.built_at,
-                                     owner_prefix='home-output:' + str(identity))
+            owner_prefix='home-output:' + str(identity), resolved_contexts=resolved_contexts,
+            recommendation_generations=recommendation_generations)
     _link_roots(conn, identity)
     for policy in sorted(policies):
         known = conn.execute('SELECT 1 FROM recommendation_policies WHERE version=?', (policy,)).fetchone()
@@ -221,6 +233,14 @@ def publish(conn, prepared, *, store=None, historical=False, input_revision=None
 
 
 def encoded(conn, surface):
+    captured = manifest(conn, surface)
+    if captured is None:
+        return None
+    return read_manifest(surface, *captured)
+
+
+def manifest(conn, surface):
+    """Capture SQL metadata only; opening the selected files belongs to callers."""
     row = conn.execute('SELECT p.id,p.content_digest,p.total_bytes,p.part_count FROM home_display_heads h '
         'JOIN home_display_publications p ON p.id=h.publication_id WHERE h.surface=?', (surface,)).fetchone()
     if row is None:
@@ -229,11 +249,15 @@ def encoded(conn, surface):
                          'WHERE publication_id=? ORDER BY CAST(chunk_key AS INTEGER)', (row[0],)).fetchall()
     if len(parts) != row[3] or [part[0] for part in parts] != list(map(str, range(row[3]))):
         raise ValueError('Incomplete Home display parts')
+    return row[1], row[2], parts
+
+
+def read_manifest(surface, digest, size, parts):
     try:
         raw = ''.join(files.read(*part[1:], surface=surface, chunk_key=part[0]) for part in parts)
     except (OSError, ValueError):
         return None
-    if len(raw.encode()) != row[2] or hashlib.sha256(raw.encode()).hexdigest() != row[1]:
+    if len(raw.encode()) != size or hashlib.sha256(raw.encode()).hexdigest() != digest:
         raise ValueError('Home display differs from its publication digest')
     return raw
 

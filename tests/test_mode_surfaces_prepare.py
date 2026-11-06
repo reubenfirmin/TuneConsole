@@ -1,6 +1,7 @@
 import numpy as np
 from tests.derived_rating_support import seed_dislike
 from yt_playlist.rec import embedding_vectors as embed, home_vibe, surfaces, mode_surfaces as ms
+from yt_playlist.rec.vibe_pool_contract import GENRE_RESERVE, POOL_LIMIT
 from tests.conftest import seed_catalog_track
 from tests.recommendation_support import publish_bundles
 
@@ -128,7 +129,14 @@ def test_prepare_reaches_genres_below_the_old_global_pool_cutoff(monkeypatch, st
     assert len(payload["2"]["wheelhouse"]) >= ms.PROTO_SIZE
     assert len(payload["all"]["wheelhouse"]) == 500
     assert len(payload["all"]["temporal"]) == 500
+    assert {item['genre'] for item in payload['all']['wheelhouse']} == {'house'}
+    assert {item['genre'] for item in payload['all']['temporal']} == {'House'}
     for preset in home_vibe.PRESETS:
-        reserve = payload['_vibes']['genres'][preset]['wheelhouse']['house']
-        assert reserve and all(item['genre'] == 'house' for item in reserve)
-        assert store.recommendations.pool('vibe:' + preset, 'house', 'wheelhouse') is not None
+        for lane, label in (('wheelhouse', 'house'), ('explore', 'house'),
+                            ('comfort', 'house'), ('temporal:0', 'House')):
+            reserve = payload['_vibes']['genres'][preset][lane]['house']
+            assert 0 < len(reserve) <= GENRE_RESERVE
+            assert len({item['key'] for item in reserve}) == len(reserve)
+            assert all(item['genre'] == label for item in reserve)
+            assert len(payload['_vibes']['pools'][preset][lane]) <= POOL_LIMIT
+            assert store.recommendations.pool('vibe:' + preset, 'house', lane) is not None

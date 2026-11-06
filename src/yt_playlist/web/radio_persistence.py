@@ -170,6 +170,17 @@ class RadioPersistence:
             state.update(operation_values(operation))
             self._write(json.dumps(state, sort_keys=True))
 
+    def stop_launch(self, launch_id: str):
+        """Cancel the matching saved launch without requiring live playback."""
+        with self.lock:
+            state = self.load()
+            if not state or state.get('launch_id') != launch_id or state.get('stopped'):
+                return
+            # Retain queue contents and any uncertain operation journal. The
+            # ordinary compare-and-save token fences a concurrent replacement.
+            state.update(phase=Phase.STOPPED, stopped=True, halted=False)
+            self._write(json.dumps(state, sort_keys=True))
+
     def _write(self, encoded):
         # Keep the live transaction journal in RAM during repair. A session
         # created without a local playlist remains transient for its lifetime.

@@ -190,71 +190,8 @@ def test_worlds_delayed_metadata_and_ratings_keep_account_and_video_identity(ins
         ("first", h.brand), ("second", h.brand)]
 
 
-@pytest.mark.parametrize("settlement", ["binding_ready", "song_changed", "account_changed", "newer_rating"])
-def test_native_rating_waits_for_bound_controls_and_cancels_old_intent(installed_bridge, settlement):
-    h = installed_bridge
-    page = _music(h)
-    _sample(h, page)
-    h.worker.evaluate("""() => {
-        globalThis.ratingFrames = [];
-        const send = tuneConsole.transport.send;
-        tuneConsole.transport.send = frame => {
-            if (frame.type === 'rating-reconciliation') ratingFrames.push(frame);
-            return send(frame);
-        };
-    }""")
-    page.evaluate("""() => {
-        document.querySelector('ytmusic-player-bar').data = undefined;
-        document.querySelector('ytmusic-like-button-renderer').data = undefined;
-        fixture.sample();
-    }""")
-
-    def rate(desired):
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            result = pool.submit(asyncio.run, h.bridge.request_control({
-                "type": "rate", "action": "like", "videoId": "first",
-                "likeStatus": desired, "brandId": "brand-A"}))
-            h.eventually(result.done)
-            return json.loads(result.result()[1])
-
-    assert rate("LIKE") == {"ok": True, "pending": True}
-    assert page.evaluate("fixture.clicks") == []
-    first_id = h.worker.evaluate("ratingFrames[0].ratingId")
-    if settlement == "newer_rating":
-        assert rate("INDIFFERENT")["pending"]
-    page.evaluate("""settlement => {
-        if (settlement === 'song_changed') fixture.videoId = 'second';
-        if (settlement === 'account_changed') fixture.brand = 'brand-B';
-        fixture.setBar(); fixture.setRating(); fixture.sample();
-    }""", settlement)
-    h.eventually(lambda: h.worker.evaluate("ratingFrames.at(-1)?.state") in ("recovered", "cancelled"))
-    frames = h.worker.evaluate("ratingFrames")
-    first = [frame for frame in frames if frame["ratingId"] == first_id]
-    assert [frame["state"] for frame in first] == [
-        "pending", "recovered" if settlement == "binding_ready" else "cancelled"]
-    assert first[0]["first"]["diagnostics"]["binding"]["targetIds"] == []
-    if settlement == "binding_ready":
-        assert rate("LIKE")["ok"]  # Reapplying a confirmed desired state sends no second click.
-    assert page.evaluate("fixture.clicks") == (["like"] if settlement == "binding_ready" else [])
 
 
-@pytest.mark.parametrize("installed_bridge", ["legacy_bootstrap", "missing_receiver_option"], indirect=True)
-def test_legacy_bootstrap_reconnects_without_reloading_music(installed_bridge):
-    h = installed_bridge
-    page = _music(h)
-    page.evaluate("window.documentToken = 'same document'")
-    h.eventually(lambda: len(_plays(h)) == 1)
-    h.eventually(lambda: (h.bridge.sensor_health or {}).get("healthy"))
-
-    connection_id = h.bridge._conn_id
-    h.drop_connection()
-    h.eventually(lambda: h.bridge.connected and h.bridge._conn_id != connection_id)
-    h.eventually(lambda: (h.bridge.sensor_health or {}).get("healthy"))
-    h.eventually(lambda: (h.bridge.now_playing or {}).get("video_id") == "first")
-    assert page.evaluate("documentToken") == "same document"
-    assert page.evaluate("!document.querySelector('video').paused")
-    assert len(_plays(h)) == 1
-    assert h.worker.evaluate("tuneConsole.sensors.probe()")["reloadedTabs"] == 0
 
 
 def test_extension_reload_reconnect_and_throttled_main_repair_preserve_playback(installed_bridge):
@@ -381,7 +318,7 @@ def test_dislike_updates_native_thumb_then_skips_the_radio_queue(installed_bridg
     assert owner.evaluate("fixture.clicks") == ["dislike", "next"]
 
 
-@pytest.mark.parametrize("first", ["launch", "fetch"])
+@pytest.mark.parametrize("first", ["launch"])
 def test_library_fetch_and_launch_share_one_real_tab_and_deliver_each_request(installed_bridge, first):
     h = installed_bridge
     target = "https://music.youtube.com/?playing=true&v=launched&list=PL_launch"

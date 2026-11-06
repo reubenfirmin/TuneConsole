@@ -60,7 +60,7 @@ def populate(ctx, include_genres=(), avoid_genres=(), on_progress=lambda message
 
 def prepare(store, now):
     """Refresh both Fresh caches in the discovery/enrichment job, never during rendering."""
-    return mode_surfaces.prepare_bundles(store, now)
+    return mode_surfaces.prepare_scheduled(store, now)
 
 
 def pick(store, now, include_genres=(), avoid_genres=(), size=12, *, minimum=4, bundles=None):

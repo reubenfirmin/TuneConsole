@@ -1,6 +1,8 @@
 """Small committed heads, bounded rank pages and directly owned opaque chunks."""
 from yt_playlist.core import recommendation_outputs, recommendation_pools, recommendation_revalidations
 from yt_playlist.core.activity import WorkBudgetExceeded
+from yt_playlist.core import listening_subject_reads
+from yt_playlist.core.preparation import listening_views
 from .base import LIKED_EXISTS, Repo, lookup_read, snapshot_read, synchronized
 from . import recommendation_publication as publication
 
@@ -305,14 +307,48 @@ class RecommendationPublicationsRepo(Repo):
         self._hydrate_pages(surface, generation, pages, include_display)
         return [page[-1] for page in pages]
 
-    def _hydrate_pages(self, surface, generation, pages, include_display):
-        keys = list(dict.fromkeys(row['key'] for _, _, _, rows, _ in pages for row in rows))
-        if not keys:
-            return
+    def _candidate_play_counts(self, keys):
+        """Count only requested subjects with the canonical evidence policy.
+
+        Filtering the aggregate listening_day_counts view happens after its
+        whole-history eligibility calculation. Materialize the bounded subject
+        inputs first so the correlated eligibility probes can index their keys.
+        Both sides of those probes refer to the same recording, so unrelated
+        subjects cannot affect the result.
+        """
+        result = {}
+        for offset in range(0, len(keys), 500):
+            batch = keys[offset:offset + 500]
+            marks = ','.join('?' for _ in batch)
+            if not listening_subject_reads.native(self.conn):
+                result.update(self.conn.execute(
+                    f'SELECT identity_key,plays FROM listening_day_counts WHERE identity_key IN ({marks})', batch))
+                continue
+            names = {name: 'radio_' + name for name in
+                     ('play_event_subjects', 'listening_observation_subjects',
+                      'eligible_listening_evidence', 'listening_day_counts')}
+            names.update(sources='play_event_sources', calendar='play_event_calendar')
+            inputs = [f'{names[name]} AS MATERIALIZED (SELECT * FROM {name} WHERE identity_key IN ({marks}))'
+                      for name in ('play_event_subjects', 'listening_observation_subjects')]
+            inputs.extend(f'{names[name]} AS ({query})'
+                          for name, query in listening_views.definitions(lambda name: names.get(name, name))
+                          if name in ('eligible_listening_evidence', 'listening_day_counts'))
+            result.update(self.conn.execute('WITH ' + ','.join(inputs) +
+                ' SELECT identity_key,plays FROM ' + names['listening_day_counts'], (*batch, *batch)))
+        return result
+
+    def _candidate_facts(self, keys):
+        """Current catalog facts shared by overlapping Radio candidate pages.
+
+        The optional cache belongs to one private planning snapshot. Pool ranks,
+        explanations and serving attribution are assembled separately per page.
+        """
         store = self._store
-        owned = store.rec_query.group_candidates(keys)
-        discovered = store.discovery.candidate_tracks_by_keys(keys)
-        videos = list(dict.fromkeys(current['video_id'] for key in keys
+        cache = getattr(store, '_radio_candidate_facts', None)
+        missing = [key for key in keys if cache is None or key not in cache]
+        owned = store.rec_query.group_candidates(missing) if missing else {}
+        discovered = store.discovery.candidate_tracks_by_keys(missing) if missing else {}
+        videos = list(dict.fromkeys(current['video_id'] for key in missing
                       if (current := owned.get(key) or discovered.get(key)) and current.get('video_id')))
         details = {}
         if videos:
@@ -320,28 +356,44 @@ class RecommendationPublicationsRepo(Repo):
             details = {row['video_id']: dict(row) for row in self.conn.execute(
                 'SELECT t.video_id,t.album_browse_id,t.duration_s AS duration,t.bpm,t.energy,t.danceability,'
                 f't.available,{LIKED_EXISTS} AS liked FROM catalog_tracks t WHERE t.video_id IN ({marks})', videos)}
-        years = store.modes.years_for(keys)
-        marks = ','.join('?' for _ in keys)
-        plays = dict(self.conn.execute(f'SELECT identity_key,plays FROM listening_day_counts WHERE identity_key IN ({marks})', keys))
-        for mode_key, purpose, pool, rows, result in pages:
-            display = (self.display(surface, mode_key, purpose, [row['rank'] for row in rows], generation=generation)
-                       if include_display else {})
-            for row in rows:
-                key = row['key']
-                current = owned.get(key) or discovered.get(key)
-                if not current or not current.get('video_id'):
-                    continue
-                explanation = display.get(row['rank'], {})
+        years = store.modes.years_for(missing) if missing else {}
+        plays = self._candidate_play_counts(missing)
+        facts = {key: cache[key] for key in keys if cache is not None and key in cache}
+        for key in missing:
+            current = owned.get(key) or discovered.get(key)
+            track = None
+            if current and current.get('video_id'):
                 year = years.get(key) if key in owned else current.get('year')
                 if isinstance(year, str):
                     year = int(year[:4]) if len(year) >= 4 and year[:4].isascii() and year[:4].isdigit() else None
                 track = {name: current.get(name) for name in ('title', 'artist', 'album', 'video_id', 'thumbnail', 'genre')}
                 track.update(details.get(current['video_id'], {}))
+                track.update(key=key, year=year, plays=plays.get(key, 0), _radio_fresh=key not in owned)
+            facts[key] = track
+            if cache is not None:
+                cache[key] = track
+                if len(cache) > 8192:
+                    cache.popitem(last=False)
+        return facts
+
+    def _hydrate_pages(self, surface, generation, pages, include_display):
+        keys = list(dict.fromkeys(row['key'] for _, _, _, rows, _ in pages for row in rows))
+        if not keys:
+            return
+        facts = self._candidate_facts(keys)
+        for mode_key, purpose, pool, rows, result in pages:
+            display = (self.display(surface, mode_key, purpose, [row['rank'] for row in rows], generation=generation)
+                       if include_display else {})
+            for row in rows:
+                key = row['key']
+                current = facts.get(key)
+                if current is None:
+                    continue
+                explanation = display.get(row['rank'], {})
+                track = dict(current)
                 track.update(key=key, recording_id=row['recording_id'], pool_rank=row['rank'], score=row['score'],
-                    pool_policy=row['pool_policy'], year=year,
-                    plays=plays.get(key, 0),
+                    pool_policy=row['pool_policy'],
                     reason=explanation.get('reason', ''), lane=explanation.get('lane', purpose),
-                    _radio_fresh=key not in owned,
                     serving_context={'recommendation_generation_id': generation, 'recommendation_pool_id': pool['id'],
                                      'recommendation_pool_rank': row['rank']})
                 result['tracks'].append(track)

@@ -254,14 +254,19 @@ class EvidenceLedger:
             durable = {event["opportunity_id"] for event in events
                        if event["kind"] not in {"visible", "open"}}
             protected = durable | set(protected_opportunities)
-            protected.update(event['opportunity_id'] for event in events if event['observed_at'] >= before)
+            resuming = retirements.offers - offers.keys()
+            # Capacity can admit menus newer than ordinary expiry. Once their
+            # offer is gone, leftover passive events cannot undo that admission.
+            # Durable responses and current capture pins still protect them.
+            protected.update(event['opportunity_id'] for event in events
+                             if event['observed_at'] >= before and event['opportunity_id'] not in resuming)
             protected.update(oid for oid, offer in offers.items()
                 if any((offer.get(field) or {}).get('run_id') in protected_runs for field in ('comparison', 'monitor')))
             retired = {oid for oid, offer in offers.items()
                        if offer["observed_at"] < before and oid not in protected}
             # A preceding slice may have removed the offer before its events or
             # SQL owners. Its durable intent supplies the missing association.
-            retired.update(retirements.offers - offers.keys() - protected)
+            retired.update(resuming - protected)
             orphan_before = before if orphan_before is None else orphan_before
             artifacts = [path for path in inventory if path.parts[-3] == 'artifact']
             sizes = {path: entry['size'] for path, entry in inventory.items()}

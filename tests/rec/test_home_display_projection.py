@@ -8,7 +8,7 @@ import pytest
 
 from tests.home_fixture_support import publish_menu
 from yt_playlist.core import fao, home_outputs, json_cache
-from yt_playlist.rec import home_cards, home_prepared
+from yt_playlist.rec import home_cache, home_cards, home_prepared
 
 
 def cards(store, payload, *, record=False):
@@ -107,15 +107,15 @@ def test_display_restores_only_selected_menu_and_preserves_the_same_assignment(f
     assert cards(store, home_prepared.load(store, 1000, display_only=True)) == expected
 
 
-def test_display_repairs_a_held_lane_with_complete_alternative_evidence(file_backed_store):
+def test_display_preserves_a_whole_held_menu_with_its_frozen_evidence(file_backed_store):
     from tests.derived_rating_support import seed_dislike
 
     store = file_backed_store
     first = publish_menu(store, prefix='first')
     second = publish_menu(store, prefix='second')
     second['menus'][0]['epoch'] = first['menus'][0]['epoch'] + 3
-    evidence = {'origin': 'replacement', 'observations': [2, 4, 6]}
-    second['menus'][0]['protos'][0]['tracks'][0]['musical'] = evidence
+    evidence = {'origin': 'held-worker-menu', 'observations': [2, 4, 6]}
+    first['menus'][0]['protos'][0]['tracks'][0]['musical'] = evidence
     payload = {**first, 'menus': [first['menus'][0], second['menus'][0]]}
     store.rec_proposals.put_proposals(home_prepared.SURFACE, payload, 1000)
     store.rec_proposals.put_proposals('home_choice', {
@@ -128,9 +128,10 @@ def test_display_repairs_a_held_lane_with_complete_alternative_evidence(file_bac
     actual = cards(store, home_prepared.load(store, 1000, display_only=True), record=True)
     assert actual == expected
     assert actual.protos[0]['tracks'][0]['musical'] == evidence
-    assert actual.protos[0]['assignment']['censored']
+    assert not actual.protos[0]['assignment'].get('censored')
+    assert [p['tracks'] for p in actual.protos] == [p['tracks'] for p in first['menus'][0]['protos']]
     held = store.rec_proposals.get_proposals('home_choice')
-    assert held['menu']['protos'][0]['tracks'][0]['musical'] == evidence
+    assert held['menu'] == first['menus'][0]
 
 
 def test_one_home_composition_verifies_each_document_once_but_next_read_checks_files(file_backed_store, monkeypatch):
@@ -147,21 +148,21 @@ def test_one_home_composition_verifies_each_document_once_but_next_read_checks_f
 
     monkeypatch.setattr(home_outputs.files, 'read', read)
     with store.read_view(tracked=True) as reader:
-        with reader.rec_proposals.verified_home_reads():
-            full = reader.rec_proposals.get_proposals(home_prepared.SURFACE)
+        with home_cache.verified_reads(reader):
+            full = home_cache.read(reader, home_prepared.SURFACE)
             assert full['menus'] == payload['menus']
             first = list(verified)
             assert first
-            projected = reader.rec_proposals.proposal_fields(home_prepared.SURFACE, ('menus',))
+            projected = home_cache.read(reader, home_prepared.SURFACE, fields=('menus',))
             projected['menus'][0]['protos'].clear()
-            assert reader.rec_proposals.get_proposals(home_prepared.SURFACE)['menus'] == payload['menus']
+            assert home_cache.read(reader, home_prepared.SURFACE)['menus'] == payload['menus']
             assert verified == first
         # Leaving the composition ends reuse even on this same pinned reader.
-        reader.rec_proposals.get_proposals(home_prepared.SURFACE)
+        home_cache.read(reader, home_prepared.SURFACE)
         assert verified == first + first
     Path(first[0]).unlink()
-    with store.read_view(tracked=True) as reader, reader.rec_proposals.verified_home_reads():
-        assert reader.rec_proposals.get_proposals(home_prepared.SURFACE) is None
+    with store.read_view(tracked=True) as reader, home_cache.verified_reads(reader):
+        assert home_cache.read(reader, home_prepared.SURFACE) is None
 
 
 def test_verified_home_reuse_retains_dependencies_for_memo_invalidation(file_backed_store):
@@ -170,12 +171,12 @@ def test_verified_home_reuse_retains_dependencies_for_memo_invalidation(file_bac
     name = 'home-projection-after-physical-read'
 
     def projection(reader):
-        return reader.rec_proposals.proposal_fields(home_prepared.SURFACE, ('menus',))
+        return home_cache.read(reader, home_prepared.SURFACE, fields=('menus',))
 
-    with store.read_view(tracked=True) as reader, reader.rec_proposals.verified_home_reads():
+    with store.read_view(tracked=True) as reader, home_cache.verified_reads(reader):
         # The physical read happens outside the nested memo's capture.
-        reader.rec_proposals.get_proposals(home_prepared.SURFACE)
+        home_cache.read(reader, home_prepared.SURFACE)
         assert reader.memoized_read(name, lambda: projection(reader))['menus'] == original['menus']
     replacement = publish_menu(store, prefix='replacement')
-    with store.read_view(tracked=True) as reader, reader.rec_proposals.verified_home_reads():
+    with store.read_view(tracked=True) as reader, home_cache.verified_reads(reader):
         assert reader.memoized_read(name, lambda: projection(reader))['menus'] == replacement['menus']

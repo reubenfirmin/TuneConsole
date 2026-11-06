@@ -8,7 +8,7 @@ import json
 import math
 
 from yt_playlist.providers import deepseek, enrichment, lastfm
-from yt_playlist.rec import (artist_start, festival_layout, growth_readiness, home_preferences, home_prepared, home_vibe, into_recently,
+from yt_playlist.rec import (artist_start, festival_layout, growth_readiness, home_cache, home_preferences, home_prepared, home_vibe, into_recently,
                              onboarding_outputs, tv, vibe_preparation)
 
 # Revisit is an early optional detour: a pool-only account may have nothing to
@@ -63,7 +63,7 @@ def _connect_paths(nodes, *, resume=()):
     # Preparation changes lighting, never the illustrated route or its parent.
     for stop in nodes:
         layout = festival_layout.LANDMARKS[stop['id']]
-        stop.update(shape=layout['shape'], route=layout['route'],
+        stop.update(shape=layout['shape'],
                     sign_x=layout['sign'][0], sign_y=layout['sign'][1],
                     x=layout['entrance'][0] / 15.36, y=layout['entrance'][1] / 10.24)
         if stop['id'] in PARENTS:
@@ -136,7 +136,7 @@ def retained_access(store, area):
         return any(MAIN_PATH.index(destination) <= MAIN_PATH.index(identity) for identity in resume)
 
 
-def vibe_access(store, now):
+def vibe_access(store, now, radio=None):
     """Evaluate the journey prefix without articles, bonuses or later outputs.
 
     Historical use retains exactly the prefix in _connect_paths. Otherwise each
@@ -144,10 +144,14 @@ def vibe_access(store, now):
     stop also keeps its independent natural-mix and current-evidence conditions.
     """
     with home_vibe.natural(), store.read_view() as reader:
-        return reader.memoized_read(('vibe-access', 1, now), lambda: _vibe_access(reader, now))
+        radio_input = (None if radio is None else (
+            bool(radio.get('state', {}).get('active')), bool(radio.get('seedMenu')),
+            tuple((track.get('key'), track.get('video_id')) for track in radio.get('seeds') or [])))
+        return reader.memoized_read(('vibe-access', 2, now, radio_input),
+                                    lambda: _vibe_access(reader, now, radio))
 
 
-def _vibe_access(reader, now):
+def _vibe_access(reader, now, radio=None):
     format_usage = reader.rec_proposals.choice_usage()
     if format_usage.get('vibe_episodes'):
         return True
@@ -173,19 +177,24 @@ def _vibe_access(reader, now):
         elif identity == 'albums':
             usable = growth_readiness.albums(reader, now)
         elif identity == 'discover':
-            prepared = reader.rec_proposals.get_proposals(home_prepared.SURFACE) or {}
+            prepared = home_cache.read(reader, home_prepared.SURFACE) or {}
             usable = growth_readiness.discover(home_prepared.collections(reader, prepared, now))
         elif identity == 'listening':
             usable = mixes
         elif identity == 'radio':
-            try:
-                radio = json.loads(reader.settings.get_setting('radio_seed_offer') or '{}')
-            except (ValueError, TypeError):
-                radio = {}
+            if radio is None:
+                try:
+                    offer = json.loads(reader.settings.get_setting('radio_seed_offer') or '{}')
+                except (ValueError, TypeError):
+                    offer = {}
+                seeds, menu = offer.get('tracks') or offer.get('seeds') or [], offer.get('offer_id') or offer.get('menu_id')
+                active = False
+            else:
+                seeds, menu = radio.get('seeds') or [], radio.get('seedMenu')
+                active = radio.get('state', {}).get('active')
             from yt_playlist.rec.radio_candidates import eligible_seeds
-            seeds = eligible_seeds(reader, radio.get('tracks') or radio.get('seeds') or [], now)
-            menu = radio.get('offer_id') or radio.get('menu_id')
-            usable = bool(menu and len({track['key'] for track in seeds}) >= growth_readiness.MIN_RADIO_SEEDS)
+            seeds = eligible_seeds(reader, seeds, now)
+            usable = bool(active or menu and len({track['key'] for track in seeds}) >= growth_readiness.MIN_RADIO_SEEDS)
             if usable and not usage.get('radio'):
                 total, processed = reader.readiness.coverage()
                 usable = bool(total and processed * 10 >= total * 9)
@@ -231,7 +240,7 @@ def _view(store, now, *, mixes_ready=None, albums_ready=None, radio=None, collec
         # Read the same bounded, currently eligible outputs that each area serves.
         # A cache row or a fitted model alone does not open a destination.
         if collections is None:
-            prepared = reader.rec_proposals.get_proposals(home_prepared.SURFACE) or {}
+            prepared = home_cache.read(reader, home_prepared.SURFACE) or {}
             collections = home_prepared.collections(reader, prepared, now)
         foundation_ready = growth_readiness.foundation(reader, now)
         discover_ready = growth_readiness.discover(collections)
@@ -346,7 +355,8 @@ def _view(store, now, *, mixes_ready=None, albums_ready=None, radio=None, collec
     stops = {node['id']: node for node in nodes}
     mixes, albums, radio_ready = (stops[identity]['ready'] for identity in ('listening', 'albums', 'radio'))
     vibes_ready = stops['vibes']['ready']
-    return {'nodes': nodes, 'foundation_ready': foundation_ready, 'achievements': achievements,
+    return {'nodes': nodes, 'trails': festival_layout.trails(nodes),
+            'foundation_ready': foundation_ready, 'achievements': achievements,
             'vibes_ready': vibes_ready, 'health': {'total': total, 'processed': processed,
             'percent': math.floor(processed * 100 / total) if total else 0,
             'label': 'Preparing your music' if processed < total else 'Ready to keep growing' if total else 'Waiting for music',

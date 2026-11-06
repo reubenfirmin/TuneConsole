@@ -13,7 +13,7 @@
     // destination page consume that confirmation so its result stays visible.
     if (pending.redirecting && !document.querySelector('.pl-headmain')) return;
     const player = status?.now_playing || {};
-    const playing = player.playlist_ytm_id === pending.playlist && !player.paused;
+    const playing = status?.connected === true && player.playlist_ytm_id === pending.playlist && player.paused === false;
     const expired = Date.now() - pending.at >= 45000;
     if (playing) {
       note?.remove();
@@ -31,8 +31,7 @@
       note.setAttribute('role', 'status'); owner.append(note);
     }
     if (expired || status?.connected === false) {
-      note.replaceChildren(document.createTextNode('Your mix is saved. ' +
-        (status?.connected === false ? 'Reconnect the YouTube Music extension. ' : 'Playback has not started. ') +
+      note.replaceChildren(document.createTextNode('Your mix is saved. Playback has not started. ' +
         (note.closest('.pl-headmain') ? 'Use Play to retry this saved playlist, or ' : 'You can ')));
       const link = document.createElement('a');
       link.textContent = 'open it on YouTube Music';

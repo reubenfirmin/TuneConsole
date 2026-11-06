@@ -208,14 +208,25 @@ def test_vibe_access_matches_journey_and_omits_unrelated_destinations(
 
     full_journey_prefix.restore(store)
     finish_full_journey(store)
-    def agrees(now):
-        expected = account_growth.has_access(account_growth.view(store, now), 'vibes')
+    def agrees(now, radio=None):
+        expected = account_growth.has_access(account_growth.view(store, now, radio=radio), 'vibes')
         with monkeypatch.context() as patch:
             patch.setattr(into_recently, 'load', lambda *a, **k: pytest.fail('Vibe access loaded articles'))
             patch.setattr(account_growth.deepseek, 'settings', lambda *a, **k: pytest.fail('Vibe access loaded bonuses'))
-            assert account_growth.vibe_access(store, now) is expected
+            assert account_growth.vibe_access(store, now, radio) is expected
         return expected
     assert agrees(1000)
+    saved_offer = store.settings.get_setting('radio_seed_offer')
+    for seeds in ([], json.loads(saved_offer)['tracks'][:3]):
+        store.settings.set_setting('radio_seed_offer', json.dumps({'menu_id': 'changed', 'tracks': seeds}))
+        radio = {'state': {'active': True}, 'seedMenu': 'changed', 'seeds': seeds}
+        assert agrees(1000, radio)
+        assert not agrees(1000, {**radio, 'state': {'active': False}})
+    store.settings.delete_setting('radio_seed_offer')
+    radio = {'state': {'active': True}, 'seedMenu': None, 'seeds': []}
+    assert agrees(1000, radio)
+    assert not agrees(1000, {**radio, 'state': {'active': False}})
+    store.settings.set_setting('radio_seed_offer', saved_offer)
     # Downstream Vibe preparation must not skip an unfinished required TV stop.
     store.rec_proposals.put_proposals(tv.SURFACE, {}, 1001)
     assert not agrees(1001)
@@ -244,6 +255,10 @@ def test_vibe_access_matches_journey_and_omits_unrelated_destinations(
         usage = choice_evidence.compile_report(store, 1002)['home_format']
         assert usage['episodes']['mixes'] == 1 and usage['vibe_episodes'] == 0
         response = client.post('/home/vibe', data={'vibe': 'relax'})
+        assert response.status_code == 200
+        assert client.app.state.ctx.work.wait(20)
+        assert client.get('/home/vibe/status').json()['phase'] == 'ready'
+        response = client.get('/home/cards')
     assert response.status_code == 200
     recipes = [json.loads(html.unescape(value)) for value in
                re.findall(r"data-recipe='([^']*)'", response.text)]

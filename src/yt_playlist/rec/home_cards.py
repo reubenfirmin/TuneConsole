@@ -508,9 +508,18 @@ class HomeCards:
         # Keep the output check and polling state on the same completion
         # observation. A job finishing between them still needs another poll.
         done = job.done
-        if done and not job.error:
+        waiting = getattr(job, 'outcome', None) == 'waiting'
+        if (done or waiting) and not job.error:
             proto = (self.built_fresh(job.parameters, now) if job.kind == "fresh_pool"
                      else self.built_library(job.parameters, now, job.exclude_keys))
+            if waiting:
+                head = self.store.recommendations.head('fresh')
+                prepared = (head and head['id'] != job.result['generation']
+                            and head['created_at'] >= job.result['requested_at'])
+                done = bool(proto or prepared)
+                if done:
+                    job.outcome = 'completed'
+                    job.done = True
         if proto:
             proto["experiment_id"] = experiment_id(proto)
             proto["recipe"]["experiment_id"] = proto["experiment_id"]

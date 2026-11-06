@@ -239,6 +239,63 @@ document.addEventListener('htmx:afterRequest', event => {
 
 let homeVibeUpdate = null;
 let homeVibeFeedbackTimer;
+let homeVibePollTimer;
+let homeVibeRead;
+
+function scheduleHomeVibeRead(update, delay = 700) {
+  clearTimeout(homeVibePollTimer);
+  homeVibePollTimer = setTimeout(() => readHomeVibe(update), delay);
+}
+
+async function readHomeVibe(update) {
+  if (homeVibeUpdate !== update || !update.feedback?.isConnected) return;
+  homeVibeRead?.abort();
+  const read = homeVibeRead = new AbortController();
+  try {
+    const response = await fetch('/home/vibe/status', {signal: read.signal});
+    if (!response.ok) throw new Error('Vibe observation unavailable');
+    const state = await response.json();
+    if (homeVibeUpdate !== update || read.signal.aborted) return;
+    if (!state && update.requestId) { clearHomeVibeFeedback(); syncHomeVibe(); return; }
+    // A lost mutation reply is reconciled by reading its persisted receipt.
+    // An older receipt cannot establish that the new selection was accepted.
+    if (!state || (!update.requestId && (state.id === update.previousRequestId || state.vibe !== update.value))) {
+      update.phase = 'error';
+      renderHomeVibeFeedback();
+      syncHomeVibe();
+      return;
+    }
+    update.requestId = state.id;
+    update.value = state.vibe;
+    update.label = homeVibeLabel(state.vibe);
+    if (state.phase === 'failed') {
+      update.phase = 'error';
+      renderHomeVibeFeedback();
+      syncHomeVibe();
+      return;
+    }
+    if (state.phase === 'ready') {
+      if (genHomeBusy(document.getElementById('home-mode-cards'))) {
+        scheduleHomeVibeRead(update);
+        return;
+      }
+      await htmx.ajax('GET', '/home/cards', {target: '#home-mode-cards', swap: 'outerHTML',
+        values: {vibe_request: state.id}});
+      if (homeVibeUpdate === update) {
+        syncHomeVibe();
+        if (update.phase === 'waiting') scheduleHomeVibeRead(update);
+      }
+      return;
+    }
+    update.phase = 'waiting';
+    renderHomeVibeFeedback();
+    scheduleHomeVibeRead(update, state.phase === 'waiting' ? 3000 : 700);
+  } catch (error) {
+    if (read.signal.aborted || homeVibeUpdate !== update) return;
+    console.debug('[Vibe observation]', error);
+    scheduleHomeVibeRead(update, 3000);
+  }
+}
 
 function homeVibeLabel(value) {
   return [...document.querySelectorAll('#home-vibe-form input')]
@@ -252,6 +309,8 @@ function dismissHomeVibeFeedback() {
 
 function clearHomeVibeFeedback() {
   clearTimeout(homeVibeFeedbackTimer);
+  clearTimeout(homeVibePollTimer);
+  homeVibeRead?.abort();
   homeVibeUpdate = null;
   document.getElementById('home-vibe-feedback')?.setAttribute('hidden', '');
 }
@@ -288,11 +347,16 @@ function syncHomeVibeFeedback() {
   if (!feedback || !row) return;
   // Navigation replaces the feed; a previous page's request must not own its status.
   if (homeVibeUpdate?.feedback !== feedback) {
-    clearTimeout(homeVibeFeedbackTimer);
-    homeVibeUpdate = null;
+    clearHomeVibeFeedback();
   }
   const value = row.dataset.vibe || '';
-  if (homeVibeUpdate?.phase === 'saving') return;
+  if (homeVibeUpdate?.phase === 'saving'
+      || (homeVibeUpdate?.phase === 'waiting' && homeVibeUpdate.request && !homeVibeUpdate.requestId)) return;
+  if (homeVibeUpdate?.requestId && (row.dataset.vibeRequest !== homeVibeUpdate.requestId
+      || ['pending', 'waiting'].includes(row.dataset.vibeRequestPhase))) {
+    renderHomeVibeFeedback();
+    return;
+  }
   if (homeVibeUpdate?.phase === 'error') {
     if (value === homeVibeUpdate.previousValue) return;
     clearHomeVibeFeedback();
@@ -303,7 +367,13 @@ function syncHomeVibeFeedback() {
     feedback.hidden = true;
   }
   // Restore ongoing preparation after a reload, without announcing old completed changes.
-  if (!homeVibeUpdate && value && row.dataset.preparing === 'true') {
+  if (!homeVibeUpdate && row.dataset.vibeRequest && ['pending', 'waiting', 'failed'].includes(row.dataset.vibeRequestPhase)) {
+    homeVibeUpdate = {feedback, value, label: homeVibeLabel(value), requestId: row.dataset.vibeRequest,
+      previousValue: value, phase: row.dataset.vibeRequestPhase === 'failed' ? 'error' : 'waiting'};
+    if (homeVibeUpdate.phase === 'waiting') scheduleHomeVibeRead(homeVibeUpdate, 0);
+    renderHomeVibeFeedback();
+    return;
+  } else if (!homeVibeUpdate && value && row.dataset.preparing === 'true') {
     homeVibeUpdate = {feedback, value, label: homeVibeLabel(value), phase: 'waiting'};
   }
   if (!homeVibeUpdate) return;
@@ -337,7 +407,8 @@ function syncHomeVibe() {
   const panel = document.getElementById('fingerprint');
   if (!panel) return;
   const row = document.getElementById('home-mode-cards');
-  const vibe = row?.dataset.vibe ?? panel.dataset.vibe ?? '';
+  const vibe = homeVibeUpdate && ['saving', 'waiting'].includes(homeVibeUpdate.phase)
+    ? homeVibeUpdate.value : row?.dataset.vibe ?? panel.dataset.vibe ?? '';
   panel.querySelectorAll('#home-vibe-form input').forEach(input => { input.checked = input.value === vibe; });
   window.dispatchEvent(new CustomEvent('home-vibe-sync', {detail: vibe}));
 }
@@ -351,6 +422,7 @@ document.addEventListener('htmx:beforeRequest', event => {
     feedback: document.getElementById('home-vibe-feedback'),
     request: event.detail.xhr,
     previousValue: document.getElementById('home-mode-cards')?.dataset.vibe || '',
+    previousRequestId: document.getElementById('home-mode-cards')?.dataset.vibeRequest || '',
     value: selected?.value || '', label: homeVibeLabel(selected?.value || ''), phase: 'saving',
   };
   window.dispatchEvent(new CustomEvent('home-vibe-saving'));
@@ -360,8 +432,10 @@ document.addEventListener('htmx:afterRequest', event => {
   if (event.detail.elt?.id === 'home-vibe-form') {
     if (homeVibeUpdate?.request !== event.detail.xhr) return;
     if (homeVibeUpdate?.request === event.detail.xhr) {
-      homeVibeUpdate.phase = event.detail.successful ? 'waiting' : 'error';
+      homeVibeUpdate.phase = 'waiting';
+      homeVibeUpdate.requestId = event.detail.xhr.getResponseHeader('X-Home-Vibe-Request');
       renderHomeVibeFeedback();
+      scheduleHomeVibeRead(homeVibeUpdate, 0);
     }
     syncHomeVibe();
   }
@@ -370,6 +444,20 @@ document.addEventListener('htmx:afterRequest', event => {
     if (status) status.textContent = event.detail.successful ? 'Freshly adjusted. Find your next mix.'
       : 'Couldn’t update your mixes. Try that adjustment again.';
   }
+});
+
+document.addEventListener('htmx:beforeSwap', event => {
+  const id = event.detail.requestConfig?.parameters?.vibe_request;
+  if (id && (homeVibeUpdate?.requestId !== id || genHomeBusy(document.getElementById('home-mode-cards')))) {
+    event.detail.shouldSwap = false;
+  }
+});
+window.addEventListener('pagehide', () => {
+  clearTimeout(homeVibePollTimer);
+  homeVibeRead?.abort();
+});
+window.addEventListener('pageshow', event => {
+  if (event.persisted && homeVibeUpdate?.phase === 'waiting') scheduleHomeVibeRead(homeVibeUpdate, 0);
 });
 
 // Remember the taste panel's open/closed state across page loads and fragment swaps.

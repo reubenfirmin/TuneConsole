@@ -173,7 +173,7 @@ def measured_home_templates(_pristine_current_schema, measured_sounds_template):
                         from tests.test_home_tuning import prepare_tuning_home
                         prepare_tuning_home(source, 1000)
                     else:
-                        from tests.browser.test_home_vibe_browser import prepare
+                        from tests.measured_home_support import prepare
                         identity = source.accounts.upsert_account('main', 'cred', None, True)
                         # Match live_app's pre-preparation state, including its
                         # existing playlist. live_app later upserts these same
@@ -479,8 +479,10 @@ def staged_custody_templates(tmp_path_factory, _pristine_installed_schema):
                 def prepare(source):
                     if admit:
                         source.init_schema(defer_metadata=True)
-                    else:
-                        source._bind_repositories()
+                    # historical_template binds before admission. An already
+                    # installed regular schema keeps its schema cookie, so
+                    # admission may not rebind its predecessor read views.
+                    source._bind_repositories()
                     return build(source)
 
                 templates[key] = resources.enter_context(historical_template(

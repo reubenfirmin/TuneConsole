@@ -17,6 +17,38 @@ from yt_playlist.core.lock_diagnostics import (
 
 
 _BACKGROUND = ContextVar("tuneconsole_background_priority", default=None)
+_REQUEST = ContextVar("tuneconsole_request_priority", default=None)
+
+
+class _RequestClaim:
+    """One HTTP owner's priority, suspended while it awaits tracked worker work."""
+    def __init__(self, priority):
+        self.priority = priority
+        self._release = priority.enter()
+        self._closed = False
+        self._waiting = 0
+
+    def close(self):
+        with self.priority._condition:
+            self._closed = True
+            if self._release is not None:
+                self._release()
+                self._release = None
+
+    @contextmanager
+    def waiting(self):
+        with self.priority._condition:
+            self._waiting += 1
+            if self._release is not None:
+                self._release()
+                self._release = None
+        try:
+            yield
+        finally:
+            with self.priority._condition:
+                self._waiting -= 1
+                if not self._waiting and not self._closed:
+                    self._release = self.priority.enter()
 
 
 class RequestPriority:
@@ -45,6 +77,16 @@ class RequestPriority:
 
         return release
 
+    @contextmanager
+    def request(self):
+        claim = _RequestClaim(self)
+        token = _REQUEST.set(claim)
+        try:
+            yield claim.close
+        finally:
+            claim.close()
+            _REQUEST.reset(token)
+
     def checkpoint(self, should_stop):
         if getattr(self._held, "depth", 0):
             return
@@ -57,8 +99,7 @@ class RequestPriority:
             self._held.resume_cpu_until = resume
         if cpu < resume:
             return
-        # A request can itself await a model/source mutation. Yield a bounded timeslice rather
-        # than waiting for that response indefinitely (which would introduce a dependency cycle).
+        # Continuing foreground traffic must still leave workers bounded opportunities to run.
         deadline = time.monotonic() + 0.1
         with self._condition:
             while self._foreground and not should_stop():
@@ -91,6 +132,17 @@ def yield_to_requests(should_stop):
     background = _BACKGROUND.get()
     if background is not None:
         background[0].checkpoint(should_stop)
+
+
+@contextmanager
+def waiting_for_worker():
+    """Relinquish only the awaiting request's claim; other owners keep priority."""
+    claim = _REQUEST.get()
+    if claim is None:
+        yield
+    else:
+        with claim.waiting():
+            yield
 
 
 class ServingLock:

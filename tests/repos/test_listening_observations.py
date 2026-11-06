@@ -119,6 +119,7 @@ def test_repeated_events_and_coarse_days_are_distinct_units(listening_store):
     assert s.history.listening_day_counts()=={'song':2}
     assert s.history.event_play_counts()=={'song':2}
     assert s.conn.execute('SELECT COUNT(*) FROM listening_activity').fetchone()[0]==3
+    assert s.recommendations._candidate_play_counts(['song', 'absent']) == {'song': 2}
 
 
 def test_removing_one_source_preserves_overlaps_and_unknown_legacy(listening_store):
@@ -161,9 +162,11 @@ def test_generated_sync_shadow_is_account_scoped_and_independent_evidence_surviv
     s.history.record_history_plays(2,ts,[('song','Today')],source_timezone='America/Costa_Rica')
     assert s.history.listening_day_counts(1)=={}
     assert s.history.listening_day_counts(2)=={'song':1}
+    assert s.recommendations._candidate_play_counts(['song', 'absent']) == {'song': 1}
     s.history.record_history_plays(1,ts,['song'],source_timezone='America/Costa_Rica')
     assert s.history.listening_day_counts(1)=={'song':1}
     assert s.history.event_play_counts(1)=={}
+    assert s.recommendations._candidate_play_counts(['song', 'absent']) == {'song': 2}
 
 
 def test_failed_draft_upgrade_rolls_back_and_backup_is_installed_v25(tmp_path):
@@ -218,6 +221,7 @@ def test_playlist_counts_and_taste_weights_ignore_confirmed_alternate_upload(lis
     assert len(s.charts.get_playlist_track_recency()[first])==1
     assert s.history.listening_day_counts(1)[key]==2
     assert s.history.event_play_counts(1)[key]==2
+    assert s.recommendations._candidate_play_counts([key, other]) == {key: 2, other: 1}
 
 
 def test_reassociation_preserves_coarse_sources_and_first_play_atomically(listening_store,monkeypatch):

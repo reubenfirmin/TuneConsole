@@ -15,9 +15,9 @@ from dataclasses import replace
 from datetime import date, datetime
 from uuid import uuid4
 from weakref import ref
+from types import SimpleNamespace
 
-from yt_playlist.core.activity import (activity_for, cancellable_work, check_stopping,
-                                      work_budget, WorkBudgetExceeded, WorkClosing)
+from yt_playlist.core.activity import (activity_for, cancellable_work, check_stopping, WorkClosing)
 from yt_playlist.core.accounts import client_for
 from yt_playlist.core.bridge import BridgeError
 from yt_playlist.core.work_diagnostics import work_span
@@ -47,6 +47,8 @@ class PlaylistRadio:
         self.operation = threading.Lock()
         self.tuning_serial = 0
         self.tuning_owner = None
+        self.tuning_pending = None
+        self.tuning_unconfirmed = None
         self.session = None
         self.offer = None
         self.offer_id = None
@@ -238,6 +240,10 @@ class PlaylistRadio:
             state['stopping_launches'] = list(dict.fromkeys(
                 owner for request, owner in self.launch_requests.items()
                 if owner is not None and request.is_set()))
+            pending = self.tuning_pending
+            if pending and pending[0] == self.tuning_serial and not state['stopped']:
+                state['tuning_pending'] = dict(pending[1])
+            state['tuning_confirmed'] = self.tuning_unconfirmed is not s or s is None
             return state
 
     def history_tracks(self, state, *, reader=None):
@@ -283,6 +289,8 @@ class PlaylistRadio:
                 s = None
         if s:
             self._persist(s)
+        elif launch_id is not None:
+            self.persistence.stop_launch(launch_id)
         return {"ok": True, **self.status()}
 
     def suspend(self):
@@ -591,13 +599,26 @@ class PlaylistRadio:
     def tune(self, values, *, serial=None):
         values = radio_tuning.controls(values)
         serial = self.reserve_tuning() if serial is None else serial
-        if self.session is None:
-            self.join(timeout=2)
-        # Playlist reconciliation can be waiting on the extension. Do not let
-        # an explicit Apply wait indefinitely behind that operation.
-        if not self.operation.acquire(timeout=2):
-            logger.info("Radio tuning refused: reason=busy serial=%d", serial)
-            return {"ok": False, "tune_reason": "busy", **self.status()}
+        with self.lock:
+            if serial != self.tuning_serial:
+                return {"ok": False, "tune_reason": "superseded", **self.status()}
+            self.tuning_pending = (serial, values)
+        # Browser requests remain bounded; their worker waits cooperatively for
+        # playlist ownership. A newer explicit action cancels this admission.
+        try:
+            if self.session is None:
+                self.join(cancelled=SimpleNamespace(is_set=lambda: serial != self.tuning_serial or not self.work.accepting))
+            while not self.operation.acquire(timeout=.05):
+                if serial != self.tuning_serial or not self.work.accepting:
+                    with self.lock:
+                        if self.tuning_pending and self.tuning_pending[0] == serial:
+                            self.tuning_pending = None
+                    return {"ok": False, "tune_reason": "superseded", **self.status()}
+        except BaseException:
+            with self.lock:
+                if self.tuning_pending and self.tuning_pending[0] == serial:
+                    self.tuning_pending = None
+            raise
         try:
             with self.lock:
                 s = self.session
@@ -612,34 +633,48 @@ class PlaylistRadio:
                 if not current() or not self._is_current(s) or s.stop.is_set() or not s.directions:
                     logger.info("Radio tuning refused: reason=inactive_or_superseded serial=%d", serial)
                     return {"ok": False, "tune_reason": "superseded", **self.status()}
-                if values == s.candidates.tuning:
-                    logger.info("Radio tuning confirmed unchanged: serial=%d values=%s", serial, values)
-                    return {"ok": True, **self.status()}
+                unchanged = values == s.candidates.tuning
+                previous_unconfirmed = self.tuning_unconfirmed
+                self.tuning_unconfirmed = s
             # Reuse the prepared pools with the new source mix. This route runs
             # off the playback poll and never changes durable taste or play evidence.
             candidates = None
             applied = False
             try:
-                with work_budget(15):
-                    candidates = RadioCandidates(self.ctx.store, self.ctx.now_fn(), values,
-                                                 now_source=s.candidates)
+                if unchanged:
+                    applied = True
+                else:
+                    with cancellable_work(lambda: not current() or s.stop.is_set()), \
+                            self.ctx.store.priority.background(check_stopping):
+                        candidates = RadioCandidates(self.ctx.store, self.ctx.now_fn(), values,
+                                                     now_source=s.candidates)
                     applied = self.listening.tune(s, candidates, current=current)
                 if applied:
                     self._persist(s)
+                    with self.lock:
+                        self.tuning_unconfirmed = None
+                        if self.tuning_pending and self.tuning_pending[0] == serial:
+                            self.tuning_pending = None
                     s.wake.set()
                 logger.info("Radio tuning result: serial=%d accepted=%s values=%s menu=%s",
                             serial, applied, values, s.directions.menu_id)
                 return {"ok": applied, **({} if applied else {"tune_reason": "superseded"}), **self.status()}
-            except WorkBudgetExceeded:
-                logger.warning("Radio tuning deferred: reason=planning_budget serial=%d", serial, exc_info=True)
-                return {"ok": False, "tune_reason": "busy", **self.status()}
+            except WorkClosing:
+                logger.info("Radio tuning superseded: serial=%d", serial)
+                return {"ok": False, "tune_reason": "superseded", **self.status()}
             except Exception:
                 logger.warning("Radio tuning failed: serial=%d values=%s", serial, values, exc_info=True)
                 raise
             finally:
+                with self.lock:
+                    if not applied and (candidates is None or s.candidates is not candidates):
+                        self.tuning_unconfirmed = previous_unconfirmed
                 if not applied and candidates is not None and candidates.prepared is not None:
                     candidates.prepared.close()
         finally:
+            with self.lock:
+                if self.tuning_pending and self.tuning_pending[0] == serial:
+                    self.tuning_pending = None
             self.operation.release()
 
     def _expire_cancelled_launches(self):

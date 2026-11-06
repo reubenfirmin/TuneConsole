@@ -10,5 +10,5 @@
   <h2>Your music is on its way.</h2>
   <a class="btn btn-primary artist-start-primary" href="https://music.youtube.com/watch?list={{ ytm|urlencode }}" target="_blank" rel="noopener">Open my first set {{ arrow_icon('external') }}</a>
 {% endif %}
-<script>genComplete({{ launch_id|default('')|tojson }}, {{ ytm|default(none)|tojson }}, {{ (error is defined and error)|tojson }}, {{ save_uncertain|default(false)|tojson }});</script>
+<script>genComplete({{ launch_id|default('')|tojson }}, {{ ytm|default(none)|tojson }}, {{ (error is defined and error)|tojson }}, {{ save_uncertain|default(false)|tojson }}, false, {{ addition_recovery|default(none)|tojson }});</script>
 </section>

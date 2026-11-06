@@ -129,8 +129,14 @@ function generationRestoreUnresolved() {
     if (!unresolved) return;
     const existing = generationWindows.get(node.id);
     if (existing?.node === node && existing.key === key && node.dataset.generationPending && !existing.uncertain) return;
+    let context = generationContext(node);
+    try {
+      const retained = JSON.parse(sessionStorage.getItem('tc-mix-return'));
+      if (retained?.id === node.id && 'tc-generation:' + retained.id + ':' +
+          JSON.stringify(retained.tracks.map(track => track.video_id).sort()) === key) context = retained;
+    } catch (_) {}
     const record = existing?.key === key ? existing : {
-      key, context: generationContext(node), token: crypto.randomUUID(), sent: true
+      key, context, token: crypto.randomUUID(), sent: true
     };
     record.node = node;
     generationWindows.set(node.id, record);
@@ -161,6 +167,7 @@ function generationFailure(record) {
     link.href = 'https://music.youtube.com/search?q=' + encodeURIComponent(record.context.name);
     link.target = '_blank'; link.rel = 'noopener'; link.textContent = 'Find this mix on YouTube Music';
     note.append(link);
+    if (record.context.recovery) generationSavedStatus(record.node, record.context);
     record.node.querySelectorAll('[hx-post="/home/generate"]').forEach(button => { button.disabled = true; });
   }
   try {
@@ -172,6 +179,64 @@ function generationFailure(record) {
       tab.postMessage({type: 'generation-failed', token: record.token}, location.origin);
     }
   } catch (_) {}
+}
+
+function generationSavedStatus(node, context) {
+  const recovery = context.recovery;
+  let note = node.querySelector('[data-generation-error]');
+  if (!note) {
+    note = document.createElement('p');
+    note.className = 'section-note';
+    note.dataset.generationError = '';
+    const songs = node.querySelector('.gen-recovery-tracks');
+    if (songs) songs.before(note);
+    else node.append(note);
+  }
+  const summary = node.querySelector('[data-generation-summary]');
+  if (summary) summary.textContent = recovery.uncertain.length ? 'Some songs are still unconfirmed.' :
+    recovery.rejected.length || recovery.unattempted.length ? 'Some selected songs were not saved.' : 'Your selected songs are saved.';
+  const labels = {confirmed: 'Saved', uncertain: 'Unconfirmed', rejected: 'Not accepted', unattempted: 'Not saved'};
+  const counts = [];
+  for (const [state, label] of Object.entries(labels)) {
+    const videos = recovery[state];
+    if (videos.length) counts.push(videos.length + ' ' + label.toLowerCase());
+    node.querySelectorAll('.gen-row, [data-generation-video]').forEach(row => {
+      if (!videos.includes(row.dataset.vid || row.dataset.generationVideo)) return;
+      let progress = row.querySelector('[data-generation-progress]');
+      if (!progress) {
+        progress = document.createElement('span');
+        progress.className = 'gen-artist';
+        progress.dataset.generationProgress = '';
+        (row.querySelector('.gen-meta, .starter-meta') || row).append(progress);
+      }
+      progress.textContent = label;
+    });
+  }
+  note.replaceChildren(document.createTextNode(counts.join(' · ') + '. '));
+  const link = document.createElement('a');
+  link.href = 'https://music.youtube.com/playlist?list=' + encodeURIComponent(recovery.playlist);
+  link.target = '_blank'; link.rel = 'noopener'; link.textContent = 'Open saved mix';
+  const check = document.createElement('button');
+  check.type = 'button'; check.className = 'btn btn-sm'; check.textContent = 'Check saved mix';
+  check.onclick = async () => {
+    check.disabled = true; check.textContent = 'Checking saved mix…';
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    try {
+      const response = await fetch('/home/generate/reconcile', {method: 'POST', signal: controller.signal,
+        body: new URLSearchParams({tracks: JSON.stringify(context.tracks), recovery: JSON.stringify(recovery)})});
+      const updated = response.ok && await response.json();
+      if (updated) {
+        context.recovery = updated;
+        if (context.id && context.returnUrl) sessionStorage.setItem('tc-mix-return', JSON.stringify(context));
+      }
+    } catch (error) { console.debug('saved mix check deferred', error); }
+    finally {
+      clearTimeout(timer);
+      generationSavedStatus(node, context);
+    }
+  };
+  note.append(link, document.createTextNode(' '), check);
 }
 
 // Home and Road Trip share the generation window. Save ownership is attached to
@@ -273,12 +338,13 @@ document.addEventListener('htmx:afterRequest', event => {
   }
 });
 
-function genComplete(token, playlist, error, uncertain = false, redirecting = false) {
+function genComplete(token, playlist, error, uncertain = false, redirecting = false, recovery = null) {
   const record = Array.from(generationWindows.values()).find(item => item.token === token);
   if (record) {
     clearTimeout(record.timer);
     delete record.node.dataset.generationPending;
     if (uncertain) {
+      if (recovery) record.context.recovery = recovery;
       try { sessionStorage.setItem('tc-mix-return', JSON.stringify(record.context)); } catch (_) {}
     } else {
       try { sessionStorage.removeItem(record.key); } catch (_) {}
@@ -304,5 +370,6 @@ function genComplete(token, playlist, error, uncertain = false, redirecting = fa
     try { sessionStorage.setItem('tc-generated-playback', JSON.stringify({playlist, at: Date.now(), redirecting})); } catch (_) {}
     window.dispatchEvent(new Event('generated-playback-pending'));
   }
+  return record?.context;
 }
 

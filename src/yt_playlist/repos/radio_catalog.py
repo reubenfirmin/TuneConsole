@@ -36,11 +36,11 @@ class RadioCatalogRepo(Repo):
             (after, *labels, limit))]
 
     @lookup_read
-    def fallback_tracks(self, limit):
+    def fallback_tracks(self, limit, *, after=0):
         return [dict(row) for row in self.conn.execute(
-            'SELECT identity_key AS key,video_id,title,artist,album,album_browse_id,thumbnail,'
+            'SELECT id,identity_key AS key,video_id,title,artist,album,album_browse_id,thumbnail,'
             'duration_s AS duration,genre,mb_year AS year FROM playable_library_tracks '
-            "WHERE video_id IS NOT NULL AND video_id<>'' LIMIT ?", (limit,))]
+            "WHERE id>? AND video_id IS NOT NULL AND video_id<>'' ORDER BY id LIMIT ?", (after, limit))]
 
     @lookup_read
     def details(self, videos):

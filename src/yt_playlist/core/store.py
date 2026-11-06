@@ -44,6 +44,7 @@ from yt_playlist.repos.rec_eligibility import RecEligibilityRepo
 from yt_playlist.repos.rec_evidence import RecEvidenceRepo
 from yt_playlist.repos.rec_ledger import RecLedgerRepo
 from yt_playlist.repos.rec_proposals import RecProposalsRepo
+from yt_playlist.repos.home_cache import HomeCacheRepo
 from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
 from yt_playlist.repos.rec_signals import RecSignalsRepo
 from yt_playlist.repos.playlist_recipes import PlaylistRecipesRepo
@@ -164,7 +165,7 @@ class Store:
                 yield snapshot
 
     @contextmanager
-    def read_view(self, *, tracked=False):
+    def read_view(self, *, tracked=False, seconds=...):
         """Bounded private reader, optionally tracking reusable input reads."""
         if getattr(self, '_read_only', False):
             # A composed read keeps its original WAL snapshot and file lifetime.
@@ -172,7 +173,7 @@ class Store:
             yield self
             return
         with self._retained_readers():
-            with read_view(self, self._make_reader, tracked=tracked) as reader:
+            with read_view(self, self._make_reader, tracked=tracked, seconds=seconds) as reader:
                 yield reader
 
     def _make_reader(self):
@@ -270,6 +271,7 @@ class Store:
         self.rec_evidence = RecEvidenceRepo(self)
         self.rec_ledger = RecLedgerRepo(self)
         self.rec_proposals = RecProposalsRepo(self)
+        self.home_cache = HomeCacheRepo(self)
         self.recommendations = RecommendationPublicationsRepo(self)
         self.rec_signals = RecSignalsRepo(self)
         self.playlist_recipes = PlaylistRecipesRepo(self)

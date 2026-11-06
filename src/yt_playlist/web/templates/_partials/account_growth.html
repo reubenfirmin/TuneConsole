@@ -33,7 +33,13 @@
       <image class="festival-grounds" href="/static/festival-grounds-v4.png" width="1536" height="1024"/>
       <g class="festival-routes" mask="url(#festival-path-surface)" aria-hidden="true">
         {# Available trails and the single preparation frontier get light; later paths stay in the art. #}
-        {% for stop in growth.nodes %}<g data-destination="{{ stop.id }}" :class="'growth-route is-' + (node('{{ stop.id }}').connected ? 'connected' : node('{{ stop.id }}').state)" :data-parent="node('{{ stop.id }}').parent" x-show="node('{{ stop.id }}').connected || node('{{ stop.id }}').ready || (node('{{ stop.id }}').state === 'preparing' && !node('{{ stop.id }}').optional)"{% if not stop.ready and not stop.connected %} style="display:none"{% endif %}><path d="{{ stop.route }}" :d="node('{{ stop.id }}').route"/></g>{% endfor %}
+        {% for trail in growth.trails %}
+        <g data-destination="{{ trail.id }}" data-destinations="{{ trail.destinations|join(' ') }}" data-parent="{{ trail.parent }}"
+           class="growth-route" :class="'is-' + trail('{{ trail.id }}').state"
+           x-show="trail('{{ trail.id }}').state !== 'untouched'"{% if trail.state == 'untouched' %} style="display:none"{% endif %}>
+          <path d="{{ trail.path }}"/>
+        </g>
+        {% endfor %}
       </g>
       {% for stop in growth.nodes %}
       <g class="landmark-art{% if growth_intro|default(false) and stop.id == 'first' %} is-soundcheck{% endif %}" data-landmark="{{ stop.id }}" :class="{['is-' + node('{{ stop.id }}').state]: true, 'is-connected': node('{{ stop.id }}').connected, 'is-lit': hovered === '{{ stop.id }}' || selected === '{{ stop.id }}'}" aria-hidden="true">

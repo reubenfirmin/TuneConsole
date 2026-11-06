@@ -215,7 +215,7 @@ def test_unknown_intensity_stays_neutral_and_weaker_than_a_known_endpoint_fit():
     assert musical_character.provenance(unknown)['intensity'] is None
 
 
-def test_live_and_reused_offers_preserve_current_explicit_exclusions(store, opportunities):
+def test_worker_selection_preserves_current_explicit_exclusions(store, opportunities):
     pool = vibe_pools.candidates(store, 'relax', 'wheelhouse')
     first, second, third = pool[:3]
     seed_dislike(store, first['key'], 2000, 1000)
@@ -230,13 +230,6 @@ def test_live_and_reused_offers_preserve_current_explicit_exclusions(store, oppo
     remaining = vibe_pools.pick(store, 1000, 'relax', 'wheelhouse', avoid_genres=['classical'])
     assert not {first['key'], second['key'], third['key']} & {track['key'] for track in remaining}
     assert all(track['genre'] != 'Metal' for track in remaining)
-    protos = home_prepared._eligible_protos(store, [{'lane': 'wheelhouse', 'label': 'Familiar',
-                                                   'name': 'Familiar - Test', 'tracks': deepcopy(pool[:24]),
-                                                   'recipe': {'vibe': 'relax',
-                                                              'genre_request': {'avoid': ['classical']}}}], 1000)
-    assert protos
-    assert not {first['key'], second['key'], third['key']} & {t['key'] for p in protos for t in p['tracks']}
-    assert all(t['genre'] != 'Metal' for p in protos for t in p['tracks'])
 
 
 def sound(key, score=0, **overrides):

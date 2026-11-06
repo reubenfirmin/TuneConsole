@@ -28,6 +28,17 @@
   when it helps explain the problem, proposed change, or evidence. Do not attempt
   to sound impressive or write more just to look good. Clarity is key.
 
+# Documentation
+
+- Write for humans: concise setup, commands, current behavior and decisions.
+  Link the owning reference instead of repeating it. Keep ticket status, run
+  transcripts and progress diaries out of source documentation.
+
+- Follow `experiments/README.md`: keep concise dataset logs and model provenance,
+  including rejected approaches and their reasons. Keep ticket diaries, handoffs
+  and progress reports out of source. Detailed run evidence belongs in ignored
+  artifacts; preserve hash-bound protocols without appending narrative history.
+
 # Error handling in the UI
 
 - Technical error popups, toasts, banners and modal alerts are forbidden. Keep

@@ -15,6 +15,7 @@ from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, RadioCandidates
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.rec.radio_policy import RadioPolicy
 from yt_playlist.web import radio_session
+from yt_playlist.web.request_priority import RequestPriorityMiddleware
 from yt_playlist.web.routes import radio_session as radio_routes
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -268,6 +269,15 @@ def test_real_tuning_route_replans_measured_candidates_and_persists_controls(poc
              store.rec_model.get_weights(now=1234))
     app = FastAPI()
     app.include_router(radio_routes.build(controller.ctx))
+    app.add_middleware(RequestPriorityMiddleware, priority=store.priority)
+    planning_owners = []
+    update = RadioDirections.update
+
+    def update_with_request_priority(*args, **kwargs):
+        planning_owners.append(store.priority._foreground)
+        return update(*args, **kwargs)
+
+    monkeypatch.setattr(RadioDirections, 'update', update_with_request_priority)
     menus = []
     with TestClient(app) as client:
         for energy in (0., 1.):
@@ -281,6 +291,7 @@ def test_real_tuning_route_replans_measured_candidates_and_persists_controls(poc
                                   for t in future)
             menus.append({t['video_id'] for t in future})
             assert client.get('/radio/status').json()['tuning'] == values
+            assert store.priority._foreground == 0
             assert controller.persistence.load()['tuning'] == values
             controller.listening.observe(controller.session)
             controller.advance(controller.session)
@@ -289,5 +300,6 @@ def test_real_tuning_route_replans_measured_candidates_and_persists_controls(poc
             assert controller.ctx.bridge.now_playing == playing
             assert frames == navigations
         assert menus[0].isdisjoint(menus[1])
+    assert planning_owners and set(planning_owners) == {0}, 'Apply must not delay its own planner'
     assert (store.rec_model.recent_liked_with_ts(limit=200), store.rec_model.disliked_with_ts(),
             store.rec_model.get_weights(now=1234)) == taste

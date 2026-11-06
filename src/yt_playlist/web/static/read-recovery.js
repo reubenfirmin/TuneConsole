@@ -4,11 +4,12 @@
   const nativeFetch = window.fetch.bind(window);
   let lifetime = new AbortController();
   window.addEventListener('pagehide', () => lifetime.abort());
-  // Restored documents keep this closure. Renew before earlier pageshow
-  // listeners restart playback/setup polls; old requests keep their old signal.
+  // Restored documents keep this closure. This script loads before shared
+  // pollers, so their restored requests use the new lifetime. Old calls keep
+  // their original, canceled signal.
   window.addEventListener('pageshow', event => {
     if (event.persisted && lifetime.signal.aborted) lifetime = new AbortController();
-  }, {capture: true});
+  });
   const deferred = response => response.status === 503 &&
     (response.headers?.get('X-Read-Pending') || response.getResponseHeader?.('X-Read-Pending')) === 'true';
   const interval = (response, attempt) => {
@@ -65,6 +66,9 @@
   };
 
   const pending = new Map();
+  // These controls reconcile their own durable receipt without replacing the
+  // page. A global refresh would discard their unresolved action state.
+  const reconcilePage = config => config?.elt?.dataset?.writeRecovery !== 'local';
   const generations = new WeakMap(), requests = new WeakMap();
   function clear(target) {
     if (!target) return;
@@ -135,7 +139,7 @@
     if (!request.retrying) clear(request.target);
     const config = event.detail.requestConfig;
     if (event.detail.xhr.status >= 500 && !['get', 'head'].includes(config?.verb?.toLowerCase()))
-      failed(config.path, config.verb.toUpperCase(), false, true);
+      failed(config.path, config.verb.toUpperCase(), false, reconcilePage(config));
   });
   for (const name of ['htmx:timeout', 'htmx:sendError']) document.addEventListener(name, event => {
     const {xhr, requestConfig} = event.detail;
@@ -146,7 +150,7 @@
     if (requestConfig.verb.toLowerCase() === 'get') {
       request.generation = generations.get(request.target);
       retryFragment(request, requestConfig, xhr);
-    } else failed(requestConfig.path, requestConfig.verb.toUpperCase(), name === 'htmx:timeout', true);
+    } else failed(requestConfig.path, requestConfig.verb.toUpperCase(), name === 'htmx:timeout', reconcilePage(requestConfig));
   });
   window.addEventListener('app-page-leaving', () => [...pending.keys()].forEach(clear));
   window.addEventListener('pagehide', () => [...pending.keys()].forEach(clear));

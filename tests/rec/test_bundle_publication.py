@@ -82,13 +82,14 @@ def test_staged_worker_publishes_captured_policy_generation_and_settings_togethe
     assert store.settings.get_setting('rec_candidate_preferences') == '11'
 
 
-def test_guard_conflict_keeps_last_heads_and_settings_after_private_staging(recommendations, policies):
+def test_input_changes_publish_captured_heads_and_settings_after_private_staging(recommendations, policies):
     store = recommendations
     first = publish(store)
     store.settings.set_setting('bundle-guard', 'before')
-    assert publish(store, now=11, guard='changed') is None
-    assert store.recommendations.head('home')['id'] == store.recommendations.head('fresh')['id'] == first
-    assert store.settings.get_setting('rec_candidate_preferences') == '10'
+    second = publish(store, now=11, guard='changed')
+    assert second is not None and second != first
+    assert store.recommendations.head('home')['id'] == store.recommendations.head('fresh')['id'] == second
+    assert store.settings.get_setting('rec_candidate_preferences') == '11'
     assert store.conn.execute("SELECT count(*) FROM recommendation_generations WHERE status='ready'").fetchone()[0] == 0
 
 
@@ -118,7 +119,7 @@ def test_empty_first_preparation_captures_actual_inputs_without_inventing_a_past
     assert store.recommendations.output('home', 'empty') == {}
 
 
-@pytest.mark.parametrize('capacity', ['available', 'released', 'changed-inputs', 'changed-smaller', 'invalid-batch'])
+@pytest.mark.parametrize('capacity', ['available', 'released', 'changed-inputs', 'invalid-batch'])
 def test_ordinary_worker_uses_typed_publication_without_serializing_a_legacy_bundle(recommendations, policies, monkeypatch, capacity):
     store = recommendations
     first = publish(store)
@@ -131,11 +132,9 @@ def test_ordinary_worker_uses_typed_publication_without_serializing_a_legacy_bun
     calculations = []
     def calculate(reader, now, captured):
         calculations.append(now)
-        guard = reader.settings.get_setting('bundle-guard')
+        reader.settings.get_setting('bundle-guard')
         items = captured.stamp([{'key': 'one', 'score': .8}], 'wheelhouse')
         lanes = {'wheelhouse': items}
-        if capacity == 'changed-smaller' and not guard:
-            lanes['fresh'] = captured.stamp([{'key': 'one', 'score': .8}], 'fresh')
         return {'all': lanes, '_meta': {'full_pools': True}}, []
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', calculate)
     monkeypatch.setattr(mode_surfaces, 'encode_proposals', lambda *args: pytest.fail('Encoded the obsolete bundle'))
@@ -148,7 +147,7 @@ def test_ordinary_worker_uses_typed_publication_without_serializing_a_legacy_bun
         return
     if capacity != 'available':
         count = store.conn.execute('SELECT count(*) FROM recommendation_policies WHERE served=0').fetchone()[0]
-        additional = 2 if capacity == 'changed-smaller' else 1
+        additional = 1
         monkeypatch.setattr(policy_storage, 'MAX_UNUSED_VARIANTS', count + additional)
         for now in (11, 12, 13):
             with pytest.raises(policy_storage.PolicyCapacityFull, match=f'batch adds {additional+1} variants'):
@@ -161,33 +160,18 @@ def test_ordinary_worker_uses_typed_publication_without_serializing_a_legacy_bun
         assert deferred.snapshot._reader_released
         with pytest.raises(sqlite3.ProgrammingError, match='closed database'):
             deferred.snapshot.store.conn.execute('SELECT 1')
-        if capacity in {'changed-inputs', 'changed-smaller'}:
+        if capacity == 'changed-inputs':
             store.settings.set_setting('bundle-guard', 'changed')
-        if capacity == 'changed-smaller':
-            result = mode_surfaces.prepare_bundles(store, 14)
-            assert calculations == [11, 14]
-            assert store.recommendations.head('home')['id'] != first
-            assert store.rec_ledger.policy_configuration('expired') is not None
-            assert result['all']['wheelhouse'][0]['key'] == 'one'
-            assert not hasattr(store, '_deferred_bundles')
-            return
         with store.conn:
             pruned = policy_storage.prune(store.conn, ['expired'], None)
         assert pruned['policies_deleted'] == 1
-        if capacity == 'changed-inputs':
-            result = mode_surfaces.prepare_bundles(store, 14)
-            assert calculations == [11, 14]
-            assert store.recommendations.head('home')['id'] != first
-            assert not hasattr(store, '_deferred_bundles')
-            return
-        else:
-            result = mode_surfaces.prepare_bundles(store, 14)
-            assert result['all']['wheelhouse'][0]['key'] == 'one'
-            assert calculations == [11]
-            assert not hasattr(store, '_deferred_bundles')
-            assert store.recommendations.head('home')['id'] != first
-            assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-            return
+        result = mode_surfaces.prepare_bundles(store, 14)
+        assert result['all']['wheelhouse'][0]['key'] == 'one'
+        assert calculations == [11]
+        assert not hasattr(store, '_deferred_bundles')
+        assert store.recommendations.head('home')['id'] != first
+        assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
+        return
     result = mode_surfaces.prepare_bundles(store, 15)
     assert result['all']['wheelhouse'][0]['key'] == 'one'
     assert store.recommendations.head('home') is not None

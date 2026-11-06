@@ -2,7 +2,8 @@
 
 Release at response headers so SSE connections and other long response bodies don't suspend
 maintenance for the entire time the browser stays connected. Individual database calls still
-take foreground priority when a stream produces its next update.
+take foreground priority when a stream produces its next update. Awaited Activity workers
+temporarily release their own request's claim so they cannot yield to their waiting caller.
 """
 from urllib.parse import parse_qs
 
@@ -36,14 +37,11 @@ class RequestPriorityMiddleware:
             # read budget and cancellation, rather than suspending its updates.
             with self.priority.background(check_stopping):
                 return await self.app(scope, receive, send)
-        release = self.priority.enter()
+        with self.priority.request() as release:
 
-        async def send_response(message):
-            if message["type"] == "http.response.start":
-                release()
-            await send(message)
+            async def send_response(message):
+                if message["type"] == "http.response.start":
+                    release()
+                await send(message)
 
-        try:
             await self.app(scope, receive, send_response)
-        finally:
-            release()

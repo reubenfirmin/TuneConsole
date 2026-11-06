@@ -1,11 +1,96 @@
 """Saved-session recovery, native queue adoption and playback continuity."""
 import json
+import subprocess
+import sys
 import time
 
 import pytest
 from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.web.radio_playlist_io import PlaylistPending
 from tests.radio_session_support import poc, play
+
+
+def test_checkpoint_only_cancel_survives_late_playback_and_process_reopen(poc, tmp_path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from tests.prepared_fixture_support import capture_template
+    from yt_playlist.core.store import Store
+    from yt_playlist.web.routes import radio_session
+
+    controller, remote, frames, *_ = poc
+    launch_id = 'checkpoint-only-cancel'
+    with controller.launch_request(launch_id) as cancelled:
+        assert controller.start(cancelled=cancelled)['ok']
+    initial, revision = controller.ctx.store.radio_checkpoints.load()
+    before_remote = json.dumps((remote.ids, remote.adds, remote.removes, frames))
+    controller.suspend()
+    controller.ctx.bridge.now_playing = None
+    controller.ctx.bridge.now_playing_seen_at = None
+    restored = PlaylistRadio(controller.ctx)
+    controller.ctx.radio = restored
+    app = FastAPI()
+    app.include_router(radio_session.build(controller.ctx))
+    with TestClient(app) as client:
+        assert client.post('/radio/stop', json={'launch_id': 'different-launch'}).json()['ok']
+        assert controller.ctx.store.radio_checkpoints.load() == (initial, revision)
+        response = client.post('/radio/stop', json={'launch_id': launch_id})
+        assert response.status_code == 200 and response.json()['ok']
+        stopped, stopped_revision = controller.ctx.store.radio_checkpoints.load()
+        assert stopped['stopped'] and stopped['phase'] == 'stopped'
+        assert {key: value for key, value in stopped.items() if key not in {'phase', 'stopped'}} == {
+            key: value for key, value in initial.items() if key not in {'phase', 'stopped'}}
+        assert client.post('/radio/stop', json={'launch_id': launch_id}).json()['ok']
+        assert controller.ctx.store.radio_checkpoints.load() == (stopped, stopped_revision)
+    bridge = controller.ctx.bridge
+    bridge.now_playing = {'video_id': remote.ids[0], 'playlist_ytm_id': initial['playlist'], 'paused': False}
+    bridge.now_playing_seen_at = time.monotonic()
+    assert not restored.join()['active']
+    another = PlaylistRadio(controller.ctx)
+    assert not another.join()['active']
+    assert json.dumps((remote.ids, remote.adds, remote.removes, frames)) == before_remote
+
+    # Copy the committed private state, including its owned files. The child
+    # receives no cancellation map or live controller from this process.
+    database = tmp_path / 'cancelled-radio.db'
+    template = capture_template(controller.ctx.store, None)
+    target = Store(database)
+    try:
+        template.restore(target)
+        target._bind_repositories()
+    finally:
+        target.conn.close()
+    child = subprocess.run([sys.executable, '-c', r'''
+import json, sys, time
+from types import SimpleNamespace
+from yt_playlist.core.store import Store
+from yt_playlist.web.radio_session import PlaylistRadio
+store = Store.open_current(sys.argv[1])
+radio = None
+try:
+    saved, revision = store.radio_checkpoints.load()
+    bridge = SimpleNamespace(connected=True, now_playing={
+        'video_id': saved['tracks'][0]['video_id'], 'playlist_ytm_id': saved['playlist'], 'paused': False},
+        now_playing_seen_at=time.monotonic())
+    radio = PlaylistRadio(SimpleNamespace(store=store, bridge=bridge,
+        client_provider=lambda: {saved['identity']: object()}, now_fn=lambda: 1234.))
+    def unexpected(*args, **kwargs):
+        raise AssertionError('A cancelled checkpoint must not start monitoring or navigate')
+    radio.work.start_thread = bridge.send_control = unexpected
+    assert not radio.cancelled_launches
+    state = radio.join()
+    assert not state['active'] and radio.session is None
+    assert saved['stopped'] and saved['launch_id'] == sys.argv[2]
+    assert store.radio_checkpoints.load() == (saved, revision)
+    assert not list(store.conn.execute('PRAGMA foreign_key_check'))
+    print(json.dumps({'active': state['active'], 'stopped': saved['stopped']}))
+finally:
+    if radio:
+        radio.work.stop_executor()
+    store.conn.close()
+''', str(database), launch_id], capture_output=True, text=True, timeout=30)
+    assert child.returncode == 0, child.stdout + child.stderr
+    assert json.loads(child.stdout) == {'active': False, 'stopped': True}
+
 
 def test_append_uses_native_observation_instead_of_stale_bridge_video(poc):
     c, remote, *_ = poc

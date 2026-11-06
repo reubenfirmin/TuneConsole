@@ -31,21 +31,14 @@ from yt_playlist.rec.mode_selection import (select_modes, thompson_mode_scores,
 CARD_SURFACES = ("wheelhouse", "explore", "comfort", "fresh")
 _MIN_CARD = 4          # below this many tracks (even after backfill) a card is dropped, not shown thin
 
-# Rankings describe a pinned past snapshot, with immutable pool-policy attribution.
-# Import/enrichment and playback may continue while they calculate. Serving rechecks
-# membership, canonical artist links, suppression and current genres. Model generations,
-# mode definitions, explicit feedback, preferences and settings remain strictly guarded.
+# Small serving projections still guard their live settings while tolerating
+# ongoing import, enrichment and playback. Full pool rounds publish captured
+# inputs and do not use this dependency filter.
 RANKING_CHURN_TABLES = frozenset({
     "recordings", "youtube_items", "catalog_entries", "library_memberships",
-    "artists", "artist_aliases",
-    # Provider evidence now backs the catalog views that rankings read. It can
-    # advance with enrichment; explicit metadata choices retain their own guard.
-    "metadata_observations",
+    "artists", "artist_aliases", "metadata_observations",
     "discovery_memberships", "entry_artists", "track_artists", "playlists", "playlist_items", "playlist_provenance",
     "play_events", "player_events", "listening_observations",
-    # Listening views join the event's retained calendar and source owners.
-    # Live capture, overlapping imports, reprojection and source removal update
-    # these companions too; they belong to the same pinned playback evidence.
     "play_event_calendar", "play_event_sources",
 })
 
@@ -114,25 +107,41 @@ def _bucket_pool(pool, mode_ids, C, lidx, LV, didx, DV, cap):
     return buckets
 
 
+def prepare_scheduled(store, now):
+    """Share one durable hourly admission across worker and discovery jobs.
+
+    Direct preparation remains available for offline builds. Live callers join
+    this admission; captured work finishes and updates wait for the next check.
+    """
+    from yt_playlist.rec import candidate_refresh
+    with store._lock:
+        if getattr(store, '_candidate_preparation_active', False) or not candidate_refresh.check_due(store, now):
+            return None
+        candidate_refresh.checked(store, now)
+        store._candidate_preparation_active = True
+    try:
+        return prepare_bundles(store, now)
+    finally:
+        with store._lock:
+            store._candidate_preparation_active = False
+
+
 def prepare_bundles(store, now) -> dict | None:
     """Calculate privately; publish bundles, discoveries and their policies as one transaction.
 
-    None means guarded model/preference inputs changed during the build. Catalog and playback
-    can advance while these disposable rankings calculate. No ranking, fingerprints or JSON
-    under UI locks; serving checks current eligibility before offering cached candidates.
+    Finish the captured run even while its inputs change. Later scheduled runs
+    consume those updates; serving checks current eligibility before offering
+    cached candidates. No ranking, fingerprints or JSON under UI locks.
     """
     measurement.maintain_storage(store, now)
     with store._lock:
         deferred = store.__dict__.pop('_deferred_bundles', None)
     if deferred is not None:
         # The admitted plan is bounded and fully materialized. Its snapshot has
-        # no open reader or retained file lock; the original guard still decides
-        # whether it can publish. Recheck quota without repeating the ranking.
-        if deferred.snapshot.is_current(allow_stale_tables=RANKING_CHURN_TABLES):
-            published = deferred.publish(store)
-            return deferred.payload if published is not None else None
-        # Changed strict inputs can produce a smaller batch that already fits.
-        # Never make that work wait for an obsolete plan's headroom.
+        # no open reader or retained file lock. Recheck quota without replacing
+        # the captured work when preferences, playback or impressions advance.
+        published = deferred.publish(store)
+        return deferred.payload if published is not None else None
     with store.read_snapshot() as snapshot:
         from yt_playlist.rec import candidate_refresh
         with column_group_reads(snapshot.store, "recordings", "catalog"):
@@ -152,19 +161,17 @@ def prepare_bundles(store, now) -> dict | None:
             store.rec_ledger.publish_prepared_policies(list(policies.rows.values()), list(policies.bases.values()))
             store.rec_proposals.publish_prepared_bundles(*prepared, now)
             store.settings.publish_values(settings)
-        if not snapshot.publish(publish, allow_stale_tables=RANKING_CHURN_TABLES):
+        if not snapshot.publish(publish, validate_inputs=False):
             return None
         return payload
 
 
 def _publish_typed_bundles(store, snapshot, payload, fresh, policies, settings, now):
-    """Stage immutable ranks, then publish one guarded generation and its settings.
+    """Stage immutable ranks, then publish the captured generation and its settings.
 
     The caller still owns the preparation snapshot. Its reader is released
-    before staging, and a late conflict leaves the last useful heads intact.
+    before staging. Source changes never discard the completed calculation.
     """
-    if not snapshot.is_current(allow_stale_tables=RANKING_CHURN_TABLES):
-        return None
     version = policies.generation_policy()
     # Comparison with derived output must not become a ranking dependency:
     # staging this very plan writes those tables. Exact immutable rows are read
@@ -200,10 +207,6 @@ class _DeferredBundles:
     payload: dict
 
     def publish(self, store):
-        def current():
-            return self.snapshot.is_current(allow_stale_tables=RANKING_CHURN_TABLES)
-        if not current():
-            return None
         try:
             build = store.recommendations.claim(self.prepared, policies=self.rows, bases=self.bases)
         except PolicyCapacityFull:
@@ -212,7 +215,7 @@ class _DeferredBundles:
             with store._lock:
                 store._deferred_bundles = self
             raise
-        if not store.recommendations.stage(self.prepared, build, still_current=current):
+        if not store.recommendations.stage(self.prepared, build):
             return None
         selected = ({slot.surface for slot in self.prepared.slots}
                     | {output.surface for output in self.prepared.outputs})
@@ -223,7 +226,7 @@ class _DeferredBundles:
             store.settings.publish_values(self.settings)
 
         return (build.generation_id
-                if self.snapshot.publish(publish, allow_stale_tables=RANKING_CHURN_TABLES) else None)
+                if self.snapshot.publish(publish, validate_inputs=False) else None)
 
 
 def _calculate_bundles(store, now, policies):

@@ -405,6 +405,31 @@ def write_bytes(path, data, *, immutable=False, max_bytes=MAX_BYTES, age=None):
                   max_bytes=max_bytes, immutable=immutable, age=age)
 
 
+def write_compressed(path, data):
+    """Compress bytes and atomically replace the caller's chosen file.
+
+    Keep the installed encoding readable by existing consumers. Cache owners
+    need no fsync protocol, publication lock or write-time round-trip check.
+    """
+    if not isinstance(data, bytes):
+        raise TypeError('Managed publication requires bytes')
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pending = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.fao-pending-', delete=False) as output:
+            pending = Path(output.name)
+            output.write(bz2.compress(data))
+            now = time.time_ns()
+            output.write(TRAILER.pack(MAGIC, len(data), now, now, hashlib.sha256(data).digest()))
+        os.replace(pending, path)
+        pending = None
+        return path
+    finally:
+        if pending is not None:
+            pending.unlink(missing_ok=True)
+
+
 def stage_bytes(path, data, *, expected=None, max_bytes=MAX_BYTES):
     """Compress, fsync and verify off-lock; caller closes even on a stale job."""
     if not isinstance(data, bytes):

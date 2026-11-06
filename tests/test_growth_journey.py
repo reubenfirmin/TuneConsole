@@ -66,8 +66,11 @@ def test_early_pool_then_small_discover_interlude_precede_four_playable_mixes(st
     assert before['listening']['state'] == 'preparing'
     assert before['radio']['state'] == 'untouched'
     tracks = publish_personal_mix(store)
+    assert stops(store)['listening']['ready']
+    # Readiness follows the complete worker publication. Feedback must not
+    # make serving trim that board or revoke an already usable destination.
     seed_dislike(store, tracks[0]['key'], until=None, now=1000)
-    assert not stops(store)['listening']['ready']
+    assert stops(store)['listening']['ready']
     remove_rating(store, tracks[0]['key'], 'dislike')
     assert stops(store)['listening']['ready']
 

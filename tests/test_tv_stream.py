@@ -44,6 +44,8 @@ def test_multiple_batches_pass_seven_and_replays_never_duplicate_writes(store, s
 
 
 def test_pending_append_is_confirmed_later_without_replaying_it(store, stream, monkeypatch):
+    from yt_playlist.library import tv_launch
+
     iid, client, playlist, recipe, items = stream
     read = client.get_playlist
     lagging = [False]
@@ -68,6 +70,65 @@ def test_pending_append_is_confirmed_later_without_replaying_it(store, stream, m
     assert result[2] == items[7:11]
     assert len(client.added) == writes
     assert len(store.charts.playlist_tracks_detail(playlist.id)) == 11
+
+    # Initial launches have their own durable intent before creation, including
+    # a lost create receipt and partial writes with never-attempted later videos.
+    monkeypatch.setattr(client, 'get_playlist', read)
+    original_create = client.create_playlist
+    for failure in ('partial', 'create'):
+        calls = []
+        selected = items[20:32]
+        lagging[0] = True
+
+        def partial(pid, videos, **kwargs):
+            calls.append(list(videos))
+            if len(videos) > 1 or videos == [selected[1]['video_id']]:
+                return {'status': 'STATUS_FAILED'}
+            result = add(pid, videos, **kwargs)
+            if videos == [selected[2]['video_id']]:
+                raise ConnectionError('second successful addition lost its receipt')
+            return result
+
+        def partial_read(pid, limit=None):
+            result = read(pid, limit)
+            return {**result, 'tracks': result['tracks'][:1]} if lagging[0] else result
+
+        def unknown_create(title, description):
+            original_create(title, description)
+            raise ConnectionError('committed create lost its receipt')
+
+        monkeypatch.setattr(client, 'add_playlist_items', partial if failure == 'partial' else add)
+        monkeypatch.setattr(client, 'get_playlist', partial_read)
+        monkeypatch.setattr(client, 'create_playlist', unknown_create if failure == 'create' else original_create)
+        with pytest.raises(tv_stream.PendingTV):
+            tv_launch.start(store, {iid: client}, failure, selected, 10)
+        retained = store.rec_proposals.tv_launch(failure)
+        count = (len(client.created), len(client.added))
+        with pytest.raises(tv_stream.PendingTV):
+            tv_launch.start(store, {iid: client}, failure, items[40:52], 11)
+        assert store.rec_proposals.tv_launch(failure) == retained
+        assert (len(client.created), len(client.added)) == count
+        lagging[0] = False
+        if failure == 'partial':
+            assert retained['outcome'] == {
+                'confirmed': [selected[0]['video_id']], 'rejected': [selected[1]['video_id']],
+                'uncertain': [selected[2]['video_id']], 'unattempted': [t['video_id'] for t in selected[3:]]}
+            pid, token = tv_launch.start(store, {iid: client}, failure, [], 12)
+            assert [t['video_id'] for t in store.charts.playlist_tracks_detail(pid)] == [
+                selected[0]['video_id'], selected[2]['video_id']]
+            assert tv_launch.start(store, {iid: client}, failure, [], 13) == (pid, token)
+        else:
+            assert retained['provider_playlist_id'] is None
+            with pytest.raises(tv_stream.PendingTV):
+                tv_launch.start(store, {iid: client}, failure, [], 12)
+        assert (len(client.created), len(client.added)) == count
+    # A separate explicit session keeps its own request, without rebinding the
+    # unknown-create intent or repeating its provider call.
+    monkeypatch.setattr(client, 'create_playlist', original_create)
+    pid, _ = tv_launch.start(store, {iid: client}, 'intentional-new-session', items[40:52], 14)
+    assert len(store.charts.playlist_tracks_detail(pid)) == 12
+    assert store.rec_proposals.tv_launch('create')['provider_playlist_id'] is None
+    assert store.rec_proposals.tv_launch('create')['state'] == 'pending'
 
 
 @pytest.mark.parametrize('rollover', ['saved', 'full'])

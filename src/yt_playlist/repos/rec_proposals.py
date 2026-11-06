@@ -5,7 +5,7 @@ rows belong to rec_ledger and must participate in that same outer transaction.
 """
 import json
 import uuid
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 
 from yt_playlist.core import (album_note_outputs, album_note_requests, choice_learning_state, home_outputs,
                               json_cache, recommendation_reports, tv_recommendation_state)
@@ -21,23 +21,6 @@ def encode_proposals(surface, value):
 
 
 class RecProposalsRepo(Repo):
-    @contextmanager
-    def verified_home_reads(self):
-        """Reuse verified bytes only while composing one pinned Home response.
-
-        A following request must reopen the physical files, even when SQL has
-        not changed. Immutable strings can be shared here; decoded callers still
-        own their detached mutable results.
-        """
-        if not getattr(self._store, '_read_only', False):
-            raise ValueError('Verified Home reads require a pinned read-only store')
-        previous = getattr(self, '_verified_home_reads', None)
-        self._verified_home_reads = previous if previous is not None else {}
-        try:
-            yield
-        finally:
-            self._verified_home_reads = previous
-
     @snapshot_read
     def tv_artwork_observation(self, key):
         """Capture the request and result revisions before optional provider I/O."""
@@ -98,6 +81,34 @@ class RecProposalsRepo(Repo):
         if self._store._tv_recommendations:
             return tv_recommendation_state.receipt(self.conn, key)
         return (self.get_proposals('tv_continuations') or {}).get(key)
+
+    @lookup_read
+    def tv_launch(self, request_id):
+        from yt_playlist.core import tv_launch_state
+        return tv_launch_state.read(self.conn, request_id)
+
+    @lookup_read
+    def pending_tv_launch(self, account_id):
+        row = self.conn.execute("SELECT request_id FROM tv_launches WHERE owner_id=? AND current=1 "
+                                "AND state='pending' LIMIT 1", (account_id,)).fetchone()
+        return row[0] if row else None
+
+    def begin_tv_launch(self, request_id, account_id, stream, maximum, items, now):
+        from yt_playlist.core import tv_launch_state
+        from yt_playlist.core.db_writes import atomic_write
+        with atomic_write(self._store):
+            return tv_launch_state.begin(self.conn, request_id, account_id, stream, maximum, items, now)
+
+    def save_tv_launch(self, request_id, *, destination=None, outcome=None, complete=False):
+        from yt_playlist.core import tv_launch_state
+        from yt_playlist.core.db_writes import atomic_write
+        with atomic_write(self._store):
+            if destination is not None:
+                tv_launch_state.destination(self.conn, request_id, *destination)
+            if outcome is not None:
+                tv_launch_state.outcome(self.conn, request_id, outcome)
+            if complete:
+                tv_launch_state.complete(self.conn, request_id)
 
     @synchronized
     def begin_tv_rollover(self, key, stream, now):
@@ -381,14 +392,6 @@ class RecProposalsRepo(Repo):
         """Publish pre-encoded Home output; the snapshot publisher owns the transaction."""
         proposal_storage.publish(self._store, surface, payload, now, input_revision=input_revision)
 
-    @synchronized
-    def remember_home(self, payload, held_choice, now) -> None:
-        with self.conn:
-            if getattr(self._store, '_compact_group_files', False) and not self.conn.in_transaction:
-                self.conn.execute('BEGIN IMMEDIATE')
-            self.publish_prepared_home(payload, now, surface="home_tuned")
-            self.publish_prepared_home(held_choice, now, surface="home_choice")
-
     def put_proposals(self, surface, data, now=None) -> None:
         """Materialize a surface's proposals as JSON (the rec worker writes; routes read last-good)."""
         self._put_proposals_json(surface, encode_proposals(surface, data), now)
@@ -435,23 +438,7 @@ class RecProposalsRepo(Repo):
 
     @snapshot_read
     def _proposal_json(self, surface):
-        cache = getattr(self, '_verified_home_reads', None)
-        if cache is None or surface not in home_outputs.SURFACES:
-            return proposal_storage.read(self._store, surface)
-        reads = getattr(self._store, '_snapshot_reads', None)
-        if surface in cache:
-            encoded, dependencies, _ = cache[surface]
-            if reads is not None:
-                reads.include(dependencies)
-            return encoded
-        with reads.capture() if reads is not None else nullcontext(set()) as dependencies:
-            encoded = proposal_storage.read(self._store, surface)
-        # Home documents already have an individual limit. Keep this extra
-        # response-local reuse bounded across all surfaces as well.
-        size = len((encoded or '').encode('utf-8'))
-        if sum(entry[2] for entry in cache.values()) + size <= home_outputs.MAX_BYTES:
-            cache[surface] = encoded, frozenset(dependencies), size
-        return encoded
+        return proposal_storage.read(self._store, surface)
 
     @snapshot_read
     def choice_usage(self):

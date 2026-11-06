@@ -7,6 +7,7 @@ from yt_playlist.rec import rec_params
 TTL_S = 4 * 3600
 UPDATED_AT_SETTING = "home_mix_tuning_updated_at"
 VIBE_UPDATED_AT_SETTING = 'home_mix_vibe_updated_at'
+VIBE_REQUEST_SETTING = 'home_mix_vibe_request'
 
 
 def card_epoch(store):
@@ -55,6 +56,7 @@ def reset(store, *, keep_vibe=False) -> None:
         if not keep_vibe:
             store.settings.delete_setting("home_mix_vibe")
             store.settings.delete_setting(VIBE_UPDATED_AT_SETTING)
+        store.settings.delete_setting(VIBE_REQUEST_SETTING)
         store.settings.delete_setting(UPDATED_AT_SETTING)
 
 
@@ -84,6 +86,7 @@ def expire(store, now) -> bool:
                 changed = bool(store.settings.get_setting('home_mix_vibe')) or vibe is not None
                 store.settings.delete_setting('home_mix_vibe')
                 store.settings.delete_setting(VIBE_UPDATED_AT_SETTING)
+                store.settings.delete_setting(VIBE_REQUEST_SETTING)
                 if ordinary != 0:
                     _resume_genres(store, now)
             if ordinary == 0:
@@ -100,6 +103,7 @@ def adjusting(store, now):
     with store._lock:
         expire(store, now)
         yield
+        store.settings.delete_setting(VIBE_REQUEST_SETTING)
         store.settings.set_setting(UPDATED_AT_SETTING, str(now))
 
 

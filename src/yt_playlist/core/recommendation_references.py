@@ -53,6 +53,13 @@ def retain(conn, kind, identity, generations):
 
 def prepared(conn, kind, surface, data, *, owner_prefix=None):
     identity = (owner_prefix or 'proposal:' + surface) + ':recommendations'
+    generations = prepared_generations(surface, data)
+    publication.release(conn, kind, identity)
+    retain(conn, kind, identity, generations)
+
+
+def prepared_generations(surface, data):
+    """Capture declared menu references before reserving a publication writer."""
     options = data.get('protos', [])
     # Adaptive previews retain their generation explicitly, independently of
     # lane allocations which are not completed track menus.
@@ -74,6 +81,4 @@ def prepared(conn, kind, surface, data, *, owner_prefix=None):
                                      for item in items if isinstance(item, dict)]))
     generations.update(from_options([{'tracks': data.get(field, [])}
                                     for field in ('tracks', 'discovery_tracks', 'rediscover_tracks')]))
-    generations = references({'recommendation_generations': sorted(generations)})
-    publication.release(conn, kind, identity)
-    retain(conn, kind, identity, generations)
+    return references({'recommendation_generations': sorted(generations)})

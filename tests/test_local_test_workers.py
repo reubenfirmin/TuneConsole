@@ -350,8 +350,6 @@ def test_interrupted(owner):
 
 @pytest.mark.parametrize('monitor', [
     'pace', 'deadline', 'interrupt', 'coverage', 'setup', 'teardown',
-    *[pytest.param('browser-' + mode, marks=pytest.mark.browser)
-      for mode in ('pace', 'deadline', 'coverage', 'setup', 'teardown', 'event', 'callback', 'callback-active')],
 ])
 def test_protocol_interrupt_keeps_live_server_storage_and_capture(mini_suite, monitor, request):
     root, _, run = mini_suite

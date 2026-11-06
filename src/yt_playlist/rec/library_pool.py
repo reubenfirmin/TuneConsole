@@ -4,9 +4,8 @@ from yt_playlist.rec import home_themes, home_vibe, measurement, mode_surfaces, 
 
 def prepare(store, now, parameters):
     if home_vibe.current(store, now):
-        # A clicked fallback uses the same complete worker inputs as the main
-        # menu. Its consumer must not get stuck waiting on an unrelated cache.
-        return mode_surfaces.prepare_bundles(store, now)
+        # A clicked fallback joins the ordinary worker's hourly admission.
+        return mode_surfaces.prepare_scheduled(store, now)
     if store._clicked_library_pools:
         with store.read_snapshot() as snapshot:
             reader = snapshot.store
@@ -23,14 +22,7 @@ def prepare(store, now, parameters):
             build = store.recommendations.claim(plan, policies=rows, bases=bases)
             store.recommendations.remember_clicked_pool_parameters(build.generation_id, parameters, now)
             store.recommendations.stage(plan, build)
-            return snapshot.publish(lambda: store.recommendations.publish(build, now),
-                                    # Staging creates unpublished generation rows.
-                                    # Viewing the existing menu can also add mode
-                                    # impressions while this explicit build runs.
-                                    # Its captured policy remains attributable;
-                                    # preferences and serving heads stay guarded.
-                                    allow_stale_tables=mode_surfaces.RANKING_CHURN_TABLES | {
-                                        'recommendation_generations', 'rec_mode_impressions'})
+            return snapshot.publish(lambda: store.recommendations.publish(build, now), validate_inputs=False)
     tracks = _calculate(store, now, parameters)
     tracks = measurement.stamp_pool(store, tracks, now, parameters['lane'])
     store.rec_proposals.put_proposals(f"home_pool:{parameters['lane']}", {"parameters": parameters, "tracks": tracks}, now)

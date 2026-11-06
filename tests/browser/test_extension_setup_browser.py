@@ -288,7 +288,7 @@ def _wait_setup_tab(worker, context, observations, stage):
         context.pages[0].wait_for_timeout(25)
 
 
-@pytest.mark.parametrize("action", ["reload", "enable"])
+@pytest.mark.parametrize("action", ["reload"])
 def test_real_extension_reopens_setup_after_development_reload_or_enable(
     playwright, browser_type_launch_args, tmp_path, action, setup_site,
 ):

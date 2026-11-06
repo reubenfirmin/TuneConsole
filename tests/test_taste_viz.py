@@ -601,7 +601,9 @@ def test_playlist_influence_explains_equal_weights_before_listening(store):
 
 
 def test_playlist_influence_identifies_behavior_fallback_as_listening(store):
-    _seed_jazz(store)
+    account = store.accounts.upsert_account("main", "cred", None, True)
+    store.tracks.upsert_track("fallback", "Song", "Band", None, None)
+    store.history.record_history_plays(account, 1., ["song|band"], source_timezone="UTC")
     store.rec_model.replace_rec_vectors([("song|band", np.array([1, 0], dtype=np.float32).tobytes())])
     store.settings.set_setting("rec_dim", "2")
 

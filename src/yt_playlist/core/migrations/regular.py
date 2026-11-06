@@ -408,6 +408,16 @@ def _validate_embedding_basis_guards(conn):
     embedding_files.validate_basis_guards(conn)
 
 
+def _install_tv_launches(conn, context):
+    from .. import tv_launch_state
+    tv_launch_state.install(conn, context)
+
+
+def _validate_tv_launches(conn):
+    from .. import tv_launch_state
+    tv_launch_state.validate(conn)
+
+
 CHANGES = (
     Change(1, 'independent_playback_feedback_receipts', _install_receipts, validate_receipts),
     Change(2, 'group_preparation_failure_progress', _install_group_progress, _validate_group_progress),
@@ -441,6 +451,7 @@ CHANGES = (
     Change(30, 'durable_album_feedback_responses', _install_album_feedback_outbox, _validate_album_feedback_outbox),
     Change(31, 'shared_vibe_model_generations', _install_joint_vibes, _validate_joint_vibes),
     Change(32, 'bounded_embedding_basis_guards', _install_embedding_basis_guards, _validate_embedding_basis_guards),
+    Change(33, 'durable_initial_tv_launches', _install_tv_launches, _validate_tv_launches),
 )
 
 

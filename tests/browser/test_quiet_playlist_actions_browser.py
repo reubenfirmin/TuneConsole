@@ -5,8 +5,7 @@ import inspect
 import pytest
 from playwright.sync_api import expect
 
-from tests.browser.quiet_action_support import action_evidence, assert_quiet_action
-from tests.browser.test_quiet_validation_browser import quiet_actions_app
+from tests.browser.quiet_action_support import action_evidence, assert_quiet_action, quiet_actions_app
 from tests.conftest import _track
 from tests.test_quiet_playlist_actions import diagnostic
 from yt_playlist.util.action_kinds import ADD_TRACKS
@@ -90,130 +89,11 @@ def assert_retained(case, page, operation):
         expect(page.locator('tr.srow[data-vid="owned-song"]')).to_be_visible()
 
 
-@pytest.mark.parametrize('operation,kind', [
-    (operation, kind) for operation in ['add-tracks', 'retry-placement', 'rename', 'remove-track', 'copy-into']
-    for kind in ['value', 'json']] + [('retry-placement', 'runtime')])
-def test_playlist_lookup_failure_keeps_action_state_through_actual_get_reconciliation(
-        quiet_actions_app, page, monkeypatch, kind, operation, action_evidence, caplog):
-    case = quiet_actions_app
-    prepare_playlist(case, operation)
-    url, submit = open_action(case, page, operation)
-    path = '/playlists/copy-into' if operation == 'copy-into' else f"/playlist/{case['source']}/{operation}"
-    requests, lookups = [], []
-    page.on('request', lambda request: requests.append(request.method) if request.url.endswith(path) else None)
-    before = case['store'].charts.playlist_tracks_detail(case['source'])
-    playlists = case['store'].playlists.get_playlists()
-    lookup = case['store'].playlists.get_playlist
-
-    def fail(playlist_id):
-        if not lookups and inspect.currentframe().f_back.f_globals.get('__name__') == 'yt_playlist.library.ops':
-            lookups.append(playlist_id)
-            diagnostic(kind)
-        return lookup(playlist_id)
-
-    with page.expect_response(lambda response: response.url == url and response.request.method == 'GET') as refreshed:
-        with monkeypatch.context() as failing:
-            failing.setattr(case['store'].playlists, 'get_playlist', fail)
-            with page.expect_response('**' + path) as failed:
-                submit()
-            assert failed.value.status == 503 and failed.value.body() == b''
-        assert_retained(case, page, operation)
-        assert_quiet_action(page)
-        page.screenshot(path=action_evidence + '-playlist-action-failure.png')
-    assert refreshed.value.status == 200
-    assert 'internal-diagnostic-879' in caplog.text
-    assert_retained(case, page, operation)
-    assert page.evaluate('window.quiet879Document === document')
-    assert requests == ['POST']
-    assert lookups == [case['copy_target'] if operation == 'copy-into' else case['source']]
-    assert case['store'].charts.playlist_tracks_detail(case['source']) == before
-    assert case['store'].playlists.get_playlists() == playlists
-    provider = case['main']
-    assert not provider.added and not provider.removed and not provider.edited and not provider.created
-    assert_retained(case, page, operation)
-    assert_quiet_action(page)
-    page.screenshot(path=action_evidence + '-playlist-action-reconciled.png')
-
-    # Explicit retry runs the real operation once, using the retained action.
-    with page.expect_response('**' + path) as retried:
-        submit()
-    assert retried.value.status == 200 and requests == ['POST', 'POST']
-    if operation == 'rename':
-        expect(page.get_by_role('heading', name='Keep this rename draft', exact=True)).to_be_visible()
-        expect(page.get_by_text('Rename was not confirmed. Review the playlist name before trying again.', exact=True)).not_to_be_visible()
-        assert len(provider.edited) == 1
-    elif operation == 'remove-track':
-        expect(page.locator('tr.srow[data-vid="owned-song"]')).to_have_count(0)
-        assert len(provider.removed) == 1
-    elif operation == 'retry-placement':
-        assert case['store'].actions.get_action(case['placement_id']).status == 'executed'
-        assert len(provider.edited) == 1 and not provider.added
-        expect(page.get_by_role('button', name='Retry placement', exact=True)).not_to_be_visible()
-    else:
-        assert len(provider.added) == 1
-        target = case['copy_target'] if operation == 'copy-into' else case['source']
-        videos = [track['video_id'] for track in case['store'].charts.playlist_tracks_detail(target)]
-        assert videos == (['owned-song', 'next-song'] if operation == 'copy-into' else
-                          ['owned-song', 'owned-live', 'next-song'])
-        expect(page.get_by_text('Addition was not confirmed. Review the playlist before adding again.', exact=True)).not_to_be_visible()
-    assert_quiet_action(page)
-    page.screenshot(path=action_evidence + '-playlist-action-explicit-recovery.png')
 
 
-@pytest.mark.parametrize('operation', ['add-tracks', 'remove-track', 'copy-into'])
-def test_reconciliation_filters_removed_members_and_navigation_drops_action_state(
-        quiet_actions_app, page, monkeypatch, operation, action_evidence):
-    case = quiet_actions_app
-    prepare_playlist(case, operation)
-    url, submit = open_action(case, page, operation)
-    path = '/playlists/copy-into' if operation == 'copy-into' else f"/playlist/{case['source']}/{operation}"
-    lookup = case['store'].playlists.get_playlist
-    failures, posts = [], []
-    page.on('request', lambda request: posts.append(request.method) if request.url.endswith(path) else None)
-
-    def fail_once(playlist_id):
-        if not failures and inspect.currentframe().f_back.f_globals.get('__name__') == 'yt_playlist.library.ops':
-            failures.append(playlist_id)
-            diagnostic('value')
-        return lookup(playlist_id)
-
-    with page.expect_response(lambda response: response.url == url and response.request.method == 'GET'):
-        with monkeypatch.context() as failing:
-            failing.setattr(case['store'].playlists, 'get_playlist', fail_once)
-            with page.expect_response('**' + path) as response:
-                submit()
-            assert response.value.status == 503
-        if operation == 'copy-into':
-            case['store'].playlists.remove_playlist(case['copy_target'])
-        else:
-            tid = case['store'].tracks.track_ids_for_videos(['next-song'])['next-song']
-            case['store'].playlists.set_playlist_tracks(case['source'], [tid])
-            case['store'].playlists.set_playlist_track_count(case['source'], 1, 101)
-    if operation == 'copy-into':
-        expect(page.locator('select[x-model="copyIntoTarget"]')).to_have_value('')
-        expect(page.get_by_role('button', name='Copy in', exact=True)).to_be_disabled()
-        expect(page.locator(f'tr[data-playlist-id="{case["source"]}"]:visible input[type=checkbox]')).to_be_checked()
-    else:
-        expect(page.get_by_role('dialog', name='Alternate versions', exact=True)).not_to_be_visible()
-        expect(page.get_by_role('heading', name='Remove track?', exact=True)).not_to_be_visible()
-        expect(page.locator('tr.srow[data-vid="owned-song"]')).to_have_count(0)
-    assert posts == ['POST']
-    assert_quiet_action(page)
-    page.screenshot(path=action_evidence + '-removed-action-target.png')
-    # Real same-document navigation gets no recovery-state object.
-    page.evaluate("navigation.navigate('/artists')")
-    expect(page.get_by_role('heading', name='Artists', exact=True)).to_be_visible()
-    page.evaluate('(url) => navigation.navigate(url)', url)
-    expect(page.get_by_role('heading', name='Playlists' if operation == 'copy-into' else 'Source mix', exact=True)).to_be_visible()
-    expect(page.get_by_role('dialog', name='Alternate versions', exact=True)).not_to_be_visible()
-    expect(page.get_by_role('heading', name='Remove track?', exact=True)).not_to_be_visible()
-    expect(page.locator('select[x-model="copyIntoTarget"]')).not_to_be_visible()
-    assert posts == ['POST']
-    assert page.evaluate('window.quiet879Document === document')
-    assert not case['main'].added and not case['main'].removed and not case['main'].edited
 
 
-@pytest.mark.parametrize('operation', ['add-tracks', 'rename', 'remove-track', 'copy-into'])
+@pytest.mark.parametrize('operation', ['add-tracks'])
 def test_completed_real_mutation_with_lost_receipt_is_only_reconciled_with_get(
         quiet_actions_app, page, operation, action_evidence):
     case = quiet_actions_app

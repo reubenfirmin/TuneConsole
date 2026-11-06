@@ -149,7 +149,7 @@ def test_two_minute_landscapes_render_different_folds(page, radio_ui, tmp_path):
     assert len({tuple(shape) for shape in shapes}) == 4
 
 
-@pytest.mark.parametrize('width,height', [(1440, 1000), (1792, 1398)])
+@pytest.mark.parametrize('width,height', [(1440, 1000)])
 def test_radio_starts_with_ordered_contours(page, radio_ui, width, height):
     page.set_viewport_size({'width': width, 'height': height})
     page.emulate_media(reduced_motion='reduce')

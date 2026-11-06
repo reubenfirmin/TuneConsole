@@ -171,12 +171,18 @@ def test_planning_reuses_pages_but_rechecks_used_tracks_and_next_pass_catalog(ra
     store, _, _ = radio
     prepared = PreparedRadio(store, 10)
     reads, original = [], RecommendationPublicationsRepo.candidate_page
+    facts, hydrate = [], type(store.rec_query).group_candidates
+
+    def catalog(self, keys, *args, **kwargs):
+        facts.extend(keys)
+        return hydrate(self, keys, *args, **kwargs)
 
     def page(self, *args, **kwargs):
         reads.append((args, kwargs))
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_page', page)
+    monkeypatch.setattr(type(store.rec_query), 'group_candidates', catalog)
 
     def pick(used=()):
         return prepared.intensity_pool('1', .8, genre_allowed=lambda label: label == 'jazz',
@@ -193,6 +199,13 @@ def test_planning_reuses_pages_but_rechecks_used_tracks_and_next_pass_catalog(ra
             assert repeated['serving_context']['recommendation_pool_rank'] == 258
             assert pick({first['key']})[0]['key'] == 'fresh-259'
             assert len(reads) == 1, 'Successive song slots must reuse the hydrated rank page'
+            # A different candidate query can overlap the same recordings. Its
+            # pool attribution stays private while catalog hydration is shared.
+            overlap = prepared.tracks('radio', '1', 'membership', band=40,
+                allowed=lambda track: True, include_display=False)
+            assert [track['key'] for track in overlap] == ['fresh-258', 'fresh-259']
+            assert facts == ['fresh-258', 'fresh-259']
+            assert len(reads) == 2
         assert prepared.current_reader is None
         with store.conn:
             store.conn.execute("UPDATE youtube_items SET available=0 WHERE video_id='fresh-upload-258'")
@@ -201,7 +214,7 @@ def test_planning_reuses_pages_but_rechecks_used_tracks_and_next_pass_catalog(ra
             with prepared.planning_read():
                 current = pick()[0]
                 assert current['key'] == 'fresh-259' and current['title'] == 'new catalog title'
-                assert len(reads) == 2
+                assert len(reads) == 3
                 raise RuntimeError('cancel this plan')
         assert prepared.current_reader is None
     finally:

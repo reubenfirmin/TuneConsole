@@ -71,7 +71,7 @@
   <div class="fp-tab-panel" id="fp-vibe-panel" role="tabpanel" aria-labelledby="fp-vibe-tab"
        :hidden="tab !== 'vibe' || !vibesAvailable" hidden>
     <div class="fp-intro"><h2>Meet the moment.</h2><p>Same taste in music. A different kind of day.</p></div>
-    <form id="home-vibe-form" hx-post="/home/vibe" hx-target="#home-mode-cards" hx-swap="outerHTML"
+    <form id="home-vibe-form" data-write-recovery="local" hx-post="/home/vibe" hx-target="#home-mode-cards" hx-swap="outerHTML"
           hx-trigger="change" hx-sync="#fingerprint:queue last" hx-disabled-elt="find fieldset"
           @keydown.space="if ($event.target.matches('input[type=radio]:checked')) { $event.preventDefault(); close(); }"
           @click="if ($event.target.matches('input[type=radio]')) close()">

@@ -25,12 +25,15 @@ function tvHome(maximum = 15) {
   let visualRequest = null, visualTimer = null, visualSerial = 0, visualTarget = null;
   const visualChecked = new Set();
   let viewObserver = null, syncView = null, updateView = null, layoutView = null;
+  let launchId = null, launchAttempts = 0;
+  try { launchId = localStorage.getItem('tc-tv-launch'); } catch (_) {}
   const lengths = [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 45, 60, 90, 120, 180, 240, 360, 480, 720, null];
   return {
     items: [], selected: -1, maxMinutes: maximum, lengths, draft: lengths.indexOf(maximum), visible: false,
     ready: false, loading: false, starting: false, connecting: false, playing: false, playerMounted: false,
     playlistId: null, playlistTitle: '', error: '', playerError: '', finished: false,
     savingParams: false, paramsError: '', resetting: false,
+    launchPending: !!launchId,
     stream: '', streamPlaylistId: null, refilling: false, waiting: false, refillError: '', refillAttempts: 0,
     failedVideos: [],
     destroyed: false, failed: [], revealedCount: 0, sessionStarted: false, savedPlaylistOpened: null,
@@ -180,7 +183,12 @@ function tvHome(maximum = 15) {
         const data = await response.json();
         if (request !== serial || this.destroyed) return;
         this.ready = data.ready; this.maxMinutes = data.max_minutes;
-        this.error = data.message || '';
+        if (!launchId && data.pending_launch) {
+          launchId = data.pending_launch;
+          try { localStorage.setItem('tc-tv-launch', launchId); } catch (_) {}
+          this.launchPending = true;
+        }
+        this.error = this.launchPending ? 'This TV session is still unconfirmed.' : data.message || '';
         if (!this.ready && this.visible) timer = setTimeout(() => this.readiness(), 5000);
       } catch (error) {
         console.debug('[TV] readiness unavailable', error);
@@ -194,13 +202,18 @@ function tvHome(maximum = 15) {
       // Keep the last usable player until a replacement playlist is confirmed.
       ++serial; clearTimeout(timer); controller?.abort(); controller = null;
       const intent = ++playbackSerial;
+      launchId ||= window.crypto?.randomUUID?.() || String(Date.now()) + '-' + Math.random().toString(36).slice(2);
+      try { localStorage.setItem('tc-tv-launch', launchId); } catch (_) {}
+      launchAttempts = 0;
       this.starting = true; this.error = ''; this.playerError = '';
       return this.generate(intent);
     },
     async generate(intent) {
       if (intent !== playbackSerial || this.destroyed) return;
       try {
-        const response = await fetch('/home/tv/play', {method: 'POST', signal: AbortSignal.timeout(20000)});
+        const requestId = launchId;
+        const response = await fetch('/home/tv/play', {method: 'POST', signal: AbortSignal.timeout(20000),
+          body: new URLSearchParams({request_id: requestId})});
         if (!response.ok) {
           console.debug('[TV] start response unavailable', response.status, await response.text());
           throw new Error('TV start failed');
@@ -208,6 +221,11 @@ function tvHome(maximum = 15) {
         const data = await response.json();
         if (intent !== playbackSerial || this.destroyed) return;
         if (response.status === 202) {
+          if (data.pending || ++launchAttempts >= 12) {
+            this.starting = false; this.launchPending = true;
+            this.error = 'This TV session is still unconfirmed.';
+            return;
+          }
           if (data.message) { this.starting = false; this.error = data.message; return; }
           // An empty or rebuilding pool is normal preparation. Keep the same
           // launch intent and embedded loader until a prepared draw is ready.
@@ -216,14 +234,20 @@ function tvHome(maximum = 15) {
         }
         this.ready = true;
         this.usePlaylist(data);
+        this.forgetLaunch(requestId);
         await this.select(0);
       } catch (error) {
         console.debug('[TV] start not confirmed', error);
         if (intent === playbackSerial && !this.destroyed) {
           this.starting = false;
-          this.error = 'TV start not confirmed. Check your playlists before trying again.';
+          this.launchPending = true;
+          this.error = 'This TV session is still unconfirmed.';
         }
       }
+    },
+    forgetLaunch(id = launchId) {
+      try { if (localStorage.getItem('tc-tv-launch') === id) localStorage.removeItem('tc-tv-launch'); } catch (_) {}
+      if (launchId === id) { launchId = null; this.launchPending = false; }
     },
     async openPlaylist(id) {
       ++serial; clearTimeout(timer); controller?.abort(); controller = null;
@@ -603,6 +627,7 @@ function tvHome(maximum = 15) {
         if (!data.ok) throw new Error('TV reset not confirmed');
         if (intent !== playbackSerial || this.destroyed) return;
         this.stopPlayer(); this.items = []; this.finished = false;
+        this.forgetLaunch();
         await this.start();
       } catch (error) {
         console.debug('[TV] reset not confirmed', error);

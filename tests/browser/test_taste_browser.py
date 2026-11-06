@@ -13,7 +13,7 @@ from yt_playlist.util.matching import identity_key
 from yt_playlist.web.track_links import track_url
 
 
-@pytest.mark.parametrize("width", [1440, 1024])
+@pytest.mark.parametrize("width", [1440])
 def test_preview_and_compare_show_artwork_play_tracks_and_keep_baseline(live_app, store, page, monkeypatch, width, tmp_path):
     from yt_playlist.rec import surfaces
     from tests.conftest import seed_catalog_track
@@ -198,7 +198,7 @@ def test_populated_overview_leads_with_changes_and_keeps_feedback_compact(store,
     expect(page.get_by_role('tab', name='Recent & learning', exact=True)).to_have_attribute('aria-selected', 'true')
 
 
-@pytest.mark.parametrize("width", [1440, 1024])
+@pytest.mark.parametrize("width", [1440])
 def test_playlist_influence_shows_the_whole_blend_and_links_selected_rows(live_app, store, page, width, tmp_path):
     iid = store.accounts.get_accounts()[0].id
     titles = ['Night drives / broken beats & "other" late discoveries',

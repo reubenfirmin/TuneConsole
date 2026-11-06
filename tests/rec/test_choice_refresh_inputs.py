@@ -23,6 +23,13 @@ def full_fingerprint(store, now):
                      'bandit': bandit.get('state_version'),
                      'bandit_active': bandit.get('expires_at') is None or now < bandit['expires_at'],
                      'album_feedback': album_feedback_state.state(store),
+                     'models': {key: store.settings.get_setting(key) for key in
+                                ('rec_content_generation', 'rec_fit_inputs', 'rec_mode_fit_inputs')},
+                     'card_views': store.rec_ledger.card_views('cards'),
+                     'mode_offers': store.modes.impression_counts(),
+                     'home': {'genre_request': store.rec_proposals.get_proposals('home_genre_request'),
+                              'vibe': store.settings.get_setting('home_mix_vibe'),
+                              'tuning_at': store.settings.get_setting('home_mix_tuning_updated_at')},
                      'decay_tick': int(now // 3600) if decaying or transient else None}
     return hashlib.sha256(json.dumps(configuration, sort_keys=True).encode()).hexdigest()
 
@@ -106,6 +113,8 @@ def test_refresh_does_not_hide_invalid_later_context_behind_active_support(store
 
 def test_tracked_refresh_rechecks_replacement_choice_publications(file_backed_store):
     store, now = file_backed_store, 1000
+    store.modes.replace_modes([{'mode_id': 101, 'label': 'House', 'families': [['house', 1]],
+                               'centroid': [1.0], 'size': 1, 'rep_keys': []}], [], now)
     with store.read_view(tracked=True) as reader:
         original = candidate_refresh.preferences(reader, now)
     store.rec_proposals.put_proposals('choice_interests', {'interest_version': 'new'}, now)
@@ -115,8 +124,16 @@ def test_tracked_refresh_rechecks_replacement_choice_publications(file_backed_st
         assert changed == full_fingerprint(reader, now)
     store.rec_proposals.put_proposals('choice_bandit', {'state_version': 'new'}, now)
     with store.read_view(tracked=True) as reader:
-        assert candidate_refresh.preferences(reader, now) != changed
+        bandit = candidate_refresh.preferences(reader, now)
+        assert bandit != changed
         assert candidate_refresh.preferences(reader, now) == full_fingerprint(reader, now)
+    store.modes.log_impressions(5, [('wheelhouse', 101)], now)
+    offers = candidate_refresh.preferences(store, now)
+    assert offers != bandit
+    store.modes.log_impressions(5, [('wheelhouse', 101)], now)
+    assert candidate_refresh.preferences(store, now) == offers, 'Repeated logging is not a new exposure'
+    store.rec_ledger.bump_card_view('cards', now)
+    assert candidate_refresh.preferences(store, now) != offers
 
 
 @pytest.mark.parametrize('installed', [92], indirect=True)

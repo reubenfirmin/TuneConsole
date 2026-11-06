@@ -178,6 +178,23 @@ def test_waiting_for_capacity_is_also_bounded(database, monkeypatch):
         assert reader.settings.get_setting('input') == 'old'
 
 
+def test_worker_snapshot_outlives_request_deadline_but_cancellation_releases_it(database, monkeypatch):
+    clock = [activity.time.monotonic()]
+    cancelled = [False]
+    monkeypatch.setattr(activity.time, 'monotonic', lambda: clock[0])
+    database._analytics_readers = threading.BoundedSemaphore(1)
+    with pytest.raises(activity.WorkClosing), activity.cancellable_work(lambda: cancelled[0]):
+        with database.read_view(seconds=None) as reader:
+            clock[0] += db_reads.READ_SECONDS + 1
+            assert reader.settings.get_setting('input') == 'old'
+            cancelled[0] = True
+            reader.settings.get_setting('input')
+    with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+        reader.conn.execute('SELECT 1')
+    assert database._analytics_readers.acquire(blocking=False)
+    database._analytics_readers.release()
+
+
 def test_nested_budget_does_not_extend_callers_deadline(monkeypatch):
     clock = [100.0]
     monkeypatch.setattr(activity.time, 'monotonic', lambda: clock[0])

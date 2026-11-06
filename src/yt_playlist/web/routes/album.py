@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from yt_playlist.library.album_fetch import fetch_album, is_upload_album, shareable_album_tracks
 from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.providers import enrichment, waterfall
-from yt_playlist.rec import album_choices, album_notes, choice_evidence
+from yt_playlist.rec import album_choices, album_notes, choice_evidence, home_cache
 from yt_playlist.util.duration import parse_duration
 from yt_playlist.util.thumbnails import best_thumb, is_placeholder_art
 
@@ -157,13 +157,11 @@ def build(ctx) -> APIRouter:
             store.rec_proposals.request_album_notes([editorial], ctx.now_fn(), visible=True)
             if ctx.rec_worker:
                 ctx.rec_worker.trigger_home_refresh()
-        prepared = store.rec_proposals.get_proposals("home_prepared") or {}
+        prepared = home_cache.read(store, 'home_prepared') or {}
         anchor = next((a for a in prepared.get("album_choices", []) if a["browse_id"] == browse_id), None)
         companion = []
         if not inline and anchor and anchor.get("companion"):
-            from yt_playlist.rec.home_prepared import _eligible_protos
-            proposals = _eligible_protos(store, [{"lane": "wheelhouse", "tracks": anchor["companion"]}], ctx.now_fn())
-            companion = proposals[0]["tracks"] if proposals else []
+            companion = anchor["companion"]
         companion_recipe = None
         if companion:
             oid = None

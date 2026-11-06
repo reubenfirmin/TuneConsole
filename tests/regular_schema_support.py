@@ -4,7 +4,7 @@ from yt_playlist.core import (
     collection_recovery_epoch, credit_retention, embedding_files, group_checkpoint_retention, group_progress, group_retention_progress,
     legacy_journals, metadata_native, metadata_runtime, mix_choices,
     mode_retention, policy_history, profile_files, recommendation_revalidations, served_facts, vibe_provenance,
-    vibe_versions,
+    vibe_versions, tv_launch_state,
 )
 from yt_playlist.core.migrations import current, migrate, regular
 from yt_playlist.core.preparation import installed_genre_contract
@@ -32,6 +32,7 @@ CHANGE_NAMES = (
     'durable_album_feedback_responses',
     'shared_vibe_model_generations',
     'bounded_embedding_basis_guards',
+    'durable_initial_tv_launches',
 )
 
 
@@ -51,7 +52,7 @@ def admit_regular_schema(store, *, clock=1234):
     before = captured(conn)
     assert 'schema_changes' not in before
     assert tuple(change.name for change in regular.CHANGES) == CHANGE_NAMES
-    assert tuple(change.version for change in regular.CHANGES) == tuple(range(1, 33))
+    assert tuple(change.version for change in regular.CHANGES) == tuple(range(1, 34))
     assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] in (103, 107)
     definitions = dict(conn.execute('SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL'))
     allowed = {'schema_changes': regular.HISTORY_SQL,
@@ -73,6 +74,7 @@ def admit_regular_schema(store, *, clock=1234):
         recommendation_revalidations.definitions(),
         vibe_models.schema(conn),
         embedding_files.bounded_basis_guards(),
+        tv_launch_state.definitions(conn),
     ):
         allowed.update(declarations)
     for sql in (*credit_retention.statements(), *mode_retention.statements(),

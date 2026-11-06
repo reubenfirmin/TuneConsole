@@ -25,9 +25,6 @@
     <h2 class="gen-status"><span class="gen-dot" aria-hidden="true"></span><span data-loader-status>{{ loader_status|default('Tuning your radio') }}</span><span class="gen-cursor" aria-hidden="true"></span></h2>
     <p class="gen-sub" data-loader-detail>{{ loader_detail|default('') }}</p>
     {% if loader_radio|default(false) %}
-    <div class="radio-launch-cancel" x-show="!launchPhase || launchUncertain" x-cloak>
-      <button class="btn" type="button" :disabled="cancelSending" @click="cancelLaunch()" x-text="cancelSending ? 'Stopping…' : 'Cancel'">Cancel</button>
-    </div>
     <div class="radio-launch-actions" x-show="launchPhase && !busy" x-cloak>
       <button class="btn btn-primary" type="button" x-show="!launchUncertain" @click="start(recoverySong, recoveryFromPlaylist)">Try this selection again</button>
       <button class="btn" type="button" x-show="launchUncertain" @click="refresh().catch(() => {})">Check playback</button>

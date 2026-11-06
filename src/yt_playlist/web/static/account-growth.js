@@ -13,12 +13,13 @@ function accountGrowth(initial) {
     get choiceInvite() { return this.growth.home_choice_available && !this.later; },
     get selectedNode() { return this.growth.nodes.find(node => node.id === this.selected); },
     node(id) { return this.growth.nodes.find(node => node.id === id); },
+    trail(id) { return this.growth.trails.find(trail => trail.id === id); },
     homePanel(anchor) { return anchor.startsWith('gen-') ? 'directions' : anchor; },
     areaAccessible(panel) {
       return ['unlocks', 'notices'].includes(panel) || this.growth.ready_areas[panel] === true ||
         this.growth.nodes.some(node => node.unlocked && node.href === '/#' + panel);
     },
-    get pathStates() { return this.growth.nodes.some(node => node.ready || node.connected) ? ['open'] : []; },
+    get pathStates() { return this.growth.trails.some(trail => ['connected', 'explored', 'ready'].includes(trail.state)) ? ['open'] : []; },
     isNew(node) { return this.newNodes.some(item => item.id === node.id); },
     saveVisibility() {
       try { localStorage.setItem('tc-growth-notices-v1', JSON.stringify({seen: this.seen, later: this.later})); } catch (_) {}
