@@ -19,7 +19,7 @@ import time
 import pytest
 
 from tests.bench_svd_background import _saved_library_source
-from tests.library_image_fixtures import benchmark_library
+from tests.library_image.fixtures import benchmark_library
 from yt_playlist.core.numerics import limit_native_threads
 from yt_playlist.core.store import Store
 from yt_playlist.rec import (album_choices, choice_evidence, daily_model_selection,

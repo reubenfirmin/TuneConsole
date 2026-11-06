@@ -1,4 +1,4 @@
-"""Directly policy-owned immutable configuration files and their backup lifecycle."""
+"""Policy-owned immutable configurations, packed reads and SQL-view leases."""
 import hashlib
 import json
 import os
@@ -10,7 +10,7 @@ import tempfile
 import time
 
 from .activity import check_cancellable_work
-from .evidence_ledger import _mkdir, _sync_directory, canonical
+from .evidence_ledger import _mkdir, canonical
 from .policy_config import BASE_FIELD
 from . import fao
 from .fao import _try_file_lock
@@ -76,12 +76,12 @@ def publish(root, configuration):
 
 def _publish_encoded(root, encoded, digest, *, age=None):
     path = Path(root) / digest[:2] / (digest + '.json')
-    fao.write_bytes(path, encoded, immutable=True, age=age)
+    fao.write(path, fao.Content(encoded, metadata=age, max_bytes=MAX_BYTES))
     return str(path)
 
 
 def _existing(path, size=MAX_BYTES):
-    with fao.open_reader(path) as stream:
+    with fao.read(path) as stream:
         return stream.read(size + 1)
 
 
@@ -173,7 +173,7 @@ def _decoded(path,digest,encoded,offset,size):
 def read(filename, digest, *, offset=0, size=None, with_age=False):
     path = Path(filename)
     _range(offset,size)
-    with fao.open_reader(path) as stream:
+    with fao.read(path) as stream:
         age = stream.info
         if offset:
             if (size is None or offset < len(PACK_HEADER) or stream.read(len(PACK_HEADER)) != PACK_HEADER
@@ -196,7 +196,7 @@ def read_many(references, *, with_age=False):
     """
     for filename,records in groupby(references,key=lambda reference:reference[0]):
         path = Path(filename)
-        with fao.open_reader(path) as stream:
+        with fao.read(path) as stream:
             header = None
             for _,digest,offset,size in records:
                 _range(offset,size)
@@ -346,46 +346,6 @@ def captured(conn, versions, *, memory_key=None):
     return rows, list(bases.values())
 
 
-def export(conn, root):
-    """Export under retained_reader, pinned to the same snapshot as the DB backup."""
-    if not conn.in_transaction:
-        raise ValueError('Policy export requires a pinned database snapshot')
-    if Path(root).resolve() == directory(conn).resolve():
-        raise ValueError('Policy backup requires a separate directory')
-    entries, chunks, pending = [], [], []
-    used = 0
-
-    def copy_batch():
-        values = read_many(((filename,digest,offset,size)
-                           for _owner,_version,filename,digest,offset,size in pending),with_age=True)
-        for (owner, version, _filename, digest, _offset, size), target in zip(
-                pending, repack(root, values, publish_many)):
-            filename, copied, copied_size, offset = target
-            if (copied, copied_size) != (digest, size):
-                raise ValueError('Policy backup changed a configuration')
-            entries.append({'owner': owner, 'version': version, 'digest': digest,
-                            'relative_filename': str(Path(filename).relative_to(root)),
-                            'offset': offset, 'byte_size': size})
-            if len(entries) == 1024:
-                chunks.append(publish(root, {'type': 'backup-chunk', 'policies': entries})[1])
-                entries.clear()
-
-    for owner in OWNERS:
-        for version, filename, digest, offset, size in conn.execute(
-                f'SELECT version,configuration_filename,content_digest,configuration_offset,byte_size '
-                f'FROM {owner} ORDER BY configuration_filename,configuration_offset,version'):
-            if pending and used + size > PACK_BYTES:
-                copy_batch()
-                pending, used = [], 0
-            pending.append((owner, version, filename, digest, offset, size))
-            used += size
-    if pending:
-        copy_batch()
-    if entries:
-        chunks.append(publish(root, {'type': 'backup-chunk', 'policies': entries})[1])
-    return publish(root, {'type': 'backup-manifest', 'chunks': chunks})[0]
-
-
 @contextmanager
 def coordinate_updates(conn, owners):
     """Relocate verified files without treating their coordinates as new input.
@@ -409,66 +369,6 @@ def coordinate_updates(conn, owners):
     finally:
         for sql in guards:
             conn.execute(sql)
-
-
-def restore(conn, manifest, *, memory_key=None):
-    path = Path(manifest)
-    document = read(path, path.stem)
-    if (set(document) != {'type', 'chunks'} or document['type'] != 'backup-manifest'
-            or not isinstance(document['chunks'], list)):
-        raise ValueError('Unsupported policy backup manifest')
-    entries = []
-    for digest in document['chunks']:
-        if not isinstance(digest, str) or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
-            raise ValueError('Invalid policy backup chunk digest')
-        chunk = read(path.parent.parent / digest[:2] / (digest + '.json'), digest)
-        if (set(chunk) != {'type', 'policies'} or chunk['type'] != 'backup-chunk'
-                or not isinstance(chunk['policies'], list)):
-            raise ValueError('Unsupported policy backup chunk')
-        entries.extend(chunk['policies'])
-    for entry in entries:
-        if (not isinstance(entry, dict) or set(entry) != {
-                'owner', 'version', 'digest', 'relative_filename', 'offset', 'byte_size'}
-                or entry['owner'] not in OWNERS or not isinstance(entry['version'], str)
-                or not entry['version'] or not isinstance(entry['digest'], str)
-                or len(entry['digest']) != 64 or any(c not in '0123456789abcdef' for c in entry['digest'])
-                or type(entry['offset']) is not int or entry['offset'] < len(PACK_HEADER)
-                or type(entry['byte_size']) is not int or not 0 < entry['byte_size'] <= MAX_BYTES
-                or not isinstance(entry['relative_filename'], str)):
-            raise ValueError('Invalid policy backup entry')
-        relative = Path(entry['relative_filename'])
-        stem = relative.stem
-        if (len(stem) != 64 or any(c not in '0123456789abcdef' for c in stem)
-                or relative != Path(stem[:2]) / (stem + '.json')
-                or entry['relative_filename'] != str(relative)):
-            raise ValueError('Invalid policy backup path')
-    if len({(entry['owner'], entry['version']) for entry in entries}) != len(entries):
-        raise ValueError('Duplicate policy in backup manifest')
-    if conn.in_transaction:
-        raise ValueError('Policy restore requires its own writer reservation')
-    conn.execute('BEGIN IMMEDIATE')
-    try:
-        expected = {(owner, version): (digest, size) for owner in OWNERS
-                    for version, digest, size in conn.execute(f'SELECT version,content_digest,byte_size FROM {owner}')}
-        if expected != {(entry['owner'], entry['version']): (entry['digest'], entry['byte_size'])
-                        for entry in entries}:
-            raise ValueError('Policy backup does not match the restored database')
-        targets = []
-        root = directory(conn, memory_key)
-        values = read_many(((path.parent.parent/entry['relative_filename'],entry['digest'],
-                             entry['offset'],entry['byte_size']) for entry in entries),with_age=True)
-        for entry, (filename, copied, size, offset) in zip(entries, repack(root, values, publish_many)):
-            if (copied, size) != (entry['digest'], entry['byte_size']):
-                raise ValueError('Policy restore changed a configuration')
-            targets.append((entry['owner'], filename, offset, entry['version']))
-        with coordinate_updates(conn, OWNERS):
-            for owner in OWNERS:
-                conn.executemany(f'UPDATE {owner} SET configuration_filename=?,configuration_offset=? WHERE version=?',
-                                 [(filename, offset, version) for table, filename, offset, version in targets if table == owner])
-        conn.commit()
-    except BaseException:
-        conn.rollback()
-        raise
 
 
 def collect_orphans(conn, *, memory_key=None):

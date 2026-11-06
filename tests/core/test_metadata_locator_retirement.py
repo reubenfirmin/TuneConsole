@@ -140,14 +140,14 @@ def test_metadata_collection_preserves_installed_owners_and_retired_snapshot_fen
         retirement.retire(store.conn, manifest)
     owned = list(metadata_delivery_files.references(store.conn))
     assert bool(owned) is not retired
-    before = {row[1]: fao.read_bytes(row[1]) for row in owned}
+    before = {row[1]: fao.read(row[1]).bytes for row in owned}
     root = metadata_delivery_files.directory(store.conn)
     old, young = root / 'unowned-old.json', root / 'unowned-young.json'
-    fao.write_bytes(old, b'{"unowned":"old"}')
+    fao.write(old, b'{"unowned":"old"}')
     now = time.time() + 31 * 86400
-    age = fao.stat(old)
+    age = fao.read(old).info
     from dataclasses import replace
-    fao.write_bytes(young, b'{"unowned":"young"}', age=replace(age, ctime_ns=int(now * 1e9)))
+    fao.write(young, fao.Content(b'{"unowned":"young"}', metadata=replace(age, ctime_ns=int(now * 1000000000.0))))
     work = Orphans(store.conn)
     try:
         with store.read_view():
@@ -163,7 +163,7 @@ def test_metadata_collection_preserves_installed_owners_and_retired_snapshot_fen
                 break
         assert not old.exists()
         assert young.exists()
-        assert {path: fao.read_bytes(path) for path in before} == before
+        assert {path: fao.read(path).bytes for path in before} == before
         assert all(metadata_delivery_files.owns_file(store.conn, path) for path in before)
         assert not metadata_delivery_files.owns_file(store.conn, old)
         # Recovery and source bytes are separate custody, never collector roots.
@@ -195,7 +195,7 @@ def test_failed_retirement_keeps_exact_installed_schema_and_can_retry(candidate,
     before = schema(target.conn)
     verify = files.verify_backup
     if failure in ('missing-backup', 'changed-backup'):
-        encoded = fao.read_bytes(manifest)
+        encoded = fao.read(manifest).bytes
         if failure == 'missing-backup':
             fao.delete(manifest)
         else:
@@ -203,7 +203,7 @@ def test_failed_retirement_keeps_exact_installed_schema_and_can_retry(candidate,
             document = json.loads(encoded)
             document['entries'][0]['sha256'] = '0' * 64
             from yt_playlist.core.evidence_ledger import canonical
-            fao.write_bytes(manifest, canonical(document))
+            fao.write(manifest, canonical(document))
     elif failure == 'ddl':
         def interrupt():
             if retirement.retired(target.conn):
@@ -224,7 +224,7 @@ def test_failed_retirement_keeps_exact_installed_schema_and_can_retry(candidate,
     assert not target.conn.in_transaction
     monkeypatch.undo()
     if failure in ('missing-backup', 'changed-backup'):
-        fao.write_bytes(manifest, encoded)
+        fao.write(manifest, encoded)
     assert retirement.retire(target.conn, manifest)['retired']
 
 
@@ -259,9 +259,9 @@ def test_candidate_owns_private_sources_targets_and_recovery_members(candidate, 
         assert (private.stat().st_dev, private.stat().st_ino) != (path.stat().st_dev, path.stat().st_ino)
         copied += 1
     assert copied > 1
-    encoded = fao.read_bytes(original_manifest)
-    fao.write_bytes(manifest, b'private damaged recovery manifest')
-    assert fao.read_bytes(original_manifest) == encoded
+    encoded = fao.read(original_manifest).bytes
+    fao.write(manifest, b'private damaged recovery manifest')
+    assert fao.read(original_manifest).bytes == encoded
     expected = metadata_provenance(target, entry)
     source.settings.set_setting('private-fixture', 'source consumer')
     directory = files.directory(source.conn)

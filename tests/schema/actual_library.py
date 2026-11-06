@@ -10,7 +10,7 @@ from yt_playlist.core.db_rebuild import job
 
 
 def copy_readonly_library(path, destination, monkeypatch, report):
-    from tests.library_image_fixtures import managed_database
+    from tests.library_image.fixtures import managed_database
     managed = managed_database(path, report)
     if managed is not None:
         return managed

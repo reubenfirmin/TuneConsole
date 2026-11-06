@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import tempfile
 from unittest.mock import patch
 
 
@@ -19,7 +20,12 @@ def private_capture_sync():
     """
     if not Path('/library').is_dir() or os.environ.get('TUNECONSOLE_IMAGE_RUN') != '1':
         raise RuntimeError('Batched capture sync is restricted to the private preparation container')
-    with patch.object(os, 'fsync', lambda _descriptor: None):
+    # Domain restore staging can exceed a container's small /tmp tmpfs. Keep it
+    # inside this unpublished subvolume and clean it before verification/freeze.
+    with tempfile.TemporaryDirectory(prefix='.capture-', dir='/library') as temporary, \
+            patch.dict(os.environ, {'TMPDIR': temporary}), \
+            patch.object(tempfile, 'tempdir', temporary), \
+            patch.object(os, 'fsync', lambda _descriptor: None):
         yield
 
 
@@ -86,14 +92,20 @@ def export(source_path, target, report):
     """Pin one SQL snapshot and its file lifetimes; export every finite owner."""
     from tests import file_custody_support as custody
     from yt_playlist.core.db_rebuild import job
+    from . import feedback
 
     with closing(sqlite3.connect(source_path.as_uri() + '?mode=ro', uri=True)) as source:
         source.row_factory = sqlite3.Row
         source.execute('PRAGMA query_only=ON')
         with source_files(source_path, target, report, strict=True), job._files(source):
-            source.execute('BEGIN')
             try:
-                report['schema'] = source.execute('SELECT max(version) FROM schema_migrations').fetchone()[0]
+                # Hold playback admission only for this short boundary and its
+                # sidecar capture, rather than the full main-library export.
+                with feedback.admission(source_path) as inbox:
+                    source.execute('BEGIN')
+                    report['schema'] = source.execute('SELECT max(version) FROM schema_migrations').fetchone()[0]
+                    feedback.capture(inbox, target, report)
+                report['capture_format'] = 1
                 with closing(sqlite3.connect(target / 'state.db')) as copied:
                     source.backup(copied, pages=256)
                 manifests = custody.export_files(source, target / 'state.db', backup_root=target / 'exports')
@@ -111,11 +123,16 @@ def finish():
     from tests import file_custody_support as custody
     from tests.prepared_fixture_support import coordinates
     from yt_playlist.core.db_rebuild.sqlite_checks import verify
+    from . import feedback
 
     root = Path('/library')
     with closing(sqlite3.connect(root / 'state.db')) as connection:
         connection.row_factory = sqlite3.Row
-        custody.restore_files(connection, json.loads((root / 'exports.json').read_text()))
+        with connection:
+            # A failed later domain discards the whole unpublished candidate.
+            # Retaining already restored exports only inflates refresh's peak.
+            custody.restore_files(connection, json.loads((root / 'exports.json').read_text()),
+                                  release=lambda name: shutil.rmtree(root / 'exports' / name))
         verify(connection)
         for table, column, value in coordinates(connection):
             if (table.strip('"'), column.strip('"')) == ('action_backups', 'filename'):
@@ -125,6 +142,7 @@ def finish():
                 raise ValueError(f'Unisolated library file coordinate: {table}.{column}: {value}')
         connection.execute('PRAGMA wal_checkpoint(TRUNCATE)')
         connection.execute('PRAGMA journal_mode=DELETE')
+    feedback.verify(root)
     shutil.rmtree(root / 'exports')
     (root / 'exports.json').unlink()
 

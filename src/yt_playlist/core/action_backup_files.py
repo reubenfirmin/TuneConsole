@@ -11,7 +11,7 @@ MAX_BYTES = 64 * 1024 * 1024
 
 
 def verified(filename,digest=None,size=None,*,with_age=False):
-    with fao.open_reader(filename) as stream:
+    with fao.read(filename) as stream:
         encoded = stream.read(MAX_BYTES+1)
         age = stream.info
     actual = hashlib.sha256(encoded).hexdigest()

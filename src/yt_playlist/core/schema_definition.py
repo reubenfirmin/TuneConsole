@@ -290,18 +290,22 @@ def _table(conn, name, sql):
 
 def _inspect_table(conn, name, sql):
     quoted = '"' + name.replace('"', '""') + '"'
-    columns = {r[1]: (r[2].upper(), r[3], r[4], r[5], r[6]) for r in conn.execute(f'PRAGMA main.table_xinfo({quoted})')}
+    # Structure observations are bounded by the declared schema. Fetch each
+    # result once rather than crossing the instrumented DB handle per column,
+    # key and index during every migration's admission check.
+    columns = {r[1]: (r[2].upper(), r[3], r[4], r[5], r[6])
+               for r in conn.execute(f'PRAGMA main.table_xinfo({quoted})').fetchall()}
     grouped_keys = defaultdict(list)
-    for row in conn.execute(f'PRAGMA main.foreign_key_list({quoted})'):
+    for row in conn.execute(f'PRAGMA main.foreign_key_list({quoted})').fetchall():
         grouped_keys[row[0]].append(row)
     foreign_keys = Counter(tuple(tuple(r[2:]) for r in sorted(rows, key=lambda r: r[1]))
                            for rows in grouped_keys.values())
     unique = Counter()
-    for index in conn.execute(f'PRAGMA main.index_list({quoted})'):
+    for index in conn.execute(f'PRAGMA main.index_list({quoted})').fetchall():
         if index[3] in ('u', 'pk'):
             index_name = '"' + index[1].replace('"', '""') + '"'
             unique[(index[3], tuple((r[2], r[3], r[4]) for r in conn.execute(
-                f'PRAGMA main.index_xinfo({index_name})') if r[5]))] += 1
+                f'PRAGMA main.index_xinfo({index_name})').fetchall() if r[5]))] += 1
     tokens = _tokens(sql)
     # table_list resolves columns of every main/TEMP view, even when its name
     # argument or WHERE clause names one table. Repeating that work per owner
@@ -319,7 +323,11 @@ def _inspect_table(conn, name, sql):
             annotations[tokens[position:position + 2]] += 1
         elif token == 'autoincrement':
             annotations[(token,)] += 1
-    return columns, foreign_keys, unique, _checks(sql), flags, annotations, _foreign_key_deferrals(sql)
+    # All counts come from observed declarations and are strictly positive.
+    # Plain mappings preserve multiplicity and compare/copy directly; Counter's
+    # missing/zero normalization adds work to every unchanged-table admission.
+    return (columns, dict(foreign_keys), dict(unique), dict(_checks(sql)), flags,
+            dict(annotations), dict(_foreign_key_deferrals(sql)))
 
 
 def _schema_contract(statements):
@@ -341,7 +349,7 @@ def _reference_contract(statements):
         return {
             name: (kind, _table(reference, name, sql) if kind == 'table' else _tokens(sql))
             for name, kind, sql in reference.execute(
-                "SELECT name,type,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'")
+                "SELECT name,type,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'").fetchall()
         }
     finally:
         reference.close()
@@ -406,7 +414,7 @@ def _validate(conn, expected_contract, version, *, replaced=frozenset(), foreign
     replaced = replaced | legacy_journals.retired_relations(conn)
     runtime_views = metadata_runtime.views() if metadata_runtime.active(conn) else {}
     objects = {r[0]: (r[1], r[2]) for r in conn.execute(
-        "SELECT name,type,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")}
+        "SELECT name,type,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchall()}
     file_vibe_guards = {}
     from . import recommendation_revalidations
     if recommendation_revalidations.available(conn):

@@ -1,4 +1,5 @@
 """Cold originals remain exact without SQL receipts or the producer directory."""
+from tests.file_custody_support import export_owner, restore_owner
 import shutil
 
 import pytest
@@ -33,17 +34,17 @@ def test_insert_once_rollback_snapshots_expiry_and_independent_restore(store, tm
         legacy_evidence.retain(store.conn,'actions','operation','replacement','retry')
     assert legacy_evidence.original(store.conn,'catalog','library','128') is None
     assert legacy_evidence.original(store.conn,'workflow','actions','operation') == ' exact signature '
-    manifest = owner.export(store.conn,tmp_path/'saved')
+    manifest = export_owner(store.conn, owner,tmp_path/'saved')
     restored = Store(tmp_path/'restored.db')
     try:
         store.conn.backup(restored.conn)
         shutil.rmtree(owner.directory(store.conn))
-        owner.restore(restored.conn,manifest)
+        restore_owner(restored.conn, 'legacy-journals', owner,manifest)
         restored.init_schema()
         assert legacy_evidence.original(restored.conn,'workflow','actions','operation') == ' exact signature '
         assert owner.read(restored.conn,'catalog','library','128')['state'] == 'expired'
         path = next(owner.references(restored.conn))
-        fao.write_bytes(path,b'{}')
+        fao.write(path, b'{}')
         with pytest.raises(fao.CorruptFile):
             legacy_evidence.original(restored.conn,'catalog','library','128')
     finally:
@@ -57,7 +58,7 @@ def test_old_receipt_conversion_failure_and_explicit_verified_retirement(store, 
             legacy_evidence.retain_many(store.conn,'album',[
                 ('album_tracklists','old','\n {"tracks": [1, 2]} ','original conversion')])
     with monkeypatch.context() as patch:
-        patch.setattr(fao,'write_bytes',lambda *a,**k: (_ for _ in ()).throw(OSError('disk full')))
+        patch.setattr(fao,'write',lambda *a,**k: (_ for _ in ()).throw(OSError('disk full')))
         with pytest.raises(OSError,match='disk full'):
             legacy_journals.prepare(store)
     assert store.conn.execute('SELECT count(*) FROM album_identity_evidence').fetchone()[0] == 1

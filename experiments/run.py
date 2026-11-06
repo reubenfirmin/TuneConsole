@@ -15,6 +15,12 @@ LOCAL = EXPERIMENTS / 'audio_lab/local'
 CHECKPOINT = LOCAL / 'external-20261028/checkpoint-1'
 MODULES = {
     'vibe-pooling': 'vibe_pooling_evaluation',
+    'vibe-pooling-labels': 'vibe_pooling_labels',
+    'vibe-pooling-metadata': 'vibe_pooling_metadata',
+    'vibe-pooling-descriptors': 'vibe_pooling_descriptors',
+    'vibe-pooling-transfer': 'vibe_pooling_transfer',
+    'vibe-pooling-pairs': 'vibe_pooling_pairs',
+    'vibe-pooling-ranking': 'vibe_pooling_ranking',
     'quality-round': 'quality_round',
     'focus-counts': 'focus_count_experiment',
     'focus-confirmation': 'focus_confirmation',
@@ -93,6 +99,7 @@ MODULES = {
     'release-wheel': 'release_package_check',
 }
 TESTS = (
+    'test_vibe_pooling_metadata.py',
     'retained_copy/test_playback_feedback_backup.py',
     'test_representation_study.py',
     'test_focus_counts.py',

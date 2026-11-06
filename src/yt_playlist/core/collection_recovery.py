@@ -1,4 +1,5 @@
 """Immutable, versioned files owned by recoverable collection workflows."""
+from yt_playlist.core import file_collection
 import hashlib
 import json
 from pathlib import Path
@@ -73,7 +74,7 @@ def read(filename,digest,size,*,kind,owner,with_age=False):
     if kind not in KINDS or type(size) is not int or not 0<size<=MAX_BYTES:
         raise ValueError('Invalid collection recovery reference')
     path = Path(filename)
-    with fao.open_reader(path) as stream:
+    with fao.read(path) as stream:
         age = stream.info
         encoded = stream.read(size+1)
     if path.stem!=digest or len(encoded)!=size or hashlib.sha256(encoded).hexdigest()!=digest:
@@ -106,7 +107,7 @@ def _manifest(root,value):
 
 def _load_manifest(path):
     path = Path(path)
-    with fao.open_reader(path) as stream:
+    with fao.read(path) as stream:
         encoded = stream.read(MAX_BYTES+1)
     if len(encoded)>MAX_BYTES or hashlib.sha256(encoded).hexdigest()!=path.stem:
         raise ValueError('Collection backup manifest does not match its digest')
@@ -199,7 +200,7 @@ class OrphanCollector:
 
     def __init__(self, root):
         self.root = Path(root)
-        self.paths = fao.walk_entries(root, max_depth=2)
+        self.paths = file_collection.walk_entries(root, max_depth=2)
         self.batch = None
         self.complete = False
         self.removed = 0

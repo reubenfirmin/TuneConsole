@@ -357,7 +357,7 @@ def test_action_log_hides_native_recovery_diagnostic_and_resumes_saved_progress(
     provider = RecoveryClient({'SOURCE': ['a', 'b']})
     iid, aid = _deleted(store, provider)
     backup = json.loads(store.actions.get_action(aid).undo_json)['backup']
-    before = fao.read_bytes(backup)
+    before = fao.read(backup).bytes
     refresh = playlist_undo._refresh
 
     def failed_refresh(*_args, **_kwargs):
@@ -373,7 +373,7 @@ def test_action_log_hides_native_recovery_diagnostic_and_resumes_saved_progress(
         step, = recovery['steps']
         assert recovery['error'] == diagnostic and step['phase'] == 'remote_complete'
         assert step['created_id'] == 'PL_NEW_0'
-        assert fao.read_bytes(backup) == before
+        assert fao.read(backup).bytes == before
         for url in (response.headers['location'], '/actions', '/actions?flasherr=' + diagnostic):
             html = web.get(url).text
             assert diagnostic not in html and 'banner err' not in html
@@ -387,7 +387,7 @@ def test_action_log_hides_native_recovery_diagnostic_and_resumes_saved_progress(
         assert web.post(f'/undo/{aid}').status_code == 200
         assert store.actions.get_action(aid).status == 'undone'
         assert (provider.created, provider.added, provider.deleted) == writes
-        assert fao.read_bytes(backup) == before
+        assert fao.read(backup).bytes == before
 
 
 def test_action_log_retains_human_conflict_without_displaying_diagnostics(store):

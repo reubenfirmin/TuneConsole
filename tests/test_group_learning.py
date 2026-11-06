@@ -1,3 +1,4 @@
+from tests.file_content_support import age_file
 from copy import deepcopy
 from dataclasses import replace
 
@@ -201,12 +202,12 @@ def test_frozen_broad_support_survives_child_rejoin(store, monkeypatch, transiti
             if storage.endswith('released'):
                 serializing.setattr(choice_retention, 'DIAGNOSTIC_FRACTION', 0)
                 for path in ledger.directory.glob('artifact/*/*.json'):
-                    file_before, raw = fao.stat(path), fao.read_bytes(path)
-                    fao.touch(path, mtime_ns=10**9)
-                    after = fao.stat(path)
+                    file_before, raw = fao.read(path).info, fao.read(path).bytes
+                    age_file(path, mtime_ns=10 ** 9)
+                    after = fao.read(path).info
                     assert after.mtime_ns == 10**9 and after.ctime_ns == file_before.ctime_ns
                     assert after.logical_bytes == file_before.logical_bytes == len(raw)
-                    assert fao.read_bytes(path) == raw
+                    assert fao.read(path).bytes == raw
             choices.maintain_storage(store, 1074)
         identity = ledger.get('opportunity', oid)['context']
         saved = choice_context.checkpoint(ledger, identity)

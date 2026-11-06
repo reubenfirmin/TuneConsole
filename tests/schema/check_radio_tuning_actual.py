@@ -6,9 +6,7 @@ from functools import wraps
 import hashlib
 import json
 from pathlib import Path
-import os
 import pstats
-import shutil
 import subprocess
 import sys
 import time
@@ -19,8 +17,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from tests.schema.actual_library import copy_readonly_library
-from tests.library_image_fixtures import report_file
-from yt_playlist.core import fao
+from tests.library_image.fixtures import report_file
 from yt_playlist.core.store import Store
 from yt_playlist.rec import musical_character
 from yt_playlist.rec.radio_candidates import RadioCandidates
@@ -46,28 +43,7 @@ def test_actual_library_tuning(request, tmp_path, monkeypatch):
         report['sources'][name] = hashlib.sha256((Path('src/yt_playlist') / name).read_bytes()).hexdigest()
     destination = tmp_path / 'radio-tuning.db'
     started = time.perf_counter()
-    copies = [0]
-
-    def copy_bytes(source, target, **_options):
-        # Export/restore manifests still hash these exact managed bytes. Copy
-        # their immutable envelope directly rather than inflating every profile.
-        target = Path(target)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-        copies[0] += 1
-        if copies[0] % 1000 == 0:
-            report.update(copy_files=copies[0], copy_elapsed=time.perf_counter() - started,
-                          copy_current=str(source))
-            report_path.write_text(json.dumps(report, indent=2) + '\n')
-        return target
-
-    # Disposable fixture exports still verify file bytes and custody. Their
-    # durability is irrelevant; avoid an fsync for each of thousands of copies.
-    # This scope ends before opening the copied Store or measuring Apply.
-    with monkeypatch.context() as capture:
-        capture.setattr(os, 'fsync', lambda _fd: None)
-        capture.setattr(fao, 'copy', copy_bytes)
-        destination = copy_readonly_library(Path(source).resolve(strict=True), destination, capture, report)
+    destination = copy_readonly_library(Path(source).resolve(strict=True), destination, monkeypatch, report)
     report['copy_seconds'] = time.perf_counter() - started
     store = Store.open_current(destination)
     try:

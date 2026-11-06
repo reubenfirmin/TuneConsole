@@ -36,11 +36,11 @@ def _copy(source, target):
     target.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with target.path.open('xb'):
         pass
-    with fao.retained_reader(target.directory), target.admission(), closing(target.connect()) as copied:
+    with policy_documents.retained_reader(target.directory), target.admission(), closing(target.connect()) as copied:
         with copied:
             for row in source.execute('SELECT * FROM playback_feedback_inbox ORDER BY sequence'):
                 Inbox.body(row)
-                with fao.open_reader(row['filename'], max_bytes=row['byte_size']) as stream:
+                with fao.read(row['filename'], max_bytes=row['byte_size']) as stream:
                     encoded = stream.read(row['byte_size'] + 1)
                     age = stream.info
                 if (len(encoded) != row['byte_size']

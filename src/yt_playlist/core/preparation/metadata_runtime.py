@@ -51,7 +51,7 @@ def signature(conn):
 
 
 def _save(path, document):
-    fao.write_bytes(path, canonical(document))
+    fao.write(path, canonical(document))
 
 
 def _initial(conn):
@@ -216,7 +216,7 @@ def step(conn, progress, *, batch_size=32):
         return {'complete': True, 'active': True}
     progress = Path(progress)
     if progress.exists():
-        state = json.loads(fao.read_bytes(progress))
+        state = json.loads(fao.read(progress).bytes)
         if (state.get('format') != 1 or state.get('database') != str(Path(conn.execute('PRAGMA database_list').fetchone()[2]).resolve())):
             raise ValueError('Metadata preparation progress belongs to another database')
     else:
@@ -249,7 +249,7 @@ def step(conn, progress, *, batch_size=32):
 def activate(conn, progress):
     if conn.in_transaction:
         raise ValueError('Metadata cutover needs an idle connection')
-    state = json.loads(fao.read_bytes(progress))
+    state = json.loads(fao.read(progress).bytes)
     database = str(Path(conn.execute('PRAGMA database_list').fetchone()[2]).resolve())
     if state.get('format') != 1 or state.get('database') != database:
         raise ValueError('Metadata preparation progress belongs to another database')
@@ -301,7 +301,7 @@ def main():
             if runtime.active(store.conn):
                 raise ValueError('An active metadata format cannot restart preparation')
             if args.progress.exists():
-                state = json.loads(fao.read_bytes(args.progress))
+                state = json.loads(fao.read(args.progress).bytes)
                 if state.get('database') != str(args.database.resolve()):
                     raise ValueError('Metadata preparation progress belongs to another database')
                 fao.delete(args.progress,missing_ok=True)

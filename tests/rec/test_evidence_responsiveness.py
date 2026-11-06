@@ -1,4 +1,6 @@
 """Recovery owns publication, while foreground reads use the last committed state."""
+from tests.file_content_support import read_bytes as original_bytes
+from tests.file_content_support import patch_byte_reads
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from html.parser import HTMLParser
@@ -334,7 +336,7 @@ def test_inventory_preparation_does_not_hold_the_home_serving_lock(library, monk
             entered.set()
             assert release.wait(5)
 
-    read_bytes, context = fao.read_bytes, group_roots.context
+    read_bytes, context = original_bytes, group_roots.context
 
     def held_read(self, **kwargs):
         if self == path:
@@ -346,7 +348,7 @@ def test_inventory_preparation_does_not_hold_the_home_serving_lock(library, monk
             hold()
         return context(store, captured, **kwargs)
 
-    monkeypatch.setattr(fao, 'read_bytes', held_read if phase == 'file_read' else read_bytes)
+    patch_byte_reads(monkeypatch, held_read if phase == 'file_read' else read_bytes)
     monkeypatch.setattr(group_roots, 'context', held_context if phase == 'context_expansion' else context)
     app = create_app(library, lambda: {}, now_fn=lambda: 1000, background_work=True)
     worker = app.state.ctx.rec_worker
@@ -558,7 +560,7 @@ def test_cached_home_does_not_wait_for_inventory_file_preparation(library, monke
             conn.execute('UPDATE group_retention_state SET roots_complete=0 WHERE id=1')
         backfill = group_root_backfill.Backfill(library)
         library._group_root_backfill = backfill
-        read_bytes = fao.read_bytes
+        read_bytes = original_bytes
 
         def held_read(candidate, **kwargs):
             if candidate == path and threading.get_ident() == maintenance_thread[0] and not entered.is_set():
@@ -573,7 +575,7 @@ def test_cached_home_does_not_wait_for_inventory_file_preparation(library, monke
             maintenance_thread[0] = threading.get_ident()
             return choice_evidence.maintain_storage(library, 1000)
 
-        monkeypatch.setattr(fao, 'read_bytes', held_read)
+        patch_byte_reads(monkeypatch, held_read)
         request = None
         with ThreadPoolExecutor(2) as executor:
             maintenance = executor.submit(maintain)
@@ -602,7 +604,7 @@ def test_cached_home_does_not_wait_for_inventory_file_preparation(library, monke
                             future.result(timeout=10)
                         except Exception as error:
                             observed['cleanup_errors'].append(f'{name}: {type(error).__name__}: {error}')
-        monkeypatch.setattr(fao, 'read_bytes', read_bytes)
+        patch_byte_reads(monkeypatch, read_bytes)
         for _ in range(10):
             if not choice_evidence.maintain_storage(library, 1000).get('deferred'):
                 break

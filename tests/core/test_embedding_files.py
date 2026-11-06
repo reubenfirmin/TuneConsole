@@ -1,4 +1,5 @@
 """Binary vectors keep exact bytes, coherent bases and discovery tie ordering."""
+from tests.file_custody_support import export_owner, restore_owner
 import shutil
 import sqlite3
 import struct
@@ -114,7 +115,7 @@ def test_partial_conversion_and_incremental_publication_preserve_order(store, mo
     expected = [(key, vector) for (_, key), vector in zip(subjects, values)]
     assert embeddings.rows(store.conn, 'rec_discovered_content_vectors') == expected
     with monkeypatch.context() as patch:
-        patch.setattr(fao, 'write_bytes', lambda *a, **k: (_ for _ in ()).throw(OSError('disk full')))
+        patch.setattr(fao, 'write', lambda *a, **k: (_ for _ in ()).throw(OSError('disk full')))
         with pytest.raises(OSError, match='disk full'):
             preparation.prepare(store, limit=1)
     assert embeddings.rows(store.conn, 'rec_discovered_content_vectors') == expected
@@ -151,14 +152,14 @@ def test_required_chunks_snapshot_and_independent_restore(store, tmp_path):
         assert embeddings.rows(snapshot.conn, 'rec_vectors') == [(key, vector)]
         assert store.retention.collect_embeddings(10**10) == 0
     store.retention.collect_embeddings(10**10)
-    manifest = owner.export(store.conn, tmp_path / 'saved')
+    manifest = export_owner(store.conn, owner, tmp_path / 'saved')
     restored = Store(tmp_path / 'restored.db')
     try:
         store.conn.backup(restored.conn)
         shutil.rmtree(owner.directory(store.conn))
-        owner.restore(restored.conn, manifest)
+        restore_owner(restored.conn, 'embeddings', owner, manifest)
         assert embeddings.rows(restored.conn, 'rec_vectors') == [(key, vector[::-1])]
-        fao.write_bytes(next(owner.references(restored.conn)), b'broken')
+        fao.write(next(owner.references(restored.conn)), b'broken')
         with pytest.raises(fao.CorruptFile):
             embeddings.rows(restored.conn, 'rec_vectors')
     finally:

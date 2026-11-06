@@ -1,4 +1,5 @@
 """Explicit resumable FAO preparation. No bulk conversion runs at startup."""
+from yt_playlist.core import file_collection
 import importlib
 
 from .. import fao
@@ -39,7 +40,7 @@ class Conversion:
 
     def _paths(self):
         for name,root in self.roots.items():
-            for path in fao.walk_entries(root):
+            for path in file_collection.walk_entries(root):
                 yield name,path
 
     def step(self, *, entries=16, logical_bytes=32*1024*1024):
@@ -57,7 +58,8 @@ class Conversion:
             if path is None:
                 continue
             try:
-                before = fao.stat(path)
+                content = fao.read(path, max_bytes=logical_bytes)
+                before = content.info
                 if before.compressed:
                     continue
                 if before.logical_bytes>logical_bytes-result['logical']:
@@ -67,11 +69,11 @@ class Conversion:
                         raise fao.FileBudgetExceeded('Managed file exceeds conversion tick budget: '+str(path))
                     self.pending = (_domain,path)
                     break
-                if fao.convert(path,max_bytes=logical_bytes):
-                    after = fao.stat(path)
-                    result['converted'] += 1
-                    for key,attribute in (('logical','logical_bytes'),('compressed','compressed_bytes'),('allocated','allocated_bytes')):
-                        result[key] += getattr(after,attribute)
+                fao.write(path, content)
+                after = fao.read(path).info
+                result['converted'] += 1
+                for key,attribute in (('logical','logical_bytes'),('compressed','compressed_bytes'),('allocated','allocated_bytes')):
+                    result[key] += getattr(after,attribute)
             except (FileNotFoundError,fao.FileChanged):
                 continue  # Concurrent owner publication/expiry is retried later.
         return result

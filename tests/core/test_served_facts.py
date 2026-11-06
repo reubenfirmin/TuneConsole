@@ -68,13 +68,13 @@ def test_partial_preparation_continuing_writes_and_expiry_preserve_reports(store
 def test_staged_diagnostics_prepare_without_sql_writer_and_publish_atomically(store, monkeypatch):
     trace = offer(store, 'first')
     before = reports(store)
-    stage = fao.stage_bytes
+    stage = fao.prepare
     calls = []
     def checked(*args, **kwargs):
         assert not store.conn.in_transaction
         calls.append(args[0])
         return stage(*args, **kwargs)
-    monkeypatch.setattr(fao, 'stage_bytes', checked)
+    monkeypatch.setattr(fao, 'prepare', checked)
     with facts.staged_batch(store.conn, 1) as publish:
         assert calls and not store.conn.in_transaction
         assert reports(store) == before
@@ -120,12 +120,12 @@ def test_foreground_write_completes_while_diagnostic_file_is_staging(file_backed
     trace = offer(store, 'first')
     entered, written = threading.Event(), threading.Event()
     failures = []
-    stage = fao.stage_bytes
+    stage = fao.prepare
     def delayed(*args, **kwargs):
         entered.set()
         assert written.wait(5), 'File preparation retained the SQL writer'
         return stage(*args, **kwargs)
-    monkeypatch.setattr(fao, 'stage_bytes', delayed)
+    monkeypatch.setattr(fao, 'prepare', delayed)
     def analytics():
         prepared = Store.open_current(store._db_path)
         try:
@@ -177,7 +177,7 @@ def test_missing_corrupt_diagnostic_are_errors_but_reports_work(store):
     offer(store, 'one')
     baseline = reports(store)
     path = facts.directory(store.conn) / facts.relative(1)
-    encoded = fao.read_bytes(path)
+    encoded = fao.read(path).bytes
     path.unlink()
     with pytest.raises(ValueError, match='Unexpectedly missing'):
         scorecard.served_recommendation(store, 1)
@@ -249,27 +249,27 @@ def test_backup_checks_all_members_before_restoring_trace(store, tmp_path, damag
     path.unlink()
     facts.restore(store.conn, manifest)
     assert scorecard.served_recommendation(store, 1)['provenance'] == trace
-    before = {i: fao.read_bytes(facts.directory(store.conn)/facts.relative(i)) for i in (1, 2)}
-    document = json.loads(fao.read_bytes(manifest))
+    before = {i: fao.read(facts.directory(store.conn) / facts.relative(i)).bytes for i in (1, 2)}
+    document = json.loads(fao.read(manifest).bytes)
     # A valid earlier member with a different opaque diagnostic would be
     # accepted on its own. A bad later member must not publish that change.
     for i in (1, 2):
         backup = tmp_path/'backup'/facts.relative(i)
-        envelope = json.loads(fao.read_bytes(backup))
+        envelope = json.loads(fao.read(backup).bytes)
         if i == 1:
             envelope['body']['provenance']['diagnostic'] = {'replacement': True}
         elif damage == 'meaning':
             envelope['body']['provenance']['candidate']['genre'] = 'Wrong genre'
         envelope['sha256'] = hashlib.sha256(canonical(envelope['body'])).hexdigest()
         encoded = canonical(envelope)
-        fao.write_bytes(backup, encoded)
+        fao.write(backup, encoded)
         document['entries'][i-1][1:] = [len(encoded), hashlib.sha256(encoded).hexdigest()]
     if damage == 'checksum':
         document['entries'][1][2] = 'wrong'
     elif damage == 'incomplete':
         document['entries'].pop()
-    fao.write_bytes(manifest, canonical(document))
+    fao.write(manifest, canonical(document))
     with pytest.raises(ValueError, match='verification|captured owner|incomplete'):
         facts.restore(store.conn, manifest)
-    assert {i: fao.read_bytes(facts.directory(store.conn)/facts.relative(i)) for i in (1, 2)} == before
+    assert {i: fao.read(facts.directory(store.conn) / facts.relative(i)).bytes for i in (1, 2)} == before
     assert scorecard.served_recommendation(store, 2)['provenance'] == second

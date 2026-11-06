@@ -1,4 +1,5 @@
 """Measure #699 after #692's current-reference reduction, without double counting."""
+from tests.file_custody_support import export_owner, restore_owner
 import argparse
 from contextlib import closing
 import hashlib
@@ -81,16 +82,16 @@ def run(source, report):
                 assert owner.same_inputs(store.conn,pid,expected[pid]['inputs'])
             result['reuse_32_seconds'] = time.monotonic()-at
             paths = set(owner.references(store.conn))
-            infos = [fao.stat(path) for path in paths]
+            infos = [fao.read(path).info for path in paths]
             result['files'] = {'count':len(infos),'logical':sum(i.logical_bytes for i in infos),
                               'compressed':sum(i.compressed_bytes for i in infos),
                               'allocated':sum(i.allocated_bytes for i in infos)}
-            manifest = owner.export(store.conn,Path(scratch)/'saved')
+            manifest = export_owner(store.conn, owner,Path(scratch)/'saved')
             restored = Store(Path(scratch)/'restored.db')
             try:
                 store.conn.backup(restored.conn)
                 shutil.rmtree(owner.directory(store.conn))
-                owner.restore(restored.conn,manifest)
+                restore_owner(restored.conn, 'vibe-provenance', owner,manifest)
                 assert all(owner.read(restored.conn,pid)==expected[pid] for pid in ids)
                 assert not restored.conn.execute('PRAGMA foreign_key_check').fetchone()
                 result['independent_restore_exact'] = True

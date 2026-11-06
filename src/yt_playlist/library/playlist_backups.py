@@ -1,6 +1,5 @@
 """Publish complete, durable playlist backups before any destructive operation."""
 import json
-import os
 import re
 from types import SimpleNamespace
 from uuid import uuid4
@@ -10,15 +9,6 @@ from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
 from yt_playlist.library.playlist_snapshot import validate_playlist
 from yt_playlist.util.matching import track_artist
 from yt_playlist.util.retry import with_retry
-
-
-def _sync_directory(path):
-    if os.name != "nt":
-        directory = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
 
 
 def backup_playlist(store, playlist_id, now, client, *, snapshot=None) -> str:
@@ -72,12 +62,7 @@ def _capture_backup(store,pl,now,detail):
     path = (backups / filename).resolve()
     if path.parent != backups:  # belt-and-suspenders: must stay inside backups dir
         raise ValueError(f"refusing to write backup outside {backups}")
-    # mkdir does not durably publish its entry in the parent. Include every
-    # ancestor, even on retries: an earlier failed sync may have left it present
-    # without making it durable. Finish this before authorizing any deletion.
-    for parent in reversed(backups.parents):
-        _sync_directory(parent)
     # A failed write must never replace a previous recovery artifact or authorize deletion.
-    fao.write_bytes(path, json.dumps(payload, indent=2).encode(), immutable=True)
+    fao.write(path, fao.Content(json.dumps(payload, indent=2).encode(), durable=True))
     return str(path)
 

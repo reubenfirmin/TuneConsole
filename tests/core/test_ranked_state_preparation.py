@@ -395,7 +395,7 @@ def test_missing_durable_plan_requires_explicit_retry_and_rebuilds_exact_checkpo
     checkpoint = job.step(store.conn, batch_size=1)
     generation = store.conn.execute('SELECT * FROM prepared_model_pairs_generations').fetchone()
     filename = Path(generation['plan_filename'])
-    original = fao.read_bytes(filename)
+    original = fao.read(filename).bytes
     filename.unlink()
     with pytest.raises(FileNotFoundError):
         job.step(store.conn, batch_size=1)
@@ -412,7 +412,7 @@ def test_missing_durable_plan_requires_explicit_retry_and_rebuilds_exact_checkpo
             job.step(reopened.conn)
         job.step(reopened.conn, batch_size=1, retry=True)
         finish(job, reopened.conn)
-        assert fao.read_bytes(filename) == original
+        assert fao.read(filename).bytes == original
         assert preparation.read_original(reopened.conn, generation)
     finally:
         reopened.conn.close()

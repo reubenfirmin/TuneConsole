@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Prove the image/snapshot backend before building the shared library manager.
+"""Standalone proof of image/snapshot first-write sharing.
 
 This copies SQLite once, then tests small real SQLite writes and representative
-mutable files in concurrent snapshots. It does not yet capture the application's
-external-file closure or replace any existing actual-library fixture.
+mutable files in concurrent snapshots. The shared manager in tests.library_image
+captures the complete file closure and serves actual-library fixtures.
 """
 import argparse
 from contextlib import closing

@@ -16,7 +16,7 @@ from yt_playlist.util.matching import recording_title
 
 @lru_cache(maxsize=1)
 def _entries():
-    return json.loads(fao.read_bytes(Path(__file__).parent.parent / 'data' / 'album_editorial.json'))['entries']
+    return json.loads(fao.read(Path(__file__).parent.parent / 'data' / 'album_editorial.json').bytes)['entries']
 
 
 def lookup(album):

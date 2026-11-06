@@ -9,7 +9,7 @@ import uvloop
 
 from tests.core.check_startup_background_actual import check
 from tests.schema.actual_library import copy_readonly_library
-from tests.library_image_fixtures import report_file
+from tests.library_image.fixtures import report_file
 
 
 def test_actual_library_radio_launches(request, tmp_path, monkeypatch):

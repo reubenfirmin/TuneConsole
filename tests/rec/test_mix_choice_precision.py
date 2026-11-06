@@ -268,7 +268,7 @@ def test_legacy_preparation_restarts_and_does_not_guess_missing_artist_genres(st
     assert preparation.status(store.conn)['phase'] == 'ready'
     assert not preparation.step(store,110)
     from yt_playlist.core import fao
-    assert json.loads(fao.read_bytes(ledger._path('opportunity','legacy'))) == old
+    assert json.loads(fao.read(ledger._path('opportunity', 'legacy')).bytes) == old
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
@@ -313,9 +313,9 @@ def test_choice_backup_restores_descriptors_and_files_and_fences_retirement(stor
     choices.respond(store, 'menu', 'visible', 101, visible=['a','b'])
     choices.respond(store, 'menu', 'choice', 102, option_id='a')
     ledger = store.rec_ledger.evidence()
-    original = {str(path.relative_to(ledger.directory)):fao.read_bytes(path)
+    original = {str(path.relative_to(ledger.directory)):fao.read(path).bytes
                 for path in choice_evidence_files.references(store.conn)}
-    clocks = {str(path.relative_to(ledger.directory)):(fao.stat(path).mtime_ns, fao.stat(path).ctime_ns)
+    clocks = {str(path.relative_to(ledger.directory)):(fao.read(path).info.mtime_ns, fao.read(path).info.ctime_ns)
               for path in choice_evidence_files.references(store.conn)}
     with policy_documents.retained_reader(ledger.directory):
         assert ledger.maintain(1000) == {'deferred':True}
@@ -326,11 +326,11 @@ def test_choice_backup_restores_descriptors_and_files_and_fences_retirement(stor
         manifest = choice_evidence_files.export(store.conn, tmp_path / 'files')
         choice_evidence_files.restore(restored.conn, manifest)
         assert choices.compile_report(restored, 110)['formats'] == choices.compile_report(store,110)['formats']
-        actual = {str(path.relative_to(choice_evidence_files.directory(restored.conn))):fao.read_bytes(path)
+        actual = {str(path.relative_to(choice_evidence_files.directory(restored.conn))):fao.read(path).bytes
                   for path in choice_evidence_files.references(restored.conn)}
         assert actual == original
         assert {str(path.relative_to(choice_evidence_files.directory(restored.conn))):
-                (fao.stat(path).mtime_ns, fao.stat(path).ctime_ns)
+                (fao.read(path).info.mtime_ns, fao.read(path).info.ctime_ns)
                 for path in choice_evidence_files.references(restored.conn)} == clocks
         source = next((tmp_path / 'files' / 'opportunity').glob('*/*.json'))
         source.write_bytes(b'{}')

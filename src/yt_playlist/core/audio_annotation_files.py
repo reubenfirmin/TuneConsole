@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 
 from yt_playlist.core.audio_annotation_contract import FILE_FORMAT
-from yt_playlist.core.evidence_ledger import _mkdir, _sync_directory, canonical
+from yt_playlist.core.evidence_ledger import canonical
 from . import fao
 
 MAX_BYTES = 4 * 1024 * 1024
@@ -31,13 +31,13 @@ def publish(root, document, *, age=None):
         raise ValueError('Annotation document exceeds the input byte budget')
     digest = hashlib.sha256(encoded).hexdigest()
     path = Path(root) / digest[:2] / (digest + '.json')
-    fao.write_bytes(path, encoded, immutable=True, max_bytes=MAX_BYTES, age=age)
+    fao.write(path, fao.Content(encoded, metadata=age, max_bytes=MAX_BYTES))
     return str(path)
 
 
 def read(filename, *, expected=None, with_age=False):
     path = Path(filename)
-    with fao.open_reader(path) as stream:
+    with fao.read(path) as stream:
         age = stream.info
         encoded = stream.read(MAX_BYTES + 1)
     if len(encoded) > MAX_BYTES:

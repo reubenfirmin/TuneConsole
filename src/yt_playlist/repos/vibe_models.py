@@ -4,6 +4,7 @@ SQL owns only calculation-to-generation identity. Parameters, original training
 manifest, conditioning data, diagnostics and posterior bytes belong to this
 domain. A generation is shared by every prediction from that per-vibe fit.
 """
+from yt_playlist.core import file_paths
 import hashlib
 import json
 import re
@@ -97,7 +98,7 @@ def available(conn):
 
 
 def directory(conn):
-    return fao.directory(conn, 'vibe-models')
+    return file_paths.directory(conn, 'vibe-models')
 
 
 def relative(generation):
@@ -296,7 +297,7 @@ def collect(conn, now, limit=16):
     root = directory(conn)
     with file_collection.collection(conn, root, name='.collection.json',
                                     valid_shard=lambda name: bool(re.fullmatch('[0-9a-f]{2}', name))) as work:
-        with fao.collector(root) as admitted:
+        with file_collection.collector(root) as admitted:
             if not admitted:
                 return 0
             conn.execute('BEGIN IMMEDIATE')
@@ -309,18 +310,10 @@ def collect(conn, now, limit=16):
                     if path.relative_to(root) != relative(path.stem) or _referenced(conn, path.stem):
                         continue
                     # Includes verified-but-unpublished files after rollback.
-                    if fao.Retention(30, 'ctime').eligible(fao.stat(path), now):
+                    if (fao.read(path).info.ctime_ns / 1e9 <= now - 30*86400):
                         fao.delete(path)
                         removed += 1
                 work.save()
                 return removed
             finally:
                 conn.rollback()
-
-
-def export(conn, target):
-    return fao.export(directory(conn), references(conn), target)
-
-
-def restore(conn, manifest):
-    fao.restore(directory(conn), manifest, expected=references(conn))

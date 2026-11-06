@@ -219,7 +219,7 @@ def test_usage_and_generated_records_do_not_contain_credentials(store, generated
     copy.get(store, ALBUM, 100)
     from yt_playlist.core import album_description_files, fao
     rows = [tuple(row) for row in store.conn.execute('SELECT * FROM album_description_requests')]
-    files = [fao.read_bytes(path).decode('utf-8')
+    files = [fao.read(path).bytes.decode('utf-8')
              for path in album_description_files.directory(store.conn).glob('*/*.json')]
     assert rows and files
     assert 'secret-key' not in json.dumps(rows + files)

@@ -5,12 +5,39 @@ from tests.derived_rating_support import seed_dislike
 import pytest
 
 from tests.recommendation_support import publish_bundles
+from tests.recommendation_support import seed_bundle_subjects
+from tests.home_prepared_support import publication_inputs
+from tests.rec.test_home_prepared import one_menu_per_attempt
 from yt_playlist.rec import (discover, embedding_vectors as embed, home_prepared, home_themes, home_vibe,
                              mode_surfaces, rec_params, stored_home, surfaces, transient)
 
 
+def candidate_inputs(store, *, lanes=mode_surfaces.CARD_SURFACES):
+    """Two actual genres with a shallow candidate page, without fitted models.
+
+    These cases own snapshot reuse and the refusal to rebuild source models.
+    Four candidates per genre/lane retain real selection, PPR counterfactuals,
+    suppression and metadata resolution without 192 prepared profiles.
+    """
+    from tests.test_home_other_genres import genre_bundles
+
+    bundles = genre_bundles(store, genres=['Jazz', 'Techno'], tracks_per_lane=4)
+    for mode, pools in bundles.items():
+        if not mode.startswith('_'):
+            for lane in list(pools):
+                if lane not in lanes:
+                    del pools[lane]
+    with store._lock, store.conn.atomic():
+        seed_bundle_subjects(store, bundles)
+    return bundles
+
+
 def test_each_preparation_snapshot_reuses_listening_signals_for_all_discovery_families(
-        store, home_seed_inputs, monkeypatch):
+        store, monkeypatch, one_menu_per_attempt):
+    # Candidate ranking is below this snapshot-sharing check. Retain real
+    # discovery selection and publication without preparing 192 profiles and
+    # twelve independently ranked menus first.
+    publication_inputs(store, monkeypatch)
     for index, genre in enumerate(('House', 'Techno', 'Jazz', 'Ambient', 'Trance', 'Classical')):
         store.discovery.upsert_discovered_artist(f'New {index}', 0.5, [], [], None, 1, genre=genre)
         store.discovery.upsert_discovered_album(f'new-{index}', f'New {index}', 'New album',
@@ -56,14 +83,16 @@ def test_shared_discovery_signals_preserve_selection_and_mutes(store, monkeypatc
 
 @pytest.mark.parametrize('include', [(), ('jazz', 'techno')])
 def test_snapshot_reuses_eligibility_and_union_metadata_without_changing_offers(
-        store, home_seed_inputs, monkeypatch, include):
-    bundles = home_seed_inputs
+        store, monkeypatch, include):
+    # A single lane still overlaps its mode and general pages across three
+    # menus. Other lane/ranker selection contracts stay in test_stored_home.
+    bundles = candidate_inputs(store, lanes=('wheelhouse',))
     bundles['_ppr'] = {str(mid): [item['key'] for items in bundles[str(mid)].values()
-                                  for item in reversed(items)] for mid in range(6)}
+                                  for item in reversed(items)] for mid in range(2)}
     publish_bundles(store, bundles, 1)
     rec_params.set_param(store, 'ppr_ab_share', 0.5)
     seed_dislike(store, bundles['0']['wheelhouse'][0]['key'], until=None, now=1)
-    orders = [(epoch, tuple(range(epoch, 6)) + tuple(range(epoch))) for epoch in range(3)]
+    orders = [(epoch, (epoch % 2, (epoch + 1) % 2)) for epoch in range(3)]
     with store.read_snapshot() as snapshot, stored_home.preparation_inputs() as metadata_inputs:
         reader = snapshot.store
         expected = [mode_surfaces.assemble_cards(reader, 1000, epoch, mode_order=order,
@@ -105,8 +134,8 @@ def test_snapshot_reuses_eligibility_and_union_metadata_without_changing_offers(
 
 @pytest.mark.parametrize('missing_bundles', [False, True])
 def test_preparation_never_rebuilds_the_library_for_cold_or_shallow_bundles(
-        store, home_seed_templates, monkeypatch, missing_bundles):
-    bundles = home_seed_templates(publish=not missing_bundles).restore(store)
+        store, monkeypatch, one_menu_per_attempt, missing_bundles):
+    bundles = candidate_inputs(store)
     bundles['_meta']['full_pools'] = False
     if not missing_bundles:
         publish_bundles(store, bundles, 1)

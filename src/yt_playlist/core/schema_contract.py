@@ -14,14 +14,14 @@ TOKEN = re.compile(r"--[^\n]*|/\*.*?\*/|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|"
 @lru_cache(maxsize=4096)
 def tokens(sql):
     result = []
-    for match in TOKEN.finditer(sql or ''):
-        token = match.group()
-        if token.startswith(('--', '/*')):
+    for token in TOKEN.findall(sql or ''):
+        first = token[0]
+        if first in '-/' and token[:2] in ('--', '/*'):
             continue
-        if token.startswith("'"):
+        if first == "'":
             result.append(token)
-        elif token.startswith(('"', '`', '[')):
-            result.append(token[1:-1].replace(token[0] * 2, token[0]).lower())
+        elif first in '"`[':
+            result.append(token[1:-1].replace(first * 2, first).lower())
         else:
             result.append(token.lower())
     return tuple(result)

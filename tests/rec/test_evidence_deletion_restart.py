@@ -1,4 +1,5 @@
 """Real unlink and reconciliation cutoffs must finish on a fresh ledger."""
+from tests.file_content_support import age_file
 from contextlib import closing, contextmanager
 import shutil
 import sqlite3
@@ -22,12 +23,12 @@ def menu(ledger, identity, *, response=None):
         ledger.put('response', identity, {'id': identity, 'opportunity_id': identity,
                                          'kind': response, 'observed_at': 3})
     ledger.put('checkpoint', context, {'source_context': context, 'learning': identity})
-    fao.touch(ledger._path('artifact', context), mtime_ns=10**9)
+    age_file(ledger._path('artifact', context), mtime_ns=10 ** 9)
     return context
 
 
 def exact_bytes(ledger, result):
-    used = sum(fao.stat(path).logical_bytes for path in ledger.directory.glob('*/*/*.json'))
+    used = sum(fao.read(path).info.logical_bytes for path in ledger.directory.glob('*/*/*.json'))
     assert result['used_bytes'] == int((ledger.directory / '.budget').read_text()) == used
     assert not result['deferred']
 
@@ -82,7 +83,7 @@ def ledger_prefix(tmp_path_factory):
 def test_restart_after_real_unlink_finishes_events_and_reconciles_ids(tmp_path, monkeypatch, boundary, ledger_prefix):
     ledger, contexts = ledger_prefix('retention', tmp_path)
     context = contexts['expired']
-    retained = {path: fao.read_bytes(path) for path in tmp_path.glob('*/*/*.json')
+    retained = {path: fao.read(path).bytes for path in tmp_path.glob('*/*/*.json')
                 if path not in {ledger._path('opportunity', 'expired'), ledger._path('artifact', context),
                                 ledger._path('checkpoint', context)}
                 and path not in {ledger._path('response', f'expired-visible-{i}') for i in range(8)}}
@@ -107,7 +108,7 @@ def test_restart_after_real_unlink_finishes_events_and_reconciles_ids(tmp_path, 
     assert all(event['opportunity_id'] != 'expired' for event in restarted.records('response'))
     assert restarted.get('checkpoint', context) is None
     assert restarted.get('artifact', context) is None
-    assert all(fao.read_bytes(path) == value for path, value in retained.items())
+    assert all(fao.read(path).bytes == value for path, value in retained.items())
     exact_bytes(restarted, result)
 
 
@@ -127,7 +128,7 @@ def test_restart_rechecks_choices_and_current_capture_pins_before_replaying_inte
     captures = CaptureQueue(lambda capture: True)
     assert captures.enqueue('response', lambda: None, references=('pending',))
     new_root = ledger.artifact({'newly': 'prepared'})
-    fao.touch(ledger._path('artifact', new_root), mtime_ns=10**9)
+    age_file(ledger._path('artifact', new_root), mtime_ns=10 ** 9)
     assert captures.enqueue('menu', lambda: None, artifacts=(new_root,))
     callbacks = []
     restarted = EvidenceLedger(tmp_path, 1_000_000)
@@ -209,7 +210,7 @@ def test_restart_repairs_accounting_if_slice_ends_before_budget_save(tmp_path, m
 
 def test_damaged_retirement_intent_is_not_silently_discarded(tmp_path, ledger_prefix):
     ledger, _ = ledger_prefix('expired', tmp_path)
-    fao.write_bytes(tmp_path / '.retention-retirements', b'{"schema":1,"offers":false}')
+    fao.write(tmp_path / '.retention-retirements', b'{"schema":1,"offers":false}')
     with pytest.raises(ValueError, match='retirement intent'):
         ledger.maintain(10)
     assert ledger.get('opportunity', 'expired')
@@ -268,4 +269,4 @@ def test_private_prefix_copies_keep_bytes_accounting_and_locks_independent(tmp_p
     assert (right.directory / '.events').read_bytes() != (left.directory / '.events').read_bytes()
     with right._budget() as (used, _save):
         assert used == int((right.directory / '.budget').read_text()) == sum(
-            fao.stat(path).logical_bytes for path in right.directory.glob('*/*/*.json'))
+            fao.read(path).info.logical_bytes for path in right.directory.glob('*/*/*.json'))

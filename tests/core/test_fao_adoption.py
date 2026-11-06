@@ -1,4 +1,5 @@
 """Production access inventory and restartable mixed-format preparation."""
+from pathlib import Path
 from experiments.retained_copy.fao_audit import audit, inventory, boundary
 from yt_playlist.core import fao
 from yt_playlist.core.preparation.file_bodies import Conversion, managed_roots
@@ -27,7 +28,7 @@ def test_conversion_restart_and_small_compressed_asset_overhead(tmp_path,store):
     data = b'{"exact":1.000001}\n'
     first.write_bytes(data)
     second.write_bytes(b'\x89PNG\r\n\x1a\n')
-    before = fao.stat(first)
+    before = fao.read(first).info
     work = Conversion({'assets':root})
     try:
         assert work.step(entries=1)['converted']==1
@@ -41,10 +42,10 @@ def test_conversion_restart_and_small_compressed_asset_overhead(tmp_path,store):
         assert sum(row['converted'] for row in totals)==1
     finally:
         restarted.close()
-    assert fao.read_bytes(first)==data
-    assert fao.stat(first).mtime_ns==before.mtime_ns
-    assert fao.stat(first).ctime_ns==before.ctime_ns
-    assert fao.stat(second).compressed_bytes>fao.stat(second).logical_bytes
+    assert fao.read(first).bytes==data
+    assert fao.read(first).info.mtime_ns==before.mtime_ns
+    assert fao.read(first).info.ctime_ns==before.ctime_ns
+    assert fao.read(second).info.compressed_bytes>fao.read(second).info.logical_bytes
     disk = Store(tmp_path/'state.db')
     try:
         assert 'profiles' in managed_roots(disk.conn)
@@ -59,16 +60,16 @@ def test_idle_orphans_keep_referenced_policy_and_snapshot_lease(store):
     store.rec_ledger.record_serving_policy('required',{'weights':[1,2,3]},1)
     root = policy_documents.directory(store.conn)
     orphan = root/'aa'/('a'*64+'.json')
-    fao.write_bytes(orphan,b'{"unused":true}')
+    fao.write(orphan, b'{"unused":true}')
     now = time.time()+31*86400
     work = Orphans(store.conn)
     try:
         with store.read_view():
             work.step(store,now)
-            assert fao.exists(orphan)
+            assert Path(orphan).is_file()
         for _ in range(20):
             work.step(store,now)
-        assert not fao.exists(orphan)
+        assert not Path(orphan).is_file()
         assert store.rec_ledger.policy_configuration('required')=={'weights':[1,2,3]}
     finally:
         work.close()
@@ -78,7 +79,7 @@ def test_crash_left_pending_collection_keeps_an_active_staged_lease(tmp_path):
     import time
     from yt_playlist.core.preparation.managed_files import Pending
     target = tmp_path/'asset.json'
-    stage = fao.stage_bytes(target,b'{"exact":true}')
+    stage = fao.prepare(target, b'{"exact":true}')
     leftover = tmp_path/'.fao-pending-abandoned'
     leftover.write_bytes(b'BZh-incomplete')
     now = time.time()+8*86400
@@ -89,7 +90,7 @@ def test_crash_left_pending_collection_keeps_an_active_staged_lease(tmp_path):
         assert not leftover.exists()
         assert stage.pending.exists()
         stage.publish()
-        assert fao.read_bytes(target)==b'{"exact":true}'
+        assert fao.read(target).bytes==b'{"exact":true}'
     finally:
         scan.close()
         stage.close()

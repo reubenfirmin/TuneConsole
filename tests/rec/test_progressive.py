@@ -156,7 +156,7 @@ def test_delta_uses_exact_published_basis_and_preserves_other_vectors(store, mon
     before = store.rec_model.content_generation()
     key = store.tracks.identity_key_for_video('v0')
     audio(store, ids[0], 190)
-    writes, write = [], fao.write_bytes
+    writes, write = [], fao.write
 
     def off_lock(path, *args, **kwargs):
         if path.suffix == '.bin':
@@ -165,7 +165,7 @@ def test_delta_uses_exact_published_basis_and_preserves_other_vectors(store, mon
             writes.append(path)
         return write(path, *args, **kwargs)
 
-    monkeypatch.setattr(fao, 'write_bytes', off_lock)
+    monkeypatch.setattr(fao, 'write', off_lock)
     assert p.capture(1001)
     assert writes
     after = store.rec_model.content_generation()

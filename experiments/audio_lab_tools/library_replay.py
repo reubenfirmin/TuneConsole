@@ -435,7 +435,7 @@ def reset_derived(store):
 
 
 def startup(database, seconds):
-    from tests.library_image_fixtures import benchmark_library
+    from tests.library_image.fixtures import benchmark_library
     from yt_playlist.core.activity import cancellable_work
     from yt_playlist.core.store import Store
     from yt_playlist.rec import audio_vibe_model, musical_preparation, progressive, vibe_preparation

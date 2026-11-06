@@ -11,6 +11,7 @@ from pathlib import Path
 import sqlite3
 
 import pytest
+from tests.file_custody_support import PolicyFiles
 
 from yt_playlist.core import (action_backup_files, album_description_files, audio_annotation_files,
     collection_recovery, fao, group_documents, legacy_evidence,
@@ -164,6 +165,7 @@ def _check_recovery(tmp_path, domain, compressed, *, duplicate=False, reverse=Fa
     with closing(sqlite3.connect(tmp_path / 'source.db')) as source, closing(sqlite3.connect(tmp_path / 'restored.db')) as target:
         source.row_factory = target.row_factory = sqlite3.Row
         module, records, directory = _seed(source, domain, duplicate=duplicate)
+        recovery = PolicyFiles if domain == 'policies' else module
         source_root = directory(source)
         paths = sorted({Path(filename) for _key, filename, _value in records(source)})
         if duplicate:
@@ -172,11 +174,11 @@ def _check_recovery(tmp_path, domain, compressed, *, duplicate=False, reverse=Fa
         for index, path in enumerate(paths):
             if reverse:
                 index = len(paths) - index - 1
-            encoded = fao.read_bytes(path)
+            encoded = fao.read(path).bytes
             # Distinct ages challenge merging records with different retention clocks.
             age = (1_000_000_000_000 + index * 1_000_000_000, 2_000_000_000_000 + index * 1_000_000_000)
             if compressed:
-                fao.write_bytes(path, encoded, age=replace(fao.stat(path), mtime_ns=age[0], ctime_ns=age[1]))
+                fao.write(path, fao.Content(encoded, metadata=replace(fao.read(path).info, mtime_ns=age[0], ctime_ns=age[1])))
             else:
                 path.write_bytes(encoded)
                 os.utime(path, ns=(age[0], age[0]))
@@ -184,7 +186,7 @@ def _check_recovery(tmp_path, domain, compressed, *, duplicate=False, reverse=Fa
         def snapshot(db):
             result = {}
             for key, filename, value in records(db):
-                info = fao.stat(filename)
+                info = fao.read(filename).info
                 result[key] = value, (info.mtime_ns, info.ctime_ns)
             return result
 
@@ -192,12 +194,12 @@ def _check_recovery(tmp_path, domain, compressed, *, duplicate=False, reverse=Fa
         with policy_documents.retained_reader(source_root):
             source.execute('BEGIN')
             try:
-                manifest = module.export(source, tmp_path / 'backup')
+                manifest = recovery.export(source, tmp_path / 'backup')
                 source.backup(target)
             finally:
                 source.rollback()
         source_root.rename(tmp_path / 'hidden-producer')
-        module.restore(target, manifest)
+        recovery.restore(target, manifest)
         assert snapshot(target) == expected
         # Recovery keeps compact packs rather than allocating a file per range.
         assert len({filename for _key, filename, _value in records(target)}) <= len(paths)
@@ -205,7 +207,7 @@ def _check_recovery(tmp_path, domain, compressed, *, duplicate=False, reverse=Fa
         assert target.execute('PRAGMA foreign_key_check').fetchall() == []
         # A previous copy with fresh clocks must not defeat a resumed restore.
         for filename in {filename for _key, filename, _value in records(target)}:
-            fao.write_bytes(filename, fao.read_bytes(filename))
+            fao.write(filename, fao.read(filename).bytes)
         assert snapshot(target) != expected
-        module.restore(target, manifest)
+        recovery.restore(target, manifest)
         assert snapshot(target) == expected

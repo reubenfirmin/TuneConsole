@@ -286,14 +286,14 @@ def test_failed_publication_rolls_back_models_settings_clusters_and_notification
     revision = store.rec_refresh.revision()
     assert revision is not None
     writes = []
-    original_write = fao.write_bytes
+    original_write = fao.write
     def write_without_serving_lock(path, data, **kwargs):
         if path.suffix == '.bin':
             assert not store._lock.held_by_current_thread, 'Embedding bytes prepared under the serving lock'
             assert not store.conn.in_transaction
             writes.append(path)
         return original_write(path, data, **kwargs)
-    monkeypatch.setattr(fao, 'write_bytes', write_without_serving_lock)
+    monkeypatch.setattr(fao, 'write', write_without_serving_lock)
 
     def selected():
         return {table: [tuple(row) for row in store.conn.execute(f'SELECT * FROM {table} ORDER BY 1,2')]
@@ -303,12 +303,12 @@ def test_failed_publication_rolls_back_models_settings_clusters_and_notification
     selected_before = selected()
     model_files = [row[0] for row in store.conn.execute(
         'SELECT recovery_filename FROM taste_model_state WHERE recovery_filename IS NOT NULL')]
-    file_bytes = {path: fao.read_bytes(path) for path in (*embedding_files.references(store.conn), *model_files)}
+    file_bytes = {path: fao.read(path).bytes for path in (*embedding_files.references(store.conn), *model_files)}
     reached = []
 
     def publication_started():
         reached.append((store.conn.in_transaction, selected()['recording_embedding_files'],
-                        {path: fao.read_bytes(path) for path in embedding_files.references(store.conn)}))
+                        {path: fao.read(path).bytes for path in embedding_files.references(store.conn)}))
         return 0
 
     store.conn.create_function('publication_started', 0, publication_started)
@@ -326,7 +326,7 @@ def test_failed_publication_rolls_back_models_settings_clusters_and_notification
         assert not store.conn.in_transaction
         store.settings.set_setting('unrelated', 'commit after failure')
         assert selected() == selected_before
-        assert {path: fao.read_bytes(path) for path in file_bytes} == file_bytes
+        assert {path: fao.read(path).bytes for path in file_bytes} == file_bytes
         assert set(embedding_files.references(store.conn)) == set(file_bytes) - set(model_files)
         assert {name: embeddings.rows(store.conn, name) for name in embeddings.SPACES} == vectors
         assert {key: store.settings.get_setting(key) for key in settings} == settings

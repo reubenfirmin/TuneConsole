@@ -16,7 +16,7 @@ class Retirements:
     def __init__(self, directory):
         self.path = directory / '.retention-retirements'
         try:
-            value = json.loads(fao.read_bytes(self.path))
+            value = json.loads(fao.read(self.path).bytes)
         except FileNotFoundError:
             value = {'schema': 1, 'offers': [], 'checkpoints': []}
         if (not isinstance(value, dict) or value.get('schema') != 1
@@ -28,7 +28,7 @@ class Retirements:
         self.checkpoints = set(value['checkpoints'])
 
     def save(self):
-        fao.write_bytes(self.path, canonical({'schema': 1, 'offers': sorted(self.offers),
+        fao.write(self.path, canonical({'schema': 1, 'offers': sorted(self.offers),
                                              'checkpoints': sorted(self.checkpoints)}))
 
     def reconcile(self, offers, checkpoints, callback):

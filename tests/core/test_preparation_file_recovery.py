@@ -96,8 +96,8 @@ def test_preparation_relocation_preserves_file_age(installed, tmp_path, compress
     expected, selection = read(producer), selected(producer.conn)
     if not compressed:
         for path in root.rglob('*.json'):
-            path.write_bytes(fao.read_bytes(path))
-    clocks = {str(path): (fao.stat(path).mtime_ns, fao.stat(path).ctime_ns)
+            path.write_bytes(fao.read(path).bytes)
+    clocks = {str(path): (fao.read(path).info.mtime_ns, fao.read(path).info.ctime_ns)
               for path in root.rglob('*.json')}
     with producer.conn:
         producer.conn.execute('BEGIN')
@@ -109,7 +109,7 @@ def test_preparation_relocation_preserves_file_age(installed, tmp_path, compress
                if entry['type'] == 'file']
     assert any(entry['graph'] for entry in records)
     for entry in records:
-        copied = fao.stat(export_root / entry['relative_filename'])
+        copied = fao.read(export_root / entry['relative_filename']).info
         assert (copied.mtime_ns, copied.ctime_ns) == clocks[entry['reference'][0]]
     candidate = Store(tmp_path / 'relocated.db')
     producer.conn.backup(candidate.conn)
@@ -123,7 +123,7 @@ def test_preparation_relocation_preserves_file_age(installed, tmp_path, compress
         originals = {(entry['table'], tuple(entry['keys'].items()), tuple(entry['columns'])):
                      clocks[entry['reference'][0]] for entry in recovery.references(producer.conn)}
         for owner in recovery.references(candidate.conn):
-            copied = fao.stat(owner['reference'][0])
+            copied = fao.read(owner['reference'][0]).info
             assert (copied.mtime_ns, copied.ctime_ns) == originals[
                 (owner['table'], tuple(owner['keys'].items()), tuple(owner['columns']))]
         assert not candidate.conn.execute('PRAGMA foreign_key_check').fetchone()
@@ -179,7 +179,7 @@ def test_selected_files_read_exactly_without_producer(installed, tmp_path, resto
                 assert (source.stat().st_dev, source.stat().st_ino) != (
                     copied.stat().st_dev, copied.stat().st_ino)
                 if owner['columns'][0] != 'plan_filename':
-                    assert fao.read_bytes(source) == fao.read_bytes(copied)
+                    assert fao.read(source).bytes == fao.read(copied).bytes
         root.rename(hidden)
         if original:
             fixture_files.restore_files(candidate.conn, report['manifests'])

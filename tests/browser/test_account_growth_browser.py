@@ -174,6 +174,8 @@ def test_festival_states_notices_home_choice_and_bonus_details(live_app, store, 
         });
     }''')
     page.set_viewport_size({'width': 3542, 'height': 2400})
+    page.mouse.move(0, 0)
+    page.evaluate("Alpine.$data(document.querySelector('.home-growth')).hovered = null")
     svg.screenshot(path='/tmp/tuneconsole-1161-current-open.png', animations='disabled')
     routes.locator('.growth-route').evaluate_all(
         "els => els.forEach(el => el.setAttribute('class','growth-route is-preparing'))")

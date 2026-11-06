@@ -12,7 +12,7 @@ import sqlite3
 import tempfile
 
 from .activity import check_cancellable_work
-from .evidence_ledger import canonical, _sync_directory
+from .evidence_ledger import canonical
 from . import policy_documents, fao
 
 FORMAT = 'metadata-delivery-1'
@@ -83,7 +83,7 @@ def _decoded(path, digest, byte_size, offset, encoded, kind):
 def _read(filename, digest, byte_size, offset, *, kind='response', with_age=False):
     path = Path(filename)
     _range(path, digest, byte_size, offset)
-    with fao.open_reader(path) as stream:
+    with fao.read(path) as stream:
         age = stream.info
         if offset:
             if offset < len(PACK_HEADER) or stream.read(len(PACK_HEADER)) != PACK_HEADER:
@@ -98,7 +98,7 @@ def _read_records(references):
     """Validate ordered ranges with one pinned reader and one record in memory."""
     for filename, records in groupby(references, key=lambda reference: reference[0]):
         path = Path(filename)
-        with fao.open_reader(path) as stream:
+        with fao.read(path) as stream:
             header = None
             for reference in records:
                 _, digest, size, offset = reference
@@ -144,7 +144,7 @@ def _document(root, value, kind):
 def _read_document(path, kind):
     path = Path(path)
     # stat bounds allocation, and _read rejects any concurrent size change.
-    return json.loads(_read(path, path.stem, fao.stat(path).logical_bytes, 0, kind=kind))['value']
+    return json.loads(_read(path, path.stem, fao.read(path).info.logical_bytes, 0, kind=kind))['value']
 
 
 def export(conn, root):
@@ -186,7 +186,7 @@ def _export(conn, root, *, directory, references, contents):
             source = Path(filename)
             relative = Path(source.stem[:2], source.stem + '.json')
             copied = root / relative
-            fao.copy(source, copied, digest=source.stem)
+            fao.write(copied, fao.read(source, digest=source.stem))
             staged.execute('UPDATE contents SET target=?,target_offset=offset WHERE filename=?',
                            (str(relative), filename))
         entries, chunks = [], []

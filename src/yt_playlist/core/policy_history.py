@@ -1,6 +1,4 @@
 """Compact impression attribution with bounded historical configuration replay."""
-from pathlib import Path
-
 from . import fao, file_collection, file_map, policy_documents
 from .evidence_ledger import canonical
 from .policy_history_read import available, configuration, directory, document, head, unpack as _configuration
@@ -173,22 +171,13 @@ def references(conn, *, root=None):
         yield from file_map.pages(directory(conn) if root is None else root,head(conn))
 
 
-def export(conn, target):
-    return fao.export(directory(conn),references(conn),target)
-
-
-def restore(conn, manifest):
-    saved, root = Path(manifest).resolve().parent, directory(conn)
-    fao.restore(root,manifest,expected=(root/path.relative_to(saved) for path in references(conn,root=saved)))
-
-
 def collect(conn, now, limit=16):
     if conn.in_transaction:
         raise RuntimeError('Policy history collection requires committed expiry')
     if type(limit) is not int or not 1 <= limit <= 128:
         raise ValueError('Policy history collection limit must be 1 to 128')
     root = directory(conn)
-    with file_collection.collection(conn, root, name='.collect.json', valid_shard=_shard) as work, fao.collector(root) as admitted:
+    with file_collection.collection(conn, root, name='.collect.json', valid_shard=_shard) as work, file_collection.collector(root) as admitted:
         if not admitted:
             return 0
         conn.execute('BEGIN IMMEDIATE')
@@ -200,8 +189,8 @@ def collect(conn, now, limit=16):
                         or any(c not in '0123456789abcdef' for c in path.stem)
                         or path.stem[:2] != path.parent.name):
                     continue
-                info = fao.stat(path)
-                if fao.Retention(30,'ctime').eligible(info,now):
+                info = fao.read(path).info
+                if (info.ctime_ns / 1e9 <= now - 30*86400):
                     if not file_map.contains_page(root,head(conn),path.stem,budget):
                         removed += fao.delete(path,expected=info.identity,missing_ok=True)
             work.save()

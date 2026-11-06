@@ -3,12 +3,13 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import shutil
+import sqlite3
 from types import SimpleNamespace
 import uuid
 
 import pytest
 
-import library_image as image
+from tests.library_image import manager as image
 
 
 @pytest.fixture
@@ -70,8 +71,9 @@ def backend(tmp_path, monkeypatch):
     source = tmp_path / 'native.db'
     source.write_bytes(b'controlled donor bytes')
     manager = image.Manager(volume).initialize()
+    reports = repository / 'build/test-reports/checks'
     return SimpleNamespace(manager=manager, source=source, calls=calls, flags=flags,
-                           failures=failures, containers=containers, root=tmp_path)
+                           failures=failures, containers=containers, root=reports)
 
 
 def test_concurrent_preparation_captures_once_and_reuses_frozen_identity(backend):
@@ -87,8 +89,8 @@ def test_concurrent_preparation_captures_once_and_reuses_frozen_identity(backend
 
 def test_acquisition_does_not_repeat_capture_or_tree_verification(backend, monkeypatch):
     metadata = backend.manager.prepare(backend.source)
-    from tests import library_image_capture
-    monkeypatch.setattr(library_image_capture, 'verify_tree', lambda *_: pytest.fail('repeated full scan'))
+    from tests.library_image import capture
+    monkeypatch.setattr(capture, 'verify_tree', lambda *_: pytest.fail('repeated full scan'))
     backend.calls.clear()
     with backend.manager.workspace(baseline=metadata['id'], report=backend.root / 'report') as run:
         (run['path'] / 'state.db').write_bytes(b'private mutation')
@@ -133,6 +135,17 @@ def test_refresh_keeps_active_generation_pinned_and_gc_preserves_latest(backend)
     assert backend.manager.resolve(source=backend.source)['id'] == latest['id']
 
 
+def test_refresh_prunes_unused_old_capture_before_export(backend):
+    first = backend.manager.prepare(backend.source)
+    second = backend.manager.prepare(backend.source, refresh=True)
+    backend.failures.add('export')
+    with pytest.raises(RuntimeError, match='capture failure'):
+        backend.manager.prepare(backend.source, refresh=True)
+    assert not (backend.manager.volume / 'baselines' / first['id']).exists()
+    assert backend.manager.resolve(source=backend.source)['id'] == second['id']
+    assert not list((backend.manager.volume / 'runs').iterdir())
+
+
 def test_gc_previews_orphan_container_and_never_stops_live_owner(backend):
     baseline = backend.manager.prepare(backend.source)
     with backend.manager.workspace(baseline=baseline['id'], report=backend.root / 'live') as active:
@@ -163,7 +176,7 @@ def test_runtime_mounts_hide_other_workspaces_and_only_preparation_gets_donor(ba
 
 
 def test_unmanaged_adapters_keep_ci_copy_behavior_without_image_tools(monkeypatch):
-    from tests.library_image_fixtures import managed_database
+    from tests.library_image.fixtures import managed_database
     monkeypatch.delenv('TUNECONSOLE_IMAGE_RUN', raising=False)
     monkeypatch.setenv('TUNECONSOLE_TEST_LIBRARY', '/does/not/exist')
     assert managed_database() is None
@@ -172,3 +185,32 @@ def test_unmanaged_adapters_keep_ci_copy_behavior_without_image_tools(monkeypatc
 def test_generation_identity_rejects_path_escape(backend):
     with pytest.raises(ValueError, match='identity'):
         backend.manager.metadata('../native.db')
+
+
+def test_playback_inbox_capture_preserves_pending_body_and_source_bytes(tmp_path):
+    from tests.library_image import feedback
+    from tests.library_image.capture import source_files
+    from yt_playlist.core import fao, playback_inbox
+    source, target = tmp_path / 'source.db', tmp_path / 'candidate'
+    target.mkdir()
+    queue = playback_inbox.Inbox(source, 'controlled')
+    identity = queue.capture('player', 1, {'videoId': 'original'}, 1)
+    with sqlite3.connect(queue.path) as reader:
+        reader.row_factory = sqlite3.Row
+        original = reader.execute('SELECT * FROM playback_feedback_inbox').fetchone()
+    before = queue.path.read_bytes(), Path(original['filename']).read_bytes()
+    report = {}
+    with source_files(source, target, report, strict=True), feedback.admission(source) as admitted:
+        feedback.capture(admitted, target, report)
+    with sqlite3.connect(target / 'state.db.playback-feedback.sqlite3') as copied:
+        copied.row_factory = sqlite3.Row
+        row = dict(copied.execute('SELECT * FROM playback_feedback_inbox').fetchone())
+    assert row['capture_id'] == identity
+    logical = Path(row['filename'])
+    assert logical.is_relative_to('/library')
+    private = target / logical.relative_to('/library')
+    assert fao.read(private).bytes == fao.read(original['filename']).bytes
+    row['filename'] = str(private)
+    assert playback_inbox.Inbox.body(row) == {'videoId': 'original'}
+    assert before == (queue.path.read_bytes(), Path(original['filename']).read_bytes())
+    assert report['playback_inbox'] == dict(rows=1, legacy=False, source_total_changes=0)

@@ -1,7 +1,7 @@
 """Explicit large-library startup check; never collected by pytest.
 
-Supply an existing disposable database in /tmp or .pytest_cache and a JSON report path. This
-changes that copy. Real storage, Radio, recommendation and enrichment workers
+Supply a managed private library snapshot or a disposable database in /tmp and a JSON report path.
+This changes that copy. Real storage, Radio, recommendation and enrichment workers
 run; provider clients, enrichment network calls and generated-playlist GC do not.
 Uses uvloop, matching the Linux backend and avoiding restricted-runner selector
 wakeup limitations in the default asyncio loop.
@@ -425,11 +425,14 @@ async def radio_launches(client, ctx, store, bridge, report):
 
 
 async def check(path, report_path, *, launch_radio=False, launch_mix=None, publish_models=False, publish_discovery=False, check_ownership=False):
+    from tests.library_image.fixtures import managed_database
     cache = Path(__file__).resolve().parents[2] / '.pytest_cache'
-    assert (path.is_relative_to(Path('/tmp')) or path.is_relative_to(cache)) and path.name.startswith('tuneconsole-')
+    assert (managed_database(path) == path or
+            (path.is_relative_to(Path('/tmp')) or path.is_relative_to(cache)) and path.name.startswith('tuneconsole-'))
     os.environ['YT_PLAYLIST_HOME'] = str(path.with_suffix('.home'))
     os.environ.pop('DEEPSEEK_API_KEY', None)
     from yt_playlist.core.bridge import Bridge
+    from yt_playlist.core import fao
     from yt_playlist.core.store import Store
     from yt_playlist.providers import enrichment
     from yt_playlist.rec import transient
@@ -461,7 +464,7 @@ async def check(path, report_path, *, launch_radio=False, launch_mix=None, publi
     protected_queries = {
         'paid_descriptions':'SELECT * FROM album_descriptions ORDER BY id',
         'paid_requests':'SELECT * FROM album_description_requests ORDER BY id',
-        'saved_recipes':'SELECT * FROM rec_recipes ORDER BY playlist_ytm',
+        'saved_recipes':'SELECT * FROM rec_recipes ORDER BY id',
         'road_trip_recipes':'SELECT * FROM road_trip_recipes ORDER BY id',
         'recipe_artists':'SELECT * FROM recipe_artists ORDER BY recipe_id,position',
         'recipe_genres':'SELECT * FROM recipe_genres ORDER BY recipe_id,position',
@@ -480,7 +483,7 @@ async def check(path, report_path, *, launch_radio=False, launch_mix=None, publi
             result[name] = {'rows':count,'sha256':digest.hexdigest()}
         files = hashlib.sha256()
         for row in store.conn.execute('SELECT filename,content_digest FROM album_descriptions ORDER BY id'):
-            raw = Path(row['filename']).read_bytes()
+            raw = fao.read(row['filename']).bytes
             assert hashlib.sha256(raw).hexdigest()==row['content_digest']
             files.update(raw)
         result['paid_file_bytes'] = files.hexdigest()
@@ -541,6 +544,7 @@ async def check(path, report_path, *, launch_radio=False, launch_mix=None, publi
              patch.object(ServingLock,'release',observed_release), \
              patch.object(store._lock._diagnostics,'record',observed_wait), \
              patch('yt_playlist.web.app._background_sync_loop'), \
+             patch('yt_playlist.core.updatecheck._raw_version', return_value='0.0.0.dev0'), \
              patch('yt_playlist.enrich.artwork.retry_due', return_value=0):
             app = create_app(store, lambda: {}, bridge=bridge, background_work=True)
             ctx = app.state.ctx

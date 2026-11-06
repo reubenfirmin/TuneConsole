@@ -1,6 +1,7 @@
 """Spotify route checks must finish owned work before releasing their Store."""
 import json
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +12,19 @@ from tests.web.test_spotify_data_route import (
 )
 from yt_playlist.web.app import create_app
 from yt_playlist.web.spotify_import import save_job
+
+
+@pytest.fixture(autouse=True)
+def spotify_routes_only(monkeypatch):
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, setup
+
+    # These cases own import work, shutdown and storage lifetimes. Route
+    # composition is covered by test_spotify_data_route and test_web.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [setup.build(ctx), app_update.build(ctx)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *a: None)
 
 
 def _blocked_job(store, open_client, phase):
@@ -54,8 +68,9 @@ def _blocked_job(store, open_client, phase):
 
 @pytest.mark.parametrize('phase', ['preview', 'confirm'])
 def test_job_wait_is_bounded_and_reads_only_after_slow_worker_finishes(store, spotify_clients, monkeypatch, phase):
+    from tests.web import test_spotify_data_route as support
+
     web, remote, entered, release = _blocked_job(store, spotify_clients, phase)
-    timer = None
     reads = []
     original = store.settings.get_setting
 
@@ -72,20 +87,32 @@ def test_job_wait_is_bounded_and_reads_only_after_slow_worker_finishes(store, sp
             _wait_for_library_job(web, timeout=.03)
         assert reads == []
         assert remote.worker.is_alive()
-        # Actual provider work lasts beyond the old polling deadline.
-        timer = threading.Timer(2.1, release.set)
-        timer.start()
-        job = _wait_for_library_job(web)
+        # Cross the former polling deadline without spending 2.1 seconds on a
+        # timer. The provider stays blocked until the actual work wait begins;
+        # its real completion signal still gates the subsequent SQLite read.
+        clock = [0.]
+        monkeypatch.setattr(support, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+        wait = web.app.state.ctx.work.wait
+        waits = []
+
+        def finish(timeout):
+            waits.append(timeout)
+            assert remote.worker.is_alive() and reads == []
+            clock[0] += 2.1
+            release.set()
+            return wait(timeout)
+
+        with monkeypatch.context() as waiting:
+            waiting.setattr(web.app.state.ctx.work, 'wait', finish)
+            job = _wait_for_library_job(web)
         assert job['status'] == ('preview' if phase == 'preview' else 'done')
         assert reads == [()]
+        assert waits == [30.] and clock[0] == 2.1
         if phase == 'confirm':
             assert job['report']['playlists_imported'] == 1
             assert len(remote.created) == 1
     finally:
         release.set()
-        if timer is not None:
-            timer.cancel()
-            timer.join(3)
         if remote.worker is not None:
             remote.worker.join(3)
     assert not remote.worker.is_alive()

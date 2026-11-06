@@ -57,7 +57,7 @@ def directory(conn):
 
 
 def read_original(row):
-    with fao.open_reader(row['filename']) as stream:
+    with fao.read(row['filename']) as stream:
         encoded = stream.read(row['byte_size'] + 1)
     if (len(encoded) != row['byte_size'] or hashlib.sha256(encoded).hexdigest() != row['digest']
             or Path(row['filename']).stem != row['digest']):

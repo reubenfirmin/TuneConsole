@@ -1,4 +1,7 @@
 """Retention yields durable prefixes to other jobs without fencing the app."""
+from tests.file_content_support import read_bytes as original_bytes
+from tests.file_content_support import patch_byte_reads
+from tests.file_content_support import age_file
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -20,8 +23,8 @@ def test_ledger_inventory_commits_prefixes_across_restarts_and_continuing_arriva
     ledger = EvidenceLedger(tmp_path, 10_000_000)
     artifacts = [ledger.artifact({'saved': str(index) * 50_000}) for index in range(23)]
     for path in tmp_path.glob('artifact/*/*.json'):
-        fao.touch(path, mtime_ns=10**9)
-    read = fao.read_bytes
+        age_file(path, mtime_ns=10 ** 9)
+    read = original_bytes
     counts, turns, saved = {}, [], []
 
     def interrupted(path, **kwargs):
@@ -32,7 +35,7 @@ def test_ledger_inventory_commits_prefixes_across_restarts_and_continuing_arriva
             counts[path.name] = counts.get(path.name, 0) + 1
         return read(path, **kwargs)
 
-    monkeypatch.setattr(fao, 'read_bytes', interrupted)
+    patch_byte_reads(monkeypatch, interrupted)
     for turn in range(10):
         # Every turn reconstructs the cache from disk, with no old iterator.
         ledger = EvidenceLedger(tmp_path, ledger.byte_budget)
@@ -53,7 +56,7 @@ def test_ledger_inventory_commits_prefixes_across_restarts_and_continuing_arriva
             break
     else:
         pytest.fail('Repeated slices never reached deletion')
-    monkeypatch.setattr(fao, 'read_bytes', read)
+    patch_byte_reads(monkeypatch, read)
     assert len(saved) >= 2 and all(b > a for a, b in zip(saved, saved[1:]))
     assert max(counts.values()) <= 2  # At most the uncommitted tail is reread.
     assert ledger.get('artifact', artifacts[0])
@@ -70,10 +73,10 @@ def test_cached_inventory_rechecks_sql_projections_and_renewed_artifact_leases(t
     context[0] = old
     ledger.put('opportunity', 'offer', {'id': 'offer', 'context': old, 'observed_at': 20})
     for path in tmp_path.glob('artifact/*/*.json'):
-        fao.touch(path, mtime_ns=10**9)
+        age_file(path, mtime_ns=10 ** 9)
     ledger.maintain(0, orphan_before=0)
     context[0] = new
-    fao.touch(ledger._path('artifact', renewed), mtime_ns=100 * 10**9)
+    age_file(ledger._path('artifact', renewed), mtime_ns=100 * 10 ** 9)
     ledger.maintain(0, orphan_before=50)
     assert ledger.get('artifact', old) is None
     assert ledger.get('artifact', new) and ledger.get('artifact', renewed)

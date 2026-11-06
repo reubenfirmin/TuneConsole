@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import tempfile
 
-from .evidence_ledger import canonical, _sync_directory
+from .evidence_ledger import canonical
 from .activity import check_cancellable_work, WorkBudgetExceeded
 from . import fao
 from .metadata_contract import ALTERNATIVE_SECONDS, runtime_active
@@ -65,14 +65,12 @@ def _prepared(conn, kind, owner, revision, data):
     path = directory(conn) / relative(kind, owner, revision)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        old = fao.read_bytes(path, max_bytes=MAX_BYTES)
+        old = fao.read(path, max_bytes=MAX_BYTES).bytes
     except FileNotFoundError:
         old = None
     if old is not None:
         if old == encoded:
-            # A previous attempt may have renamed the file but failed its
-            # final directory sync before SQL committed. Renew durability.
-            fao.write_bytes(path, encoded, immutable=True, max_bytes=MAX_BYTES)
+            # An identical orphan can be reused after a rolled-back SQL write.
             return path, None
         # A failed transaction may leave its next revision on disk. Only a
         # committed/current revision is immutable; no snapshot owns an orphan.
@@ -94,7 +92,7 @@ def publish(conn, kind, owner, revision, data):
     path, encoded = _prepared(conn, kind, owner, revision, data)
     # The owner's SQL reservation fences this revision's publication.
     if encoded is not None:
-        fao.write_bytes(path, encoded, max_bytes=MAX_BYTES)
+        fao.write(path, encoded)
     return path
 
 
@@ -128,7 +126,7 @@ def publish_many(conn, documents):
                 future, length = pending.popleft()
                 future.result()
                 size -= length
-            future = pool.submit(copy_context().run, fao.write_bytes, path, encoded, max_bytes=MAX_BYTES)
+            future = pool.submit(copy_context().run, fao.write, path, encoded)
             pending.append((future, len(encoded)))
             size += len(encoded)
         for future, _ in pending:
@@ -138,7 +136,7 @@ def publish_many(conn, documents):
 def read(conn, kind, owner, revision, *, missing=False, max_bytes=MAX_BYTES):
     path = directory(conn) / relative(kind, owner, revision)
     try:
-        with fao.open_reader(path) as stream:
+        with fao.read(path) as stream:
             encoded = stream.read(min(max_bytes, MAX_BYTES) + 1)
     except FileNotFoundError:
         if missing:
@@ -187,7 +185,7 @@ def owns_file(conn, filename):
     Prepared inactive heads have the same ownership rules as active heads.
     """
     try:
-        encoded = fao.read_bytes(filename, max_bytes=MAX_BYTES)
+        encoded = fao.read(filename, max_bytes=MAX_BYTES).bytes
         body = json.loads(encoded)['body']
         kind, owner, revision = body['kind'], body['owner'], body['revision']
         if not isinstance(owner, list) or len(owner) != (2 if kind == 'alternatives' else 1):
@@ -228,19 +226,19 @@ def export(conn, root):
         relative_path = relative(kind, owner, revision)
         source, target = directory(conn) / relative_path, root / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
-        fao.copy(source, target, max_bytes=MAX_BYTES)
+        fao.write(target, fao.read(source, max_bytes=MAX_BYTES))
         entries.append({'kind': kind, 'owner': list(owner), 'revision': revision,
-                        'bytes': fao.stat(target).logical_bytes, 'sha256': hashlib.sha256(fao.read_bytes(target)).hexdigest()})
+                        'bytes': fao.read(target).info.logical_bytes, 'sha256': hashlib.sha256(fao.read(target).bytes).hexdigest()})
     root.mkdir(parents=True, exist_ok=True)
     manifest = root / 'manifest.json'
-    fao.write_bytes(manifest, canonical({'format': 1, 'entries': entries}))
+    fao.write(manifest, canonical({'format': 1, 'entries': entries}))
     return str(manifest)
 
 
 def _verify_backup(conn, manifest, *, staged=None, current=False):
     """Validate membership and bytes, staging only for later publication."""
     manifest = Path(manifest)
-    document = json.loads(fao.read_bytes(manifest))
+    document = json.loads(fao.read(manifest).bytes)
     if not isinstance(document, dict) or document.get('format') != 1 or not isinstance(document.get('entries'), list):
         raise ValueError('Invalid runtime metadata backup')
     expected = {(kind, tuple(owner), revision): required for kind, owner, revision, required in references(conn, include_expired=True)}
@@ -255,12 +253,12 @@ def _verify_backup(conn, manifest, *, staged=None, current=False):
         prepared = manifest.parent / relative_path
         if staged is not None:
             prepared = staged / relative_path
-            fao.copy(manifest.parent / relative_path, prepared, max_bytes=MAX_BYTES)
-        encoded = fao.read_bytes(prepared, max_bytes=MAX_BYTES)
+            fao.write(prepared, fao.read(manifest.parent / relative_path, max_bytes=MAX_BYTES))
+        encoded = fao.read(prepared, max_bytes=MAX_BYTES).bytes
         if len(encoded) != entry['bytes'] or hashlib.sha256(encoded).hexdigest() != entry['sha256']:
             raise ValueError('Runtime metadata backup file failed verification')
         _verified_data(encoded, *key)
-        if current and encoded != fao.read_bytes(directory(conn) / relative_path, max_bytes=MAX_BYTES):
+        if current and encoded != fao.read(directory(conn) / relative_path, max_bytes=MAX_BYTES).bytes:
             raise ValueError('Runtime metadata backup differs from current content')
     if any(required and key not in seen for key, required in expected.items()):
         raise ValueError('Runtime metadata backup is missing a required document')
@@ -287,4 +285,4 @@ def restore(conn, manifest):
         # after validation cannot introduce unchecked bytes into live history.
         for key in seen:
             relative_path = relative(*key)
-            fao.copy(staged / relative_path, directory(conn) / relative_path, max_bytes=MAX_BYTES)
+            fao.write(directory(conn) / relative_path, fao.read(staged / relative_path, max_bytes=MAX_BYTES))

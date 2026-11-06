@@ -102,7 +102,7 @@ def _read(reference, *, with_age=False):
             or type(size) is not int or not 0 < size <= 512 * 1024 * 1024):
         raise ValueError('Invalid preparation file reference')
     path = Path(filename)
-    with fao.open_reader(path) as stream:
+    with fao.read(path) as stream:
         encoded = stream.read(size + 1)
         age = stream.info
     if path.stem != digest or len(encoded) != size or hashlib.sha256(encoded).hexdigest() != digest:

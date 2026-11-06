@@ -2,12 +2,15 @@
 from collections import Counter
 from tests.derived_rating_support import seed_dislike
 from copy import deepcopy
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 import pytest
 
 from tests.rec.test_home_prepared import prepared, service, store
 from tests.home_fixture_support import publish_menu, returning_listener
+from tests.home_prepared_support import publication_inputs
+from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.recommendation_support import publish_bundles
 from tests.test_group_home import library as group_library
 from yt_playlist.core.activity import WorkBudgetExceeded
@@ -121,9 +124,23 @@ def test_stale_worker_mixes_survive_new_dislikes_until_replaced(store, prepared)
     assert [p['tracks'] for p in result.protos] == [p['tracks'] for p in first.protos]
 
 
-@pytest.mark.usefixtures('refill_inputs')
+@pytest.mark.usefixtures('returning_vibe_listener')
 def test_vibe_fresh_reuses_prepared_recipe_inputs(store, monkeypatch):
-    from yt_playlist.rec import recipes
+    from yt_playlist.rec import recipes, vibe_pools
+
+    # This case owns recipe-input reuse after the selected Vibe candidates have
+    # arrived. Actual typed candidate reads and eligibility remain exercised in
+    # test_vibe_pool_reads; fitting profiles for every lane is below this check.
+    selected = [{'key': f'fresh {index}|artist {index}', 'video_id': f'fresh-{index}',
+                 'title': f'Fresh {index}', 'artist': f'Artist {index}', 'genre': 'Techno'}
+                for index in range(4)]
+    calls = []
+
+    def candidates(reader, now, preset, lane, **filters):
+        calls.append((preset, lane, filters))
+        return deepcopy(selected)
+
+    monkeypatch.setattr(vibe_pools, 'pick', candidates)
 
     with mix_tuning.adjusting_vibe(store, 1001):
         store.settings.set_setting(home_vibe.SETTING, 'energize')
@@ -144,6 +161,8 @@ def test_vibe_fresh_reuses_prepared_recipe_inputs(store, monkeypatch):
     home = service(store)
     home.selection_data = {'preparation': preparation}
     assert home.built_fresh(parameters, 1002) == expected
+    assert len(calls) == 2
+    assert all(preset == 'energize' and lane == 'fresh' for preset, lane, _ in calls)
 
 
 def test_worker_menu_is_recorded_intact_despite_later_feedback(
@@ -257,8 +276,21 @@ def test_partial_genre_menu_keeps_worker_offers_while_refilling(
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == prepared
 
 
-@pytest.mark.usefixtures('refill_inputs')
-def test_retry_reuses_completed_card_work_without_publishing_partial_set(store, monkeypatch):
+def test_retry_reuses_completed_card_work_without_publishing_partial_set(
+        store, monkeypatch, one_menu_per_attempt):
+    # Retry owns completion and publication, with a controlled lower selection.
+    # Real ranking/filtering is retained in test_stored_home and
+    # test_home_other_genres; do not rebuild its 192 profiles for this failure.
+    calculate = home_cards.HomeCards.cards
+    selected = publication_inputs(store, monkeypatch)
+    monkeypatch.setattr(home_cards.HomeCards, 'cards', calculate)
+
+    def assemble(reader, now, epoch, **options):
+        result = selected.cards(service(reader), SimpleNamespace(
+            epoch=epoch, mode_order=options.get('mode_order')))
+        return [{**proto, 'ranker': 'controlled'} for proto in result.protos]
+
+    monkeypatch.setattr(mode_surfaces, 'assemble_cards', assemble)
     track = store.conn.execute('SELECT identity_key FROM tracks LIMIT 1').fetchone()[0]
     seed_dislike(store, track, until=None, now=900)
     complete = home_cards._complete_card

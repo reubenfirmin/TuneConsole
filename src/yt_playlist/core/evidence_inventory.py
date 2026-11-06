@@ -41,7 +41,7 @@ class Inventory:
         self.progress = progress if progress is not None else {}
         self.path = ledger.directory / '.retention-inventory'
         try:
-            saved = json.loads(fao.read_bytes(self.path))
+            saved = json.loads(fao.read(self.path).bytes)
             if not isinstance(saved, dict) or not isinstance(saved.get('entries'), dict):
                 raise ValueError('Invalid retention inventory cache')
             self.entries = saved['entries'] if saved.get('schema') == 1 else {}
@@ -54,7 +54,7 @@ class Inventory:
 
     def _save(self):
         if self.dirty:
-            fao.write_bytes(self.path, canonical({'schema': 1, 'entries': self.entries}))
+            fao.write(self.path, canonical({'schema': 1, 'entries': self.entries}))
             self.progress['files_saved'] = len(self.entries)
             self.dirty = 0
 
@@ -66,10 +66,10 @@ class Inventory:
             check_cancellable_work()
             key = str(path.relative_to(self.ledger.directory))
             try:
-                info = fao.stat(path)
+                info = fao.read(path).info
                 entry = self.entries.get(key)
                 if entry is None or entry['identity'] != list(info.identity):
-                    value = json.loads(fao.read_bytes(path))
+                    value = json.loads(fao.read(path).bytes)
                     entry = dict(identity=list(info.identity), size=info.logical_bytes,
                                  mtime=info.mtime_ns / 1e9, data=_metadata(path.parts[-3], value))
                     self.entries[key] = entry

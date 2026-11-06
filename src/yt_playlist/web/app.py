@@ -336,11 +336,11 @@ def create_app(store, client_provider, *, now_fn=time.time,
             try:
                 files = sorted((p for p in [*static_dir.glob("*.js"), *static_dir.glob("*.css"),
                                             static_dir / "favicon.svg"] if p.exists()), key=lambda p: p.name)
-                key = tuple((p.name, fao.stat(p).identity) for p in files)
+                key = tuple((p.name, fao.read(p).info.identity) for p in files)
                 if key != self._key:
                     h = hashlib.md5()
                     for p in files:
-                        h.update(fao.read_bytes(p))
+                        h.update(fao.read(p).bytes)
                     self._val, self._key = h.hexdigest()[:12], key
                 return self._val
             except (OSError, ValueError):

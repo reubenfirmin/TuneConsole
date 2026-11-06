@@ -15,6 +15,7 @@ The dated logs summarize existing evidence, not a fresh evaluation or acceptance
 | Model | Selected recipe and history |
 | --- | --- |
 | [Shared classifier](models/shared.md) | Emotify native emotions plus local six-vibe calibration; classification/intensity baseline and rejected broad replacements |
+| [Joint pooling](models/pooling.md) | Inactive artist/genre transfer candidates, categorical holdout lineage and failed ranking gates |
 | [Cruise](models/cruise.md) | Equal PMEmo/DEAM VA experts, moderate-arousal/positive-valence mapping |
 | [Focus](models/focus.md) | Direct CAL500 Reading/Studying ridge heads; failed count/chroma follow-ups |
 | [Relax](models/relax.md) | Fixed Emotify/Soundtracks/ManyMusic/Memo consensus |

@@ -77,7 +77,7 @@ def test_file_batch_overlaps_document_preparation_with_durable_writes(store, mon
     from threading import Event
 
     started, preparing_next = Event(), Event()
-    write = fao.write_bytes
+    write = fao.write
 
     def writing(*args, **kwargs):
         started.set()
@@ -90,7 +90,7 @@ def test_file_batch_overlaps_document_preparation_with_durable_writes(store, mon
         preparing_next.set()
         yield 'native', ('second',), 1, {'observations': {'energy': .8}}
 
-    monkeypatch.setattr(fao, 'write_bytes', writing)
+    monkeypatch.setattr(fao, 'write', writing)
     with store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
         metadata_runtime_files.publish_many(store.conn, documents())
@@ -104,7 +104,7 @@ def test_file_batch_joins_writers_when_document_preparation_fails(store, monkeyp
     from threading import Event
 
     started, release, finished = Event(), Event(), Event()
-    write = fao.write_bytes
+    write = fao.write
 
     def writing(*args, **kwargs):
         started.set()
@@ -122,7 +122,7 @@ def test_file_batch_joins_writers_when_document_preparation_fails(store, monkeyp
             raise ValueError('Document preparation failed')
         yield 'native', (0,), 1, {'observations': {}}
 
-    monkeypatch.setattr(fao, 'write_bytes', writing)
+    monkeypatch.setattr(fao, 'write', writing)
     with pytest.raises(ValueError, match='Document preparation failed|Invalid runtime metadata primary key'):
         with store.conn:
             store.conn.execute('BEGIN IMMEDIATE')
@@ -141,7 +141,7 @@ def test_failed_batch_joins_file_writers_before_rolling_back_heads(file_backed_s
                 MetadataObservation('energy', .3, 'recording', str(number), 'prediction',
                                     unit='classifier_probability')], run_id='native', now=100)
         assert store.conn.execute('SELECT count(*) FROM metadata_native_delivery_heads').fetchone()[0] == 0
-        original = fao.write_bytes
+        original = fao.write
         first_started, second_failed, first_finished = Event(), Event(), Event()
         lock, calls = Lock(), []
 
@@ -162,14 +162,14 @@ def test_failed_batch_joins_file_writers_before_rolling_back_heads(file_backed_s
                 raise OSError('Durable file publication failed')
             return original(*args, **kwargs)
 
-        monkeypatch.setattr(fao, 'write_bytes', fail_during_durable_writes)
+        monkeypatch.setattr(fao, 'write', fail_during_durable_writes)
         with pytest.raises(OSError, match='Durable file publication failed'):
             with store.conn:
                 store.conn.execute('BEGIN IMMEDIATE')
                 preparation.prepare_batch(store.conn, 'native', None, 128, at=time.time())
         assert first_finished.is_set()
         assert store.conn.execute('SELECT count(*) FROM metadata_native_delivery_heads').fetchone()[0] == 0
-        monkeypatch.setattr(fao, 'write_bytes', original)
+        monkeypatch.setattr(fao, 'write', original)
         with store.conn:
             store.conn.execute('BEGIN IMMEDIATE')
             _, count = preparation.prepare_batch(store.conn, 'native', None, 128, at=time.time())
@@ -242,10 +242,10 @@ def test_committed_batch_with_lost_progress_can_be_replayed(file_backed_store, t
     path = tmp_path / 'progress.json'
     try:
         run(store, path)
-        state = json.loads(fao.read_bytes(path))
+        state = json.loads(fao.read(path).bytes)
         state.update(stage=2, cursor=None)
-        fao.write_bytes(path, json.dumps(state).encode())
-        assert json.loads(fao.read_bytes(path)) == state
+        fao.write(path, json.dumps(state).encode())
+        assert json.loads(fao.read(path).bytes) == state
         assert state['stage'] == 2 and state['cursor'] is None
         counts = store.conn.execute('SELECT id,revision FROM metadata_runtime_choices ORDER BY id').fetchall()
         assert counts

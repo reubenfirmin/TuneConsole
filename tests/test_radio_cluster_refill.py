@@ -1,4 +1,6 @@
 """Continuing style streams are independent of Home's finite card proposals."""
+from copy import deepcopy
+
 import pytest
 from tests.derived_rating_support import remove_rating, seed_dislike
 
@@ -9,7 +11,7 @@ from tests.musical_support import prepare_profiles
 from yt_playlist.core import catalog
 from yt_playlist.rec import musical_character
 from tests.recommendation_support import publish_bundles
-from tests.prepared_fixture_support import prepared_template
+from tests.radio_candidate_support import intensity_inputs
 from tests.radio_timing_support import radio_costs
 from yt_playlist.core.db_writes import atomic_write
 
@@ -24,26 +26,35 @@ def indexed(store, seed, count=110, *, mixed=False, home=True):
     return tracks
 
 
-@pytest.fixture(scope='module')
-def refill_template(_pristine_current_schema):
-    def build(store):
-        anchor = seed_catalog(store)
-        tracks = indexed(store, anchor)
-        assert len(tracks) == 110
-        return anchor, tracks
-
-    with prepared_template(_pristine_current_schema, build) as template:
-        yield template
-
-
 @pytest.fixture
-def refill_library(store, refill_template):
-    return refill_template.restore(store)
+def refill_library(intensity_inputs):
+    """One published style exceeds the finite Home and catalog lookahead.
+
+    Real stored-page reads and live eligibility are owned by test_stored_radio;
+    this fixture isolates candidate continuation policy from SQL/model setup.
+    """
+    inputs = intensity_inputs
+    anchor = inputs.pools['1'][0]
+    mode = inputs.modes['1']
+    inputs.modes.clear()
+    inputs.modes['1'] = mode
+    inputs.pools.clear()
+    tracks = []
+    for index in range(110):
+        key = f'continued-{index}'
+        track = {**deepcopy(anchor), 'key': key, 'video_id': key,
+                 'title': key, 'artist': f'Artist {index}'}
+        inputs.tracks[key] = track
+        inputs.profiles[key] = track['musical']
+        inputs.vectors[key] = mode['centroid'].tobytes()
+        tracks.append(track)
+    inputs.pools['1'] = [anchor, *tracks]
+    return inputs.store, anchor, tracks
 
 
 @pytest.mark.parametrize('theme', [0, .5, 1])
-def test_every_dial_position_refills_beyond_home_and_catalog_batch(store, refill_library, monkeypatch, theme):
-    seed, tracks = refill_library
+def test_every_dial_position_refills_beyond_home_and_catalog_batch(refill_library, monkeypatch, theme):
+    store, seed, tracks = refill_library
     c = RadioCandidates(store, 1000, {**radio_tuning.DEFAULTS, 'theme': theme})
     monkeypatch.setattr(embedding_vectors, 'load_content_vectors', lambda *a, **kw: pytest.fail('request loaded full vectors'))
     sizes, read = [], c._read_vectors
@@ -137,12 +148,16 @@ def test_themed_streams_pin_the_playing_genre_inside_mixed_clusters(store, seed)
     assert directions.slots == first
 
 
-def test_pinned_refill_reads_past_a_full_page_of_other_genres(store, seed):
-    wrong = [catalog_track(store, f'wrong-{i}', label='Indie Rock')[0] for i in range(CLUSTER_POOL_LIMIT)]
-    matching = [catalog_track(store, f'matching-{i}', label=seed['genre'])[0] for i in range(30)]
-    publish_bundles(store, {
-        '1': {'wheelhouse': [seed, *wrong]}, '_radio': {'generation': None, 'space': '',
-        'members': {'1': [t['key'] for t in [seed, *wrong, *matching]]}}})
+def test_pinned_refill_reads_past_a_full_page_of_other_genres(refill_library):
+    store, seed, tracks = refill_library
+    # The candidate policy must continue beyond an ineligible first page.
+    # Real SQL paging through rarer genres is independently exercised by
+    # test_stored_radio's two-page pinned-genre owner.
+    wrong = tracks[:CLUSTER_POOL_LIMIT]
+    matching = tracks[CLUSTER_POOL_LIMIT:]
+    assert len(wrong) == CLUSTER_POOL_LIMIT and matching
+    for track in wrong:
+        track['genre'] = 'Indie Rock'
     c = RadioCandidates(store, 1000, {**radio_tuning.DEFAULTS, 'theme': 1})
     history = [seed]
     for _ in matching:

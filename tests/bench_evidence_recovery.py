@@ -1,8 +1,8 @@
 """Opt-in #473 sustained recovery audit, run only by the current test owner.
 
 Set TUNECONSOLE_BENCH_DB to an existing isolated actual-library export. All
-writes, migrations, simulated listening, publication and restore affect a new
-pytest copy. Menus/catalog/model inputs come from that export; times, responses,
+writes, migrations, simulated listening, publication and restore affect a private
+library workspace. Menus/catalog/model inputs come from that export; times, responses,
 input perturbations and the identical-vector comparison arms are controlled.
 This verifies storage and learning continuity, not recommendation superiority,
 cold startup, real fitting cost or future user behavior.
@@ -14,7 +14,6 @@ import json
 import logging
 import os
 from pathlib import Path
-import shutil
 import sys
 import time
 import traceback
@@ -24,8 +23,8 @@ import numpy as np
 import pytest
 
 from tests.bench_choice_retention import inventory
-from tests.bench_svd_background import _backup_library
 from tests.comparison_support import legacy_projection
+from tests.library_image.fixtures import benchmark_library, report_file
 from yt_playlist.core.activity import Activity, work_budget
 from yt_playlist.core.evidence_ledger import EvidenceBudgetExceeded, EvidenceLedger, _components, canonical
 from yt_playlist.core.store import Store
@@ -141,7 +140,8 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
         'Select an existing isolated export, not the native database')
     source_evidence = Path(str(source) + '.evidence')
     assert source_evidence.is_dir(), 'The export must include its external evidence'
-    path, destination = tmp_path / 'library.db', tmp_path / 'sustained-recovery.json'
+    path = tmp_path / 'library.db'
+    destination = report_file(tmp_path / 'sustained-recovery.json')
     clock = [time.time()]
     report = {'source': str(source), 'database': str(path), 'python': sys.version,
               'status': 'running', 'phase': 'backup', 'maintenance': [], 'days': [], 'pressure': [],
@@ -204,8 +204,8 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
     monkeypatch.setattr(EvidenceLedger, 'put', virtual_put)
     try:
         save()
-        report.update(_backup_library(source, path))
-        shutil.copytree(source_evidence, Path(str(path) + '.evidence'))
+        path, backup = benchmark_library(source, path)
+        report.update(backup, database=str(path))
         store, worker = open_store()
         ledger = store.rec_ledger.evidence()
         offers, responses = ledger.records('opportunity'), ledger.records('response')

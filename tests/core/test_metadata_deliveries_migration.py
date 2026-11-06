@@ -231,25 +231,23 @@ def test_export_streams_and_preserves_existing_pack_offsets_and_clocks(store, tm
     record(store, *(replace(first, delivery_key=str(i), response={'value': i}) for i in range(128)))
     before = refs(store)
     source, = {Path(row[1]) for row in before}
-    encoded, age = source.read_bytes(), fao.stat(source)
+    encoded, age = source.read_bytes(), fao.read(source).info
     opened = 0
-    original = fao.open_reader
+    original = fao.Content.__enter__
 
-    @contextmanager
-    def counted(path, **kwargs):
+    def counted(content):
         nonlocal opened
-        if Path(path) == source:
+        if content.path == source:
             opened += 1
-        with original(path, **kwargs) as stream:
-            yield stream
+        return original(content)
 
-    monkeypatch.setattr(fao, 'open_reader', counted)
+    monkeypatch.setattr(fao.Content, '__enter__', counted)
     root = tmp_path / 'backup'
     manifest = export(store, root)
     assert opened == 2  # One range-validation stream and one verified encoded copy.
     copied = root / source.stem[:2] / source.name
     assert copied.read_bytes() == encoded
-    assert (fao.stat(copied).mtime_ns, fao.stat(copied).ctime_ns) == (age.mtime_ns, age.ctime_ns)
+    assert (fao.read(copied).info.mtime_ns, fao.read(copied).info.ctime_ns) == (age.mtime_ns, age.ctime_ns)
     document = files._read_document(manifest, 'backup-manifest')
     chunk = files._read_document(root / document['chunks'][0][:2] / (document['chunks'][0] + '.json'), 'backup-chunk')
     assert [(row['id'], row['offset']) for row in chunk] == [(row[0], row[4]) for row in before]

@@ -30,7 +30,7 @@ def encode(value):
 
 def read(root, generation):
     try:
-        raw = fao.read_bytes(root / relative(generation), max_bytes=MAX_BYTES)
+        raw = fao.read(root / relative(generation), max_bytes=MAX_BYTES).bytes
     except FileNotFoundError as exc:
         raise fao.CorruptFile('Required shared vibe generation is missing') from exc
     if hashlib.sha256(raw).hexdigest() != generation:
@@ -62,16 +62,14 @@ def read(root, generation):
 def stage(root, value):
     generation, raw = encode(value)
     path = root / relative(generation)
-    if fao.exists(path):
-        identity = fao.stat(path).identity
+    source = fao.read(path, max_bytes=MAX_BYTES) if path.is_file() else None
+    if source is not None:
         try:
-            if fao.read_bytes(path, max_bytes=MAX_BYTES) == raw:
+            if source.bytes == raw:
                 return generation, None
         except (OSError, ValueError):
             pass
-    else:
-        identity = False
-    return generation, fao.stage_bytes(path, raw, expected=identity, max_bytes=MAX_BYTES)
+    return generation, fao.prepare(path, source.replacing(raw) if source is not None else raw)
 
 
 def measurement_ids(value):

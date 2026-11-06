@@ -1,7 +1,10 @@
 """A SQLite callback and parameter binding must never freeze the Python GIL."""
+import os
+import selectors
 import subprocess
 import sys
 import textwrap
+import time
 
 import pytest
 
@@ -64,7 +67,7 @@ def test_callback_and_concurrent_bind_finish(factory, operation, tmp_path):
                     # Release the GIL while retaining SQLite's mutex. A safe
                     # native implementation can resume after this bounded
                     # wait; a GIL-holding bind cannot let Python resume at all.
-                    bound.wait(1)
+                    bound.wait(.1)
                 else:
                     assert contended.wait(2)
                 mark('callback-resumed')
@@ -94,7 +97,7 @@ def test_callback_and_concurrent_bind_finish(factory, operation, tmp_path):
             except BaseException as error:
                 mark('bind-failed: ' + repr(error))
                 failures.append(error)
-        faulthandler.dump_traceback_later(2)
+        faulthandler.dump_traceback_later(.2 if native else 2)
         threads = [threading.Thread(target=step, name='step'),
                    threading.Thread(target=bind, name='bind')]
         for thread in threads: thread.start()
@@ -108,25 +111,44 @@ def test_callback_and_concurrent_bind_finish(factory, operation, tmp_path):
     ''')
     command = [sys.executable, '-c', script, factory, operation]
     if factory == 'Native':
-        # subprocess.run kills and reaps a timed-out child. A timeout alone is
-        # insufficient: require the adapter/callback handoff and a C-watchdog
-        # traceback showing the adapter returned into execute while the other
-        # thread remains in the SQLite callback.
+        # Stop as soon as the C watchdog establishes the deadlock, rather than
+        # spending five seconds waiting for subprocess.run's timeout. Keep a
+        # generous failure deadline for a slow child startup; a passing check
+        # needs the actual adapter handoff and both complete blocked stacks.
+        captured = {'stdout': bytearray(), 'stderr': bytearray()}
+        proven = False
+        process = subprocess.Popen(command, cwd=tmp_path, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
         try:
-            result = subprocess.run(command, cwd=tmp_path, capture_output=True,
-                                    text=True, timeout=5)
-        except subprocess.TimeoutExpired as error:
-            stdout = (error.stdout or b'').decode()
-            stderr = (error.stderr or b'').decode()
-            diagnostic = f'Native child timed out:\n{stdout}\n{stderr}'
-            assert stdout.splitlines() == [
+            with selectors.DefaultSelector() as streams:
+                streams.register(process.stdout, selectors.EVENT_READ, 'stdout')
+                streams.register(process.stderr, selectors.EVENT_READ, 'stderr')
+                deadline = time.monotonic() + 5
+                while streams.get_map() and time.monotonic() < deadline:
+                    for key, _ in streams.select(.1):
+                        chunk = os.read(key.fd, 65536)
+                        if chunk:
+                            captured[key.data].extend(chunk)
+                        else:
+                            streams.unregister(key.fileobj)
+                    error = captured['stderr']
+                    if all(frame in error for frame in
+                           (b' in bind\n', b' in progress\n', b' in <module>\n')):
+                        proven = True
+                        break
+        finally:
+            if process.poll() is None:
+                process.kill()
+            stdout_tail, stderr_tail = process.communicate(timeout=2)
+            captured['stdout'].extend(stdout_tail)
+            captured['stderr'].extend(stderr_tail)
+        stdout, stderr = (bytes(captured[name]).decode() for name in ('stdout', 'stderr'))
+        diagnostic = f'Native deadlock evidence (exit {process.returncode}):\n{stdout}\n{stderr}'
+        assert proven, diagnostic
+        assert stdout.splitlines() == [
                 'native-adapter-entered', 'callback-entered', 'native-binding-resuming',
-            ], diagnostic
-            assert ' in bind\n' in stderr and ' in progress\n' in stderr, diagnostic
-            assert ' in __conform__\n' not in stderr, diagnostic
-        else:
-            pytest.fail(f'Native child exited {result.returncode}; expected a proven '
-                        f'GIL deadlock:\n{result.stdout}\n{result.stderr}')
+        ], diagnostic
+        assert ' in __conform__\n' not in stderr, diagnostic
         return
     result = subprocess.run(command,
                             cwd=tmp_path, capture_output=True, text=True, timeout=10)

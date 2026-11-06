@@ -309,7 +309,7 @@ def _backup_library(source, destination):
 
 
 def _saved_library_run(tmp_path, *, full_generation=False, refresh=None, projection=None, inline_checkpoint=False):
-    from tests.library_image_fixtures import benchmark_library
+    from tests.library_image.fixtures import benchmark_library
     destination = tmp_path / "library.db"
     destination, backup = benchmark_library(_saved_library_source(), destination)
     print(json.dumps(backup), flush=True)

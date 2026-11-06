@@ -20,10 +20,10 @@ def test_frozen_bytes_hash_and_existing_ledger_record_remain_exact(tmp_path):
     assert evidence_contract.canonical(VALUE) == canonical(VALUE) == ENCODED
     assert hashlib.sha256(evidence_contract.canonical(VALUE)).hexdigest() == DIGEST
     ledger = EvidenceLedger(tmp_path, 1_000_000)
-    fao.write_bytes(ledger._path('response', 'frozen'), ENCODED)
+    fao.write(ledger._path('response', 'frozen'), ENCODED)
     assert ledger.get('response', 'frozen') == VALUE
     assert not ledger.put('response', 'frozen', VALUE)
-    assert fao.read_bytes(ledger._path('response', 'frozen')) == ENCODED
+    assert fao.read(ledger._path('response', 'frozen')).bytes == ENCODED
 
 
 def test_recursive_references_preserve_order_duplicates_and_exact_reference_shape():

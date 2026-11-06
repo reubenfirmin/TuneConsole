@@ -76,7 +76,7 @@ def test_bulk_move_deletes_only_selected_and_backs_up_each(transfers):
         local_id, video = expected.pop(playlist)
         backup = json.loads(action.undo_json)["backup"]
         assert Path(backup).is_file()
-        saved = json.loads(fao.read_text(backup))
+        saved = json.loads(fao.read(backup).bytes.decode())
         assert saved['playlist_id'] == local_id and saved['ytm_playlist_id'] == playlist
         assert saved['identity_id'] == t.source
         assert [track['video_id'] for track in saved['tracks']] == [video]

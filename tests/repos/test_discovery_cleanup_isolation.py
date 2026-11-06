@@ -216,7 +216,7 @@ def test_large_cleanup_prepares_after_reader_close_and_allows_foreground_writes(
     assert database.recommendations.framing('home')['comfort_pool'] == 12
     assert database.recommendations.framing('home')['full_pools'] == 1
     outputs = before['home']['outputs']
-    output_bytes = sum(len(fao.read_bytes(row['filename'])) for row, _encoded in outputs)
+    output_bytes = sum(len(fao.read(row['filename']).bytes) for row, _encoded in outputs)
     assert output_bytes > 0
     if count == 8000:
         assert output_bytes > 5 * 1024 * 1024

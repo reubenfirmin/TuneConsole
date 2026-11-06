@@ -198,7 +198,7 @@ def test_backup_and_intent_are_committed_before_transport_and_survive_lost_reply
             step = reader.conn.execute("SELECT phase,outcome,backup_status,claim_token FROM action_steps "
                                        "WHERE action_id=? AND operation='delete_playlist'",(action.id,)).fetchone()
             assert tuple(step[:3])==('uncertain','unknown','verified') and step['claim_token']
-            backup = json.loads(fao.read_bytes(entry["backup"]))
+            backup = json.loads(fao.read(entry['backup']).bytes)
             assert backup["ytm_playlist_id"] == playlist_id
             assert [t["video_id"] for t in backup["tracks"]] == ([] if operation == "empty" else ["a", "b"])
         finally:

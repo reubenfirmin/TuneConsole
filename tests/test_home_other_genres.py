@@ -4,15 +4,54 @@ import re
 
 import numpy as np
 import pytest
+from fastapi import APIRouter
+from fastapi.testclient import TestClient
 
-from tests.test_mode_cards_route import _client
+from tests.conftest import FakeClient
+from tests.prepared_fixture_support import prepared_template
+from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
-from yt_playlist.rec import home_themes, mode_surfaces
+from yt_playlist.rec import home_prepared, home_themes, mode_surfaces
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
 from yt_playlist.rec import home_cards as home
 
 pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
+
+
+@pytest.fixture(scope='module')
+def genre_candidates_template(_pristine_current_schema):
+    # Eight candidates still require general-pool backfill when a mode is
+    # trimmed to four below. Extra copies do not add a filtering scenario.
+    with prepared_template(_pristine_current_schema,
+                           lambda source: seed_genres(source, tracks_per_lane=8)) as template:
+        yield template
+
+
+@pytest.fixture(autouse=True)
+def genre_routes(monkeypatch, one_menu_per_attempt):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, home
+
+    # Keep the real Home routes, views, templates and application request
+    # handling. These cases do not exercise the other resource routers.
+    monkeypatch.setattr(webapp, 'build_all',
+                        lambda ctx: [app_update.build(ctx), audio_preview.build(ctx), home.build(ctx)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
+
+
+def _client(store, now=1000.0):
+    from yt_playlist.web.app import create_app
+
+    identity = store.accounts.upsert_account('main', 'cred', None, True)
+    # Genre steering consumes candidate pools and one completed mix menu.
+    # Independent discovery/revisit summaries and twelve alternative menus
+    # have separate preparation owners in test_home_prepared.
+    assert home_prepared.prepare_mixes(store, now) is not None
+    return TestClient(create_app(store, lambda: {identity: FakeClient()},
+                                now_fn=lambda: now, background_work=False),
+                      base_url='http://127.0.0.1')
 
 
 def seed_genres(store, *, genres=None, tracks_per_lane=20, fresh=True):

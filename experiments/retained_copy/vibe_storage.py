@@ -87,7 +87,7 @@ def run(source, report):
                 for _ in range(prediction_count//256+2):
                     vibe_history.maintain(store, future, 256)
                     cursor = vibe_provenance.directory(store.conn)/'.history-collection.json'
-                    if json.loads(fao.read_bytes(cursor))['after'] == 0:
+                    if json.loads(fao.read(cursor).bytes)['after'] == 0:
                         break
                 else:
                     raise AssertionError('History traversal did not finish its bounded cycle')

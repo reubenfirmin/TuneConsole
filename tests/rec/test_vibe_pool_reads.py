@@ -58,7 +58,6 @@ def seed_costs(store, costs):
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(owner, '_finish', transaction)
         patch.setattr(fao, '_write', timed(costs, 'subject_seed_artifact_write', fao._write))
-        patch.setattr(fao, '_sync', timed(costs, 'subject_seed_directory_sync', fao._sync))
         yield
 
 
@@ -347,8 +346,14 @@ def test_selected_vibe_template_retains_complete_private_publications(
 
 def test_vibe_candidate_retry_is_detached_invalidated_and_rechecks_dislikes(store, monkeypatch, vibe_read_costs):
     # This case inserts discovery records before publication and later replaces
-    # its head. Keep that producer sequence separate from the shared read input.
+    # its head. Thirteen rows leave a replacement after a twelve-track pick;
+    # unrelated presets, lanes and genre reserves belong to the selected-read
+    # parity case above, which retains its full multi-page publication.
     value = bundles()
+    pool = value['_vibes']['pools']['energize']['fresh'][:13]
+    value['all'] = {}
+    value['_vibes']['pools'] = {'energize': {'fresh': pool}}
+    value['_vibes']['genres'] = {}
     items = value['_vibes']['pools']['energize']['fresh'][:12]
     with measured(vibe_read_costs, 'retry_existing_subject_seed'), store._lock, store.conn.atomic():
         for item in items:

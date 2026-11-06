@@ -55,7 +55,7 @@ def _load(path, mtime, size):
 
 def load(path):
     path = Path(path).resolve()
-    info = fao.stat(path)
+    info = fao.read(path).info
     return _load(str(path), info.identity, info.logical_bytes)
 
 

@@ -12,6 +12,7 @@ import pytest
 from yt_playlist.core import file_owners, policy_documents, preparation_files, served_facts
 from yt_playlist.core.preparation.file_bodies import BODY_OWNERS
 from yt_playlist.core.store import Store
+from tests.store_fixture_support import PristineSchema, initialize_consumer, revision_definitions
 
 
 def roots(conn):
@@ -62,10 +63,26 @@ class PreparedTemplate:
     bundles: dict
     result: object
     preparation_manifest: object = None
+    revision_guards: tuple = ()
+    revision_tables: frozenset = frozenset()
+    revision_views: frozenset = frozenset()
 
     def restore(self, target, *, ignore=None, external_files=()):
         assert not target.conn.in_transaction
         self.source.conn.backup(target.conn)
+        # A backup replaces inputs even if SQLite gives the two copies the same
+        # schema epoch. Fence earlier readers and memoized results explicitly.
+        target._database_generation = getattr(target, '_database_generation', 0) + 1
+        revisions = getattr(target, '_snapshot_revisions', None)
+        if (self.revision_guards and revisions is not None
+                and revisions.tables == self.revision_tables
+                and revisions.views == self.revision_views
+                and revision_definitions(target.conn) == self.revision_guards):
+            # TEMP survives backup. Reuse guards only when every generated SQL
+            # definition and tracked owner matches this immutable source. Their
+            # existing counters remain valid because total_changes is monotonic;
+            # later writes still stamp the real connection-local triggers.
+            revisions.schema_version = target.conn.execute('PRAGMA main.schema_version').fetchone()[0]
         destinations = roots(target.conn)
         cleanup_memory_files(target, destinations)
         relocations = {}
@@ -150,9 +167,16 @@ def capture_template(source, result, *, logical_coordinates=()):
     ordinary = tuple((table, column, filename)
         for table, column, filename in coordinates(source.conn, logical=logical_coordinates)
         if (table.strip('"'), column.strip('"')) not in prepared_columns)
+    revisions = getattr(source, '_snapshot_revisions', None)
+    guards, tables, views = (), frozenset(), frozenset()
+    if (revisions is not None and revisions.schema_version ==
+            source.conn.execute('PRAGMA main.schema_version').fetchone()[0]):
+        guards = revision_definitions(source.conn)
+        tables, views = frozenset(revisions.tables), frozenset(revisions.views)
     source.conn.execute('PRAGMA query_only=ON')
     return PreparedTemplate(source, roots(source.conn), ordinary,
-        deepcopy(getattr(source, '_fixture_bundle_payload', {})), deepcopy(result), manifest)
+        deepcopy(getattr(source, '_fixture_bundle_payload', {})), deepcopy(result), manifest,
+        guards, tables, views)
 
 
 @contextmanager
@@ -191,8 +215,16 @@ def prepared_template(pristine, seed, *, database=None, defer_metadata=False):
             # The higher-scope fixture owns that path through tmp_path_factory.
             source = Store(':memory:' if database is None else database)
             resources.callback(source.conn.close)
-            pristine.backup(source.conn)
-            source.init_schema(defer_metadata=defer_metadata)
+            if isinstance(pristine, PristineSchema) and not defer_metadata:
+                # The session builder already admitted this exact empty SQL
+                # schema. Bind the private consumer just like the store fixture
+                # instead of revalidating hundreds of unchanged DDL objects for
+                # every independently prepared dataset. Historical/raw sources
+                # and explicit deferred-admission checks retain real admission.
+                initialize_consumer(source, pristine)
+            else:
+                pristine.backup(source.conn)
+                source.init_schema(defer_metadata=defer_metadata)
             files = roots(source.conn)
             cleanup_memory_files(source, files)
             result = seed(source)

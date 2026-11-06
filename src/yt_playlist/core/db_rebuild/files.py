@@ -4,6 +4,7 @@ SQL-stored absolute references and installed relative roots remain in place
 under the job's reader fences. Private database names borrow those roots.
 The directory inventory comes from domain owners, not filesystem discovery.
 """
+from yt_playlist.core import file_paths
 from pathlib import Path
 import os
 
@@ -14,7 +15,7 @@ from ..evidence_ledger import _sync_directory
 
 def roots(database):
     database = Path(database)
-    return {**{name: fao.root_for_database(database, None, name) for name in file_owners.owners()},
+    return {**{name: file_paths.root_for_database(database, None, name) for name in file_owners.owners()},
             'choice_evidence': evidence_ledger.root_for_database(database, None),
             'runtime_metadata': metadata_runtime_files.root_for_database(database, None),
             'served': served_facts.root_for_database(database, None)}
@@ -88,4 +89,4 @@ def rollback(state):
 def verify(conn):
     for _, _, references in owners(conn):
         for path in references:
-            fao._hash(path)
+            fao.read(path).digest

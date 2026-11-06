@@ -24,7 +24,7 @@ def test_unowned_compact_menu_requires_exact_file_custody(tmp_path, damage):
         inventory = mix_verification.capture(source)
         root = evidence_ledger.directory(target)
         for relative, _digest in inventory:
-            fao.copy(evidence_ledger.directory(source) / relative, root / relative)
+            fao.write(root / relative, fao.read(evidence_ledger.directory(source) / relative))
         target.execute('CREATE TABLE mix_choice_preparation(id INTEGER,phase TEXT,cursor TEXT)')
         target.execute("INSERT INTO mix_choice_preparation VALUES (1,'ready','')")
         target.execute('CREATE TABLE group_retention_state(id INTEGER,roots_complete INTEGER)')
@@ -34,10 +34,10 @@ def test_unowned_compact_menu_requires_exact_file_custody(tmp_path, damage):
         if damage == 'missing':
             fao.delete(copied)
         elif damage == 'changed':
-            fao.write_bytes(copied, b'{"changed":true}')
+            fao.write(copied, b'{"changed":true}')
         if damage:
             with pytest.raises(ValueError, match='changed original listening evidence'):
                 mix_verification.verify_captured(source, target, inventory=inventory)
         else:
             mix_verification.verify_captured(source, target, inventory=inventory)
-            assert all(list(fao._hash(root / relative)) == digest for relative, digest in inventory)
+            assert all(list(fao.read(root / relative).digest) == digest for relative, digest in inventory)

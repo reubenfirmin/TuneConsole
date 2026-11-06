@@ -22,12 +22,12 @@ def test_home_scans_assets_once_and_detects_same_size_zero_mtime_edits(store, tm
     monkeypatch.setattr(webapp, '__file__', str(tmp_path / 'app.py'))
     app = webapp.create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
     scans = []
-    stat = fao.stat
+    stat = fao._stat
     def counted(path, *args, **kwargs):
         if Path(path).parent == static:
             scans.append(Path(path).name)
         return stat(path, *args, **kwargs)
-    monkeypatch.setattr(fao, 'stat', counted)
+    monkeypatch.setattr(fao, '_stat', counted)
     with TestClient(app, base_url='http://127.0.0.1') as client:
         before = client.get('/')
         assert before.status_code == 200

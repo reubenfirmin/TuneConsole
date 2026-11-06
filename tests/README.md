@@ -184,23 +184,31 @@ python3 scripts/test-library.py run -- pytest tests/schema/check_radio_launch_ac
 python3 scripts/test-library.py run --readonly -- python3 -c 'import sqlite3; print(sqlite3.connect("file:/library/state.db?mode=ro", uri=True).execute("select count(*) from recordings").fetchone())'
 ```
 
-Python checks can import `tests.library_image_fixtures.managed_database()`.
+Python checks can import `tests.library_image.fixtures.managed_database()`.
 Use `run --baseline ID` or `run --schema VERSION` to select a retained generation;
 the selection stays pinned across all selected tests, even during refresh.
 Scripts must write retained artifacts to `/reports`; the host destination is
-chosen with `run --report PATH`, or defaults to `build/test-reports/library-images`.
+chosen with `run --report PATH` under `build/test-reports` or `/tmp`, or defaults
+to a private directory under `build/test-reports/library-images`.
 Console output, per-run receipts and pytest JUnit reports are retained there.
 Disposable workspaces and process-local temporary files are removed after their
 containers stop, on both passing and failing runs.
 
-Refresh retains the newest two generations plus current generations for other
-sources and any active pins. Preview and remove abandoned runs or older unpinned
-generations with:
+The manager keeps up to two recent generations, plus current generations for
+other sources and any active pins. Before capturing another generation it prunes
+older unused captures to leave room for the candidate; the current generation
+stays available even if preparation fails. Preview and remove abandoned runs or
+older unpinned generations with:
 
 ```sh
 python3 scripts/test-library.py gc
 python3 scripts/test-library.py gc --delete
 ```
+
+`python3 scripts/test-library.py verify` explicitly checks concurrent actual-library
+writes, extent sharing and interrupted-owner recovery. Add `--refresh` to check
+new-generation publication while old workspaces remain active. This is a focused
+local backend check, separate from ordinary pytest and CI.
 
 For an individual abandoned `build/library-image-poc/volume/workspaces/ID`, use
 `./scripts/test-artifacts-cleanup.py PATH` and then `--delete PATH`. Cleanup checks

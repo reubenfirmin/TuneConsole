@@ -11,7 +11,7 @@ import sys
 import time
 import uuid
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_VOLUME = ROOT / 'build/library-image-poc/volume'
 DEFAULT_IMAGE = 'localhost/tuneconsole-library-tests:local'
 IDENTITY = re.compile(r'[0-9a-f]{32}\Z')
@@ -38,10 +38,18 @@ def save(path, value):
 
 
 @contextmanager
-def lease(path, *, exclusive=True, blocking=True):
+def lease(path, *, exclusive=True, blocking=True, wait_seconds=0):
     with path.open('a+b') as stream:
-        fcntl.flock(stream, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
-                    | (0 if blocking else fcntl.LOCK_NB))
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            try:
+                fcntl.flock(stream, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+                            | (0 if blocking else fcntl.LOCK_NB))
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(.025)
         # Close rather than LOCK_UN: launched Podman clients inherit this open
         # description so a killed coordinator cannot free their lifetime lock.
         yield stream
@@ -60,10 +68,10 @@ def process_identity():
 
 
 def owner_alive(owner):
-    if owner['namespace'] != os.readlink('/proc/self/ns/pid'):
-        raise RuntimeError('Cleanup must run in the workspace owner PID namespace')
     if owner['boot'] != Path('/proc/sys/kernel/random/boot_id').read_text().strip():
         return False
+    if owner['namespace'] != os.readlink('/proc/self/ns/pid'):
+        raise RuntimeError('Cleanup must run in the workspace owner PID namespace')
     try:
         fields = Path(f'/proc/{owner["pid"]}/stat').read_text().rsplit(')', 1)[1].split()
         return fields[0] != 'Z' and fields[19] == owner['start']
@@ -143,15 +151,20 @@ class Manager:
         command('btrfs', 'subvolume', 'delete', path)
 
     def prepare(self, source, *, refresh=False):
-        from tests.library_image_capture import verify_tree
+        from .capture import verify_tree
 
         self.initialize()
         source = Path(source).resolve(strict=True)
         key = hashlib.sha256(str(source).encode()).hexdigest()
         pointer = self.volume / 'sources' / (key + '.json')
         with lease(self.volume / 'locks' / ('prepare-' + key + '.lock')):
+            self.collect(delete=True)
             if pointer.exists() and not refresh:
                 return self.resolve(source=source)
+            # Leave space for the candidate instead of temporarily retaining
+            # three full captures. Current source generations and active pins
+            # remain protected even when older unused generations are pruned.
+            self.collect(keep=1, delete=True)
             identity = uuid.uuid4().hex
             target = self.volume / 'baselines' / identity
             report_dir = ROOT / 'build/test-reports/library-images' / identity
@@ -168,12 +181,14 @@ class Manager:
                     before = source.stat()
                     print('Capturing one consistent SQL/file baseline', flush=True)
                     command(*self.container_args(target, report_dir, name, donor=source), '-m',
-                            'tests.library_image_capture', 'export', str(source), pass_fds=(held.fileno(),))
+                            'tests.library_image.capture', 'export', str(source), pass_fds=(held.fileno(),))
+                    receipt['export_seconds'] = time.monotonic() - started
                     receipt.update(json.loads((target / '.capture.json').read_text()))
                     (target / '.capture.json').unlink()
                     print('Restoring and checking stable /library coordinates', flush=True)
                     command(*self.container_args(target, report_dir, name), '-m',
-                            'tests.library_image_capture', 'finish', pass_fds=(held.fileno(),))
+                            'tests.library_image.capture', 'finish', pass_fds=(held.fileno(),))
+                    receipt['restore_seconds'] = time.monotonic() - started - receipt['export_seconds']
                     after = source.stat()
                     if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
                         raise RuntimeError('Source database was replaced during capture; retry preparation')
@@ -216,6 +231,9 @@ class Manager:
     def workspace(self, *, report, readonly=False, **selection):
         self.initialize()
         report = Path(report).resolve()
+        roots = (ROOT / 'build/test-reports', Path('/tmp'))
+        if not any(report != root and report.is_relative_to(root) for root in roots) or report.is_relative_to(self.volume):
+            raise ValueError('Reports must be in a private directory under build/test-reports or /tmp, outside the image')
         report.mkdir(parents=True, exist_ok=True)
         identity = uuid.uuid4().hex
         name = 'tuneconsole-library-run-' + identity
@@ -300,7 +318,8 @@ class Manager:
                         protected.add(receipt.get('baseline', identity))
                         continue
                 try:
-                    with lease(self.volume / 'locks' / (identity + '.lock'), blocking=False):
+                    with lease(self.volume / 'locks' / (identity + '.lock'), blocking=False,
+                               wait_seconds=1 if delete and state.returncode == 0 else 0):
                         target = self.volume / ('baselines' if receipt['kind'] == 'prepare' else 'workspaces') / identity
                         if receipt['kind'] != 'readonly' and target.exists() and not (
                                 receipt['kind'] == 'prepare' and (self.volume / 'metadata' / (identity + '.json')).exists()):

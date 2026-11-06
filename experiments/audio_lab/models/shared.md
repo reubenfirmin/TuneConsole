@@ -46,8 +46,8 @@ installed-package checks establish parity, not population accuracy.
 
 ## Unselected pooling proposal
 
-#819's `vibe-pooling` is a prospective shared prediction-pooling evaluation;
-no run or qualification is established here. Respect any current execution hold.
+#819's [joint pooling](pooling.md) remains unqualified. Its development results
+and label lineage are separate from this classifier's adoption evidence.
 `freeze --db ISOLATED_SNAPSHOT --plan PLAN.json` uses read-only repository access;
 mask all target-recording observations, distinguish known/unseen artists, and
 keep optional held-out human targets out of every fit. Format-2 plans require

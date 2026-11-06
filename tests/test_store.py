@@ -166,13 +166,13 @@ def test_update_action_sets_undo(store, tmp_path):
     from yt_playlist.core import fao
 
     backup = tmp_path / 'backup.json'
-    fao.write_bytes(backup, json.dumps({'ytm_playlist_id': 'PL', 'tracks': []}).encode())
+    fao.write(backup, json.dumps({'ytm_playlist_id': 'PL', 'tracks': []}).encode())
     aid = store.actions.record_action("plan", "{}", "{}", "planned", "{}", 10.0)
     store.actions.update_action(aid, "executed", 20.0, undo_json=json.dumps({'backup': str(backup)}))
     a = store.actions.get_action(aid)
     assert a.status == "executed" and a.executed_at == 20.0
     retained = json.loads(a.undo_json)['backup']
-    assert fao.read_bytes(retained) == fao.read_bytes(backup)
+    assert fao.read(retained).bytes == fao.read(backup).bytes
     # An admitted same-state update preserves Undo when that argument is omitted.
     store.actions.update_action(aid, "executed", 30.0)
     assert store.actions.get_action(aid).undo_json == a.undo_json

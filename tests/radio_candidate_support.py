@@ -115,5 +115,49 @@ def intensity_inputs(monkeypatch):
         lambda store, keys: {key: deepcopy(profiles[key]) for key in keys})
     inputs_state.store, inputs_state.pools, inputs_state.quiet = store, pools, quiet
     inputs_state.modes = modes
+    inputs_state.tracks, inputs_state.vectors = all_tracks, vectors
     inputs_state.profiles, inputs_state.weights, inputs_state.reads = profiles, weights, reads
     return inputs_state
+
+
+@pytest.fixture
+def catalog_inputs(intensity_inputs):
+    """An unindexed published seed with controlled repository catalog pages.
+
+    Keep RadioCandidates and radio_catalog's paging/filtering real. Catalog SQL
+    eligibility, aliases, upload overrides and hydration retain their owners in
+    test_radio_catalog and test_stored_radio.
+    """
+    from yt_playlist.repos.radio_catalog import RadioCatalogRepo
+
+    inputs = intensity_inputs
+    inputs.indexed = False
+    seed = inputs.pools['1'][0]
+    seed['genre'] = 'Downtempo'
+    mode = inputs.modes['1']
+    inputs.modes.clear()
+    inputs.modes['1'] = mode
+    inputs.pools.clear()
+    inputs.pools['1'] = [seed]
+    rows = []
+
+    def add(prefix, count, *, artist=None):
+        added = []
+        for index in range(count):
+            key = f'{prefix}-{index}'
+            row = {**deepcopy(seed), 'id': len(rows) + 1, 'key': key,
+                   'video_id': key, 'title': key, 'artist': artist or key}
+            rows.append(row)
+            added.append(row)
+            inputs.tracks[key] = row
+            inputs.profiles[key] = row['musical']
+            inputs.vectors[key] = mode['centroid'].tobytes()
+        return added
+
+    inputs.store.radio_catalog.genre_labels = Mock(
+        spec=RadioCatalogRepo.genre_labels, side_effect=lambda: list({r['genre'] for r in rows}))
+    inputs.store.radio_catalog.genre_tracks = Mock(spec=RadioCatalogRepo.genre_tracks,
+        side_effect=lambda labels, after, limit: deepcopy([
+            r for r in rows if r['id'] > after and r['genre'] in labels][:limit]))
+    return SimpleNamespace(store=inputs.store, seed=seed, add=add,
+                           pages=inputs.store.radio_catalog.genre_tracks)

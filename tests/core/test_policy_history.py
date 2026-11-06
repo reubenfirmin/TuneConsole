@@ -1,4 +1,5 @@
 """Historical attribution survives body expiry, rollback and independent restore."""
+from tests.file_custody_support import export_owner, restore_owner
 import shutil
 
 import pytest
@@ -47,7 +48,7 @@ def test_impression_only_history_keeps_exact_shared_configuration_and_compact_id
     store.rec_proposals.put_proposals('home_choice',{'items':[{'pool_policy':live}]},10000)
     expected = store.rec_ledger.policy_configuration(historical)
     with monkeypatch.context() as patch:
-        patch.setattr(fao,'write_bytes',lambda *a,**k: (_ for _ in ()).throw(OSError('disk full')))
+        patch.setattr(fao,'write',lambda *a,**k: (_ for _ in ()).throw(OSError('disk full')))
         with pytest.raises(OSError,match='disk full'):
             policy_history.prepare(store,now=10000)
     assert store.rec_ledger.policy_configuration(historical) == expected
@@ -61,12 +62,12 @@ def test_impression_only_history_keeps_exact_shared_configuration_and_compact_id
     assert store.conn.execute('SELECT count(*) FROM historical_impression_policies').fetchone()[0] == 2
     assert owner.document(store.conn,historical)['base']['version'] == base[0]
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    manifest = owner.export(store.conn,tmp_path/'saved')
+    manifest = export_owner(store.conn, owner,tmp_path/'saved')
     restored = Store(tmp_path/'restored.db')
     try:
         store.conn.backup(restored.conn)
         shutil.rmtree(owner.directory(store.conn))
-        owner.restore(restored.conn,manifest)
+        restore_owner(restored.conn, 'policy-history', owner,manifest)
         restored.init_schema()
         assert restored.rec_ledger.policy_configuration(historical) == expected
         with atomic_write(restored):
@@ -95,7 +96,7 @@ def test_missing_required_history_is_a_failure_and_queued_policy_can_republish(s
     with atomic_write(store):
         store.conn.execute("DELETE FROM recommendation_policies WHERE version='old'")
     path = next(owner.references(store.conn))
-    fao.write_bytes(path,b'{}')
+    fao.write(path, b'{}')
     with pytest.raises(fao.CorruptFile):
         store.rec_ledger.policy_configuration('old')
 

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import FakeClient, _track
+from yt_playlist.core import fao
 from yt_playlist.library import executor, playlist_undo, playlist_backups, playlist_generated
 from yt_playlist.repos.base import GENERATED_GROUP
 
@@ -56,7 +57,7 @@ def test_every_deletion_path_backs_up_current_order_and_occurrences(store, sourc
             executor.execute_planned(store, aid, {iid: client}, 1000000)
     backup, = (tmp_path / "backups").glob("SOURCE_*.json")
     from yt_playlist.core import fao
-    saved = json.loads(fao.read_text(backup))
+    saved = json.loads(fao.read(backup).bytes.decode())
     assert [t["video_id"] for t in saved["tracks"]] == ["new", "one", "new"]
     assert [t["set_video_id"] for t in saved["tracks"]] == ["new-first", "one", "new-second"]
     assert [t["position"] for t in saved["tracks"]] == [0, 1, 2]
@@ -111,11 +112,11 @@ def test_failed_backup_does_not_delete_or_overwrite_prior_recovery(
     elif failure == "write":
         monkeypatch.setattr(playlist_backups.json, "dumps", fail)
     elif failure == "publish":
-        monkeypatch.setattr(playlist_backups.os, "replace", fail)
+        monkeypatch.setattr(fao.os, "replace", fail)
     elif failure == "fsync":
-        monkeypatch.setattr(playlist_backups.os, "fsync", fail)
+        monkeypatch.setattr(fao.os, "fsync", fail)
     else:
-        fsync = playlist_backups.os.fsync
+        fsync = fao.os.fsync
 
         def fail_at_boundary(fd):
             info = os.fstat(fd)
@@ -129,7 +130,7 @@ def test_failed_backup_does_not_delete_or_overwrite_prior_recovery(
                 fail()
             return fsync(fd)
 
-        monkeypatch.setattr(playlist_backups.os, "fsync", fail_at_boundary)
+        monkeypatch.setattr(fao.os, "fsync", fail_at_boundary)
     with pytest.raises(OSError, match="Backup unavailable"):
         executor.delete_playlist(store, pid, client, 2)
     if failure in {"file_fsync", "directory_fsync"}:
@@ -147,7 +148,7 @@ def test_failed_backup_does_not_delete_or_overwrite_prior_recovery(
     assert store.playlists.get_playlist(pid) is not None
     assert store.actions.get_actions() == []
     if failure in {"file_fsync", "directory_fsync"}:
-        monkeypatch.setattr(playlist_backups.os, "fsync", fsync)
+        monkeypatch.setattr(fao.os, "fsync", fsync)
         executor.delete_playlist(store, pid, client, 3)
         assert client.deleted == ["SOURCE"]
         assert store.actions.get_actions()[0].status == "executed"
@@ -174,5 +175,5 @@ def test_merge_gate_and_backup_use_the_same_source_snapshot(store, source, monke
     executor.execute_planned(store, aid, {iid: client}, 2)
     assert reads == ["SOURCE"]
     from yt_playlist.core import fao
-    payload = json.loads(fao.read_text(Path(json.loads(store.actions.get_action(aid).undo_json)["backup"])))
+    payload = json.loads(fao.read(Path(json.loads(store.actions.get_action(aid).undo_json)['backup'])).bytes.decode())
     assert [t["video_id"] for t in payload["tracks"]] == ["new", "one", "new"]

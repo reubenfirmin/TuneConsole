@@ -6,9 +6,8 @@ is introduced. Existing plain files remain readable during explicit conversion.
 """
 import bz2
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import hashlib
-import json
 import os
 from pathlib import Path
 import struct
@@ -58,30 +57,6 @@ def _try_file_lock(stream, *, exclusive):
     return unlock
 
 
-@contextmanager
-def retained_reader(root):
-    """Fence retained file bytes for the full lifetime of a SQL snapshot."""
-    root = Path(root)
-    missing, current = [], root
-    while not current.exists():
-        missing.append(current)
-        current = current.parent
-    root.mkdir(parents=True, exist_ok=True)
-    for directory in reversed(missing):
-        _sync(directory.parent)
-    with (root / '.readers.lock').open('a+b') as lock:
-        while True:
-            check_cancellable_work()
-            unlock = _try_file_lock(lock, exclusive=False)
-            if unlock is not None:
-                break
-            time.sleep(.025)
-        try:
-            yield
-        finally:
-            unlock()
-
-
 BLOCK = 64 * 1024
 MAX_BYTES = 512 * 1024 * 1024
 # A trailing custody record does not alter bz2.decompress's original output.
@@ -105,7 +80,7 @@ class FileChanged(RuntimeError):
 
 
 @dataclass(frozen=True)
-class FileStat:
+class _FileStat:
     logical_bytes: int
     compressed_bytes: int
     allocated_bytes: int
@@ -114,20 +89,6 @@ class FileStat:
     compressed: bool
     digest: str | None
     identity: tuple
-
-
-@dataclass(frozen=True)
-class Retention:
-    days: int
-    clock: str
-
-    def __post_init__(self):
-        if self.days not in (7, 30, 180) or self.clock not in ('ctime', 'mtime'):
-            raise ValueError('Retention requires 7, 30 or 180 days and ctime or mtime')
-
-    def eligible(self, info, now):
-        age = info.ctime_ns if self.clock == 'ctime' else info.mtime_ns
-        return age / 1e9 <= now - self.days * 86400
 
 
 def _identity(info):
@@ -148,49 +109,22 @@ def _info(stream):
             raise CorruptFile('Unsupported compressed managed file')
         digest = digest.hex()
     stream.seek(0)
-    return FileStat(logical, info.st_size, getattr(info, 'st_blocks', (info.st_size + 511)//512)*512,
+    return _FileStat(logical, info.st_size, getattr(info, 'st_blocks', (info.st_size + 511)//512)*512,
                     modified, changed, compressed, digest, _identity(info))
 
 
-def stat(path):
+def _stat(path):
     with Path(path).open('rb') as stream:
         return _info(stream)
 
 
-def exists(path):
+def _exists(path):
     # Existence is independent of validity. Required reads still report damage.
     return Path(path).is_file()
 
 
-def listing(root, pattern='**/*'):
-    """Logical files only, including both installed and converted formats."""
-    return (p for p in Path(root).glob(pattern) if p.is_file() and not p.name.startswith('.'))
-
-
-def walk_entries(root, *, pending=False, directories=False, max_depth=None):
-    """Stream a managed tree; directory entries count against caller work too."""
-    root = Path(root)
-    if not root.is_dir():
-        return
-    with os.scandir(root) as entries:
-        for entry in entries:
-            if entry.is_symlink():
-                yield None
-            elif entry.name.startswith('.'):
-                yield Path(entry.path) if pending and entry.name.startswith('.fao-pending-') and entry.is_file() else None
-            elif entry.is_dir(follow_symlinks=False):
-                yield Path(entry.path) if directories else None
-                if max_depth is None or max_depth > 0:
-                    yield from walk_entries(entry.path,pending=pending,directories=directories,
-                                            max_depth=None if max_depth is None else max_depth-1)
-            elif entry.is_file(follow_symlinks=False):
-                yield Path(entry.path)
-            else:
-                yield None
-
-
-class Reader:
-    def __init__(self, stream, info, max_bytes, work_bytes):
+class _Reader:
+    def __init__(self, stream, info, max_bytes, work_bytes, required_digest=None):
         if type(max_bytes) is not int or max_bytes < 0 or max_bytes > MAX_BYTES:
             raise ValueError('Invalid managed file byte budget')
         if info.logical_bytes > max_bytes:
@@ -200,6 +134,7 @@ class Reader:
         self.stream = bz2.BZ2File(stream, 'rb') if info.compressed else stream
         self.position, self.work = 0, 0
         self.digest = hashlib.sha256()
+        self.required_digest = required_digest
         self.verified = False
 
     def read(self, size=-1):
@@ -225,6 +160,8 @@ class Reader:
                 raise CorruptFile('Managed file is truncated')
             if self.info.digest and self.digest.hexdigest() != self.info.digest:
                 raise CorruptFile('Managed file failed integrity verification')
+            if self.required_digest is not None and self.digest.hexdigest() != self.required_digest:
+                raise CorruptFile('Managed content differs from its required content digest')
             # Require end of stream as well as the declared output length.
             try:
                 if self.stream.read(1):
@@ -250,14 +187,15 @@ class Reader:
 
 
 @contextmanager
-def open_reader(path, *, max_bytes=MAX_BYTES, work_bytes=None):
+def _open_reader(path, *, max_bytes=MAX_BYTES, work_bytes=None, digest=None):
     """Pin the inode for streams/leases. Collectors never remove active readers."""
     with Path(path).open('rb') as stream:
         unlock = _try_file_lock(stream, exclusive=False)
         if unlock is None:
             raise FileChanged('Managed file is being collected')
         try:
-            reader = Reader(stream, _info(stream), max_bytes, work_bytes if work_bytes is not None else max_bytes*2)
+            reader = _Reader(stream, _info(stream), max_bytes,
+                             work_bytes if work_bytes is not None else max_bytes*2, digest)
             try:
                 yield reader
             finally:
@@ -265,24 +203,6 @@ def open_reader(path, *, max_bytes=MAX_BYTES, work_bytes=None):
                     reader.stream.close()
         finally:
             unlock()
-
-
-def read_bytes(path, *, max_bytes=MAX_BYTES):
-    with open_reader(path, max_bytes=max_bytes) as stream:
-        return stream.read()
-
-
-def read_text(path, *, max_bytes=MAX_BYTES, encoding='utf-8'):
-    return read_bytes(path, max_bytes=max_bytes).decode(encoding)
-
-
-def _sync(directory):
-    if hasattr(os, 'O_DIRECTORY'):
-        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
 
 
 @contextmanager
@@ -296,35 +216,43 @@ def _publication(path):
                 break
             time.sleep(.01)
         try:
-            # Precreated directories and retries after partial sync failures
-            # need the same boundary as newly created shards. Existence does
-            # not prove durability. Make the complete pathname durable before
-            # renaming; the final leaf sync then persists the file entry.
-            directory = path.parent.resolve()
-            for ancestor in (directory, *directory.parents):
-                _sync(ancestor)
             yield
         finally:
             unlock()
 
 
-class PreparedFile:
-    """Verified same-directory bytes prepared before a short guarded publish."""
-    def __init__(self, path, pending, expected):
-        self.path, self.pending, self.expected = path, pending, expected
-        self.lease = open_reader(pending)
+def _sync_directory(path):
+    if os.name != 'nt':
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+class _PreparedFile:
+    """Same-directory bytes prepared before a short guarded publish."""
+    def __init__(self, path, pending, expected, durable=False):
+        self.path, self.pending, self.expected, self.durable = path, pending, expected, durable
+        self.lease = _open_reader(pending)
         self.lease.__enter__()
 
     def publish(self):
         if self.pending is None:
             raise RuntimeError('Prepared publication has already been consumed')
         with _publication(self.path):
-            identity = stat(self.path).identity if exists(self.path) else False
+            identity = _identity(self.path.stat()) if _exists(self.path) else False
             if self.expected is not None and identity != self.expected:
                 raise FileChanged('Prepared publication observed a replaced source')
+            if self.durable:
+                # Only recovery files authorizing an external deletion request
+                # durable publication, including directories created by callers.
+                for parent in reversed(self.path.parent.parents):
+                    _sync_directory(parent)
             os.replace(self.pending, self.path)
             self.pending = None
-            _sync(self.path.parent)
+            if self.durable:
+                _sync_directory(self.path.parent)
         self.lease.__exit__(None,None,None)
         self.lease = None
 
@@ -336,10 +264,18 @@ class PreparedFile:
             self.pending.unlink(missing_ok=True)
             self.pending = None
 
+    def __enter__(self):
+        return self
 
-def _write(path, chunks, *, max_bytes, age=None, expected=None, immutable=False, staged=False, expected_digest=None):
-    """A failed write/verification leaves the last published source untouched."""
+    def __exit__(self, *exc):
+        self.close()
+
+
+def _write(path, chunks, *, max_bytes, age=None, expected=None, expected_digest=None, durable=False):
+    """A failed preparation leaves the last published source untouched."""
     path = Path(path)
+    if type(max_bytes) is not int or not 0 <= max_bytes <= MAX_BYTES:
+        raise ValueError('Invalid managed file byte budget')
     path.parent.mkdir(parents=True, exist_ok=True)
     pending = None
     try:
@@ -359,154 +295,124 @@ def _write(path, chunks, *, max_bytes, age=None, expected=None, immutable=False,
             now = time.time_ns()
             modified, changed = (age.mtime_ns, age.ctime_ns) if age is not None else (now, now)
             output.write(TRAILER.pack(MAGIC, size, modified, changed, digest.digest()))
-            output.flush()
-            os.fsync(output.fileno())
-        # Verify in bounded blocks before atomic publication, including ENOSPC
-        # and malformed compressor output. No second full uncompressed copy.
-        with open_reader(pending, max_bytes=max_bytes) as verify:
-            while verify.read(BLOCK):
-                pass
-        os.utime(pending, ns=(modified, modified))
-        if staged:
-            result = PreparedFile(path, pending, expected)
-            pending = None
-            return result
-        with _publication(path):
-            if expected is not None and (not exists(path) or stat(path).identity != expected):
-                raise FileChanged('Managed publication replaced a stale source')
-            if immutable and exists(path):
-                current = stat(path)
-                if current.logical_bytes != size:
-                    raise CorruptFile('Immutable managed publication differs from its content digest')
-                with open_reader(path, max_bytes=max_bytes) as reader:
-                    found = hashlib.sha256()
-                    while chunk := reader.read(BLOCK):
-                        found.update(chunk)
-                if found.digest() != digest.digest():
-                    raise CorruptFile('Immutable managed publication differs from its content digest')
-                if age is None or (current.mtime_ns, current.ctime_ns) == (modified, changed):
-                    return path
-                # Recovery can encounter a previously copied identical body.
-                # An explicit source age remains authoritative for its clocks.
-            os.replace(pending, path)
-            pending = None
-            _sync(path.parent)
-        return path
-    finally:
-        if pending is not None:
-            pending.unlink(missing_ok=True)
-
-
-def write_bytes(path, data, *, immutable=False, max_bytes=MAX_BYTES, age=None):
-    """Publish bytes, preserving pinned source clocks for coordinate rewrites."""
-    if not isinstance(data, bytes):
-        raise TypeError('Managed publication requires bytes')
-    return _write(path, (memoryview(data)[i:i+BLOCK] for i in range(0, len(data), BLOCK)),
-                  max_bytes=max_bytes, immutable=immutable, age=age)
-
-
-def write_compressed(path, data):
-    """Compress bytes and atomically replace the caller's chosen file.
-
-    Keep the installed encoding readable by existing consumers. Cache owners
-    need no fsync protocol, publication lock or write-time round-trip check.
-    """
-    if not isinstance(data, bytes):
-        raise TypeError('Managed publication requires bytes')
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pending = None
-    try:
-        with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.fao-pending-', delete=False) as output:
-            pending = Path(output.name)
-            output.write(bz2.compress(data))
-            now = time.time_ns()
-            output.write(TRAILER.pack(MAGIC, len(data), now, now, hashlib.sha256(data).digest()))
-        os.replace(pending, path)
-        pending = None
-        return path
-    finally:
-        if pending is not None:
-            pending.unlink(missing_ok=True)
-
-
-def stage_bytes(path, data, *, expected=None, max_bytes=MAX_BYTES):
-    """Compress, fsync and verify off-lock; caller closes even on a stale job."""
-    if not isinstance(data, bytes):
-        raise TypeError('Managed publication requires bytes')
-    return _write(path, (memoryview(data)[i:i+BLOCK] for i in range(0,len(data),BLOCK)),
-                  max_bytes=max_bytes, expected=expected, staged=True)
-
-
-def convert(path, *, max_bytes=MAX_BYTES):
-    """One restartable explicit preparation unit; never called at startup."""
-    with open_reader(path, max_bytes=max_bytes) as source:
-        if source.info.compressed:
-            return False
-        _write(path, iter(lambda: source.read(BLOCK), b''), max_bytes=max_bytes,
-               age=source.info, expected=source.info.identity)
-        return True
-
-
-def copy(source, target, *, max_bytes=MAX_BYTES, digest=None):
-    """Verify before replacement, preserving clocks and an optional owner digest."""
-    with open_reader(source, max_bytes=max_bytes) as reader:
-        if not reader.info.compressed:
-            return _write(target, iter(lambda: reader.read(BLOCK), b''), max_bytes=max_bytes,
-                          age=reader.info, expected_digest=digest)
-        # Existing managed bytes already contain their encoding and custody
-        # clocks. Copy them once and independently verify the destination,
-        # rather than decompressing, recompressing and decompressing again.
-        path, pending = Path(target), None
-        path.parent.mkdir(parents=True,exist_ok=True)
-        try:
-            with tempfile.NamedTemporaryFile(dir=path.parent,prefix='.fao-pending-',delete=False) as output:
-                pending = Path(output.name)
-                reader.raw.seek(0)
-                while chunk := reader.raw.read(BLOCK):
-                    check_cancellable_work()
-                    output.write(chunk)
+            os.utime(pending, ns=(modified, modified))
+            if durable:
                 output.flush()
                 os.fsync(output.fileno())
-            with open_reader(pending,max_bytes=max_bytes) as verify:
-                if (verify.info.logical_bytes,verify.info.digest,verify.info.mtime_ns,verify.info.ctime_ns)!=\
-                        (reader.info.logical_bytes,reader.info.digest,reader.info.mtime_ns,reader.info.ctime_ns):
-                    raise CorruptFile('Managed copy changed its custody record')
-                while verify.read(BLOCK):
-                    pass
-                if digest is not None and verify.digest.hexdigest() != digest:
-                    raise CorruptFile('Managed copy differs from its required content digest')
-            os.utime(pending,ns=(reader.info.mtime_ns,reader.info.mtime_ns))
-            with _publication(path):
-                os.replace(pending,path)
-                pending = None
-                _sync(path.parent)
-            return path
-        finally:
-            if pending is not None:
-                pending.unlink(missing_ok=True)
+        result = _PreparedFile(path, pending, expected, durable)
+        pending = None
+        return result
+    finally:
+        if pending is not None:
+            pending.unlink(missing_ok=True)
 
 
-def touch(path, *, mtime_ns=None, max_bytes=MAX_BYTES):
-    """Renew logical modification time while preserving exact bytes and creation age."""
-    modified = time.time_ns() if mtime_ns is None else mtime_ns
-    if type(modified) is not int or modified < 0:
-        raise ValueError('Managed modification time must be nonnegative integer nanoseconds')
-    with open_reader(path, max_bytes=max_bytes) as reader:
-        return _write(path, iter(lambda: reader.read(BLOCK), b''), max_bytes=max_bytes,
-            age=replace(reader.info, mtime_ns=modified), expected=reader.info.identity)
+def write(path, content):
+    """Compress and atomically publish bytes or the result of read()."""
+    with prepare(path, content) as pending:
+        if not isinstance(content, Content) or content.path != Path(path):
+            # Ordinary writes replace atomically. Only read/modify/write needs
+            # a source identity; SQL owners already guard their own revisions.
+            pending.expected = None
+        pending.publish()
+    return Path(path)
 
 
-def relocate(source,target,*,max_bytes=MAX_BYTES):
-    """Verified relocation; a concurrent replacement remains at its old owner."""
-    if Path(source).resolve()==Path(target).resolve():
-        raise ValueError('Relocation needs a separate destination')
-    before = stat(source)
-    copy(source,target,max_bytes=max_bytes)
-    return delete(source,expected=before.identity,missing_ok=True)
+def read(path, *, max_bytes=MAX_BYTES, work_bytes=None, digest=None):
+    """Return bounded file content; decoding and reader leases are implicit.
+
+    Use .bytes for an entire document, or a with block for streaming. Metadata
+    describes the logical file, including the supported installed plain format.
+    Passing this content to write/prepare streams a verified copy and preserves
+    its timestamps. A write back to the same path also fences replacement.
+    """
+    return Content(path=Path(path), max_bytes=max_bytes, work_bytes=work_bytes, digest=digest)
 
 
-def delete(path, *, expected=None, missing_ok=False):
+def prepare(path, content):
+    """Prepare a temporary file; the caller chooses when to publish or close."""
+    path = Path(path)
+    expected = _identity(path.stat()) if _exists(path) else False
+    if isinstance(content, bytes):
+        chunks = (memoryview(content)[i:i+BLOCK] for i in range(0,len(content),BLOCK))
+        return _write(path, chunks, max_bytes=MAX_BYTES, expected=expected)
+    if not isinstance(content, Content):
+        raise TypeError('Managed publication requires bytes or file content')
+    if content.data is not None:
+        chunks = (memoryview(content.data)[i:i+BLOCK] for i in range(0,len(content.data),BLOCK))
+        return _write(path, chunks, max_bytes=content.max_bytes, age=content.metadata,
+                      expected=content.expected if content.path == path else expected,
+                      expected_digest=content.required_digest, durable=content.durable)
+    with content as source:
+        return _write(path, iter(lambda: source.read(BLOCK), b''), max_bytes=content.max_bytes,
+                      age=source.info, expected=source.info.identity if content.path == path else expected,
+                      expected_digest=content.required_digest, durable=content.durable)
+
+
+class Content:
+    """A lazy read result, or replacement bytes retaining a read's metadata.
+
+    durable=True is reserved for recovery bytes authorizing external deletion.
+    Ordinary cache/evidence content requires no synchronous disk publication.
+    """
+    def __init__(self, data=None, *, path=None, metadata=None, max_bytes=MAX_BYTES, work_bytes=None,
+                 digest=None, durable=False):
+        if data is not None and not isinstance(data, bytes):
+            raise TypeError('Managed content requires bytes')
+        self.path, self.data, self.metadata = path, data, metadata
+        self.max_bytes, self.work_bytes = max_bytes, work_bytes
+        self.expected = metadata.identity if metadata is not None else None
+        self.required_digest = digest
+        self.durable = durable
+
+    @property
+    def bytes(self):
+        if self.data is not None:
+            return self.data
+        with self as source:
+            data = source.read()
+        return data
+
+    @property
+    def info(self):
+        if self.metadata is None:
+            self.metadata = _stat(self.path)
+        return self.metadata
+
+    @property
+    def digest(self):
+        digest = hashlib.sha256()
+        with self as stream:
+            while chunk := stream.read(BLOCK):
+                digest.update(chunk)
+            return stream.info.logical_bytes, digest.hexdigest()
+
+    def replacing(self, data):
+        """Keep the source identity when preparing edited content."""
+        return Content(data, path=self.path, metadata=self.info, max_bytes=self.max_bytes, durable=self.durable)
+
+    def __enter__(self):
+        self.reader = _open_reader(self.path, max_bytes=self.max_bytes,
+                                   work_bytes=self.work_bytes, digest=self.required_digest)
+        source = self.reader.__enter__()
+        if self.metadata is not None and self.path is not None and source.info.identity != self.metadata.identity:
+            self.reader.__exit__(None, None, None)
+            raise FileChanged('Managed content observed a replaced source')
+        self.metadata = source.info
+        self.expected = source.info.identity
+        return source
+
+    def __exit__(self, *exc):
+        return self.reader.__exit__(*exc)
+
+    def materialize(self):
+        return _materialize(self)
+
+    def response(self, **kwargs):
+        return _response(self, **kwargs)
+
+
+def delete(path, *, expected=None, missing_ok=True):
     """Conditional deletion fences stale jobs and active streams/materializations."""
     path = Path(path)
     with _publication(path):
@@ -519,7 +425,6 @@ def delete(path, *, expected=None, missing_ok=False):
                     return False
                 try:
                     path.unlink()
-                    _sync(path.parent)
                     return True
                 finally:
                     unlock()
@@ -529,35 +434,12 @@ def delete(path, *, expected=None, missing_ok=False):
             return False
 
 
-def expire(path, policy, *, now, required, expired):
-    """Owner supplies a fenced reference check and records intentional absence.
-
-    Caller holds its domain's publication/SQL reservation throughout. Persist
-    expiry intent before removal: restart may finish removal, never refetch.
-    """
-    info = stat(path)
-    if required() or not policy.eligible(info, now):
-        return False
-    expired()
-    return delete(path, expected=info.identity, missing_ok=True)
-
-
-def discard_unpublished(path,now):
-    """Seven-day crash recovery for private streams lacking a valid trailer."""
-    path = Path(path)
-    if not path.name.startswith('.fao-pending-'):
-        raise ValueError('Only unpublished FAO bytes may use inode-only recovery')
-    info = path.stat()
-    return (delete(path,expected=_identity(info),missing_ok=True)
-            if info.st_ctime<=now-7*86400 else False)
-
-
 @contextmanager
-def materialize(path, *, max_bytes=MAX_BYTES):
+def _materialize(content):
     """Bounded real-path lease for third-party decoders and HTTP range serving."""
-    with open_reader(path, max_bytes=max_bytes) as source:
+    with content as source:
         with tempfile.TemporaryDirectory(prefix='tuneconsole-fao-lease-') as directory:
-            target = Path(directory) / Path(path).name
+            target = Path(directory) / content.path.name
             with target.open('wb') as output:
                 while chunk := source.read(BLOCK):
                     output.write(chunk)
@@ -565,93 +447,7 @@ def materialize(path, *, max_bytes=MAX_BYTES):
             yield target
 
 
-def root_for_database(path, memory_key, domain):
-    if path:
-        path = Path(path).resolve()
-        return path.with_name(path.name + '.' + domain)
-    return Path(tempfile.gettempdir()) / ('tuneconsole-' + domain) / str(memory_key)
-
-
-def directory(conn, domain):
-    path = conn.execute('PRAGMA database_list').fetchone()[2]
-    return root_for_database(path, getattr(conn, '_policy_memory_key', id(conn)), domain)
-
-
-@contextmanager
-def collector(root):
-    """Try the existing domain snapshot fence; a busy owner is retried later."""
-    root = Path(root)
-    root.mkdir(parents=True, exist_ok=True)
-    with (root / '.readers.lock').open('a+b') as stream:
-        unlock = _try_file_lock(stream, exclusive=True)
-        try:
-            yield unlock is not None
-        finally:
-            if unlock is not None:
-                unlock()
-
-
-def _hash(path):
-    digest = hashlib.sha256()
-    with open_reader(path) as stream:
-        while chunk := stream.read(BLOCK):
-            digest.update(chunk)
-        return stream.info.logical_bytes, digest.hexdigest()
-
-
-def export(root, paths, target):
-    """Backup an explicit domain inventory, never discover owners implicitly."""
-    root, target = Path(root).resolve(), Path(target).resolve()
-    if root == target:
-        raise ValueError('Managed backup needs a separate destination')
-    entries = []
-    for source in sorted(set(map(Path, paths))):
-        relative = source.resolve().relative_to(root)
-        destination = target / relative
-        copy(source, destination)
-        # The manifest describes the pinned bytes actually copied, even if the
-        # producer replaced its publication between these operations.
-        size, digest = _hash(destination)
-        entries.append([relative.as_posix(), size, digest])
-    manifest = target / 'manifest.json'
-    write_bytes(manifest, json.dumps({'format': 'fao-backup-1', 'files': entries}, separators=(',', ':')).encode())
-    return str(manifest)
-
-
-def restore(root, manifest, *, expected):
-    root, manifest = Path(root).resolve(), Path(manifest)
-    document = json.loads(read_bytes(manifest))
-    if not isinstance(document, dict) or set(document) != {'format', 'files'} or document['format'] != 'fao-backup-1':
-        raise CorruptFile('Unsupported managed backup')
-    required = {Path(path).resolve().relative_to(root).as_posix() for path in expected}
-    root.mkdir(parents=True, exist_ok=True)
-    # A hidden private tree is outside managed traversal. Stage sequentially so
-    # large backups do not retain an open reader/lease for every member.
-    with tempfile.TemporaryDirectory(prefix='.fao-restore-', dir=root) as workspace:
-        admitted = {}
-        for name, size, digest in document['files']:
-            relative = Path(name)
-            if relative.is_absolute() or '..' in relative.parts or name not in required or name in admitted:
-                raise CorruptFile('Managed backup differs from its domain owners')
-            source = manifest.parent / relative
-            staged = Path(workspace) / relative
-            copy(source, staged)
-            admitted[name] = staged
-            # Verify private bytes, then publish those same bytes. The backup
-            # path can change afterwards without changing the admitted content.
-            if _hash(staged) != (size, digest):
-                raise CorruptFile('Managed backup differs from its content digest')
-        if admitted.keys() != required:
-            raise CorruptFile('Managed backup lacks required domain files')
-        for name, staged in admitted.items():
-            destination = root / name
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            with _publication(destination):
-                os.replace(staged, destination)
-                _sync(destination.parent)
-
-
-def response(path, *, media_type=None, filename=None, headers=None, max_bytes=MAX_BYTES):
+def _response(content, *, media_type=None, filename=None, headers=None):
     """Deliver original bytes with FileResponse's standard range/cache contract."""
     from starlette.responses import FileResponse
     from starlette.concurrency import run_in_threadpool
@@ -661,7 +457,7 @@ def response(path, *, media_type=None, filename=None, headers=None, max_bytes=MA
         return {'content-length':str(size),'last-modified':formatdate(modified//10**9,usegmt=True),
                 'etag':'"'+hashlib.md5(f'{modified}:{size}'.encode(),usedforsecurity=False).hexdigest()+'"'}
 
-    info = stat(path)
+    path, info = content.path, content.info
     physical = Path(path).stat()
     logical = os.stat_result((physical.st_mode, physical.st_ino, physical.st_dev,
         physical.st_nlink, physical.st_uid, physical.st_gid, info.logical_bytes,
@@ -669,7 +465,7 @@ def response(path, *, media_type=None, filename=None, headers=None, max_bytes=MA
 
     class LeasedResponse(FileResponse):
         async def __call__(self, scope, receive, send):
-            lease = materialize(path, max_bytes=max_bytes)
+            lease = _materialize(content)
             materialized = await run_in_threadpool(lease.__enter__)
             try:
                 self.path = materialized

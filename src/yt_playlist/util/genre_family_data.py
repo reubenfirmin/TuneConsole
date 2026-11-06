@@ -11,7 +11,7 @@ _DATA = Path(__file__).parent.parent / 'data' / 'genre_families.json'
 
 @functools.lru_cache(maxsize=1)
 def load():
-    raw = json.loads(fao.read_bytes(_DATA))
+    raw = json.loads(fao.read(_DATA).bytes)
     families = raw['families']
     adjacency = raw['adjacency']
     energy = raw.get('energy', {})

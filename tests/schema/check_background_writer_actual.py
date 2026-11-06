@@ -12,7 +12,7 @@ import time
 import pytest
 
 from tests.schema.actual_library import copy_readonly_library
-from tests.library_image_fixtures import report_file
+from tests.library_image.fixtures import report_file
 from yt_playlist.core import radio_storage
 from yt_playlist.core.activity import check_cancellable_work, work_budget
 from yt_playlist.core.store import Store

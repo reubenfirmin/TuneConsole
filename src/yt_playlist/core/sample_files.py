@@ -7,7 +7,7 @@ import tempfile
 from itertools import zip_longest
 
 from yt_playlist.core.activity import check_cancellable_work
-from yt_playlist.core.evidence_ledger import _mkdir, _sync_directory, canonical
+from yt_playlist.core.evidence_ledger import canonical
 from . import fao
 
 MAX_BYTES = 256 * 1024
@@ -38,14 +38,14 @@ def _publish(root, encoded, *, age=None):
     # interrupted migrations/retries reuse an already durable file safely.
     digest = hashlib.sha256(encoded).hexdigest()
     path = Path(root) / digest[:2] / (digest + '.json')
-    fao.write_bytes(path, encoded, immutable=True, age=age)
+    fao.write(path, fao.Content(encoded, metadata=age))
     return str(path)
 
 
 def _encoded(filename, *, max_bytes=MAX_BYTES, with_age=False):
     """Bound external input and verify the immutable content address on every read."""
     path = Path(filename)
-    with fao.open_reader(path) as stream:
+    with fao.read(path) as stream:
         encoded = stream.read(max_bytes + 1)
         age = stream.info
     if len(encoded) > max_bytes:

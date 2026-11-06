@@ -1,4 +1,6 @@
 """Actual-library policy/archive evidence, confined to disposable SQL/files."""
+from tests.file_custody_support import export_owner, restore_owner
+from yt_playlist.core import file_collection
 import argparse
 from collections import Counter
 from contextlib import closing
@@ -139,19 +141,19 @@ def run(source,report,domain='both'):
                 owners = {domain:owners[domain]}
             for name,owner in owners.items():
                 live = set(owner.references(store.conn))
-                all_paths = list(fao.listing(owner.directory(store.conn),'**/*.json'))
+                all_paths = list(owner.directory(store.conn).glob('**/*.json'))
                 result['files'][name] = {}
                 for category,paths in (('live',live),('including_superseded_pages',all_paths)):
-                    infos = [fao.stat(path) for path in paths]
+                    infos = [fao.read(path).info for path in paths]
                     result['files'][name][category] = {'count':len(infos),'logical':sum(i.logical_bytes for i in infos),
                         'compressed':sum(i.compressed_bytes for i in infos),'allocated':sum(i.allocated_bytes for i in infos)}
-                manifests[name] = owner.export(store.conn,scratch/'saved'/name)
+                manifests[name] = export_owner(store.conn, owner,scratch/'saved'/name)
             restored = Store(scratch/'restored.db')
             try:
                 store.conn.backup(restored.conn)
                 for name,owner in owners.items():
                     shutil.rmtree(owner.directory(store.conn))
-                    owner.restore(restored.conn,manifests[name])
+                    restore_owner(restored.conn, {'archives':'legacy-journals','policies':'policy-history'}[name], owner,manifests[name])
                 restored.init_schema()
                 verify_archives(restored.conn)
                 assert all(policy_storage.configuration(restored.conn,version)==value for version,value in configs.items())

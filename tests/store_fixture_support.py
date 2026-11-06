@@ -11,6 +11,14 @@ from yt_playlist.core import repair
 from yt_playlist.core.db_revisions import Revisions
 
 
+def revision_definitions(conn):
+    """Read the complete connection-local snapshot guard definitions."""
+    return tuple(conn.execute(
+        "SELECT type,name,sql FROM sqlite_temp_schema WHERE "
+        "(type='trigger' AND name LIKE 'snapshot_revision_%') OR "
+        "(type='table' AND name='snapshot_revisions') ORDER BY type,name").fetchall())
+
+
 class PristineSchema(sqlite3.Connection):
     """Keep genuinely generated connection-local guards beside the SQL seed."""
 

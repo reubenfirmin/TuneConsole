@@ -1,37 +1,24 @@
-"""Cache writes compress and replace; round-trip verification belongs here."""
-import bz2
-
+"""All writes use the same compression and atomic replacement path."""
 import pytest
 
 from yt_playlist.core import fao
 
 
-@pytest.mark.parametrize('body', [b'', bytes(range(256)), ('été 東京 ' * 10000).encode()])
-def test_compressed_write_round_trips_without_syncs_or_rereading(tmp_path, monkeypatch, body):
-    path = tmp_path / 'business-chosen' / 'menu.cache'
+@pytest.mark.parametrize('staged', [False, True])
+def test_publication_does_not_fsync_or_decompress_its_new_bytes(tmp_path, monkeypatch, staged):
+    path = tmp_path / 'owner' / 'shard' / 'document'
+    fao.write(path, b'previous')
 
     def forbidden(*args, **kwargs):
-        pytest.fail('Cache write attempted a durability protocol or read-back')
+        pytest.fail('Write attempted fsync or a decompression read-back')
 
     with monkeypatch.context() as patch:
         patch.setattr(fao.os, 'fsync', forbidden)
-        patch.setattr(fao, 'open_reader', forbidden)
-        patch.setattr(fao, '_publication', forbidden)
-        assert fao.write_compressed(path, body) == path
-    assert bz2.decompress(path.read_bytes()) == body
-    assert fao.read_bytes(path) == body
-    assert not list(path.parent.glob('.fao-*'))
-
-
-def test_failed_replace_keeps_the_previous_cache_and_removes_pending_file(tmp_path, monkeypatch):
-    path = tmp_path / 'menu.cache'
-    fao.write_compressed(path, b'previous menu')
-
-    def interrupted(*args):
-        raise OSError('replacement failed')
-
-    monkeypatch.setattr(fao.os, 'replace', interrupted)
-    with pytest.raises(OSError, match='replacement failed'):
-        fao.write_compressed(path, b'replacement menu')
-    assert fao.read_bytes(path) == b'previous menu'
-    assert list(tmp_path.iterdir()) == [path]
+        patch.setattr(fao._Reader, 'read', forbidden)
+        if staged:
+            with fao.prepare(path, b'new content') as pending:
+                pending.publish()
+        else:
+            fao.write(path, b'new content')
+    assert fao.read(path).bytes == b'new content'
+    assert not list(path.parent.glob('.fao-pending-*'))

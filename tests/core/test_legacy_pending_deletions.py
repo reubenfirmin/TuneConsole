@@ -87,7 +87,7 @@ def test_imported_pending_requires_readback_before_keeper_writes(tmp_path,monkey
         action, = store.actions.get_actions()
         entry, = json.loads(action.undo_json)['deletions']
         assert entry['phase']=='pending' and client.attempts==['SOURCE']
-        backup = fao.read_bytes(entry['backup'])
+        backup = fao.read(entry['backup']).bytes
         if already_converted:
             # Recreate the installed v98 bug using its actual conversion/runner.
             original = action_work._step
@@ -112,7 +112,7 @@ def test_imported_pending_requires_readback_before_keeper_writes(tmp_path,monkey
             assert (step['phase'],step['outcome'])==('pending','not_sent')
             assert step['backup_status']=='verified'
             assert step['backup_digest']==hashlib.sha256(backup).hexdigest()
-            assert fao.read_bytes(step['backup_filename'])==backup
+            assert fao.read(step['backup_filename']).bytes==backup
             assert json.loads(store.actions.get_action(action.id).undo_json)['deletions'][0]['phase']=='uncertain'
             JOB.install(store.conn)
             prepared = JOB.step(store.conn, batch_size=1)
@@ -123,7 +123,7 @@ def test_imported_pending_requires_readback_before_keeper_writes(tmp_path,monkey
             original, = store.conn.execute('SELECT source_snapshot FROM prepared_deletion_originals').fetchone()
             assert json.loads(original)['step']['outcome'] == 'not_sent'
         else:
-            assert fao.read_bytes(entry['backup']) == backup
+            assert fao.read(entry['backup']).bytes == backup
         assert store.actions.get_action(action.id).status=='delete_pending'
         if not remote_present:
             del client._tracks['SOURCE']

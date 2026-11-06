@@ -1,4 +1,7 @@
 """Exact profile heads survive partial conversion, failed writes and recovery."""
+from tests.file_custody_support import export_owner, restore_owner
+from tests.file_content_support import read_bytes as original_bytes
+from tests.file_content_support import patch_byte_reads
 import hashlib
 import json
 import shutil
@@ -7,7 +10,7 @@ import time
 
 import pytest
 
-from yt_playlist.core import fao, policy_documents, profile_files as owner
+from yt_playlist.core import fao, file_collection, policy_documents, profile_files as owner
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.preparation import profiles
 from yt_playlist.core.store import Store
@@ -35,11 +38,11 @@ def test_profile_page_batches_heads_and_validates_mixed_publications(store, monk
     keys, bodies = seed(store)
     profiles.prepare(store, limit=1)
     statements, opened = [], []
-    original = fao.read_bytes
+    original = original_bytes
     def read(path, **options):
         opened.append(path)
         return original(path, **options)
-    monkeypatch.setattr(fao, 'read_bytes', read)
+    patch_byte_reads(monkeypatch, read)
     store.conn.set_trace_callback(statements.append)
     try:
         assert owner.read_page(store.conn, 'recording', keys) == {
@@ -60,11 +63,11 @@ def test_profile_page_reuses_a_chunk_for_interleaved_identity_order(store, monke
     keys, bodies = seed(store)
     profiles.prepare(store)
     opened = []
-    read = fao.read_bytes
+    read = original_bytes
     def counted(path, **options):
         opened.append(path)
         return read(path, **options)
-    monkeypatch.setattr(fao, 'read_bytes', counted)
+    patch_byte_reads(monkeypatch, counted)
     assert owner.read_page(store.conn, 'recording', list(reversed(keys))) == {
         key: json.loads(raw) for key, raw in bodies.items()}
     assert len(opened) == 1
@@ -73,7 +76,7 @@ def test_profile_page_reuses_a_chunk_for_interleaved_identity_order(store, monke
 def test_exact_partial_conversion_budgets_and_failed_file_publication(store, monkeypatch):
     keys, bodies = seed(store)
     with monkeypatch.context() as patch:
-        patch.setattr(fao, 'write_bytes', lambda *a, **k: (_ for _ in ()).throw(OSError('disk full')))
+        patch.setattr(fao, 'write', lambda *a, **k: (_ for _ in ()).throw(OSError('disk full')))
         with pytest.raises(OSError, match='disk full'):
             profiles.prepare(store, limit=1)
     assert dict(store.conn.execute('SELECT identity_key,payload FROM rec_musical_profiles')) == bodies
@@ -95,12 +98,12 @@ def test_cached_profile_page_keeps_file_and_caller_budget_checks(store, monkeypa
     assert owner.read_page(store.conn, 'recording', keys) == {
         key: json.loads(body) for key, body in bodies.items()}
     with monkeypatch.context() as patch:
-        patch.setattr(fao, 'read_bytes', lambda *a, **k: pytest.fail('Unchanged chunk was reopened'))
+        patch_byte_reads(patch, lambda *a, **k: pytest.fail('Unchanged chunk was reopened'))
         assert owner.read_page(store.conn, 'recording', keys)[keys[0]] == json.loads(bodies[keys[0]])
         with pytest.raises(Exception, match='work budget'):
             owner.read(store.conn, 'recording', keys[0], cache=owner.Cache(work_bytes=1))
     path = next(owner.references(store.conn))
-    fao.write_bytes(path, b'{}')
+    fao.write(path, b'{}')
     with pytest.raises(fao.CorruptFile, match='publication'):
         owner.read_page(store.conn, 'recording', keys)
     path.unlink()
@@ -121,16 +124,16 @@ def test_snapshot_retains_old_body_and_independent_restore(store, tmp_path):
     assert owner.read(store.conn, 'recording', keys[0]) == raw
     store.retention.collect_musical_profiles(10**10)
     assert owner.read(store.conn, 'recording', keys[1]) == bodies[keys[1]]
-    manifest = owner.export(store.conn, tmp_path / 'saved')
+    manifest = export_owner(store.conn, owner, tmp_path / 'saved')
     restored = Store(tmp_path / 'restored.db')
     try:
         store.conn.backup(restored.conn)
         shutil.rmtree(owner.directory(store.conn))
-        owner.restore(restored.conn, manifest)
+        restore_owner(restored.conn, 'profiles', owner, manifest)
         restored.init_schema()
         assert restored.musical_profiles.by_keys(keys)[keys[0]] == json.loads(raw)
         path = next(owner.references(restored.conn))
-        fao.write_bytes(path, b'{}')
+        fao.write(path, b'{}')
         with pytest.raises(fao.CorruptFile):
             restored.musical_profiles.by_keys(keys)
     finally:
@@ -155,13 +158,13 @@ def test_collection_bounds_dense_shards_and_resumes_behind_reader_and_writer_fen
             if publication[0] != 0:
                 continue
             path = root/'recording'/'00'/(publication.hex()+'.'+extension)
-            fao.write_bytes(path, encoded, immutable=True)
+            fao.write(path, encoded)
             paths.append(path)
             publications.append(publication)
         conn.execute('INSERT INTO heads VALUES (?)', (publications[0],))
         conn.commit()
         examined, opened = [], []
-        walk = fao.walk_entries
+        walk = file_collection.walk_entries
 
         def counted(*args, **kwargs):
             opened.append(args[0])
@@ -169,8 +172,7 @@ def test_collection_bounds_dense_shards_and_resumes_behind_reader_and_writer_fen
                 examined.append((entry, conn.in_transaction))
                 yield entry
 
-        monkeypatch.setattr(fao, 'walk_entries', counted)
-        monkeypatch.setattr(fao, 'listing', lambda *a, **k: pytest.fail('Collection must not enumerate the owner'))
+        monkeypatch.setattr(file_collection, 'walk_entries', counted)
 
         def step(now):
             examined.clear()
@@ -209,7 +211,7 @@ def test_collection_bounds_dense_shards_and_resumes_behind_reader_and_writer_fen
         assert all(not path.exists() for path in paths[2:])
         assert all(path.exists() for path in paths[:2])
         assert step(10**10) == 0
-        assert 0 < json.loads(fao.read_bytes(root/'.collection.json'))['shard'] < 256
+        assert 0 < json.loads(fao.read(root / '.collection.json').bytes)['shard'] < 256
         conn.execute('DELETE FROM heads WHERE publication=?', (publications[0],))
         conn.commit()
         previous = conn

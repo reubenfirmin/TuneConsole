@@ -1,4 +1,5 @@
 """Bounded immutable musical-profile publications, with typed current heads (#693)."""
+from yt_playlist.core import file_collection, file_paths
 import hashlib
 import json
 from collections import OrderedDict
@@ -25,7 +26,7 @@ class _Collection:
     def __init__(self, root, kinds):
         self.root, self.kinds = root, tuple(sorted(kinds))
         self.cursor = root / '.collection.json'
-        saved = json.loads(fao.read_bytes(self.cursor)) if self.cursor.exists() else {}
+        saved = json.loads(fao.read(self.cursor).bytes) if self.cursor.exists() else {}
         self.shard = saved.get('shard', 0)
         if type(self.shard) is not int or not 0 <= self.shard < len(self.kinds)*256:
             raise ValueError('Invalid publication collection cursor')
@@ -34,7 +35,7 @@ class _Collection:
     def next(self):
         if self.paths is None:
             kind, shard = divmod(self.shard, 256)
-            self.paths = fao.walk_entries(self.root/self.kinds[kind]/f'{shard:02x}', max_depth=0)
+            self.paths = file_collection.walk_entries(self.root/self.kinds[kind]/f'{shard:02x}', max_depth=0)
         try:
             return next(self.paths)
         except StopIteration:
@@ -110,7 +111,7 @@ def validate(conn):
 
 
 def directory(conn):
-    return fao.directory(conn, 'profiles')
+    return file_paths.directory(conn, 'profiles')
 
 
 def relative(kind, publication):
@@ -147,11 +148,11 @@ def _chunk(conn, kind, publication, cache):
             encoded = _CHUNKS.get(identity_key)
             if encoded is not None:
                 _CHUNKS.move_to_end(identity_key)
-        logical = len(encoded) if encoded is not None else fao.stat(path).logical_bytes
+        logical = len(encoded) if encoded is not None else fao.read(path).info.logical_bytes
         if logical > cache.remaining:
             raise WorkBudgetExceeded('Musical-profile page exceeds decompression work budget')
     if encoded is None:
-        encoded = fao.read_bytes(path, max_bytes=MAX_BYTES)
+        encoded = fao.read(path, max_bytes=MAX_BYTES).bytes
         if hashlib.sha256(encoded).digest() != publication:
             raise fao.CorruptFile('Musical-profile chunk differs from its publication')
         # Retain only immutable verified bytes, never decoded mutable profiles.
@@ -288,7 +289,7 @@ def publish(conn, kind, values):
             used += size
         encoded = canonical({'format': 'musical-profile-1', 'kind': kind, 'profiles': records})
         publication = hashlib.sha256(encoded).digest()
-        fao.write_bytes(directory(conn) / relative(kind, publication), encoded, immutable=True, max_bytes=MAX_BYTES)
+        fao.write(directory(conn) / relative(kind, publication), encoded)
         for key, raw, version, digest in batch:
             conn.execute(f'INSERT INTO {marker} VALUES (?,?,?) ON CONFLICT({subject}) DO UPDATE '
                 'SET publication=excluded.publication,byte_size=excluded.byte_size',
@@ -304,7 +305,7 @@ def prepare_batch(conn, kind, limit=MAX_ROWS):
     # A file cursor avoids rescanning the converted prefix. It is only a hint:
     # legacy writers behind it are picked up on the next complete pass.
     cursor = directory(conn) / ('.prepare-' + kind + '.json')
-    after = json.loads(fao.read_bytes(cursor))['after'] if cursor.exists() else ''
+    after = json.loads(fao.read(cursor).bytes)['after'] if cursor.exists() else ''
     rows = conn.execute(f"SELECT {key},payload,version,digest FROM {table} WHERE {key}>? "
         f"AND payload<>'' ORDER BY {key} LIMIT ?", (after, limit)).fetchall()
     publish(conn, kind, rows)
@@ -314,7 +315,7 @@ def prepare_batch(conn, kind, limit=MAX_ROWS):
             raise fao.CorruptFile('Profile preparation changed original bytes')
     # Advancing before commit is safe: a rollback leaves nonempty bodies behind
     # the hint and the next wrap will retry them. Completion always checks them.
-    fao.write_bytes(cursor, canonical({'after': rows[-1][0] if len(rows) == limit else ''}))
+    fao.write(cursor, canonical({'after': rows[-1][0] if len(rows) == limit else ''}))
     if not rows and after:
         return prepare_batch(conn, kind, limit)
     return len(rows)
@@ -333,14 +334,6 @@ def recording_size_sql(alias='m'):
             f'WHERE pr.identity_key={alias}.identity_key) END')
 
 
-def export(conn, target):
-    return fao.export(directory(conn), references(conn), target)
-
-
-def restore(conn, manifest):
-    fao.restore(directory(conn), manifest, expected=references(conn))
-
-
 def collect(conn, now, limit=16):
     """Bounded round-robin orphan maintenance; pinned heads never expire."""
     return collect_unreferenced(conn, directory(conn),
@@ -354,7 +347,7 @@ def collect_unreferenced(conn, root, markers, now, limit, pattern):
     if type(limit) is not int or not 1 <= limit <= 256:
         raise ValueError('Publication collection budget must be 1 to 256')
     root = Path(root)
-    with _COLLECTION_LOCK, fao.collector(root) as admitted:
+    with _COLLECTION_LOCK, file_collection.collector(root) as admitted:
         if not admitted:
             return 0
         # Serialize the owner recheck and deletion with every SQL publisher.
@@ -372,13 +365,13 @@ def collect_unreferenced(conn, root, markers, now, limit, pattern):
                 publication = bytes.fromhex(path.stem)
                 marker = markers[kind]
                 try:
-                    info = fao.stat(path)
+                    info = fao.read(path).info
                     if (not conn.execute(f'SELECT 1 FROM {marker} WHERE publication=? LIMIT 1', (publication,)).fetchone()
-                            and fao.Retention(30, 'ctime').eligible(info, now)):
+                            and (info.ctime_ns / 1e9 <= now - 30*86400)):
                         removed += fao.delete(path, expected=info.identity, missing_ok=True)
                 except (FileNotFoundError, fao.FileChanged):
                     continue
-            fao.write_bytes(work.cursor, canonical({'shard': work.shard}))
+            fao.write(work.cursor, canonical({'shard': work.shard}))
             return removed
         finally:
             conn.rollback()

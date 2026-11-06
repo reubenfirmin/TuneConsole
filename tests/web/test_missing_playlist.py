@@ -111,13 +111,13 @@ def test_disappearing_after_empty_read_keeps_the_verified_backup(missing, store,
     assert store.playlists.get_playlist(pid) is not None
     backup, = tmp_path.glob('backups/*.json')
     saved = backup.read_bytes()
-    payload = json.loads(fao.read_text(backup))
+    payload = json.loads(fao.read(backup).bytes.decode())
     assert payload['tracks'] == []
     assert payload['playlist_id'] == pid and payload['ytm_playlist_id'] == 'MISSING'
     action, = store.actions.get_actions()
     assert action.status == 'delete_pending'
     retained_backup = json.loads(action.undo_json)['backup']
-    retained_contents = fao.read_bytes(retained_backup)
+    retained_contents = fao.read(retained_backup).bytes
     assert json.loads(retained_contents) == payload
     monkeypatch.setattr(client, 'get_playlist', already_deleted)
     # A repeated request reconciles the saved attempt without issuing another deletion.
@@ -128,7 +128,7 @@ def test_disappearing_after_empty_read_keeps_the_verified_backup(missing, store,
     assert store.playlists.get_playlist(pid) is None
     assert store.actions.get_action(action.id).status == 'executed'
     assert json.loads(store.actions.get_action(action.id).undo_json)['backup'] == retained_backup
-    assert fao.read_bytes(retained_backup) == retained_contents
+    assert fao.read(retained_backup).bytes == retained_contents
     assert [item.id for item in store.actions.get_actions()] == [action.id]
     assert list(tmp_path.glob('backups/*.json')) == [backup]
     assert backup.read_bytes() == saved

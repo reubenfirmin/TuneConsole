@@ -171,7 +171,7 @@ def test_export_retains_backup_bytes_after_original_file_is_removed(store,tmp_pa
     client = RecoveryClient({'SOURCE':['one','one','two']})
     account,action = _deleted(store,client)
     original = store.conn.execute('SELECT filename,retained_filename FROM action_backups WHERE action_id=?',(action,)).fetchone()
-    assert fao.read_bytes(original[0])==fao.read_bytes(original[1])
+    assert fao.read(original[0]).bytes==fao.read(original[1]).bytes
     store.conn.execute('BEGIN')
     manifest = action_backup_files.export(store.conn,tmp_path/'export')
     store.conn.rollback()

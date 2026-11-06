@@ -19,7 +19,7 @@ from unittest.mock import patch
 import pytest
 
 from tests.bench_svd_background import _saved_library_source
-from tests.library_image_fixtures import benchmark_library
+from tests.library_image.fixtures import benchmark_library
 from yt_playlist.core import embeddings, embedding_files
 from yt_playlist.core.db_diagnostics import PublicationTimings
 from yt_playlist.core.db_revisions import Revisions

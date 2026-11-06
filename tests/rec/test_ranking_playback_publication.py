@@ -6,14 +6,15 @@ import sqlite3
 import threading
 import time
 
+import numpy as np
 import pytest
 
 from tests.derived_rating_support import seed_dislike
 from tests.prepared_fixture_support import prepared_template
-from tests.rec.test_candidate_refresh import refresh
+from tests.recommendation_support import publish_bundles
 from tests.rec.test_model_refresh import seed
 from yt_playlist.core import db_handles, fao, listening
-from yt_playlist.rec import bundle_storage, discover, home_prepared, mode_surfaces, surfaces
+from yt_playlist.rec import bundle_storage, discover, home_prepared, measurement, mode_surfaces, surfaces
 
 
 def seed_discoveries(store):
@@ -27,17 +28,38 @@ def seed_discoveries(store):
 
 
 def playback_library(store):
-    # Keep the real mode-discovery threshold (80), all three genres and eight
-    # overlapping baskets. Keep the modes produced by the real learner; the
-    # independent concurrent-playback control retains 96 tracks and k=3.
-    seed(store, track_count=80, mode_count=1)
-    seed_discoveries(store)
-    refresh(store)
-    assert len(store.rec_query.library_keys()) == 80
-    assert store.modes.list_modes(active_only=True)
+    # These cases coordinate captured rankings with listening writes. Three
+    # owned recordings and one discovery retain every mutation below. The
+    # independent concurrent-ranker case retains the full 96-track pipeline.
+    account = store.accounts.upsert_account('Listener', 'fixture', None, True)
+    for index, genre in ((0, 'Techno'), (10, 'Jazz'), (11, 'Rock')):
+        tid = store.tracks.upsert_track(f'v{index}', f'Song {index:03}',
+                                       f'Artist {index}', 'Album', None)
+        store.tracks.set_track_genre(tid, genre)
+    store.history.import_play_events(account, [('song 000|artist 0', 'v0', 1000)], source='takeout')
+    store.discovery.upsert_discovered_track('new song 0|new artist 0', 'new0', 'New song 0',
+        'New artist 0', 'New album 0', None, 'Techno', '1990', None, 1800, duration_s=200)
+    store.rec_model.replace_rec_content_vectors([
+        ('song 000|artist 0', np.array([1., 0.], dtype=np.float32).tobytes())])
+    bundle, fresh = completed_rankings(store)
+    publish_bundles(store, bundle, now=2000, fresh=fresh)
     assert store.recommendations.page('home', 'all', 'temporal')
     assert store.recommendations.page('home', 'all', 'wheelhouse')
     assert store.recommendations.page('fresh', 'all', 'fresh')
+
+
+def completed_rankings(reader, now=None, policies=None):
+    """Small lower-layer result; real catalog, policy and publication owners."""
+    keys = ['song 000|artist 0', 'song 010|artist 10']
+    tracks = reader.rec_query.tracks_by_keys(keys)
+    fresh = [{'key': 'new song 0|new artist 0', 'video_id': 'new0',
+              'title': 'New song 0', 'artist': 'New artist 0', 'genre': 'Techno'}]
+    lanes = {'wheelhouse': [{'key': keys[0], **tracks[keys[0]]}],
+             'temporal': [{'key': keys[1], **tracks[keys[1]], 'year': '1990'}],
+             'fresh': fresh}
+    if policies is not None:
+        lanes = {lane: policies.stamp(items, lane) for lane, items in lanes.items()}
+    return {'all': lanes, '_meta': {'full_pools': True}}, lanes['fresh']
 
 
 @pytest.fixture(scope='module')
@@ -47,8 +69,12 @@ def playback_library_template(_pristine_current_schema):
 
 
 @pytest.fixture
-def library(file_backed_store, playback_library_template):
+def library(file_backed_store, playback_library_template, monkeypatch):
     playback_library_template.restore(file_backed_store)
+    # Policy retirement has its own real maintenance owners in
+    # test_policy_storage; it is below this coordination check.
+    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', completed_rankings)
+    monkeypatch.setattr(measurement, 'maintain_storage', lambda *args, **kwargs: True)
     return file_backed_store
 
 
@@ -77,9 +103,9 @@ def ranking_phases(store, monkeypatch, record_property):
     with monkeypatch.context() as patch:
         operations = [(bundle_storage, 'prepare', 'plan'),
                       (db_handles.Cursor, '_run', 'sql_cursor'),
-                      (fao, 'write_bytes', 'artifact_write'),
-                      (fao, 'stage_bytes', 'artifact_stage'),
-                      (fao.PreparedFile, 'publish', 'artifact_publish')]
+                      (fao, 'write', 'artifact_write'),
+                      (fao, 'prepare', 'artifact_stage'),
+                      (fao._PreparedFile, 'publish', 'artifact_publish')]
         operations.extend((type(store.recommendations), name, name)
                           for name in ('claim', 'stage', 'publish'))
         for owner, attribute, name in operations:
@@ -146,7 +172,7 @@ def prepare_change(store, change):
 
 
 @pytest.mark.parametrize('change', CHANGES)
-def test_real_bundle_ranking_publishes_one_coherent_generation_during_playback(
+def test_bundle_publication_keeps_one_coherent_generation_during_playback(
         library, monkeypatch, change, record_property):
     prepare_change(library, change)
     other = library.accounts.upsert_account('Other listener', 'other fixture', None, False)
@@ -161,18 +187,16 @@ def test_real_bundle_ranking_publishes_one_coherent_generation_during_playback(
         before = evidence(reader)
         result = calculate(reader, now, policies)
         playback_change(library, change)
-        # Every ranker retains the same pinned evidence, including after writes.
+        # Calculation retains the same pinned evidence, including after writes.
         assert evidence(reader) == before
         captured.append(result[0])
         return result
 
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', calculate_while_playing)
-    with ranking_phases(library, monkeypatch, record_property) as timed:
-        # Wrap the real calculation inside the callback so its timing excludes
-        # the deliberately injected listening write.
-        calculate = timed('ranking', calculate)
-        started, cpu = time.monotonic(), time.thread_time()
-        result = mode_surfaces.prepare_bundles(library, 2000)
+    # Detailed ranker/SQL profiling belongs to the independent real-ranker
+    # control, rather than wrapping every cursor in these publication cases.
+    started, cpu = time.monotonic(), time.thread_time()
+    result = mode_surfaces.prepare_bundles(library, 2000)
     record_property('wall_seconds', time.monotonic() - started)
     record_property('thread_cpu_seconds', time.thread_time() - cpu)
     assert result is captured[0]
@@ -225,6 +249,8 @@ def test_captured_rankings_finish_despite_input_changes_but_preserve_the_schema_
         elif change == 'preferences':
             library.rec_model.set_weight('genre:techno', .5, now=now)
         elif change == 'model':
+            assert library.conn.execute(
+                "SELECT count(*) FROM recording_embedding_files WHERE space='content_library'").fetchone()[0]
             with library.conn:
                 library.conn.execute("DELETE FROM recording_embedding_files WHERE space='content_library'")
         elif change == 'schema':

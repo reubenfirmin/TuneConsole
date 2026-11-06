@@ -57,10 +57,10 @@ def test_recovery_keeps_pending_feedback_and_receipts_without_source_files(sourc
     assert queue.pending() == 3
     assert store.conn.execute('SELECT count(*) FROM player_events').fetchone()[0] == 1
     for index, path in enumerate(sorted(queue.directory.glob('*/*.json'))):
-        encoded = fao.read_bytes(path)
-        age = replace(fao.stat(path), mtime_ns=1_000_000_000_000 + index, ctime_ns=2_000_000_000_000 + index)
+        encoded = fao.read(path).bytes
+        age = replace(fao.read(path).info, mtime_ns=1_000_000_000_000 + index, ctime_ns=2_000_000_000_000 + index)
         if compressed:
-            fao.write_bytes(path, encoded, age=age)
+            fao.write(path, fao.Content(encoded, metadata=age))
         else:
             path.write_bytes(encoded)
             os.utime(path, ns=(age.mtime_ns, age.mtime_ns))
@@ -69,7 +69,7 @@ def test_recovery_keeps_pending_feedback_and_receipts_without_source_files(sourc
         with closing(inbox.connect()) as conn:
             return {row['capture_id']: (info.mtime_ns, info.ctime_ns)
                     for row in conn.execute('SELECT capture_id,filename FROM playback_feedback_inbox')
-                    for info in [fao.stat(row['filename'])]}
+                    for info in [fao.read(row['filename']).info]}
 
     expected_clocks = clocks(queue)
     store.conn.close()

@@ -23,7 +23,7 @@ def memory_checkpoint_files(monkeypatch):
     from yt_playlist.core import collection_recovery, fao
 
     files = {}
-    original_reader = fao.open_reader
+    original_reader = fao._open_reader
 
     def publish(root, encoded, digest, *, age=None):
         filename = str(Path(root) / digest[:2] / (digest + '.json'))
@@ -38,11 +38,11 @@ def memory_checkpoint_files(monkeypatch):
                 yield stream
         else:
             with BytesIO(encoded) as stream:
-                stream.info = None
+                stream.info = fao._FileStat(len(encoded), len(encoded), 0, 0, 0, False, None, ())
                 yield stream
 
     monkeypatch.setattr(collection_recovery, '_publish_encoded', publish)
-    monkeypatch.setattr(fao, 'open_reader', reader)
+    monkeypatch.setattr(fao, '_open_reader', reader)
     return files
 
 

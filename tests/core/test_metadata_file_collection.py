@@ -1,4 +1,5 @@
 """Real runtime publications retain committed history and collect rollback bytes."""
+from yt_playlist.core import file_collection
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import sqlite3
@@ -62,7 +63,7 @@ def test_rolled_back_and_unlinked_metadata_collect_without_losing_committed_hist
     native(store, track, recording, .3, 'first', at)
     store.enrichment.upsert_conflict(track, 'genre', [{'provider': 'a', 'value': 'Jazz'}], now=at)
     root = files.directory(store.conn)
-    before = set(fao.listing(root))
+    before = set((p for p in file_collection.walk_entries(root) if p is not None))
     with pytest.raises(RuntimeError, match='rollback publication'):
         with store.conn:
             store.conn.execute('BEGIN IMMEDIATE')
@@ -82,7 +83,7 @@ def test_rolled_back_and_unlinked_metadata_collect_without_losing_committed_hist
                     'recording', 'identity', 'prediction', unit='classifier_probability')],
                     run_id='rolled-back', now=at + 1, recording_id=recording)
             raise RuntimeError('rollback publication')
-    orphan, = set(fao.listing(root)) - before
+    orphan, = set((p for p in file_collection.walk_entries(root) if p is not None)) - before
     if kind == 'unlinked-native':
         native(store, track, recording, .6, 'second', at + 2)
         key, revision = store.conn.execute('SELECT source_key,revision FROM rec_musical_sources').fetchone()
@@ -91,7 +92,7 @@ def test_rolled_back_and_unlinked_metadata_collect_without_losing_committed_hist
         orphan = root / files.relative('native', (key,), revision - 1)
         with store.conn:
             store.conn.execute('DELETE FROM rec_musical_links WHERE source_key=?', (key,))
-    committed = {str(root / files.relative(kind_, owner, revision)): fao.read_bytes(root / files.relative(kind_, owner, revision))
+    committed = {str(root / files.relative(kind_, owner, revision)): fao.read(root / files.relative(kind_, owner, revision)).bytes
                  for kind_, owner, revision, required in files.references(store.conn)
                  if required and kind_ != 'conflicts'}
     assert committed and str(orphan) not in committed
@@ -104,7 +105,7 @@ def test_rolled_back_and_unlinked_metadata_collect_without_losing_committed_hist
     managed_files.close(store)
     collect(store, future)
     assert not orphan.exists()
-    assert {path: fao.read_bytes(path) for path in committed} == committed
+    assert {path: fao.read(path).bytes for path in committed} == committed
     assert all(files.owns_file(store.conn, path) for path in committed)
     # Normal maintenance legitimately replaces an expired conflict's contents.
     # Its new current document must remain owned and readable.
@@ -130,13 +131,13 @@ def test_stale_collector_keeps_replacement_and_incomplete_publication(runtime_st
     replaced = []
     def replace_before_delete(path, **kwargs):
         if Path(path) == orphan and not replaced:
-            fao.write_bytes(orphan, b'new publication')
+            fao.write(orphan, b'new publication')
             replaced.append(True)
         return original(path, **kwargs)
     with monkeypatch.context() as patch:
         patch.setattr(fao, 'delete', replace_before_delete)
         collect(store, time.time() + 31 * 86400)
-    assert replaced and fao.read_bytes(orphan) == b'new publication'
+    assert replaced and fao.read(orphan).bytes == b'new publication'
 
 
 @pytest.mark.parametrize('rollback', [False, True])
@@ -164,7 +165,7 @@ def test_collection_waits_for_real_publication_transaction(runtime_store, rollba
             future = executor.submit(publish)
             try:
                 assert entered.wait(5)
-                orphan, = list(fao.listing(root))
+                orphan, = list((p for p in file_collection.walk_entries(root) if p is not None))
                 # SQL writer admission must fail before any ownership decision.
                 with pytest.raises(sqlite3.OperationalError, match='locked'):
                     work.step(store, time.time() + 31 * 86400)
@@ -193,7 +194,7 @@ def test_orphan_traversal_is_bounded_and_restarts_make_progress(runtime_store):
         store.conn.execute('BEGIN IMMEDIATE')
         for revision in range(2, 42):
             orphans.append(files.publish(store.conn, 'choices', (1,), revision, {'prospective': revision}))
-    walk = fao.walk_entries
+    walk = file_collection.walk_entries
     visited = []
     def bounded(root, *args, **kwargs):
         # Count the outer walk only; its recursive directory entries already

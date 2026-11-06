@@ -108,7 +108,7 @@ def read_artifact(path, size, max_bytes, unpack, *, exact_size=True):
     """
     if size > max_bytes or (exact_size and size <= 0):
         raise ValueError('Audio-vibe artifact exceeds size bound')
-    with fao.open_reader(path, max_bytes=max_bytes) as stream:
+    with fao.read(path, max_bytes=max_bytes) as stream:
         raw = stream.read(max_bytes + 1)
     if len(raw) > max_bytes or (exact_size and len(raw) != size):
         raise ValueError('Audio-vibe artifact changed or exceeds size bound')
@@ -128,7 +128,7 @@ def consensus_loader(validate, max_bytes):
 
     def load(path):
         path = Path(path).resolve()
-        info = fao.stat(path)
+        info = fao.read(path).info
         return cached(str(path), info.identity, info.logical_bytes)
 
     return load

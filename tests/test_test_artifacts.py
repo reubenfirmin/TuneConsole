@@ -224,8 +224,9 @@ def test_storage(tmp_path, tmp_path_factory, request):
     with tempfile.TemporaryDirectory(dir=explicit_root) as explicit:
         store = Store(':memory:')
         try:
-            managed = fao.root_for_database(None, store._evidence_key, 'recommendations')
-            fao.write_bytes(managed / 'proof', b'private fixture')
+            from yt_playlist.core import file_paths
+            managed = file_paths.root_for_database(None, store._evidence_key, 'recommendations')
+            fao.write(managed / 'proof', b'private fixture')
             paths = [implicit, managed, Path(tempfile.gettempdir())]
             assert all(path.is_relative_to(base) for path in paths)
             assert Path(explicit).parent == explicit_root

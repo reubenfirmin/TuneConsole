@@ -60,11 +60,11 @@ def test_home_part_reuse_rechecks_the_physical_file(tmp_path, monkeypatch, chang
     assert read() == read() == 'A complete prepared menu'
     assert len(reads) == 1
     if change == 'replace':
-        fao.write_bytes(filename, encoded)
+        fao.write(filename, encoded)
         assert read() == 'A complete prepared menu'
         assert len(reads) == 2
     elif change == 'tamper':
-        fao.write_bytes(filename, files.encode('home_prepared', '0', 'A different menu'))
+        fao.write(filename, files.encode('home_prepared', '0', 'A different menu'))
         with pytest.raises(ValueError):
             read()
     else:

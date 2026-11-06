@@ -28,12 +28,12 @@ def mix_launch_tokens() -> str:
     or a failed stylesheet load. Only this small dependency closure is embedded.
     """
     path = Path(__file__).with_name('static') / 'tokens.css'
-    return _mix_launch_tokens(fao.stat(path).identity)
+    return _mix_launch_tokens(fao.read(path).info.identity)
 
 
 @lru_cache(maxsize=1)
 def _mix_launch_tokens(identity: tuple) -> str:
-    css = fao.read_bytes(Path(__file__).with_name('static') / 'tokens.css').decode()
+    css = fao.read(Path(__file__).with_name('static') / 'tokens.css').bytes.decode()
     definitions = dict(re.findall(r'(--[a-z0-9-]+)\s*:\s*([^;{}]+);', css))
     selected = {}
 

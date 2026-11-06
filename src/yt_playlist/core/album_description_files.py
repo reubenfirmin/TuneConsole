@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 
-from .evidence_ledger import _mkdir, _sync_directory, canonical
+from .evidence_ledger import canonical
 from . import fao
 
 FORMAT = 'album-description-1'
@@ -43,12 +43,12 @@ def publish(root, raw, *, age=None):
     encoded = document(raw)
     digest = hashlib.sha256(encoded).hexdigest()
     path = Path(root) / digest[:2] / (digest + '.json')
-    fao.write_bytes(path, encoded, immutable=True, max_bytes=MAX_BYTES, age=age)
+    fao.write(path, fao.Content(encoded, metadata=age, max_bytes=MAX_BYTES))
     return str(path), digest, len(encoded)
 
 
 def _existing(path, *, with_age=False):
-    with fao.open_reader(path) as stream:
+    with fao.read(path) as stream:
         encoded = stream.read(MAX_BYTES + 1)
         age = stream.info
     return (encoded, age) if with_age else encoded

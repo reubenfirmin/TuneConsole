@@ -62,7 +62,7 @@ def managed_image_workspace(path):
 
 def managed_cleanup(path, *, delete):
     sys.path.insert(0, str(REPOSITORY))
-    from library_image import Manager
+    from tests.library_image.manager import Manager
     return Manager(path.parent.parent).collect(workspace=path.name, delete=delete)
 
 

@@ -4,6 +4,7 @@ The donor is opened mode=ro. Existing lifetime/budget lock files are opened rb;
 no source directory, lock file, cache, migration, Store or worker is created.
 Only the report survives the TemporaryDirectory on success or failure.
 """
+from tests.file_content_support import read_bytes as original_bytes
 import argparse
 from contextlib import contextmanager, ExitStack
 import hashlib
@@ -87,7 +88,6 @@ def qualify(source, report_path):
             began = time.monotonic()
             print('Copying and relocating actual-library owners (donor read-only).', flush=True)
             with (patch.object(policy_documents, 'retained_reader', read_only_lifetime),
-                  patch.object(fao, 'retained_reader', read_only_lifetime),
                   patch.object(EvidenceLedger, '_budget', read_only_budget),
                   patch.object(fao, '_publication', private_publication),
                   patch.object(fao.os, 'fsync', lambda fd: None)):
@@ -101,13 +101,13 @@ def qualify(source, report_path):
             path = Path(copied['restored'])
             # After relocation, even reads must use the private files. Guard
             # every managed read/publication to catch leaked source coordinates.
-            open_reader = fao.open_reader
+            open_reader = fao.read
 
             def private_reader(path, **kwargs):
                 assert not Path(path).is_relative_to(source.parent), 'Leaked donor file coordinate'
                 return open_reader(path, **kwargs)
 
-            with (patch.object(fao, 'open_reader', private_reader),
+            with (patch.object(fao, 'read', private_reader),
                   patch.object(fao, '_publication', private_publication)):
                 def reopen():
                     current = Store(path)
@@ -120,10 +120,10 @@ def qualify(source, report_path):
                 report['before'] = {kind: len(ledger.records(kind)) for kind in EvidenceLedger.KINDS}
                 offers = {row['id']: row for row in ledger.records('opportunity')}
                 durable = [row for row in ledger.records('response') if row['kind'] not in {'visible', 'open'}]
-                originals = {(kind, identity): hashlib.sha256(fao.read_bytes(ledger._path(kind, identity))).hexdigest()
+                originals = {(kind, identity): hashlib.sha256(fao.read(ledger._path(kind, identity)).bytes).hexdigest()
                     for kind, identity in [('response', row['id']) for row in durable] +
                     [('opportunity', identity) for identity in {row['opportunity_id'] for row in durable} & offers.keys()]}
-                scan, read = Inventory.scan, fao.read_bytes
+                scan, read = Inventory.scan, original_bytes
                 cut = [False]
 
                 def first_cutoff(inventory):
@@ -137,7 +137,7 @@ def qualify(source, report_path):
                                 cut[0] = True
                                 raise WorkBudgetExceeded('Controlled inventory cutoff after forty reads')
                         return read(target, **kwargs)
-                    with patch.object(fao, 'read_bytes', bounded_read):
+                    with patch.object(fao.Content, 'bytes', property(lambda content: bounded_read(content.path, max_bytes=content.max_bytes))):
                         return scan(inventory)
 
                 with patch.object(Inventory, 'scan', first_cutoff):
@@ -165,7 +165,7 @@ def qualify(source, report_path):
                         raise AssertionError('Actual-library retention did not finish in thirty turns')
                 ledger = store.rec_ledger.evidence()
                 for (kind, identity), digest in originals.items():
-                    assert hashlib.sha256(fao.read_bytes(ledger._path(kind, identity))).hexdigest() == digest
+                    assert hashlib.sha256(fao.read(ledger._path(kind, identity)).bytes).hexdigest() == digest
                 assert store.settings.get_setting(choice_evidence.STORAGE_PENDING) == '0'
                 assert store.conn.execute('PRAGMA quick_check').fetchone()[0] == 'ok'
                 assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()

@@ -1,4 +1,5 @@
 """File-owned lineage preserves exact original evidence and transaction boundaries."""
+from tests.file_custody_support import export_owner, restore_owner
 import shutil
 import sqlite3
 import json
@@ -57,7 +58,7 @@ def test_partial_conversion_exact_reuse_and_failed_publication(store, monkeypatc
     expected = {'inputs': mids, 'artists': [artist]}
     assert owner.read(store.conn, pid) == expected
     with monkeypatch.context() as patch:
-        patch.setattr(fao, 'write_bytes', lambda *a, **k: (_ for _ in ()).throw(OSError('disk full')))
+        patch.setattr(fao, 'write', lambda *a, **k: (_ for _ in ()).throw(OSError('disk full')))
         with pytest.raises(OSError, match='disk full'):
             preparation.prepare(store, limit=1)
     assert owner.read(store.conn, pid) == expected
@@ -70,7 +71,7 @@ def test_partial_conversion_exact_reuse_and_failed_publication(store, monkeypatc
     assert not store.conn.execute('SELECT 1 FROM prediction_inputs').fetchone()
     assert not store.conn.execute('SELECT 1 FROM prediction_artists').fetchone()
     path = owner.directory(store.conn) / owner.relative(pid)
-    fao.write_bytes(path, b'corrupt format')
+    fao.write(path, b'corrupt format')
     with pytest.raises(ValueError):
         owner.read(store.conn, pid)
 
@@ -106,7 +107,7 @@ def test_batch_read_preserves_mixed_lineage_and_bounds_schema_and_file_reads(sto
             (legacy,expected), (ready,expected), (other_chunk,expected), (expired,None), (expired+1,None)]
     assert len(checks) == 1
     assert reads == [ready // owner.CHUNK_ROWS, other_chunk // owner.CHUNK_ROWS]
-    fao.write_bytes(owner.directory(store.conn) / owner.relative(other_chunk), b'corrupt format')
+    fao.write(owner.directory(store.conn) / owner.relative(other_chunk), b'corrupt format')
     with store.read_view() as reader, pytest.raises(ValueError):
         list(owner.read_many(reader.conn, [ready,other_chunk]))
 
@@ -125,12 +126,12 @@ def test_current_protection_expiry_snapshot_and_independent_restore(store, tmp_p
     assert store.retention.maintain_prediction_provenance(40 * DAY) == 0
     if shared_model:
         model_path = vibe_model_files.directory(store.conn) / vibe_model_files.relative(inputs['generation'])
-        collection_at = fao.stat(model_path).ctime_ns / 1e9 + 40 * DAY
+        collection_at = fao.read(model_path).info.ctime_ns / 1e9 + 40 * DAY
         assert vibe_model_files.collect(store.conn, collection_at) == 0
         assert model_path.exists()
         # A physically damaged required model is an error; exact verified bytes
         # can repair it without changing any calculation's immutable identity.
-        fao.write_bytes(model_path, b'broken model')
+        fao.write(model_path, b'broken model')
         with pytest.raises(fao.CorruptFile):
             owner.read(store.conn, pid)
         repaired, _value = shared_receipt(store, mids, artist)
@@ -169,26 +170,26 @@ def test_current_protection_expiry_snapshot_and_independent_restore(store, tmp_p
         finally:
             staged.close()
         orphan_path = vibe_model_files.directory(store.conn) / vibe_model_files.relative(orphan_generation)
-        collection_at = fao.stat(orphan_path).ctime_ns / 1e9 + 40 * DAY
+        collection_at = fao.read(orphan_path).info.ctime_ns / 1e9 + 40 * DAY
         with store.read_view():
             assert vibe_model_files.collect(store.conn, collection_at) == 0
             assert orphan_path.exists()
         assert sum(vibe_model_files.collect(store.conn, collection_at) for _ in range(4)) == 1
         assert not orphan_path.exists() and model_path.exists()
         assert vibe_model_files.linked(store.conn, new_pid) == inputs['generation']
-    manifest = owner.export(store.conn, tmp_path / 'saved')
-    models = vibe_model_files.export(store.conn, tmp_path / 'saved-models') if shared_model else None
+    manifest = export_owner(store.conn, owner, tmp_path / 'saved')
+    models = export_owner(store.conn, vibe_model_files, tmp_path / 'saved-models') if shared_model else None
     copied = Store(tmp_path / 'restored.db')
     try:
         store.conn.backup(copied.conn)
         shutil.rmtree(owner.directory(store.conn))
         if shared_model:
             shutil.rmtree(vibe_model_files.directory(store.conn))
-        owner.restore(copied.conn, manifest)
+        restore_owner(copied.conn, 'vibe-provenance', owner, manifest)
         if shared_model:
             with pytest.raises(fao.CorruptFile, match='missing'):
                 owner.read(copied.conn, new_pid)
-            vibe_model_files.restore(copied.conn, models)
+            restore_owner(copied.conn, 'vibe-models', vibe_model_files, models)
         assert owner.read(copied.conn, new_pid) == expected
         assert not copied.conn.execute('PRAGMA foreign_key_check').fetchall()
     finally:
@@ -234,13 +235,13 @@ def test_periodic_preparation_stages_off_lock_and_rejects_stale_allocation(store
         resolved[key]['relax'] = {'source':'artist','score':.5,'support':1.,'recordings':2,
             'model_version':'joint-control', **receipt}
         expected = {**receipt, 'inputs': mids}
-    original = fao.stage_bytes
+    original = fao.prepare
     calls = []
     def stage(*args,**kwargs):
         assert not store._lock.held_by_current_thread
         calls.append(args[0])
         return original(*args,**kwargs)
-    monkeypatch.setattr(fao,'stage_bytes',stage)
+    monkeypatch.setattr(fao,'prepare',stage)
     with store.read_snapshot() as snapshot:
         with closing(snapshot.store.vibe_predictions.prepare_publication(tracks,resolved,set(),5)) as plan:
             with atomic_write(store):
@@ -252,7 +253,7 @@ def test_periodic_preparation_stages_off_lock_and_rejects_stale_allocation(store
     assert not list(owner.directory(store.conn).rglob('.fao-pending-*'))
     with store.read_snapshot() as snapshot:
         with closing(snapshot.store.vibe_predictions.prepare_publication(tracks,resolved,set(),6)) as plan:
-            monkeypatch.setattr(fao,'stage_bytes',lambda *a,**k: pytest.fail('Compression under SQL publication'))
+            monkeypatch.setattr(fao,'prepare',lambda *a,**k: pytest.fail('Compression under SQL publication'))
             assert snapshot.publish(lambda:store.vibe_predictions.publish_prepared(plan))
     current = store.conn.execute('SELECT prediction_id FROM recording_vibes WHERE recording_id=?',(rid,)).fetchone()[0]
     assert owner.read(store.conn,current)==expected

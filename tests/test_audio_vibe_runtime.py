@@ -24,7 +24,7 @@ def test_logical_artifact_digest_and_cache_follow_replacement(module, compressed
     raw = module.DEFAULT_PATH.read_bytes()
     path = tmp_path / module.DEFAULT_PATH.name
     if compressed:
-        fao.write_bytes(path, raw)
+        fao.write(path, raw)
     else:
         path.write_bytes(raw)
     first = module.load(path)
@@ -37,7 +37,7 @@ def test_logical_artifact_digest_and_cache_follow_replacement(module, compressed
     changed = raw.replace(old.encode(), new.encode(), 1)
     assert len(changed) == len(raw)
     if compressed:
-        fao.write_bytes(path, changed)
+        fao.write(path, changed)
     else:
         replacement = tmp_path / 'replacement.json'
         replacement.write_bytes(changed)
@@ -95,7 +95,7 @@ def test_explicit_empty_environment_overrides_local_model_and_mode(module, monke
 def test_read_bounds_apply_to_logical_bytes_and_changed_lengths(tmp_path):
     path = tmp_path / 'artifact.json'
     raw = b'{"header": {"padding": "' + b'x' * 1024 + b'"}}'
-    fao.write_bytes(path, raw)
+    fao.write(path, raw)
     assert path.stat().st_size < len(raw)
     with pytest.raises(ValueError):
         runtime.read_artifact(path, len(raw), 512, lambda value: value)

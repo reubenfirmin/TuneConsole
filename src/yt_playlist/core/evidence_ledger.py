@@ -54,18 +54,18 @@ def library_byte_budget(recordings):
 
 
 def _sync_directory(path):
-    fao._sync(path)
+    # Whole-database replacement and the fixed coordination counters use this
+    # boundary. Managed document publication has no directory sync protocol.
+    if hasattr(os, 'O_DIRECTORY'):
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
 
 def _mkdir(path):
-    missing, current = [], path
-    while not current.exists():
-        missing.append(current)
-        current = current.parent
     path.mkdir(parents=True, exist_ok=True)
-    # A durable file also needs durable links to each newly created ancestor.
-    for directory in reversed(missing):
-        _sync_directory(directory.parent)
 
 
 class EvidenceLedger:
@@ -97,8 +97,8 @@ class EvidenceLedger:
                     used = int(stream.read())
                 except ValueError:
                     recovered = True
-                    used = sum(fao.stat(path).logical_bytes for path in self.directory.glob("*/*.json"))
-                    used += sum(fao.stat(path).logical_bytes for path in self.directory.glob("*/*/*.json"))
+                    used = sum(fao.read(path).info.logical_bytes for path in self.directory.glob("*/*.json"))
+                    used += sum(fao.read(path).info.logical_bytes for path in self.directory.glob("*/*/*.json"))
                 def save(value):
                     stream.seek(0)
                     stream.truncate()
@@ -119,7 +119,7 @@ class EvidenceLedger:
 
     def get(self, kind, identity):
         try:
-            value = json.loads(fao.read_bytes(self._path(kind, identity)))
+            value = json.loads(fao.read(self._path(kind, identity)).bytes)
             return self.project_opportunity(value) if kind == 'opportunity' else value
         except FileNotFoundError:
             return None
@@ -155,12 +155,12 @@ class EvidenceLedger:
                     and any(not self._path('artifact', component).is_file() for component in dependencies)):
                 raise ValueError('Listening context component is no longer retained')
             if existing:
-                if fao.read_bytes(path) != encoded:
+                if fao.read(path).bytes != encoded:
                     raise EvidenceConflict(f"Conflicting {kind} evidence: {identity}")
                 if kind == 'artifact':
                     # Reusing an old immutable manifest starts a fresh preparation
                     # lease for its graph before a proposal/menu can reference it.
-                    fao.touch(path)
+                    fao.write(path, encoded)
                 return False
             artifact_data = canonical(artifact) if artifact is not None else None
             artifact_path = (self._path("artifact", hashlib.sha256(artifact_data).hexdigest())
@@ -183,9 +183,9 @@ class EvidenceLedger:
                 raise
 
     def _publish(self, path, encoded, kind, identity, *, age=None):
-        existing = fao.exists(path)
+        existing = path.is_file()
         try:
-            fao.write_bytes(path, encoded, immutable=True, age=age)
+            fao.write(path, fao.Content(encoded, metadata=age))
         except fao.CorruptFile as exc:
             raise EvidenceConflict(f"Conflicting {kind} evidence: {identity}") from exc
         return not existing
@@ -204,7 +204,7 @@ class EvidenceLedger:
         for path in paths:
             check_cancellable_work()
             try:
-                value = json.loads(fao.read_bytes(path))
+                value = json.loads(fao.read(path).bytes)
                 value = self.project_opportunity(value) if kind == 'opportunity' else value
                 if value is not None:
                     records.append(value)
@@ -447,7 +447,7 @@ class EvidenceLedger:
             # The lock excludes writers; only old abandoned staging files may be removed.
             for path in self.directory.glob("*/*/.pending-*"):
                 path.unlink(missing_ok=True)
-            used = sum(fao.stat(path).logical_bytes for path in self.directory.glob("*/*/*.json"))
+            used = sum(fao.read(path).info.logical_bytes for path in self.directory.glob("*/*/*.json"))
             save(used)
             return {"used_bytes": used, "budget_bytes": self.byte_budget, "deferred": deferred,
                     "required_bytes": required_bytes,

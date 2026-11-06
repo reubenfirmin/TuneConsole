@@ -145,10 +145,10 @@ def relative(pid):
     return Path(str(chunk // 256), str(chunk) + '.json')
 
 
-def _chunk(conn, pid):
+def _chunk(conn, pid, *, content=None):
     path = directory(conn) / relative(pid)
     try:
-        value = json.loads(fao.read_bytes(path, max_bytes=MAX_BYTES))
+        value = json.loads((content if content is not None else fao.read(path, max_bytes=MAX_BYTES)).bytes)
     except FileNotFoundError:
         return {}
     if not isinstance(value, dict) or value.get('format') != 1 or not isinstance(value.get('calculations'), dict):
@@ -258,11 +258,11 @@ def stage_many(conn, values):
         for chunk, pending in grouped.items():
             pid = int(next(iter(pending)))
             path = directory(conn)/relative(pid)
-            identity = fao.stat(path).identity if fao.exists(path) else False
-            records = _chunk(conn,pid)
+            source = fao.read(path, max_bytes=MAX_BYTES) if path.is_file() else None
+            records = _chunk(conn,pid,content=source)
             records.update(pending)
-            staged.append(fao.stage_bytes(path,canonical({'format':1,'calculations':records}),
-                                          expected=identity,max_bytes=MAX_BYTES))
+            encoded = canonical({'format':1,'calculations':records})
+            staged.append(fao.prepare(path, source.replacing(encoded) if source is not None else encoded))
         # Existing roots need no repeated write during the guarded publication.
         roots = [mid for mid in sorted(originals) if not conn.execute(
             'SELECT 1 FROM prediction_measurement_roots WHERE measurement_id=?',(mid,)).fetchone()]
@@ -313,7 +313,7 @@ def publish_many(conn, values):
                     raise ValueError('Calculation provenance cannot change')
             records[identity] = value
         encoded = canonical({'format': 1, 'calculations': records})
-        fao.write_bytes(directory(conn) / relative(pid), encoded, max_bytes=MAX_BYTES)
+        fao.write(directory(conn) / relative(pid), encoded)
         conn.executemany('INSERT INTO prediction_provenance VALUES (?,?,?,\'ready\') '
                          'ON CONFLICT(prediction_id) DO NOTHING',
                          [(int(identity), fingerprint(value['inputs']), len(canonical(value))) for identity, value in values.items()])
@@ -369,7 +369,7 @@ def collect(conn, now, limit=16):
     if type(limit) is not int or not 1 <= limit <= 128:
         raise ValueError('Provenance collection limit must be 1 to 128')
     root = directory(conn)
-    with file_collection.collection(conn, root, name='.collection.json', valid_shard=_shard) as work, fao.collector(root) as admitted:
+    with file_collection.collection(conn, root, name='.collection.json', valid_shard=_shard) as work, file_collection.collector(root) as admitted:
         if not admitted:
             return 0
         conn.execute('BEGIN IMMEDIATE')
@@ -394,30 +394,21 @@ def _collect_reserved(conn,root,work,now,limit):
         if path.relative_to(root) != relative(pid):
             continue
         examined += 1
-        records = _chunk(conn, pid)
+        content = fao.read(path, max_bytes=MAX_BYTES)
+        records = _chunk(conn, pid, content=content)
         ready = {str(r[0]) for r in conn.execute("SELECT prediction_id FROM prediction_provenance "
             "WHERE state='ready' AND prediction_id>=? AND prediction_id<?", (group*CHUNK_ROWS, (group+1)*CHUNK_ROWS))}
         owned = {str(r[0]) for r in conn.execute('SELECT prediction_id FROM prediction_provenance '
             'WHERE prediction_id>=? AND prediction_id<?', (group*CHUNK_ROWS, (group+1)*CHUNK_ROWS))}
         # Orphans from a rolled-back publication have a thirty-day grace.
-        if not ready and records.keys() - owned and not fao.Retention(30, 'ctime').eligible(fao.stat(path), now):
+        if not ready and records.keys() - owned and not (content.info.ctime_ns / 1e9 <= now - 30*86400):
             continue
         retained = {key: value for key, value in records.items() if key in ready}
         if ready - retained.keys():
             raise fao.CorruptFile('Required calculation provenance is missing')
         if retained and retained != records:
-            info = fao.stat(path)
-            fao._write(path, [canonical({'format': 1, 'calculations': retained})],
-                       max_bytes=MAX_BYTES, age=info, expected=info.identity)
+            fao.write(path, content.replacing(canonical({'format': 1, 'calculations': retained})))
         elif not retained:
             fao.delete(path, missing_ok=True)
     work.save()
     return examined
-
-
-def export(conn, target):
-    return fao.export(directory(conn), references(conn), target)
-
-
-def restore(conn, manifest):
-    fao.restore(directory(conn), manifest, expected=references(conn))

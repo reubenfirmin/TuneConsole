@@ -206,7 +206,7 @@ def _document(root, value, kind):
 
 def _read_document(path, kind):
     path = Path(path)
-    return _read('catalog', str(path), path.stem, fao.stat(path).logical_bytes, 0, kind=kind)[1]
+    return _read('catalog', str(path), path.stem, fao.read(path).info.logical_bytes, 0, kind=kind)[1]
 
 
 def export(conn, target):

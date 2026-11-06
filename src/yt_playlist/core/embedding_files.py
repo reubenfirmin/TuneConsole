@@ -1,4 +1,5 @@
 """Exact binary embedding chunks and typed canonical subject heads (#694)."""
+from yt_playlist.core import file_paths
 import hashlib
 import struct
 
@@ -161,7 +162,7 @@ def validate_legacy_order(conn):
 
 
 def directory(conn):
-    return fao.directory(conn, 'embeddings')
+    return file_paths.directory(conn, 'embeddings')
 
 
 def relative(kind, publication):
@@ -199,7 +200,7 @@ def load_many(conn, kind, rows):
             chunks.setdefault(publication, []).append((len(result)-1, dimensions, position))
     for publication, positions in chunks.items():
         path = directory(conn) / relative(kind, publication)
-        raw = fao.read_bytes(path, max_bytes=MAX_BYTES)
+        raw = fao.read(path, max_bytes=MAX_BYTES).bytes
         if hashlib.sha256(raw).digest() != publication or len(raw) < HEADER.size:
             raise fao.CorruptFile('Embedding chunk differs from its publication')
         magic, count, dimensions = HEADER.unpack(raw[:HEADER.size])
@@ -230,7 +231,7 @@ def prepare(conn, kind, dimensions, rows):
             raise ValueError('Embedding bytes differ from the declared dimensions')
         raw = HEADER.pack(MAGIC, len(batch), dimensions) + b''.join(row[1] for row in batch)
         publication = hashlib.sha256(raw).digest()
-        fao.write_bytes(directory(conn) / relative(kind, publication), raw, immutable=True, max_bytes=MAX_BYTES)
+        fao.write(directory(conn) / relative(kind, publication), raw)
         for position, (subject, vector, built, order) in enumerate(batch):
             result.append((subject, dimensions, publication, position, order, built))
     return tuple(result)
@@ -281,14 +282,6 @@ def references(conn):
         for kind in ('recording', 'artist'):
             for (publication,) in conn.execute(f'SELECT DISTINCT publication FROM {kind}_embedding_files'):
                 yield directory(conn) / relative(kind, publication)
-
-
-def export(conn, target):
-    return fao.export(directory(conn), references(conn), target)
-
-
-def restore(conn, manifest):
-    fao.restore(directory(conn), manifest, expected=references(conn))
 
 
 def collect(conn, now, limit=16):

@@ -38,7 +38,7 @@ def capture(reader):
     The inventory travels with the existing durable rebuild bookmark.
     """
     root = evidence_ledger.directory(reader)
-    return [[str(path.relative_to(root)), list(fao._hash(path))]
+    return [[str(path.relative_to(root)), list(fao.read(path).digest)]
             for path in choice_evidence_files.references(reader)]
 
 
@@ -115,10 +115,10 @@ def verify_captured(reader, target, *, inventory):
         if name.is_absolute() or '..' in name.parts:
             raise ValueError('Invalid captured listening evidence path')
         copied = rebuilt / name
-        if not copied.exists() or list(fao._hash(copied)) != digest:
+        if not copied.exists() or list(fao.read(copied).digest) != digest:
             raise ValueError('Rebuild changed original listening evidence')
         if name.parts[0] == 'opportunity':
-            value = json.loads(fao.read_bytes(copied))
+            value = json.loads(fao.read(copied).bytes)
             _captured_menu(reader, target, value, allow_new=inventory is None)
 
 
@@ -231,12 +231,12 @@ def _ledger(reader, target):
     admitted, responses, menus = [], [], 0
     for path in choice_evidence_files.references(reader):
         copied = rebuilt / path.relative_to(original)
-        if not copied.exists() or fao._hash(path) != fao._hash(copied):
+        if not copied.exists() or fao.read(path).digest != fao.read(copied).digest:
             raise ValueError('Rebuild changed original listening evidence')
         kind = path.parent.parent.name
         if kind not in ('opportunity', 'response'):
             continue
-        value = json.loads(fao.read_bytes(path))
+        value = json.loads(fao.read(path).bytes)
         (admitted if kind == 'opportunity' else responses).append(value)
         if kind != 'opportunity':
             continue

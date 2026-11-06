@@ -30,10 +30,10 @@ def relative(digest):
 def _read(root, digest, budget=None):
     path = Path(root) / relative(digest)
     if budget is not None:
-        budget.remaining -= fao.stat(path).logical_bytes
+        budget.remaining -= fao.read(path).info.logical_bytes
         if budget.remaining < 0:
             raise fao.FileBudgetExceeded('Map operation exceeds its decompression work budget')
-    raw = fao.read_bytes(path, max_bytes=MAX_BYTES)
+    raw = fao.read(path, max_bytes=MAX_BYTES).bytes
     if hashlib.sha256(raw).hexdigest() != digest:
         raise fao.CorruptFile('Map page differs from its publication')
     value = json.loads(raw)
@@ -55,7 +55,7 @@ def _read(root, digest, budget=None):
 def _write(root, value):
     raw = canonical({'format': FORMAT, **value})
     digest = hashlib.sha256(raw).hexdigest()
-    fao.write_bytes(Path(root) / relative(digest), raw, immutable=True, max_bytes=MAX_BYTES)
+    fao.write(Path(root) / relative(digest), raw)
     return digest
 
 
@@ -162,7 +162,7 @@ def bounded_changes(root, publication, changes):
                 break
             page = pages.get(digest) or pending.get(digest)
             if page is None:
-                size = fao.stat(Path(root)/relative(digest)).logical_bytes
+                size = fao.read(Path(root)/relative(digest)).info.logical_bytes
                 if old_bytes+sum(size for size,_page in pending.values())+size>MAX_WORK//2:
                     break
                 page = _read(root,digest)

@@ -17,7 +17,7 @@ import time
 
 from experiments.investigations.bench_musical_character import _catalog, _lookup_evidence, _vector_digest
 from tests.bench_svd_background import _saved_library_source
-from tests.library_image_fixtures import benchmark_library
+from tests.library_image.fixtures import benchmark_library
 from tests.musical_evaluation_support import coverage, holdouts, listening_packet
 from yt_playlist.core.activity import cancellable_work
 from yt_playlist.core.store import Store

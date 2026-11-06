@@ -9,7 +9,7 @@ import threading
 import time
 from urllib.request import Request, urlopen
 
-from fastapi import BackgroundTasks, FastAPI
+from fastapi import APIRouter, BackgroundTasks, FastAPI
 import pytest
 import uvicorn
 
@@ -19,6 +19,7 @@ from yt_playlist.core import evidence_ledger
 from yt_playlist.core.store import Store
 from yt_playlist.rec import choice_evidence
 from yt_playlist.web.app import create_app
+from yt_playlist.web import app as webapp
 
 
 @pytest.mark.parametrize('ending', ['normal', 'failure', 'interrupt'])
@@ -26,8 +27,14 @@ from yt_playlist.web.app import create_app
 def test_teardown_drains_real_response_before_removing_its_store(
         tmp_path, _pristine_current_schema, monkeypatch, caplog, ending, work_kind, request):
     held, release, owner_finished = threading.Event(), threading.Event(), threading.Event()
+    draining = threading.Event()
     observations = {}
     original_sync = evidence_ledger._sync_directory
+    # The real lifespan, request admission and native writer remain in use.
+    # Register only this test's endpoint, rather than every application route.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
 
     with ThreadPoolExecutor(max_workers=2) as clients:
         with tempfile.TemporaryDirectory(dir=tmp_path, prefix='request-owner-') as directory:
@@ -65,7 +72,8 @@ def test_teardown_drains_real_response_before_removing_its_store(
                 with socket.socket() as listener:
                     listener.bind(('127.0.0.1', 0))
                     port = listener.getsockname()[1]
-                    server = uvicorn.Server(uvicorn.Config(app, log_level='warning'))
+                    server = uvicorn.Server(uvicorn.Config(app, log_level='warning',
+                                                          ws='none', loop='asyncio', http='h11'))
 
                     def send_request():
                         with urlopen(Request(f'http://127.0.0.1:{port}/held-response',
@@ -88,12 +96,14 @@ def test_teardown_drains_real_response_before_removing_its_store(
                                     break
                                 assert time.monotonic() < deadline, 'Server still admits connections'
                                 time.sleep(.01)
-                            started = time.monotonic()
-                            # Deliberately exceed the former five-second join boundary.
-                            assert not owner_finished.wait(5.2), 'Server owner abandoned a live write'
+                            assert draining.wait(2), 'Server owner did not start draining'
+                            # Timed lifetime waits return immediately below, as
+                            # though their deadline elapsed with work still live.
+                            # The owner must remain until the real write resumes.
+                            assert not owner_finished.wait(.01), 'Server owner abandoned a live write'
                             assert ledger.directory.is_dir()
                             assert store.conn.execute('SELECT 1').fetchone()[0] == 1
-                            observations['held_during_shutdown_seconds'] = time.monotonic() - started
+                            observations['retained_after_shutdown_wait_started'] = True
                         finally:
                             release.set()
 
@@ -101,6 +111,18 @@ def test_teardown_drains_real_response_before_removing_its_store(
                     try:
                         with pytest.raises(expected) if expected else nullcontext():
                             with LiveServer(server, sockets=[listener]) as owner:
+                                finished_wait, thread_join = owner._finished.wait, owner.thread.join
+
+                                def wait_for_completion(timeout=None):
+                                    draining.set()
+                                    return finished_wait(0 if timeout is not None else None)
+
+                                def join_server(timeout=None):
+                                    draining.set()
+                                    return thread_join(0 if timeout is not None else None)
+
+                                monkeypatch.setattr(owner._finished, 'wait', wait_for_completion)
+                                monkeypatch.setattr(owner.thread, 'join', join_server)
                                 response = clients.submit(send_request)
                                 assert held.wait(5), 'Request did not reach the native evidence write'
                                 releaser = clients.submit(release_after_shutdown)

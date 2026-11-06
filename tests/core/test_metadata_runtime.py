@@ -150,13 +150,13 @@ def test_rejected_backup_preserves_all_live_metadata_bytes(runtime_store, tmp_pa
     with store.conn:
         store.conn.execute('BEGIN')
         manifest = files.export(store.conn, tmp_path/'backup')
-    document = json.loads(fao.read_bytes(manifest))
+    document = json.loads(fao.read(manifest).bytes)
     paths = [files.relative(member['kind'], member['owner'], member['revision'])
              for member in document['entries']]
     before = {path: (files.directory(store.conn)/path).read_bytes() for path in paths}
     assert len(paths) == 2
     for index, (member, path) in enumerate(zip(document['entries'], paths)):
-        envelope = json.loads(fao.read_bytes(tmp_path/'backup'/path))
+        envelope = json.loads(fao.read(tmp_path / 'backup' / path).bytes)
         if index == 0:
             # This member remains valid on its own. Rejecting a later member
             # must preserve the original retained decision, including its time.
@@ -167,7 +167,7 @@ def test_rejected_backup_preserves_all_live_metadata_bytes(runtime_store, tmp_pa
         if index == 1 and damage == 'envelope_checksum':
             envelope['sha256'] = 'wrong'
         encoded = canonical(envelope)
-        fao.write_bytes(tmp_path/'backup'/path, encoded)
+        fao.write(tmp_path / 'backup' / path, encoded)
         member['bytes'] = len(encoded)
         member['sha256'] = hashlib.sha256(encoded).hexdigest()
     if damage == 'transport_checksum':
@@ -182,7 +182,7 @@ def test_rejected_backup_preserves_all_live_metadata_bytes(runtime_store, tmp_pa
         document['entries'].append(document['entries'][0])
     elif damage == 'unexpected':
         document['entries'].append({**document['entries'][1], 'owner': [999999]})
-    fao.write_bytes(manifest, canonical(document))
+    fao.write(manifest, canonical(document))
     with pytest.raises((ValueError, FileNotFoundError)):
         files.restore(store.conn, manifest)
     assert {path: (files.directory(store.conn)/path).read_bytes() for path in paths} == before
@@ -199,28 +199,28 @@ def test_restore_publishes_verified_copies_after_backup_changes(runtime_store, t
     with store.conn:
         store.conn.execute('BEGIN')
         manifest = files.export(store.conn, tmp_path/'backup')
-    members = json.loads(fao.read_bytes(manifest))['entries']
+    members = json.loads(fao.read(manifest).bytes)['entries']
     paths = [files.relative(member['kind'], member['owner'], member['revision']) for member in members]
     root = files.directory(store.conn)
-    ages = {path: fao.stat(root/path) for path in paths}
+    ages = {path: fao.read(root / path).info for path in paths}
     for path in paths:
         (root/path).unlink()
-    copy = fao.copy
+    write = fao.write
     published = []
 
-    def replace_backup_before_publication(source, target, **kwargs):
+    def replace_backup_before_publication(target, content):
         if target.is_relative_to(root):
             for path in paths:
-                fao.write_bytes(tmp_path/'backup'/path, b'{}')
+                fao.write(tmp_path / 'backup' / path, b'{}')
             published.append(target)
-        return copy(source, target, **kwargs)
+        return write(target, content)
 
-    monkeypatch.setattr(fao, 'copy', replace_backup_before_publication)
+    monkeypatch.setattr(fao, 'write', replace_backup_before_publication)
     files.restore(store.conn, manifest)
     assert len(published) == len(paths)
     assert metadata_provenance(store, track)['decisions'] == decisions
     for path in paths:
-        restored = fao.stat(root/path)
+        restored = fao.read(root / path).info
         assert restored.compressed
         assert (restored.mtime_ns, restored.ctime_ns) == (ages[path].mtime_ns, ages[path].ctime_ns)
 
@@ -346,7 +346,7 @@ def test_relocation_restores_current_native_inputs_alternatives_and_conflicts(ru
     with store.conn:
         store.conn.execute('BEGIN')
         manifest = files.export(store.conn, tmp_path/'backup-files')
-    members = json.loads(fao.read_bytes(manifest))['entries']
+    members = json.loads(fao.read(manifest).bytes)['entries']
     assert sum(member['kind'] == 'alternatives' for member in members) == 1
     moved = Store(tmp_path/'moved.db')
     try:
@@ -383,13 +383,13 @@ def test_restore_requires_each_durable_metadata_kind(runtime_store, tmp_path, ki
     with store.conn:
         store.conn.execute('BEGIN')
         manifest = files.export(store.conn, tmp_path/'backup')
-    document = json.loads(fao.read_bytes(manifest))
+    document = json.loads(fao.read(manifest).bytes)
     paths = [files.relative(member['kind'], member['owner'], member['revision'])
              for member in document['entries']]
     before = {path: (files.directory(store.conn)/path).read_bytes() for path in paths}
     omitted = next(member for member in document['entries'] if member['kind'] == kind)
     document['entries'].remove(omitted)
-    fao.write_bytes(manifest, canonical(document))
+    fao.write(manifest, canonical(document))
     with pytest.raises(ValueError, match='missing a required document'):
         files.restore(store.conn, manifest)
     assert {path: (files.directory(store.conn)/path).read_bytes() for path in paths} == before

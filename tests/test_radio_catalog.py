@@ -12,7 +12,7 @@ from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, RadioCandidates
 from yt_playlist.rec.radio_directions import DEPTH, RadioDirections
 from yt_playlist.rec.radio_genres import genre
 from yt_playlist.core import catalog
-from yt_playlist.core.db_writes import atomic_write
+from tests.radio_candidate_support import catalog_inputs, intensity_inputs
 
 
 def catalog_track(store, video, label="Downtempo", *, artist=None, duration=200, available=None):
@@ -94,15 +94,13 @@ def test_themed_fills_all_four_streams_with_unprepared_catalog_tracks(store, see
     assert not plans.update([seed], [], 0)
 
 
-def test_themed_keeps_refilling_beyond_one_catalog_batch(store, seed, monkeypatch, record_property):
+def test_themed_keeps_refilling_beyond_one_catalog_batch(catalog_inputs, monkeypatch, record_property):
     # An entire rejected page must not hide the matching catalog entries after it.
+    store, seed = catalog_inputs.store, catalog_inputs.seed
     phases = {}
     started = time.perf_counter()
-    with atomic_write(store):
-        for i in range(CLUSTER_POOL_LIMIT):
-            catalog_track(store, f"muted-{i}", artist="Muted Artist")
-        expected = {catalog_track(store, f"eligible-{i}")[0]["video_id"]
-                    for i in range(CLUSTER_POOL_LIMIT + 7)}
+    catalog_inputs.add('muted', CLUSTER_POOL_LIMIT, artist='Muted Artist')
+    expected = {track['video_id'] for track in catalog_inputs.add('eligible', CLUSTER_POOL_LIMIT + 7)}
     phases['catalog_population_seconds'] = time.perf_counter() - started
     monkeypatch.setattr(store.rec_model, "muted_artists", lambda: {"Muted Artist"})
     started = time.perf_counter()
@@ -148,6 +146,7 @@ def test_themed_keeps_refilling_beyond_one_catalog_batch(store, seed, monkeypatc
     assert c.next_track(history) is None
     phases['exhaustion_seconds'] = time.perf_counter() - started
     assert max(batches) == CLUSTER_POOL_LIMIT
+    assert any(call.args[1] >= CLUSTER_POOL_LIMIT for call in catalog_inputs.pages.call_args_list)
     record_property('catalog_refill', json.dumps({
         'page_size': CLUSTER_POOL_LIMIT, 'muted_tracks': CLUSTER_POOL_LIMIT,
         'eligible_tracks': len(expected), 'phases': phases,

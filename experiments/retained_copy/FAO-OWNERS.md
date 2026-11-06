@@ -7,6 +7,14 @@ history stays intact; #626 owns subsequent compatibility retirement.
 
 ## File access
 
+`core.fao` exposes `write(path, content)`, `read(path)`, `prepare(path, content)`
+and `delete(path)`. Read results supply bounded `.bytes` or a streaming context,
+logical metadata, temporary decoded paths and HTTP responses. Writing a read
+result streams a verified copy with its logical clocks. Writing edited content
+from `content.replacing(bytes)` also checks the observed source identity.
+Prepared files publish by atomic rename and remove private temporary bytes when
+closed. Compression, integrity checks and file-reader leases stay inside FAO.
+
 The logical path and original bytes stay stable. The physical file contains a
 bzip2 stream and a fixed custody trailer: format, logical size, original mtime,
 captured inode ctime, and SHA-256 of the original bytes. Plain installed files
@@ -16,9 +24,22 @@ publishing changed content renews them. There is no SQL path/compression registr
 Readers bound logical bytes and cumulative decompression work. Real-path users
 hold a temporary materialization lease; range delivery uses that same original
 content and preserves logical content length, type, modification time and ETag.
-Publication verifies the pending stream, fsyncs and atomically replaces its
-logical name. Failure leaves the prior publication intact. Inode leases and
-the existing domain snapshot fence protect active consumers from collection.
+Ordinary writes atomically replace the logical name without a decompression
+reread or synchronous file/directory flushes. Failed compression or rename leaves
+the prior publication intact. Playlist backups authorizing remote deletion use
+`Content(bytes, durable=True)`; FAO completes their disk durability boundary
+before returning. Cache and evidence writes do not inherit that protocol.
+Inode leases and the existing domain snapshot fence protect active consumers
+from collection.
+
+Owners retain their paths, content validation, SQL publication guards, evidence
+ID conflicts, storage budgets and retention eligibility. `file_collection`
+provides bounded traversal and coordinates collectors with retained SQL views.
+Plain and managed bzip2 files support reads and continuing writes; explicit
+bounded conversion stays in `core.preparation.file_bodies`, outside startup.
+Policy relocation and generic fixture inventories live in
+`tests/file_custody_support.py`. Ordinary local actual-library checks use the
+immutable baseline and private snapshots in the [test guide](../../tests/README.md#local-actual-library-workspaces).
 
 ## Domain ownership and retention
 
@@ -53,7 +74,7 @@ chunk, not a filesystem locator. File names derive from domain and publication.
 The marker is required only when the compatibility payload is empty. The head's
 digest and version remain the source of truth; reads verify both against the
 chunk. Budget checks use file-head logical sizes before reading any bodies.
-Files are durable before marker/head publication. A rollback leaves a collectable
+Files publish atomically before marker/head publication. A rollback leaves a collectable
 orphan and the old SQL head usable. Old snapshots pin their prior publication.
 Conversion clears a payload only after exact verification, in bounded resumable
 prefixes. The old columns remain for supported installed reads under #622.
@@ -103,7 +124,7 @@ shard repeats safely, and later turns wrap to newly superseded publications.
 Cold archives use one cursor across their eight domains, so crossing domains
 also consumes work without retaining a directory-sized list or eight cursors.
 
-Restore stages every required backup member in a hidden private tree on the
+The test exporter stages every required backup member in a hidden private tree on the
 destination filesystem, verifies its logical digest and size, then publishes
 those same bytes after the whole inventory passes. It preserves both logical
 clocks and uses a constant number of open streams. Corrupt or incomplete
@@ -206,7 +227,7 @@ failed publication cleanup and removal of obsolete derived outputs are owner
 dispositions, separate from expiry of retained history.
 
 Prediction preparation chooses exact original IDs and contributor sets on its
-private guarded snapshot. Compression, integrity verification and fsync complete
+private guarded snapshot. Compression and source integrity verification complete
 before publication. Only prepared rows and atomic file renames enter the SQL
 publisher. Allocation/current/cohort revisions and the observed physical chunk
 identity reject stale work. Abandoned staged files release their leases and
@@ -274,7 +295,7 @@ not an independent effective sample size. Existing source kinds describe
 available artist/genre conditioning, rather than a selected exclusive cohort.
 
 Fit artifacts are staged and verified off the request path on a consistent
-snapshot. Files become durable before guarded SQL heads. Bounded score batches
+snapshot. Files publish atomically before guarded SQL heads. Bounded score batches
 retain their actual generation and exact calculation identity; unchanged means
 with changed originals still receive new receipts. A capture loads one posterior
 at a time. Product score readers use SQL and do not read these files or fit.

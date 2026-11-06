@@ -1,4 +1,5 @@
 """Observation collection respects pending captures and file-before-SQL custody."""
+from yt_playlist.core import file_collection
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
@@ -26,13 +27,13 @@ def test_observation_orphans_collect_while_pending_capture_replays_once(file_bac
     queue = playback_feedback.inbox(store)
     queue.capture('player', account, event(10), 100)
     if failure == 'insert':
-        before = set(fao.listing(queue.directory))
+        before = set((p for p in file_collection.walk_entries(queue.directory) if p is not None))
         with closing(queue.connect()) as conn, conn:
             conn.execute("CREATE TRIGGER fail_capture BEFORE INSERT ON playback_feedback_inbox "
                 "WHEN NEW.observed_at=101 BEGIN SELECT RAISE(ABORT,'controlled insert failure'); END")
         with pytest.raises(sqlite3.IntegrityError, match='controlled insert failure'):
             queue.capture('player', account, event(99), 101)
-        orphan, = set(fao.listing(queue.directory)) - before
+        orphan, = set((p for p in file_collection.walk_entries(queue.directory) if p is not None)) - before
         expected = 0
     else:
         orphan = Path(queue.next()['filename'])
@@ -48,7 +49,7 @@ def test_observation_orphans_collect_while_pending_capture_replays_once(file_bac
         queue.capture('player', account, event(20), 102)
         expected = 1
     pending = queue.next()
-    encoded = fao.read_bytes(pending['filename'])
+    encoded = fao.read(pending['filename']).bytes
     abandoned = queue.directory / '.fao-pending-abandoned'
     abandoned.write_bytes(b'incomplete private stream')
     collect(store, time.time())
@@ -56,7 +57,7 @@ def test_observation_orphans_collect_while_pending_capture_replays_once(file_bac
     managed_files.close(store)
     collect(store, time.time() + 31 * 86400)
     assert not orphan.exists() and not abandoned.exists()
-    assert fao.read_bytes(pending['filename']) == encoded
+    assert fao.read(pending['filename']).bytes == encoded
     assert queue.pending() == 1
     assert playback_feedback.drain(store) == 1
     assert playback_feedback.drain(store) == 0
@@ -86,7 +87,7 @@ def test_collection_cannot_remove_active_capture_before_inbox_insert(file_backed
             assert queue.pending() == 0
             collect(store, time.time() + 31 * 86400)
             assert paths[0].exists()
-            with fao.collector(queue.directory) as admitted:
+            with file_collection.collector(queue.directory) as admitted:
                 assert not admitted
         finally:
             release.set()

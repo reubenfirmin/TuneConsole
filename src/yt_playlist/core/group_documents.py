@@ -5,7 +5,7 @@ from itertools import chain
 from pathlib import Path
 import tempfile
 
-from .evidence_ledger import canonical, _sync_directory
+from .evidence_ledger import canonical
 from . import policy_documents, fao
 
 FORMAT = 'musical-group-document-1'
@@ -51,7 +51,7 @@ def read(filename, digest, size, offset, kind, *, with_age=False):
     if (type(size) is not int or not 0 < size <= MAX_BYTES or type(offset) is not int
             or offset < len(HEADER) or kind not in KINDS):
         raise ValueError('Invalid musical group file reference')
-    with fao.open_reader(filename) as stream:
+    with fao.read(filename) as stream:
         age = stream.info
         if stream.read(len(HEADER)) != HEADER:
             raise ValueError('Invalid musical group pack')
@@ -112,7 +112,7 @@ def _manifest(root, value):
 
 def _read_manifest(path):
     path = Path(path)
-    with fao.open_reader(path) as stream:
+    with fao.read(path) as stream:
         encoded = stream.read(MAX_BYTES + 1)
     if len(encoded) > MAX_BYTES or hashlib.sha256(encoded).hexdigest() != path.stem:
         raise ValueError('Musical group backup manifest does not match its digest')

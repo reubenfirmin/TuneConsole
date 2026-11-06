@@ -8,6 +8,7 @@ import sys
 
 import pytest
 
+from tests.file_custody_support import PolicyFiles
 from yt_playlist.core import policy_documents as files
 from yt_playlist.core import fao
 from yt_playlist.core.migrations import migrate, registry
@@ -166,13 +167,13 @@ def test_backup_restore_all_bases_and_variants_with_same_text_versions(predecess
     before = {version: configuration(conn, version) for version in ('one', 'two', 'shared')}
     with files.retained_reader(files.directory(conn)), conn:
         conn.execute('BEGIN')
-        manifest = files.export(conn, tmp_path / 'backup')
+        manifest = PolicyFiles.export(conn, tmp_path / 'backup')
     originals = {owner: [tuple(r) for r in conn.execute(
         f'SELECT version,content_digest,byte_size FROM {owner} ORDER BY version')]
         for owner in files.OWNERS}
     for filename in owned_files(conn):
         filename.unlink()
-    files.restore(conn, manifest)
+    PolicyFiles.restore(conn, manifest)
     assert {version: configuration(conn, version) for version in before} == before
     for owner, rows in originals.items():
         assert [tuple(r) for r in conn.execute(
@@ -198,10 +199,10 @@ def test_thousands_of_compact_variants_do_not_allocate_a_file_per_policy(predece
         assert files.configuration(conn, f'compact-{i:04}') == {'ranker': f'model-{i}'}
     with files.retained_reader(files.directory(conn)), conn:
         conn.execute('BEGIN')
-        manifest = files.export(conn, tmp_path / 'backup')
+        manifest = PolicyFiles.export(conn, tmp_path / 'backup')
     for path in paths:
         path.unlink()
-    files.restore(conn, manifest)
+    PolicyFiles.restore(conn, manifest)
     for i in (0, 127, 1023, 2048, 2499):
         assert files.configuration(conn, f'compact-{i:04}') == {'ranker': f'model-{i}'}
     assert len(owned_files(conn)) < 5
@@ -220,9 +221,9 @@ def test_pack_records_are_individually_bounded_and_verified(tmp_path):
             files.read(filename, digest, offset=wrong_offset, size=wrong_size)
     with pytest.raises(ValueError, match='digest'):
         files.read(filename, records[1][1], offset=offset, size=size)
-    encoded = bytearray(fao.read_bytes(filename))
+    encoded = bytearray(fao.read(filename).bytes)
     encoded[offset] = ord('!')
-    fao.write_bytes(filename, bytes(encoded))
+    fao.write(filename, bytes(encoded))
     with pytest.raises(ValueError, match='digest'):
         files.read(filename, digest, offset=offset, size=size)
     second_file, second_digest, second_size, second_offset = records[1]
@@ -230,17 +231,14 @@ def test_pack_records_are_individually_bounded_and_verified(tmp_path):
 
 
 def test_bulk_reader_pins_each_pack_once_and_verifies_each_record(tmp_path,monkeypatch):
-    from contextlib import contextmanager
     expected = [{'original':i,'configuration':'x'*1000} for i in range(128)]
     references = list(files.publish_many(tmp_path,expected))
     assert len({row[0] for row in references})==1
-    opened,original = [],fao.open_reader
-    @contextmanager
-    def counted(path,**kwargs):
-        opened.append(path)
-        with original(path,**kwargs) as stream:
-            yield stream
-    monkeypatch.setattr(fao,'open_reader',counted)
+    opened,original = [],fao.Content.__enter__
+    def counted(content):
+        opened.append(content.path)
+        return original(content)
+    monkeypatch.setattr(fao.Content,'__enter__',counted)
     values = list(files.read_many((filename,digest,offset,size) for filename,digest,size,offset in references))
     assert values==expected
     assert len(opened)==1
@@ -271,7 +269,7 @@ def test_individual_large_policy_has_its_own_pack_without_splitting_the_record(t
         encoded = json.dumps({'format': 'recommendation-policy-1', 'configuration': value},
                              sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
         packed = b'TuneConsole recommendation policies 1\n' + encoded
-        assert fao.read_bytes(filename) == packed
+        assert fao.read(filename).bytes == packed
         assert Path(filename) == tmp_path / hashlib.sha256(packed).hexdigest()[:2] / (hashlib.sha256(packed).hexdigest() + '.json')
         assert (digest, size, offset) == (hashlib.sha256(encoded).hexdigest(), len(encoded), len(files.PACK_HEADER))
         assert files.read(filename, digest, offset=offset, size=size) == value
@@ -300,7 +298,7 @@ def test_interrupted_restore_never_publishes_partial_database_ranges(predecessor
     apply(conn)
     with files.retained_reader(files.directory(conn)), conn:
         conn.execute('BEGIN')
-        manifest = files.export(conn, tmp_path / 'backup')
+        manifest = PolicyFiles.export(conn, tmp_path / 'backup')
     original = list(conn.iterdump())
     for path in owned_files(conn):
         path.unlink()
@@ -315,10 +313,10 @@ def test_interrupted_restore_never_publishes_partial_database_ranges(predecessor
     monkeypatch.setattr(files, 'PACK_BYTES', 100)
     monkeypatch.setattr(files, '_publish_encoded', interrupted)
     with pytest.raises(OSError, match='controlled restore interruption'):
-        files.restore(conn, manifest)
+        PolicyFiles.restore(conn, manifest)
     assert list(conn.iterdump()) == original
     monkeypatch.setattr(files, '_publish_encoded', publish)
-    files.restore(conn, manifest)
+    PolicyFiles.restore(conn, manifest)
     assert files.configuration(conn, 'one')['ranker'] == 'primary'
     assert files.configuration(conn, 'two')['ranker'] == 'alternative'
     assert files.configuration(conn, 'shared') == {'standalone': True}
@@ -331,7 +329,7 @@ def test_invalid_backup_ranges_leave_all_database_owners_unchanged(predecessor, 
     root = tmp_path / 'backup'
     with files.retained_reader(files.directory(conn)), conn:
         conn.execute('BEGIN')
-        manifest = files.export(conn, root)
+        manifest = PolicyFiles.export(conn, root)
     document = files.read(manifest, Path(manifest).stem)
     chunk_digest = document['chunks'][0]
     chunk = files.read(root / chunk_digest[:2] / (chunk_digest + '.json'), chunk_digest)
@@ -354,7 +352,7 @@ def test_invalid_backup_ranges_leave_all_database_owners_unchanged(predecessor, 
     bad_manifest = files.publish(root, document)[0]
     original = list(conn.iterdump())
     with pytest.raises(ValueError):
-        files.restore(conn, bad_manifest)
+        PolicyFiles.restore(conn, bad_manifest)
     assert list(conn.iterdump()) == original
     assert files.configuration(conn, 'one')['ranker'] == 'primary'
 
@@ -377,14 +375,14 @@ def test_cleanup_cannot_remove_uncommitted_policy_files(predecessor):
         other.close()
 
 
-def test_corrupt_existing_file_is_not_accepted_as_durable_content(tmp_path):
+def test_publishing_known_content_repairs_a_corrupt_existing_file(tmp_path):
     configuration = {'shared': ['meaning']}
     filename, digest, _size = files.publish(tmp_path, configuration)
     Path(filename).write_bytes(b'corrupt')
     with pytest.raises(ValueError, match='digest'):
-        files.publish(tmp_path, configuration)
-    with pytest.raises(ValueError, match='digest'):
         files.read(filename, digest)
+    assert files.publish(tmp_path, configuration)[:2] == (filename, digest)
+    assert files.read(filename, digest) == configuration
 
 
 def test_empty_store_reader_retains_a_first_publication_until_it_exits(predecessor):

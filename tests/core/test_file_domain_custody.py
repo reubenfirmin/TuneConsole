@@ -60,10 +60,10 @@ def test_export_restores_all_annotation_revisions_and_paid_results_independently
         'actions', 'collections', 'samples', 'choice_evidence', 'served',
         'vibe-provenance', 'vibe-models', 'profiles', 'embeddings', 'legacy-journals', 'policy-history'}
     for domain in ('vibe-provenance', 'vibe-models', 'profiles', 'embeddings', 'legacy-journals', 'policy-history'):
-        assert json.loads(fao.read_bytes(manifests[domain])) == {'format': 'fao-backup-1', 'files': []}
-    assert json.loads(fao.read_bytes(manifests['choice_evidence'])) == {
+        assert json.loads(fao.read(manifests[domain]).bytes) == {'format': 'fao-backup-1', 'files': []}
+    assert json.loads(fao.read(manifests['choice_evidence']).bytes) == {
         'format': 'choice-evidence-1', 'pages': []}
-    assert json.loads(fao.read_bytes(manifests['served'])) == {
+    assert json.loads(fao.read(manifests['served']).bytes) == {
         'format': 'served-diagnostics-1', 'entries': []}
     separate = tmp_path / 'restored-original.db'
     with closing(sqlite3.connect(snapshot['snapshot'])) as backup, closing(sqlite3.connect(separate)) as target:

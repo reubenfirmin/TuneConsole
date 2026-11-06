@@ -64,7 +64,7 @@ def _verify_restored_sources(clients, steps):
     for step in steps:
         if step["kind"] != "backup":
             continue
-        payload = json.loads(fao.read_bytes(step["backup"]))
+        payload = json.loads(fao.read(step["backup"]).bytes)
         client = _client(clients, payload.get("identity_id"))
         detail = _existing(client, step["created_id"])
         required = Counter(t["video_id"] for t in payload.get("tracks", []))
@@ -130,7 +130,7 @@ def _find_created(client, marker):
 
 
 def _restore_backup(store, clients, step, now, save):
-    payload = json.loads(fao.read_bytes(step["backup"]))
+    payload = json.loads(fao.read(step["backup"]).bytes)
     if payload.get('snapshot_version', 1) not in (1, 2):
         raise ValueError('Unsupported playlist backup version. Review it before recovering manually.')
     identity = payload.get("identity_id")

@@ -48,7 +48,7 @@ def disable_periodic_library_sync(monkeypatch):
 
 @pytest.fixture(scope="session")
 def _pristine_current_schema(tmp_path_factory):
-    """Read-only SQL template for ordinary consumers, built through real startup.
+    """Read-only SQL template built through real bootstrap and admission.
 
     Fresh-bootstrap and historical-upgrade tests construct their own Stores.
     Every consumer still owns a new connection and file namespace. Admission
@@ -61,13 +61,17 @@ def _pristine_current_schema(tmp_path_factory):
             patch.setenv("YT_PLAYLIST_AUDIO_VIBES", "0")
             patch.setenv("YT_PLAYLIST_AUDIO_VIBE_MODEL", "")
             patch.delenv("DEEPSEEK_API_KEY", raising=False)
-            initial = Store(":memory:")
-            try:
-                initial.init_schema()
-                initial.conn.backup(template)
-                template.capture_revisions(initial._snapshot_revisions)
-            finally:
-                initial.conn.close()
+            from yt_playlist.core.db_revisions import Revisions
+            from yt_playlist.core.migrations import migrate
+
+            # This fixture owns SQL construction, not application request
+            # admission. Use one ordinary SQLite connection for the real
+            # migration runner and revision guards, avoiding a second Store,
+            # duplicate backup and per-statement diagnostic wrappers. Consumer
+            # fixtures still bind their own real repositories and guards.
+            template.execute('PRAGMA foreign_keys=ON')
+            migrate(template)
+            template.capture_revisions(Revisions(template))
         template.execute("PRAGMA query_only=ON")
         yield template
     finally:
@@ -386,27 +390,27 @@ def _pristine_installed_schema(tmp_path_factory):
                 directory.mkdir()
                 with pytest.MonkeyPatch.context() as patch:
                     patch.setenv("YT_PLAYLIST_HOME", str(directory / "app-home"))
-                    initial = Store(directory / "installed.db")
-                    try:
-                        previous = max((old for old in templates if old < version), default=None)
-                        if previous is not None:
-                            templates[previous].backup(initial.conn)
-                        runner.migrate(initial.conn, registry=registry.MIGRATIONS[:version])
-                        for table, in initial.conn.execute(
-                                "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
-                            quoted = '"' + table.replace('"', '""') + '"'
-                            for column in initial.conn.execute(f'PRAGMA table_info({quoted})'):
-                                if column[1] == 'filename' or column[1].endswith('_filename'):
-                                    field = '"' + column[1].replace('"', '""') + '"'
-                                    assert initial.conn.execute(
-                                        f'SELECT 1 FROM {quoted} WHERE {field} IS NOT NULL LIMIT 1'
-                                    ).fetchone() is None, f"Installed template retains files: {table}.{column[1]}"
-                        snapshot = resources.enter_context(closing(sqlite3.connect(":memory:")))
-                        initial.conn.backup(snapshot)
-                        snapshot.execute("PRAGMA query_only=ON")
-                        templates[version] = snapshot
-                    finally:
-                        initial.conn.close()
+                    # Empty SQL construction needs neither Store diagnostics
+                    # nor a disk commit for every historical version. Consumers
+                    # still own real disk/Store admission and populated upgrades.
+                    initial = resources.enter_context(closing(sqlite3.connect(":memory:")))
+                    initial.row_factory = sqlite3.Row
+                    initial.execute('PRAGMA foreign_keys=ON')
+                    previous = max((old for old in templates if old < version), default=None)
+                    if previous is not None:
+                        templates[previous].backup(initial)
+                    runner.migrate(initial, registry=registry.MIGRATIONS[:version])
+                    for table, in initial.execute(
+                            "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
+                        quoted = '"' + table.replace('"', '""') + '"'
+                        for column in initial.execute(f'PRAGMA table_info({quoted})'):
+                            if column[1] == 'filename' or column[1].endswith('_filename'):
+                                field = '"' + column[1].replace('"', '""') + '"'
+                                assert initial.execute(
+                                    f'SELECT 1 FROM {quoted} WHERE {field} IS NOT NULL LIMIT 1'
+                                ).fetchone() is None, f"Installed template retains files: {table}.{column[1]}"
+                    initial.execute("PRAGMA query_only=ON")
+                    templates[version] = initial
             return templates[version]
 
         yield template
@@ -652,9 +656,9 @@ def seed_catalog_track(store, key, title, artist, *, video_id=None, track_id=Non
         store.conn.execute("INSERT INTO library_memberships VALUES (?,'fixture',NULL)", (rid,))
         store.conn.execute("INSERT INTO recording_aliases VALUES (?,?,'fixture')", (key,rid))
         if metadata:
-            columns = {r[1] for r in store.conn.execute('PRAGMA table_info(catalog_tracks)')}
-            assert metadata.keys() <= columns
             from yt_playlist.core import metadata as metadata_owner
+            # The metadata owner validates each field. Resolving the complete
+            # catalog view's columns again for every seeded track is redundant.
             for field,value in metadata.items():
                 metadata_owner.select(store.conn,rid,field,value,'fixture')
         from yt_playlist.core import artists

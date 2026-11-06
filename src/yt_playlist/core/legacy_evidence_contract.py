@@ -76,7 +76,7 @@ def read(domain, filename, digest, size, offset, *, kind='original', with_age=Fa
     path = Path(filename)
     if not valid_digest(path.stem):
         raise ValueError('Invalid retained evidence filename')
-    with fao.open_reader(path) as stream:
+    with fao.read(path) as stream:
         age = stream.info
         if offset:
             expected_header = header(domain)

@@ -3,17 +3,29 @@ import html
 import json
 import re
 
+from fastapi import APIRouter
 from fastapi.testclient import TestClient
 
-from tests.rec.test_home_prepared import prepared, store
+from tests.rec.test_home_prepared import (
+    one_menu_per_attempt, publication_inputs, publication_prepared, store,
+)
 
 
 def test_home_keeps_assignment_and_visible_options_without_hidden_ranker_recipes(
-        store, prepared, unlocked_home_controls):
+        store, publication_prepared, unlocked_home_controls, monkeypatch):
     from yt_playlist.rec import choice_evidence
     from yt_playlist.core import mix_choices
     from yt_playlist.web.app import create_app
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, home
 
+    # The resource consumes a completed menu. Its ranking is controlled below
+    # preparation; real HTTP rendering, evidence capture and SQL expansion own
+    # the visible assignment and omission of private recipe fields here.
+    monkeypatch.setattr(webapp, 'build_all',
+                        lambda ctx: [app_update.build(ctx), audio_preview.build(ctx), home.build(ctx)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
     app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
     with TestClient(app, base_url='http://127.0.0.1') as client:
         response = client.get('/home/cards')

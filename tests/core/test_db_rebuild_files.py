@@ -17,7 +17,7 @@ def test_private_databases_reuse_installed_file_owners_without_copying(tmp_path)
     before = {}
     for domain, root in installed.items():
         path = root/'retained.json'
-        fao.write_bytes(path, b'original '+domain.encode())
+        fao.write(path, b'original ' + domain.encode())
         before[domain] = path.stat(), path.read_bytes()
     for database in (candidate, original):
         files.borrow(source, database)
@@ -29,7 +29,7 @@ def test_private_databases_reuse_installed_file_owners_without_copying(tmp_path)
             assert retained.stat().st_ino == info.st_ino
             assert retained.read_bytes() == encoded
     publication = files.roots(candidate)['runtime_metadata']/'new.json'
-    fao.write_bytes(publication, b'new runtime document')
+    fao.write(publication, b'new runtime document')
     assert (installed['runtime_metadata']/'new.json').samefile(publication)
 
 
@@ -41,10 +41,10 @@ def test_interrupted_root_moves_restore_every_original_byte(tmp_path,monkeypatch
     originals = {}
     for domain in ('vibe-provenance','legacy-journals','profiles'):
         path = installed[domain]/'retained.json'
-        fao.write_bytes(path, b'original '+domain.encode())
+        fao.write(path, b'original ' + domain.encode())
         originals[path] = path.read_bytes()
     for domain in ('vibe-provenance','legacy-journals','served'):
-        fao.write_bytes(prepared[domain]/'retained.json', b'candidate '+domain.encode())
+        fao.write(prepared[domain] / 'retained.json', b'candidate ' + domain.encode())
     # Persisted state from the older root-moving installer remains supported.
     saved = files.roots(original)
     state = json.loads(json.dumps({'file_roots': [

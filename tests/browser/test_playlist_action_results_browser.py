@@ -34,7 +34,7 @@ def test_undo_failure_and_reload_preserve_journal_without_repeating_completed_wr
     base, provider, aid = undo_app
     diagnostic = 'sqlite3.OperationalError: Undo journal corrupt [review-879-undo-browser]'
     backup = json.loads(store.actions.get_action(aid).undo_json)['backup']
-    original_backup = fao.read_bytes(backup)
+    original_backup = fao.read(backup).bytes
     refresh = playlist_undo._refresh
 
     def fail_refresh(*_args, **_kwargs):
@@ -64,14 +64,14 @@ def test_undo_failure_and_reload_preserve_journal_without_repeating_completed_wr
         expect(page.locator('.notice.banner')).to_have_count(0)
         page.screenshot(path=action_evidence + '-undo-' + suffix + '.png')
         assert json.loads(store.actions.get_action(aid).undo_json)['recovery'] == recovery
-        assert fao.read_bytes(backup) == original_backup
+        assert fao.read(backup).bytes == original_backup
         assert (provider.created, provider.added, provider.deleted) == writes
     monkeypatch.setattr(playlist_undo, '_refresh', refresh)
     row.get_by_role('button', name='Resume Undo').click()
     expect(row.locator('td').nth(3)).to_have_text('undone')
     assert store.actions.get_action(aid).status == 'undone'
     assert (provider.created, provider.added, provider.deleted) == writes
-    assert fao.read_bytes(backup) == original_backup
+    assert fao.read(backup).bytes == original_backup
     page.screenshot(path=action_evidence + '-undo-resumed.png')
 
 

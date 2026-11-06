@@ -198,7 +198,7 @@ def test_lost_merge_deletion_receipt_keeps_draft_backup_and_single_attempt(
     assert action.status == 'delete_pending'
     deletion, = json.loads(action.undo_json)['deletions']
     assert deletion['phase'] == 'uncertain'
-    backup = fao.read_bytes(deletion['backup'])
+    backup = fao.read(deletion['backup']).bytes
     assert store.playlists.get_playlist(int(case['ids'].split(',')[1])) is not None
     assert_quiet_action(page)
     page.screenshot(path=action_evidence + '-merge-uncertain-delete.png', full_page=True)
@@ -206,4 +206,4 @@ def test_lost_merge_deletion_receipt_keeps_draft_backup_and_single_attempt(
     expect(page.locator('#merge-body')).to_be_visible()
     assert len(attempts) == len(posts) == 1
     assert store.actions.get_action(action.id).undo_json == action.undo_json
-    assert fao.read_bytes(deletion['backup']) == backup
+    assert fao.read(deletion['backup']).bytes == backup

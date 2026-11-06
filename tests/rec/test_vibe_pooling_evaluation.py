@@ -5,10 +5,12 @@ import json
 import pytest
 
 from experiments.audio_lab_tools import vibe_pooling_evaluation as evaluation
+from experiments.audio_lab_tools import vibe_pooling_labels as categorical
 from tests.enrichment_support import seed_enrichment
 from tests.rec.test_musical_preparation import observe
 from tests.rec.test_vibe_prediction import capture, drain, fits, track
-from yt_playlist.core import catalog, db_handles, fao, profile_files, vibe_provenance
+from yt_playlist.core import catalog, db_handles, fao, file_collection, profile_files, vibe_provenance
+from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import home_vibe, musical_preparation, vibe_joint_preparation
@@ -182,7 +184,7 @@ def test_frozen_masked_comparison_matches_runtime_and_ignores_target_observation
             with pytest.raises(TimeoutError):
                 with db_handles.lease(database, exclusive=True, timeout=0):
                     pytest.fail('Capture admitted database replacement')
-            with fao.collector(root) as admitted:
+            with file_collection.collector(root) as admitted:
                 assert admitted is False
             return capture_profiles(conn, recordings, **options)
         with monkeypatch.context() as patch:
@@ -191,7 +193,7 @@ def test_frozen_masked_comparison_matches_runtime_and_ignores_target_observation
         assert snapshot['profile_inputs'] == plans[-1]['profile_inputs']
         with db_handles.lease(database, exclusive=True, timeout=0):
             pass
-        with fao.collector(root) as admitted:
+        with file_collection.collector(root) as admitted:
             assert admitted is True
 
 
@@ -223,3 +225,64 @@ def test_frozen_plan_rejects_target_observations(tmp_path, leaked):
         'profile_inputs': {'1': profile}}))
     with pytest.raises(ValueError, match='Target observations leaked'):
         evaluation.load_plan(path)
+
+
+def test_categorical_freeze_keeps_revisions_and_withdrawals_without_samples(file_backed_store, tmp_path):
+    store = file_backed_store
+    first, _ = track(store, 'judged', artist='First artist', genre='Psybient')
+    alternate, _ = track(store, 'judged-upload', artist='First artist', genre='Psybient')
+    other, _ = track(store, 'reserved', artist='New artist', genre='Doom Metal')
+    recording, = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (first,)).fetchone()
+    reserved, = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (other,)).fetchone()
+    with store.conn:
+        catalog.associate_item(store.conn, 'judged-upload', recording, source='verified',
+            evidence={'same': True}, now=1, same_recording=True)
+    for run, video, labels, now in [('one', 'judged', ['relax', 'concentrate'], 1),
+                                   ('two', 'judged-upload', ['cruise'], 2),
+                                   ('new', 'reserved', ['release'], 3)]:
+        store.audio_vibes.save_playback(run, video, video, 'artist', now)
+        store.audio_vibes.save_feedback(run, [], labels, TAXONOMY_VERSION, None, now)
+    previous = [{'path': 'earlier.json', 'sha256': 'history',
+                 'rows': [{'video': 'judged', 'labels': ['relax'], 'updated_at': 0}]}]
+    path = tmp_path / 'judgments.json'
+    before = list(store.conn.iterdump())
+    categorical.freeze(store._db_path, path, previous)
+    assert list(store.conn.iterdump()) == before
+    plan = categorical.load(path)
+    actual = {row['recording']: row for row in plan['human_targets']}
+    assert actual[recording]['labels'] == ['cruise']
+    assert actual[recording]['partition'] == 'development'
+    assert actual[recording]['label_changed'] is True
+    assert actual[reserved]['labels'] == ['release']
+    assert actual[reserved]['partition'] == 'reserved'
+    assert len(plan['annotations']['revisions']) == 3
+    assert not store.conn.execute('SELECT 1 FROM sample_attributes').fetchone()
+    assert {recording, reserved} == {int(key) for key in plan['profile_inputs']}
+    # A cleared newest run cannot resurrect a prior positive from another upload.
+    store.audio_vibes.save_feedback('two', [], [], TAXONOMY_VERSION, None, 4)
+    cleared = tmp_path / 'cleared.json'
+    categorical.freeze(store._db_path, cleared, previous)
+    after = categorical.load(cleared)
+    assert [row['recording'] for row in after['human_targets']] == [reserved]
+    assert any(row.get('recording') == recording and row['state'] == 'withdrawn' for row in after['label_gaps'])
+    assert len(after['annotations']['revisions']) == 4
+    with pytest.raises(ValueError, match='prospective candidate seal'):
+        categorical.run(cleared, tmp_path / 'forbidden.json', 'known', 0, 'relax', 'reserved')
+    assert not (tmp_path / 'forbidden.json').exists()
+
+
+def test_categorical_metrics_count_only_observed_positive_coverage():
+    # Both raw-score orderings recover one acceptable alternative first; neither
+    # may fabricate five negative labels or a numeric suitability target.
+    scores = {vibe: 0. for vibe in home_vibe.PRESETS}
+    rows = [{'recording': 1, 'cluster': 'artist:one', 'labels': ['relax', 'concentrate'],
+             'baseline': {**scores, 'relax': .8, 'concentrate': .7},
+             'candidate': {**scores, 'concentrate': .8, 'relax': .7}}]
+    result = categorical.categorical_metrics(rows)
+    assert result['baseline'] == result['candidate']
+    assert result['candidate']['annotated_choice_coverage']['1'] == 1.
+    assert result['candidate']['annotated_vibe_recall']['1'] == .5
+    assert result['candidate']['annotated_vibe_recall']['2'] == 1.
+    assert result['candidate']['within_vibe_observed_positive_retrieval']['release']['observed_positives'] == 0
+    assert result['candidate']['within_vibe_observed_positive_retrieval']['release']['mean_positive_rank'] is None
+    assert not any('mae' in key or 'calibration' in key for key in result['candidate'])

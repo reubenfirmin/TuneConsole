@@ -40,7 +40,7 @@ def state(path):
         from . import fao
         # Recovery admission must remain readable after cancellation of the
         # disposable job whose durable outcome this record establishes.
-        value = json.loads(Context().run(fao.read_bytes,state_path(path),max_bytes=4*1024**2))
+        value = json.loads(Context().run(lambda: fao.read(state_path(path),max_bytes=4*1024**2).bytes))
     except FileNotFoundError:
         return None
     if (not isinstance(value, dict) or value.get('format') != 1

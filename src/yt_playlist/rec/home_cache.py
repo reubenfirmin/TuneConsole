@@ -55,7 +55,7 @@ def prepare(store, surface, raw, now):
         for position, encoded in enumerate(prepared.parts):
             digest = hashlib.sha256(encoded).hexdigest()
             path = root(store) / digest[:2] / (digest + '.json')
-            fao.write_compressed(path, encoded)
+            fao.write(path, encoded)
             filenames.append((surface, str(position), str(path), digest, len(encoded)))
     return Publication(prepared, tuple(filenames), frozenset(home_outputs.policy_references(prepared.value)),
                        contexts, generations)

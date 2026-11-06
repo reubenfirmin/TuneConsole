@@ -15,7 +15,7 @@ import uvloop
 from tests.conftest import FakeClient, _track
 from tests.core.check_startup_background_actual import check
 from tests.schema.actual_library import copy_readonly_library
-from tests.library_image_fixtures import report_file
+from tests.library_image.fixtures import report_file
 
 
 class OfferedMixes(HTMLParser):
@@ -111,7 +111,7 @@ async def exercise_mix(client, ctx, store, bridge, report):
     response = pending.result()
     report['mix_result'] = {'seconds': time.monotonic() - started, 'status': response.status_code,
                             'body': response.text}
-    assert response.status_code == 200 and 'Saved' in response.text
+    assert response.status_code == 200 and 'data-generated-playlist="ISOLATED_MIX"' in response.text
     await asyncio.wait_for(sync, 15)
     deadline = time.monotonic() + 15
     while not frames and time.monotonic() < deadline:

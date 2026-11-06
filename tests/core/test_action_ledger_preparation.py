@@ -75,7 +75,7 @@ def test_exact_documents_unknown_outcomes_order_links_and_backups(installed):
     assert steps[1]['creation_marker'] == 'captured-marker' and steps[1]['observed_status'] == 'unknown'
     backups = rows(store.conn, action, 'backups', 'position')
     assert len(backups) == 1 and backups[0]['backup_status'] == 'verified'
-    assert fao.read_bytes(backups[0]['retained_filename']) == fao.read_bytes(path)
+    assert fao.read(backups[0]['retained_filename']).bytes == fao.read(path).bytes
     assert [row['video_id_snapshot'] for row in rows(store.conn, placed, 'placement_items', 'position')] == ['one'] * 3
     assert preparation.head(store.conn, draft)['draft_signature'] == 'SOURCE|COPY'
     assert preparation.head(store.conn, linked)['undo_of_action_id'] == action

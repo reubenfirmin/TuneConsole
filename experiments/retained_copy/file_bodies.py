@@ -1,4 +1,5 @@
 """Actual-library FAO body evidence; all mutations stay in disposable copies."""
+from tests.file_custody_support import export_owner, restore_owner
 import argparse
 from contextlib import closing
 import hashlib
@@ -103,17 +104,17 @@ def run(source, report):
             manifests = {}
             for name,owner in owners.items():
                 paths = sorted(set(owner.references(store.conn)))
-                infos = [fao.stat(path) for path in paths]
+                infos = [fao.read(path).info for path in paths]
                 result['files'][name] = {'count':len(paths),'logical':sum(i.logical_bytes for i in infos),
                     'compressed':sum(i.compressed_bytes for i in infos),'allocated':sum(i.allocated_bytes for i in infos)}
-                manifests[name] = owner.export(store.conn,Path(scratch)/'backup'/name)
+                manifests[name] = export_owner(store.conn, owner,Path(scratch)/'backup'/name)
             restored = Store(Path(scratch)/'restored.db')
             try:
                 store.conn.backup(restored.conn)
                 for owner in owners.values():
                     shutil.rmtree(owner.directory(store.conn))
                 for name,owner in owners.items():
-                    owner.restore(restored.conn,manifests[name])
+                    restore_owner(restored.conn, name, owner,manifests[name])
                 assert {name:digest_rows(embeddings.rows(restored.conn,name)) for name in embeddings.SPACES} == before_vectors
                 for kind, values in keys.items():
                     assert digest_rows((key,profile_files.read(restored.conn,kind,key)) for key in values) == baselines[kind]

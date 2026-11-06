@@ -9,7 +9,7 @@ from pathlib import Path
 import tempfile
 
 from . import policy_documents
-from .evidence_ledger import canonical, _sync_directory
+from .evidence_ledger import canonical
 
 RETAIN_SECONDS = 30 * 86400
 MAX_BYTES = 8 * 1024 * 1024
@@ -144,7 +144,7 @@ def _replaceable(conn, identity, encoded):
         raise ValueError('Served diagnostic is immutable')
     # Failed publications can leave an ID's orphan. A reused legacy ID must
     # also respect readers of its former owner before replacing that file.
-    if fao.exists(path) and fao.read_bytes(path) != encoded:
+    if path.is_file() and fao.read(path).bytes != encoded:
         with (root / '.readers.lock').open('a+b') as lock:
             unlock = policy_documents._try_file_lock(lock, exclusive=True)
             if unlock is None:
@@ -163,7 +163,7 @@ def _capture(conn, identity, trace):
 def publish(conn, identity, at, trace):
     encoded = _encoded(identity, at, trace)
     path = _replaceable(conn, identity, encoded)
-    fao.write_bytes(path, encoded, max_bytes=MAX_BYTES)
+    fao.write(path, encoded)
     _capture(conn, identity, trace)
 
 
@@ -172,7 +172,7 @@ def diagnostic(conn, row):
         return None
     path = directory(conn) / relative(row['id'])
     try:
-        with fao.open_reader(path) as stream:
+        with fao.read(path) as stream:
             encoded = stream.read(MAX_BYTES + 1)
     except FileNotFoundError:
         raise ValueError('Unexpectedly missing served diagnostic: ' + str(row['id'])) from None
@@ -230,8 +230,7 @@ def staged_batch(conn, limit=128):
             trace = json.loads(provenance)
             encoded = _encoded(identity, at, trace)
             path = directory(conn) / relative(identity)
-            expected = fao.stat(path).identity if fao.exists(path) else False
-            file = fao.stage_bytes(path, encoded, expected=expected, max_bytes=MAX_BYTES)
+            file = fao.prepare(path, encoded)
             cleanup.callback(file.close)
             prepared.append((identity, encoded, trace, file))
 
@@ -331,7 +330,7 @@ def collect_orphans(conn, now, limit=256):
     root = directory(conn)
     progress = root / '.orphan-collection.json'
     current = getattr(conn, '_served_orphan_gc', None)
-    shard = (json.loads(fao.read_bytes(progress))['shard'] if progress.exists() else 0) if current is None else current[0]
+    shard = (json.loads(fao.read(progress).bytes)['shard'] if progress.exists() else 0) if current is None else current[0]
     removed = 0
     for _ in range(limit):
         if current is None:
@@ -360,11 +359,11 @@ def collect_orphans(conn, now, limit=256):
             continue
         if conn.execute('SELECT 1 FROM rec_served_impressions WHERE id=?', (identity,)).fetchone():
             continue
-        info = fao.stat(entry.path)
+        info = fao.read(entry.path).info
         if info.ctime_ns / 1e9 <= now - RETAIN_SECONDS:
             removed += fao.delete(entry.path, expected=info.identity, missing_ok=True)
     # Persist once per bounded pass. A crash may rescan a shard, never skip it.
-    fao.write_bytes(progress, canonical({'shard': shard}))
+    fao.write(progress, canonical({'shard': shard}))
     return removed
 
 
@@ -384,18 +383,18 @@ def export(conn, target):
         path = relative(row['id'])
         destination = target / path
         destination.parent.mkdir(parents=True, exist_ok=True)
-        fao.copy(directory(conn) / path, destination, max_bytes=MAX_BYTES)
-        encoded = fao.read_bytes(destination, max_bytes=MAX_BYTES)
+        fao.write(destination, fao.read(directory(conn) / path, max_bytes=MAX_BYTES))
+        encoded = fao.read(destination, max_bytes=MAX_BYTES).bytes
         entries.append([row['id'], len(encoded), hashlib.sha256(encoded).hexdigest()])
     target.mkdir(parents=True, exist_ok=True)
     manifest = target / 'manifest.json'
-    fao.write_bytes(manifest, canonical({'format': 'served-diagnostics-1', 'entries': entries}))
+    fao.write(manifest, canonical({'format': 'served-diagnostics-1', 'entries': entries}))
     return str(manifest)
 
 
 def restore(conn, manifest):
     manifest = Path(manifest)
-    value = json.loads(fao.read_bytes(manifest))
+    value = json.loads(fao.read(manifest).bytes)
     if not isinstance(value, dict) or set(value) != {'format', 'entries'} or value['format'] != 'served-diagnostics-1':
         raise ValueError('Unsupported served diagnostics backup')
     expected = {row['id']: row for row in references(conn)}
@@ -410,12 +409,12 @@ def restore(conn, manifest):
             seen.add(identity)
             source = manifest.parent / relative(identity)
             prepared = staged / relative(identity)
-            fao.copy(source, prepared, max_bytes=MAX_BYTES)
-            encoded = fao.read_bytes(prepared, max_bytes=MAX_BYTES)
+            fao.write(prepared, fao.read(source, max_bytes=MAX_BYTES))
+            encoded = fao.read(prepared, max_bytes=MAX_BYTES).bytes
             if len(encoded) != size or hashlib.sha256(encoded).hexdigest() != digest:
                 raise ValueError('Served diagnostic backup failed verification')
             _verified_diagnostic(encoded, expected[identity])
         if seen != expected.keys():
             raise ValueError('Served diagnostics backup is incomplete')
         for identity in seen:
-            fao.copy(staged / relative(identity), directory(conn) / relative(identity), max_bytes=MAX_BYTES)
+            fao.write(directory(conn) / relative(identity), fao.read(staged / relative(identity), max_bytes=MAX_BYTES))

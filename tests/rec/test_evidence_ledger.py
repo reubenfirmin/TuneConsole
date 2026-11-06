@@ -1,3 +1,4 @@
+from tests.file_content_support import age_file
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 
@@ -103,7 +104,7 @@ def test_capacity_error_reports_record_and_only_missing_artifact_bytes(tmp_path,
         assert ledger.artifact(manifest) == identity
     record = {'id': 'new', 'context': identity, 'observed_at': 100}
     required = len(canonical(record)) + (0 if existing_manifest else len(canonical(manifest)))
-    used = sum(fao.stat(path).logical_bytes for path in tmp_path.glob('*/*/*.json'))
+    used = sum(fao.read(path).info.logical_bytes for path in tmp_path.glob('*/*/*.json'))
     ledger.byte_budget = used + required - 1
     with pytest.raises(EvidenceBudgetExceeded) as failure:
         ledger.put('opportunity', 'new', record, artifact=manifest)
@@ -132,8 +133,8 @@ def test_reusing_an_immutable_prepared_manifest_renews_its_component_grace(tmp_p
     manifest = {'saved': {'$artifact': component}}
     identity = ledger.artifact(manifest)
     for path in tmp_path.glob('artifact/*/*.json'):
-        fao.touch(path, mtime_ns=10**9)
-        assert fao.stat(path).mtime_ns == 10**9
+        age_file(path, mtime_ns=10 ** 9)
+        assert fao.read(path).info.mtime_ns == 10**9
     assert ledger.artifact(manifest) == identity
     ledger.maintain(10**12, orphan_before=time.time() - 60)
     assert ledger.get('artifact', identity) == manifest
@@ -196,8 +197,8 @@ def test_retiring_unanswered_events_advances_the_event_generation(tmp_path, monk
     else:
         ledger.put('response', 'passive', {'id': 'passive', 'opportunity_id': 'old',
                                          'kind': kind, 'observed_at': 2})
-        fao.touch(ledger._path('artifact', context), mtime_ns=10**9)
-        used = sum(fao.stat(path).logical_bytes for path in tmp_path.glob('*/*/*.json'))
+        age_file(ledger._path('artifact', context), mtime_ns=10 ** 9)
+        used = sum(fao.read(path).info.logical_bytes for path in tmp_path.glob('*/*/*.json'))
         ledger.byte_budget = int(used / .95)
         delete = fao.delete
         def interrupted(path, **options):
@@ -231,14 +232,14 @@ def test_orphan_grace_is_independent_of_choice_retention_and_protects_components
     ledger.put('response', 'selected', {'id': 'selected', 'opportunity_id': 'choice',
                                        'kind': 'choice', 'observed_at': 101})
     for identity in (component, prepared, orphan, chosen, reused):
-        fao.touch(ledger._path('artifact', identity), mtime_ns=100*10**9)
-    fao.touch(ledger._path('artifact', in_flight), mtime_ns=1000*10**9)
+        age_file(ledger._path('artifact', identity), mtime_ns=100 * 10 ** 9)
+    age_file(ledger._path('artifact', in_flight), mtime_ns=1000 * 10 ** 9)
     result = ledger.maintain(50, protected_artifacts=[prepared], orphan_before=900)
     assert ledger.get('artifact', orphan) is None
     for identity in (component, prepared, in_flight, chosen, reused):
         assert ledger.get('artifact', identity) is not None
     assert ledger.get('response', 'selected') is not None
-    assert result['used_bytes'] == sum(fao.stat(p).logical_bytes for p in tmp_path.glob('*/*/*.json'))
+    assert result['used_bytes'] == sum(fao.read(p).info.logical_bytes for p in tmp_path.glob('*/*/*.json'))
 
 
 def test_capacity_tracks_library_growth_without_counting_discovery_or_duplicate_entries(store):
@@ -279,8 +280,8 @@ def test_capacity_retires_oldest_unanswered_graphs_and_preserves_protected_roots
         ledger.put('response', name, {'id': name, 'opportunity_id': name,
                                      'kind': kind, 'observed_at': 50})
     for path in tmp_path.glob('artifact/*/*.json'):
-        fao.touch(path, mtime_ns=100*10**9)
-    used = sum(fao.stat(path).logical_bytes for path in tmp_path.glob('*/*/*.json'))
+        age_file(path, mtime_ns=100 * 10 ** 9)
+    used = sum(fao.read(path).info.logical_bytes for path in tmp_path.glob('*/*/*.json'))
     ledger.byte_budget = int(used / .95)
     result = ledger.maintain(0, orphan_before=9000, pressure_before=9000,
                             protected_opportunities={'active', 'pending'})
@@ -296,7 +297,7 @@ def test_capacity_retires_oldest_unanswered_graphs_and_preserves_protected_roots
     second_ledger = EvidenceLedger(tmp_path, ledger.byte_budget)
     assert second_ledger.put('response', 'later-choice', {'choice': 'kept'})
     assert int((tmp_path / '.budget').read_text()) == sum(
-        fao.stat(path).logical_bytes for path in tmp_path.glob('*/*/*.json'))
+        fao.read(path).info.logical_bytes for path in tmp_path.glob('*/*/*.json'))
 
 
 def test_capacity_never_discards_protected_evidence_when_it_cannot_recover(tmp_path):
@@ -335,8 +336,8 @@ def test_pending_write_reclaims_old_optional_graphs_but_preserves_learning_and_s
     ledger.put('opportunity', 'old-again', duplicate)
     records['old-again'] = duplicate
     for path in tmp_path.glob('artifact/*/*.json'):
-        fao.touch(path, mtime_ns=10**9)
-    used = sum(fao.stat(path).logical_bytes for path in tmp_path.glob('*/*/*.json'))
+        age_file(path, mtime_ns=10 ** 9)
+    used = sum(fao.read(path).info.logical_bytes for path in tmp_path.glob('*/*/*.json'))
     ledger.byte_budget = used + 100
     required_record = {'id': 'choice', 'opportunity_id': 'held', 'kind': 'choice',
                        'observed_at': 11, 'details': 'x' * 300}
@@ -368,7 +369,7 @@ def test_pending_write_reclaims_old_optional_graphs_but_preserves_learning_and_s
     restarted = EvidenceLedger(tmp_path, ledger.byte_budget)
     assert restarted.get('response', 'choice') == required_record
     assert int((tmp_path / '.budget').read_text()) == sum(
-        fao.stat(path).logical_bytes for path in tmp_path.glob('*/*/*.json'))
+        fao.read(path).info.logical_bytes for path in tmp_path.glob('*/*/*.json'))
 
 
 def test_pending_write_reports_shortfall_without_releasing_required_context(tmp_path):
@@ -376,7 +377,7 @@ def test_pending_write_reports_shortfall_without_releasing_required_context(tmp_
     context = ledger.artifact({'required': 'x' * 1000})
     record = {'id': 'held', 'context': context, 'observed_at': 1}
     ledger.put('opportunity', 'held', record)
-    used = sum(fao.stat(path).logical_bytes for path in tmp_path.glob('*/*/*.json'))
+    used = sum(fao.read(path).info.logical_bytes for path in tmp_path.glob('*/*/*.json'))
     ledger.byte_budget = used + 100
     result = ledger.maintain(0, protected_opportunities={'held'}, orphan_before=100,
                              compacted_contexts={context}, context_before=0,

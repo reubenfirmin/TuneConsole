@@ -193,7 +193,7 @@ class Backfill:
                 self._advance()
                 continue
             try:
-                size = fao.stat(path).logical_bytes
+                size = fao.read(path).info.logical_bytes
                 if size > MAX_RECORD_BYTES:
                     self.pending_path = path
                     raise WorkBudgetExceeded('Historical listening group evidence exceeds its admitted memory')
@@ -203,7 +203,7 @@ class Backfill:
                 # Keep this exact path on cancellation or malformed input;
                 # retry must never skip an unprocessed historical owner.
                 self.pending_path = path
-                value = json.loads(fao.read_bytes(path))
+                value = json.loads(fao.read(path).bytes)
                 operation = self._record(ledger, kind, value, path)
                 if operation is not None:
                     operations.append(operation)

@@ -93,7 +93,7 @@ def test_malformed_bookmark_is_preserved_and_failed_owner_recovers(maintenance, 
     assert provenance.available(store.conn)
     bookmark = provenance.directory(store.conn) / '.history-collection.json'
     damaged = b'{damaged bookmark'
-    fao.write_bytes(bookmark, damaged)
+    fao.write(bookmark, damaged)
     monkeypatch.setattr(RetentionRepo, 'maintain_prediction_provenance', m.original_vibes)
     m.run(100)
     state = m.worker.retention.progress['prediction provenance retirement']
@@ -103,13 +103,13 @@ def test_malformed_bookmark_is_preserved_and_failed_owner_recovers(maintenance, 
         'runtime': 1, 'derived': 1, 'policies': 1}
     m.run(105)
     assert state.failures == 2 and state.retry_at == 115
-    assert fao.read_bytes(bookmark) == damaged
+    assert fao.read(bookmark).bytes == damaged
     assert len(m.calls) == 7  # Healthy idle owners keep their own deadlines.
     m.clock[0] = 114.9
     m.worker._poll_retention()
     assert not m.targets
     # Explicitly repair the controlled fixture; production does not reset it.
-    fao.write_bytes(bookmark, b'{"after":0}')
+    fao.write(bookmark, b'{"after":0}')
     m.run(115)
     assert state.error is None and state.failures == 0 and not state.pending
     assert state.result == 0 and state.retry_at == 415

@@ -87,7 +87,7 @@ def _load(path, modified, size):
 
 def load(path):
     path = Path(path)
-    info = fao.stat(path)
+    info = fao.read(path).info
     return _load(str(path.resolve()), info.identity, info.logical_bytes)
 
 

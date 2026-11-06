@@ -1,4 +1,5 @@
 """Bounded idle collection for established file owners, never live-body expiry."""
+from yt_playlist.core import file_collection
 from .. import (fao, policy_documents, metadata_delivery_files, audio_annotation_files,
                album_description_files, sample_files, legacy_evidence,
                metadata_runtime_files, playback_inbox)
@@ -37,7 +38,7 @@ class Orphans:
     def step(self,store,now,limit=16):
         root,required = self.contracts[self.position]
         if self.paths is None:
-            self.paths = fao.walk_entries(root)
+            self.paths = file_collection.walk_entries(root)
         removed = 0
         for _ in range(limit):
             try:
@@ -50,10 +51,10 @@ class Orphans:
             if path is None:
                 continue
             try:
-                info = fao.stat(path)
-                if not fao.Retention(30,'ctime').eligible(info,now):
+                info = fao.read(path).info
+                if not (info.ctime_ns / 1e9 <= now - 30*86400):
                     continue
-                with fao.collector(root) as admitted:
+                with file_collection.collector(root) as admitted:
                     if not admitted:
                         continue
                     with reserved_write(store):
@@ -78,7 +79,7 @@ class Pending:
 
     def _paths(self,roots):
         for root in set(roots):
-            yield from fao.walk_entries(root,pending=True)
+            yield from file_collection.walk_entries(root,pending=True)
 
     def step(self,now,limit=16):
         removed = 0
@@ -91,7 +92,9 @@ class Pending:
             if path is None or not path.name.startswith('.fao-pending-'):
                 continue
             try:
-                removed += fao.discard_unpublished(path,now)
+                info = path.stat()
+                if info.st_ctime <= now-7*86400:
+                    removed += fao.delete(path, missing_ok=True)
             except FileNotFoundError:
                 pass
         return removed

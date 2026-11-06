@@ -62,7 +62,7 @@ def _acknowledge(store, now, publish):
                 break
             if scan.identity is None:
                 try:
-                    offer = ledger.project_opportunity(json.loads(fao.read_bytes(scan.path)))
+                    offer = ledger.project_opportunity(json.loads(fao.read(scan.path).bytes))
                 except FileNotFoundError:
                     scan.advance(store)
                     continue

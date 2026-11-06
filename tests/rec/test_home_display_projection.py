@@ -55,7 +55,7 @@ def test_cached_display_falls_back_after_file_damage_and_follows_republication(f
     if damage == 'missing':
         Path(filename).unlink()
     else:
-        fao.write_bytes(filename, b'Invalid replacement document')
+        fao.write(filename, b'Invalid replacement document')
     fallback = home_prepared.load(store, 1000, display_only=True)
     assert [p['experiment_id'] for p in fallback['menus'][0]['protos']] == [
         p['experiment_id'] for p in baseline['menus'][0]['protos']]

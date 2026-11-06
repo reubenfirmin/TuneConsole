@@ -9,7 +9,7 @@ import sys
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from library_image import DEFAULT_IMAGE, DEFAULT_VOLUME, Manager, ROOT, command
+from tests.library_image.manager import DEFAULT_IMAGE, DEFAULT_VOLUME, Manager, ROOT, command
 
 
 def runtime():
@@ -33,7 +33,7 @@ def check_runtime(manager):
 
 def pytest_checks(manager, arguments, report, selection):
     collection = report / 'collection'
-    extra = ['-p', 'library_image_pytest', '-n', '0', '-o', 'cache_dir=/tmp/pytest-cache',
+    extra = ['-p', 'tests.library_image.pytest_plugin', '-n', '0', '-o', 'cache_dir=/tmp/pytest-cache',
              '--fixture-root=/tmp/pytest-fixtures', '--junitxml=/reports/pytest.xml']
     code = manager.execute(['-m', 'pytest', *arguments, *extra, '--collect-only',
                             '--library-collection-report=/reports/nodes.json'], report=collection,
@@ -76,6 +76,9 @@ def main(argv=None):
     gc.add_argument('--delete', action='store_true')
     gc.add_argument('--keep', type=int, default=2)
     actions.add_parser('list', help='List prepared generations without scanning their contents')
+    verify = actions.add_parser('verify', help='Explicit local backend acceptance on the prepared actual library')
+    verify.add_argument('--report', type=Path, default=ROOT / 'build/test-reports/library-image-acceptance')
+    verify.add_argument('--refresh', action='store_true', help='Also capture a new generation while two old runs stay pinned')
     args = parser.parse_args(argv)
     if args.action == 'build-runtime':
         runtime()
@@ -84,6 +87,10 @@ def main(argv=None):
     if args.action == 'prepare':
         check_runtime(manager)
         print(json.dumps(manager.prepare(args.source, refresh=args.refresh), indent=2))
+    elif args.action == 'verify':
+        check_runtime(manager)
+        from tests.library_image.check_backend import verify
+        print(json.dumps(verify(manager, args.report.resolve(), refresh=args.refresh), indent=2))
     elif args.action == 'gc':
         if args.keep < 1:
             parser.error('--keep must be at least one')

@@ -50,7 +50,7 @@ def test_collection_bounds_all_entries_and_resumes_with_current_owners(tmp_path,
         shard, other_shard, checkpoint = '0', '1', '.collection.json'
     conn.commit()
     for path, raw in zip(paths, payloads):
-        fao.write_bytes(path, raw)
+        fao.write(path, raw)
     if domain != 'provenance':
         # Keep a reachable child as well as the SQL root itself.
         key = next(iter(json.loads(payloads[0])['entries']))
@@ -59,7 +59,7 @@ def test_collection_bounds_all_entries_and_resumes_with_current_owners(tmp_path,
         conn.execute('UPDATE ' + table + ' SET publication=?', (bytes.fromhex(publication),))
         conn.commit()
         current_root = data_root / file_map.relative(publication)
-        original_root = fao.read_bytes(current_root)
+        original_root = fao.read(current_root).bytes
     extra_orphans = []
     if domain == 'archive':
         for namespace in ('catalog', 'workflow'):
@@ -69,13 +69,13 @@ def test_collection_bounds_all_entries_and_resumes_with_current_owners(tmp_path,
     # all consume traversal work, even though none can be collected as a body.
     for base in (data_root, data_root / shard):
         for i in range(24):
-            fao.write_bytes(base / ('.hidden-' + str(i)), b'hidden')
-        fao.write_bytes(base / 'unsupported.txt', b'keep')
+            fao.write(base / ('.hidden-' + str(i)), b'hidden')
+        fao.write(base / 'unsupported.txt', b'keep')
     nested = data_root / shard / 'nested'
-    fao.write_bytes(nested / 'untouched.json', b'nested')
-    fao.write_bytes(data_root / other_shard / '.keep', b'keep')
+    fao.write(nested / 'untouched.json', b'nested')
+    fao.write(data_root / other_shard / '.keep', b'keep')
     examined, opened = [], []
-    walk = fao.walk_entries
+    walk = file_collection.walk_entries
 
     def counted(*args, **kwargs):
         opened.append(args[0])
@@ -83,8 +83,7 @@ def test_collection_bounds_all_entries_and_resumes_with_current_owners(tmp_path,
             examined.append((path, conn.in_transaction))
             yield path
 
-    monkeypatch.setattr(fao, 'walk_entries', counted)
-    monkeypatch.setattr(fao, 'listing', lambda *a, **k: pytest.fail('Unbounded owner listing'))
+    monkeypatch.setattr(file_collection, 'walk_entries', counted)
     monkeypatch.setattr(Path, 'glob', lambda *a, **k: pytest.fail('Unbounded owner glob'))
 
     def step(now):
@@ -128,11 +127,11 @@ def test_collection_bounds_all_entries_and_resumes_with_current_owners(tmp_path,
                 break
         assert all(not path.exists() for path in paths[1:])
         assert all(not path.exists() for path in extra_orphans)
-        assert fao.read_bytes(paths[0]) == payloads[0]
+        assert fao.read(paths[0]).bytes == payloads[0]
         if domain != 'provenance':
-            assert fao.read_bytes(current_root) == original_root
-        assert fao.read_bytes(nested / 'untouched.json') == b'nested'
-        saved = json.loads(fao.read_bytes(root / checkpoint))
+            assert fao.read(current_root).bytes == original_root
+        assert fao.read(nested / 'untouched.json').bytes == b'nested'
+        saved = json.loads(fao.read(root / checkpoint).bytes)
         assert set(saved) == ({'shard', 'after_shard', 'prefix'} if domain == 'archive'
                               else {'shard', 'after_shard'})
         # A superseded current body becomes collectible on a later wrap.
@@ -162,7 +161,7 @@ def test_provenance_collection_validates_every_calculation_before_repacking(tmp_
     conn.execute("INSERT INTO prediction_provenance VALUES (1,'ready')")
     conn.commit()
     path = root / vibe_provenance.relative(1)
-    fao.write_bytes(path, canonical({'format': 1, 'calculations': {'1': {}, '129': {}}}))
+    fao.write(path, canonical({'format': 1, 'calculations': {'1': {}, '129': {}}}))
     original = path.read_bytes()
     try:
         with pytest.raises(fao.CorruptFile, match='chunk owner'):

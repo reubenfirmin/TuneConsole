@@ -212,7 +212,7 @@ def _capture_choice_rebuild(path,new_format):
             record = mix_choices.publish_menu(conn,record,compact)
         ledger.put('opportunity',record['id'],record)
         conn.commit()
-        expected = {str(file.relative_to(ledger.directory)):list(fao._hash(file))
+        expected = {str(file.relative_to(ledger.directory)):list(fao.read(file).digest)
                     for kind in ('artifact','opportunity')
                     for file in (ledger.directory/kind).glob('*/*.json')}
         assert {'artifact','opportunity'}=={Path(name).parts[0] for name in expected}
@@ -359,7 +359,7 @@ def test_analytics_verifies_captured_choices_without_rejecting_new_publications(
                 # Appendable roots are shared with the retained original.
                 # A comparison of their current hashes would miss this loss.
                 path = store.rec_ledger.evidence()._path('opportunity','captured-menu')
-                fao.write_bytes(path,evidence_ledger.canonical({**record,'episode_id':'corrupted'}))
+                fao.write(path, evidence_ledger.canonical({**record, 'episode_id': 'corrupted'}))
             else:
                 raise InterruptedError('restart with accepted choices and captured inventory')
         if damage:

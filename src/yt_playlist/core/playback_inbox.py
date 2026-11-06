@@ -106,7 +106,7 @@ class Inbox:
         status = body.get('status') if kind == 'rating' else None
         # A collector cannot visit file-before-SQL publication, even when
         # backup admission is held or publication subsequently rolls back.
-        with fao.retained_reader(self.directory):
+        with policy_documents.retained_reader(self.directory):
             owner = self._publish(capture, kind, body)
             with self.admission(), closing(self.connect()) as conn, conn:
                 conn.execute('INSERT INTO playback_feedback_inbox(capture_id,kind,account_id,observed_at,video_id,rating_status,'
@@ -150,7 +150,7 @@ class Inbox:
     def body(row):
         path = Path(row['filename'])
         from . import fao
-        encoded = fao.read_bytes(path, max_bytes=row['byte_size'])
+        encoded = fao.read(path, max_bytes=row['byte_size']).bytes
         if (len(encoded) != row['byte_size'] or path.stem != row['content_digest']
                 or hashlib.sha256(encoded).hexdigest() != row['content_digest']):
             raise ValueError('Playback observation does not match its retained content')

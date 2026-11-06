@@ -321,12 +321,12 @@ def _cards(selection, modes, framing, leans, epoch, avoid, include, mode_order):
         ordering.considered(card, requested)
         selected = selection.select(mode, ranker, requested, caps)
         if lane != 'comfort' and len(selected) < 12:
-            # Backfill may widen beyond an explicit include only to the mode's
-            # close families. An avoid request always remains an exclusion.
+            # Keep explicit genre choices when filling a thin mode bucket.
+            # Nearby families may widen an unconstrained menu only.
             family = families.get(mode)
             extra = CandidateFilter(selection.load('all', lane), eligible=True, unseen=True,
                 excluded=tuple(row['key'] for row in selected), avoid=tuple(avoid),
-                include=() if family else tuple(include), near_family=family, tagged=bool(family or include),
+                include=tuple(include), near_family=family, tagged=bool(family or include),
                 year_band=band if lane == 'temporal' and has_years else None, years=years)
             ordering.considered(card, extra)
             selected = selection.select(mode, ranker, extra, caps, family=family, initial=selected)

@@ -1,7 +1,7 @@
 """Domain-owned cold originals without a SQL receipt per original (#697)."""
+from yt_playlist.core import file_paths
 import json
 import time
-from pathlib import Path
 
 from . import fao, file_collection, file_map, policy_documents
 from .evidence_ledger import canonical
@@ -34,7 +34,7 @@ def validate(conn):
 
 
 def directory(conn):
-    return fao.directory(conn,'legacy-journals')
+    return file_paths.directory(conn,'legacy-journals')
 
 
 def head(conn, domain):
@@ -204,24 +204,12 @@ def references(conn):
             yield from file_map.pages(directory(conn)/domain,publication.hex())
 
 
-def export(conn, target):
-    return fao.export(directory(conn),references(conn),target)
-
-
-def restore(conn, manifest):
-    root, saved = directory(conn), Path(manifest).resolve().parent
-    expected = (root/path.relative_to(saved)
-        for domain,publication in conn.execute('SELECT domain,publication FROM legacy_archive_heads')
-        for path in file_map.pages(saved/domain,publication.hex()))
-    fao.restore(root,manifest,expected=expected)
-
-
 def maintain(conn, now, limit=128):
     """One bounded leaf page per tick; expiry keeps exact insert-once keys."""
     if not conn.in_transaction:
         raise RuntimeError('Archive expiry requires the writer reservation')
     cursor = directory(conn)/'.expiry.json'
-    state = json.loads(fao.read_bytes(cursor)) if cursor.exists() else {'domain':0,'after':''}
+    state = json.loads(fao.read(cursor).bytes) if cursor.exists() else {'domain':0,'after':''}
     domain = DOMAINS[state['domain']]
     root, publication = directory(conn)/domain, head(conn,domain)
     leaf = file_map.next_leaf(root,publication,state['after'] or None)
@@ -237,7 +225,7 @@ def maintain(conn, now, limit=128):
         current = file_map.update(root,publication,updates)
         conn.execute('UPDATE legacy_archive_heads SET publication=? WHERE domain=?',(bytes.fromhex(current),domain))
     # Routes survive copy-on-write publication and need no unbounded prefix scan.
-    fao.write_bytes(cursor,canonical({'domain':state['domain'] if leaf else (state['domain']+1)%len(DOMAINS),
+    fao.write(cursor,canonical({'domain':state['domain'] if leaf else (state['domain']+1)%len(DOMAINS),
                                      'after':after if leaf else ''}))
     return len(updates)
 
@@ -251,7 +239,7 @@ def collect(conn, now, limit=16):
     root = directory(conn)
     removed = 0
     with file_collection.collection(conn, root, name='.collect.json', valid_shard=_shard,
-                                    prefixes=sorted(DOMAINS)) as work, fao.collector(root) as admitted:
+                                    prefixes=sorted(DOMAINS)) as work, file_collection.collector(root) as admitted:
         if not admitted:
             return 0
         conn.execute('BEGIN IMMEDIATE')
@@ -264,8 +252,8 @@ def collect(conn, now, limit=16):
                         or path.stem[:2] != path.parent.name):
                     continue
                 domain = path.relative_to(root).parts[0]
-                age = fao.stat(path)
-                if fao.Retention(30, 'ctime').eligible(age, now):
+                age = fao.read(path).info
+                if (age.ctime_ns / 1e9 <= now - 30*86400):
                     try:
                         live = file_map.contains_page(root/domain,head(conn,domain),path.stem,budget)
                     except fao.FileBudgetExceeded:

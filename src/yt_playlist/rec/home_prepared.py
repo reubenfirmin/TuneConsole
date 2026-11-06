@@ -4,6 +4,7 @@ The cache contains complete offers, not fitted models. Selection evidence stays 
 the existing mode ledger and survives replacing or losing these prepared contents.
 """
 from copy import deepcopy
+from contextlib import nullcontext
 from dataclasses import asdict
 import hashlib
 import json
@@ -50,8 +51,15 @@ class _NoJobs:
 
 def tuning_key(store, now=None):
     now = time.time() if now is None else now
-    vibe = home_vibe.current(store, now)
-    return store.memoized_read(('home-tuning', now, vibe), lambda: _tuning_key(store, now, vibe))
+    mix_tuning.expire(store, now)
+    # Compose the inputs on one pinned reader. Reading through the writer here
+    # opened a new SQL/file snapshot for every repository call and could mix
+    # preferences from opposite sides of a concurrent settings update.
+    owned = getattr(store._lock, 'held_by_current_thread', False)
+    with (nullcontext(store) if owned else store.read_view()) as reader:
+        vibe = home_vibe.current(reader, now)
+        return reader.memoized_read(('home-tuning', now, vibe),
+            lambda: _tuning_key(reader, now, vibe))
 
 
 def _tuning_key(store, now, vibe):

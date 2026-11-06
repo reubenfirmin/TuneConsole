@@ -9,7 +9,7 @@ from tests.core.test_predecessor_writes import installed
 
 
 def test_selection_round_trip_keeps_file_work_outside_repo_and_sql(store, monkeypatch):
-    write, read = fao.write_compressed, files.read
+    write, read = fao.write, files.read
     observed = []
 
     def written(path, data):
@@ -25,7 +25,7 @@ def test_selection_round_trip_keeps_file_work_outside_repo_and_sql(store, monkey
     def forbidden(*args, **kwargs):
         pytest.fail('Home cache used the legacy durable publisher')
 
-    monkeypatch.setattr(fao, 'write_compressed', written)
+    monkeypatch.setattr(fao, 'write', written)
     monkeypatch.setattr(files, 'read', restored)
     monkeypatch.setattr(files, 'publish', forbidden)
     tailored = {'schema': 1, 'menus': [{'protos': [{'tracks': [{'title': 'été 東京'}]}]}]}
@@ -43,7 +43,7 @@ def test_selection_round_trip_keeps_file_work_outside_repo_and_sql(store, monkey
 @pytest.mark.parametrize('failure', ['file', 'sql'])
 def test_failed_selection_preserves_both_previous_heads(store, monkeypatch, failure):
     home_cache.remember(store, {'old': 'tailored'}, {'old': 'held'}, 1)
-    original = fao.write_compressed if failure == 'file' else store.home_cache.publish
+    original = fao.write if failure == 'file' else store.home_cache.publish
     calls = []
 
     def interrupted(*args, **kwargs):
@@ -53,7 +53,7 @@ def test_failed_selection_preserves_both_previous_heads(store, monkeypatch, fail
         return original(*args, **kwargs)
 
     if failure == 'file':
-        monkeypatch.setattr(fao, 'write_compressed', interrupted)
+        monkeypatch.setattr(fao, 'write', interrupted)
     else:
         monkeypatch.setattr(store.home_cache, 'publish', interrupted)
     with pytest.raises(OSError, match='second document failed'):

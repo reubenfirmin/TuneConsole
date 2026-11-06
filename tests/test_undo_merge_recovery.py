@@ -1,4 +1,6 @@
 """A failed merge Undo must retain the keeper's usable copy until sources are restored."""
+from tests.file_content_support import read_bytes as original_bytes
+from tests.file_content_support import patch_byte_reads
 import json
 
 import pytest
@@ -45,14 +47,14 @@ def test_merge_source_failures_preserve_keeper_and_resume_safely(store, merged, 
     backup = json.loads(store.actions.get_action(aid).undo_json)["backups"][0]
     with monkeypatch.context() as patch:
         if failure == "backup_read":
-            read = fao.read_bytes
+            read = original_bytes
 
             def unreadable(path, *args, **kwargs):
                 if str(path) == backup:
                     raise OSError("Backup unavailable")
                 return read(path, *args, **kwargs)
 
-            patch.setattr(fao, "read_bytes", unreadable)
+            patch_byte_reads(patch, unreadable)
         elif failure == "account":
             clients = {}
         elif failure == "create":

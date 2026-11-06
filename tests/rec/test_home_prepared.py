@@ -17,7 +17,7 @@ import pytest
 from tests.conftest import FakeClient
 from tests.group_support import publish as publish_groups, recordings as grouped_recordings
 from tests.home_fixture_support import returning_listener
-from tests.home_prepared_support import seed
+from tests.home_prepared_support import publication_inputs as controlled_publication_inputs, seed
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.store import Store
@@ -51,6 +51,18 @@ def prepared(store, home_prepared_template):
 
 
 @pytest.fixture
+def publication_inputs(store, monkeypatch):
+    return controlled_publication_inputs(store, monkeypatch)
+
+
+@pytest.fixture
+def publication_prepared(publication_inputs, one_menu_per_attempt):
+    payload = home_prepared.prepare_mixes(publication_inputs.store, 1000)
+    assert home_prepared._valid(payload)
+    return payload
+
+
+@pytest.fixture
 def one_menu_per_attempt(monkeypatch):
     """Exercise real setup/selection/publication once per worker slice.
 
@@ -74,7 +86,8 @@ def service(store):
     return home_cards.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__))
 
 
-def test_capacity_projection_preserves_worker_menu_after_feedback(store, prepared):
+def test_capacity_projection_preserves_worker_menu_after_feedback(store, publication_prepared):
+    prepared = publication_prepared
     def selections(projected):
         with store.read_view() as reader:
             payload = home_prepared.peek(reader, 1000, readiness_only=projected)
@@ -181,8 +194,9 @@ def test_history_diagnostics_do_not_change_generation_but_effective_allocation_d
     assert home_prepared._proposal_generation(store, None, 106) != changed_pool
 
 
-def test_generation_shares_play_counts_and_facets_across_summaries(home_inputs, monkeypatch):
-    store = home_inputs
+def test_generation_shares_play_counts_and_facets_across_summaries(
+        publication_inputs, one_menu_per_attempt, monkeypatch):
+    store = publication_inputs.store
     repo = type(store.rec_query)
     original = repo.play_counts
     calls = []
@@ -210,6 +224,8 @@ def test_generation_shares_play_counts_and_facets_across_summaries(home_inputs, 
     assert home_prepared.prepare(store, 1000) is not None
     assert len(calls) == 1
     assert not bundle_reads
+    assert publication_inputs.requests
+    assert all(not request.record for request in publication_inputs.requests)
 
 
 def test_album_budget_deferral_still_publishes_mixes_with_last_good_album_context(
@@ -399,8 +415,9 @@ def test_explicit_metadata_choice_during_build_allows_captured_candidate_heads_t
     assert store.tracks.track_detail('import-0')['genre'] == 'House'
 
 
-def test_changed_artist_links_do_not_rewrite_the_worker_publication(home_inputs, monkeypatch):
-    store = home_inputs
+def test_changed_artist_links_do_not_rewrite_the_worker_publication(
+        publication_inputs, one_menu_per_attempt, monkeypatch):
+    store = publication_inputs.store
     store.rec_model.record_feedback('for_you', 'artist:Guest', 'mute', now=999)
     original = home_cards.HomeCards.cards
     corrected = []
@@ -429,13 +446,42 @@ def test_changed_artist_links_do_not_rewrite_the_worker_publication(home_inputs,
     assert [p['tracks'] for p in current.protos] == [p['tracks'] for p in chosen['protos']]
 
 
-def test_ordinary_home_reads_use_prepared_results_without_selection_or_analytics(store, prepared, monkeypatch):
-    from tests.test_growth_journey import early_journey
-    from yt_playlist.rec import account_growth
+def test_ordinary_home_reads_use_prepared_results_without_selection_or_analytics(
+        store, publication_prepared, monkeypatch):
+    from yt_playlist.rec import account_growth, growth_readiness
 
-    # Publish genuine foundation, album and Discover prerequisites before the
-    # spies. Restore this fixture's real prepared menus after early setup.
-    early_journey(store)
+    prepared = publication_prepared
+    # These routes consume readiness; computing and publishing every preceding
+    # product is not part of their serving contract. The real progression gates
+    # and their output requirements are owned by test_growth_journey and
+    # test_growth_readiness. Keep actual prepared menus and HTTP rendering here.
+    monkeypatch.setattr(growth_readiness, 'foundation', lambda *a: True)
+    monkeypatch.setattr(growth_readiness, 'albums', lambda *a: True)
+    monkeypatch.setattr(growth_readiness, 'discover', lambda *a: True)
+    from fastapi import APIRouter, Response
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, home
+
+    rendered = []
+    templates = webapp.Jinja2Templates
+
+    def serving_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+
+        def render(request, name, context, **options):
+            rendered.append((request.url.path, name, context))
+            return Response(media_type='text/html', **options)
+
+        # This case owns serving without expensive producers/analytics. Keep
+        # HTTP, views and actual prepared selections; rendered markup retains
+        # its owners in test_mode_cards_route and web/test_home_composition.
+        monkeypatch.setattr(result, 'TemplateResponse', render)
+        return result
+
+    monkeypatch.setattr(webapp, 'Jinja2Templates', serving_templates)
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [app_update.build(ctx), home.build(ctx)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *a: None)
     # Force the description/audit fallback on actual selected tracks. A fully
     # tagged fixture used to miss its whole-library artist lookup.
     for menu in prepared['menus']:
@@ -462,15 +508,19 @@ def test_ordinary_home_reads_use_prepared_results_without_selection_or_analytics
     for path in ("/", "/home/cards", "/home/feed", "/home/discovery", "/home/genres"):
         response = client.get(path)
         assert response.status_code == 200
-        assert "Finding four ways into your library" not in response.text
         if path in ("/", "/home/cards", "/home/feed"):
-            assert 'class="gen-card' in response.text or 'class="card gen-card' in response.text
-    assert 'hx-trigger="load" hx-swap="innerHTML" class="card-row-loading"' not in client.get("/").text
+            rendered_path, _, context = rendered[-1]
+            assert rendered_path == path
+            assert not context['preparing']
+            assert {proto['lane'] for proto in context['protos']} == {
+                'wheelhouse', 'explore', 'comfort', 'fresh'}
+            assert all(proto['tracks'] for proto in context['protos'])
     assert client.post("/home/refresh-cards").status_code == 200
     assert client.post("/home/refresh-card/wheelhouse").status_code == 200
 
 
-def test_genre_preference_edits_schedule_and_publish_a_new_prepared_generation(store, prepared):
+def test_genre_preference_edits_schedule_and_publish_a_new_prepared_generation(store, publication_prepared):
+    prepared = publication_prepared
     scheduled = []
     store.rec_model.set_weight('genre:techno', 0.5, now=1000)
     retained = home_prepared.load(store, 1000, lambda: scheduled.append(True))
@@ -772,7 +822,8 @@ def test_startup_cards_keep_polling_with_backoff_until_offers_recover(
         assert not assignment.get('censored')
 
 
-def test_cached_discovery_honors_unavailability_and_current_tile_metadata(store, prepared):
+def test_cached_discovery_honors_unavailability_and_current_tile_metadata(store, publication_prepared):
+    prepared = publication_prepared
     initial = home_prepared.cards(store, prepared, 1001, service(store), record=False)
     fresh = next(p for p in initial.protos if p["lane"] == "fresh")
     key = fresh["tracks"][0]["key"]
@@ -841,7 +892,8 @@ def test_cache_rebuild_and_restart_preserve_evidence_and_experiment_identity(
         reopened.conn.close()
 
 
-def test_generation_race_retains_previous_cache(store, prepared, monkeypatch):
+def test_generation_race_retains_previous_cache(store, publication_prepared, monkeypatch):
+    prepared = publication_prepared
     tid = store.tracks.track_ids_for_videos(['v-wheelhouse-0-0'])['v-wheelhouse-0-0']
     store.tracks.set_track_genre(tid, 'House')  # Recompute the completed genre setup for new metadata.
     original = home_themes.genre_options
@@ -894,9 +946,10 @@ def test_setup_sql_obeys_total_budget_and_preserves_previous_cache(store, prepar
 @pytest.mark.parametrize('boundary', ['before_commit', 'reader_cleanup'])
 @pytest.mark.parametrize('reason', ['deadline', 'shutdown'])
 def test_publication_acknowledges_commit_across_cleanup_deadline(
-        store, prepared, monkeypatch, boundary, reason):
+        store, publication_prepared, monkeypatch, boundary, reason):
     from yt_playlist.core import activity
 
+    prepared = publication_prepared
     clock, stopping = [100.], [False]
     monkeypatch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
     monkeypatch.setattr(home_prepared, 'prepare_discovery', lambda *args: None)
@@ -947,9 +1000,11 @@ def test_publication_acknowledges_commit_across_cleanup_deadline(
             assert result == stored
 
 
-def test_small_preparation_batches_accumulate_alternatives_across_attempts(home_inputs, monkeypatch):
+def test_small_preparation_batches_accumulate_alternatives_across_attempts(publication_inputs, monkeypatch):
     """Complete every alternative through bounded retries without any exposure."""
-    store = home_inputs
+    from yt_playlist.core import json_cache
+
+    store = publication_inputs.store
     clock = [100]
     original = home_cards.HomeCards.cards
 
@@ -958,14 +1013,25 @@ def test_small_preparation_batches_accumulate_alternatives_across_attempts(home_
         clock[0] += 6
         return result
 
-    monkeypatch.setattr(home_prepared.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(home_prepared, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
     monkeypatch.setattr(home_prepared, 'PREPARE_BUDGET_S', 10)
     monkeypatch.setattr(home_cards.HomeCards, 'cards', one_menu)
+    # This case owns retry composition. SQL/file publication and its deadline
+    # rollback are exercised by the four real publication-boundary cases above.
+    published = {}
+    monkeypatch.setattr(home_cache, 'read', lambda reader, surface: deepcopy(published.get(surface)))
+    monkeypatch.setattr(home_cache, 'prepare',
+        lambda writer, surface, raw, now: (surface, json_cache.decode(raw)))
+    monkeypatch.setattr(home_cache, 'publish',
+        lambda writer, publication, **kwargs: published.__setitem__(*publication))
     for size in range(1, home_prepared.MAX_MENUS + 1):
-        payload = home_prepared.prepare(store, 1000 + size)
+        # Independent discovery/revisit summaries are not part of mix retries.
+        payload = home_prepared.prepare_mixes(store, 1000 + size)
         assert payload is not None
         assert len(payload['menus']) == size
     assert len(payload['menus']) == home_prepared.MAX_MENUS
+    assert [request.epoch for request in publication_inputs.requests] == list(range(home_prepared.MAX_MENUS))
+    assert all(not request.record for request in publication_inputs.requests)
     assert all(menu['protos'] for menu in payload['menus'])
     assert {p['mode_id'] for m in payload['menus'] for p in m['protos']
             if p.get('mode_id') is not None} == set(range(6))
@@ -977,21 +1043,25 @@ def test_small_preparation_batches_accumulate_alternatives_across_attempts(home_
 
 
 def test_hydrated_menus_accumulate_losslessly_and_serve_after_reopen(file_backed_store, monkeypatch):
-    from yt_playlist.core import home_outputs, json_cache
+    from yt_playlist.core import home_outputs, json_cache, policy_config
+    from yt_playlist.rec import musical_character
 
     store = file_backed_store
     path = store._db_path
-    seed(store, tracks_per_lane=16)
+    controlled_publication_inputs(store, monkeypatch)
+    policy, base = policy_config.pack({'schema': 4, 'ranker': 'controlled-menu'}, 1000)
+    store.rec_ledger.record_prepared_policies([policy], [base])
     clock, expected = [100.], {}
     original = home_cards.HomeCards.cards
 
     def hydrate(value):
         if isinstance(value, dict):
             if isinstance(value.get('musical'), dict):
-                # Retain the real profile and add a realistic captured feature
-                # vector. Slots, offers and counterfactuals repeat these inputs.
+                # Numeric features and an opaque captured source exercise both
+                # profile preservation and a logical document over four MB.
                 value['musical']['captured_features'] = {
-                    f'feature-{i}': (i + 1) / 137 for i in range(110)}
+                    f'feature-{i}': (i + 1) / 137 for i in range(3)}
+                value['musical']['captured_source'] = 'fixture-source-observation|' * 1000
             for item in value.values():
                 hydrate(item)
         elif isinstance(value, list):
@@ -1000,16 +1070,24 @@ def test_hydrated_menus_accumulate_losslessly_and_serve_after_reopen(file_backed
 
     def one_hydrated_menu(self, request):
         result = original(self, request)
+        for proto in result.protos:
+            for track in proto['tracks']:
+                track['pool_policy'] = policy[0]
+                track['musical'] = {'version': musical_character.VERSION,
+                    'dimensions': {'intensity': {'value': .7, 'support': 1}}}
+            proto['counterfactual'] = {'tracks': deepcopy(proto['tracks'])}
         hydrate(result.protos)
         expected[result.epoch] = deepcopy(result.protos)
-        clock[0] += 6
+        clock[0] += .9
         return result
 
-    monkeypatch.setattr(home_prepared.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(home_prepared, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
     monkeypatch.setattr(home_cards.HomeCards, 'cards', one_hydrated_menu)
     try:
-        for size in range(1, home_prepared.MAX_MENUS + 1):
-            payload = home_prepared.prepare(store, 1000)
+        # Two real file/SQL publications exercise lossless continuation. The
+        # small retry owner above checks each of the twelve cursor transitions.
+        for size in (6, home_prepared.MAX_MENUS):
+            payload = home_prepared.prepare_mixes(store, 1000)
             assert payload is not None and len(payload['menus']) == size
             assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == payload
         assert home_prepared.MAX_MENUS == 12 and home_prepared.MAX_BYTES == 4_000_000
@@ -1025,6 +1103,7 @@ def test_hydrated_menus_accumulate_losslessly_and_serve_after_reopen(file_backed
                 assert proto['recipe']['experiment_id'] == proto['experiment_id']
             assert all(slot['proto'] in menu['protos'] for slot in menu['slots'] if slot['proto'])
         assert store.modes.impression_counts() == {}
+        assert home_outputs.policy_references(payload) == {policy[0]}
         assert {row[0] for row in store.conn.execute('SELECT raw_key FROM home_display_policies')} >= (
             home_outputs.policy_references(payload))
     finally:
@@ -1043,15 +1122,23 @@ def test_hydrated_menus_accumulate_losslessly_and_serve_after_reopen(file_backed
         # A failed replacement cannot hide the fully accumulated publication.
         def fail(*args, **kwargs):
             raise OSError('Controlled output-volume failure')
-        monkeypatch.setattr(home_cache.fao, 'write_compressed', fail)
+        monkeypatch.setattr(home_cache.fao, 'write', fail)
+
+        def replacement(self, request):
+            result = original(self, request)
+            clock[0] += home_prepared.PREPARE_BUDGET_S * .6
+            return result
+
+        monkeypatch.setattr(home_cards.HomeCards, 'cards', replacement)
         with pytest.raises(OSError, match='output-volume'):
-            home_prepared.prepare(reopened, 1003)
+            home_prepared.prepare_mixes(reopened, 1003)
         assert reopened.rec_proposals.get_proposals(home_prepared.SURFACE) == payload
     finally:
         reopened.conn.close()
 
 
-def test_preparation_can_publish_while_ordinary_unrelated_ui_writes_continue(store, prepared, monkeypatch):
+def test_preparation_can_publish_while_ordinary_unrelated_ui_writes_continue(
+        store, publication_prepared, monkeypatch):
     tid = store.tracks.track_ids_for_videos(['v-wheelhouse-0-0'])['v-wheelhouse-0-0']
     store.tracks.set_track_genre(tid, 'House')
     iid = store.accounts.upsert_account('main', 'cred', None, True)

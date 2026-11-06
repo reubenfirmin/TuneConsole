@@ -30,7 +30,7 @@ def pytest_collection_modifyitems(config, items):
 
 @pytest.fixture
 def managed_library():
-    from tests.library_image_fixtures import managed_database
+    from .fixtures import managed_database
     database = managed_database()
     if database is None:
         pytest.skip('Run this actual-library check through scripts/test-library.py')

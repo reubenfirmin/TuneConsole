@@ -11,6 +11,67 @@ from yt_playlist.core import profile_files
 from yt_playlist.rec import home_prepared
 
 
+@pytest.mark.parametrize('fixture_name', ['store', 'file_backed_store'])
+@pytest.mark.parametrize('validate_inputs', [False, True])
+def test_restoring_identical_schema_fences_old_readers_and_preserves_write_guards(
+        request, fixture_name, validate_inputs, _pristine_current_schema):
+    target = request.getfixturevalue(fixture_name)
+    target.settings.set_setting('fixture_input', 'before restore')
+    calculations, statements = [], []
+
+    def value(reader):
+        def calculate():
+            calculations.append(True)
+            return reader.settings.get_setting('fixture_input')
+        return reader.memoized_read('fixture-restore-input', calculate)
+
+    def seed(source):
+        source.settings.set_setting('fixture_input', 'template value')
+
+    with prepared_template(_pristine_current_schema, seed) as template:
+        target.conn.set_trace_callback(statements.append)
+        try:
+            with target.read_snapshot() as old:
+                assert value(old.store) == 'before restore'
+                old.release_reader()
+                template.restore(target)
+                assert not old.publish(lambda: pytest.fail('Published before database replacement'),
+                                       validate_inputs=validate_inputs)
+            with target.read_snapshot() as current:
+                assert value(current.store) == 'template value'
+                target.settings.set_setting('fixture_input', 'after restore')
+                assert not current.publish(lambda: pytest.fail('Missed a real post-restore write'))
+            with target.read_snapshot() as current:
+                assert value(current.store) == 'after restore'
+                assert current.publish(lambda: None)
+        finally:
+            target.conn.set_trace_callback(None)
+        assert template.source.settings.get_setting('fixture_input') == 'template value'
+    assert len(calculations) == 3
+    assert not any(sql.startswith(('CREATE TEMP TRIGGER', 'DROP TRIGGER')) for sql in statements)
+    assert not target.conn.in_transaction
+
+
+def test_restored_schema_with_added_owner_gets_real_revision_guards(
+        store, _pristine_current_schema):
+    def seed(source):
+        source.conn.execute('CREATE TABLE fixture_added_owner (id INTEGER PRIMARY KEY,value TEXT)')
+        with source.conn:
+            source.conn.execute("INSERT INTO fixture_added_owner VALUES (1,'template value')")
+
+    with prepared_template(_pristine_current_schema, seed) as template:
+        template.restore(store)
+        with store.read_snapshot() as snapshot:
+            assert snapshot.store.conn.execute('SELECT value FROM fixture_added_owner').fetchone()[0] == 'template value'
+            with store.conn:
+                store.conn.execute("UPDATE fixture_added_owner SET value='new value'")
+            assert not snapshot.publish(lambda: pytest.fail('New owner was not guarded'))
+        with store.read_snapshot() as snapshot:
+            assert snapshot.store.conn.execute('SELECT value FROM fixture_added_owner').fetchone()[0] == 'new value'
+            assert snapshot.publish(lambda: None)
+        assert template.source.conn.execute('SELECT value FROM fixture_added_owner').fetchone()[0] == 'template value'
+
+
 @pytest.mark.parametrize('fail_build', [False, True])
 @pytest.mark.parametrize('historical', [False, True])
 def test_prepared_template_isolates_construction_and_restores_caller_settings(

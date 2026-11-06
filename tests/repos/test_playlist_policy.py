@@ -53,7 +53,7 @@ def test_recovery_preserves_policy_groups_and_remote_markers(store, tmp_path, mo
     else:
         executor.delete_playlist(store, pid, client, 40 * 86400)
     action = store.actions.get_actions()[0]
-    snapshot = json.loads(fao.read_bytes(json.loads(action.undo_json)['backup']))
+    snapshot = json.loads(fao.read(json.loads(action.undo_json)['backup']).bytes)
     assert snapshot['snapshot_version'] == 2
     assert snapshot['group'] == 'Road trips'
     playlist_undo.undo_action(store, action.id, {iid: client}, 40 * 86400 + 1)

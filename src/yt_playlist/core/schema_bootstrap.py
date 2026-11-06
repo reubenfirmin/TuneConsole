@@ -1,6 +1,6 @@
 """Install the compiled destination in one caller-owned transaction."""
 from . import destination_schema
-from .schema_contract import MigrationError, tokens
+from .schema_contract import MigrationError, TOKEN
 
 
 def bootstrap(conn, registry, changes, now, *, validation):
@@ -21,7 +21,11 @@ def bootstrap(conn, registry, changes, now, *, validation):
     try:
         guards = []
         for sql in document['destination_statements']:
-            if tokens(sql)[:2] == ('create', 'trigger'):
+            # Classification only needs two words, not every token in a large
+            # trigger body. Full definitions are still checked by validation.
+            words = (match.group().lower() for match in TOKEN.finditer(sql)
+                     if not match.group().startswith(('--', '/*')))
+            if next(words, None) == 'create' and next(words, None) == 'trigger':
                 guards.append(sql)
             else:
                 conn.execute(sql)

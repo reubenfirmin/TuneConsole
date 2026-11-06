@@ -87,7 +87,7 @@ def _read(filename, digest, size, *, surface=None, chunk_key=None, with_age=Fals
     if type(size) is not int or not 0 < size <= MAX_BYTES:
         raise ValueError('Invalid prepared output byte range')
     path = Path(filename)
-    with fao.open_reader(path) as stream:
+    with fao.read(path) as stream:
         age = stream.info
         encoded = stream.read(size + 1)
     if path.stem != digest or len(encoded) != size or hashlib.sha256(encoded).hexdigest() != digest:
@@ -144,7 +144,7 @@ def _manifest(root, value):
 
 def _load_manifest(path):
     path = Path(path)
-    with fao.open_reader(path) as stream:
+    with fao.read(path) as stream:
         encoded = stream.read(MANIFEST_BYTES + 1)
     if len(encoded) > MANIFEST_BYTES or hashlib.sha256(encoded).hexdigest() != path.stem:
         raise ValueError('Prepared output manifest does not match its digest')
@@ -171,7 +171,7 @@ def _export(conn, root, *, directory, references):
         copied = root / digest[:2] / (digest + '.json')
         # Preserve the existing encoding after domain validation. FAO checks
         # the owner's digest again before replacing any earlier backup.
-        fao.copy(filename, copied, max_bytes=MAX_BYTES, digest=digest)
+        fao.write(copied, fao.read(filename, max_bytes=MAX_BYTES, digest=digest))
         entries.append({'owner': owner, 'id': identity, 'surface': surface, 'chunk_key': key, 'digest': digest, 'byte_size': size,
                         'relative_filename': str(Path(copied).relative_to(root))})
         if len(entries) == 512:
@@ -312,7 +312,7 @@ class OrphanCollector:
                             check_cancellable_work()
                             if str(path) not in owned:
                                 try:
-                                    length = fao.stat(path).compressed_bytes
+                                    length = fao.read(path).info.compressed_bytes
                                     if not fao.delete(path, missing_ok=True):
                                         continue
                                 except FileNotFoundError:

@@ -34,7 +34,7 @@ def save(database, value):
     destination = db_handles.state_path(database)
     # Cancellation may stop construction, but recovery custody must finish
     # recording which database is authoritative before write admission resumes.
-    Context().run(fao.write_bytes,destination,(json.dumps(value, sort_keys=True, allow_nan=False)+'\n').encode())
+    Context().run(fao.write,destination,(json.dumps(value, sort_keys=True, allow_nan=False)+'\n').encode())
 
 
 def reopen(store, *, internal=False):

@@ -93,7 +93,7 @@ def test_saved_failure_confirmed_absent_completes_original_without_another_delet
 
     result = collect(case)
 
-    assert len(result)==1 and fao.read_bytes(result[0]['backup']) == fao.read_bytes(backup)
+    assert len(result)==1 and fao.read(result[0]['backup']).bytes == fao.read(backup).bytes
     retained = case.store.conn.execute('SELECT retained_filename FROM action_backups WHERE action_id=?',(aid,)).fetchone()[0]
     assert result[0]['backup']==retained
     assert case.store.actions.get_action(aid).status == "executed"
@@ -113,7 +113,7 @@ def test_confirmed_survivor_requires_fresh_complete_backup_and_committed_intent(
         newest = case.store.actions.get_actions()[0]
         assert newest.id != old_aid and newest.status == "delete_pending"
         entry, = json.loads(newest.undo_json)["deletions"]
-        saved = json.loads(fao.read_bytes(entry["backup"]))
+        saved = json.loads(fao.read(entry['backup']).bytes)
         assert [row["video_id"] for row in saved["tracks"]] == ["a", "b", "new"]
         assert entry["backup"] != str(old_backup)
         return delete(ytm)
@@ -207,7 +207,7 @@ def test_production_complete_pages_back_up_new_members_before_fresh_delete(case,
     assert len(result) == 1 and case.client.writes == ["SOURCE"]
     assert len(bridge.calls) == 2
     assert backup.read_bytes() == original
-    fresh = json.loads(fao.read_bytes(result[0]["backup"]))
+    fresh = json.loads(fao.read(result[0]['backup']).bytes)
     assert [row["video_id"] for row in fresh["tracks"]] == ["a", "b", "new"]
     assert case.store.actions.get_actions()[0].id != old_aid
 
@@ -406,7 +406,7 @@ def test_eligibility_changed_during_backup_prevents_automatic_delete(case, monke
 
     assert case.client.writes == []
     assert len(retained) == 1 and retained[0].is_file()
-    assert [row["video_id"] for row in json.loads(fao.read_bytes(retained[0]))["tracks"]] == ["a", "b"]
+    assert [row["video_id"] for row in json.loads(fao.read(retained[0]).bytes)["tracks"]] == ["a", "b"]
     assert case.store.actions.get_actions() == []
     assert playlist_gc_retry.states(case.store) == {}
 

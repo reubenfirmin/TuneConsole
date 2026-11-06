@@ -20,7 +20,7 @@ def references(conn):
 
 
 def _read(path, *, with_age=False):
-    with fao.open_reader(path) as stream:
+    with fao.read(path) as stream:
         data = stream.read(MAX_BYTES + 1)
         age = stream.info
     if len(data) > MAX_BYTES:
@@ -133,5 +133,5 @@ def restore(conn, manifest):
                     raise ValueError('Listening evidence backup failed verification')
                 _validate(kind, token, data)
                 output._publish(output.directory / kind / token[:2] / (token + '.json'), data, kind, token, age=age)
-        save(sum(fao.stat(path).logical_bytes for path in references(conn)))
+        save(sum(fao.read(path).info.logical_bytes for path in references(conn)))
         output._advance_generation()

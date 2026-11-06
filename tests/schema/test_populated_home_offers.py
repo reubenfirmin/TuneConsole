@@ -11,7 +11,7 @@ from yt_playlist.core.migrations import current, v080_metadata_evidence
 from yt_playlist.core.migrations import migrate, registry, regular
 from yt_playlist.core.store import Store
 from tests.schema.actual_library import copy_readonly_library
-from tests.library_image_fixtures import report_file
+from tests.library_image.fixtures import report_file
 
 
 def test_actual_completed_library_preserves_offer_history(request, tmp_path, monkeypatch):

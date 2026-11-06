@@ -1,4 +1,5 @@
 """Correction and chronology guarantees after releasing heavy diagnostic inputs."""
+from tests.file_content_support import age_file
 import json
 from copy import deepcopy
 from functools import wraps
@@ -34,17 +35,17 @@ def captured(store, oid='menu', at=100, *, groups=None):
 def age_artifacts(store):
     totals = {'checked': 0, 'aged': 0, 'logical_bytes': 0, 'verified_bytes': 0}
     for path in store.rec_ledger.evidence().directory.glob('artifact/*/*.json'):
-        before = fao.stat(path)
+        before = fao.read(path).info
         totals['checked'] += 1
         totals['logical_bytes'] += before.logical_bytes
         if before.mtime_ns == 10**9:
             continue
-        raw = fao.read_bytes(path)
-        fao.touch(path, mtime_ns=10**9)
-        after = fao.stat(path)
+        raw = fao.read(path).bytes
+        age_file(path, mtime_ns=10 ** 9)
+        after = fao.read(path).info
         assert after.mtime_ns == 10**9 and after.ctime_ns == before.ctime_ns
         assert after.logical_bytes == before.logical_bytes == len(raw)
-        assert fao.read_bytes(path) == raw
+        assert fao.read(path).bytes == raw
         totals['aged'] += 1
         totals['verified_bytes'] += len(raw)
     return totals
@@ -68,7 +69,7 @@ def retention_costs(monkeypatch, record_property):
         return call
 
     for owner, name in ((choices, 'issue'), (choices, 'respond'), (choices, 'maintain_storage'),
-                        (fao, '_write'), (fao, 'read_bytes')):
+                        (fao, '_write'), (fao.Content, '__enter__')):
         monkeypatch.setattr(owner, name, timed(name, getattr(owner, name)))
     yield
     for name, (calls, wall, cpu) in sorted(totals.items()):

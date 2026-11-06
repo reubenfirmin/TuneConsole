@@ -1,3 +1,4 @@
+from yt_playlist.core import file_paths
 import sqlite3
 import threading
 import uuid
@@ -102,7 +103,7 @@ class Store:
             self.conn._close_callbacks.append(lambda: shutil.rmtree(runtime_root, ignore_errors=True))
             from . import fao
             for domain in file_owners.owners():
-                root = fao.root_for_database(None, self._evidence_key, domain)
+                root = file_paths.root_for_database(None, self._evidence_key, domain)
                 self.conn._close_callbacks.append(lambda root=root: shutil.rmtree(root, ignore_errors=True))
         self._configure_connection()
         self.priority = RequestPriority()

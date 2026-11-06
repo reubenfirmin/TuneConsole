@@ -163,7 +163,7 @@ def validate(model):
 def _load(path, modified, size):
     if size > 262144:
         raise ValueError('Listening model exceeds 256 KiB')
-    with fao.open_reader(path, max_bytes=262144) as stream:
+    with fao.read(path, max_bytes=262144) as stream:
         content = stream.read(262145)
     if len(content) > 262144:
         raise ValueError('Listening model exceeds 256 KiB')
@@ -190,7 +190,7 @@ def identity():
     path = configured_path()
     if path:
         try:
-            info = fao.stat(path)
+            info = fao.read(path).info
             return _load(path, info.identity, info.logical_bytes)[1]
         except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
             pass
@@ -203,7 +203,7 @@ def apply(samples, prediction, metadata=None):
     if not path:
         return prediction
     try:
-        info = fao.stat(path)
+        info = fao.read(path).info
         model, digest = _load(path, info.identity, info.logical_bytes)
         external = model.get('format') == audio_vibe_external.FORMAT
         if external:

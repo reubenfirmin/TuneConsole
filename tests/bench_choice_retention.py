@@ -10,7 +10,7 @@ from pathlib import Path
 import time
 
 from tests.bench_svd_background import _saved_library_source
-from tests.library_image_fixtures import benchmark_library
+from tests.library_image.fixtures import benchmark_library
 from yt_playlist.core.activity import work_budget
 from yt_playlist.core.store import Store
 from yt_playlist.rec import (choice_evidence as choices, candidate_refresh,
