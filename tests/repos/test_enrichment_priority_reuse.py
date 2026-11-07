@@ -37,6 +37,7 @@ def queue(file_backed_store, monkeypatch):
             yield snapshot
 
     monkeypatch.setattr(store, 'read_snapshot', traced_reader)
+    monkeypatch.setattr(store.enrichment_queue, 'read_snapshot', traced_reader)
     return store, first, second, anchor, calculations
 
 

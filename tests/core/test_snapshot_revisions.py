@@ -59,6 +59,34 @@ def test_rolled_back_and_identical_updates_do_not_invalidate_snapshot(database):
         assert snapshot.publish(lambda: None)
 
 
+@pytest.mark.parametrize('function', ['json_each', 'json_tree'])
+def test_json_expansion_guards_its_input_without_rejecting_unrelated_writes(database, function):
+    database.settings.set_setting('json-input', '["first"]')
+    with database.read_snapshot() as snapshot:
+        payload = snapshot.store.settings.get_setting('json-input')
+        assert [row[0] for row in snapshot.store.conn.execute(
+            f"SELECT value FROM {function}(?) WHERE type='text'", (payload,))] == ['first']
+        database.settings.set_setting('unrelated', 'changed')
+        assert snapshot.publish(lambda: None)
+    with database.read_snapshot() as snapshot:
+        payload = snapshot.store.settings.get_setting('json-input')
+        snapshot.store.conn.execute(f'SELECT value FROM {function}(?)', (payload,)).fetchall()
+        database.settings.set_setting('json-input', '["second"]')
+        assert not snapshot.publish(lambda: pytest.fail('Published stale JSON input'))
+
+
+@pytest.mark.parametrize('name', ['json_each', 'json_tree'])
+def test_real_tables_named_like_json_functions_keep_their_revision_guards(database, name):
+    with database.conn:
+        database.conn.execute(f'CREATE TABLE {name}(value TEXT)')
+        database.conn.execute(f'INSERT INTO {name} VALUES ("first")')
+    with database.read_snapshot() as snapshot:
+        assert snapshot.store.conn.execute(f'SELECT value FROM {name}').fetchone()[0] == 'first'
+        with database.conn:
+            database.conn.execute(f'UPDATE {name} SET value="second"')
+        assert not snapshot.publish(lambda: pytest.fail('Ignored an actual table'))
+
+
 def test_interrupted_writer_reservation_releases_transaction_before_retry(database):
     store = database
     interrupted = False

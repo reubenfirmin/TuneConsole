@@ -60,7 +60,8 @@ def test_preopened_and_pinned_readers_select_exact_files_without_legacy_payload(
     other = Store(store._db_path)
     try:
         other.init_schema(defer_metadata=True)
-        with other.read_view() as pinned:
+        with other.read_snapshot() as snapshot:
+            pinned = snapshot.store
             assert pinned.rec_proposals.get_proposals('home_prepared') == json.loads(originals['home_prepared'])
             stage = ready(store.conn, size=1)
             publication.OWNER.publish(store.conn, stage=stage)

@@ -320,9 +320,10 @@ between turns. Its pending queue is acknowledged only on final publication.
 Model metadata capture separately yields after each 32-recording, two-second
 input admission, then fits under the ten-second admission. Its reader lifetime
 is capped at 180 seconds; no work-budget context survives a yield.
-A complete model cycle gets at most eighty seconds to publish a useful score
-batch before its own source worker resumes. Indexed current generation references
-acknowledge that delivery across restart; no additional checkpoint is stored.
+A complete model cycle can admit a useful score batch before its own source
+worker resumes, within eighty seconds of the latest model attempt. An admitted
+batch retains its ordinary bounded reader lifetime. Indexed current generation
+references acknowledge delivery across restart; no additional checkpoint is stored.
 Shutdown, storage pauses and batch expiry close idle snapshots and file-reader
 leases; cancellation and stale publication leave the durable queue for retry.
 Product score readers use SQL and do not read these files or fit.

@@ -293,21 +293,49 @@ def test_vibe_use_requires_a_choice_and_confirmed_start_of_the_actual_vibe_offer
     assert home_preferences.compile_usage(offers, [choice, start], 10, 30)['vibe_episodes'] == 1
 
 
-def test_vibes_require_current_sound_evidence_and_playable_prepared_pools(store):
+def test_vibe_readiness_combines_current_sound_evidence_with_pool_readiness(store, monkeypatch):
     from yt_playlist.core import vibe_versions
-    from tests.test_growth_readiness import publish_vibe_menus
-    from tests.test_growth_destinations import publish_destinations
+    from tests.musical_support import prepare_profiles
+    from tests.test_tv_stream import video
+    from yt_playlist.rec import tv
 
-    publish_vibe_menus(store)
-    publish_destinations(store)
+    # Account growth coordinates the current SQL evidence with the lower
+    # readiness owner's output. Actual four-card pool selection is covered by
+    # test_growth_readiness.test_vibe_gate_checks_real_menus_for_every_preset_and_current_exclusions.
+    available, requests = False, []
+
+    def pools(reader, now):
+        requests.append(now)
+        return available
+
+    monkeypatch.setattr(account_growth.growth_readiness, 'vibes', pools)
     store.rec_proposals.put_proposals('listening_choices', {'home_format': {'episodes': {'radio': 1}}}, 1000)
-    state = account_growth.view(store, 1000, mixes_ready=True, albums_ready=False, radio={})
+    store.rec_proposals.put_proposals(tv.SURFACE, {'schema': tv.SCHEMA, 'key': 'ready',
+        'at': 1000, 'attempted': [], 'items': [video(i) for i in range(tv.QUEUE_SIZE)]}, 1000)
+
+    def growth(now=1000, *, mixes=True):
+        return account_growth.view(store, now, mixes_ready=mixes, albums_ready=False, radio={})
+
+    assert not growth()['vibes_ready']
+    assert not requests
+    seed_catalog_track(store, 'measured|artist', 'Measured', 'Artist', video_id='measured',
+                       genre='Jazz', energy=.1, mood_relaxed=.9, mood_happy=.8)
+    prepare_profiles(store)
+    assert not growth()['vibes_ready']
+    assert requests == [1000]
+    available = True
+    state = growth(1060)
+    assert requests == [1000, 1060]
     assert state['health']['measured'] > 0
     assert state['vibes_ready'] and nodes(state)['vibes']['state'] == 'ready'
+    assert not growth(1060, mixes=False)['vibes_ready']
+    assert requests == [1000, 1060]
     with store.conn:
         column = vibe_versions.column(store.conn, 'recording_vibes')
         store.conn.execute(f"UPDATE recording_vibes SET {column}=?",
                            (vibe_versions.stored(store.conn, 'outdated'),))
-    state = account_growth.view(store, 1000, mixes_ready=True, albums_ready=False, radio={})
+    state = growth(1060)
+    assert state['health']['measured'] == 0
     assert not state['vibes_ready']
     assert nodes(state)['vibes']['state'] == 'preparing'
+    assert requests == [1000, 1060]

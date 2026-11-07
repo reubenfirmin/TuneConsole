@@ -567,24 +567,23 @@ class RecModelRepo(Repo):
 
     @synchronized
     def publish_training_generation(self, changes):
-        """Apply snapshot-checked deltas inside ReadSnapshot's atomic transaction.
+        """Commit snapshot-checked deltas within this repository.
 
         Identical rows avoid vector-page, revision-trigger and WAL churn unless preserving
         discovery order requires replacement. An omitted space stays intact; an empty target
         removes it.
         """
-        if not self.conn.in_transaction:
-            raise RuntimeError("Training publication requires an outer transaction")
         for table in changes:
             embeddings.descriptor(table)
-        for table, delta in changes.items():
-            if delta.publication is None:
-                embeddings.publish(self.conn, table, delta.upserts, delta.removed,
-                                   replace=delta.replace, model_version=delta.model_version)
-            else:
-                if delta.publication.name != table:
-                    raise ValueError('Training publication belongs to another space')
-                embeddings.publish_prepared(self.conn, delta.publication)
+        with self.conn.atomic(join=True):
+            for table, delta in changes.items():
+                if delta.publication is None:
+                    embeddings.publish(self.conn, table, delta.upserts, delta.removed,
+                                       replace=delta.replace, model_version=delta.model_version)
+                else:
+                    if delta.publication.name != table:
+                        raise ValueError('Training publication belongs to another space')
+                    embeddings.publish_prepared(self.conn, delta.publication)
 
     @synchronized
     def replace_rec_vectors(self, rows) -> None:

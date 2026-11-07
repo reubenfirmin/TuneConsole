@@ -171,7 +171,8 @@ def test_sql_reader_during_evidence_publication_retains_its_head_until_reaped(re
 def test_private_reader_selects_its_pinned_head_after_the_writer_switches_and_retires_it(recommendations):
     store = recommendations
     first = publish(store, plan(store)).generation_id
-    with store.read_view() as reader:
+    with store.read_snapshot() as snapshot:
+        reader = snapshot.store
         assert reader.recommendations.head('home')['id'] == first
         second = publish(store, plan(store, 'new-head')).generation_id
         collect(store)

@@ -1,6 +1,8 @@
 """Revisit is remembered music, with hard listening rests and per-visit variety."""
 from tests.conftest import seed_catalog_track
 from tests.test_recommend import _seed_album
+from yt_playlist.core import artists
+from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.library import ratings
 from yt_playlist.rec import home_prepared, surfaces
 
@@ -62,11 +64,18 @@ def test_calendar_imports_count_once_per_account_day_without_recounting_exact_ev
     assert rows[0]['last_played'] == day+3.5*DAY
 
 
-def test_current_rating_availability_and_new_play_revalidate_prepared_song_pool(store, home_seed_inputs):
+def test_current_rating_availability_and_new_play_revalidate_prepared_song_pool(store, monkeypatch):
     iid = store.accounts.upsert_account('Main', 'cred', None, True)
-    keys = [song(store, iid, f'song{i}', plays=2, age=60) for i in range(20)]
-    prepared = home_prepared.prepare(store, NOW)
-    assert prepared and len(prepared['rediscover_tracks']) == 20
+    # Artist ingestion is independent of the remembered-song eligibility SQL.
+    # Keep actual catalog, rating and listening writes for every candidate.
+    with monkeypatch.context() as inputs, atomic_write(store):
+        inputs.setattr(artists, 'observe', lambda *args, **kwargs: None)
+        keys = [song(store, iid, f'song{i}', plays=2, age=60) for i in range(20)]
+    # Rediscovery has its own real checkpoint. Mix-menu model fitting and
+    # discovery producers are independent of current listening eligibility.
+    home_prepared.prepare_revisit(store, NOW)
+    prepared = store.rec_proposals.get_proposals(home_prepared.REVISIT_SURFACE)
+    assert {row['key'] for row in prepared['rediscover_tracks']} == set(keys)
     first = home_prepared.collections(store, prepared, NOW)['rediscover_tracks']
     assert len(first) == 15
     assert home_prepared.collections(store, prepared, NOW)['rediscover_tracks'] == first

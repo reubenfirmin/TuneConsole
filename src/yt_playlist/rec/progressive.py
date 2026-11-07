@@ -367,7 +367,6 @@ class Preparation:
             reader.settings.get_setting('rec_content_generation')
             vibe_plan = reader.vibe_predictions.prepare_publication(*vibe_updates, now)
             def publish():
-                self.store.prepared_content.publish_capture(rows, now)
                 self.store.musical_profiles.publish_recordings(musical, now)
                 self.store.vibe_predictions.publish_prepared(vibe_plan)
                 if changes:
@@ -376,8 +375,9 @@ class Preparation:
                         'rec_content_generation': uuid.uuid4().hex,
                         'rec_content_inputs': '',  # not a claim of a current full-corpus fit
                     })
+                self.store.prepared_content.publish_capture(rows, now)
             with closing(vibe_plan):
-                return snapshot.publish(publish)
+                return snapshot.publish_ordered(publish)
 
     def fit(self, now):
         """Fit a coherent basis only after useful accumulated changes, within a budget."""

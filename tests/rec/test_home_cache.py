@@ -84,7 +84,8 @@ def test_orphan_collection_cannot_remove_files_before_their_sql_commit(file_back
 def test_reader_keeps_its_manifest_when_a_new_head_is_published(file_backed_store):
     store = file_backed_store
     home_cache.put(store, 'home_prepared', {'menu': 'previous'}, 1)
-    with store.read_view() as reader:
+    with store.read_snapshot() as snapshot:
+        reader = snapshot.store
         assert home_cache.read(reader, 'home_prepared') == {'menu': 'previous'}
         home_cache.put(store, 'home_prepared', {'menu': 'replacement'}, 2)
         assert home_cache.read(reader, 'home_prepared') == {'menu': 'previous'}

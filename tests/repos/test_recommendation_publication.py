@@ -27,13 +27,17 @@ def canonical_vector_owners(store):
 
 def test_publication_owners_require_an_outer_transaction(store):
     for publish in (
-        lambda: store.rec_model.publish_training_generation({}),
-        lambda: store.settings.publish_values({'generation': 'new'}),
         lambda: store.modes.publish_generation([], []),
         lambda: store.rec_refresh.acknowledge(1),
     ):
         with pytest.raises(RuntimeError, match='transaction'):
             publish()
+
+
+def test_settings_publication_owns_its_write_without_an_outer_transaction(store):
+    store.settings.publish_values({'generation': 'new'})
+    assert store.settings.get_setting('generation') == 'new'
+    assert not store.conn.in_transaction
 
 
 def test_late_mode_failure_rolls_back_vectors_settings_and_queue(store, monkeypatch):

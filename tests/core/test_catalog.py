@@ -7,6 +7,7 @@ from tests.historical_support import upgrade_fixture
 
 from yt_playlist.core.migrations import Migration, MigrationError, migrate
 from yt_playlist.core.migrations.registry import MIGRATIONS
+from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.migrations import v008_recordings
 from yt_playlist.core.store import Store
 from yt_playlist.core import legacy_evidence
@@ -79,14 +80,18 @@ def test_failure_after_reference_remapping_rolls_back_and_can_resume(legacy_stor
         raise RuntimeError('after remap')
     monkeypatch.setattr(v008_recordings,'remap_state',fail)
     with pytest.raises(MigrationError,match='after remap'):
-        from yt_playlist.core.migrations.registry import MIGRATIONS
-        migrate(s.conn, registry=MIGRATIONS)
+        migrate(s.conn, registry=MIGRATIONS[:8])
     assert s.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 7
     assert s.conn.execute('SELECT COUNT(*) FROM tracks').fetchone()[0] == 5
     assert not s.conn.execute("SELECT 1 FROM sqlite_master WHERE name='recordings'").fetchone()
     monkeypatch.setattr(v008_recordings,'remap_state',original)
-    upgrade_fixture(s)
-    assert s.tracks.track_for_waterfall(7)['video_id'] == 'upload-a'
+    # Exercise the interrupted owner's retry. The populated upgrade above owns
+    # the remaining historical suffix and current application admission.
+    migrate(s.conn, registry=MIGRATIONS[:8])
+    validate_version(s.conn, 8)
+    assert tuple(s.conn.execute(
+        'SELECT entry_id,video_id FROM legacy_track_refs WHERE legacy_id=7'
+    ).fetchone()) == (3, 'upload-a')
 
 
 def test_migration_unknown_video_cannot_borrow_an_existing_recording_key(legacy_store):
@@ -94,8 +99,9 @@ def test_migration_unknown_video_cannot_borrow_an_existing_recording_key(legacy_
     populate_legacy(s)
     s.conn.execute("INSERT INTO play_events(identity_id,identity_key,video_id,played_at) VALUES (1,'cold|other','unknown-upload',400)")
     s.conn.commit()
-    upgrade_fixture(s)
-    row = s.conn.execute('SELECT identity_key,raw_identity_key,recording_id FROM play_event_subjects WHERE played_at=400').fetchone()
+    migrate(s.conn, registry=MIGRATIONS[:10])
+    validate_version(s.conn, 10)
+    row = s.conn.execute('SELECT identity_key,raw_identity_key,recording_id FROM play_events WHERE played_at=400').fetchone()
     assert row['raw_identity_key'] == 'cold|other' and row['recording_id'] is None
     assert row['identity_key'] != s.tracks.identity_key_for_video('cold-upload')
 

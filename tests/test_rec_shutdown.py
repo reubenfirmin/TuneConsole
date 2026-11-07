@@ -43,7 +43,7 @@ def test_quit_interrupts_rollup_sql_rolls_back_and_releases_waiting_request(
     # Exercise the real first-play refresh savepoint: cancellation must retain its
     # previously published data, even if SQLite rolls back the savepoint itself.
     if operation == "first-play":
-        monkeypatch.setattr(store.trends, "_replace_first_play",
+        monkeypatch.setattr(store.trends.repository, "_replace_first_play",
                             lambda: store.conn.execute(SLOW_SQL).fetchone())
         calculate = store.trends.refresh_first_play
     else:

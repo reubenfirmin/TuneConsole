@@ -3,6 +3,8 @@ from collections import OrderedDict
 from copy import deepcopy
 from threading import Lock
 
+from yt_playlist.core.db_revisions import DERIVED_TABLES
+
 
 class ReadMemo:
     def __init__(self, limit=32):
@@ -33,7 +35,8 @@ class ReadMemo:
             value = prepare()
         # Unknown tables cannot be tracked safely. View definitions are protected
         # by the schema epoch; their underlying table reads are also captured.
-        if any(table not in tables and table not in views and not table.startswith("sqlite_")
+        if any(table not in tables and table not in views and table not in DERIVED_TABLES
+               and not table.startswith("sqlite_")
                for table, _ in dependencies):
             return value
         detached = deepcopy(value)

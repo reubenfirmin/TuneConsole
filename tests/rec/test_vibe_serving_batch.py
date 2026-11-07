@@ -4,7 +4,6 @@ from types import SimpleNamespace
 import pytest
 
 from yt_playlist.rec import home_vibe, musical_character, vibe_pools, vibe_serving
-from tests.test_growth_readiness import vibe_menu_template, vibe_menus
 
 
 def test_deep_dive_reuses_pinned_plays_and_rechecks_later_listening(file_backed_store, monkeypatch):

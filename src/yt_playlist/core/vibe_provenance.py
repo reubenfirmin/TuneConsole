@@ -10,6 +10,7 @@ from pathlib import Path
 import tempfile
 
 from . import fao, file_collection, vibe_model_files
+from .activity import check_stopping
 from yt_playlist.repos import vibe_models
 from .evidence_ledger import canonical
 
@@ -271,8 +272,14 @@ def stage_many(conn, values):
             encoded = canonical({'format':1,'calculations':records})
             staged.append(fao.prepare(path, source.replacing(encoded) if source is not None else encoded))
         # Existing roots need no repeated write during the guarded publication.
-        roots = [mid for mid in sorted(originals) if not conn.execute(
-            'SELECT 1 FROM prediction_measurement_roots WHERE measurement_id=?',(mid,)).fetchone()]
+        roots, ordered = [], sorted(originals)
+        for start in range(0, len(ordered), 128):
+            check_stopping()
+            batch = ordered[start:start + 128]
+            qs = ','.join('?' for _ in batch)
+            existing = {row[0] for row in conn.execute(
+                f'SELECT measurement_id FROM prediction_measurement_roots WHERE measurement_id IN ({qs})', batch)}
+            roots.extend(mid for mid in batch if mid not in existing)
         return staged, markers, roots
     except BaseException:
         for publication in staged:

@@ -33,7 +33,19 @@ def genre_controls_template(_pristine_current_schema):
     # HTTP controls need four playable tracks per lane. Backfill checks retain
     # the larger candidate template above and manipulate its real pools.
     def seed(source):
-        bundles = seed_genres(source, tracks_per_lane=4)
+        bundles = genre_bundles(source, tracks_per_lane=4)
+        # Genre steering needs four distinct recordings per theme, rather than
+        # a disjoint catalog for every way of framing that same theme. Keep
+        # all real mode/lane pools while sharing their input recordings.
+        bundles['all'] = {}
+        for mode in range(6):
+            tracks = bundles[str(mode)]['wheelhouse']
+            for lane in mode_surfaces.CARD_SURFACES:
+                items = [{**track, 'lane': lane} for track in tracks]
+                bundles[str(mode)][lane] = items
+                bundles['all'].setdefault(lane, []).extend(items)
+        seed_bundle_subjects(source, bundles)
+        publish_bundles(source, bundles, 1.0)
         _publish_menu(source, 1000.0)
         return bundles
 
@@ -80,9 +92,11 @@ def _publish_menu(store, now):
     # Publish the real genre selection once. Worker snapshot coordination,
     # discovery summaries and alternative-menu enumeration belong to
     # test_home_prepared, rather than every HTTP genre-control scenario.
-    result = home.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__)).cards(
-        home.CardsRequest(now, record=False))
-    home_prepared.remember(store, None, result, now)
+    with store.read_view() as reader:
+        result = home.HomeCards(reader, home_prepared._NoJobs(), logging.getLogger(__name__)).cards(
+            home.CardsRequest(now, record=False))
+        tuning = home_prepared.tuning_key(reader, now)
+    home_prepared.remember(store, None, result, now, tuning=tuning)
     payload = home_cache.read(store, 'home_tuned')
     assert home_prepared._valid(payload)
     home_cache.put(store, home_prepared.SURFACE, payload, now)

@@ -55,8 +55,10 @@ from yt_playlist.repos.enrichment_queue import EnrichmentQueueRepo
 from yt_playlist.repos.enrichment_reports import EnrichmentReportsRepo
 from yt_playlist.repos.enrichment_state import EnrichmentStateRepo
 from yt_playlist.repos.genres import GenreRepo
+from yt_playlist.controllers.genres import Genres
 from yt_playlist.repos.history import HistoryRepo
 from yt_playlist.repos.accounts import AccountRepo
+from yt_playlist.controllers.accounts import Accounts
 from yt_playlist.repos.modes import ModesRepo
 from yt_playlist.repos.taste_groups import TasteGroupsRepo
 from yt_playlist.repos.compact_taste_groups import CompactTasteGroupsRepo
@@ -79,9 +81,11 @@ from yt_playlist.repos.playlist_recipes import PlaylistRecipesRepo
 from yt_playlist.repos.artist_similarity import ArtistSimilarityRepo
 from yt_playlist.repos.rec_refresh import RecRefreshRepo
 from yt_playlist.repos.prepared_content import PreparedContentRepo
+from yt_playlist.controllers.prepared_content import PreparedContent
 from yt_playlist.repos.musical_profiles import MusicalProfilesRepo
 from yt_playlist.repos.vibe_predictions import VibePredictionsRepo
 from yt_playlist.repos.road_trip import RoadTripRepo
+from yt_playlist.controllers.road_trip import RoadTrips
 from yt_playlist.repos.discovery import DiscoveryRepo
 from yt_playlist.repos.search import SearchRepo
 from yt_playlist.repos.settings import SettingsRepo
@@ -224,7 +228,10 @@ class Store:
             reader._lock = threading.RLock()
             reader._read_only = True
             reader.maintenance_diagnostics = self.maintenance_diagnostics
-            reader._bind_repositories()
+            # Memory readers bind after their private SQL copy is populated.
+            # Binding the empty database here repeats every owner construction.
+            if self._db_path is not None:
+                reader._bind_repositories()
             return reader
         except BaseException:
             reader.conn.close()
@@ -268,7 +275,8 @@ class Store:
         self._metadata_files = 'metadata_deliveries' in tables
         self._legacy_files = 'legacy_catalog_evidence' in tables
         self.overlaps = OverlapRepo(self)
-        self.genres = GenreRepo(self)
+        self.discovery = DiscoveryRepo(self)
+        self.genres = Genres(GenreRepo(self), self.discovery)
         self.recap = Recap(RecapRepo(self), self.genres)
         self.settings = SettingsRepo(self)
         self.radio_checkpoints = RadioCheckpointRepo(self)
@@ -290,7 +298,9 @@ class Store:
         self.actions = ActionRepo(self)
         self.audio_vibes = AudioVibesRepo(self)
         self.artists = Artists(ArtistRepo(self))
-        self.accounts = AccountRepo(self)
+        self.accounts = Accounts(AccountRepo(self), self.settings,
+            paused=lambda: self.activity_paused,
+            maintenance_accounts=lambda: getattr(self, '_maintenance_accounts', None))
         self.history = HistoryRepo(self)
         self.collection = CollectionRepo(self)
         self.album_feedback = AlbumFeedback(AlbumFeedbackRepo(self), self.collection,
@@ -316,16 +326,15 @@ class Store:
         self.recommendations = RecommendationPublicationsRepo(self)
         self.rec_signals = RecommendationSignals(RecSignalsRepo(self))
         self.playlist_recipes = PlaylistRecipesRepo(self)
-        self.artist_similarity = ArtistSimilarity(ArtistSimilarityRepo(self))
+        self.artist_similarity = ArtistSimilarity(ArtistSimilarityRepo(self), self.artists)
         self.rec_refresh = RecommendationRefresh(RecRefreshRepo(self), self.settings)
-        self.prepared_content = PreparedContentRepo(self)
         self.musical_profiles = MusicalProfilesRepo(self)
         self.vibe_predictions = VibePredictionsRepo(self)
         self.charts = Charts(ChartsRepo(self))
         self.tracks = TrackRepo(self)
         self.playlists = PlaylistRepo(self)
         self.player_events = PlayerEvents(PlayerEventsRepo(self))
-        self.discovery = DiscoveryRepo(self)
+        self.prepared_content = PreparedContent(PreparedContentRepo(self), self.discovery, self.rec_refresh)
         self.search = Search(SearchRepo(self))
         self.enrichment = EnrichmentRepo(self)
         self.enrichment_reports = EnrichmentReports(EnrichmentReportsRepo(self),
@@ -339,7 +348,10 @@ class Store:
         self.modes = ModesRepo(self)
         self.taste_groups = (CompactTasteGroupsRepo if self._compact_group_files else TasteGroupsRepo)(self)
         self.trends = Trends(TrendsRepo(self), self.rec_proposals)
-        self.road_trip = RoadTripRepo(self)
+        from yt_playlist.core.preparation.road_trip_drafts import read_original_parts
+        self.road_trip = RoadTrips(RoadTripRepo(self),
+            collection_recovery.RecoveryFiles(collection_recovery.root_for_database(self._db_path, self._evidence_key)),
+            read_original_parts)
 
     @classmethod
     def open_current(cls, db_path):

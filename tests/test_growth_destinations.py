@@ -10,11 +10,17 @@ import pytest
 from tests.conftest import seed_catalog_track
 from tests.onboarding_support import publish_personal_mix
 from tests.test_tv_stream import video
+from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import account_growth, choice_evidence, home_prepared, into_recently, onboarding, tv
 
 
 def publish_destinations(store, now=1000):
     """Controlled usable output for each new destination; no readiness overrides."""
+    with atomic_write(store):
+        _publish_destinations(store, now)
+
+
+def _publish_destinations(store, now):
     tracks = [{'key': f'new {i}|new artist {i}', 'video_id': f'new-song-{i}', 'title': f'New song {i}',
                'artist': f'New artist {i}', 'genre': 'Jazz'} for i in range(10)]
     for track in tracks:
@@ -42,15 +48,26 @@ def publish_destinations(store, now=1000):
              'display': f'New artist {i}'} for i in range(3)]}, now)
 
 
-def publish_journey_prefix(store, now=1000):
+def publish_journey_prefix(store, now=1000, *, vibe_template=None):
     from tests.test_growth_journey import early_journey
     from tests.test_growth_readiness import publish_vibe_menus
 
+    if vibe_template is not None:
+        vibe_template.restore(store)
     if not store.conn.execute("SELECT 1 FROM recordings WHERE identity_key='first|artist'").fetchone():
         early_journey(store)
     if not store.conn.execute("SELECT 1 FROM youtube_items WHERE video_id='prepared-0'").fetchone():
         publish_personal_mix(store, now=now)
-    publish_vibe_menus(store)
+    if vibe_template is None:
+        publish_vibe_menus(store)
+    else:
+        from copy import deepcopy
+        from tests.recommendation_support import publish_bundles
+
+        # The shared source already owns all 116 real profiles. Add the earlier
+        # journey outputs and republish their actual Vibe candidates together;
+        # rebuilding numeric profiles would repeat the same completed producer.
+        publish_bundles(store, deepcopy(vibe_template.bundles), now, vibes=True)
 
 
 def finish_full_journey(store, now=1000):
@@ -95,7 +112,16 @@ def test_four_eligible_mixes_are_required_everywhere(store, count):
         assert client.get('/home/onboard/status').json()['setup']['mixes_ready']
 
 
-def test_new_destinations_require_usable_outputs_and_recheck_current_eligibility(store):
+def test_new_destinations_require_usable_outputs_and_recheck_current_eligibility(store, monkeypatch):
+    from tests.test_growth_journey import early_journey
+
+    # Numerical Vibe evidence is a completed lower-layer result here. Its real
+    # menu/evidence agreement is owned by test_growth_readiness and the Vibe
+    # access test below. Keep actual prerequisite ordering, destination outputs
+    # and their live feedback/eligibility reads under test.
+    monkeypatch.setattr(type(store.readiness), 'vibe_evidence', lambda *args: (12, 0))
+    monkeypatch.setattr(account_growth.growth_readiness, 'vibes', lambda *args: True)
+
     def areas():
         return account_growth.view(store, 1000)['ready_areas']
 
@@ -104,7 +130,9 @@ def test_new_destinations_require_usable_outputs_and_recheck_current_eligibility
     ready = areas()
     assert not any(ready.values()), 'Later output must not skip the foundation'
     assert not ready['directions'] and not ready['radio']
-    publish_full_journey(store)
+    early_journey(store)
+    publish_personal_mix(store)
+    finish_full_journey(store)
     assert all(areas().values())
     store.rec_model.record_feedback('for_you', 'new 0|new artist 0', 'dismiss', now=1000)
     seed_dislike(store, 'old 0|artist', until=None, now=1000)

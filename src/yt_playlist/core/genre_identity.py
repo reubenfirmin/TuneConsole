@@ -58,6 +58,11 @@ def family(conn, label):
 
 def feature_axes(conn, labels):
     """Resolve a bounded set with the same collision and redirect rules as resolve."""
+    return axes_from_matches(axis_matches(conn, labels))
+
+
+def axis_matches(conn, labels):
+    """Detach bounded current identity/family candidates without choosing a match."""
     labels = list(dict.fromkeys(label for label in labels if label))
     if any(not isinstance(label, str) for label in labels):
         raise ValueError('A genre label must be text or null')
@@ -65,7 +70,6 @@ def feature_axes(conn, labels):
         return {}
     redirected = conn.execute("SELECT 1 FROM sqlite_schema WHERE name='genre_redirects'").fetchone() is not None
     result = {}
-    from yt_playlist.util import genre_family_data
     for offset in range(0, len(labels), 200):
         page = labels[offset:offset + 200]
         wanted = ','.join('(?,?)' for _ in page)
@@ -88,13 +92,20 @@ def feature_axes(conn, labels):
             [value for label in page for value in (label, normalize(label))])
         matches = {label: {} for label in page}
         for label, key, family_key in rows:
-            matches[label][key] = family_key or 'other:' + key
-        for label, choices in matches.items():
-            if len(choices) == 1:
-                key, family_key = next(iter(choices.items()))
-                result[label] = family_key, key
-            else:
-                result[label] = ('other:' + normalize(label) if choices else genre_family_data.family(label)), None
+            matches[label][key] = family_key
+        result.update(matches)
+    return result
+
+
+def axes_from_matches(matches):
+    from yt_playlist.util import genre_family_data
+    result = {}
+    for label, choices in matches.items():
+        if len(choices) == 1:
+            key, family_key = next(iter(choices.items()))
+            result[label] = family_key or 'other:' + key, key
+        else:
+            result[label] = ('other:' + normalize(label) if choices else genre_family_data.family(label)), None
     return result
 
 

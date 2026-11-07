@@ -15,8 +15,8 @@ class ArtistRepo(Repo):
                 yield
 
     @synchronized
-    def resolve(self, value):
-        return artists.lookup(self.conn,value)
+    def resolve(self, value, *, exact=False):
+        return artists.lookup(self.conn,value,exact=exact)
 
     @synchronized
     def provider_id(self, provider, provider_id):

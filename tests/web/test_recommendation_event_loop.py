@@ -72,12 +72,20 @@ def test_forms_wait_for_database_outside_event_loop(store, monkeypatch, request,
     guarded_home = path.startswith('/home/') and path != '/home/generate'
     if guarded_home:
         if path == '/home/vibe':
-            from tests.test_growth_destinations import publish_full_journey
-            publish_full_journey(store)
+            # This form owns database waits, not numerical readiness. Its
+            # real prerequisite/served-menu agreement has an independent owner
+            # in test_growth_readiness. Admission still opens the real reader
+            # and the accepted request persists through actual settings writes.
+            request.getfixturevalue('unlocked_home_controls')
         else:
             request.getfixturevalue('home_contention_template').restore(store)
     app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
     monkeypatch.setattr(app.state.ctx.bridge, 'send_control', lambda frame, *, intent: True)
+    if path == '/home/vibe':
+        # The request's real admission/settings writes must wait off the event
+        # loop. Numerical menu generation is a lower-layer collaborator, owned
+        # by test_vibe_requests; it need not run for this contention check.
+        monkeypatch.setattr(app.state.ctx.vibe_requests, '_build', lambda request: None)
     if guarded_home:
         from yt_playlist.web.routes.home_access import state
         growth = state(app.state.ctx)
@@ -101,7 +109,9 @@ def test_forms_wait_for_database_outside_event_loop(store, monkeypatch, request,
     assert held.wait(1)
 
     async def exercise():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+        # ASGITransport does not run lifespan itself. Drain accepted work before
+        # the fixture closes its database, including requests that start jobs.
+        async with app.router.lifespan_context(app), httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                      base_url='http://127.0.0.1') as client:
             started = time.monotonic()
             body = {'json': data} if path in ('/play', '/now-playing/rate') else {'data': data}
@@ -121,6 +131,10 @@ def test_forms_wait_for_database_outside_event_loop(store, monkeypatch, request,
             assert result.status_code in expected
             if path == '/play':
                 assert result.json()['ok'] is True
+            if path == '/home/vibe':
+                accepted = app.state.ctx.vibe_requests.state()
+                assert accepted['id'] == result.headers['X-Home-Vibe-Request']
+                assert accepted['vibe'] == '' and accepted['phase'] == 'pending'
 
     try:
         asyncio.run(exercise())

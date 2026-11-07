@@ -54,7 +54,8 @@ def test_selection_matches_native_disabled_default_meaning_and_pinned_reads(inst
     other, upgraded = Store(store._db_path), Store(tmp_path/'preference-native.db')
     try:
         other.init_schema(defer_metadata=True)
-        with other.read_view() as pinned:
+        with other.read_snapshot() as snapshot:
+            pinned = snapshot.store
             assert pinned.genres.get_genre_whitelist() == ['Drum And Bass']
             stage = ready(store.conn, 1)
             publication.publish(store.conn, identity=stage)

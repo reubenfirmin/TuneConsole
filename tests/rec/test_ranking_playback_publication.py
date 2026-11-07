@@ -38,6 +38,8 @@ def playback_library(store):
                                        f'Artist {index}', 'Album', None)
         store.tracks.set_track_genre(tid, genre)
     store.history.import_play_events(account, [('song 000|artist 0', 'v0', 1000)], source='takeout')
+    other = store.accounts.upsert_account('Other listener', 'other fixture', None, False)
+    store.history.import_play_events(other, [('song 011|artist 11', 'v11', 500)], source='takeout')
     store.discovery.upsert_discovered_track('new song 0|new artist 0', 'new0', 'New song 0',
         'New artist 0', 'New album 0', None, 'Techno', '1990', None, 1800, duration_s=200)
     store.rec_model.replace_rec_content_vectors([
@@ -78,8 +80,7 @@ def playback_library_template(_pristine_current_schema):
 
 
 @pytest.fixture
-def library(file_backed_store, playback_library_template, monkeypatch):
-    playback_library_template.restore(file_backed_store)
+def library(tmp_path, playback_library_template, monkeypatch):
     # Policy retirement has its own real maintenance owners in
     # test_policy_storage; it is below this coordination check.
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', completed_rankings)
@@ -89,7 +90,8 @@ def library(file_backed_store, playback_library_template, monkeypatch):
     # test_candidate_refresh. These checks own publication and its schema fence.
     monkeypatch.setattr(candidate_refresh, 'prepared_settings',
                         lambda reader, now: {'rec_candidate_preferences': 'captured-fixture-inputs'})
-    return file_backed_store
+    with playback_library_template.open(tmp_path / 'playback.db') as store:
+        yield store
 
 
 @contextmanager
@@ -189,9 +191,10 @@ def prepare_change(store, change):
 def test_bundle_publication_keeps_one_coherent_generation_during_playback(
         library, monkeypatch, change, record_property):
     prepare_change(library, change)
-    other = library.accounts.upsert_account('Other listener', 'other fixture', None, False)
-    other_key = library.tracks.identity_key_for_video('v11')
-    library.history.import_play_events(other, [(other_key, 'v11', 500)], source='takeout')
+    # The unchanged account is an input, not a transition under test. Its real
+    # retained listening evidence is part of the private immutable prefix.
+    other = next(account.id for account in library.accounts.get_accounts()
+                 if account.label == 'Other listener')
     other_evidence = tuple(row for row in evidence(library) if row[0] == other)
     old_heads = library.recommendations.heads()
     calculate = mode_surfaces._calculate_bundles

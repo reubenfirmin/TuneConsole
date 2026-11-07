@@ -1,5 +1,6 @@
 import numpy as np
 from time import perf_counter
+from types import SimpleNamespace
 from tests.derived_rating_support import seed_dislike
 from tests.retained_rating_support import apply_model_ratings
 import pytest
@@ -7,7 +8,8 @@ from tests.conftest import seed_catalog_track
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
 from yt_playlist.core import catalog
-from yt_playlist.rec import mode_selection, mode_surfaces as ms
+from yt_playlist.core.db_writes import atomic_write
+from yt_playlist.rec import mode_selection, mode_surfaces as ms, stored_home
 
 
 def _eye(i, d=4):
@@ -45,32 +47,87 @@ def _subject_keys(payload):
             for items in bucket.values() for item in items}
 
 
-def _seed(store, n_modes=4):
-    """Seed live modes and subjects; let each consumer publish its final payload."""
-    store.modes.replace_modes(
-        [{"mode_id": m, "label": f"m{m}", "families": [["house", 1]],
-          "centroid": _eye(m - 1), "size": 80 - m, "rep_keys": []} for m in range(1, n_modes + 1)],
-        retired_ids=[], now=1.0)
-
+def _mode_candidates(n_modes=4):
+    modes = [{"mode_id": m, "label": f"m{m}", "families": [["house", 1]],
+              "centroid": _eye(m - 1), "size": 80 - m, "rep_keys": []}
+             for m in range(1, n_modes + 1)]
     def items(prefix):
         return [{"key": f"{prefix}{i}", "video_id": "v", "title": f"{prefix}{i}", "artist": f"{prefix}art{i}",
                  "album": "", "thumbnail": None, "plays": 0, "reason": "", "lane": "", "genre": "house"}
                 for i in range(13)]
     payload = {str(m): {} for m in range(1, n_modes + 1)}
-    for surf in ms.CARD_SURFACES:
-        for m in range(1, n_modes + 1):
-            payload[str(m)][surf] = items(f"{surf}-m{m}-")
+    for m in range(1, n_modes + 1):
+        # The same owned tracks can be ranked in several framings. Keep fresh
+        # discoveries distinct, and keep every mode's subjects disjoint so the
+        # cross-card deduplication and complete-card requirements stay real.
+        owned = items(f"owned-m{m}-")
+        for surf in ms.CARD_SURFACES:
+            payload[str(m)][surf] = items(f"fresh-m{m}-") if surf == 'fresh' else list(owned)
     payload["_meta"] = {"comfort_pool": 100, "year_cuts": None}   # comfort credible -> it holds the 4th slot
-    seed_bundle_subjects(store, payload)
+    return modes, payload
+
+
+def _seed(store, n_modes=4):
+    """Seed live modes and subjects; let each consumer publish its final payload."""
+    modes, payload = _mode_candidates(n_modes)
+    store.modes.replace_modes(modes, retired_ids=[], now=1.0)
+    with atomic_write(store):
+        seed_bundle_subjects(store, payload)
     store._assembly_subject_keys = _subject_keys(payload)
     assert not store.recommendations.heads()
     return payload
 
 
-@pytest.fixture(scope='module')
-def assembly_subject_template(_pristine_current_schema):
-    with prepared_template(_pristine_current_schema, _seed) as template:
-        yield template
+@pytest.fixture
+def ranked_cards():
+    """Assignment consumes controlled published ranks, with real scratch SQL.
+
+    The neighboring publication, current-genre and durable-dislike cases own
+    application catalog integration. These cases own complete card assignment,
+    priority rotation, diversity and cross-card deduplication.
+    """
+    modes, payload = _mode_candidates()
+
+    class PublishedPools:
+        def __init__(self):
+            self.rows = {(mid, lane): [{**item, 'pool_rank': rank, 'serving_context': {}}
+                                      for rank, item in enumerate(items)]
+                         for mid, bucket in payload.items() if not mid.startswith('_')
+                         for lane, items in bucket.items()}
+            self.ids = {key: index for index, key in enumerate(self.rows, 1)}
+
+        def framing(self, surface, *, generation):
+            return {'comfort_pool': payload['_meta']['comfort_pool']}
+
+        def selections(self, surface, lane, *, generation):
+            return [{'mode_key': mid, 'id': self.ids[mid, lane]}
+                    for mid, purpose in self.rows if purpose == lane]
+
+        def candidate_page(self, surface, mode, lane, *, generation, after, limit):
+            rows = self.rows[mode, lane][after + 1:after + 1 + limit]
+            return {'tracks': rows, 'after': rows[-1]['pool_rank'] if rows else after,
+                    'exhausted': after + 1 + len(rows) == len(self.rows[mode, lane])}
+
+        def selected_candidates(self, surface, selections, *, generation):
+            return [[row for row in self.rows[mode, lane] if row['key'] in keys]
+                    for mode, lane, keys in selections]
+
+        def pool(self, surface, mode, purpose, *, generation):
+            return None
+
+    def assemble(*, epoch=0, order=(1, 2, 3, 4)):
+        reader = SimpleNamespace(
+            recommendations=PublishedPools(),
+            settings=SimpleNamespace(get_setting=lambda key: None),
+            modes=SimpleNamespace(list_modes=lambda **kwargs: modes),
+            rec_model=SimpleNamespace(muted_artists=lambda: set(),
+                disliked_key_page=lambda **kwargs: [], suppressed_keys=lambda *args, **kwargs: set()),
+            rec_eligibility=SimpleNamespace(suppressed_candidate_keys=lambda keys, now: set()),
+            rec_query=SimpleNamespace(track_genres=lambda keys: {}),
+            genres=SimpleNamespace(feature_axes=lambda genres: dict.fromkeys(genres, ('house', None))))
+        return stored_home._assemble(reader, 1, 10., epoch, (), (), order, {'leans': {}})
+
+    return payload, assemble
 
 
 @pytest.fixture
@@ -81,7 +138,19 @@ def assembly_subjects(store, assembly_subject_template, record_property):
     record_property('subject_restore_seconds', perf_counter() - started)
     assert not store.recommendations.heads()
     assert len(store.modes.list_modes(active_only=True)) == 4
+    library = store.rec_query.tracks_by_keys(_subject_keys(payload))
+    discovery = store.discovery.discovered_tracks_by_keys(_subject_keys(payload))
+    assert set(library) == {row['key'] for mode in map(str, range(1, 5))
+                            for row in payload[mode]['wheelhouse']}
+    assert set(discovery) == {row['key'] for mode in map(str, range(1, 5))
+                              for row in payload[mode]['fresh']}
     return payload
+
+
+@pytest.fixture(scope='module')
+def assembly_subject_template(_pristine_current_schema):
+    with prepared_template(_pristine_current_schema, _seed) as template:
+        yield template
 
 
 @pytest.fixture(autouse=True)
@@ -195,16 +264,9 @@ def test_comfort_thin_rotates_to_temporal(store):
     assert tcard["mode_id"] == 4 and all(t["key"].startswith("t") for t in tcard["tracks"])
 
 
-def test_assemble_four_cards_distinct_modes(store, assembly_subject_template):
-    # Independent uncached producer/control for the shared subject prefix.
-    payload = _seed(store, n_modes=4)
-    assert payload == assembly_subject_template.result
-    original = assembly_subject_template.source
-    keys = _subject_keys(payload)
-    assert store.rec_query.tracks_by_keys(keys) == original.rec_query.tracks_by_keys(keys)
-    assert store.discovery.discovered_tracks_by_keys(keys) == original.discovery.discovered_tracks_by_keys(keys)
-    _publish(store, payload, subjects_ready=True)
-    cards = ms.assemble_cards(store, now=10.0, epoch=0)
+def test_assemble_four_cards_distinct_modes(ranked_cards):
+    _payload, assemble = ranked_cards
+    cards = assemble()
     assert len(cards) == 4
     assert len({c["mode_id"] for c in cards}) == 4          # one distinct mode per card
     assert all(c["mode_id"] in (1, 2, 3, 4) for c in cards)
@@ -227,14 +289,13 @@ def test_cached_cards_respond_to_durable_dislikes_and_clear_without_rebuild(
     rec_params.set_param(store, "ppr_ab_share", ppr_share)
     monkeypatch.setattr(mode_selection, "select_modes", lambda *args, **kwargs: [1, 2, 3, 4])
     seed_catalog_track(store, 'disliked-seed', 'Disliked seed', 'Disliked artist', video_id='disliked-seed')
-    keys = [item["key"] for bucket in payload.values() if isinstance(bucket, dict)
-            for items in bucket.values() if isinstance(items, list) for item in items]
+    keys = sorted(_subject_keys(payload))
     vectors = np.array([[1., 0.] if key.endswith("-0") else [0., 1.] for key in keys] + [[1., 0.]],
                        dtype=np.float32)
     store.rec_model.replace_rec_vectors([(key, vector.tobytes())
                                         for key, vector in zip(keys + ["disliked-seed"], vectors)])
-    payload["_ppr"] = {str(mid): [item["key"] for surf in ms.CARD_SURFACES
-                                for item in payload[str(mid)][surf]] for mid in range(1, 5)}
+    payload["_ppr"] = {str(mid): list(dict.fromkeys(item["key"] for surf in ms.CARD_SURFACES
+                                for item in payload[str(mid)][surf])) for mid in range(1, 5)}
     _publish(store, payload, subjects_ready=True)
     publication = _publication(store)
     before = ms.assemble_cards(store, now=100, epoch=0)
@@ -250,20 +311,18 @@ def test_cached_cards_respond_to_durable_dislikes_and_clear_without_rebuild(
     assert _publication(store) == publication
 
 
-def test_full_buckets_do_not_pin_a_theme_to_one_framing(store, assembly_subjects):
-    payload = assembly_subjects
+def test_full_buckets_do_not_pin_a_theme_to_one_framing(ranked_cards):
+    payload, assemble = ranked_cards
     # One theme has the deepest pool in every framing. All the others can fill a
     # complete card too; raw pool depth must not undo the model's theme rotation.
     for mid in (2, 3, 4):
         for surf in ms.CARD_SURFACES:
             payload[str(mid)][surf] = payload[str(mid)][surf][:12]
-    _publish(store, payload, subjects_ready=True)
     # Assignment must honor every selected priority even when mode 1 has an
     # extra candidate. Check each possible leading theme directly; sampling's
     # posterior and deterministic RNG have independent mode-selection tests.
     order = [1, 2, 3, 4]
-    menus = [ms.assemble_cards(store, now=10.0, epoch=e,
-                              mode_order=order[e:] + order[:e]) for e in range(4)]
+    menus = [assemble(epoch=e, order=order[e:] + order[:e]) for e in range(4)]
     wheelhouse = [next(c["mode_id"] for c in cards if c["lane"] == "wheelhouse") for cards in menus]
     assert set(wheelhouse) == {1, 2, 3, 4}
     assert all(len(cards) == 4 for cards in menus)

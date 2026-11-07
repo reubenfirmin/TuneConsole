@@ -2,6 +2,7 @@
 from collections import Counter
 from tests.derived_rating_support import seed_dislike
 from copy import deepcopy
+from dataclasses import replace
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -12,7 +13,6 @@ from tests.home_fixture_support import publish_menu, returning_listener
 from tests.home_prepared_support import publication_inputs
 from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.recommendation_support import publish_bundles
-from tests.test_group_home import library as group_library
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.rec import choice_evidence, home_cards, home_prepared, home_vibe, mix_tuning, mode_surfaces, transient
 from yt_playlist.web.app import create_app
@@ -228,12 +228,27 @@ def test_worker_menu_is_recorded_intact_despite_later_feedback(
 
 @pytest.mark.parametrize('selection', ['include', 'avoid'])
 def test_partial_genre_menu_keeps_worker_offers_while_refilling(
-        store, prepared, selection):
+        store, controlled_refill_inputs, selection, one_menu_per_attempt, monkeypatch):
+    # This consumer owns partial-menu publication, stable serving and later
+    # feedback. Genre matching/ranking are lower-layer contracts retained in
+    # test_stored_home and test_home_other_genres.
+    prepared = home_prepared.prepare(store, 1000)
+    assert prepared and len(prepared['menus'][0]['protos']) == 4
     request = ({'include_genres': ['jazz']} if selection == 'include' else
                {'avoid_genres': ['ambient', 'classical', 'rock-indie', 'techno', 'trance']})
     with mix_tuning.adjusting(store, 1001):
         store.rec_proposals.put_proposals('home_genre_request', {
             'epoch': mix_tuning.card_epoch(store), **request}, 1001)
+    calculate = home_cards.HomeCards.cards
+
+    def partial(home, card_request):
+        result = calculate(home, card_request)
+        proto = deepcopy(next(proto for proto in prepared['menus'][0]['protos']
+                              if proto['tracks'][0]['genre'] == 'Jazz'))
+        proto['recipe']['genre_request'] = {selection: request[f'{selection}_genres']}
+        return replace(result, protos=[proto], slots=[{'proto': proto, 'pool': None}])
+
+    monkeypatch.setattr(home_cards.HomeCards, 'cards', partial)
     tailored = home_prepared.prepare(store, 1001)
     assert tailored and all(0 < len(menu['protos']) < 4 for menu in tailored['menus'])
     keys = {t['key'] for menu in tailored['menus'] for p in menu['protos'] for t in p['tracks']}
@@ -276,6 +291,11 @@ def test_partial_genre_menu_keeps_worker_offers_while_refilling(
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == prepared
 
 
+@pytest.fixture
+def controlled_refill_inputs(store, monkeypatch):
+    return publication_inputs(store, monkeypatch)
+
+
 def test_retry_reuses_completed_card_work_without_publishing_partial_set(
         store, monkeypatch, one_menu_per_attempt):
     # Retry owns completion and publication, with a controlled lower selection.
@@ -313,9 +333,10 @@ def test_retry_reuses_completed_card_work_without_publishing_partial_set(
     assert not store.modes.impression_counts()
 
 
-def test_typed_adaptive_pools_survive_deferred_setup_and_follow_replacement(store, monkeypatch):
+def test_typed_adaptive_pools_survive_deferred_setup_and_follow_replacement(
+        store, monkeypatch, adaptive_library_template, one_menu_per_attempt):
     from yt_playlist.repos.rec_proposals import RecProposalsRepo
-    group_library(store)
+    adaptive_library_template.restore(store)
     real_read = mode_surfaces.bundle_metadata
     framings = []
 
@@ -423,8 +444,9 @@ def test_context_and_mix_preparation_share_signals_across_retries_and_expire(sto
 
 
 @pytest.mark.parametrize('new_feedback', [False, True])
-def test_graph_retry_reuses_completed_selection_until_its_inputs_change(store, monkeypatch, new_feedback):
-    group_library(store)
+def test_graph_retry_reuses_completed_selection_until_its_inputs_change(
+        store, monkeypatch, new_feedback, adaptive_library_template, one_menu_per_attempt):
+    adaptive_library_template.restore(store)
     assemble, complete = home_cards._group_cards, home_cards._complete_card
     calls, selected, failed = Counter(), [], []
 

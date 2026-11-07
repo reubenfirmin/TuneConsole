@@ -61,6 +61,24 @@ def installed(request, tmp_path, _pristine_installed_schema):
         store.conn.close()
 
 
+@pytest.mark.parametrize('admitted_installed', [79, 93, 107], indirect=True)
+def test_admitted_publication_inputs_keep_pinned_reads_and_real_write_guards(
+        admitted_installed, _admitted_installed_schema):
+    store, version = admitted_installed
+    template, _ = _admitted_installed_schema(version)
+    assert store.settings.get_setting('private-publication-input') is None
+    store.settings.set_setting('private-publication-input', 'original')
+    with store.read_snapshot() as snapshot:
+        assert snapshot.store.settings.get_setting('private-publication-input') == 'original'
+        store.settings.set_setting('private-publication-input', 'changed')
+        assert snapshot.store.settings.get_setting('private-publication-input') == 'original'
+        assert not snapshot.publish(lambda: pytest.fail('Published a changed input'))
+    with store.read_snapshot() as snapshot:
+        assert snapshot.store.settings.get_setting('private-publication-input') == 'changed'
+        assert snapshot.publish(lambda: None)
+    assert template.source.settings.get_setting('private-publication-input') is None
+
+
 def test_account_reconciliation_keeps_physical_ids_and_rolls_back(installed):
     store, version = installed
     main = store.accounts.upsert_account('Main', 'main.json', None, True)
@@ -68,15 +86,17 @@ def test_account_reconciliation_keeps_physical_ids_and_rolls_back(installed):
     configs = [AccountConfig('Brand', 'main.json', None, True, main),
                AccountConfig('Main', 'brand.json', 'remote-brand', False, brand)]
     before = store.accounts.get_accounts()
-    with pytest.raises(RuntimeError, match='publication interrupted'):
-        with store.accounts.reconciled(configs):
-            raise RuntimeError('publication interrupted')
+    table = 'identities' if version < 103 else 'accounts'
+    store.conn.execute(f"CREATE TEMP TRIGGER fail_account_update BEFORE UPDATE OF label ON {table} "
+                       "WHEN NEW.label='Brand' BEGIN SELECT RAISE(ABORT,'publication interrupted'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='publication interrupted'):
+        store.accounts.replace_accounts(configs)
     assert store.accounts.get_accounts() == before
+    store.conn.execute('DROP TRIGGER fail_account_update')
     assert store.accounts.replace_accounts(configs) == {'Brand': main, 'Main': brand}
     assert store.accounts.get_master_account().id == main
     with pytest.raises(ValueError, match='retargeted'):
         store.accounts.upsert_account('Brand', 'new.json', 'another-remote-account', True)
-    table = 'identities' if version < 103 else 'accounts'
     assert entity_names.owner(store.conn, 'accounts').table == 'main.' + table
     assert [tuple(row) for row in store.conn.execute(f'SELECT id,label FROM main.{table} ORDER BY id')] == [
         (main, 'Brand'), (brand, 'Main')]

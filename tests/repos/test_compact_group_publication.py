@@ -368,7 +368,8 @@ def test_store_retains_group_files_until_the_last_old_snapshot_read(database, tm
             store.conn.execute('UPDATE group_versions SET definition_filename=?,definition_offset=? WHERE id=?',
                                (replacement[0], replacement[3], key[0]))
         group_documents.collect_orphans(store.conn)
-        with store.read_view() as view:
+        with store.read_snapshot() as snapshot:
+            view = snapshot.store
             original = list(group_documents.references(view.conn))
             manifest = group_documents.export(view.conn, tmp_path / 'pinned-backup')
             group_documents.restore(store.conn, manifest)

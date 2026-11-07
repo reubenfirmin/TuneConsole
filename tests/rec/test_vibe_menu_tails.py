@@ -3,7 +3,6 @@ from copy import deepcopy
 
 import pytest
 
-from tests.test_growth_readiness import vibe_menu_template, vibe_menus
 from yt_playlist.core import json_cache
 from yt_playlist.rec import home_vibe, vibe_pools, vibe_readiness
 

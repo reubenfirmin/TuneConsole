@@ -49,7 +49,12 @@ def payload(row):
 
 
 def upsert(conn, key, inputs, digest, now, revision):
-    values = (*flatten(inputs), revision, digest, now)
+    upsert_values(conn, key, flatten(inputs), digest, now, revision, empty=not any(inputs.values()))
+
+
+def upsert_values(conn, key, fields, digest, now, revision, *, empty):
+    """Persist validated columns against their current relational owner."""
+    values = (*fields, revision, digest, now)
     row = conn.execute('SELECT r.id FROM recordings r WHERE r.identity_key=? AND NOT EXISTS('
                        'SELECT 1 FROM recording_redirects d WHERE d.retired_id=r.id)', (key,)).fetchone()
     columns = ','.join(COLUMNS)
@@ -61,7 +66,7 @@ def upsert(conn, key, inputs, digest, now, revision):
         # An admitted owner can replace its disposable accepted retraction.
         conn.execute("DELETE FROM unresolved_preparation_inputs WHERE raw_key=? AND reason='empty_retraction'", (key,))
     else:
-        reason = ('empty_retraction' if not any(inputs.values()) else
+        reason = ('empty_retraction' if empty else
                   'retired_owner' if conn.execute('SELECT 1 FROM recordings WHERE identity_key=?', (key,)).fetchone()
                   else 'missing_owner')
         conn.execute(f'INSERT INTO unresolved_preparation_inputs(raw_key,reason,{columns}) VALUES ('

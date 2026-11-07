@@ -1,19 +1,21 @@
 """External attributes, normalized score history and current lineage integration."""
 from pathlib import Path
-from contextlib import closing
+from contextlib import ExitStack, closing
+import hashlib
 import json
 import sqlite3
 import time
+from tempfile import TemporaryDirectory
 
 import pytest
 
-from tests.conftest import seed_catalog_track
+from tests.prepared_fixture_support import capture_template
 from tests.rec.test_vibe_prediction import capture, drain, fits, track
 from tests.test_audio_vibes import sample
-from yt_playlist.core import catalog, sample_files, profile_files, vibe_provenance, vibe_versions
+from yt_playlist.core import catalog, prepared_inputs, sample_files, profile_files, vibe_provenance, vibe_versions
 from yt_playlist.core.db_rebuild import build, destination
-from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.migrations import MigrationError, current, migrate
+from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.store import Store
 from yt_playlist.rec import vibe_preparation
@@ -252,8 +254,25 @@ def legacy(path):
         raise
 
 
-def test_populated_upgrade_preserves_samples_scores_labels_and_reopens(tmp_path):
-    store, value = legacy(tmp_path / 'legacy.db')
+@pytest.fixture(scope='module')
+def recording_vibe_predecessor():
+    """Retain a genuine populated v60 prefix; each upgrade owns private files."""
+    with ExitStack() as resources:
+        directory = Path(resources.enter_context(TemporaryDirectory(prefix='recording-vibe-v60-')))
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv('YT_PLAYLIST_HOME', str(directory / 'app-home'))
+            patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+            patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+            patch.delenv('DEEPSEEK_API_KEY', raising=False)
+            source, value = legacy(directory / 'source.db')
+            resources.callback(source.conn.close)
+            template = capture_template(source, value)
+        yield template
+
+
+def test_populated_upgrade_preserves_samples_scores_labels_and_reopens(tmp_path, recording_vibe_predecessor):
+    store = Store(tmp_path / 'legacy.db')
+    value = recording_vibe_predecessor.restore(store)
     labels = store.conn.execute('SELECT * FROM audio_session_labels').fetchone()
     labels = {key: labels[key] for key in labels.keys()}
     migrate(store.conn,registry=MIGRATIONS)
@@ -278,8 +297,9 @@ def test_populated_upgrade_preserves_samples_scores_labels_and_reopens(tmp_path)
         reopened.conn.close()
 
 
-def test_externalization_failure_rolls_back_database_and_can_resume(tmp_path, monkeypatch):
-    store, value = legacy(tmp_path / 'legacy.db')
+def test_externalization_failure_rolls_back_database_and_can_resume(tmp_path, monkeypatch, recording_vibe_predecessor):
+    store = Store(tmp_path / 'legacy.db')
+    value = recording_vibe_predecessor.restore(store)
     before = list(store.conn.iterdump())
     original = sample_files.publish
     def fail_after_publication(*args):
@@ -288,10 +308,14 @@ def test_externalization_failure_rolls_back_database_and_can_resume(tmp_path, mo
     with monkeypatch.context() as patch:
         patch.setattr(sample_files, 'publish', fail_after_publication)
         with pytest.raises(MigrationError, match='interrupted externalization'):
-            migrate(store.conn,registry=MIGRATIONS)
+            migrate(store.conn,registry=MIGRATIONS[:61])
     assert list(store.conn.iterdump()) == before
-    migrate(store.conn,registry=MIGRATIONS)
-    store.init_schema()
+    # This failure belongs to v61. The populated upgrade/reopen case above
+    # owns the complete suffix and current application admission.
+    migrate(store.conn,registry=MIGRATIONS[:61])
+    validate_version(store.conn, 61)
+    store._bind_repositories()
+    assert store.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 61
     assert store.audio_vibes.samples(value['run_id']) == [value]
     assert len(list((tmp_path / 'sample-attributes').glob('*/*.json'))) == 1
     store.conn.close()
@@ -304,34 +328,51 @@ def test_dense_cohort_finishes_one_recording_with_exact_inputs(store):
     stamp = vibe_preparation.version()
     # Controlled density fixture: 2,000 provider-measured recordings, six vibes
     # each, shared by all three cohorts. No synthetic raw audio or human labels.
-    # Commit the complete donor catalog once before the real input snapshot;
-    # each helper still writes its metadata, artists, aliases and library rows.
-    with atomic_write(store):
-        for i in range(2000):
-            seed_catalog_track(store, f'dense-{i}', f'Dense {i}', 'Shared artist',
-                               video_id=f'dense-{i}', genre='Psybient', mood_relaxed=.8)
-    # Donors already have accepted library inputs. A startup audit must not
-    # turn the timed one-target capture into repair of incomplete donor rows.
-    with store.read_snapshot() as snapshot:
-        reader = snapshot.store
-        rows = reader.prepared_content.capture(reader.prepared_content.pending(2001))
-        assert snapshot.publish(lambda: store.prepared_content.publish_capture(rows, 1))
-    assert not store.prepared_content.missing_unqueued(1)
+    # The worker captures the target normally. Donors are controlled accepted
+    # inputs and original measurements, not an ingestion/provider-selection test.
+    # Keep all 2,000 real SQL subjects without repeating metadata selection and
+    # artist observation for each of the already-defined cohort contributors.
+    first = store.conn.execute('SELECT coalesce(max(id),0)+1 FROM recordings').fetchone()[0]
+    first_entry = store.conn.execute('SELECT coalesce(max(id),0)+1 FROM catalog_entries').fetchone()[0]
+    donors = [(first+i, f'dense-{i}', f'Dense {i}') for i in range(2000)]
+    donor_inputs = {'library': {'genre': 'Psybient', 'year': None, 'audio': {}}, 'discovered': None}
+    donor_digest = hashlib.sha256(json.dumps(donor_inputs, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    accepted = (*prepared_inputs.flatten(donor_inputs), 1, donor_digest, 1)
+    store.settings.publish_values({'rec_vibe_version': stamp})
     with store.conn:
+        store.conn.executemany("INSERT INTO recordings(id,identity_key,title,artist) VALUES (?,?,?,'Shared artist')", donors)
+        end = first + len(donors)
+        store.conn.execute("INSERT INTO youtube_items(video_id,recording_id,title,artist) "
+            "SELECT identity_key,id,title,artist FROM recordings WHERE id>=? AND id<?", (first, end))
+        store.conn.execute('INSERT INTO catalog_entries(id,recording_id,video_id) '
+            'SELECT ?+id-?,id,identity_key FROM recordings WHERE id>=? AND id<?',
+            (first_entry, first, first, end))
+        store.conn.execute("INSERT INTO library_memberships SELECT id,'fixture',NULL FROM catalog_entries "
+            'WHERE recording_id>=? AND recording_id<?', (first, end))
+        columns = ','.join(prepared_inputs.COLUMNS)
+        store.conn.execute(f'INSERT INTO prepared_recording_inputs(recording_id,{columns}) SELECT id,'
+            + ','.join('?' for _ in accepted) + ' FROM recordings WHERE id>=? AND id<?',
+            (*accepted, first, end))
         store.conn.execute("INSERT OR IGNORE INTO genre_catalog(key,name,source) VALUES ('psybient','Psybient','custom')")
         version = vibe_versions.column(store.conn, 'measurements')
         stored_version = vibe_versions.stored(store.conn, stamp)
-        for rid, in store.conn.execute("SELECT id FROM recordings WHERE identity_key LIKE 'dense-%'").fetchall():
-            for vibe in home_vibe.PRESETS:
-                mid = store.conn.execute(f'INSERT INTO measurements(recording_id,vibe,score,support,source,{version},input_digest,measured_at) '
-                    "VALUES (?,?,.8,1,'provider_measurement',?,'density',1)", (rid, vibe, stored_version)).lastrowid
-                store.conn.execute('INSERT INTO recording_vibes VALUES (?,?,.8,1,\'provider_measurement\',?,NULL,?,?,\'psybient\',NULL,NULL)',
-                                   (rid, vibe, mid, stored_version, artist))
+        first_measurement = store.conn.execute('SELECT coalesce(max(id),0)+1 FROM measurements').fetchone()[0]
+        # Set-based fixture insertion keeps all 12,000 independently guarded
+        # measurements without crossing the DB wrapper once per accepted row.
+        store.conn.execute('WITH vibes(ordinal,vibe) AS (VALUES '
+            + ','.join(f'({i},?)' for i in range(len(home_vibe.PRESETS))) + ') '
+            f'INSERT INTO measurements(id,recording_id,vibe,score,support,source,{version},input_digest,measured_at) '
+            "SELECT ?+(r.id-?)*?+v.ordinal,r.id,v.vibe,.8,1,'provider_measurement',?,'density',1 "
+            'FROM recordings r CROSS JOIN vibes v WHERE r.id>=? AND r.id<?',
+            (*home_vibe.PRESETS, first_measurement, first, len(home_vibe.PRESETS), stored_version, first, end))
+        store.conn.execute('INSERT INTO recording_vibes '
+            f"SELECT recording_id,vibe,score,support,source,id,NULL,{version},?,'psybient',NULL,NULL "
+            'FROM measurements WHERE recording_id>=? AND recording_id<?', (artist, first, end))
         store.conn.execute('DELETE FROM rec_musical_pending')
         store.conn.execute('DELETE FROM rec_vibe_pending')
         store.conn.execute('DELETE FROM rec_content_pending')
         store.conn.execute('INSERT INTO rec_content_pending(identity_key) VALUES (?)', (target,))
-        store.settings.publish_values({'rec_vibe_version': stamp})
+    assert not store.prepared_content.missing_unqueued(1)
     started = time.monotonic()
     assert Preparation(store).capture(1000)
     elapsed = time.monotonic() - started

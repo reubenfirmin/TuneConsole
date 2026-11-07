@@ -325,12 +325,13 @@ def test_masked_metadata_refits_after_categorical_changes_without_learning_own_n
 
 def test_symbolic_cache_rechecks_memory_and_distinguishes_equal_size_graphs(monkeypatch):
     from scipy.sparse import csr_matrix
+    from yt_playlist.rec import vibe_joint_common
 
-    monkeypatch.setattr(joint, '_ORDERING_CACHE', None)
+    monkeypatch.setattr(vibe_joint_common, '_ORDERING_CACHE', None)
     first = csr_matrix([[1., 1., 0.], [1., 0., 1.]])
     expected = joint._ordering(first, 1000, joint.MEMORY_BYTES)
     with monkeypatch.context() as cached:
-        cached.setattr(joint.heapq, 'heapify', lambda *_: pytest.fail('Repeated symbolic elimination'))
+        cached.setattr(vibe_joint_common.heapq, 'heapify', lambda *_: pytest.fail('Repeated symbolic elimination'))
         # Weights and observation values do not change precision sparsity.
         assert joint._ordering(first * .5, 2000, joint.MEMORY_BYTES) == (
             expected[0], expected[1], expected[2] + 1000)
@@ -339,7 +340,7 @@ def test_symbolic_cache_rechecks_memory_and_distinguishes_equal_size_graphs(monk
     # Shape and nonzero count alone cannot identify the elimination graph.
     second = csr_matrix([[1., 1., 1.], [1., 0., 0.]])
     actual = joint._ordering(second, 1000, joint.MEMORY_BYTES)
-    monkeypatch.setattr(joint, '_ORDERING_CACHE', None)
+    monkeypatch.setattr(vibe_joint_common, '_ORDERING_CACHE', None)
     assert actual == joint._ordering(second, 1000, joint.MEMORY_BYTES)
     assert actual[1] != expected[1]
 
@@ -585,7 +586,7 @@ def test_deferral_and_refresh_queue_roll_back_together(store, monkeypatch):
         'SELECT group_key,revision,cursor FROM rec_vibe_pending ORDER BY position')] == before
 
 
-def test_prediction_queue_survives_restart_and_failure_rolls_back_all_derived_state(tmp_path, monkeypatch, qualified_candidate):
+def test_prediction_queue_retries_after_committed_derived_state_and_restart(tmp_path, monkeypatch, qualified_candidate):
     path = tmp_path / 'predictions.db'
     store = Store(path)
     store.init_schema()
@@ -601,17 +602,24 @@ def test_prediction_queue_survives_restart_and_failure_rolls_back_all_derived_st
         patch.setattr(VibePredictionsRepo, 'publish_prepared', fail)
         with pytest.raises(RuntimeError, match='interrupted prediction'):
             Preparation(store).capture(1000)
-    assert not store.conn.execute('SELECT 1 FROM recording_vibes').fetchone()
-    assert not store.conn.execute('SELECT 1 FROM measurements').fetchone()
-    assert not store.conn.execute('SELECT 1 FROM predictions').fetchone()
+    committed = {table: [tuple(row) for row in store.conn.execute(f'SELECT * FROM {table} ORDER BY id')]
+                 for table in ('measurements', 'predictions')}
+    assert committed['measurements']
+    assert store.conn.execute('SELECT 1 FROM recording_vibes').fetchone()
     assert store.prepared_content.has_pending()
+    assert store.prepared_content.counters()[0] == 0
     store.conn.close()
     store = Store(path)
     store.init_schema()
     try:
+        for table, rows in committed.items():
+            assert [tuple(row) for row in store.conn.execute(f'SELECT * FROM {table} ORDER BY id')] == rows
         drain(store, batch=1)
         assert fits(store, target)['relax']['source'] == 'artist_genre'
         assert not store.vibe_predictions.pending()
+        assert not store.prepared_content.has_pending()
+        measurements = {tuple(row) for row in store.conn.execute('SELECT * FROM measurements')}
+        assert set(committed['measurements']) <= measurements
     finally:
         store.conn.close()
 

@@ -3,9 +3,18 @@ import pytest
 from fastapi.testclient import TestClient
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
-from tests.home_fixture_support import home_routes_only, publish_menu
+from tests.home_fixture_support import home_routes_only, publish_menu, without_metadata_providers
 
-pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'home_routes_only')
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'home_routes_only', 'without_metadata_providers')
+
+
+@pytest.fixture(autouse=True)
+def without_diagnostic_history(monkeypatch):
+    from yt_playlist.rec.home_cards import HomeCards
+
+    # Real impressions/picks are the subject here. Audit metadata and JSONL
+    # capture have their own route-level owner in test_home_audit.
+    monkeypatch.setattr(HomeCards, 'audit', lambda *args, **kwargs: None)
 
 
 def _seed_modes(store):

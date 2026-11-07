@@ -15,11 +15,10 @@ class RecRefreshRepo(Repo):
 
     @synchronized
     def publish_notification(self):
-        """Retain source changes discovered by a guarded content capture, atomically."""
-        if not self.conn.in_transaction:
-            raise RuntimeError('Refresh notification requires an outer transaction')
-        self.conn.execute("INSERT INTO rec_change_queue(kind,item) VALUES ('refresh','') "
-                          "ON CONFLICT(kind,item) DO UPDATE SET revision=revision+1")
+        """Commit this notification, or join a legacy publisher of this row."""
+        with self.conn.atomic(join=True):
+            self.conn.execute("INSERT INTO rec_change_queue(kind,item) VALUES ('refresh','') "
+                              "ON CONFLICT(kind,item) DO UPDATE SET revision=revision+1")
 
     @synchronized
     def acknowledge(self, revision):

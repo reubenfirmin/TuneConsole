@@ -6,21 +6,19 @@ import time
 
 import pytest
 
-from tests.test_home_other_genres import _client as _home_client, seed_genres
+from tests.test_home_other_genres import _client as _home_client, genre_routes, seed_genres, template_bytecode
 from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.home_fixture_support import home_routes_only, returning_listener
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles
 from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.rec import home_cards, library_pool, mode_surfaces, surfaces
+from yt_playlist.rec import library_pool, mode_surfaces, surfaces
 from yt_playlist.util.matching import identity_key
 
 
-@pytest.fixture(autouse=True)
-def library_routes(home_routes_only, one_menu_per_attempt, monkeypatch):
-    # Jobs, requests and pool filtering stay real. Audit diagnostics have their
-    # separate payload and HTTP contracts in test_home_audit.
-    monkeypatch.setattr(home_cards.HomeCards, 'audit', lambda *args, **kwargs: None)
+# Share compiled templates and controlled diagnostics/tag setup with the genre
+# HTTP owner. Jobs, requests, real template rendering and pool filtering stay real.
+pytestmark = pytest.mark.usefixtures('genre_routes', 'one_menu_per_attempt')
 
 
 @pytest.fixture(scope='module')
@@ -70,12 +68,13 @@ def test_catalog_skeleton_click_ranks_once_preserves_genres_and_survives_restart
     siblings = two_ready_cards(store, monkeypatch, bundles=genre_candidates)
     started, release = threading.Event(), threading.Event()
     rows = []
-    for i in range(30):
-        title, artist = f"Catalog song {i}", f"Catalog artist {i}"
-        key, genre = identity_key(title, artist), "Jazz" if i < 15 else "Classical"
-        tid = store.tracks.upsert_track(f"v{i}", title, artist, None, None)
-        store.tracks.set_track_genre(tid, genre)
-        rows.append(surfaces.ForYouItem(title, artist, "", f"v{i}", None, 0, "", key=key, genre=genre))
+    with atomic_write(store):
+        for i in range(30):
+            title, artist = f"Catalog song {i}", f"Catalog artist {i}"
+            key, genre = identity_key(title, artist), "Jazz" if i < 15 else "Classical"
+            tid = store.tracks.upsert_track(f"v{i}", title, artist, None, None)
+            store.tracks.set_track_genre(tid, genre)
+            rows.append(surfaces.ForYouItem(title, artist, "", f"v{i}", None, 0, "", key=key, genre=genre))
     calls = []
     def rank(store, now, limit):
         calls.append(limit)

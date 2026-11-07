@@ -197,6 +197,7 @@ def run(output, *, seconds=180., turns=1000, request_idle=.1):
         'code': {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in (
             'experiments/audio_lab_tools/vibe_pooling_operations.py',
             'src/yt_playlist/rec/vibe_joint_model.py', 'src/yt_playlist/rec/vibe_joint_preparation.py',
+            'src/yt_playlist/rec/vibe_joint_common.py', 'src/yt_playlist/rec/vibe_joint_calibrated.py',
             'src/yt_playlist/rec/progressive.py',
             'src/yt_playlist/core/priority.py',
             'src/yt_playlist/rec/vibe_preparation.py', 'src/yt_playlist/repos/vibe_predictions.py',

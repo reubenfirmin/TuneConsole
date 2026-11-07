@@ -48,7 +48,8 @@ def test_selected_requests_preserve_identity_order_sources_and_supported_upgrade
     history = list(map(tuple,store.conn.execute('SELECT * FROM schema_migrations')))
     native = Store(tmp_path/'native-demand.db')
     try:
-        with store.read_view() as pinned:
+        with store.read_snapshot() as snapshot:
+            pinned = snapshot.store
             assert pinned.rec_proposals.get_proposals('choice_window:mixes')=={}
             identity = ready(store.conn)
             publication.publish(store.conn,identity=identity)

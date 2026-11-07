@@ -1,5 +1,3 @@
-from contextlib import contextmanager
-
 import pytest
 
 from yt_playlist.core.runtime import Runtime
@@ -13,10 +11,13 @@ def _configured(store, tmp_path):
     return rt
 
 
-@pytest.mark.parametrize("failure", ["publish", "reload", "reconcile", "commit"])
-def test_failed_save_retains_file_accounts_and_runtime(store, tmp_path, monkeypatch, failure):
+@pytest.mark.parametrize("failure", ["publish", "reload", "reconcile"])
+def test_failed_save_retains_file_and_runtime_and_can_reconcile_committed_bindings(store, tmp_path, monkeypatch, failure):
     rt = _configured(store, tmp_path)
     before, provider, accounts = rt.config_path.read_bytes(), rt._provider, store.accounts.get_accounts()
+    original_replace = runtime_mod.os.replace
+    original_validate = rt._validate_clients
+    original_bindings = store.accounts.repository.replace_accounts
     if failure == "publish":
         def fail(*args):
             raise OSError("publication failed")
@@ -24,24 +25,27 @@ def test_failed_save_retains_file_accounts_and_runtime(store, tmp_path, monkeypa
     elif failure == "reload":
         def fail(*args):
             raise ValueError("candidate client cannot load")
-        monkeypatch.setattr(rt, "_prepare_provider", fail)
+        monkeypatch.setattr(rt, "_validate_clients", fail)
     else:
-        original = store.accounts.reconciled
-        @contextmanager
-        def failed_reconciliation(configs):
-            with original(configs) as ids:
-                if failure == "reconcile":
-                    raise ValueError("identity reconciliation failed")
-                yield ids
-                raise OSError("identity commit failed")
-        monkeypatch.setattr(store.accounts, "reconciled", failed_reconciliation)
+        def failed_reconciliation(rows, *, expected):
+            raise ValueError("identity reconciliation failed")
+        monkeypatch.setattr(store.accounts.repository, "replace_accounts", failed_reconciliation)
     with pytest.raises(ValueError, match="not saved"):
         rt.apply_setup([{"label": "renamed", "credential_ref": "browser.json", "is_master": True}])
     assert rt.config_path.read_bytes() == before
-    assert store.accounts.get_accounts() == accounts
+    if failure == 'publish':
+        assert [account.label for account in store.accounts.get_accounts()] == ['renamed']
+    else:
+        assert store.accounts.get_accounts() == accounts
     assert rt.configured and rt._provider is provider
     assert set(rt.clients()) == {i.id for i in accounts}
     assert list(tmp_path.glob(".config.toml.*")) == []
+    monkeypatch.setattr(runtime_mod.os, 'replace', original_replace)
+    monkeypatch.setattr(rt, '_validate_clients', original_validate)
+    monkeypatch.setattr(store.accounts.repository, 'replace_accounts', original_bindings)
+    rt.load()
+    assert store.accounts.get_accounts() == accounts
+    assert set(rt.clients()) == {account.id for account in accounts}
 
 
 def test_failed_reload_restores_last_usable_file_and_runtime(store, tmp_path):

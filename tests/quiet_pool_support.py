@@ -15,7 +15,9 @@ DIAGNOSTIC = 'internal-diagnostic-879-fresh: invalid stored ranking document'
 @pytest.fixture
 def quiet_pool(store, fresh_home_template, monkeypatch):
     fresh_home_template.restore(store)
-    http = prepared_client(store)
+    # Explicit Fresh jobs remain real. Periodic model/choice workers own
+    # separate tests and must not replace this controlled listener's history.
+    http = prepared_client(store, background_work=False)
     ctx = http.app.state.ctx
     case = SimpleNamespace(store=store, http=http, ctx=ctx, fault=None, boundary='populate',
         calls=[], calculations=[], refreshes=[], schedules=[], entered=threading.Event(), release=threading.Event())

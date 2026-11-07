@@ -69,14 +69,20 @@ def test_reference_reuse_across_layouts_preserves_changed_constraints_and_live_o
              'DEFERRABLE INITIALLY DEFERRED, label TEXT COLLATE NOCASE UNIQUE CHECK(length(label)>0))')
     schema_definition._reference_table.cache_clear()
     inspected = []
+    connections = []
     inspect = schema_definition._inspect_table
 
     def observe(conn, name, sql):
         inspected.append(name)
+        connections.append(conn)
         return inspect(conn, name, sql)
 
     monkeypatch.setattr(schema_definition, '_inspect_table', observe)
     first = schema_definition._schema_contract((parent, child))
+    assert inspected == ['parent', 'child']
+    assert connections[0] is connections[1]
+    with pytest.raises(sqlite3.ProgrammingError, match='closed database'):
+        connections[0].execute('SELECT 1')
     later = schema_definition._schema_contract((parent, child, 'CREATE TABLE later(value TEXT)'))
     assert first['child'] == later['child']
     assert inspected.count('child') == 1

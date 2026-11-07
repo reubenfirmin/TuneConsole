@@ -125,32 +125,32 @@ def test_incorrect_draft_fields_members_or_original_cannot_publish(installed, st
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_real_conditional_writer_reserves_before_read_and_rolls_back_failed_save(installed, monkeypatch):
+def test_real_conditional_writer_compares_atomically_and_rolls_back_failed_sql(installed, monkeypatch):
     store, _ = installed
     identity, raw = seed(store)
     owner = publication.OWNER
     selected = stage(store.conn)
     owner.publish(store.conn, stage=selected)
     other = sqlite3.connect(store._db_path, timeout=.001)
-    read, save = store.road_trip.get_road_trip_draft, store.road_trip.save_road_trip_draft
-    reads = []
-    def reserved(identity):
-        assert store.conn.in_transaction
-        with pytest.raises(sqlite3.OperationalError, match='locked'):
-            other.execute('BEGIN IMMEDIATE')
-        reads.append(identity)
-        return read(identity)
-    def fail(*args):
-        save(*args)
-        raise RuntimeError('controlled draft save failure')
-    monkeypatch.setattr(store.road_trip, 'get_road_trip_draft', reserved)
-    monkeypatch.setattr(store.road_trip, 'save_road_trip_draft', fail)
+    read, execute = store.road_trip.get_road_trip_draft, store.conn.execute
+    writes = []
+    def fail(sql, args=()):
+        conditional_save = sql.startswith('UPDATE road_trip_drafts SET state=')
+        if conditional_save:
+            assert store.conn.in_transaction
+            with pytest.raises(sqlite3.OperationalError, match='locked'):
+                other.execute('BEGIN IMMEDIATE')
+            writes.append(args[2])
+        result = execute(sql, args)
+        if conditional_save:
+            raise RuntimeError('controlled draft save failure')
+        return result
+    monkeypatch.setattr(store.conn, 'execute', fail)
     try:
         with pytest.raises(RuntimeError, match='controlled draft save failure'):
             store.road_trip.replace_road_trip_draft(identity, {'revision':'next'}, 12, expected_revision='held')
-        monkeypatch.setattr(store.road_trip, 'get_road_trip_draft', read)
-        monkeypatch.setattr(store.road_trip, 'save_road_trip_draft', save)
-        assert reads == [identity]
+        monkeypatch.setattr(store.conn, 'execute', execute)
+        assert writes == [identity]
         assert owner.selected(store.conn) == selected
         assert read(identity) == json.loads(raw)
         with store.read_snapshot() as snapshot:

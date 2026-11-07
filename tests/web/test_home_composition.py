@@ -1,11 +1,11 @@
-"""Home visits keep one committed view while background updates continue."""
+"""Home keeps prepared display content while reporting reads see new commits."""
 import pytest
 import json
 from copy import deepcopy
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
-from tests.home_fixture_support import home_routes_only, publish_menu, returning_listener
+from tests.home_fixture_support import home_routes_only, publish_menu, returning_listener, without_metadata_providers
 from yt_playlist.rec import home_cache, home_cards, home_prepared
 from yt_playlist.web.app import create_app
 from yt_playlist.web.routes.home import ROTATING_CARDS
@@ -37,7 +37,8 @@ def test_home_metadata_update_preserves_publication_and_refreshes_next_snapshot(
             if not updated:
                 updated = True
                 store.tracks.upsert_track(track['video_id'], 'Corrected title', track['artist'], '', 180)
-                assert self.store.tracks.metadata_for_video(track['video_id'])['title'] == track['title']
+                assert self.store.tracks.metadata_for_video(track['video_id'])['title'] == 'Corrected title'
+                assert not self.store.conn.in_transaction
         return result
 
     monkeypatch.setattr(HomeViews, 'prepared', update_after_menu_read)
@@ -46,7 +47,8 @@ def test_home_metadata_update_preserves_publication_and_refreshes_next_snapshot(
         assert first.status_code == 200
         assert f'data-title="{track["title"]}"' in first.text
         assert 'data-title="Corrected title"' not in first.text
-        assert observed and set(observed) == {track['title']}
+        assert observed[0] == track['title']
+        assert observed[1:] and set(observed[1:]) == {'Corrected title'}
         observed.clear()
         following = client.get('/')
         assert following.status_code == 200
@@ -81,7 +83,8 @@ def test_failed_home_visit_does_not_advance_only_some_cards(file_backed_store, m
         card: 0 for card in ROTATING_CARDS}
 
 
-def test_prepared_albums_and_stories_arrive_in_the_home_document(file_backed_store, home_routes_only):
+def test_prepared_albums_and_stories_arrive_in_the_home_document(
+        file_backed_store, home_routes_only, without_metadata_providers):
     from tests.onboarding_support import publish_personal_album
     from yt_playlist.rec import album_choices, album_tuning, choice_evidence, into_recently
 

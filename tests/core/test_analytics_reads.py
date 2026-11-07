@@ -69,12 +69,14 @@ def test_file_reader_pins_committed_state_without_copying_database(file_backed_s
     monkeypatch.setattr(DiagnosticConnection, 'backup', backup)
     before = set(tmp_path.iterdir())
     try:
-        with store.read_view() as reader:
+        with store.read_snapshot() as snapshot:
+            reader = snapshot.store
             assert reader.conn is not store.conn
             store.settings.set_setting('input', 'new')
             assert reader.settings.get_setting('input') == 'old'
-            with pytest.raises(sqlite3.OperationalError, match='readonly'):
+            with pytest.raises(sqlite3.DatabaseError, match='not authorized'):
                 reader.conn.execute("INSERT INTO settings VALUES ('forbidden','write')")
+        assert store.settings.get_setting('forbidden') is None
         assert Analytics(store).value() == 'new'
         added = set(tmp_path.iterdir()) - before
         assert added <= {tmp_path / ('store.db.' + domain) for domain in (
@@ -94,7 +96,8 @@ def test_releasing_reader_allows_wal_checkpoint_to_finish(file_backed_store):
     store.settings.set_setting('input', 'old')
     try:
         store.conn.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
-        with store.read_view() as reader:
+        with store.read_snapshot() as snapshot:
+            reader = snapshot.store
             for n in range(5):
                 store.settings.set_setting('input', str(n))
             assert reader.settings.get_setting('input') == 'old'

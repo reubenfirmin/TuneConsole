@@ -8,6 +8,11 @@ from contextlib import contextmanager
 import sqlite3
 
 
+# These built-in table-valued functions derive rows from their SQL arguments.
+# Actual tables with these names still have ordinary revision guards.
+DERIVED_TABLES = frozenset({'json_each', 'json_tree'})
+
+
 _KEY_COLUMNS = {"settings": "key", "rec_proposals": "surface", "player_events": "kind",
                 "rec_proposal_cache_heads": "surface", "rec_proposal_cache_builds": "cache_id",
                 "rec_proposal_cache_chunks": "cache_id",
@@ -217,14 +222,6 @@ class Reads:
                 self._record_keys[table] = previous
             self._authorized.clear()
 
-    def _include_authorized(self, token, dependencies):
-        # SQLite reports every column read, often many times while expanding
-        # catalog views. One inclusion per scope is sufficient. Scope changes
-        # clear this set so nested captures and exact-key reads remain complete.
-        if token not in self._authorized:
-            self.include(dependencies())
-            self._authorized.add(token)
-
     def authorize(self, operation, table, _column, database, _trigger):
         if database == "main":
             if operation in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE):
@@ -232,17 +229,28 @@ class Reads:
             if operation == sqlite3.SQLITE_READ:
                 keys = self._record_keys.get(table)
                 if keys is not None:
-                    self._include_authorized((table, 'keys'), lambda: {(table, key) for key in keys})
-                    if _column in _KEY_COLUMN_EXCLUSIONS.get(table, ()):
-                        # A caller consuming bookkeeping needs its full guard;
-                        # keyed membership counters deliberately omit it.
-                        self._include_authorized((table, ''), lambda: {(table, "")})
+                    token = table, 'keys'
+                    if token not in self._authorized:
+                        self.include({(table, key) for key in keys})
+                        self._authorized.add(token)
+                    if _column not in _KEY_COLUMN_EXCLUSIONS.get(table, ()):
+                        return sqlite3.SQLITE_OK
+                    # A caller consuming bookkeeping needs its full guard;
+                    # keyed membership counters deliberately omit it.
+                    token = table, ''
                 elif table == 'metadata_runtime_state' and _column in ('id', 'active'):
                     # Format detection reads this owner directly. File-GC cursor
                     # changes must not invalidate model calculations or rankings.
-                    self._include_authorized((table, 'group:format'), lambda: {(table, 'group:format')})
+                    token = table, 'group:format'
                 else:
-                    self._include_authorized((table, ''), lambda: {(table, "")})
+                    token = table, ''
+                # View expansion reports each column repeatedly. Avoid a
+                # callback and newly allocated closure for every repeated read.
+                # Scope changes clear this set, preserving nested captures and
+                # exact-key dependencies even when the outer scope saw them.
+                if token not in self._authorized:
+                    self.include({token})
+                    self._authorized.add(token)
         return sqlite3.SQLITE_OK
 
 

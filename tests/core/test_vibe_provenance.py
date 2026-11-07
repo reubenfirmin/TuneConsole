@@ -112,6 +112,32 @@ def test_batch_read_preserves_mixed_lineage_and_bounds_schema_and_file_reads(sto
         list(owner.read_many(reader.conn, [ready,other_chunk]))
 
 
+def test_staging_preserves_existing_roots_and_roots_allocated_by_the_planner(store):
+    pid, mids, artist, _rid = evidence(store)
+    with atomic_write(store):
+        store.conn.execute('INSERT INTO prediction_measurement_roots VALUES (?)', (mids[0],))
+    # New measurements are allocated by the planner before either those rows
+    # or their roots are committed. Keep both kinds across several SQL pages.
+    allocated = list(range(max(mids) + 1, max(mids) + 260))
+    inputs = mids + allocated
+    statements = []
+    store.conn.set_trace_callback(statements.append)
+    try:
+        staged, markers, roots = owner.stage_many(store.conn, [(pid, inputs + mids, [artist])])
+        try:
+            assert roots == inputs[1:]
+            assert markers[0][:2] == (pid, owner.fingerprint(inputs))
+            assert [row[0] for row in store.conn.execute(
+                'SELECT measurement_id FROM prediction_measurement_roots')] == mids[:1]
+            assert not (owner.directory(store.conn) / owner.relative(pid)).exists()
+            assert len([sql for sql in statements if sql.startswith('SELECT measurement_id FROM prediction_measurement_roots WHERE')]) == 3
+        finally:
+            for publication in staged:
+                publication.close()
+    finally:
+        store.conn.set_trace_callback(None)
+
+
 @pytest.mark.parametrize('shared_model', [False, True, 'conditioned'])
 def test_current_protection_expiry_snapshot_and_independent_restore(store, tmp_path, shared_model):
     pid, mids, artist, rid = evidence(store)

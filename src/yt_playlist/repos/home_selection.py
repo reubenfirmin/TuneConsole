@@ -14,6 +14,9 @@ class HomeSelectionRepo:
         conn.execute('PRAGMA cache_size=-1024')
         conn.execute('PRAGMA temp_store=FILE')
         conn.execute('PRAGMA mmap_size=0')
+        # This private workspace is discarded on close. Keep its schema and
+        # candidate writes in one transaction instead of fsyncing every CREATE.
+        conn.execute('BEGIN')
         conn.execute('CREATE TABLE candidates(pool INTEGER,rank INTEGER,key TEXT,artist TEXT,album TEXT,'
             'family TEXT,has_genre INTEGER,year INTEGER,tilt REAL,delta REAL,eligible INTEGER,'
             'PRIMARY KEY(pool,rank)) WITHOUT ROWID')
@@ -93,6 +96,7 @@ class HomeInputRepo:
         self._conn = conn
         conn.execute('PRAGMA cache_size=-1024')
         conn.execute('PRAGMA mmap_size=0')
+        conn.execute('BEGIN')
         conn.execute('CREATE TABLE inputs(key TEXT PRIMARY KEY,genre TEXT,blocked INTEGER) WITHOUT ROWID')
 
     @classmethod

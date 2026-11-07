@@ -20,8 +20,10 @@ def test_background_snapshots_leave_capacity_for_foreground(file_backed_store):
             value = reader.settings.get_setting('reader-priority-probe')
             entered[index].set()
             assert release.wait(3), 'Foreground read could not finish while background readers were held'
-            # Keep real WAL snapshot isolation while the foreground writes.
-            assert reader.settings.get_setting('reader-priority-probe') == value
+            # Reporting remains transaction-free and observes the foreground
+            # commit even while its connection occupies a background slot.
+            assert reader.settings.get_setting('reader-priority-probe') == 'new'
+            assert not reader.conn.in_transaction
             return value
 
     with ThreadPoolExecutor(db_reads.MAX_READERS) as pool:

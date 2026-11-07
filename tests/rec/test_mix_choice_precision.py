@@ -347,10 +347,14 @@ def test_backup_snapshot_excludes_a_menu_with_future_sql_ownership(store, tmp_pa
     menu(store, 'before')
     restored = Store(tmp_path / 'snapshot.db')
     try:
-        with store.read_view() as reader:
+        with store.read_snapshot() as snapshot:
+            reader = snapshot.store
             assert reader.conn.execute('SELECT count(*) FROM mix_choice_menus').fetchone()[0] == 1
             menu(store, 'future')
             choices.respond(store,'future','choice',102,option_id='a')
+            # The in-memory snapshot is a private copy; export owners also require
+            # an explicit SQL transaction while collecting its file references.
+            reader.conn.execute('BEGIN')
             manifests = custody.export_files(reader.conn, tmp_path / 'full.db')
             assert 'choice_evidence' in manifests
             reader.conn.backup(restored.conn)

@@ -3,34 +3,18 @@ from contextlib import ExitStack
 import json
 from pathlib import Path
 import sqlite3
-from tempfile import TemporaryDirectory
 
 import pytest
-from tests.prepared_fixture_support import capture_template, roots
+from tests.prepared_fixture_support import roots
 
 from tests.rec.test_vibe_prediction import capture, drain, fits, track
-from tests.repos.test_recording_vibes import legacy
+from tests.repos.test_recording_vibes import recording_vibe_predecessor
 from tests.test_audio_vibes import sample
 from yt_playlist.core import sample_files
 from yt_playlist.core.db_revisions import column_group_reads
 from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.store import Store
-
-
-@pytest.fixture(scope='module')
-def recording_vibe_predecessor():
-    with ExitStack() as resources:
-        directory = Path(resources.enter_context(TemporaryDirectory(prefix='recording-vibe-v60-')))
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setenv('YT_PLAYLIST_HOME', str(directory / 'app-home'))
-            patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
-            patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
-            patch.delenv('DEEPSEEK_API_KEY', raising=False)
-            source, value = legacy(directory / 'source.db')
-            resources.callback(source.conn.close)
-            template = capture_template(source, value)
-        yield template
 
 
 @pytest.fixture

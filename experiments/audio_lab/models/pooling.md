@@ -17,6 +17,8 @@ The format-four runtime implementation is under `src/yt_playlist/rec/`:
 `vibe_joint_calibrated.py` owns fitting, prediction and mixture quantiles;
 `vibe_joint_model.py` owns versioned representation and compatibility;
 `vibe_joint_preparation.py` owns masked covariates and guarded publication.
+`vibe_joint_common.py` owns the shared algebra and configuration, keeping the
+version dispatcher and calibrated implementation free of circular imports.
 Experiments contain offline evaluators and historical recipes only. The
 format-four recipe learns the full masked-metadata covariate, artist-nested
 album effects, separate audio/provider residuals and provider support slope.
@@ -269,13 +271,26 @@ reports bounded background progress, shared generation storage and paired SQL
 score-read timings. Existing prepared output does not establish fresh-user
 startup; incomplete work and unmeasured recovery/resource gates remain explicit.
 
+The current format-four worker completes a model cycle and admits a bounded
+score batch before its own source work can invalidate that cycle. Current-cache
+generation references acknowledge delivery across restart. In the frozen
+300-second paired actual-library rehearsal, all eight models were ready at
+140.13s and the first generation-linked scores published at 146.43s. There were
+152 prediction records referencing eight generations. Foreground p95 was
+68.89ms baseline and 58.03ms candidate; both phases retained useful content and
+remained incomplete. This establishes bounded progress, not the completed-refresh
+latency gate or cold-library startup. The earlier 900-second candidate phase
+published no generation-linked scores and is rejected scheduling evidence.
+Exact source, queue, storage and I/O results:
+`build/test-reports/implementation819-product-score-delivery-operations-20261106/`.
+
 The bounded warm-library rehearsal preserved existing useful scores across
 5,495 foreground SQL requests. Source/content queues did not drain in either
 180-second phase; no joint model fitted. Its similar p95 timings therefore do
 not establish candidate latency or startup acceptance. Raw results and the
 assessment are in `build/test-reports/implementation819-operations-20261106/`.
 
-The earlier format-three rehearsal froze 1,492 source/configuration files and uses
+The earlier format-three rehearsal froze 1,492 source/configuration files and used
 production request/background priority and the same 100ms request cadence in
 both phases. All eight product models became ready in 37.31s; the first
 generation-linked scores appeared in 41.53s. Two model cycles published 448

@@ -111,7 +111,8 @@ def test_snapshot_and_retained_action_backup_survive_collection(file_backed_stor
     exact = retained.read_bytes()
     store.playlist_recipes.set_recipe('P', {'model': 'old'}, 1)
     old = Path(store.conn.execute("SELECT recovery_filename FROM rec_recipes").fetchone()[0])
-    with store.read_view() as reader:
+    with store.read_snapshot() as snapshot:
+        reader = snapshot.store
         assert reader.playlist_recipes.get_recipe('P') == {'model': 'old'}
         store.playlist_recipes.set_recipe('P', {'model': 'new'}, 2)
         store.retention.maintain_collection_recovery()

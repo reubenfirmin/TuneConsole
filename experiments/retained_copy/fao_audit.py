@@ -34,7 +34,7 @@ BOUNDARIES = {
   # contract. These exact readers never open account-owned runtime assets.
   'core/schema_admission.py': ('reference',),
   'core/destination_schema.py': ('definition',),
-  'core/schema_definition.py': ('_statements','_read_statements'),
+  'core/schema_definition.py': ('_statements','_read_statements','assembled_statements'),
   'core/schema_transforms.py': ('saved_output_definitions',),
   'core/preparation/choice_learning.py': ('_contract',),
   'core/preparation/tv_state.py': ('_frozen',),

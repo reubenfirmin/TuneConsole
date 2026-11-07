@@ -1,4 +1,6 @@
 """DAO suite for AccountRepo (the managed YouTube Music accounts)."""
+import sqlite3
+
 import pytest
 from yt_playlist.core.config import AccountConfig
 
@@ -58,29 +60,42 @@ def test_master_and_label_exchange_preserves_account_ids_and_retired_history(sto
     assert store.accounts.replace_accounts(exchanged)['brand'] == ids['main']
 
 
-def test_reconciliation_allows_temporary_zero_master_but_checks_the_final_state(store):
-    config = AccountConfig('main', 'c', None, True)
-    ids = store.accounts.replace_accounts([config])
-    with store.accounts.reconciled([config]):
-        store.conn.execute('UPDATE accounts SET is_master=0')
-        store.conn.execute('UPDATE accounts SET is_master=1 WHERE id=?', (ids['main'],))
-    before = [tuple(row) for row in store.conn.execute('SELECT * FROM accounts')]
-    with pytest.raises(ValueError, match='exactly one active master'):
-        with store.accounts.reconciled([config]):
-            store.conn.execute('UPDATE accounts SET is_master=0')
-    assert [tuple(row) for row in store.conn.execute('SELECT * FROM accounts')] == before
-
-
-def test_interrupted_master_change_rolls_back_before_configuration_publication(store):
+def test_interrupted_account_sql_rolls_back_the_complete_binding_change(store):
     configs = [AccountConfig('main', 'c', None, True), AccountConfig('brand', 'c', 'BA1', False)]
     ids = store.accounts.replace_accounts(configs)
     switched = [AccountConfig('main', 'c', None, False, ids['main']),
                 AccountConfig('brand', 'c', 'BA1', True, ids['brand'])]
-    with pytest.raises(RuntimeError, match='controlled interrupted setup'):
-        with store.accounts.reconciled(switched):
-            assert store.accounts.get_master_account().id == ids['brand']
-            raise RuntimeError('controlled interrupted setup')
+    before = [tuple(row) for row in store.conn.execute('SELECT * FROM accounts')]
+    store.conn.execute("CREATE TEMP TRIGGER fail_account_update BEFORE UPDATE OF is_master ON accounts "
+                       "WHEN NEW.is_master=1 BEGIN SELECT RAISE(ABORT,'controlled interrupted setup'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='controlled interrupted setup'):
+        store.accounts.replace_accounts(switched)
+    assert [tuple(row) for row in store.conn.execute('SELECT * FROM accounts')] == before
     assert store.accounts.get_master_account().id == ids['main']
+    assert not store.conn.in_transaction
+    store.conn.execute('DROP TRIGGER fail_account_update')
+    assert store.accounts.replace_accounts(switched) == ids
+    assert store.accounts.get_master_account().id == ids['brand']
+
+
+def test_binding_plan_cannot_overwrite_a_change_after_its_read(store):
+    identity = store.accounts.upsert_account('Main', 'old-credential', None, True)
+    repository = store.accounts.repository
+    observed = repository.account_rows()
+    store.accounts.upsert_account('Main', 'new-credential', None, True)
+    with pytest.raises(ValueError, match='bindings changed'):
+        repository.replace_accounts([('Renamed', 'old-credential', None, 1, identity)], expected=observed)
+    assert [(account.label, account.credential_ref) for account in store.accounts.get_accounts()] == [
+        ('Main', 'new-credential')]
+    assert not store.conn.in_transaction
+
+
+def test_conditional_upsert_rejects_retargeting_even_after_an_outdated_controller_read(store):
+    identity = store.accounts.upsert_account('Main', 'old-credential', 'original-owner', True)
+    with pytest.raises(ValueError, match='cannot be retargeted'):
+        store.accounts.repository.upsert_account('Main', 'new-credential', 'another-owner', 1)
+    assert store.accounts.get_master_account().id == identity
+    assert store.accounts.get_master_account().brand_account_id == 'original-owner'
 
 
 def test_migration_preserves_existing_identities(legacy_store):

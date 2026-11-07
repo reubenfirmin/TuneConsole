@@ -82,3 +82,25 @@ def test_blank_display_name_does_not_create_an_alias(artists):
     artists.repository.provider_id.return_value = 7
     assert artists.ensure_artist('', provider='youtube', provider_id='channel') == 7
     artists.repository.add_alias.assert_not_called()
+
+
+def test_similarity_state_reuses_an_exact_artist_reference(artists):
+    artists.repository.resolve.return_value = 7
+    assert artists.state_id('@artist:7') == 7
+    artists.repository.resolve.assert_called_once_with('@artist:7', exact=True)
+    artists.repository.transaction.assert_not_called()
+
+
+@pytest.mark.parametrize('value', [999, '@artist:999', '@artist:invalid'])
+def test_similarity_state_rejects_unknown_explicit_identity(artists, value):
+    artists.repository.resolve.return_value = None
+    with pytest.raises(ValueError, match='Unknown artist reference'):
+        artists.state_id(value)
+    artists.repository.transaction.assert_not_called()
+
+
+def test_similarity_state_admits_an_unknown_name_as_provisional(artists):
+    artists.repository.resolve.return_value = None
+    assert artists.state_id('Unknown') == 42
+    artists.repository.resolve.assert_called_once_with('Unknown', exact=True)
+    artists.repository.create.assert_called_once_with('Unknown', provisional=True)

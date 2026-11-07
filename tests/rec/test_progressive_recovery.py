@@ -278,7 +278,7 @@ def test_repair_fences_each_read_owner_and_ignores_independent_owners(store, mon
     if invalidates:
         assert publications == []
         assert store.prepared_content.pending(10) == queue_after_mutation
-        expected = missing(store.prepared_content, 10)
+        expected = missing(store.prepared_content.repository, 10)
         assert preparation.repair(1001)
         assert {key for key, _revision in store.prepared_content.pending(10)} == (
             set(expected) | {key for key, _revision in queue_after_mutation})

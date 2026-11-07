@@ -22,6 +22,14 @@ def home_routes_only(monkeypatch):
 
 
 @pytest.fixture
+def without_metadata_providers(monkeypatch):
+    """Home consumers use catalog reads, independently of metadata tag matching."""
+    from yt_playlist.providers import genres
+
+    monkeypatch.setattr(genres, 'configure', lambda *args, **kwargs: None)
+
+
+@pytest.fixture
 def browser_store(tmp_path, _pristine_current_schema):
     """Exercise live serving and background writes through installed WAL readers."""
     database = Store(tmp_path / 'home.db')

@@ -8,7 +8,7 @@ import pytest
 
 from tests.test_home_other_genres import seed_genres
 from tests.test_mode_cards_route import _client as current_client
-from tests.home_fixture_support import home_routes_only, prepared_client, returning_listener
+from tests.home_fixture_support import home_routes_only, prepared_client as _prepared_client, returning_listener
 from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
 from yt_playlist.rec import embedding_vectors as embed, fresh_pool, mode_surfaces, road_trip_candidates, surfaces
@@ -27,6 +27,12 @@ def fresh_routes(monkeypatch, home_routes_only, one_menu_per_attempt):
 def _client(store, now=1000.0):
     returning_listener(store, 'mixes', now=now)
     return current_client(store, now)
+
+
+def prepared_client(store):
+    # The requested Fresh worker/preparation runs explicitly in these tests.
+    # Unrelated periodic learning would replace synthetic prior-listening usage.
+    return _prepared_client(store, background_work=False)
 
 
 def test_fresh_card_waits_for_metadata_then_renders_discoveries(store):

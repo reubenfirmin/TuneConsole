@@ -52,7 +52,8 @@ def test_selection_keeps_null_blank_ambiguity_and_all_originals_with_pinned_read
     other = Store(store._db_path)
     try:
         other.init_schema(defer_metadata=True)
-        with other.read_view() as pinned:
+        with other.read_snapshot() as snapshot:
+            pinned = snapshot.store
             assert genre_classifications.read(pinned.conn, 'recordings', 1) == 'Drum And Bass'
             stage = ready(conn, 1)
             publication.publish(conn, identity=stage)

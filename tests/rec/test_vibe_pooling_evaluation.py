@@ -8,7 +8,7 @@ from experiments.audio_lab_tools import vibe_pooling_evaluation as evaluation
 from experiments.audio_lab_tools import vibe_pooling_labels as categorical
 from tests.enrichment_support import seed_enrichment
 from tests.rec.test_musical_preparation import observe
-from tests.rec.test_vibe_prediction import capture, drain, fits, track
+from tests.rec.test_vibe_prediction import capture, drain as drain_predictions, fits, track
 from yt_playlist.core import catalog, db_handles, fao, file_collection, profile_files, vibe_provenance
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
 from yt_playlist.core.activity import WorkBudgetExceeded
@@ -19,6 +19,21 @@ from yt_playlist.repos import vibe_evaluation
 
 def bucket(value):
     return int(hashlib.sha256(str(value).encode()).hexdigest(), 16) % 5
+
+
+def drain(store):
+    # This comparison owns final masked numerical parity, not the worker's
+    # fairness under provider backlog (test_provider_backlog_cannot_starve_vibe_bootstrap_or_dependency_fanout).
+    # Finish real source captures first so 66 arrivals do not reconstruct every
+    # recording and refit every model once per source. The ordinary prediction
+    # pipeline still computes and publishes all final values, including retries.
+    for _ in range(500):
+        if store.musical_profiles.pending() is None:
+            break
+        musical_preparation.source_step(store, 1000, batch=32)
+    else:
+        pytest.fail('Comparison source inputs did not drain')
+    return drain_predictions(store)
 
 
 @pytest.mark.parametrize('scope,stratum', [

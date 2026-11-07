@@ -385,14 +385,16 @@ def test_recommendation_generation_protects_group_history_without_a_permanent_pa
 def test_output_files_survive_old_reader_and_backup_relocates_exact_owners(recommendations, tmp_path):
     store = recommendations
     first = publish(store, plan(store))
-    with store.read_view() as reader:
+    with store.read_snapshot() as snapshot:
+        reader = snapshot.store
         assert reader.recommendations.output('home', 'framing') == {'title': 'one'}
         publish(store, plan(store, 'two'))
         collect(store)
         assert outputs.collect_orphans(store.conn) == 0
         assert reader.recommendations.output('home', 'framing', generation=first.generation_id) == {'title': 'one'}
     assert outputs.collect_orphans(store.conn) == 1
-    with store.read_view() as reader:
+    with store.read_snapshot() as snapshot:
+        reader = snapshot.store
         manifest = outputs.export(reader.conn, tmp_path / 'recommendation-backup')
     before = [tuple(row) for row in store.conn.execute('SELECT * FROM prepared_outputs')]
     outputs.restore(store.conn, manifest)

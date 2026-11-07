@@ -311,6 +311,30 @@ def _table(conn, name, sql):
     return schema_inspection.table(conn, name, sql, lambda: _inspect_table(conn, name, sql))
 
 
+@lru_cache(maxsize=1024)
+def _table_declarations(sql):
+    """Immutable facts from exact DDL, independent of live SQLite observations."""
+    tokens = _tokens(sql)
+    # table_list resolves columns of every main/TEMP view, even when its name
+    # argument or WHERE clause names one table. Repeating that work per owner
+    # makes admission expand unrelated nested publication views hundreds of
+    # times. SQLite has already validated this stored CREATE TABLE statement;
+    # its trailing options contain exactly these two flags. Column names,
+    # defaults and CHECK expressions occur before the final closing parenthesis.
+    end = max((index for index, token in enumerate(tokens) if token == ')'), default=-1)
+    options = tokens[end+1:] if end>=0 else ()
+    flags = (int(any(options[index:index+2] == ('without', 'rowid') for index in range(len(options)-1))),
+             int('strict' in options))
+    annotations = Counter()
+    for position, token in enumerate(tokens):
+        if token == 'collate':
+            annotations[tokens[position:position + 2]] += 1
+        elif token == 'autoincrement':
+            annotations[(token,)] += 1
+    return (tuple(_checks(sql).items()), flags, tuple(annotations.items()),
+            tuple(_foreign_key_deferrals(sql).items()))
+
+
 def _inspect_table(conn, name, sql):
     quoted = '"' + name.replace('"', '""') + '"'
     # Structure observations are bounded by the declared schema. Fetch each
@@ -329,28 +353,12 @@ def _inspect_table(conn, name, sql):
             index_name = '"' + index[1].replace('"', '""') + '"'
             unique[(index[3], tuple((r[2], r[3], r[4]) for r in conn.execute(
                 f'PRAGMA main.index_xinfo({index_name})').fetchall() if r[5]))] += 1
-    tokens = _tokens(sql)
-    # table_list resolves columns of every main/TEMP view, even when its name
-    # argument or WHERE clause names one table. Repeating that work per owner
-    # makes admission expand unrelated nested publication views hundreds of
-    # times. SQLite has already validated this stored CREATE TABLE statement;
-    # its trailing options contain exactly these two flags. Column names,
-    # defaults and CHECK expressions occur before the final closing parenthesis.
-    end = max((index for index, token in enumerate(tokens) if token == ')'), default=-1)
-    options = tokens[end+1:] if end>=0 else ()
-    flags = (int(any(options[index:index+2] == ('without', 'rowid') for index in range(len(options)-1))),
-             int('strict' in options))
-    annotations = Counter()
-    for position, token in enumerate(tokens):
-        if token == 'collate':
-            annotations[tokens[position:position + 2]] += 1
-        elif token == 'autoincrement':
-            annotations[(token,)] += 1
+    checks, flags, annotations, deferrals = _table_declarations(sql)
     # All counts come from observed declarations and are strictly positive.
     # Plain mappings preserve multiplicity and compare/copy directly; Counter's
     # missing/zero normalization adds work to every unchanged-table admission.
-    return (columns, dict(foreign_keys), dict(unique), dict(_checks(sql)), flags,
-            dict(annotations), dict(_foreign_key_deferrals(sql)))
+    return (columns, dict(foreign_keys), dict(unique), dict(checks), flags,
+            dict(annotations), dict(deferrals))
 
 
 def _schema_contract(statements):
@@ -362,10 +370,14 @@ def _schema_contract(statements):
             for name, (kind, value) in _reference_contract(tuple(statements)).items()}
 
 
+_REFERENCE_CONNECTION = ContextVar('schema_reference_connection', default=None)
+
+
 @lru_cache(maxsize=16)
 def _reference_contract(statements):
     """Private reference observations, keyed by the complete ordered SQL."""
     reference = sqlite3.connect(':memory:')
+    token = _REFERENCE_CONNECTION.set(reference)
     try:
         for sql in statements:
             reference.execute(sql)
@@ -375,6 +387,7 @@ def _reference_contract(statements):
                 "SELECT name,type,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'").fetchall()
         }
     finally:
+        _REFERENCE_CONNECTION.reset(token)
         reference.close()
 
 
@@ -382,9 +395,13 @@ def _reference_contract(statements):
 def _reference_table(name, sql):
     """An unchanged reference table has the same declared constraints in every layout.
 
-    Only shipped CREATE TABLE text is reused here. Live database observations
-    still belong to their connection's admission session.
+    Only shipped CREATE TABLE text is reused here. Observe the private contract
+    database already built by the caller, rather than constructing another
+    database for every table. The cache retains values, never connections.
+    Live observations still belong to their connection's admission session.
     """
+    if (reference := _REFERENCE_CONNECTION.get()) is not None:
+        return _inspect_table(reference, name, sql)
     with closing(sqlite3.connect(':memory:')) as reference:
         reference.execute(sql)
         return _inspect_table(reference, name, sql)

@@ -154,7 +154,10 @@ def test_changed_head_rejects_old_snapshot_but_private_staging_does_not(database
 def test_cleanup_is_bounded_keeps_active_generation_and_preserves_pinned_reader(database):
     old = publish(database, plan(database, 'old', count=1100))
     new_plan = plan(database, 'new', count=1)
-    with database.read_view() as reader:
+    # A reporting reader can observe later commits. This contract explicitly
+    # owns the pinned generation while its old rows and files are retired.
+    with database.read_snapshot() as snapshot:
+        reader = snapshot.store
         assert reader.recommendations.head('home')['id'] == old.generation_id
         new = publish(database, new_plan)
         for _ in range(20):

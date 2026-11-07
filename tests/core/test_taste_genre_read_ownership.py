@@ -1,4 +1,4 @@
-"""Taste calculations keep metadata and canonical genres in the same owned view."""
+"""Taste reporting reads committed edits privately, without blocking writers."""
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import threading
@@ -131,7 +131,7 @@ def test_live_home_tuning_calculates_privately_then_publishes(installed, monkeyp
         work.result(5)
     assert response.status_code == 200
     assert 'home cards render failed' not in caplog.text
-    assert observed == ['pop'] and len(published) == 1
+    assert observed == ['jazz' if commit else 'pop'] and len(published) == 1
     tuned = store.rec_proposals.get_proposals('home_tuned')
     assert tuned['built_at'] == 1000 and tuned['tuning'] == published[0][0]
     assert [p['experiment_id'] for p in tuned['menus'][0]['protos']] == published[0][1]
@@ -150,7 +150,7 @@ def test_taste_workflows_keep_one_view_without_blocking_writes(installed, monkey
         start, entered, release = (threading.Event() for _ in range(3))
         observed = []
         family = genre_identity.family
-        feature_axes = genre_identity.feature_axes
+        axis_matches = genre_identity.axis_matches
 
         def writer():
             assert start.wait(5), name
@@ -185,18 +185,19 @@ def test_taste_workflows_keep_one_view_without_blocking_writes(installed, monkey
                 return result
             return family(conn, value)
 
-        def resolve_axes(conn, labels):
+        def resolve_matches(conn, labels):
             labels = list(labels)
             if 'Owned Seed' in labels and not observed:
                 with concurrent_edit(conn):
-                    result = feature_axes(conn, labels)
-                    observed.append((result['Owned Seed'][0], conn is store.conn))
+                    result = axis_matches(conn, labels)
+                    axes = genre_identity.axes_from_matches(result)
+                    observed.append((axes['Owned Seed'][0], conn is store.conn))
                 return result
-            return feature_axes(conn, labels)
+            return axis_matches(conn, labels)
 
         with monkeypatch.context() as patch, ThreadPoolExecutor(max_workers=1) as pool:
             patch.setattr(genre_identity, 'family', resolve)
-            patch.setattr(genre_identity, 'feature_axes', resolve_axes)
+            patch.setattr(genre_identity, 'axis_matches', resolve_matches)
             work = pool.submit(writer)
             try:
                 result = calculate()
@@ -205,12 +206,13 @@ def test_taste_workflows_keep_one_view_without_blocking_writes(installed, monkey
                 release.set()
             work.result(5)
         assert result, name
-        assert observed == [('pop', False)], name
-        assert _families(name, result) == {'pop'}, (name, result)
+        assert observed == [('jazz' if commit else 'pop', False)], name
+        expected = ({'jazz'} if name == 'facets' else {'pop', 'jazz'}) if commit else {'pop'}
+        assert _families(name, result) == expected, (name, result)
         assert family(store.conn, 'Owned Seed') == ('jazz' if commit else 'pop')
         if name == 'fingerprint':
-            pop = next(row for row in result if row['name'] == 'pop')
-            assert 'owned-seed' in {row['name'] for row in pop['subgenres']}
+            seed_family = next(row for row in result if row['name'] == ('jazz' if commit else 'pop'))
+            assert 'owned-seed' in {row['name'] for row in seed_family['subgenres']}
 
 
 @pytest.mark.parametrize('installed', [93, 107], indirect=True)
@@ -276,7 +278,7 @@ def test_facets_pin_membership_before_loading_track_metadata(installed, monkeypa
             start.set()
             release.set()
         work.result(5)
-    assert facets['genres'] == [{'name': 'pop', 'keys': ['anchor track|band']}]
+    assert facets['genres'] == [{'name': 'jazz' if commit else 'pop', 'keys': ['anchor track|band']}]
     assert facets['tracks'] == [{'key': 'anchor track|band', 'title': 'Anchor track', 'artist': 'Band'}]
     assert store.rec_query.track_genres(['anchor track|band']) == {
         'anchor track|band': 'Jazz' if commit else 'Owned Seed'}
@@ -321,13 +323,14 @@ def test_http_candidates_survive_concurrent_genre_edits(installed, monkeypatch, 
             assert entered.wait(5)
         return result
 
-    feature_axes = genre_identity.feature_axes
+    axis_matches = genre_identity.axis_matches
 
     def resolve(conn, labels):
         labels = list(labels)
-        result = feature_axes(conn, labels)
+        result = axis_matches(conn, labels)
         if 'Owned Seed' in result and entered.is_set() and not observed:
-            observed.append((result['Owned Seed'][0], conn is store.conn))
+            axes = genre_identity.axes_from_matches(result)
+            observed.append((axes['Owned Seed'][0], conn is store.conn))
             release.set()
             work.result(5)
         return result
@@ -335,7 +338,7 @@ def test_http_candidates_survive_concurrent_genre_edits(installed, monkeypatch, 
     app = create_app(store, lambda: {account: LocalOnly()}, now_fn=lambda: 100, background_work=False)
     with TestClient(app, base_url='http://127.0.0.1') as client:
         monkeypatch.setattr(owner, method, after_metadata)
-        monkeypatch.setattr(genre_identity, 'feature_axes', resolve)
+        monkeypatch.setattr(genre_identity, 'axis_matches', resolve)
         with ThreadPoolExecutor(max_workers=1) as pool:
             work = pool.submit(writer)
             try:
@@ -346,8 +349,11 @@ def test_http_candidates_survive_concurrent_genre_edits(installed, monkeypatch, 
                 release.set()
             work.result(5)
     assert response.status_code == 200
-    assert ('Candidate track' if surface == 'suggestions' else 'Cold track') in response.text
-    assert observed == [('pop', False)]
+    title = 'Candidate track' if surface == 'suggestions' else 'Cold track'
+    # The now-committed Jazz mute governs these candidates. An uncommitted
+    # genre edit stays invisible to the reporting connection.
+    assert (title in response.text) is (not commit)
+    assert observed == [('jazz' if commit else 'pop', False)]
 
 
 @pytest.mark.parametrize('installed', [93, 107], indirect=True)

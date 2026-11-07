@@ -5,31 +5,46 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from yt_playlist.core import catalog
-from yt_playlist.rec import mode_surfaces as ms, ppr, surfaces, vibe_pools
+from yt_playlist.core import genre_classifications
+from yt_playlist.rec import candidate_refresh, measurement, mode_surfaces as ms, ppr, surfaces, vibe_pools
 from yt_playlist.util.matching import identity_key
 
 
 def _library(store, monkeypatch, years, *, modes=1):
     iid = store.accounts.upsert_account("main", "cred", None, True)
-    tracks, vectors, membership = [], [], {}
-    # The repository methods delegate to these same catalog operations, but
-    # commit after each track/field. This builder owns one real transaction.
+    rows, vectors, membership = [], [], {}
+    first_recording = store.conn.execute('SELECT coalesce(max(id),0)+1 FROM recordings').fetchone()[0]
+    first_entry = store.conn.execute('SELECT coalesce(max(id),0)+1 FROM catalog_entries').fetchone()[0]
+    for mid in range(1, modes + 1):
+        direction = np.eye(modes, dtype=np.float32)[mid - 1]
+        for i, year in enumerate(years):
+            title, artist = f"Release {mid} {i}", f"Artist {mid} {i}"
+            key = identity_key(title, artist)
+            offset = len(rows)
+            rows.append((first_recording + offset, first_entry + offset, f"v{mid}_{i}",
+                         title, artist, f"Album {mid} {i}", year, key, mid))
+            vectors.append((key, direction.tobytes()))
+            membership[key] = mid
+    # These cases own catalog reads and date selection, not metadata ingestion,
+    # provider evidence or explicit choice files. Seed existing playable inputs
+    # in one transaction; all SQL constraints and the genre projection stay real.
     with store._lock, store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
-        for mid in range(1, modes + 1):
-            direction = np.eye(modes, dtype=np.float32)[mid - 1]
-            for i, year in enumerate(years):
-                title, artist = f"Release {mid} {i}", f"Artist {mid} {i}"
-                tid = catalog.upsert(store.conn, f"v{mid}_{i}", title, artist, f"Album {mid} {i}", 200,
-                                     library=True)
-                catalog.choose_field(store.conn, tid, 'genre', "house" if mid == 1 else "techno")
-                if year is not None:
-                    catalog.choose_field(store.conn, tid, 'mb_year', str(year))
-                key = identity_key(title, artist)
-                vectors.append((key, direction.tobytes()))
-                membership[key] = mid
-                tracks.append(tid)
+        store.conn.executemany('INSERT INTO recordings(id,identity_key,title,artist) VALUES (?,?,?,?)',
+            [(rid, key, title, artist) for rid, _, _, title, artist, _, _, key, _ in rows])
+        store.conn.executemany('INSERT INTO youtube_items(video_id,recording_id,title,artist,'
+            'orig_title,orig_artist,album,duration_s,mb_year) VALUES (?,?,?,?,?,?,?,?,?)',
+            [(video, rid, title, artist, title, artist, album, 200, year)
+             for rid, _, video, title, artist, album, year, _, _ in rows])
+        store.conn.executemany('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
+            [(entry, rid, video) for rid, entry, video, *_ in rows])
+        store.conn.executemany("INSERT INTO library_memberships VALUES (?,'fixture',NULL)",
+            [(row[1],) for row in rows])
+        store.conn.executemany("INSERT INTO recording_aliases VALUES (?,?,'fixture')",
+            [(row[7], row[0]) for row in rows])
+        for rid, _, _, _, _, _, _, _, mid in rows:
+            genre_classifications.write(store.conn, 'recordings', rid, "house" if mid == 1 else "techno")
+    tracks = [row[1] for row in rows]
     pid = store.playlists.upsert_playlist(iid, "PL_library", "Library", len(tracks), "h", 0)
     store.playlists.set_playlist_tracks(pid, tracks)
     store.rec_model.replace_rec_content_vectors(vectors)
@@ -50,6 +65,13 @@ def _temporal_fallback(monkeypatch):
     monkeypatch.setattr(surfaces, "cold_candidates", lambda *args, **kwargs: [])
     monkeypatch.setattr(ppr, 'mode_rankings', lambda *args, **kwargs: {})
     monkeypatch.setattr(vibe_pools, 'prepare', lambda *args, **kwargs: None)
+    # Date selection does not consume model/listening fingerprints. Keep real
+    # policy rows, files and generation references; their fingerprint producers
+    # have independent owners in test_serving_policy and test_candidate_refresh.
+    monkeypatch.setattr(measurement, 'serving_policy', lambda *args, **kwargs:
+                        ('temporal-fixture', {'ranker': 'temporal-fixture'}))
+    monkeypatch.setattr(candidate_refresh, 'prepared_settings', lambda *args, **kwargs:
+                        {'rec_candidate_preferences': 'temporal-fixture'})
 
 
 @pytest.fixture(scope='module')

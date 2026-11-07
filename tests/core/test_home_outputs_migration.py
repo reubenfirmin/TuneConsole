@@ -8,6 +8,7 @@ from yt_playlist.core import home_outputs as owner, json_cache, recommendation_o
 from yt_playlist.core.migrations import migrate, registry, v091_home_outputs
 from yt_playlist.core.migrations.runner import MigrationError
 from yt_playlist.core.store import Store
+from yt_playlist.core.db_revisions import Revisions
 
 
 @pytest.fixture
@@ -23,6 +24,7 @@ def predecessor(tmp_path, request, _pristine_installed_schema):
 def upgrade(store):
     migrate(store.conn, registry=registry.MIGRATIONS)
     store._bind_repositories()
+    store._snapshot_revisions = Revisions(store.conn)
 
 
 def test_registered_cutover_preserves_large_display_unknown_time_and_explicit_roots(predecessor):
@@ -169,7 +171,8 @@ def test_file_failure_or_interrupted_outer_publication_keeps_the_last_good(prede
 def test_replacement_keeps_pinned_reader_files_and_backup_restores_current_head(predecessor, tmp_path):
     predecessor.rec_proposals.put_proposals('home_prepared', {'title': 'one'}, 10)
     upgrade(predecessor)
-    with predecessor.read_view() as reader:
+    with predecessor.read_snapshot() as snapshot:
+        reader = snapshot.store
         assert reader.rec_proposals.get_proposals('home_prepared') == {'title': 'one'}
         predecessor.rec_proposals.put_proposals('home_prepared', {'title': 'two'}, 11)
         assert reader.rec_proposals.get_proposals('home_prepared') == {'title': 'one'}

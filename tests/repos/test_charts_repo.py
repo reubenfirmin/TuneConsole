@@ -215,7 +215,8 @@ def test_story_query_keeps_distinct_recordings_in_listening_order(store):
         key = store.tracks.identity_key_for_video(video)
         store.history.import_listening_events(iid, [(key, video, 10 * 86400 - index * 86400)])
     for selection in ({'artist': 'John Coltrane'}, {'genres': ['Free Jazz']}):
-        with store.charts.repository.read() as repository:
+        with store.read_view() as reader:
+            repository = reader.charts.repository
             with repository.story_track_rows(since=0, **selection) as rows:
                 assert [song['video_id'] for song in rows] == ['first', 'copy', 'remaster', 'other', 'live']
 

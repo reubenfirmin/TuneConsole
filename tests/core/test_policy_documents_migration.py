@@ -440,13 +440,23 @@ def test_pruning_keeps_files_needed_by_older_database_readers(predecessor, reade
         with getattr(store, reader_kind)() as pinned:
             reader = pinned.store if reader_kind == 'read_snapshot' else pinned
             assert configuration(reader.conn, 'one')['ranker'] == 'primary'
+            captured = [reader.conn.execute('SELECT * FROM recommendation_policies WHERE version=?',
+                                            (version,)).fetchone() for version in ('one', 'two')]
             with conn:
                 conn.execute("DELETE FROM recommendation_policies WHERE version IN ('one','two')")
                 conn.execute("DELETE FROM recommendation_policy_bodies WHERE version='shared'")
-            # The current head no longer owns these files, but the WAL reader does.
+            # Both reader owners retain file lifetimes. Only an explicit snapshot
+            # retains deleted SQL rows; reporting sees the current committed rows.
             assert files.collect_orphans(conn) == 0
-            assert configuration(reader.conn, 'one')['ranker'] == 'primary'
-            assert configuration(reader.conn, 'two')['ranker'] == 'alternative'
+            if reader_kind == 'read_snapshot':
+                assert configuration(reader.conn, 'one')['ranker'] == 'primary'
+                assert configuration(reader.conn, 'two')['ranker'] == 'alternative'
+            else:
+                assert reader.conn.execute(
+                    "SELECT version FROM recommendation_policies WHERE version IN ('one','two')"
+                ).fetchall() == []
+                assert not reader.conn.in_transaction
+            assert [read_record(row)['ranker'] for row in captured] == ['primary', 'alternative']
         assert files.collect_orphans(conn) == len(original_files - owned_files(conn))
         assert configuration(conn, 'shared') == {'standalone': True}
         assert files.collect_orphans(conn) == 0

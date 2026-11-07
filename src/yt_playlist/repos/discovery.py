@@ -32,6 +32,12 @@ _GENERATED_PL = "(SELECT playlist_scope_id FROM quarantined_playlists)"
 
 class DiscoveryRepo(Repo):
 
+    @synchronized
+    def merge_genre_origins(self, previous, target):
+        with self.conn.atomic(join=True):
+            if provenance.available(self.conn):
+                provenance.merge_origins(self.conn, 'genre_key', previous, target, reason='explicit genre merge')
+
     @lookup_read
     def fetched_albums(self, browse_ids):
         """Detach retained fetch checkpoints without borrowing another writer's transaction."""

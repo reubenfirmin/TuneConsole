@@ -1,23 +1,21 @@
 """Onboarding consumes the feature owners' real serving selection and exclusions."""
 from copy import deepcopy
-from contextlib import contextmanager
-import time
 from tests.derived_rating_support import seed_dislike
 
 import pytest
 
-from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
-from yt_playlist.rec import album_feedback, growth_readiness, home_prepared, musical_character, vibe_preparation
+from yt_playlist.core.db_writes import atomic_write
+from yt_playlist.rec import album_feedback, growth_readiness, home_prepared, measurement, musical_character, vibe_preparation
 
 
-@contextmanager
-def measured(record_property, phase):
-    started = time.perf_counter()
-    try:
-        yield
-    finally:
-        record_property(phase + '_seconds', time.perf_counter() - started)
+@pytest.fixture(autouse=True)
+def readiness_policy(monkeypatch):
+    # Readiness consumes prepared candidates and current sound/eligibility.
+    # Full model/listening fingerprint construction belongs to serving-policy
+    # owners; retain real policy records and SQL/file publication here.
+    monkeypatch.setattr(measurement, 'serving_policy', lambda *args, **kwargs:
+                        ('readiness-fixture', {'ranker': 'readiness-fixture'}))
 
 
 def fresh_reserve(store, count=48, score=.8):
@@ -130,42 +128,34 @@ def publish_vibe_menus(store):
     # Controlled music with contrasting measured attributes, processed by the
     # ordinary profile worker and selected by the real Vibe assembler.
     lanes = {}
-    for lane in ('wheelhouse', 'explore', 'fresh', 'comfort'):
-        tracks = []
-        for index in range(48 if lane == 'fresh' else 36 if lane == 'comfort' else 16):
-            key = f'{lane} {index}|{lane} artist {index}'
-            soft = index % 2 == 0
-            audio = {'energy': .1 if soft else .9, 'mood_relaxed': .9 if soft else .1,
-                     'mood_happy': .8 if soft else .2}
-            track = {'key': key, 'video_id': key, 'title': f'{lane} {index}',
-                     'artist': f'{lane} artist {index}', 'genre': 'Jazz', 'score': .8}
-            if lane == 'fresh':
-                store.discovery.upsert_discovered_track(key, key, track['title'], track['artist'],
-                    '', None, 'Jazz', None, None, 1, audio=audio)
-            else:
-                entry = seed_catalog_track(store, key, track['title'], track['artist'],
-                                           video_id=key, genre='Jazz')
-                from yt_playlist.core import metadata
-                with store.conn:
-                    for field, value in audio.items():
-                        metadata.select(store.conn, entry, field, value, 'fixture')
-            tracks.append(track)
-        lanes[lane] = tracks
+    # One existing input batch, rather than a commit for every recording and
+    # metadata field. Real evidence, files and normal profile workers remain.
+    with atomic_write(store):
+        for lane in ('wheelhouse', 'explore', 'fresh', 'comfort'):
+            tracks = []
+            for index in range(48 if lane == 'fresh' else 36 if lane == 'comfort' else 16):
+                key = f'{lane} {index}|{lane} artist {index}'
+                soft = index % 2 == 0
+                audio = {'energy': .1 if soft else .9, 'mood_relaxed': .9 if soft else .1,
+                         'mood_happy': .8 if soft else .2}
+                track = {'key': key, 'video_id': key, 'title': f'{lane} {index}',
+                         'artist': f'{lane} artist {index}', 'genre': 'Jazz', 'score': .8}
+                if lane == 'fresh':
+                    store.discovery.upsert_discovered_track(key, key, track['title'], track['artist'],
+                        '', None, 'Jazz', None, None, 1, audio=audio)
+                else:
+                    entry = seed_catalog_track(store, key, track['title'], track['artist'],
+                                               video_id=key, genre='Jazz')
+                    from yt_playlist.core import metadata
+                    with store.conn:
+                        for field, value in audio.items():
+                            metadata.select(store.conn, entry, field, value, 'fixture')
+                tracks.append(track)
+            lanes[lane] = tracks
     prepare_profiles(store)
     bundle = {'all': lanes, '_meta': {'comfort_pool': 36}}
     publish_bundles(store, bundle, vibes=True)
     return lanes
-
-
-@pytest.fixture(scope='session')
-def vibe_menu_template(_pristine_current_schema):
-    with prepared_template(_pristine_current_schema, publish_vibe_menus) as template:
-        yield template
-
-
-@pytest.fixture
-def vibe_menus(store, vibe_menu_template):
-    return vibe_menu_template.restore(store)
 
 
 def test_vibe_gate_checks_real_menus_for_every_preset_and_current_exclusions(store, vibe_menus):
@@ -216,9 +206,12 @@ def test_readiness_follows_normal_worker_updates_between_menu_publications(store
     from yt_playlist.rec.progressive import Preparation
 
     lanes = vibe_menus
+    # Three supported Fresh candidates cannot fill the four-supported-song
+    # requirement. Change only the decisive lane, keeping the other 68 real
+    # library candidates and their current evidence available throughout.
     entries = [store.conn.execute('SELECT id FROM catalog_tracks WHERE identity_key=?',
                                  (item['key'],)).fetchone()[0]
-               for tracks in lanes.values() for item in tracks]
+               for item in lanes['fresh'][3:]]
 
     def check(expected):
         # Derive the expected answer from the actual current serving output,
@@ -260,8 +253,6 @@ def test_readiness_follows_normal_worker_updates_between_menu_publications(store
     update_inputs(withdraw=True)
     # Restored evidence revalidates the retained menu immediately, without
     # waiting for an unrelated complete recommendation publication.
-    check(True)
-    publish_bundles(store, deepcopy(store._fixture_bundle_payload), vibes=True)
     check(True)
 
 
@@ -340,8 +331,10 @@ def test_legacy_publication_without_summary_does_not_restore_full_bundle(store, 
 
 @pytest.mark.parametrize('summary', [True, False])
 def test_compact_gate_agrees_with_served_menus_for_genres_rotation_and_feedback(
-        store, summary, vibe_menus, record_property):
-    from yt_playlist.rec import home_vibe, vibe_pools, vibe_readiness
+        store, summary, vibe_menus, monkeypatch):
+    from yt_playlist.core import json_cache
+    from yt_playlist.rec import home_vibe, vibe_pools, vibe_readiness, vibe_readiness_index
+    from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
 
     lanes = vibe_menus
     bundle = deepcopy(store._fixture_bundle_payload)
@@ -349,35 +342,53 @@ def test_compact_gate_agrees_with_served_menus_for_genres_rotation_and_feedback(
                                for index, track in enumerate(lanes['comfort'])]
     bundle['_meta'].update(comfort_pool=0, year_cuts=[1990, 2000])
     jazz = store.genres.feature_axes(['Jazz'])['Jazz'][0]
+    # Filters and dislikes do not change the underlying measured candidates.
+    # Prepare their real pools once, then project the actual index for each
+    # request below. No unchanged model/profile work belongs in that loop.
+    prepared = vibe_pools.prepare(store, bundle, 1000, measurement.PoolPolicies(store, 1000))
+    profile_state = json_cache.decode(prepared['_meta']['vibe_readiness'])['profile_state']
 
-    state = 0
+    # This comparison owns compact selection versus full selection. Typed
+    # publication and generation coherence have their real SQL/file owners in
+    # test_vibe_pool_reads and the other readiness cases above. Supply the
+    # worker's real prepared output at the repository boundary rather than
+    # staging the same candidate ranks again for every exclusion scenario.
+    metadata = {}
+    output = RecommendationPublicationsRepo.output
+
+    def prepared_output(repo, surface, kind, **options):
+        if (surface, kind) == ('home', 'ranking-evidence'):
+            return metadata
+        return output(repo, surface, kind, **options)
+
+    monkeypatch.setattr(RecommendationPublicationsRepo, 'output', prepared_output)
 
     def check(expected, **filters):
-        nonlocal state
-        state += 1
         store.rec_proposals.put_proposals('home_genre_request', {'epoch': 0, **filters}, 1000)
-        with measured(record_property, f'state_{state}_publication'):
-            publish_bundles(store, deepcopy(bundle), vibes=True, retain_vibe_readiness=summary)
-        assert ('vibe_readiness' in store._fixture_bundle_payload['_meta']) is summary
-        for epoch in range(3):
-            with store.read_view() as reader:
+        metadata.clear()
+        if summary:
+            index = vibe_readiness_index.prepare(prepared, include_genres=True, genre_request=(
+                filters.get('include_genres', ()), filters.get('avoid_genres', ())))
+            metadata['vibe_readiness'] = json_cache.encode({**index, 'profile_state': profile_state})
+        # All rotations use the same current eligibility snapshot. The next
+        # filter/feedback scenario opens a new reader after its actual writes.
+        with store.read_view() as reader:
+            for epoch in range(3):
                 signatures = set()
                 usable = True
                 for preset in home_vibe.PRESETS:
-                    with measured(record_property, f'state_{state}_epoch_{epoch}_{preset}_assembly'):
-                        cards = vibe_pools.assemble(reader, 1000, preset, epoch, **filters)
+                    cards = vibe_pools.assemble(reader, 1000, preset, epoch, bundles=prepared, **filters)
                     usable = usable and len(cards) == 4 and all(
                         sum(growth_readiness._supported(track, preset) for track in card['tracks']) >= 4
                         for card in cards)
                     signatures.add(tuple(tuple(track['key'] for track in card['tracks']) for card in cards))
                 assert (usable and len(signatures) > 1) is expected
-                with measured(record_property, f'state_{state}_epoch_{epoch}_readiness'):
-                    ready = vibe_readiness.ready(reader, 1000, epoch, **filters)
+                ready = vibe_readiness.ready(reader, 1000, epoch, **filters)
                 assert ready is (expected and summary)
 
     check(True, include_genres=[jazz])
     check(False, avoid_genres=[jazz])
-    with measured(record_property, 'dislike_writes'), store._lock, store.conn.atomic():
+    with atomic_write(store):
         for track in lanes['fresh'][3:]:
             seed_dislike(store, track['key'], until=None, now=1000)
     check(False, include_genres=[jazz])

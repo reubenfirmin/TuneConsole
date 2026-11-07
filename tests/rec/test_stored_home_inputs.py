@@ -95,12 +95,12 @@ def test_genre_options_resolve_current_metadata_after_preparation(home, monkeypa
 
 def test_genre_options_resolve_each_distinct_label_once_across_metadata_pages(home, monkeypatch):
     store, _, _ = home
-    original = GenreRepo.feature_axes
+    original = GenreRepo.axis_matches
     labels = []
     def axes(self, requested):
         labels.extend(requested)
         return original(self, requested)
-    monkeypatch.setattr(GenreRepo, 'feature_axes', axes)
+    monkeypatch.setattr(GenreRepo, 'axis_matches', axes)
     assert home_themes.genre_options(store, genre_plays={})
     assert len(labels) == len(set(labels)) == 2
 

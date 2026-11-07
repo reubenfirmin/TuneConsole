@@ -465,7 +465,8 @@ def test_pinned_reader_keeps_one_generation_while_next_publication_switches_head
     catalog(store)
     prepared = prepare(store, bundle(store))
     first = publish(store, prepared)
-    with store.read_view() as reader:
+    with store.read_snapshot() as snapshot:
+        reader = snapshot.store
         assert reader.recommendations.head('home')['id'] == first.generation_id
         second = publish(store, replace(prepared, external_key='next-serving-generation'))
         page = reader.recommendations.candidate_page('home', 'all', 'wheelhouse', limit=1)

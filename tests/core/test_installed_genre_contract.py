@@ -1,4 +1,5 @@
 """Previously installed development schemas remain readable and upgrade intact."""
+from contextlib import closing
 import sqlite3
 import hashlib
 
@@ -12,6 +13,7 @@ def earlier_database(path):
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys=ON')
+    conn.execute('BEGIN IMMEDIATE')
     # Install the exact known earlier contract rather than relabelling a fresh
     # latest schema. Admission is checked separately against literal old DDL.
     for sql in repair.legacy_statements(current.statements(version=88)):
@@ -28,9 +30,27 @@ def earlier_database(path):
     return conn
 
 
-def test_earlier_install_is_admitted_and_numbered_upgrade_preserves_references(tmp_path):
+@pytest.fixture(scope='module')
+def earlier_template():
+    with closing(earlier_database(':memory:')) as source:
+        source.execute('PRAGMA query_only=ON')
+        yield source
+
+
+@pytest.fixture
+def earlier_install(earlier_template):
+    def restore(path):
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        earlier_template.backup(conn)
+        return conn
+    return restore
+
+
+def test_earlier_install_is_admitted_and_numbered_upgrade_preserves_references(tmp_path, earlier_install):
     path = tmp_path / 'earlier.db'
-    conn = earlier_database(path)
+    conn = earlier_install(path)
     try:
         # These independent assertions pin the definitions observed in the
         # user's v88 install, including its four-column archive.
@@ -65,8 +85,8 @@ def test_earlier_install_is_admitted_and_numbered_upgrade_preserves_references(t
         conn.close()
 
 
-def test_unknown_trigger_damage_is_rejected_without_repair(tmp_path):
-    conn = earlier_database(tmp_path / 'damaged.db')
+def test_unknown_trigger_damage_is_rejected_without_repair(tmp_path, earlier_install):
+    conn = earlier_install(tmp_path / 'damaged.db')
     try:
         # A previously admitted connection must still reject later damage;
         # cached reference definitions never cache live admission results.
@@ -84,8 +104,8 @@ def test_unknown_trigger_damage_is_rejected_without_repair(tmp_path):
         conn.close()
 
 
-def test_constraint_upgrade_failure_rolls_back_without_discarding_legacy_evidence(tmp_path):
-    conn = earlier_database(tmp_path / 'invalid.db')
+def test_constraint_upgrade_failure_rolls_back_without_discarding_legacy_evidence(tmp_path, earlier_install):
+    conn = earlier_install(tmp_path / 'invalid.db')
     try:
         with conn:
             conn.execute("INSERT INTO taste_axes(id,kind) VALUES (8,'other')")
@@ -99,7 +119,7 @@ def test_constraint_upgrade_failure_rolls_back_without_discarding_legacy_evidenc
         conn.close()
 
 
-def test_exact_native_v88_triggers_admit_writable_app_without_bulk_conversion(tmp_path, caplog):
+def test_exact_native_v88_triggers_admit_writable_app_without_bulk_conversion(tmp_path, caplog, earlier_install):
     """Pin the actual read-only native capture, then exercise an isolated Store."""
     from fastapi.testclient import TestClient
     from yt_playlist.core.store import Store
@@ -108,7 +128,7 @@ def test_exact_native_v88_triggers_admit_writable_app_without_bulk_conversion(tm
     from yt_playlist.web.app import create_app
 
     path = tmp_path / 'native-v88.db'
-    conn = earlier_database(path)
+    conn = earlier_install(path)
     hashes = {'catalog_tracks_update': '223ba10042f4c50345b0568ed9d55ca99a44ce988ef29c7457ddc2dd8c7956bb',
               'tracks_update': 'ecca94598461eede0a44fb1a0e389ed90cdff2a58074ecd42544b86f2de97021'}
     try:
@@ -166,7 +186,7 @@ def test_exact_native_v88_triggers_admit_writable_app_without_bulk_conversion(tm
 
 
 @pytest.mark.parametrize('version', [79, 85, 87, 92])
-def test_regular_guards_follow_later_explicit_owner_upgrades(tmp_path, version):
+def test_regular_guards_follow_later_explicit_owner_upgrades(tmp_path, version, _pristine_installed_schema):
     from yt_playlist.core.migrations import regular
     from yt_playlist.core.preparation import installed_genre_contract
     from yt_playlist.core.store import Store
@@ -176,7 +196,7 @@ def test_regular_guards_follow_later_explicit_owner_upgrades(tmp_path, version):
     conn.row_factory = sqlite3.Row
     try:
         conn.execute('PRAGMA foreign_keys=ON')
-        migrate(conn, registry=registry.MIGRATIONS[:version])
+        _pristine_installed_schema(version).backup(conn)
         with conn:
             conn.execute("INSERT INTO settings VALUES ('retained-guard-setting','original')")
             if version < 88:

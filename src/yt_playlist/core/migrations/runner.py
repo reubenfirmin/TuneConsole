@@ -424,10 +424,13 @@ def _migrate(conn, registry, clock, defer_validation, inspections):
                 from .. import schema_bootstrap
                 from . import regular
                 schema_bootstrap.bootstrap(conn, registry, regular.CHANGES, clock(), validation=current_schema.validate)
+                # Bootstrap installs both complete histories. Validate their
+                # regular owners before committing the same transaction, rather
+                # than reopening it and repeating the current-schema check.
+                regular.validate(conn)
                 conn.commit()
-                fresh = False
                 log.info('Initialized current schema at version %s', current_schema.VERSION)
-                continue
+                return False
             if current == len(registry):
                 if frozen and not checked_entry:
                     _validate_migration_structure(conn, current)

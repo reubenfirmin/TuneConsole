@@ -1,5 +1,6 @@
 """Engineering contracts for shared consumers, not a listening-quality verdict."""
 from copy import deepcopy
+from contextlib import nullcontext
 from tests.derived_rating_support import seed_dislike
 import json
 import logging
@@ -12,43 +13,99 @@ from tests.musical_support import prepare_profiles, prepare_vibes
 from tests.prepared_fixture_support import prepared_template, roots
 from tests.recommendation_support import publish_bundles
 from yt_playlist.core import catalog
+from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.util import genre_map
 from yt_playlist.rec import (fresh_pool, home_cards, home_prepared, home_vibe, library_pool,
                              mix_tuning, mode_surfaces, musical_character, musical_profiles,
-                             surfaces, vibe_pools)
+                             surfaces, vibe_pools, vibe_preparation)
+from yt_playlist.repos.musical_profiles import MusicalProfilesRepo
 
 # These are consumer contracts after unlock. Real startup/readiness is covered
 # separately by test_growth_readiness and test_growth_journey.
 pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
 
 
-def _prepare_opportunities(store):
+@pytest.fixture
+def controlled_profiles(monkeypatch):
+    # These consumers own pool selection, genre reserves and served stamps.
+    # Profile inference and its replacement publication remain real in the
+    # independent profile-stamp test below and in test_vibe_prediction.
+    profiles = {}
+    monkeypatch.setattr(MusicalProfilesRepo, 'by_keys',
+                        lambda _repo, keys: {key: deepcopy(profiles[key]) for key in keys if key in profiles})
+
+    def add(key, energy):
+        profile = musical_profiles.resolve([], selected={'energy': energy})
+        profile['vibes'] = {'inputs_version': vibe_preparation.serving_prefix() + 'controlled-provider-profiles', 'fits': {
+            preset: {'score': energy if preset in ('energize', 'release') else 1 - energy,
+                     'support': .8, 'source': 'provider_measurement'}
+            for preset in home_vibe.PRESETS}}
+        profiles[key] = profile
+        return musical_character.compact(profile)
+
+    return add
+
+
+@pytest.fixture
+def character_consumer(monkeypatch, controlled_profiles):
+    # These consumers assemble completed lower-layer results. SQL/file reads,
+    # numerical preparation and access admission have independent real owners.
+    reader = SimpleNamespace(
+        _recommendation_files=True, _read_only=True,
+        settings=SimpleNamespace(get_setting=lambda key: None),
+        recommendations=SimpleNamespace(framing=lambda *args, **kwargs: {}),
+        musical_profiles=MusicalProfilesRepo.__new__(MusicalProfilesRepo),
+        rec_query=SimpleNamespace(track_genres=lambda keys: {}, track_decades=lambda keys: {},
+            track_audio_features=lambda: {}, library_keys=lambda: set()),
+        genres=SimpleNamespace(feature_axes=lambda genres:
+            {genre: (genre_map.family(genre), None) for genre in genres}),
+        memoized_read=lambda key, read: read())
+    # The recipe producer is below card composition. Keep the actual journey,
+    # ranker, profile stamp and card construction under test.
+    monkeypatch.setattr(home_cards, '_rolled_theme', lambda *args, **kwargs:
+                        {'journey': 'warm_up', 'dj': {'seed': 1}, 'facets': {}})
+    with home_vibe.authorized(reader, 'relax'):
+        yield reader
+
+
+def _prepare_opportunities(store, *, controlled=None):
     pools = {}
-    for lane in ('library', 'fresh'):
-        items = []
-        for i in range(64):
-            key = f'{lane}-{i}'
-            good = i >= 40  # Outside an ordinary full mode bucket, not just a card.
-            genre = ('Metal' if i % 2 else 'Techno') if good else 'Jazz'
-            audio = {'energy': .05 if good else .95, 'mood_relaxed': .95 if good else .05}
-            item = dict(key=key, video_id=key, title=key, artist=f'Artist {key}', album='',
-                        genre=genre, score=.1 if good else 10, year='2000')
-            if lane == 'library':
-                seed_catalog_track(store, key, key, item['artist'], video_id=key, genre=genre, **audio)
-            else:
-                store.discovery.upsert_discovered_track(key, key, key, item['artist'], '', None,
-                                                       genre, '2000', None, 1, audio=audio)
-            items.append(item)
-        pools[lane] = items
+    # Only the fallback-ranking case needs to cross the full 40-item mode head.
+    # Publication/edit/exclusion owners need a full 12-track card and contrasting
+    # genres, rather than preparing 128 profiles for the same state transition.
+    count, good_start = (64, 40) if controlled is not None else (24, 12)
+    # All existing candidates form one input batch. Keep actual metadata and
+    # evidence while avoiding a separate transaction for every subject/field.
+    with (atomic_write(store) if controlled is None else nullcontext()):
+        for lane in ('library', 'fresh'):
+            items = []
+            for i in range(count):
+                key = f'{lane}-{i}'
+                good = i >= good_start
+                genre = ('Metal' if i % 2 else 'Techno') if good else 'Jazz'
+                audio = {'energy': .05 if good else .95, 'mood_relaxed': .95 if good else .05}
+                item = dict(key=key, video_id=key, title=key, artist=f'Artist {key}', album='',
+                            genre=genre, score=.1 if good else 10, year='2000')
+                if controlled:
+                    item['musical'] = controlled(key, audio['energy'])
+                elif lane == 'library':
+                    seed_catalog_track(store, key, key, item['artist'], video_id=key, genre=genre,
+                                       **audio)
+                else:
+                    store.discovery.upsert_discovered_track(key, key, key, item['artist'], '', None,
+                                                           genre, '2000', None, 1, audio=audio)
+                items.append(item)
+            pools[lane] = items
     # Prepare profiles before the sole publication; prepare_vibes would publish
     # these same ordinary pools a second time after their initial publication.
-    prepare_profiles(store)
-    publish_bundles(store, {
-        '0': {'wheelhouse': pools['library'][:40], 'fresh': pools['fresh'][:40]},
-        'all': {'wheelhouse': pools['library'], 'explore': pools['library'], 'fresh': pools['fresh']},
-        '_meta': {'full_pools': True, 'comfort_pool': 0}}, 1000, vibes=True)
-    with mix_tuning.adjusting_vibe(store, 1000):
-        store.settings.set_setting(home_vibe.SETTING, 'relax')
+    if controlled is None:
+        prepare_profiles(store)
+        publish_bundles(store, {
+            '0': {'wheelhouse': pools['library'][:40], 'fresh': pools['fresh'][:40]},
+            'all': {'wheelhouse': pools['library'], 'explore': pools['library'], 'fresh': pools['fresh']},
+            '_meta': {'full_pools': True, 'comfort_pool': 0}}, 1000, vibes=True)
+        with mix_tuning.adjusting_vibe(store, 1000):
+            store.settings.set_setting(home_vibe.SETTING, 'relax')
     return pools
 
 
@@ -63,7 +120,19 @@ def opportunities(store, opportunities_template):
     return opportunities_template.restore(store)
 
 
-def test_fit_precedes_mode_heads_within_explicit_genres_in_every_cached_fallback(store, opportunities, monkeypatch):
+def test_fit_precedes_mode_heads_within_explicit_genres_in_every_cached_fallback(
+        character_consumer, controlled_profiles, monkeypatch):
+    store = character_consumer
+    pools = _prepare_opportunities(store, controlled=controlled_profiles)
+    # The consumer receives complete lower-layer pool/catalog results. Real
+    # typed reads are owned by test_vibe_pool_reads; the reserve test below
+    # independently owns preparation before global/mode truncation.
+    def stored(_reader, _preset, lanes, _include, _avoid, **_options):
+        return {lane: deepcopy(pools['fresh'] if lane == 'fresh' else pools['library']
+                              if lane in ('wheelhouse', 'explore') else []) for lane in lanes}
+
+    monkeypatch.setattr(vibe_pools, '_stored_pools', stored)
+    _controlled_eligibility(monkeypatch, store, pools['library'], pools['fresh'])
     def unexpected(*args, **kwargs):
         pytest.fail('A control must only assemble prepared opportunities')
     for name in ('for_you', 'explore_for_you', 'comfort_listening'):
@@ -187,23 +256,35 @@ def test_prepared_profile_stamp_survives_a_new_profile_until_menu_publication(
         assert paths[0].read_bytes() == paths[2].read_bytes() == expected
 
 
-def test_selected_genre_has_reserved_candidates_beyond_the_global_vibe_head(store):
+def _controlled_eligibility(monkeypatch, store, library, fresh):
+    owned = {item['key']: item for item in library}
+    discoveries = {item['key']: item for item in fresh}
+    metadata = {item['video_id']: item for item in [*library, *fresh]}
+    axes = store.genres.feature_axes(item.get('genre') for item in metadata.values())
+    # Eligibility/retraction integration remains real in the independent
+    # worker-selection test below and test_growth_readiness.
+    monkeypatch.setattr(vibe_pools, 'eligibility_inputs', lambda *args, **kwargs:
+                        (set(), owned, discoveries, metadata, {}, 3600, set(), axes))
+
+
+def test_selected_genre_has_reserved_candidates_beyond_the_global_vibe_head(store, controlled_profiles, monkeypatch):
     items = []
     for i in range(vibe_pools.POOL_LIMIT + 24):
         key = f'genre-reserve-{i}'
         genre = 'Techno' if i < vibe_pools.POOL_LIMIT else 'Jazz'
-        store.discovery.upsert_discovered_track(key, key, key, f'Artist {i}', '', None, genre,
-            None, None, 1, audio={'energy': .04 if genre == 'Techno' else .2, 'mood_relaxed': .95})
+        controlled_profiles(key, .04 if genre == 'Techno' else .2)
         items.append({'key': key, 'video_id': key, 'title': key, 'artist': f'Artist {i}', 'genre': genre})
-    publish_bundles(store, {'all': {'fresh': items}})
-    prepare_vibes(store)
-    assert all(t['genre'] == 'Techno' for t in vibe_pools.candidates(store, 'relax', 'fresh'))
-    focused = vibe_pools.pick(store, 1000, 'relax', 'fresh', include_genres=['jazz'])
-    other = vibe_pools.pick(store, 1000, 'relax', 'fresh', avoid_genres=['techno'])
+    bundles = {'all': {'fresh': items}}
+    policies = SimpleNamespace(stamp=lambda tracks, *_: list(tracks))
+    vibe_pools.prepare(store, bundles, 1000, policies)
+    _controlled_eligibility(monkeypatch, store, [], items)
+    assert all(t['genre'] == 'Techno' for t in vibe_pools.candidates(store, 'relax', 'fresh', bundles=bundles))
+    focused = vibe_pools.pick(store, 1000, 'relax', 'fresh', bundles=bundles, include_genres=['jazz'])
+    other = vibe_pools.pick(store, 1000, 'relax', 'fresh', bundles=bundles, avoid_genres=['techno'])
     assert len(focused) == len(other) == 12
     assert all(t['genre'] == 'Jazz' for t in focused + other)
     # A thin or exhausted explicit choice must not silently expand to other genres.
-    assert vibe_pools.pick(store, 1000, 'relax', 'fresh', include_genres=['metal']) == []
+    assert vibe_pools.pick(store, 1000, 'relax', 'fresh', bundles=bundles, include_genres=['metal']) == []
 
 
 def test_unknown_intensity_stays_neutral_and_weaker_than_a_known_endpoint_fit():

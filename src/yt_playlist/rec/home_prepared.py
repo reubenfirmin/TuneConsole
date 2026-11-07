@@ -826,6 +826,15 @@ def _matches_genre_request(protos, requested):
 def cards(store, payload, now, service, schedule=lambda: None, *, record=True, readiness_only=False,
           writer=None):
     """Choose an experiment from prepared alternatives using current mode evidence."""
+    if (not getattr(store, '_read_only', False)
+            and not getattr(store._lock, 'held_by_current_thread', False)):
+        mix_tuning.expire(store, now)
+        # Compose the read phase through one reporting reader. Otherwise each
+        # repository lookup on the writer constructs its own reader and owners.
+        # Choice/exposure writes still use the original writer and service.
+        with store.read_view() as reader:
+            return cards(reader, payload, now, service, schedule, record=record,
+                         readiness_only=readiness_only, writer=store if writer is None else writer)
     epoch = home_cards._epoch(store, "cards")
     tuning = tuning_key(store, now)
     genres = store.rec_proposals.get_proposals("home_genre_request") or {}

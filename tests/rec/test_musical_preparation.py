@@ -337,7 +337,7 @@ def test_restart_budget_exhaustion_empty_tag_retraction_and_version_rebuild(file
         store.conn.close()
 
 
-def test_profile_publication_rolls_back_with_content_capture(store, monkeypatch):
+def test_interrupted_profile_publication_keeps_batch_queued_for_retry(store, monkeypatch):
     tid = store.tracks.upsert_track('v', 'Song', 'Artist', '', 200)
     observe(store, tid, .9, field='mood_aggressive', scope='recording')
     assert musical_preparation.source_step(store, 1000)
@@ -350,7 +350,7 @@ def test_profile_publication_rolls_back_with_content_capture(store, monkeypatch)
         with pytest.raises(RuntimeError, match='interrupted'):
             Preparation(store).capture(1000)
     assert store.prepared_content.has_pending()
-    assert not store.musical_profiles.by_keys(['song|artist'])
+    assert store.musical_profiles.by_keys(['song|artist'])
     assert store.prepared_content.counters()[0] == 0
     drain(store)
     assert get(store)['intensity']['value'] > .5

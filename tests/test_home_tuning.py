@@ -5,11 +5,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
-from tests.home_fixture_support import home_routes_only
+from tests.home_fixture_support import home_routes_only, without_metadata_providers
 from tests.prepared_fixture_support import prepared_template
-from tests.test_home_other_genres import _client as genre_client, seed_genres
+from tests.recommendation_support import publish_bundles, seed_bundle_subjects
+from tests.test_home_other_genres import _client as genre_client, genre_bundles, seed_genres
 from tests.test_mode_cards_route import prepare_home
-from yt_playlist.rec import graduation, home_cards, mix_tuning, rec_params, scoring
+from yt_playlist.rec import graduation, home_cards, mix_tuning, mode_surfaces, rec_params, scoring
 from yt_playlist.web.app import create_app
 
 pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
@@ -66,13 +67,23 @@ def assert_cleared(store):
     assert store.settings.get_setting(mix_tuning.VIBE_UPDATED_AT_SETTING) is None
 
 
-def test_clear_resets_genre_selections_and_all_biases_together(store, monkeypatch, home_routes_only):
+def test_clear_resets_genre_selections_and_all_biases_together(
+        store, monkeypatch, home_routes_only, without_metadata_providers):
     clock = [1000.0]
     # Reset owns clearing the combined persisted state and rendering a usable
     # board. Each individual HTTP adjustment is covered by the parametrized
     # four-hour control test below; replaying all six is unrelated setup here.
     # Distinct themes must still fill all four slots after reset.
-    seed_genres(store, genres=['Jazz', 'Techno', 'Trance', 'Ambient'], tracks_per_lane=4)
+    bundles = genre_bundles(store, genres=['Jazz', 'Techno', 'Trance', 'Ambient'], tracks_per_lane=4)
+    # Each of the four themes can fill its own slot. Reset does not need the
+    # sixteen alternative mode/lane pools owned by the assignment tests.
+    bundles['all'] = {}
+    for mode, lane in enumerate(mode_surfaces.CARD_SURFACES):
+        tracks = bundles[str(mode)][lane]
+        bundles[str(mode)] = {lane: tracks}
+        bundles['all'][lane] = tracks
+    seed_bundle_subjects(store, bundles)
+    publish_bundles(store, bundles, 1.0)
     monkeypatch.setattr(home_cards.HomeCards, 'audit', lambda *args, **kwargs: None)
     client = genre_client(store, prepare=False)
     store.rec_model.set_weight("genre:jazz", 1.4, now=clock[0])

@@ -103,13 +103,30 @@ def store(_pristine_current_schema, request):
 
 
 @pytest.fixture(scope='session')
-def full_journey_prefix(_pristine_current_schema):
+def vibe_menu_template(_pristine_current_schema):
+    from tests.prepared_fixture_support import prepared_template
+    from tests.test_growth_readiness import publish_vibe_menus
+
+    # Register once here: importing a session fixture into several test modules
+    # creates separate pytest owners and repeats the same profile preparation.
+    with prepared_template(_pristine_current_schema, publish_vibe_menus) as template:
+        yield template
+
+
+@pytest.fixture
+def vibe_menus(store, vibe_menu_template):
+    return vibe_menu_template.restore(store)
+
+
+@pytest.fixture(scope='session')
+def full_journey_prefix(_pristine_current_schema, vibe_menu_template):
     from tests.prepared_fixture_support import prepared_template
     from tests.test_growth_destinations import publish_journey_prefix
 
     # Keep actual catalog subjects, profiles, policies and menu files. Account
     # setup, destination publication and live readiness remain with each case.
-    with prepared_template(_pristine_current_schema, publish_journey_prefix) as template:
+    with prepared_template(_pristine_current_schema,
+                           lambda source: publish_journey_prefix(source, vibe_template=vibe_menu_template)) as template:
         yield template
 
 

@@ -17,7 +17,7 @@ from yt_playlist.rec import musical_preparation, vibe_preparation
 from yt_playlist.rec.progressive import BASIS_STATE, Budget, Preparation
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.rec.worker_queue import Job
-from yt_playlist.repos.prepared_content import PreparedContentRepo
+from yt_playlist.controllers.prepared_content import PreparedContent
 
 
 def catalog(store, n=12):
@@ -66,14 +66,14 @@ def test_empty_then_single_recording_can_prepare_without_coverage_gate(store):
 def test_unrelated_enrichment_does_not_discard_captured_batch(store, monkeypatch):
     ids = catalog(store)
     p = Preparation(store, budget=replace(Budget(), batch=3))
-    capture = PreparedContentRepo.capture
+    capture = PreparedContent.capture
 
     def write_elsewhere(repo, pending):
         rows = capture(repo, pending)
         audio(store, ids[-1], 200)
         return rows
 
-    monkeypatch.setattr(PreparedContentRepo, 'capture', write_elsewhere)
+    monkeypatch.setattr(PreparedContent, 'capture', write_elsewhere)
     assert p.capture(1000)
     assert p.status()['prepared'] == 3
     assert p.status()['pending'] == 9
@@ -82,7 +82,7 @@ def test_unrelated_enrichment_does_not_discard_captured_batch(store, monkeypatch
 def test_hot_recording_yields_without_losing_its_pending_revision(store, monkeypatch):
     ids = catalog(store, 3)
     p = Preparation(store, budget=replace(Budget(), batch=1))
-    capture = PreparedContentRepo.capture
+    capture = PreparedContent.capture
 
     def write_same(repo, pending):
         rows = capture(repo, pending)
@@ -90,7 +90,7 @@ def test_hot_recording_yields_without_losing_its_pending_revision(store, monkeyp
         return rows
 
     with monkeypatch.context() as patch:
-        patch.setattr(PreparedContentRepo, 'capture', write_same)
+        patch.setattr(PreparedContent, 'capture', write_same)
         assert not p.capture(1000)
     assert p.status()['prepared'] == 0 and p.status()['pending'] == 3
     assert p.capture(1001)
@@ -103,7 +103,7 @@ def test_repeated_unrelated_enrichment_keeps_advancing_bounded_batches(store, mo
     p = Preparation(store, budget=replace(Budget(), batch=3))
     drain(p)  # Finish version bootstrap/fanout before measuring recording batches.
     ids = catalog(store)
-    capture = PreparedContentRepo.capture
+    capture = PreparedContent.capture
     writes = []
 
     def write_elsewhere(repo, pending):
@@ -114,7 +114,7 @@ def test_repeated_unrelated_enrichment_keeps_advancing_bounded_batches(store, mo
         return rows
 
     with monkeypatch.context() as patch:
-        patch.setattr(PreparedContentRepo, 'capture', write_elsewhere)
+        patch.setattr(PreparedContent, 'capture', write_elsewhere)
         for prepared in (3, 6, 9):
             assert p.capture(1000)
             assert p.status()['prepared'] == prepared
@@ -328,13 +328,13 @@ def test_external_writer_still_invalidates_capture(tmp_path, monkeypatch):
     store.init_schema()
     store.conn.execute('PRAGMA journal_mode=WAL')
     catalog(store, 2)
-    capture = PreparedContentRepo.capture
+    capture = PreparedContent.capture
     def external(repo, pending):
         rows = capture(repo, pending)
         with sqlite3.connect(store._db_path) as writer:
             writer.execute("UPDATE recordings SET bpm=200 WHERE identity_key='song 0001|artist 1'")
         return rows
-    monkeypatch.setattr(PreparedContentRepo, 'capture', external)
+    monkeypatch.setattr(PreparedContent, 'capture', external)
     try:
         assert not Preparation(store).capture(1000)
         assert store.prepared_content.progress()['pending'] == 2

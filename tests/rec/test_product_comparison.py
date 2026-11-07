@@ -139,7 +139,8 @@ def test_comparison_preferences_serialize_with_concurrent_settings_updates(store
 
     disk = file_backed_store
     before = product.constraints(disk)
-    with disk.read_view() as pinned, disk._lock:
+    with disk.read_snapshot() as snapshot, disk._lock:
+        pinned = snapshot.store
         disk.conn.execute('BEGIN IMMEDIATE')
         try:
             disk.settings.publish_values({'rec_param:album_collab_weight': '.25'})

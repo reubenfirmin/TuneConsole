@@ -1,12 +1,8 @@
 """AccountRepo: the YouTube Music accounts the app manages."""
-import json
-
 from yt_playlist.repos.base import Repo, synchronized, lookup_read
 from yt_playlist.repos.models import Account
-from yt_playlist.core.config import account_flag, validate_accounts
 from yt_playlist.core import account_auth_state, entity_names
 from yt_playlist.core.db_writes import atomic_write
-from contextlib import contextmanager
 from uuid import uuid4
 
 
@@ -14,184 +10,96 @@ _UPSERT = (
     "INSERT INTO {table}(label, credential_ref, brand_account_id, is_master, active) "
     "VALUES (?,?,?,?,1) ON CONFLICT(label) DO UPDATE SET "
     "credential_ref=excluded.credential_ref, brand_account_id=excluded.brand_account_id, "
-    "is_master=excluded.is_master, active=1"
+    "is_master=excluded.is_master, active=1 "
+    "WHERE COALESCE(brand_account_id,'')=COALESCE(excluded.brand_account_id,'') RETURNING id"
 )
-
-
-def _select(configs, existing):
-    """Resolve saved account identity without changing an existing remote owner."""
-    validate_accounts([{'id': cfg.account_id, 'label': cfg.label,
-        'credential_ref': cfg.credential_ref, 'brand_account_id': cfg.brand_account_id,
-        'is_master': cfg.is_master} for cfg in configs])
-    selected, used = [], set()
-    for cfg in configs:
-        row = next((r for r in existing if r['id'] == cfg.account_id), None) if cfg.account_id else None
-        if cfg.account_id is not None and row is None:
-            raise ValueError('Unknown identity ID')
-        if row is not None and (row['brand_account_id'] or None) != (cfg.brand_account_id or None):
-            raise ValueError('An existing account cannot be retargeted; add the other account separately')
-        if row is None and cfg.account_id is None:
-            row = next((r for r in existing if r['label'] == cfg.label
-                        and (r['brand_account_id'] or None) == (cfg.brand_account_id or None)), None)
-        if row is None and cfg.account_id is None:
-            matches = [r for r in existing if r['credential_ref'] == cfg.credential_ref
-                       and (r['brand_account_id'] or None) == (cfg.brand_account_id or None)
-                       and r['id'] not in used]
-            row = matches[0] if len(matches) == 1 else None
-        iid = row['id'] if row else cfg.account_id
-        if iid in used:
-            raise ValueError('each account may only appear once')
-        if iid is not None:
-            used.add(iid)
-        selected.append((cfg, iid))
-    return selected, used
 
 
 class AccountRepo(Repo):
     @lookup_read
-    def auth_expirations(self):
-        """Load durable authentication failures in the installed storage format."""
-        if account_auth_state.available(self.conn):
-            return account_auth_state.read(self.conn)
-        raw = self._store.settings.get_setting('auth_expired_identities')
-        return account_auth_state.legacy_map(json.loads(raw)) if raw else {}
+    def has_auth_state(self):
+        return account_auth_state.available(self.conn)
 
-    def update_auth_expiration(self, *, account_id=None, label=None, clear_all=False):
-        """Merge one confirmation with current state after reserving the writer."""
+    @lookup_read
+    def auth_expirations(self):
+        return account_auth_state.read(self.conn)
+
+    def flag_auth_expiration(self, account_id, label):
         if self._store.activity_paused:
             return None
-        invalid = False
         with atomic_write(self._store):
             if self._store.activity_paused:
                 return None
-            if account_auth_state.available(self.conn):
-                if clear_all:
-                    account_auth_state.clear(self.conn)
-                elif label is not None:
-                    account_auth_state.flag(self.conn, account_id, label)
-                else:
-                    account_auth_state.clear(self.conn, account_id)
-                current = account_auth_state.read(self.conn)
-            else:
-                try:
-                    current = self.auth_expirations()
-                except (ValueError, TypeError):
-                    current, invalid = {}, True
-                if clear_all:
-                    current.clear()
-                elif label is not None:
-                    current[account_id] = label
-                else:
-                    current.pop(account_id, None)
-                if current:
-                    self._store.settings.set_setting('auth_expired_identities', json.dumps(current))
-                else:
-                    self._store.settings.delete_setting('auth_expired_identities')
-        return current, invalid
+            account_auth_state.flag(self.conn, account_id, label)
+            return account_auth_state.read(self.conn)
+
+    def clear_auth_expirations(self, account_id=None):
+        if self._store.activity_paused:
+            return None
+        with atomic_write(self._store):
+            if self._store.activity_paused:
+                return None
+            account_auth_state.clear(self.conn, account_id)
+            return account_auth_state.read(self.conn)
 
     @lookup_read
-    def configured_ids(self, configs):
-        """Load existing account bindings during maintenance without reconciliation."""
+    def account_rows(self, *, active=False):
         table = entity_names.owner(self.conn, 'accounts').table
-        existing = list(self.conn.execute(f'SELECT * FROM {table} WHERE active=1'))
-        selected, used = _select(tuple(configs), existing)
-        if any(iid is None for _, iid in selected) or used != {r['id'] for r in existing}:
-            raise ValueError('Account changes must wait for the storage update')
-        masters = {r['id'] for r in existing if r['is_master']}
-        if {iid for cfg, iid in selected if cfg.is_master} != masters:
-            raise ValueError('Account changes must wait for the storage update')
-        return {cfg.label: iid for cfg, iid in selected}
+        where = ' WHERE active=1' if active else ''
+        return [dict(row) for row in self.conn.execute(
+            f'SELECT id,label,credential_ref,brand_account_id,is_master,active FROM {table}{where} ORDER BY id')]
+
+    @lookup_read
+    def account_by_label(self, label):
+        table = entity_names.owner(self.conn, 'accounts').table
+        row = self.conn.execute(f'SELECT * FROM {table} WHERE label=?', (label,)).fetchone()
+        return dict(row) if row else None
 
     @synchronized
     def upsert_account(self, label, credential_ref, brand_account_id, is_master):
-        is_master = account_flag(is_master)
         table = entity_names.owner(self.conn, 'accounts').table
-        existing = self.conn.execute(f'SELECT brand_account_id FROM {table} WHERE label=?', (label,)).fetchone()
-        if existing and (existing[0] or None)!=(brand_account_id or None):
-            raise ValueError('An existing account cannot be retargeted; add the other account separately')
-        self.conn.execute(
-            _UPSERT.format(table=table),
-            (label, credential_ref, brand_account_id, is_master))
-        self.conn.commit()
-        row = self.conn.execute(f"SELECT id FROM {table} WHERE label=?", (label,)).fetchone()
-        return row["id"]
+        with self.conn.atomic(join=True):
+            row = self.conn.execute(_UPSERT.format(table=table),
+                                    (label, credential_ref, brand_account_id, is_master)).fetchone()
+            if row is None:
+                raise ValueError('An existing account cannot be retargeted; add the other account separately')
+            return row[0]
 
     @synchronized
-    def replace_accounts(self, configs) -> dict[str, int]:
-        """Reconcile the saved config, retaining removed rows for their history and cached data."""
-        with self.reconciled(configs) as ids:
+    def replace_accounts(self, rows, *, expected) -> dict[str, int]:
+        """Commit selected bindings, retaining inactive IDs and their history."""
+        with self.conn.atomic(join=True):
+            table = entity_names.owner(self.conn, 'accounts').table
+            self.conn.execute(f'UPDATE {table} SET active=active WHERE 0')
+            if self.account_rows() != expected:
+                raise ValueError('Account bindings changed; reload their configuration')
+            existing = self.conn.execute(f'SELECT id,label FROM {table}').fetchall()
+            used = {row[4] for row in rows if row[4] is not None}
+            labels = {row[0] for row in rows}
+            self.conn.execute(f'UPDATE {table} SET active=0, is_master=0')
+            for old in existing:
+                if old['id'] not in used and old['label'] in labels:
+                    retired = f"@inactive:{old['id']}:{old['label']}"
+                    while self.conn.execute(f'SELECT 1 FROM {table} WHERE label=?', (retired,)).fetchone():
+                        retired += ':'
+                    self.conn.execute(f'UPDATE {table} SET label=? WHERE id=?', (retired, old['id']))
+            # Avoid unique-label conflicts while existing IDs exchange labels.
+            for iid in used:
+                self.conn.execute(f'UPDATE {table} SET label=? WHERE id=?', (f'@setup:{iid}:{uuid4().hex}', iid))
+            ids = {}
+            for label, credential, brand, master, iid in rows:
+                if iid is None:
+                    iid = self.conn.execute(f'INSERT INTO {table}(label,credential_ref,brand_account_id,is_master,active) '
+                        'VALUES (?,?,?,?,1)', (label, credential, brand, master)).lastrowid
+                else:
+                    self.conn.execute(f'UPDATE {table} SET label=?,credential_ref=?,brand_account_id=?,is_master=?,active=1 '
+                                      'WHERE id=?', (label, credential, brand, master, iid))
+                ids[label] = iid
             return ids
 
-    @contextmanager
-    def reconciled(self, configs):
-        """Keep reconciliation unpublished until the caller has prepared its config/runtime."""
-        configs = tuple(configs)
-        with self._lock:
-            table = entity_names.owner(self.conn, 'accounts').table
-            self.conn.execute("SAVEPOINT setup_identities")
-            try:
-                existing = list(self.conn.execute(f"SELECT * FROM {table}"))
-                selected, used = _select(configs, existing)
-                self.conn.execute(f"UPDATE {table} SET active=0, is_master=0")
-                labels = {cfg.label for cfg,_ in selected}
-                for old in existing:
-                    if old['id'] not in used and old['label'] in labels:
-                        # Reusing a label for a new remote account must not reuse its local ID.
-                        retired = f"@inactive:{old['id']}:{old['label']}"
-                        while self.conn.execute(f'SELECT 1 FROM {table} WHERE label=?', (retired,)).fetchone():
-                            retired += ':'
-                        self.conn.execute(f'UPDATE {table} SET label=? WHERE id=?', (retired,old['id']))
-                # Temporary labels allow two existing accounts to exchange display labels.
-                for _, iid in selected:
-                    if iid is not None:
-                        self.conn.execute(f"UPDATE {table} SET label=? WHERE id=?", (f"@setup:{iid}:{uuid4().hex}", iid))
-                ids = {}
-                for cfg, iid in selected:
-                    if iid is None:
-                        iid = self.conn.execute(f"INSERT INTO {table}(label,credential_ref,brand_account_id,is_master,active) "
-                            "VALUES (?,?,?,?,1)", (cfg.label,cfg.credential_ref,cfg.brand_account_id,int(cfg.is_master))).lastrowid
-                    else:
-                        self.conn.execute(f"INSERT INTO {table}(id,label,credential_ref,brand_account_id,is_master,active) "
-                            "VALUES (?,?,?,?,?,1) ON CONFLICT(id) DO UPDATE SET label=excluded.label, "
-                            "credential_ref=excluded.credential_ref,brand_account_id=excluded.brand_account_id, "
-                            "is_master=excluded.is_master,active=1", (iid,cfg.label,cfg.credential_ref,cfg.brand_account_id,int(cfg.is_master)))
-                    ids[cfg.label] = iid
-                yield ids
-                # Temporary zero-master states are valid inside this transaction.
-                # A configured result must contain exactly the selected accounts
-                # and one active master, even when the caller performed writes.
-                rows = self.conn.execute(f'SELECT id,is_master,active FROM {table}').fetchall()
-                for row in rows:
-                    account_flag(row['is_master'])
-                    account_flag(row['active'], 'active')
-                active = [row for row in rows if row['active'] == 1]
-                if ({row['id'] for row in active} != set(ids.values())
-                        or sum(row['is_master'] for row in active) != 1):
-                    raise ValueError('Configured accounts must have exactly one active master')
-                self.conn.execute("RELEASE setup_identities")
-            except BaseException:
-                self.conn.execute("ROLLBACK TO setup_identities")
-                self.conn.execute("RELEASE setup_identities")
-                raise
-
-    def get_accounts(self) -> list[Account]:
-        # Compaction cannot change accounts. This finite snapshot also lets
-        # incoming playback frames retain exact attribution while all main
-        # database handles are briefly closed for replacement.
-        cached = getattr(self._store, '_maintenance_accounts', None)
-        if getattr(self._store, 'activity_paused', False) and cached is not None:
-            return list(cached)
-        return self._get_accounts()
-
     @lookup_read
-    def _get_accounts(self):
+    def get_accounts(self) -> list[Account]:
         table = entity_names.owner(self.conn, 'accounts').table
         rows = self.conn.execute(f"SELECT * FROM {table} WHERE active=1").fetchall()
         return [Account(r["id"], r["label"], r["credential_ref"], r["brand_account_id"],
                          bool(r["is_master"]), r["last_auth_ok"]) for r in rows]
-
-    def get_master_account(self):
-        try:
-            return next(i for i in self.get_accounts() if i.is_master)
-        except StopIteration:
-            raise ValueError("No master identity configured")

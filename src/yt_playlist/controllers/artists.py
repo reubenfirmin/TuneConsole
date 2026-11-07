@@ -21,6 +21,14 @@ class Artists:
     def resolve(self, value):
         return self.repository.resolve(value)
 
+    def state_id(self, value):
+        identity = self.repository.resolve(value, exact=True)
+        if identity is not None:
+            return identity
+        if isinstance(value, int) or str(value).startswith('@artist:'):
+            raise ValueError(f'Unknown artist reference: {value}')
+        return self.ensure_artist(str(value))
+
     def get_artist(self, value):
         return self.repository.get_artist(value)
 

@@ -7,13 +7,21 @@ import pytest
 from tests.recommendation_support import publish_bundles
 from tests.recommendation_support import seed_bundle_subjects
 from tests.home_prepared_support import publication_inputs
+from tests.prepared_fixture_support import prepared_template
 from tests.rec.test_home_prepared import one_menu_per_attempt
 from yt_playlist.rec import (discover, embedding_vectors as embed, home_prepared, home_themes, home_vibe,
                              mode_surfaces, rec_params, stored_home, surfaces, transient)
 
 
-def candidate_inputs(store, *, lanes=mode_surfaces.CARD_SURFACES):
-    """Two actual genres with a shallow candidate page, without fitted models.
+@pytest.fixture(autouse=True)
+def independent_history_summaries(monkeypatch):
+    # History summary preparation has its own checkpoint/recovery owners in
+    # test_maintenance_logging. These cases inspect discovery and mix inputs.
+    monkeypatch.setattr(home_prepared, 'prepare_revisit', lambda *args: None)
+
+
+def candidate_inputs(store, *, genres=('Jazz', 'Techno'), lanes=mode_surfaces.CARD_SURFACES):
+    """Actual genres with a shallow candidate page, without fitted models.
 
     These cases own snapshot reuse and the refusal to rebuild source models.
     Four candidates per genre/lane retain real selection, PPR counterfactuals,
@@ -21,7 +29,7 @@ def candidate_inputs(store, *, lanes=mode_surfaces.CARD_SURFACES):
     """
     from tests.test_home_other_genres import genre_bundles
 
-    bundles = genre_bundles(store, genres=['Jazz', 'Techno'], tracks_per_lane=4)
+    bundles = genre_bundles(store, genres=genres, tracks_per_lane=4)
     for mode, pools in bundles.items():
         if not mode.startswith('_'):
             for lane in list(pools):
@@ -30,6 +38,19 @@ def candidate_inputs(store, *, lanes=mode_surfaces.CARD_SURFACES):
     with store._lock, store.conn.atomic():
         seed_bundle_subjects(store, bundles)
     return bundles
+
+
+@pytest.fixture(scope='module')
+def eligibility_template(_pristine_current_schema):
+    def prepare(source):
+        bundles = candidate_inputs(source, lanes=('wheelhouse',))
+        bundles['_ppr'] = {str(mid): [item['key'] for items in bundles[str(mid)].values()
+                                     for item in reversed(items)] for mid in range(2)}
+        publish_bundles(source, bundles, 1)
+        return bundles
+
+    with prepared_template(_pristine_current_schema, prepare) as template:
+        yield template
 
 
 def test_each_preparation_snapshot_reuses_listening_signals_for_all_discovery_families(
@@ -83,18 +104,24 @@ def test_shared_discovery_signals_preserve_selection_and_mutes(store, monkeypatc
 
 @pytest.mark.parametrize('include', [(), ('jazz', 'techno')])
 def test_snapshot_reuses_eligibility_and_union_metadata_without_changing_offers(
-        store, monkeypatch, include):
+        store, monkeypatch, include, eligibility_template):
     # A single lane still overlaps its mode and general pages across three
     # menus. Other lane/ranker selection contracts stay in test_stored_home.
-    bundles = candidate_inputs(store, lanes=('wheelhouse',))
-    bundles['_ppr'] = {str(mid): [item['key'] for items in bundles[str(mid)].values()
-                                  for item in reversed(items)] for mid in range(2)}
-    publish_bundles(store, bundles, 1)
+    bundles = eligibility_template.restore(store)
     rec_params.set_param(store, 'ppr_ab_share', 0.5)
     seed_dislike(store, bundles['0']['wheelhouse'][0]['key'], until=None, now=1)
     orders = [(epoch, (epoch % 2, (epoch + 1) % 2)) for epoch in range(3)]
     with store.read_snapshot() as snapshot, stored_home.preparation_inputs() as metadata_inputs:
         reader = snapshot.store
+        # Catalog hydration is below the eligibility/metadata-reuse boundary.
+        # Resolve the real private fixture once; replay those immutable facts
+        # while retaining actual pool paging, selection, PPR counterfactuals,
+        # dislikes and genre resolution across all six assemblies. Hydration's
+        # current-catalog contract remains in test_recommendation_publication.
+        keys = [track['key'] for tracks in bundles['all'].values() for track in tracks]
+        facts = reader.recommendations._candidate_facts(keys)
+        monkeypatch.setattr(reader.recommendations, '_candidate_facts',
+                            lambda requested: {key: facts[key] for key in requested})
         expected = [mode_surfaces.assemble_cards(reader, 1000, epoch, mode_order=order,
                                                 include_genres=include) for epoch, order in orders]
         preparation = {'leans': transient.facet_leans(reader, 1000),
@@ -135,7 +162,9 @@ def test_snapshot_reuses_eligibility_and_union_metadata_without_changing_offers(
 @pytest.mark.parametrize('missing_bundles', [False, True])
 def test_preparation_never_rebuilds_the_library_for_cold_or_shallow_bundles(
         store, monkeypatch, one_menu_per_attempt, missing_bundles):
-    bundles = candidate_inputs(store)
+    # One genre still fills each lane and proves preparation can consume a
+    # shallow publication. Cross-genre/menu reuse is checked separately above.
+    bundles = candidate_inputs(store, genres=('Jazz',))
     bundles['_meta']['full_pools'] = False
     if not missing_bundles:
         publish_bundles(store, bundles, 1)

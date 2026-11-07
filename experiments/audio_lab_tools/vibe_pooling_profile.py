@@ -27,7 +27,8 @@ def run(output):
     repository = Path(__file__).resolve().parents[2]
     sources = ('experiments/audio_lab_tools/vibe_pooling_profile.py',
         'src/yt_playlist/core/vibe_model_files.py', 'src/yt_playlist/repos/vibe_models.py',
-        'src/yt_playlist/rec/vibe_joint_model.py', 'src/yt_playlist/rec/vibe_joint_preparation.py')
+        'src/yt_playlist/rec/vibe_joint_model.py', 'src/yt_playlist/rec/vibe_joint_preparation.py',
+        'src/yt_playlist/rec/vibe_joint_common.py', 'src/yt_playlist/rec/vibe_joint_calibrated.py')
     report = {'quality_acceptance': False, 'fixed_variances': model.INITIAL, 'code': {}}
     with zipfile.ZipFile(output.parent / 'source.zip', 'x', zipfile.ZIP_DEFLATED) as archive:
         for name in sources:

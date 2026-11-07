@@ -34,6 +34,31 @@ def test_tracked_view_reuses_only_unchanged_inputs_and_releases_admission(store)
         store._analytics_readers.release()
 
 
+@pytest.mark.parametrize('function', ['json_each', 'json_tree'])
+def test_json_expansion_reuses_only_unchanged_input_values(store, function):
+    store.settings.set_setting('json-input', '["first"]')
+    calls = []
+
+    def read(reader):
+        def calculate():
+            calls.append(True)
+            payload = reader.settings.get_setting('json-input')
+            return [row[0] for row in reader.conn.execute(
+                f"SELECT value FROM {function}(?) WHERE type='text'", (payload,))]
+        return reader.memoized_read('json-values', calculate)
+
+    with store.read_view(tracked=True) as reader:
+        assert read(reader) == ['first']
+    store.settings.set_setting('unrelated', 'changed')
+    with store.read_view(tracked=True) as reader:
+        assert read(reader) == ['first']
+    assert len(calls) == 1
+    store.settings.set_setting('json-input', '["second"]')
+    with store.read_view(tracked=True) as reader:
+        assert read(reader) == ['second']
+    assert len(calls) == 2
+
+
 def test_composed_read_reuses_detached_results_only_within_its_pinned_view(store):
     store.settings.set_setting('input', 'old')
     calls = []

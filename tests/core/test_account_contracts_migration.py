@@ -121,13 +121,15 @@ def test_reconciliation_swaps_labels_master_and_retains_retired_ids(predecessor)
     assert store.accounts.get_master_account().id == 2
     assert store.conn.execute('SELECT active FROM identities WHERE id=3').fetchone()[0] == 0
     before = accounts(store)
-    with pytest.raises(RuntimeError, match='interrupted'):
-        with store.accounts.reconciled([
+    store.conn.execute("CREATE TEMP TRIGGER fail_account_update BEFORE UPDATE OF is_master ON identities "
+                       "WHEN NEW.is_master=1 BEGIN SELECT RAISE(ABORT,'interrupted'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='interrupted'):
+        store.accounts.replace_accounts([
             AccountConfig('Other', 'bridge', None, True, 1),
             AccountConfig('Main', 'bridge', 'other', False, 2),
-        ]):
-            raise RuntimeError('interrupted runtime preparation')
+        ])
     assert accounts(store) == before
+    store.conn.execute('DROP TRIGGER fail_account_update')
     ids = store.accounts.replace_accounts([
         AccountConfig('Main', 'bridge', 'other', False, 2),
         AccountConfig('Returned', 'bridge', 'retired', True, 3),

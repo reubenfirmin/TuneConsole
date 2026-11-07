@@ -96,16 +96,16 @@ def test_interruption_rolls_back_index_and_checkpoint(store, monkeypatch):
     assert store.trends.first_play_map("track") == {}
     watermark = store.settings.get_setting("trend_first_play_watermark")
     before = list(map(tuple, store.conn.execute("SELECT * FROM trend_first_play")))
-    original = store.trends._replace_first_play
+    original = store.trends.repository._replace_first_play
     def interrupted():
         original()
         raise RuntimeError("interrupted after index writes")
-    monkeypatch.setattr(store.trends, "_replace_first_play", interrupted)
+    monkeypatch.setattr(store.trends.repository, "_replace_first_play", interrupted)
     with pytest.raises(RuntimeError, match="interrupted"):
         store.trends.refresh_first_play()
     assert list(map(tuple, store.conn.execute("SELECT * FROM trend_first_play"))) == before
     assert store.settings.get_setting("trend_first_play_watermark") == watermark
-    monkeypatch.setattr(store.trends, "_replace_first_play", original)
+    monkeypatch.setattr(store.trends.repository, "_replace_first_play", original)
     _assert_first(store, key, "Artist", 10)
 
 

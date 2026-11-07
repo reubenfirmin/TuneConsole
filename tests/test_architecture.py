@@ -22,7 +22,16 @@ def _modules():
 
 @cache
 def _import_nodes(tree):
-    return tuple(node for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom)))
+    # Imports are statements. Walking expression operands, names and constants
+    # again for this index adds no import edge, even for local imports.
+    pending, imports = [tree], []
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            imports.append(node)
+        for field in ('body', 'orelse', 'finalbody', 'handlers', 'cases'):
+            pending.extend(getattr(node, field, ()))
+    return tuple(imports)
 
 
 def _imports(tree, module=None):
@@ -235,6 +244,13 @@ def test_persistence_guard_catches_absolute_local_and_relative_policy_imports():
         'from .. import rec',
         'from ..core.store import Store',
         'from ..web import app',
+        'if enabled:\n    pass\nelse:\n    from yt_playlist.rec import surfaces',
+        'try:\n    pass\nexcept Exception:\n    import yt_playlist.web\nfinally:\n    pass',
+        'try:\n    pass\nexcept* Exception:\n    from .. import rec',
+        'try:\n    pass\nexcept Exception:\n    pass\nelse:\n    from ..web import app',
+        'try:\n    pass\nfinally:\n    from ..core.store import Store',
+        'match value:\n    case 1:\n        from .. import rec',
+        'async def lookup():\n    async with owner:\n        from ..web import app',
     ):
         assert _persistence_consumers(ast.parse(source), "yt_playlist.repos.rec_model"), source
     assert not _persistence_consumers(ast.parse(

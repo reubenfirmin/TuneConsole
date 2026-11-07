@@ -194,8 +194,15 @@ class VibePredictionsRepo(Repo):
     @synchronized
     def publish_prepared(self, plan):
         """Only prepared SQL rows and verified atomic file renames under the writer."""
-        if not self.conn.in_transaction:
-            raise RuntimeError('Vibe predictions require guarded publication')
+        with self.conn.atomic(join=True):
+            self._publish_prepared(plan)
+        repairs = {key.removeprefix('!joint:') for key in plan.cohorts if key.startswith('!joint:')}
+        if repairs:
+            self._store.settings.publish_values({vibe_model_files.STATE_PREFIX + vibe: '' for vibe in repairs})
+        if plan.deleted or plan.publications:
+            self._store.rec_refresh.publish_notification()
+
+    def _publish_prepared(self, plan):
         measured_version = vibe_versions.column(self.conn, 'measurements')
         predicted_version = vibe_versions.column(self.conn, 'predictions')
         current_version = vibe_versions.column(self.conn, 'recording_vibes')
@@ -219,12 +226,7 @@ class VibePredictionsRepo(Repo):
             f'{current_version}=excluded.{current_version},artist_key=excluded.artist_key,subgenre_key=excluded.subgenre_key,'
             'recordings=excluded.recordings,variance=excluded.variance',
             [(*row[:7],versions[row[7]],*row[8:]) for row in plan.publications])
-        repairs = {key.removeprefix('!joint:') for key in plan.cohorts if key.startswith('!joint:')}
-        if repairs:
-            self._store.settings.publish_values({vibe_model_files.STATE_PREFIX + vibe: '' for vibe in repairs})
         self._queue(sorted(key for key in plan.cohorts if not key.startswith('!joint:')))
-        if plan.deleted or plan.publications:
-            self._store.rec_refresh.publish_notification()
 
     @synchronized
     def pending(self):
@@ -388,13 +390,19 @@ class VibePredictionsRepo(Repo):
                     f'WHERE {where} AND m.support>0 ORDER BY v.recording_id,v.vibe', args)
             stats, inputs = {}, {}
             while batch := rows.fetchmany(128):
+                # Each bounded page is cheap arithmetic over observed rows;
+                # keep cancellation at the page boundary rather than crossing
+                # the activity context for every contributor and every cohort.
+                check_stopping()
                 for identity, mid, vibe, score, support in batch:
-                    check_stopping()
                     identity = identities.setdefault(identity, identity)
                     inputs.setdefault(vibe, {})[identity] = mid
                     values = stats.setdefault(vibe, [0, 0., 0., 0.])
-                    for i, amount in enumerate((1, support, support * score, support * score * score)):
-                        values[i] += amount
+                    weighted = support * score
+                    values[0] += 1
+                    values[1] += support
+                    values[2] += weighted
+                    values[3] += weighted * score
             result[key] = {'stats': stats, 'inputs': inputs}
         return result
 

@@ -9,7 +9,7 @@ import logging
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing, check_cancellable_work
 from yt_playlist.core.db_checkpoint import checkpoint_wal, deferred_autocheckpoint
 from yt_playlist.core.db_diagnostics import PublicationTimings
-from yt_playlist.core.db_revisions import Reads
+from yt_playlist.core.db_revisions import DERIVED_TABLES, Reads
 from yt_playlist.core.db_writes import reserved_write
 from yt_playlist.core.read_memo import ReadMemo
 
@@ -96,6 +96,49 @@ class ReadSnapshot:
         with self.source._lock:
             return self._inputs_current(PublicationTimings(), allow_stale_tables)
 
+    def publish_ordered(self, target):
+        """Check captured inputs once, then let each repository commit its own write.
+
+        The serving lock preserves application ordering. A failed later step
+        leaves earlier commits intact; the coordinator acknowledges queued work
+        last so the next attempt can finish it.
+        """
+        timings = PublicationTimings()
+        outcome = 'failed'
+        checkpoint = False
+        self.release_reader()
+        try:
+            with timings.locked(self.source._lock):
+                if self.source.conn.in_transaction:
+                    raise RuntimeError('Ordered publication cannot join another transaction')
+                check_cancellable_work()
+                if not self._inputs_current(timings, frozenset()):
+                    outcome = 'deferred'
+                    return False
+                changes = self.source.conn.total_changes
+                with deferred_autocheckpoint(self.source.conn, self.source._db_path is not None) as checkpoint:
+                    try:
+                        with timings.measure('writes'):
+                            target()
+                    finally:
+                        checkpoint = checkpoint and self.source.conn.total_changes != changes
+                self.source.maintenance_diagnostics.record('published')
+                outcome = 'published'
+                return True
+        except (WorkClosing, WorkBudgetExceeded):
+            outcome = 'cancelled'
+            raise
+        except Exception:
+            self.source.maintenance_diagnostics.record('failed')
+            raise
+        finally:
+            try:
+                if checkpoint:
+                    with timings.measure('checkpoint'):
+                        checkpoint_wal(self.source._db_path)
+            finally:
+                timings.report(outcome)
+
     def _inputs_current(self, timings, allow_stale_tables):
         """Check the original guard even after its reader has been released.
 
@@ -120,7 +163,7 @@ class ReadSnapshot:
         # schema_version; a view itself does not have a row revision.
         unknown = ({table for table, _key in dependencies
                     if not table.startswith("sqlite_")} - tracked
-                   - self.source._snapshot_revisions.views)
+                   - self.source._snapshot_revisions.views - DERIVED_TABLES)
         changed = sorted(key for key in guarded
                          if current.get(key, 0) > self._changes)
         schema_changed = (schema != self._schema

@@ -224,27 +224,27 @@ class MusicalProfilesRepo(Repo):
 
     @synchronized
     def publish_recordings(self, rows, now):
-        self._guard()
-        changed, publications = False, []
-        for key, payload, version, digest in rows:
-            if payload is None:
-                cursor = self.conn.execute('DELETE FROM rec_musical_profiles WHERE identity_key=?', (key,))
-            else:
-                profile = json.loads(payload)
-                if 'vibes' in profile:
-                    profile.pop('vibes')
-                    payload = json.dumps(profile, sort_keys=True, separators=(',', ':'), allow_nan=False)
-                    digest = hashlib.sha256(payload.encode()).hexdigest()
-                cursor = self.conn.execute('INSERT INTO rec_musical_profiles VALUES (?,?,?,?,?) '
-                    'ON CONFLICT(identity_key) DO UPDATE SET payload=excluded.payload,version=excluded.version,'
-                    'digest=excluded.digest,prepared_at=excluded.prepared_at '
-                    'WHERE digest<>excluded.digest OR version<>excluded.version',
-                    (key, payload, version, digest, now))
-                if cursor.rowcount and profile_files.available(self.conn):
-                    publications.append((key, payload, version, digest))
-            changed = changed or cursor.rowcount > 0
-        if publications:
-            profile_files.publish(self.conn, 'recording', publications)
+        with self.conn.atomic(join=True):
+            changed, publications = False, []
+            for key, payload, version, digest in rows:
+                if payload is None:
+                    cursor = self.conn.execute('DELETE FROM rec_musical_profiles WHERE identity_key=?', (key,))
+                else:
+                    profile = json.loads(payload)
+                    if 'vibes' in profile:
+                        profile.pop('vibes')
+                        payload = json.dumps(profile, sort_keys=True, separators=(',', ':'), allow_nan=False)
+                        digest = hashlib.sha256(payload.encode()).hexdigest()
+                    cursor = self.conn.execute('INSERT INTO rec_musical_profiles VALUES (?,?,?,?,?) '
+                        'ON CONFLICT(identity_key) DO UPDATE SET payload=excluded.payload,version=excluded.version,'
+                        'digest=excluded.digest,prepared_at=excluded.prepared_at '
+                        'WHERE digest<>excluded.digest OR version<>excluded.version',
+                        (key, payload, version, digest, now))
+                    if cursor.rowcount and profile_files.available(self.conn):
+                        publications.append((key, payload, version, digest))
+                changed = changed or cursor.rowcount > 0
+            if publications:
+                profile_files.publish(self.conn, 'recording', publications)
         if changed:
             self._store.rec_refresh.publish_notification()
 

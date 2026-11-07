@@ -51,7 +51,8 @@ def test_preopened_and_new_readers_match_native_precision_and_subjects(installed
         native.init_schema(defer_metadata=True)
         native.trends.refresh_first_play()
         expected = projection(native.conn)
-        with store.read_view() as pinned, connect(store) as job:
+        with store.read_snapshot() as snapshot, connect(store) as job:
+            pinned = snapshot.store
             before = list(map(tuple, pinned.conn.execute('SELECT * FROM listening_activity')))
             identity = ready(job)
             publication.publish(job, identity=identity)

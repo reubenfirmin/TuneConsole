@@ -72,6 +72,11 @@ def read_original(conn, row):
     parts = conn.execute(f'SELECT position,filename,digest,byte_size FROM {PARTS} '
         'WHERE recipe_id=? AND generation=? ORDER BY position LIMIT ?',
         (row['recipe_id'], row['generation'], MAX_PARTS + 1)).fetchall()
+    return read_original_parts(row, parts)
+
+
+def read_original_parts(row, parts):
+    """Read a detached original manifest without accessing SQLite."""
     if [part[0] for part in parts] != list(range(row['part_count'])):
         raise MigrationError('Prepared road-trip draft original parts are incomplete')
     raw = ''.join(files.read(*part[1:], surface='road_trip_draft', chunk_key=f'{row["recipe_id"]}:{part[0]}') for part in parts)

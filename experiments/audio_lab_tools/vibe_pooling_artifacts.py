@@ -40,6 +40,7 @@ def run(output, *, all_vibes=False):
         'src/yt_playlist/core/vibe_model_files.py', 'src/yt_playlist/core/vibe_provenance.py',
         'src/yt_playlist/repos/vibe_models.py', 'src/yt_playlist/repos/vibe_predictions.py',
         'src/yt_playlist/rec/vibe_joint_model.py', 'src/yt_playlist/rec/vibe_joint_calibrated.py',
+        'src/yt_playlist/rec/vibe_joint_common.py',
         'src/yt_playlist/rec/musical_preparation.py', 'src/yt_playlist/rec/vibe_joint_preparation.py')
     repository = Path(__file__).resolve().parents[2]
     report['code'] = {}

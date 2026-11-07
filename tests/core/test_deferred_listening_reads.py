@@ -159,7 +159,8 @@ def test_pinned_listening_reader_survives_explicit_publication_and_new_readers_s
         client = web(store)
         # Publication is explicit and leaves installed writers/history intact.
         # Old read adapters retire only with their separately verified cleanup.
-        with store.read_view() as pinned, closing(sqlite3.connect(store._db_path)) as job:
+        with store.read_snapshot() as snapshot, closing(sqlite3.connect(store._db_path)) as job:
+            pinned = snapshot.store
             job.row_factory = sqlite3.Row
             job.execute('PRAGMA foreign_keys=ON')
             before = listening_state(pinned)

@@ -1,5 +1,4 @@
 """Temporary suppression expiry restores original rankings without refitting."""
-from contextlib import closing
 import logging
 from types import SimpleNamespace
 
@@ -11,7 +10,6 @@ from tests.conftest import seed_catalog_track
 from tests.rec.test_model_refresh import refresh_costs
 from tests.prepared_fixture_support import prepared_template
 from tests.rec.test_candidate_refresh import candidate, no_fit
-from tests.store_fixture_support import initialize_consumer
 from yt_playlist.core.store import Store
 from yt_playlist.rec import candidate_refresh, embedding_training as embed, mode_surfaces
 from yt_playlist.rec.rec_worker import RecWorker
@@ -103,6 +101,15 @@ def candidate_library_template(_pristine_current_schema, expiry_rankers):
         yield template
 
 
+@pytest.fixture
+def store(candidate_library_template):
+    # Every case consumes already ranked inputs. Clone those once, including
+    # their genuine guards/files, instead of initializing and replacing an
+    # empty consumer before restoring the same prepared inputs again.
+    with candidate_library_template.open(':memory:') as consumer:
+        yield consumer
+
+
 def refresh(store, now=2000):
     # Feedback and expiry change ranking eligibility, not fitted inputs. These
     # cases own real reranking/publication; model rebuilding has separate owners.
@@ -116,7 +123,7 @@ def snooze(store, key, until=3000.1, now=2100):
 
 
 def test_expiry_restores_candidate_without_source_edit_or_fitting(store, monkeypatch, candidate_library_template):
-    key = candidate_library_template.restore(store)
+    key = candidate_library_template.result
     snooze(store, key)
     vectors = store.rec_model.get_rec_vectors()
     monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
@@ -131,7 +138,7 @@ def test_expiry_restores_candidate_without_source_edit_or_fitting(store, monkeyp
 @pytest.mark.parametrize('permanent', [False, True])
 def test_old_deadline_respects_renewal_and_permanent_blocks(
         store, monkeypatch, permanent, candidate_library_template):
-    key = candidate_library_template.restore(store)
+    key = candidate_library_template.result
     snooze(store, key)
     store.rec_model.record_feedback('for_you', key, 'dismiss' if permanent else 'not_now',
                                    until=None if permanent else 4000, now=2500)
@@ -146,7 +153,7 @@ def test_old_deadline_respects_renewal_and_permanent_blocks(
 @pytest.mark.parametrize('removed', [False, True])
 def test_expiry_preserves_unavailable_and_removed_sources(
         store, monkeypatch, removed, candidate_library_template):
-    key = candidate_library_template.restore(store)
+    key = candidate_library_template.result
     snooze(store, key)
     with store.conn:
         if removed:
@@ -162,12 +169,10 @@ def test_expiry_preserves_unavailable_and_removed_sources(
     assert candidate(store, key) is None
 
 
-def test_expiry_survives_restart(tmp_path, monkeypatch, _pristine_current_schema, candidate_library_template):
+def test_expiry_survives_restart(tmp_path, monkeypatch, candidate_library_template):
     path = tmp_path / 'expiry.db'
-    store = Store(path)
-    with closing(store.conn):
-        initialize_consumer(store, _pristine_current_schema)
-        key = candidate_library_template.restore(store)
+    with candidate_library_template.open(path) as store:
+        key = candidate_library_template.result
         snooze(store, key)
     monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
     store = Store(path)
@@ -181,7 +186,7 @@ def test_expiry_survives_restart(tmp_path, monkeypatch, _pristine_current_schema
 
 
 def test_idle_worker_notices_expiry(store, monkeypatch, candidate_library_template):
-    key = candidate_library_template.restore(store)
+    key = candidate_library_template.result
     snooze(store, key)
     worker = RecWorker(SimpleNamespace(store=store, now_fn=lambda: 3100,
         logger=logging.getLogger(__name__)), enabled=False)

@@ -42,7 +42,8 @@ def test_composed_read_keeps_its_original_snapshot_after_an_independent_commit(f
     store = file_backed_store
     store.settings.set_setting('probe', 'original')
     try:
-        with store.read_view() as outer:
+        with store.read_snapshot() as snapshot:
+            outer = snapshot.store
             assert outer.settings.get_setting('probe') == 'original'
             store.settings.set_setting('probe', 'new commit')
             with outer.read_view() as nested:
@@ -52,6 +53,20 @@ def test_composed_read_keeps_its_original_snapshot_after_an_independent_commit(f
         assert store.settings.get_setting('probe') == 'new commit'
     finally:
         store.conn.close()
+
+
+def test_reporting_composition_reads_new_commits_without_a_transaction(file_backed_store):
+    store = file_backed_store
+    store.settings.set_setting('probe', 'original')
+    with store.read_view() as outer:
+        assert outer.settings.get_setting('probe') == 'original'
+        assert not outer.conn.in_transaction
+        store.settings.set_setting('probe', 'new commit')
+        with outer.read_view() as nested:
+            assert nested is outer
+            assert nested.settings.get_setting('probe') == 'new commit'
+            assert not nested.conn.in_transaction
+        assert outer.settings.get_setting('probe') == 'new commit'
 
 
 @pytest.mark.parametrize('route', ['memory', 'available', 'owned', 'private'])

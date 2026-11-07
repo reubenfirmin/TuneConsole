@@ -2,7 +2,7 @@
 from tests.file_content_support import read_bytes as original_bytes
 from tests.file_content_support import patch_byte_reads
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from html.parser import HTMLParser
 import hashlib
 import json
@@ -20,14 +20,16 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import seed_catalog_track
 from tests.core.test_group_content import prepared
-from tests.home_fixture_support import returning_listener
+from tests.home_fixture_support import returning_listener, without_metadata_providers
 from tests.onboarding_support import publish_personal_mix
+from tests.prepared_fixture_support import prepared_template
+from tests.recommendation_support import publish_bundles
 from yt_playlist.core import fao
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.evidence_ledger import canonical, EvidenceBudgetExceeded, EvidenceLedger
 from yt_playlist.core.storage_maintenance import EVIDENCE_MESSAGE, EVIDENCE_RETRY_MESSAGE
 from yt_playlist.core.store import Store
-from yt_playlist.rec import choice_evidence, choice_retention, group_root_backfill, group_roots, home_cards, mode_surfaces, stored_home
+from yt_playlist.rec import choice_evidence, choice_retention, group_root_backfill, group_roots, home_cards, home_cache, stored_home
 from yt_playlist.rec.choice_capture import CaptureQueue
 from yt_playlist.rec.choice_context import checkpoint, CORRECTION_CONTRACT
 from yt_playlist.rec.stored_radio import PreparedRadio
@@ -35,6 +37,41 @@ from yt_playlist.rec.worker_queue import Job
 from yt_playlist.repos.compact_taste_groups import CompactTasteGroupsRepo
 from yt_playlist.repos import group_queries
 from yt_playlist.web.app import create_app
+
+
+@pytest.fixture(scope='module')
+def serving_bytecode(tmp_path_factory):
+    from jinja2 import FileSystemBytecodeCache
+
+    return FileSystemBytecodeCache(str(tmp_path_factory.mktemp('evidence-template-bytecode')))
+
+
+@pytest.fixture(autouse=True)
+def serving_routes(monkeypatch, serving_bytecode, without_metadata_providers):
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, home, playlists
+
+    # Exercise real pages, settings writes, middleware and maintenance handlers.
+    # Registration of unrelated feature routers and desktop idle shutdown are
+    # independent of the storage/evidence admission boundaries under test.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (app_update, audio_preview, home, playlists)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
+    # Diagnostic JSONL history is owned by test_home_audit. Opportunity capture,
+    # visibility, retained roots and recovery publication still run normally.
+    monkeypatch.setattr(home_cards.HomeCards, 'audit', lambda *args, **kwargs: None)
+    templates = webapp.Jinja2Templates
+
+    def compiled_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        result.env.bytecode_cache = serving_bytecode
+        return result
+
+    # Reuse compiled source, with a private environment and request context for
+    # every app. No rendered markup or database-dependent values are cached.
+    monkeypatch.setattr(webapp, 'Jinja2Templates', compiled_templates)
 
 
 def assert_maintenance_banner(response, *, visible=False):
@@ -91,22 +128,8 @@ def historical_inventory(store, identity):
     return identity, surface
 
 
-@pytest.fixture
-def installed_v94_store(tmp_path, _pristine_installed_schema):
-    store = Store(tmp_path / 'library.db')
-    try:
-        _pristine_installed_schema(94).backup(store.conn)
-        store.init_schema()
-        yield store
-    finally:
-        store.conn.close()
-
-
-@pytest.fixture
-def library(request):
-    # Historical inventory retains genuine predecessor proposal writes (#486).
-    fixture = 'installed_v94_store' if getattr(request, 'param', None) == 94 else 'file_backed_store'
-    store = request.getfixturevalue(fixture)
+def seed_evidence_library(store):
+    """Initial retained evidence, independent of the recovery transition under test."""
     for key in ('one', 'two'):
         seed_catalog_track(store, key, key, 'Artist', video_id=key, genre='house')
     value = prepared('first', 1)
@@ -120,7 +143,81 @@ def library(request):
     choice_evidence.issue(store, 'mixes', [{'id': 'one'}, {'id': 'two'}], 10,
         context={'at': 10, 'group_generation': 'first', 'musical_groups': [
             {'group_id': 'stable-leaf', 'version': 'first-leaf', 'parent_version': 'first-parent'}]})
-    return store
+
+
+@pytest.fixture(scope='module')
+def evidence_template(_pristine_current_schema):
+    with prepared_template(_pristine_current_schema, seed_evidence_library) as template:
+        yield template
+
+
+@pytest.fixture(scope='module')
+def historical_evidence_template(_pristine_installed_schema, tmp_path_factory):
+    # Admit one genuine installed v94 source, retaining its physical owners and
+    # history. Consumers receive private SQL/files, not a relabelled new schema.
+    path = tmp_path_factory.mktemp('historical-evidence') / 'library.db'
+    with prepared_template(_pristine_installed_schema(94), seed_evidence_library,
+                           database=path) as template:
+        assert template.source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 94
+        yield template
+
+
+@pytest.fixture
+def library(request, tmp_path):
+    historical = getattr(request, 'param', None) == 94
+    name = 'historical_evidence_template' if historical else 'evidence_template'
+    with request.getfixturevalue(name).open(tmp_path / 'evidence.db') as store:
+        yield store
+
+
+def restore_evidence(template, target):
+    template.restore(target)
+    # Admission was genuinely completed on the immutable source. Bind its
+    # physical owner format on this private clone without rerunning admission;
+    # the actual evidence recovery and all later transitions remain per test.
+    for name in ('_schema_compatibility', '_rebuild_source_version', '_schema_recovery_pending'):
+        setattr(target, name, getattr(template.source, name))
+    target._bind_repositories()
+
+
+def publish_serving_inputs(store):
+    """Consume completed menus and candidates without running unrelated rankers."""
+    publish_personal_mix(store)
+    menu = home_cache.read(store, 'home_tuned')['menus'][0]
+    lanes = {proto['lane']: proto['tracks'] for proto in menu['protos']}
+    assert set(lanes) == {'comfort', 'wheelhouse', 'explore', 'temporal'}
+    # The responsiveness checks exercise real snapshot/SQL publication leases,
+    # including Radio's retained head. Numerical ranking has independent owners
+    # in test_ranking_playback_publication and test_model_refresh.
+    publish_bundles(store, {'all': lanes, '_meta': {'full_pools': True}}, 1000)
+
+
+@pytest.fixture(scope='module')
+def serving_templates(request, _pristine_current_schema, tmp_path_factory):
+    templates = {}
+    root = tmp_path_factory.mktemp('evidence-serving-inputs')
+    with ExitStack() as resources:
+        def template(historical):
+            if historical not in templates:
+                name = 'historical_evidence_template' if historical else 'evidence_template'
+                evidence = request.getfixturevalue(name)
+
+                def seed(store):
+                    restore_evidence(evidence, store)
+                    publish_serving_inputs(store)
+
+                templates[historical] = resources.enter_context(prepared_template(
+                    _pristine_current_schema, seed, database=root / f'{historical}.db'))
+            return templates[historical]
+
+        yield template
+
+
+@pytest.fixture
+def serving_library(request, tmp_path, serving_templates):
+    historical = getattr(request, 'param', None) == 94
+    with serving_templates(historical).open(tmp_path / 'evidence.db') as store:
+        yield store
 
 
 def test_correction_identity_and_current_learning_descriptors_match_the_published_head(library, monkeypatch):
@@ -243,13 +340,12 @@ def test_pending_cleanup_survives_interruption_without_pausing_activity(library,
     reopened.conn.close()
 
 
-@pytest.mark.parametrize('library', [94], indirect=True, ids=['installed-v94'])
-def test_home_and_navigation_remain_available_while_processing_historical_prepared_context(library, monkeypatch):
+@pytest.mark.parametrize('serving_library', [94], indirect=True, ids=['installed-v94'])
+def test_home_and_navigation_remain_available_while_processing_historical_prepared_context(serving_library, monkeypatch):
+    library = serving_library
     library.accounts.upsert_account('Main', 'bridge', None, True)
     library.settings.set_setting('last_sync_at', '1000')
     library.settings.set_setting('onboard_dismissed', '1')
-    publish_personal_mix(library)
-    mode_surfaces.prepare_bundles(library, 1000)
     returning_listener(library, 'mixes', now=1000)
     historical_inventory(library, 'historical-prepared-home')
     app = create_app(library, lambda: {}, now_fn=lambda: 1000, background_work=True)
@@ -317,13 +413,12 @@ def test_home_and_navigation_remain_available_while_processing_historical_prepar
 
 
 @pytest.mark.parametrize('phase', ['file_read', 'context_expansion'])
-@pytest.mark.parametrize('library', [94], indirect=True, ids=['installed-v94'])
-def test_inventory_preparation_does_not_hold_the_home_serving_lock(library, monkeypatch, phase):
+@pytest.mark.parametrize('serving_library', [94], indirect=True, ids=['installed-v94'])
+def test_inventory_preparation_does_not_hold_the_home_serving_lock(serving_library, monkeypatch, phase):
+    library = serving_library
     library.accounts.upsert_account('Main', 'bridge', None, True)
     library.settings.set_setting('last_sync_at', '1000')
     library.settings.set_setting('onboard_dismissed', '1')
-    publish_personal_mix(library)
-    mode_surfaces.prepare_bundles(library, 1000)
     returning_listener(library, 'mixes', now=1000)
     # Controlled predecessor capture: real immutable evidence lacking only its
     # new SQL owner. The collector fence remains closed throughout preparation.
@@ -386,13 +481,11 @@ def test_inventory_preparation_does_not_hold_the_home_serving_lock(library, monk
 
 
 @pytest.mark.parametrize('shared_writer', [True, False], ids=['serving-writer', 'separate-writer'])
-def test_home_onboarding_and_growth_do_not_wait_for_a_schema_writer(library, monkeypatch, shared_writer):
+def test_home_onboarding_and_growth_do_not_wait_for_a_schema_writer(serving_library, monkeypatch, shared_writer):
     from yt_playlist.util import genre_map
-
+    library = serving_library
     library.accounts.upsert_account('Main', 'bridge', None, True)
     library.settings.set_setting('last_sync_at', '1000')
-    publish_personal_mix(library)
-    mode_surfaces.prepare_bundles(library, 1000)
     prepared_home = library.rec_proposals.get_proposals('home_tuned')
     families = genre_map.all_families()
     prepared_home['fingerprint'] = {'breadth': {'families': {
@@ -427,31 +520,31 @@ def test_home_onboarding_and_growth_do_not_wait_for_a_schema_writer(library, mon
             if not shared_writer:
                 conn.close()
 
-    with TestClient(app, base_url='http://127.0.0.1') as client, ThreadPoolExecutor(2) as executor:
-        app.state.ctx.storage_maintenance.phase = 'schema'
-        writer = executor.submit(hold_writer)
-        response = None
-        try:
-            assert entered.wait(2)
-            response = executor.submit(client.get, '/')
-            # The lock hook rejects every blocking serving-lock acquisition.
-            # Allow cold template compilation within the first-page deadline.
-            home = response.result(timeout=5)
-            assert home.status_code == 200 and 'A comfort mix for you' in home.text
-            assert_maintenance_banner(home)
-            assert 'id="growth-title"' in home.text
-            assert not writer.done()
-        finally:
-            release.set()
-            writer.result(timeout=5)
-            if response is not None:
-                response.result(timeout=5)
-            app.state.ctx.storage_maintenance.phase = 'done'
-    assert list(map(tuple, library.conn.execute('SELECT * FROM rec_impressions ORDER BY surface,item_key'))) == before
-    assert library.conn.execute('PRAGMA busy_timeout').fetchone()[0] == 5000
-    assert not library.activity_paused
-    # Ordinary visits still advance each counter once after admission is free.
     with TestClient(app, base_url='http://127.0.0.1') as client:
+        with ThreadPoolExecutor(2) as executor:
+            app.state.ctx.storage_maintenance.phase = 'schema'
+            writer = executor.submit(hold_writer)
+            response = None
+            try:
+                assert entered.wait(2)
+                response = executor.submit(client.get, '/')
+                # The lock hook rejects every blocking serving-lock acquisition.
+                # Allow cold template compilation within the first-page deadline.
+                home = response.result(timeout=5)
+                assert home.status_code == 200 and 'A comfort mix for you' in home.text
+                assert_maintenance_banner(home)
+                assert 'id="growth-title"' in home.text
+                assert not writer.done()
+            finally:
+                release.set()
+                writer.result(timeout=5)
+                if response is not None:
+                    response.result(timeout=5)
+                app.state.ctx.storage_maintenance.phase = 'done'
+        assert list(map(tuple, library.conn.execute('SELECT * FROM rec_impressions ORDER BY surface,item_key'))) == before
+        assert library.conn.execute('PRAGMA busy_timeout').fetchone()[0] == 5000
+        assert not library.activity_paused
+        # The same running app resumes ordinary visits after admission is free.
         old_views = library.rec_ledger.card_views('comfort')
         assert client.get('/').status_code == 200
         assert library.rec_ledger.card_views('comfort') == old_views + 1
@@ -527,13 +620,12 @@ def test_playlists_keep_committed_account_metadata_while_schema_writer_is_held(l
     assert library.playlists.get_playlist(first).title == 'Main liked'
 
 
-@pytest.mark.parametrize('library', [94], indirect=True, ids=['installed-v94'])
-def test_cached_home_does_not_wait_for_inventory_file_preparation(library, monkeypatch, tmp_path):
+@pytest.mark.parametrize('serving_library', [94], indirect=True, ids=['installed-v94'])
+def test_cached_home_does_not_wait_for_inventory_file_preparation(serving_library, monkeypatch, tmp_path):
+    library = serving_library
     library.accounts.upsert_account('Main', 'bridge', None, True)
     library.settings.set_setting('last_sync_at', '1000')
     library.settings.set_setting('onboard_dismissed', '1')
-    publish_personal_mix(library)
-    mode_surfaces.prepare_bundles(library, 1000)
     returning_listener(library, 'mixes', now=1000)
     app = create_app(library, lambda: {}, now_fn=lambda: 1000, background_work=True)
     worker = app.state.ctx.rec_worker

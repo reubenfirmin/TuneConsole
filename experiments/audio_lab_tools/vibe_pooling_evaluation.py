@@ -24,6 +24,7 @@ from yt_playlist.repos import vibe_evaluation
 
 ROOT = Path(__file__).resolve().parents[2]
 CODE = ('src/yt_playlist/rec/vibe_joint_model.py', 'src/yt_playlist/rec/vibe_prediction.py',
+        'src/yt_playlist/rec/vibe_joint_common.py',
         'src/yt_playlist/rec/vibe_joint_calibrated.py', 'src/yt_playlist/rec/vibe_joint_preparation.py',
         'src/yt_playlist/rec/musical_profiles.py', 'src/yt_playlist/rec/home_vibe.py',
         'src/yt_playlist/rec/musical_preparation.py', 'src/yt_playlist/rec/vibe_preparation.py',

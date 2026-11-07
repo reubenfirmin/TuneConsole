@@ -880,16 +880,19 @@ def test_composite_foreign_key_order_and_grouping_are_validated():
             current.validate(conn)
 
 
-def test_bootstrap_failure_rolls_back_all_objects_and_history(monkeypatch):
-    validate = current.validate
-    monkeypatch.setattr(current, 'validate', lambda conn: (_ for _ in ()).throw(ValueError('injected bootstrap failure')))
+@pytest.mark.parametrize('owner', [current, regular], ids=['current', 'regular'])
+def test_bootstrap_failure_rolls_back_all_objects_and_history(monkeypatch, owner):
+    validate = owner.validate
+    monkeypatch.setattr(owner, 'validate', lambda conn: (_ for _ in ()).throw(ValueError('injected bootstrap failure')))
     with connect() as conn:
         with pytest.raises(MigrationError, match='injected bootstrap failure'):
             migrate(conn)
         assert list(conn.execute('SELECT * FROM sqlite_master')) == []
-        monkeypatch.setattr(current, 'validate', validate)
+        monkeypatch.setattr(owner, 'validate', validate)
         migrate(conn)
         current.validate(conn)
+        assert regular.validate(conn) == len(regular.CHANGES)
+        assert not conn.in_transaction
 
 
 @pytest.mark.parametrize('upgraded', [False, True])

@@ -39,7 +39,8 @@ def test_selected_folds_match_native_and_preserve_exact_contributions(installed,
     history = list(map(tuple,store.conn.execute('SELECT * FROM schema_migrations')))
     native = Store(tmp_path/'native-taste.db')
     try:
-        with store.read_view() as pinned:
+        with store.read_snapshot() as snapshot:
+            pinned = snapshot.store
             assert 'genre:Known alias' in pinned.rec_model.get_weights(now=11)
             identity = ready(store.conn)
             publication.publish(store.conn,identity=identity)

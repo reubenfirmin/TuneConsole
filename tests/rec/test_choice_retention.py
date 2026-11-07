@@ -4,6 +4,7 @@ import json
 from copy import deepcopy
 from functools import wraps
 import time
+from unittest.mock import Mock
 
 import pytest
 
@@ -11,7 +12,7 @@ from tests.rec.test_choice_bandit import modes
 from yt_playlist.core import fao
 from yt_playlist.core.store import Store
 from yt_playlist.rec import choice_evidence as choices, choice_retention, comparison_storage
-from yt_playlist.rec.choice_context import checkpoint, learning_context
+from yt_playlist.rec.choice_context import checkpoint, learning_context, resolve_context
 
 DAY = 86400
 
@@ -21,11 +22,11 @@ def captured_groups(store):
             for mode in store.modes.list_modes(active_only=True)]
 
 
-def captured(store, oid='menu', at=100, *, groups=None):
+def captured(store, oid='menu', at=100, *, groups=None, format='mixes', diagnostic_repeat=40_000):
     groups = captured_groups(store) if groups is None else deepcopy(groups)
-    oid = choices.issue(store, 'mixes', [{'id': 'one', 'genres':['Jazz'], 'score': 1},
+    oid = choices.issue(store, format, [{'id': 'one', 'genres':['Jazz'], 'score': 1},
                                         {'id': 'two', 'genres':['House'], 'score': 0}], at,
-                        context={'at': at, 'groups': groups, 'layers': {'saved': oid * 40_000}},
+                        context={'at': at, 'groups': groups, 'layers': {'saved': oid * diagnostic_repeat}},
                         opportunity_id=oid)
     choices.respond(store, oid, 'visible', at + 1, visible=['one', 'two'])
     choices.respond(store, oid, 'choice', at + 2, option_id='one', action_id=oid + ':pick')
@@ -130,17 +131,35 @@ def test_failed_learning_publication_never_acknowledges_or_releases(store, monke
     assert ledger.get('artifact', offer['context'])
 
 
-def test_optional_context_bytes_are_bounded_during_active_trial_and_held_context_survives(
-        store, monkeypatch, retention_costs, record_property):
+@pytest.fixture
+def retention_trial(store, monkeypatch):
     modes(store)
     groups = captured_groups(store)
+    # The compaction and failed-publication tests above own real learning
+    # publication. This case owns repeated SQL/file retention under its byte cap.
+    publish = Mock(return_value={'watermark': 'acknowledged-learning-generation'})
+    monkeypatch.setattr(choices, 'compile_report', publish)
     # Exercise the byte limit during a trial, well before the 30-day age limit.
     monkeypatch.setattr(choice_retention, 'DIAGNOSTIC_FRACTION', .003)
+    return groups, publish
+
+
+def test_optional_context_bytes_are_bounded_during_active_trial(
+        store, retention_trial, retention_costs, record_property):
+    groups, publish = retention_trial
     ledger = store.rec_ledger.evidence()
     snapshots, aging_seconds, aged, verified_bytes = [], 0.0, 0, 0
-    for index in range(15):
-        offer = captured(store, oid=f'menu-{index}', at=(index + 1) * DAY, groups=groups)
+    # Initial, repeated and continuing compaction each exceed the real byte
+    # cap. More identical days do not add a retention or chronology boundary.
+    trial_days = 3
+    for index in range(trial_days):
+        # Mix envelopes now discard model diagnostics before capture. Album
+        # contexts still retain the heavy graph whose byte budget this owns.
+        offer = captured(store, oid=f'menu-{index}', at=(index + 1) * DAY,
+                         groups=groups, format='albums', diagnostic_repeat=20_000)
         snapshots.append(offer['context'])
+        diagnostic = ledger.get('artifact', offer['context'])['layers']['saved']['$artifact']
+        assert ledger.get('artifact', diagnostic)
         started = time.perf_counter()
         aging = age_artifacts(store)
         aging_seconds += time.perf_counter() - started
@@ -148,24 +167,43 @@ def test_optional_context_bytes_are_bounded_during_active_trial_and_held_context
         verified_bytes += aging['verified_bytes']
         assert aging['logical_bytes'] > ledger.byte_budget * .003
         result = choices.maintain_storage(store, (index + 1) * DAY + 1000)
+        publish.assert_called_with(store, (index + 1) * DAY + 1000)
+        assert publish.call_count == index + 1
         assert result['optional_context_bytes'] <= ledger.byte_budget * .003
         assert len(ledger.records('checkpoint')) == index + 1
-        assert checkpoint(ledger, offer['context'])
-    assert len(ledger.records('opportunity')) == 15
-    assert len(set(snapshots)) == 15
+        assert checkpoint(ledger, offer['context'])['watermark'] == publish.return_value['watermark']
+        assert ledger.get('artifact', diagnostic) is None
+    assert len(ledger.records('opportunity')) == trial_days
+    assert len(set(snapshots)) == trial_days
     assert captured_groups(store) == groups
-    # Compact mix timing is cheap enough to retain inside the optional budget.
+    # Only compact manifests may remain inside the optional budget.
     assert sum(len(json.dumps(a)) for a in ledger.records('artifact')) < ledger.byte_budget * .003
-    held = captured(store, oid='held', at=16 * DAY, groups=groups)
-    store.rec_proposals.put_proposals('home_prepared', {'choice_context': {'artifact': held['context']}}, 16 * DAY)
-    age_artifacts(store)
-    choices.maintain_storage(store, 100 * DAY)
-    assert ledger.get('artifact', held['context'])
-    assert checkpoint(ledger, snapshots[0])
     assert all(checkpoint(ledger, identity) for identity in snapshots)
     record_property('trial_aging_seconds', aging_seconds)
     record_property('trial_aged_artifacts', aged)
     record_property('trial_verified_artifact_bytes', verified_bytes)
+
+
+def test_prepared_context_keeps_its_graph_and_prior_checkpoint_after_retention(store, retention_trial):
+    groups, publish = retention_trial
+    ledger = store.rec_ledger.evidence()
+    previous = captured(store, oid='menu-0', at=DAY, groups=groups,
+                        format='albums', diagnostic_repeat=20_000)
+    age_artifacts(store)
+    choices.maintain_storage(store, DAY + 1000)
+    assert checkpoint(ledger, previous['context'])['watermark'] == publish.return_value['watermark']
+    assert ledger.get('artifact', previous['context']) is None
+
+    held_at = 4 * DAY
+    held = captured(store, oid='held', at=held_at, groups=groups,
+                    format='albums', diagnostic_repeat=20_000)
+    held_context = resolve_context(store, {'artifact': held['context']})
+    assert held_context['layers']['saved'] == 'held' * 20_000
+    store.rec_proposals.put_proposals('home_prepared', {'choice_context': {'artifact': held['context']}}, held_at)
+    age_artifacts(store)
+    choices.maintain_storage(store, 100 * DAY)
+    assert resolve_context(store, {'artifact': held['context']}) == held_context
+    assert checkpoint(ledger, previous['context'])
 
 
 def test_retained_paired_storage_preserves_context_and_read_limits(monkeypatch):

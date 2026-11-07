@@ -11,6 +11,7 @@ from yt_playlist.core import album_note_requests as owner, albums, recommendatio
 from yt_playlist.core.migrations import current, migrate, registry
 from yt_playlist.core.migrations.runner import MigrationError
 from yt_playlist.core.store import Store
+from yt_playlist.core.db_revisions import Revisions
 
 ALBUM = {'browse_id': 'release-one', 'artist': 'Artist', 'title': 'Release',
          'year': '2020', 'thumbnail': None}
@@ -100,7 +101,9 @@ def test_note_file_cutover_backup_and_restart_preserve_last_good_and_demand(pred
     assert predecessor.rec_proposals.get_proposals('album_notes') == value
     row = predecessor.conn.execute('SELECT * FROM album_note_outputs').fetchone()
     assert row['album_provider_id'] == ALBUM['browse_id'] and row['built_at'] == 99.5
-    with predecessor.read_view() as reader:
+    predecessor._snapshot_revisions = Revisions(predecessor.conn)
+    with predecessor.read_snapshot() as snapshot:
+        reader = snapshot.store
         manifest = outputs.export(reader.conn, tmp_path / 'backup')
     original = row['filename']
     from pathlib import Path

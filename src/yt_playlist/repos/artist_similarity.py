@@ -6,37 +6,30 @@ from yt_playlist.repos.base import Repo, synchronized
 
 class ArtistSimilarityRepo(Repo):
     @synchronized
-    def cached_similar(self, artist, *, fetched_since):
+    def cached_similar(self, artist_id, *, fetched_since):
         """Return evidence meeting the caller's explicit freshness bound."""
-        from yt_playlist.core import artists
-        aid = artists.lookup(self.conn,artist)
         row = self.conn.execute(
-            "SELECT payload, fetched_at FROM rec_artist_similar WHERE artist_id=?", (aid,)).fetchone()
+            "SELECT payload, fetched_at FROM rec_artist_similar WHERE artist_id=?", (artist_id,)).fetchone()
         if row is None or row["fetched_at"] is None or row['fetched_at'] < fetched_since:
             return None
         return json.loads(row["payload"])
 
     @synchronized
-    def artist_similar_edges(self, artist) -> list:
+    def artist_similar_edges(self, artist_id) -> list:
         """Cached Last.fm similar pairs [[name, match], ...] for an artist, ignoring TTL ([] if none).
         Used by the #28 artist model's §C edge block, where a slightly-stale relatedness hint is fine
         (the model rebuilds periodically and new_artists keeps the cache warm)."""
-        from yt_playlist.core import artists
-        aid = artists.lookup(self.conn,artist)
-        return [(artists.token(r[0]),r[1]) for r in self.conn.execute(
-            'SELECT target_artist_id,weight FROM artist_similarity_targets WHERE source_artist_id=?', (aid,))]
+        return [tuple(row) for row in self.conn.execute(
+            'SELECT target_artist_id,weight FROM artist_similarity_targets WHERE source_artist_id=?', (artist_id,))]
 
     @synchronized
-    def cache_similar(self, artist, pairs, now) -> None:
-        from yt_playlist.core import artists
-        aid = artists.state_id(self.conn,artist)
-        self.conn.execute(
-            "INSERT INTO rec_artist_similar(artist, payload, fetched_at,artist_id) VALUES (?,?,?,?) "
-            "ON CONFLICT(artist_id) DO UPDATE SET payload=excluded.payload, fetched_at=excluded.fetched_at",
-            (artists.token(aid), json.dumps(pairs), now,aid))
-        self.conn.execute('DELETE FROM artist_similarity_targets WHERE source_artist_id=?', (aid,))
-        for name,weight in pairs:
-            target = artists.state_id(self.conn,name)
-            self.conn.execute('INSERT OR REPLACE INTO artist_similarity_targets VALUES (?,?,?)', (aid,target,weight))
-        self.conn.commit()
+    def cache_similar(self, artist_id, pairs, edges, now) -> None:
+        with self.conn.atomic(join=True):
+            self.conn.execute(
+                "INSERT INTO rec_artist_similar(artist, payload, fetched_at,artist_id) VALUES (?,?,?,?) "
+                "ON CONFLICT(artist_id) DO UPDATE SET payload=excluded.payload, fetched_at=excluded.fetched_at",
+                (f'@artist:{artist_id}', json.dumps(pairs), now, artist_id))
+            self.conn.execute('DELETE FROM artist_similarity_targets WHERE source_artist_id=?', (artist_id,))
+            self.conn.executemany('INSERT OR REPLACE INTO artist_similarity_targets VALUES (?,?,?)',
+                                  [(artist_id, target, weight) for target, weight in edges])
 

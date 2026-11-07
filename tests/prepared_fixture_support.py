@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 import pytest
 
 from yt_playlist.core import file_owners, policy_documents, preparation_files, served_facts
+from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.preparation.file_bodies import BODY_OWNERS
 from yt_playlist.core.store import Store
 from tests.store_fixture_support import PristineSchema, initialize_consumer, revision_definitions
@@ -67,6 +68,23 @@ class PreparedTemplate:
     revision_tables: frozenset = frozenset()
     revision_views: frozenset = frozenset()
 
+    @contextmanager
+    def open(self, database):
+        """Open a private admitted consumer without first cloning an empty DB."""
+        assert self.revision_guards, 'Consumer cloning requires an admitted source'
+        target = Store(database)
+        try:
+            self.restore(target)
+            for name in ('_schema_compatibility', '_rebuild_source_version', '_schema_recovery_pending'):
+                setattr(target, name, getattr(self.source, name))
+            target._bind_repositories()
+            if target._db_path is not None:
+                mode = target.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0]
+                assert mode.lower() == 'wal'
+            yield target
+        finally:
+            target.conn.close()
+
     def restore(self, target, *, ignore=None, external_files=()):
         assert not target.conn.in_transaction
         self.source.conn.backup(target.conn)
@@ -83,6 +101,27 @@ class PreparedTemplate:
             # existing counters remain valid because total_changes is monotonic;
             # later writes still stamp the real connection-local triggers.
             revisions.schema_version = target.conn.execute('PRAGMA main.schema_version').fetchone()[0]
+        elif self.revision_guards:
+            # SQL backup excludes TEMP. A prepared source can add real owners;
+            # restore its generated guards rather than making the first consumer
+            # request rediscover every column and rebuild their SQL in Python.
+            existing = {(kind, name): sql for kind, name, sql in revision_definitions(target.conn)}
+            desired = {(kind, name): sql for kind, name, sql in self.revision_guards}
+            statements = []
+            for (kind, name), sql in existing.items():
+                if desired.get((kind, name)) != sql:
+                    quoted = '"' + name.replace('"', '""') + '"'
+                    statements.append(f'DROP {kind.upper()} IF EXISTS temp.{quoted}')
+            statements.extend(sql.replace('CREATE ', 'CREATE TEMP ', 1)
+                for key, sql in desired.items() if existing.get(key) != sql)
+            if statements:
+                target.conn.executescript('BEGIN;\n' + ';\n'.join(statements) + ';\nCOMMIT;')
+            revisions = Revisions.__new__(Revisions)
+            revisions.conn = target.conn
+            revisions.schema_version = target.conn.execute('PRAGMA main.schema_version').fetchone()[0]
+            revisions.tables = set(self.revision_tables)
+            revisions.views = set(self.revision_views)
+            target._snapshot_revisions = revisions
         destinations = roots(target.conn)
         cleanup_memory_files(target, destinations)
         relocations = {}
@@ -116,10 +155,12 @@ class PreparedTemplate:
                     if path in external_relocations:
                         updates.setdefault((table, column), {})[filename] = str(external_relocations[path])
                         continue
-                    matches = [(source, destination) for source, destination in relocations.items()
-                               if path.is_relative_to(source)]
-                    assert matches, 'Unmanaged prepared fixture coordinate: ' + filename
-                    source, destination = max(matches, key=lambda pair: len(pair[0].parts))
+                    # Walk each ancestry once. Checking every owner with
+                    # is_relative_to repeatedly constructs the same parents.
+                    source = next((parent for parent in (path, *path.parents)
+                                   if parent in relocations), None)
+                    assert source is not None, 'Unmanaged prepared fixture coordinate: ' + filename
+                    destination = relocations[source]
                     updates.setdefault((table, column), {})[filename] = str(
                         destination / path.relative_to(source))
                 for (table, column), mapping in updates.items():
@@ -169,9 +210,27 @@ def capture_template(source, result, *, logical_coordinates=()):
         if (table.strip('"'), column.strip('"')) not in prepared_columns)
     revisions = getattr(source, '_snapshot_revisions', None)
     guards, tables, views = (), frozenset(), frozenset()
+    if revisions is not None:
+        revisions.refresh()
+        physical = {name for name, in source.conn.execute(
+            "SELECT name FROM main.sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+        actual_views = {name for name, in source.conn.execute(
+            "SELECT name FROM main.sqlite_schema WHERE type='view'")}
+        if revisions.tables != physical or revisions.views != actual_views:
+            # A backup can give a different schema the same SQLite cookie.
+            # Refresh's ordinary cookie fast path cannot establish its owners.
+            Revisions.unbind(source.conn)
+            revisions = source._snapshot_revisions = Revisions(source.conn)
+        # SQLite can retain orphan TEMP trigger catalog rows after backup.
+        # DROP IF EXISTS can leave those unreachable rows in the catalog;
+        # capture only guards attached to this source's real physical owners.
+        attached = {name for name, table in source.conn.execute(
+            "SELECT name,tbl_name FROM sqlite_temp_schema WHERE type='trigger' "
+            "AND name LIKE 'snapshot_revision_%'") if table in physical}
     if (revisions is not None and revisions.schema_version ==
             source.conn.execute('PRAGMA main.schema_version').fetchone()[0]):
-        guards = revision_definitions(source.conn)
+        guards = tuple(row for row in revision_definitions(source.conn)
+                       if row[0] == 'table' or row[1] in attached)
         tables, views = frozenset(revisions.tables), frozenset(revisions.views)
     source.conn.execute('PRAGMA query_only=ON')
     return PreparedTemplate(source, roots(source.conn), ordinary,

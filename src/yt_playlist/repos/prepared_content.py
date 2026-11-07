@@ -1,7 +1,5 @@
 """Guarded, restartable content inputs; no provider calls or fitting on the writer."""
-from contextlib import ExitStack
-import hashlib
-import json
+from contextlib import contextmanager, ExitStack
 
 from yt_playlist.core.db_revisions import column_group_reads, keyed_reads
 from yt_playlist.core import embeddings, prepared_inputs, metadata_evidence
@@ -37,19 +35,16 @@ class PreparedContentRepo(Repo):
             "(SELECT COUNT(*) FROM unresolved_preparation_inputs WHERE reason='empty_retraction' AND input_revision>?)",
             (revision, revision)).fetchone()[0]
 
-    @synchronized
-    def capture(self, pending, *, mask_numeric=False):
-        """Read only these identities and declare every dependent base-table key.
+    @contextmanager
+    def capture_reads(self, keys):
+        """Declare dependent base-table keys for a bounded catalog read.
 
         Counter keys match the TEMP write triggers, including both sides of a
         reassociation. Queries remain constrained even when a catalog view
         authorizes columns which its caller did not select.
         """
-        keys = [key for key, _revision in pending]
-        if not keys:
-            return []
         qs = ','.join('?' for _ in keys)
-        with ExitStack() as guards:
+        with self._lock, ExitStack() as guards:
             guards.enter_context(keyed_reads(self._store, 'recordings', keys))
             recordings = [r[0] for r in self.conn.execute(
                 f'SELECT id FROM recordings WHERE identity_key IN ({qs})', keys)]
@@ -70,58 +65,56 @@ class PreparedContentRepo(Repo):
                 guards.enter_context(keyed_reads(self._store, table, recordings))
             guards.enter_context(keyed_reads(self._store, 'prepared_recording_inputs', recordings))
             guards.enter_context(keyed_reads(self._store, 'unresolved_preparation_inputs', keys))
-            library = {r[0] for r in self.conn.execute(
-                f'SELECT DISTINCT identity_key FROM tracks WHERE identity_key IN ({qs})', keys)}
-            # Match the established full-input aggregation, including its empty
-            # categorical-value and duplicate-entry semantics.
-            content = {r['identity_key']: (r['genre'], r['year']) for r in self.conn.execute(
-                'SELECT identity_key,MIN(genre) genre,MIN(mb_year) year FROM tracks '
-                f"WHERE identity_key IN ({qs}) AND (genre<>'' OR mb_year<>'') GROUP BY identity_key", keys)}
-            cols = self._store.rec_query.AUDIO_COLS
-            sel = ','.join(f'MIN({c}) AS {c}' for c in cols)
-            where = ' OR '.join(f'{c} IS NOT NULL' for c in cols)
-            audio = {} if mask_numeric else {r['identity_key']: {c: r[c] for c in cols if r[c] not in (None, '')}
+            yield
+
+    @synchronized
+    def capture_facts(self, keys, *, mask_numeric=False):
+        qs = ','.join('?' for _ in keys)
+        library = {r[0] for r in self.conn.execute(
+            f'SELECT DISTINCT identity_key FROM tracks WHERE identity_key IN ({qs})', keys)}
+        # Preserve the full-input aggregation's empty and duplicate-entry semantics.
+        content = {r['identity_key']: (r['genre'], r['year']) for r in self.conn.execute(
+            'SELECT identity_key,MIN(genre) genre,MIN(mb_year) year FROM tracks '
+            f"WHERE identity_key IN ({qs}) AND (genre<>'' OR mb_year<>'') GROUP BY identity_key", keys)}
+        cols = prepared_inputs.AUDIO
+        sel = ','.join(f'MIN({c}) AS {c}' for c in cols)
+        where = ' OR '.join(f'{c} IS NOT NULL' for c in cols)
+        audio = {} if mask_numeric else {r['identity_key']: {c: r[c] for c in cols if r[c] not in (None, '')}
                      for r in self.conn.execute(f'SELECT identity_key,{sel} FROM tracks '
                          f'WHERE identity_key IN ({qs}) AND ({where}) GROUP BY identity_key', keys)}
-            discovered = self._store.discovery.discovered_tracks_by_keys(keys, metadata_only=mask_numeric)
-            previous = dict(self.conn.execute(
+        previous = dict(self.conn.execute(
                 'SELECT r.identity_key,p.digest FROM prepared_recording_inputs p '
                 f'JOIN recordings r ON r.id=p.recording_id WHERE r.identity_key IN ({qs})', keys))
-            # An admission must promote an accepted raw retraction even when
-            # both cohorts are still empty. Compare raw digests only while the
-            # identity has no current owner.
-            previous.update(self.conn.execute('SELECT p.raw_key,p.digest FROM unresolved_preparation_inputs p '
+        # Admission must promote a raw retraction even when both cohorts are empty.
+        previous.update(self.conn.execute('SELECT p.raw_key,p.digest FROM unresolved_preparation_inputs p '
                 f'WHERE p.raw_key IN ({qs}) AND NOT EXISTS(SELECT 1 FROM recordings r '
                 'WHERE r.identity_key=p.raw_key AND NOT EXISTS(SELECT 1 FROM recording_redirects d '
                 'WHERE d.retired_id=r.id))', keys))
-            result = []
-            for key, revision in pending:
-                genre, year = content.get(key, (None, None))
-                year = year[:4] if year and year[:4].isdigit() else None
-                d = discovered.get(key)
-                payload = {'library': ({'genre': genre, 'year': year, 'audio': audio.get(key, {})}
-                                        if key in library else None),
-                           'discovered': ({'genre': d.get('genre'), 'year': d.get('year'),
-                                           'audio': d.get('audio', {})} if d else None)}
-                raw = json.dumps(payload, sort_keys=True, separators=(',', ':'))
-                digest = hashlib.sha256(raw.encode()).hexdigest()
-                result.append((key, revision, raw, digest, previous.get(key) != digest))
-            return result
+        return {'library': library, 'content': content, 'audio': audio, 'previous': previous}
 
     @synchronized
     def publish_capture(self, rows, now):
-        if not self.conn.in_transaction:
-            raise RuntimeError('Content capture requires guarded publication')
-        changed = 0
-        serial = self.counters()[0]
-        for key, revision, payload, digest, different in rows:
-            if different:
+        with self.conn.atomic(join=True):
+            changed = 0
+            serial = self.counters()[0]
+            for key, fields, digest, empty in rows:
+                owner = self.conn.execute('SELECT r.id FROM recordings r WHERE r.identity_key=? '
+                    'AND NOT EXISTS(SELECT 1 FROM recording_redirects d WHERE d.retired_id=r.id)', (key,)).fetchone()
+                previous = (self.conn.execute('SELECT digest FROM prepared_recording_inputs WHERE recording_id=?',
+                                             (owner[0],)).fetchone() if owner else
+                            self.conn.execute('SELECT digest FROM unresolved_preparation_inputs WHERE raw_key=?',
+                                              (key,)).fetchone())
+                if previous and previous[0] == digest:
+                    continue
                 changed += 1
-                prepared_inputs.upsert(self.conn, key, json.loads(payload), digest, now, serial + changed)
-            self.conn.execute('DELETE FROM rec_content_pending WHERE identity_key=? AND revision=?', (key, revision))
-        self.conn.execute('UPDATE rec_preparation SET content_changes=content_changes+? WHERE id=1', (changed,))
-        if changed:
-            self._store.rec_refresh.publish_notification()
+                prepared_inputs.upsert_values(self.conn, key, fields, digest, now, serial + changed, empty=empty)
+            self.conn.execute('UPDATE rec_preparation SET content_changes=content_changes+? WHERE id=1', (changed,))
+        return changed
+
+    @synchronized
+    def acknowledge(self, pending):
+        with self.conn.atomic(join=True):
+            self.conn.executemany('DELETE FROM rec_content_pending WHERE identity_key=? AND revision=?', pending)
 
     @synchronized
     def rotate(self, pending):

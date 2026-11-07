@@ -1,4 +1,4 @@
-"""TV responses keep saved membership, metadata and photos on one committed view."""
+"""TV reporting stays playable across committed replacements without a transaction."""
 import sqlite3
 
 import pytest
@@ -44,8 +44,8 @@ def test_playlist_response_stays_consistent_during_replacement_and_refreshes_nex
             result = read_recipe(repo, scope)
             if not replaced:
                 replaced = True
-                # Real committed owner writes between the recipe and membership
-                # reads must not splice different generations into one response.
+                # Reporting allows later committed membership/artwork. Optional
+                # recipe metadata must never be attributed to another video.
                 source.playlists.publish_confirmed_tracks(playlist.id, 'Next TV', videos[7:], 2)
                 source.playlist_recipes.set_recipe(scope, {**recipe, 'videos': videos[7:]}, 2)
                 source.rec_proposals.put_proposals(tv_artwork.SURFACE, photos('after'), 2)
@@ -57,6 +57,7 @@ def test_playlist_response_stays_consistent_during_replacement_and_refreshes_nex
 
         def open_reader():
             reader = make_reader()
+            assert not reader.conn.in_transaction
             readers.append(reader)
             return reader
 
@@ -64,10 +65,16 @@ def test_playlist_response_stays_consistent_during_replacement_and_refreshes_nex
         before_playlist, before = playlist_items(source, playlist.id, artwork=artwork)
         assert replaced
         assert before_playlist.title == playlist.title
-        assert [item['video_id'] for item in before] == [item['video_id'] for item in videos[:7]]
-        assert [item['source_key'] for item in before] == [item['source_key'] for item in videos[:7]]
+        visible = videos[7:] if file_backed else videos[:7]
+        assert [item['video_id'] for item in before] == [item['video_id'] for item in visible]
+        if file_backed:
+            assert all('source_key' not in item for item in before)
+        else:
+            assert [item['source_key'] for item in before] == [item['source_key'] for item in visible]
+        assert all(item['title'] and item['artist'] and item['duration'] > 0 for item in before)
         if artwork:
-            assert all(item['artist_art'] == [f'https://images.test/before/{item["video_id"]}.jpg']
+            version = 'after' if file_backed else 'before'
+            assert all(item['artist_art'] == [f'https://images.test/{version}/{item["video_id"]}.jpg']
                        and not item['artist_art_pending'] for item in before)
             before[0]['artist_art'].append('https://images.test/detached.jpg')
         else:

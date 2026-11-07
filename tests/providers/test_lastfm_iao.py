@@ -534,5 +534,6 @@ def test_queue_rechecks_metadata_changed_after_snapshot_selection(file_backed_st
             catalog.choose_field(store.conn, entry, 'artist', '')
 
     monkeypatch.setattr(store, 'read_snapshot', changed_reader)
+    monkeypatch.setattr(store.enrichment_queue, 'read_snapshot', changed_reader)
     assert store.enrichment_queue.next_enrich_batch(10, providers=['lastfm'], now=1000) == []
     assert store.enrichment_reports.queue_remaining() == 1

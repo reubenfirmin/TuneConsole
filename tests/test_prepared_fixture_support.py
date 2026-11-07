@@ -11,6 +11,52 @@ from yt_playlist.core import profile_files
 from yt_playlist.rec import home_prepared
 
 
+@pytest.mark.parametrize('disk', [False, True])
+def test_open_prepared_consumer_keeps_private_writes_and_real_snapshot_guards(
+        tmp_path, _pristine_current_schema, disk):
+    def seed(source):
+        source.settings.set_setting('private_input', 'prepared')
+
+    with prepared_template(_pristine_current_schema, seed) as template:
+        with template.open(tmp_path / 'consumer.db' if disk else ':memory:') as target:
+            if disk:
+                assert target.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
+            assert not target._schema_compatibility
+            with target.read_snapshot() as snapshot:
+                assert snapshot.store.settings.get_setting('private_input') == 'prepared'
+                target.settings.set_setting('private_input', 'private write')
+                assert not snapshot.publish(lambda: pytest.fail('Published stale cloned input'))
+            with target.read_snapshot() as snapshot:
+                assert snapshot.store.settings.get_setting('private_input') == 'private write'
+                assert snapshot.publish(lambda: None)
+            assert template.source.settings.get_setting('private_input') == 'prepared'
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            target.conn.execute('SELECT 1')
+
+
+def test_cloning_replaced_schema_does_not_copy_guards_for_retired_owners(
+        tmp_path, _pristine_current_schema):
+    def seed(source):
+        source.conn.execute('CREATE TABLE fixture_retired_owner (value TEXT)')
+        source._snapshot_revisions.refresh()
+        # A genuine schema replacement can leave unreachable TEMP trigger
+        # catalog rows for the vanished owner. Do not forge migration history.
+        _pristine_current_schema.backup(source.conn)
+        source.settings.set_setting('replacement_input', 'prepared')
+
+    with prepared_template(_pristine_current_schema, seed) as template:
+        with template.open(tmp_path / 'replaced.db') as target:
+            assert not target.conn.execute(
+                "SELECT 1 FROM main.sqlite_schema WHERE name='fixture_retired_owner'").fetchone()
+            assert not target.conn.execute(
+                "SELECT 1 FROM sqlite_temp_schema WHERE tbl_name='fixture_retired_owner'").fetchone()
+            with target.read_snapshot() as snapshot:
+                assert snapshot.store.settings.get_setting('replacement_input') == 'prepared'
+                target.settings.set_setting('replacement_input', 'changed')
+                assert not snapshot.publish(lambda: pytest.fail('Missed replacement-schema write'))
+            assert template.source.settings.get_setting('replacement_input') == 'prepared'
+
+
 @pytest.mark.parametrize('fixture_name', ['store', 'file_backed_store'])
 @pytest.mark.parametrize('validate_inputs', [False, True])
 def test_restoring_identical_schema_fences_old_readers_and_preserves_write_guards(
@@ -52,8 +98,10 @@ def test_restoring_identical_schema_fences_old_readers_and_preserves_write_guard
     assert not target.conn.in_transaction
 
 
+@pytest.mark.parametrize('fixture_name', ['store', 'file_backed_store'])
 def test_restored_schema_with_added_owner_gets_real_revision_guards(
-        store, _pristine_current_schema):
+        request, fixture_name, _pristine_current_schema):
+    store = request.getfixturevalue(fixture_name)
     def seed(source):
         source.conn.execute('CREATE TABLE fixture_added_owner (id INTEGER PRIMARY KEY,value TEXT)')
         with source.conn:
@@ -61,6 +109,12 @@ def test_restored_schema_with_added_owner_gets_real_revision_guards(
 
     with prepared_template(_pristine_current_schema, seed) as template:
         template.restore(store)
+        # Guards must already match the cloned schema, rather than being
+        # reconstructed by the first snapshot. Existing pinned readers are
+        # fenced separately by the replacement's database generation.
+        assert store._snapshot_revisions.schema_version == store.conn.execute(
+            'PRAGMA main.schema_version').fetchone()[0]
+        assert 'fixture_added_owner' in store._snapshot_revisions.tables
         with store.read_snapshot() as snapshot:
             assert snapshot.store.conn.execute('SELECT value FROM fixture_added_owner').fetchone()[0] == 'template value'
             with store.conn:

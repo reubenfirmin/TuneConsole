@@ -543,14 +543,12 @@ def test_one_actual_group_input_update_publishes_and_preserves_retained_version(
         queued = list(map(tuple, conn.execute('SELECT * FROM rec_content_pending ORDER BY position,identity_key')))
         counters = store.prepared_content.counters()
         now = time.time()
-        with conn:
-            conn.execute('BEGIN IMMEDIATE')
-            store.taste_groups.retain_evidence('prepared', f'review485-retained:{time.time_ns()}',
-                {'group_generation': previous['generation'],
-                 'musical_groups': [{'group_id': group['group_id'], 'version': alias}]}, now)
-            # None cannot acknowledge any real queue revision. Admit one accepted
-            # typed feature change through the production owner transaction.
-            store.prepared_content.publish_capture([(key, None, raw, digest, True)], now)
+        store.taste_groups.retain_evidence('prepared', f'review485-retained:{time.time_ns()}',
+            {'group_generation': previous['generation'],
+             'musical_groups': [{'group_id': group['group_id'], 'version': alias}]}, now)
+        # None cannot acknowledge a real queue revision. Each production owner
+        # commits its own write in the same order as ordinary preparation.
+        store.prepared_content.publish_capture([(key, None, raw, digest, True)], now)
         accepted = conn.execute('SELECT * FROM prepared_recording_inputs WHERE recording_id=?',
                                 (row['recording_id'],)).fetchone()
         assert prepared_inputs.payload(accepted) == inputs and accepted['digest'] == digest

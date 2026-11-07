@@ -10,15 +10,10 @@ import json
 import math
 
 from yt_playlist.core.activity import WorkBudgetExceeded, check_stopping
-from . import vibe_joint_model as joint
+from . import vibe_joint_common as joint
 
-MAX_MIXTURE = 128
-RECIPE = {'prior': 'learned masked production heuristic covariate',
-          'album': 'nested within canonical artist',
-          'residual': 'audio/provider separate',
-          'support': 'provider centered log support; fitted logit variance slope [-10,10]',
-          'interval': 'equal-tail empirical source/support Gaussian mixture',
-          'mixture_components': MAX_MIXTURE}
+MAX_MIXTURE = joint.MAX_MIXTURE
+RECIPE = joint.RECIPE
 
 
 def terms(row, kind):
