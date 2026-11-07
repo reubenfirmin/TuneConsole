@@ -16,7 +16,7 @@ from yt_playlist.core.audio_metadata_files import AudioMetadataFiles
 from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.core.sample_files import SampleFiles
 from yt_playlist.core.vibe_provenance import ProvenanceFiles
-from yt_playlist.repos.settings import SettingsRepo
+from yt_playlist.controllers.settings import Settings
 from yt_playlist.repos.vibe_predictions import VibePredictionsRepo
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -30,7 +30,7 @@ def predictions():
         create_autospec(SampleFiles, instance=True, spec_set=True),
         create_autospec(AudioMetadataFiles, instance=True, spec_set=True),
         create_autospec(VibeModels, instance=True, spec_set=True),
-        create_autospec(SettingsRepo, instance=True, spec_set=True),
+        create_autospec(Settings, instance=True, spec_set=True),
         create_autospec(RecommendationRefresh, instance=True, spec_set=True),
         create_autospec(PreparedContent, instance=True, spec_set=True),
         create_autospec(Genres, instance=True, spec_set=True))

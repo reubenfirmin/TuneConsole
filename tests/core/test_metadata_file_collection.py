@@ -31,10 +31,10 @@ def collect(store, now, ticks=128):
     assert ticks > 0
     completed = set()
     for _ in range(ticks):
-        work = getattr(store, '_managed_file_orphans', None)
+        work = getattr(store.retention.database, '_managed_file_orphans', None)
         position = work.position if work is not None else 0
         store.retention.maintain_managed_files(now)
-        work = store._managed_file_orphans
+        work = store.retention.database._managed_file_orphans
         if work.position != position:
             completed.add(position)
         if len(completed) == len(work.contracts):
@@ -102,7 +102,7 @@ def test_rolled_back_and_unlinked_metadata_collect_without_losing_committed_hist
     with store.read_view():
         assert root in collect(store, future)
         assert orphan.exists(), 'A pinned older snapshot fences the whole domain'
-    managed_files.close(store)
+    managed_files.close(store.retention.database)
     collect(store, future)
     assert not orphan.exists()
     assert {path: fao.read(path).bytes for path in committed} == committed

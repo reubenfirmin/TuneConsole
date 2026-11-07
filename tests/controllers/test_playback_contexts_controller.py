@@ -8,7 +8,7 @@ import pytest
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.playback_contexts import PlaybackContexts, BINDINGS_KEY
 from yt_playlist.repos.rec_ledger import RecLedgerRepo
-from yt_playlist.repos.settings import SettingsRepo
+from yt_playlist.controllers.settings import Settings
 from yt_playlist.controllers.tracks import Tracks
 from yt_playlist.repos.collection import CollectionRepo
 
@@ -18,7 +18,7 @@ pytestmark = pytest.mark.usefixtures('no_database')
 @pytest.fixture
 def playback():
     return PlaybackContexts(create_autospec(RecLedgerRepo, instance=True, spec_set=True),
-        create_autospec(SettingsRepo, instance=True, spec_set=True),
+        create_autospec(Settings, instance=True, spec_set=True),
         create_autospec(Tracks, instance=True, spec_set=True),
         create_autospec(CollectionRepo, instance=True, spec_set=True), nullcontext)
 

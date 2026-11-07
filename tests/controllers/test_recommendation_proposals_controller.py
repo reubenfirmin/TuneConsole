@@ -11,7 +11,9 @@ from yt_playlist.controllers.recommendation_proposals import RecommendationPropo
 from yt_playlist.controllers.listening_analytics import ListeningAnalytics
 from yt_playlist.controllers.home_outputs import HomeOutputs
 from yt_playlist.controllers.recommendation_publications import RecommendationPublications
+from yt_playlist.controllers.comparison_outputs import ComparisonOutputs
 from yt_playlist.core.recommendation_files import RecommendationFiles
+from yt_playlist.core.schema_contract import MigrationError
 from yt_playlist.repos.rec_proposals import RecProposalsRepo
 from yt_playlist.repos.album_notes import AlbumNotesRepo
 from yt_playlist.repos.recommendation_reports import RecommendationReportsRepo
@@ -28,7 +30,8 @@ def proposals():
     publications = create_autospec(RecommendationPublications, instance=True, spec_set=True)
     return RecommendationProposals(repository, reports, create_autospec(AlbumNotesRepo, instance=True, spec_set=True), files,
                                    create_autospec(ListeningAnalytics, instance=True, spec_set=True),
-                                   create_autospec(HomeOutputs, instance=True, spec_set=True), lambda: publications)
+                                   create_autospec(HomeOutputs, instance=True, spec_set=True), lambda: publications,
+                                   create_autospec(ComparisonOutputs, instance=True, spec_set=True))
 
 
 def manifest(raw, *, prepared=False):
@@ -47,7 +50,7 @@ def test_native_clicked_pool_bypasses_repository_dispatcher(proposals):
     assert proposals.get_proposals('home_pool:comfort') == publications.clicked_pool.return_value
     assert proposals.has_proposals('home_pool:comfort')
     proposals.repository.put_encoded.assert_not_called()
-    proposals.repository._proposal_json.assert_not_called()
+    proposals.repository.document.assert_not_called()
     proposals.repository.has_proposals.assert_not_called()
 
 
@@ -91,7 +94,7 @@ def test_report_read_captures_references_before_file_access(proposals):
     proposals.files.read.return_value = raw
     assert proposals.get_proposals('model_health') == {'detail': 'é'}
     proposals.files.read.assert_called_once_with(manifest(raw)['parts'][0], surface='model_health', chunk_key='0')
-    proposals.repository._proposal_json.assert_not_called()
+    proposals.repository.document.assert_not_called()
 
 
 @pytest.mark.parametrize('error', [OSError('lost file'), ValueError('bad envelope')])
@@ -154,10 +157,47 @@ def test_unknown_report_checkpoint_is_rejected_before_sql(proposals):
 
 
 def test_fresh_projection_omits_private_profiles_and_metadata(proposals):
-    proposals.repository._proposal_json.return_value = json.dumps({
+    proposals.repository.document.return_value = json.dumps({
         '_meta': {'private': True}, 'all': {'fresh': [{'key': 'song', 'title': 'Title', 'score': .5,
-                                                     'profile': {'audio': 'large'}}]}})
+                                                     'profile': {'audio': 'large'}}]}}), None
     assert proposals.fresh_candidates() == {'all': {'fresh': [{'key': 'song', 'title': 'Title', 'score': .5}]}}
+
+
+@pytest.mark.parametrize('surface,prefix', [('model_pair:2:incumbent:mixes', 'original:'),
+                                         ('home_pool:comfort', 'original:'), ('tv_pool', '')])
+def test_prepared_original_is_read_outside_repository(proposals, surface, prefix):
+    proposals.comparisons.native.return_value = False
+    proposals.publications().native_clicked_pools.return_value = False
+    raw = '{ "original": "é" }'
+    reference = {**manifest(raw), 'prefix': prefix}
+    proposals.repository.document.return_value = None, reference
+    proposals.files.read.return_value = raw
+    assert proposals.get_proposals(surface) == {'original': 'é'}
+    proposals.files.read.assert_called_once_with(reference['parts'][0], surface=surface, chunk_key=prefix + '0')
+
+
+@pytest.mark.parametrize('damage', ['missing', 'reordered', 'digest', 'size'])
+def test_prepared_original_keeps_integrity_checks(proposals, damage):
+    raw = '{}'
+    reference = {**manifest(raw), 'prefix': ''}
+    if damage == 'missing':
+        reference['parts'] = []
+    elif damage == 'reordered':
+        reference['parts'][0]['chunk_key'] = '1'
+    elif damage == 'digest':
+        reference['content_digest'] = 'wrong'
+    else:
+        reference['total_bytes'] += 1
+    proposals.repository.document.return_value = None, reference
+    proposals.files.read.return_value = raw
+    with pytest.raises(MigrationError):
+        proposals.get_proposals('tv_pool')
+
+
+def test_selected_empty_original_never_falls_back(proposals):
+    proposals.repository.document.return_value = None, None
+    assert proposals.get_proposals('tv_pool') is None
+    proposals.files.read.assert_not_called()
 
 
 def test_listening_documents_use_the_listening_workflow(proposals):
@@ -168,7 +208,7 @@ def test_listening_documents_use_the_listening_workflow(proposals):
     assert proposals.get_proposals('listening_edition') == {'text': 'Ready'}
     assert proposals.has_proposals('listening_edition')
     proposals.repository.put_encoded.assert_not_called()
-    proposals.repository._proposal_json.assert_not_called()
+    proposals.repository.document.assert_not_called()
     proposals.repository.has_proposals.assert_not_called()
 
 
@@ -180,7 +220,7 @@ def test_home_documents_use_the_home_workflow(proposals):
     assert proposals.get_proposals('home_prepared') == {'title': 'Ready'}
     assert proposals.has_proposals('home_prepared')
     proposals.repository.put_encoded.assert_not_called()
-    proposals.repository._proposal_json.assert_not_called()
+    proposals.repository.document.assert_not_called()
     proposals.repository.has_proposals.assert_not_called()
 
 

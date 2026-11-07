@@ -104,9 +104,6 @@ class Pending:
 
 
 def maintain(store,now):
-    # Selected metadata and paid/manual facts have independent SQL owners;
-    # only the seven-day alternative class is expired by this owner method.
-    store.enrichment_state.expire_provider_alternatives(now)
     work = getattr(store,'_managed_file_orphans',None)
     if work is None:
         with store._lock:

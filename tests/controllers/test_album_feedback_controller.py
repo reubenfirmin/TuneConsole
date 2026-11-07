@@ -10,7 +10,7 @@ from tests.repository_mock_support import no_database
 from yt_playlist.controllers.album_feedback import AlbumFeedback
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.repos.album_feedback import AlbumFeedbackRepo
-from yt_playlist.repos.collection import CollectionRepo
+from yt_playlist.controllers.collection import Collection
 
 pytestmark = pytest.mark.usefixtures('no_database')
 
@@ -18,7 +18,7 @@ pytestmark = pytest.mark.usefixtures('no_database')
 @pytest.fixture
 def feedback():
     repository = create_autospec(AlbumFeedbackRepo, instance=True, spec_set=True)
-    collection = create_autospec(CollectionRepo, instance=True, spec_set=True)
+    collection = create_autospec(Collection, instance=True, spec_set=True)
     writing = False
 
     @contextmanager
@@ -54,6 +54,24 @@ def feedback():
 
 def previous(**values):
     return {'created_at': 10, 'withdrawn_at': None, 'opportunity_id': 'offer', 'action_id': 'original', **values}
+
+
+def test_alias_merge_selects_latest_response_per_account_and_keeps_response_lineage(feedback):
+    feedback.repository.merge_inputs.return_value = [
+        dict(id=1, account_id=4, created_at=10, source_browse_id='B'),
+        dict(id=2, account_id=4, created_at=10, source_browse_id='A'),
+        dict(id=3, account_id=5, created_at=20, source_browse_id='A')]
+    feedback.merge_albums(1, 2, 9)
+    feedback.repository.apply_merge.assert_called_once_with(1, 2, [(10, 2)])
+    feedback.collection.preferred_album_ids.assert_not_called()
+    feedback.fence.assert_not_called()
+
+
+def test_alias_merge_leaves_installed_legacy_feedback_in_its_original_form(feedback):
+    feedback.repository.uses_rows.return_value = False
+    feedback.merge_albums(1, 2, 9)
+    feedback.repository.transaction.assert_not_called()
+    feedback.repository.apply_merge.assert_not_called()
 
 
 def test_replacement_withdraws_each_original_action_once_and_supplies_new_response(feedback):

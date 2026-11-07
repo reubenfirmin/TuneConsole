@@ -209,6 +209,36 @@ class DiscoveryRepo(Repo):
                     (str(target), str(previous)))
                 self.conn.execute("DELETE FROM discovery_visible_impressions WHERE kind='artist' AND item_id=?", (str(previous),))
 
+    @snapshot_read
+    def album_merge_inputs(self, previous, target):
+        typed = provenance.available(self.conn)
+        return {'typed': typed, 'memberships': [dict(row) for row in self.conn.execute(
+            'SELECT * FROM album_discovery_memberships WHERE album_id IN (?,?)', (previous, target))],
+            **{key: [dict(row) for row in self.conn.execute('SELECT * FROM '+table+' WHERE album_id IN (?,?)',
+                (previous, target))] if typed else [] for key, table in (
+                    ('impressions', 'discovery_impressions'), ('legacy', 'discovery_legacy_offers'))}}
+
+    @synchronized
+    def apply_album_merge(self, previous, target, inputs, origins, member):
+        with self.conn.atomic():
+            self.conn.execute('DELETE FROM album_discovery_memberships WHERE album_id IN (?,?)', (previous, target))
+            if member is not None:
+                self.conn.execute('INSERT INTO album_discovery_memberships('+','.join(member)+') VALUES ('+
+                                  ','.join('?' for _ in member)+')', tuple(member.values()))
+            if inputs['typed']:
+                self._move_origins('album_id', target, origins)
+                self.conn.execute('INSERT INTO discovery_impressions(view_id,album_id,shown_at) '
+                    'SELECT view_id,?,shown_at FROM discovery_impressions WHERE album_id=? '
+                    'ON CONFLICT(view_id,album_id) WHERE album_id IS NOT NULL DO UPDATE '
+                    'SET shown_at=MIN(shown_at,excluded.shown_at)', (target, previous))
+                self.conn.execute('DELETE FROM discovery_impressions WHERE album_id=?', (previous,))
+                for row in inputs['legacy']:
+                    if row['album_id'] == previous:
+                        provenance.retain_legacy(self.conn, 'album', target,
+                            row['offered_count'], row['first_shown'], row['last_shown'])
+                self.conn.execute('DELETE FROM discovery_legacy_offers WHERE album_id=?', (previous,))
+                provenance.refresh_counts(self.conn, 'album', target)
+
     @synchronized
     def remove_spotify_origins(self):
         from yt_playlist.core.discovery_sources import remove_spotify_artists

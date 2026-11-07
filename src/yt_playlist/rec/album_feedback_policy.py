@@ -20,6 +20,13 @@ def validate_replacement(previous, now):
         raise ValueError('Feedback precedes the retained response')
 
 
+def merged_withdrawals(rows, now):
+    ordered = sorted(rows, key=lambda row: (row['created_at'], row['source_browse_id'], row['id']))
+    winners = {row['account_id']: row['id'] for row in ordered}
+    return [(max(now, row['created_at']), row['id']) for row in ordered
+            if winners[row['account_id']] != row['id']]
+
+
 def action_id(kind):
     return uuid.uuid4().hex if kind != 'clear' else None
 

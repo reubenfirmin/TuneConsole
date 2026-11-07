@@ -56,12 +56,13 @@ def test_preopened_readers_and_real_callers_use_exact_selected_receipts(installe
             identity = stage(owner, store.conn)
             owner.publish(store.conn, stage=identity)
             assert owner.selected(other.conn) == identity
-        original = preparation.read_original
+        original = other.settings.files.read
         seen = []
-        def read(conn, name, header):
-            seen.append(header['source'])
-            return original(conn, name, header)
-        monkeypatch.setattr(preparation, 'read_original', read)
+        def read(reference, *, surface, chunk_key):
+            assert not other.conn.in_transaction
+            seen.append(surface)
+            return original(reference, surface=surface, chunk_key=chunk_key)
+        monkeypatch.setattr(other.settings.files, 'read', read)
         for key, raw in originals.items():
             assert other.settings.get_setting(key) == raw
         assert set(seen) == set(originals)

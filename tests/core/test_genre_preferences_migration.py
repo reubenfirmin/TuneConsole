@@ -1,20 +1,69 @@
 """Keyed preferences preserve disabled defaults and deliberate custom choices."""
+from contextlib import closing
 import sqlite3
 
 import pytest
 
+from tests.genre_catalog_support import bound_catalog
 from yt_playlist.core.migrations import migrate, registry, regular
-from yt_playlist.core.migrations.runner import MigrationError, validate_version
+from yt_playlist.core.migrations.runner import Context, MigrationError, validate_version
+from yt_playlist.core import genre_identity, schema_admission, schema_definition
 from yt_playlist.core.store import Store
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These SQL-only cases never start web lifespan or background sync.
+
+    Override the global web fixture so a preference conversion does not import
+    and construct the entire web application just to disable an unused worker.
+    """
+
+
 @pytest.fixture
-def predecessor(tmp_path, _pristine_installed_schema):
+def bounded_vocabulary(monkeypatch):
+    bound_catalog(monkeypatch)
+
+
+@pytest.fixture
+def bounded_current_store(store, bounded_vocabulary):
+    # Build the shared current schema before replacing this lower-layer input;
+    # later modules must still receive its complete unmodified catalog.
+    return store
+
+
+@pytest.fixture
+def predecessor(tmp_path, bounded_vocabulary):
     store = Store(tmp_path / 'genres.db')
-    _pristine_installed_schema(84).backup(store.conn)
-    store._bind_repositories()
-    yield store
-    store.conn.close()
+    try:
+        # Start from the shipped literal installed-v79 definition, not today's
+        # bootstrap with an older version label. Construct the five unrelated
+        # predecessor changes from their real definitions in one fixture
+        # transaction; the v85 runner still performs its own admission checks.
+        with closing(sqlite3.connect(':memory:')) as source:
+            source.execute('PRAGMA foreign_keys=ON')
+            source.execute('BEGIN')
+            for sql in schema_admission.reference()['statements']:
+                source.execute(sql)
+            source.executemany('INSERT INTO schema_migrations VALUES (?,?,1)',
+                [(item.version, item.name) for item in registry.MIGRATIONS[:79]])
+            source.executemany('INSERT INTO settings VALUES (?,?)',
+                               schema_definition.SEED_SETTINGS.items())
+            for sql in schema_definition.INITIAL_STATE:
+                source.execute(sql)
+            genre_identity.seed_catalog(source)
+            for item in registry.MIGRATIONS[79:84]:
+                with schema_definition.migration_definitions(item.version):
+                    item.apply(source, Context(1.))
+                source.execute('INSERT INTO schema_migrations VALUES (?,?,1)',
+                               (item.version, item.name))
+            source.commit()
+            source.backup(store.conn)
+        store.conn.execute('PRAGMA journal_mode=WAL')
+        store._bind_repositories()
+        yield store
+    finally:
+        store.conn.close()
 
 
 def test_upgrade_restart_and_seeding_keep_disabled_defaults_and_custom(predecessor):
@@ -35,7 +84,7 @@ def test_upgrade_restart_and_seeding_keep_disabled_defaults_and_custom(predecess
     validate_version(predecessor.conn, 85)
     reopened = Store(predecessor._db_path)
     try:
-        reopened.init_schema()
+        reopened.init_schema(defer_metadata=True)
         reopened.genres.configure_catalog()
         assert reopened.genres.get_genre_whitelist() == before
         regular.validate(reopened.conn)
@@ -55,7 +104,8 @@ def test_ambiguous_predecessor_retains_all_original_rows(predecessor):
     assert list(predecessor.conn.iterdump()) == before
 
 
-def test_renamed_identity_keeps_preference_and_repeated_configuration(store):
+def test_renamed_identity_keeps_preference_and_repeated_configuration(bounded_current_store):
+    store = bounded_current_store
     store.genres.configure_catalog()
     store.genres.remove_genre('Rock')
     with store.conn:
@@ -74,7 +124,8 @@ def test_renamed_identity_keeps_preference_and_repeated_configuration(store):
     "UPDATE genre_preferences SET origin='guess'",
     "DELETE FROM genre_catalog WHERE key='rock'",
 ])
-def test_direct_sql_rejects_invalid_preferences_and_referenced_identity(store, sql):
+def test_direct_sql_rejects_invalid_preferences_and_referenced_identity(bounded_current_store, sql):
+    store = bounded_current_store
     store.genres.configure_catalog()
     with pytest.raises(sqlite3.IntegrityError):
         with store.conn:

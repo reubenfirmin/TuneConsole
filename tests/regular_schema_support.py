@@ -1,6 +1,6 @@
 """Exact regular-admission oracle for the installed v103/v107 fixtures."""
 from yt_playlist.core import (
-    album_feedback_outbox,
+    album_feedback_outbox, association_work,
     collection_recovery_epoch, credit_retention, embedding_files, group_checkpoint_retention, group_progress, group_retention_progress,
     legacy_journals, metadata_native, metadata_runtime, mix_choices,
     mode_retention, policy_history, profile_files, recommendation_revalidations, served_facts, vibe_provenance,
@@ -34,6 +34,7 @@ CHANGE_NAMES = (
     'bounded_embedding_basis_guards',
     'durable_initial_tv_launches',
     'masked_vibe_metadata_guards',
+    'resumable_recording_associations',
 )
 
 
@@ -53,12 +54,13 @@ def admit_regular_schema(store, *, clock=1234):
     before = captured(conn)
     assert 'schema_changes' not in before
     assert tuple(change.name for change in regular.CHANGES) == CHANGE_NAMES
-    assert tuple(change.version for change in regular.CHANGES) == tuple(range(1, 35))
+    assert tuple(change.version for change in regular.CHANGES) == tuple(range(1, 36))
     assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] in (103, 107)
     definitions = dict(conn.execute('SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL'))
     allowed = {'schema_changes': regular.HISTORY_SQL,
                'metadata_native_delivery_heads': metadata_native.RUNTIME_HEAD_SQL,
                'prediction_provenance': vibe_provenance.SQL,
+               'recording_association_work': association_work.SQL,
                'album_feedback_response_outbox': album_feedback_outbox.SQL,
                'ix_album_feedback_response_pending': album_feedback_outbox.INDEX}
     for declarations in (
@@ -88,6 +90,7 @@ def admit_regular_schema(store, *, clock=1234):
     additions = {name: [] for name, sql in allowed.items()
                  if sql.startswith('CREATE TABLE') and name not in before}
     additions.update({
+        'recording_association_work': [],
         'schema_changes': sorted(((version, name, float(clock))
                                   for version, name in enumerate(CHANGE_NAMES, 1)), key=repr),
         'group_preparation_progress': [tuple(row) for row in conn.execute(

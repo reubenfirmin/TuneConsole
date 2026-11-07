@@ -201,7 +201,7 @@ def test_sql_deadline_interrupts_owner_scan_and_preserves_its_batch(
         finally:
             store.conn.set_trace_callback(None)
     assert interrupted_queries and orphan.exists()
-    assert store.retention.collection_recovery_pending() and store._collection_orphans.batch
+    assert store.retention.collection_recovery_pending() and store.retention.database._collection_orphans.batch
     assert not store.conn.in_transaction
     store.settings.set_setting('after SQL deadline', 'usable')
     finish(store)
@@ -282,7 +282,7 @@ def test_worker_continues_local_batches_without_clients(file_backed_store, monke
             clock[0] += seconds
             store.settings.set_setting('between local batches', str(clock[0]))
             assert len(batches) < 20, 'Local collection did not finish'
-            return len(batches) > 1 and not recovery.pending(store)
+            return len(batches) > 1 and not store.retention.collection_recovery_pending()
 
         def is_set(self):
             return False

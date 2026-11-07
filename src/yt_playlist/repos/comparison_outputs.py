@@ -1,5 +1,5 @@
 """SQL heads, captured modes and file manifests for paired model output."""
-from yt_playlist.core import model_projections
+from yt_playlist.core import group_evidence, model_projections
 from yt_playlist.repos.base import Repo, lookup_read, snapshot_read, synchronized
 
 
@@ -28,3 +28,12 @@ class ComparisonOutputsRepo(Repo):
     def publish(self, prepared, durable, generation, roots):
         with self.conn.atomic(join=True):
             return model_projections.publish_files(self.conn, prepared, durable, generation=generation, roots=roots)
+
+    @synchronized
+    def publish_legacy(self, surface, raw, at, roots):
+        with self.conn.atomic(join=True):
+            if roots is not None:
+                group_evidence.register_prepared(self.conn, *roots)
+            self.conn.execute('INSERT INTO rec_proposals(surface,payload,built_at) VALUES (?,?,?) '
+                'ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload,built_at=excluded.built_at',
+                (surface, raw, at))

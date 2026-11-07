@@ -7,7 +7,7 @@ import pytest
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.sync import LibrarySync
 from yt_playlist.core.collection_recovery import RecoveryFiles
-from yt_playlist.repos.settings import SettingsRepo
+from yt_playlist.controllers.settings import Settings
 from yt_playlist.repos.sync import SyncRepo
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -18,7 +18,7 @@ def sync():
     repository = create_autospec(SyncRepo, instance=True, spec_set=True)
     repository.state_facts.return_value = {'raw': '{}'}
     repository.has_attempt_state.return_value = True
-    settings = create_autospec(SettingsRepo, instance=True, spec_set=True)
+    settings = create_autospec(Settings, instance=True, spec_set=True)
     files = create_autospec(RecoveryFiles, instance=True, spec_set=True)
     files.publish.return_value = ('result.json', 'digest', 123)
     return LibrarySync(repository, settings, files, Mock())

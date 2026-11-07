@@ -23,7 +23,15 @@ def finish(job, conn, size=128):
 
 
 def seed(store):
-    store.tracks.upsert_track('visual00001', 'Song', 'Artist', None, 100)
+    from tests.recommendation_support import seed_publication_subjects
+    from yt_playlist.core import artists
+    from yt_playlist.core.db_writes import atomic_write
+
+    seed_publication_subjects(store, [{'key': 'song|artist', 'video_id': 'visual00001',
+                                     'title': 'Song', 'artist': 'Artist', 'duration_s': 100}])
+    with atomic_write(store):
+        artists.observe(store.conn, store.conn.execute(
+            "SELECT id FROM recordings WHERE identity_key='song|artist'").fetchone()[0], 'Artist')
     recording = store.conn.execute("SELECT identity_key FROM catalog_tracks WHERE video_id='visual00001'").fetchone()[0]
     values = {'tv_pool': {'schema': 3, 'key': 'original', 'at': 8,
         'items': [{**video(1), 'source_key': recording}, video(2)], 'attempted': [recording, 'missing|artist']},

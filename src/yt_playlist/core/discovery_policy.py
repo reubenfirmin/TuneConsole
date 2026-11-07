@@ -12,6 +12,18 @@ SPOTIFY_MIN_PLAYS = 3
 DAY = 86400
 
 
+def merged_album_membership(rows, target):
+    if not rows:
+        return None
+    result = {**rows[0], 'album_id': target}
+    for field in ('found_at', 'first_shown', 'legacy_first_shown', 'last_shown', 'legacy_last_shown'):
+        values = [row[field] for row in rows if row[field] is not None]
+        result[field] = (max(values) if 'last' in field else min(values)) if values else None
+    for field in ('offered_count', 'legacy_offered_count'):
+        result[field] = sum(row[field] for row in rows)
+    return result
+
+
 def starter_tracks(rows):
     groups = {}
     for row in rows:

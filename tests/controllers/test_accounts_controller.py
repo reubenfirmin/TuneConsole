@@ -9,7 +9,7 @@ from tests.repository_mock_support import no_database
 from yt_playlist.controllers.accounts import Accounts
 from yt_playlist.core.config import AccountConfig
 from yt_playlist.repos.accounts import AccountRepo
-from yt_playlist.repos.settings import SettingsRepo
+from yt_playlist.controllers.settings import Settings
 
 pytestmark = pytest.mark.usefixtures('no_database')
 
@@ -25,7 +25,7 @@ def accounts():
     repository.account_rows.return_value = [row()]
     repository.account_by_label.return_value = None
     repository.has_auth_state.return_value = True
-    settings = create_autospec(SettingsRepo, instance=True, spec_set=True)
+    settings = create_autospec(Settings, instance=True, spec_set=True)
     return Accounts(repository, settings, paused=Mock(return_value=False),
                     maintenance_accounts=Mock(return_value=None))
 

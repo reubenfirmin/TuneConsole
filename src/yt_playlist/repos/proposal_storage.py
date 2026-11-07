@@ -10,9 +10,9 @@ from functools import partial
 import json
 from typing import Callable
 
-from yt_playlist.core import (album_note_outputs, album_note_requests, choice_learning_state,
-    home_offers, home_outputs, library_pool_state, listening_outputs, model_comparison_state,
-    model_projections, recommendation_requests, recommendation_work,
+from yt_playlist.core import (album_note_requests, choice_learning_state,
+    home_offers, library_pool_state, model_comparison_state,
+    recommendation_requests, recommendation_work,
     tv_recommendation_state)
 from yt_playlist.core.db_revisions import keyed_reads
 from yt_playlist.repos import proposal_cache
@@ -23,6 +23,7 @@ class Storage:
     encoded: Callable[[], str | None]
     present: Callable[[], bool]
     prepare: Callable[[object, float | None, int | None], Callable[[], object]] | None = None
+    manifest: Callable[[], dict | None] | None = None
 
 
 def _json(reader):
@@ -61,18 +62,45 @@ def _tv_present(conn, surface, header=None):
     return _exists(conn, table, predicate, parameters)
 
 
-def _document(conn, owner, revision, present):
+def _original_manifest(header, parts, prefix=''):
+    return {'content_digest': header['raw_digest'], 'total_bytes': header['raw_size'],
+            'part_count': header['part_count'], 'prefix': prefix,
+            'parts': [dict(part) for part in parts]}
+
+
+def _ranked_document(conn, owner, revision, surface):
+    from yt_playlist.core.preparation.ranked_state import table
+
+    header = owner.capture(conn, revision, surface)
+    def manifest():
+        if header is None:
+            return None
+        parts = conn.execute('SELECT CAST(position AS TEXT) AS chunk_key,filename,content_digest,byte_size FROM '+
+            table(surface, 'parts')+" WHERE surface=? AND preparation_revision=? AND kind='original' "
+            'ORDER BY position LIMIT 2049', (surface, header['preparation_revision'])).fetchall()
+        return _original_manifest(header, parts, 'original:')
+    return Storage(lambda: None, lambda: header is not None, manifest=manifest)
+
+
+def _document(conn, owner, revision, present, *, file_backed=False):
     # A selected empty generation owns the miss; it must not expose stale bytes.
     generation = conn.execute('SELECT generation FROM '+owner.tables[0]+' WHERE revision=?',
                               (revision,)).fetchone()[0]
     header = (conn.execute('SELECT * FROM '+owner.preparation.tables(owner.source)[0]+
         ' WHERE source=? AND '+owner.generation_column+'=?', (owner.source, generation)).fetchone()
         if generation is not None else None)
-    return Storage(partial(owner.value, conn, revision),
-                   lambda: header is not None and present(header))
+    def manifest():
+        if header is None:
+            return None
+        parts = conn.execute('SELECT CAST(position AS TEXT) AS chunk_key,filename,digest AS content_digest,byte_size FROM '+
+            owner.preparation.tables(owner.source)[1]+' WHERE preparation_revision=? ORDER BY position LIMIT 33',
+            (generation,)).fetchall()
+        return _original_manifest(header, parts)
+    return Storage((lambda: None) if file_backed else partial(owner.value, conn, revision),
+                   lambda: header is not None and present(header), manifest=manifest if file_backed else None)
 
 
-def _legacy(store, surface, *, validate_home=False):
+def _legacy(store, surface):
     conn = store.conn
     def encoded():
         if surface in proposal_cache.SURFACES:
@@ -84,20 +112,14 @@ def _legacy(store, surface, *, validate_home=False):
     def present():
         if surface in proposal_cache.SURFACES:
             if getattr(store, '_recommendation_files', False):
-                return store.recommendations.head('home' if surface == 'mode_bundles' else 'fresh') is not None
+                return _exists(conn, 'recommendation_heads', 'surface=?',
+                               ('home' if surface == 'mode_bundles' else 'fresh',))
             build = proposal_cache.head(conn, surface, store=store)
             if build is not None:
                 return bool(build[3])
         return _exists(conn, 'rec_proposals', "surface=? AND payload NOT IN ('null','{}')", (surface,))
     def prepare(raw, now, revision):
-        value = None
-        if getattr(store, '_compact_group_files', False):
-            value = (home_outputs.prepare(surface, raw, now).value
-                     if validate_home and surface in home_outputs.SURFACES else json.loads(raw))
         def write():
-            if getattr(store, '_compact_group_files', False):
-                from yt_playlist.core import prepared_references
-                prepared_references.replace_prepared(store, surface, value, now)
             conn.execute('INSERT INTO rec_proposals(surface,payload,built_at) VALUES (?,?,?) '
                 'ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload,built_at=excluded.built_at',
                 (surface, raw, now))
@@ -105,23 +127,15 @@ def _legacy(store, surface, *, validate_home=False):
     return Storage(encoded, present, prepare)
 
 
-def select(store, surface, *, writing=False, validate_home=False):
+def select(store, surface, *, writing=False):
     """Resolve ownership once for encoded reads, cheap presence or publication."""
     conn = store.conn
     if surface.startswith('model_pair:'):
-        if store._model_projections:
-            def prepare(raw, now, revision):
-                value = model_projections.prepare(conn, surface, json.loads(raw), now, input_revision=revision)
-                return partial(model_projections.publish, conn, value, store=store)
-            return Storage(_json(partial(model_projections.read, conn, surface)),
-                lambda: _exists(conn, 'model_pair_heads', 'run_id=? AND arm=? AND format=?',
-                                model_projections.address(surface)), prepare)
         if not writing:
             from yt_playlist.core.preparation.pair_publication import OWNER
             revision = OWNER.selected(conn)
             if revision is not None:
-                return Storage(partial(OWNER.value, conn, revision, surface),
-                               lambda: OWNER.capture(conn, revision, surface) is not None)
+                return _ranked_document(conn, OWNER, revision, surface)
     elif surface in model_comparison_state.SURFACES:
         if store._model_comparison_state:
             return _typed(conn, surface, model_comparison_state,
@@ -138,8 +152,7 @@ def select(store, surface, *, writing=False, validate_home=False):
             from yt_playlist.core.preparation.clicked_publication import OWNER
             revision = OWNER.selected(conn)
             if revision is not None:
-                return Storage(partial(OWNER.value, conn, revision, surface),
-                               lambda: OWNER.capture(conn, revision, surface) is not None)
+                return _ranked_document(conn, OWNER, revision, surface)
     elif surface in tv_recommendation_state.SURFACES:
         if store._tv_recommendations:
             return _typed(conn, surface, tv_recommendation_state,
@@ -149,7 +162,7 @@ def select(store, surface, *, writing=False, validate_home=False):
             owner = tv_publication.SOURCES[surface]
             revision = owner.selected(conn)
             if revision is not None:
-                return _document(conn, owner, revision, partial(_tv_present, conn, surface))
+                return _document(conn, owner, revision, partial(_tv_present, conn, surface), file_backed=True)
     elif surface in choice_learning_state.SURFACES:
         if store._choice_learning:
             return _typed(conn, surface, choice_learning_state,
@@ -190,17 +203,22 @@ def select(store, surface, *, writing=False, validate_home=False):
         return Storage(_json(partial(recommendation_work.read, conn, surface)),
             lambda: _exists(conn, prefix+table, 'id=1'),
             lambda raw, now, revision: partial(recommendation_work.write, conn, surface, json.loads(raw), now))
-    return _legacy(store, surface, validate_home=validate_home)
+    return _legacy(store, surface)
 
 
-def read(store, surface, *, presence=False):
+def document(store, surface):
     with keyed_reads(store, 'rec_proposals', (surface,)):
         owner = select(store, surface)
-        return owner.present() if presence else owner.encoded()
+        return (None, owner.manifest()) if owner.manifest is not None else (owner.encoded(), None)
+
+
+def present(store, surface):
+    with keyed_reads(store, 'rec_proposals', (surface,)):
+        return select(store, surface).present()
 
 
 def publish(store, surface, raw, now, *, input_revision=None, standalone=False):
-    owner = select(store, surface, writing=True, validate_home=not standalone)
+    owner = select(store, surface, writing=True)
     write = owner.prepare(raw, now, input_revision)
     if standalone and not store.conn.in_transaction:
         store.conn.execute('BEGIN IMMEDIATE')

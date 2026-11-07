@@ -33,7 +33,26 @@ def get(conn,key,default=None):
                                      kind='taste-settings',owner=owner)
 
 
+def prepare_models(values):
+    result = {}
+    for key, value in values.items():
+        owner, column = FIELDS[key]
+        if column == 'model' and value:
+            if not isinstance(value, str) or not isinstance(json.loads(value), dict):
+                raise ValueError('Content encoder must be a supported JSON object')
+            result[owner] = value
+    return result
+
+
 def put(conn,values):
+    from . import model_reads
+    references = {owner: collection_recovery.publish(conn, 'taste-settings', owner, value)
+                  for owner, value in prepare_models(values).items()} if model_reads.native(conn) else {}
+    register(conn, values, references)
+
+
+def register(conn, values, references):
+    """Persist model fields using references prepared outside the SQL owner."""
     from . import model_reads as model_publication
     if not model_publication.native(conn):
         conn.executemany('INSERT INTO main.settings(key,value) VALUES (?,?) '
@@ -50,10 +69,7 @@ def put(conn,values):
                 continue
             if column=='model':
                 if value:
-                    if not isinstance(value,str) or not isinstance(json.loads(value),dict):
-                        raise ValueError('Content encoder must be a supported JSON object')
-                    fields['recovery_filename'],fields['recovery_digest'],fields['recovery_bytes'] = collection_recovery.publish(
-                        conn,'taste-settings',owner,value)
+                    fields['recovery_filename'],fields['recovery_digest'],fields['recovery_bytes'] = references[owner]
                 else:
                     fields.update(recovery_filename=None,recovery_digest=None,recovery_bytes=None)
             else:

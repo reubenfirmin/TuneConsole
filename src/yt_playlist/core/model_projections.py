@@ -136,6 +136,8 @@ def retire(conn, identity):
 
 def publish(conn, prepared, *, store=None, generation=None, historical=False):
     from yt_playlist.controllers import recommendation_import
+    if not conn.in_transaction or not isinstance(prepared, Prepared):
+        raise ValueError('Comparison publication requires prepared output and its owning transaction')
     if prepared.plan is not None and generation is None:
         generation = recommendation_import.import_plan(conn, prepared.plan, prepared.plan.created_at)
     roots = store.group_evidence.prepare_references(prepared.surface, prepared.value, prepared.at,

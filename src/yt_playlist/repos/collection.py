@@ -3,7 +3,7 @@ library views that power the collection pages.
 """
 import json
 from contextlib import contextmanager
-from yt_playlist.core import artists as artist_catalog, albums as album_catalog, album_aliases, album_memberships, album_tracklists
+from yt_playlist.core import artists as artist_catalog, albums as album_catalog, album_memberships, album_tracklists
 
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
 
@@ -355,13 +355,6 @@ class CollectionRepo(Repo):
         return [dict(row) for row in self.conn.execute(
             "SELECT p.provider_id browse_id,a.title,a.artist FROM albums a "
             "JOIN album_primary_provider_ids p ON p.album_id=a.id AND p.provider='youtube'")]
-
-    @synchronized
-    def observe_album_representation(self, browse_id, album, *, now=None):
-        with self.conn:
-            if not self.conn.in_transaction:
-                self.conn.execute('BEGIN IMMEDIATE')
-            return album_aliases.observe(self.conn, browse_id, album, now=now)
 
     @synchronized
     def claim_album_alias_check(self, first, second, now, *, expire_before, retry_before):

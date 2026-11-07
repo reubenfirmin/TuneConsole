@@ -8,7 +8,7 @@ from yt_playlist.controllers.recommendation_eligibility import RecommendationEli
 from yt_playlist.rec import candidate_policy
 from yt_playlist.repos.rec_candidates import RecCandidatesRepo
 from yt_playlist.repos.rec_eligibility import RecEligibilityRepo
-from yt_playlist.repos.settings import SettingsRepo
+from yt_playlist.controllers.settings import Settings
 
 pytestmark = pytest.mark.usefixtures('no_database')
 
@@ -55,7 +55,7 @@ def test_playlist_completion_supplies_artist_weight(candidates):
 
 def test_eligibility_resolves_config_and_feedback_semantics_before_querying():
     repository = create_autospec(RecEligibilityRepo, instance=True, spec_set=True)
-    settings = create_autospec(SettingsRepo, instance=True, spec_set=True)
+    settings = create_autospec(Settings, instance=True, spec_set=True)
     settings.get_setting.return_value = '12'
     eligibility = RecommendationEligibility(repository, settings)
     assert eligibility.maximum_duration() == 720

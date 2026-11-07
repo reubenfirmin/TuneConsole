@@ -25,6 +25,13 @@ class AlbumFeedback:
     def original(self):
         return self._original(self.repository.original_facts())
 
+    def merge_albums(self, target, retired, now):
+        if not self.repository.uses_rows():
+            return
+        with self.repository.transaction():
+            rows = self.repository.merge_inputs(target, retired)
+            self.repository.apply_merge(target, retired, policy.merged_withdrawals(rows, now))
+
     @contextmanager
     def protection(self, capture=None):
         with self.fence(wait_seconds=0):

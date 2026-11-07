@@ -9,6 +9,7 @@ import pytest
 
 from tests.core.test_predecessor_writes import installed
 from tests.comparison_support import legacy_projection
+from tests.recommendation_support import seed_publication_subjects
 from yt_playlist.core import fao, library_pool_state, model_projections, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import ranked_state as preparation
@@ -26,7 +27,8 @@ def finish(job, conn, size=128):
 
 
 def seed(store, count=4, *, lane_counts=None):
-    store.tracks.upsert_track('known-video', 'Known', 'Artist', None, 100)
+    seed_publication_subjects(store, [{'key': 'known|artist', 'video_id': 'known-video',
+                                     'title': 'Known', 'artist': 'Artist', 'duration_s': 100}])
     store.rec_ledger.record_serving_policy('ranked-policy', {'algorithm': 'captured'}, 1)
     run_id = store.model_selection.start_selection(1, {'kind': 'product'})
     def candidates(amount):

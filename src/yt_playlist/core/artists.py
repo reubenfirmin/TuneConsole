@@ -6,7 +6,8 @@ from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core import artist_credits, legacy_evidence
 from yt_playlist.core.artist_keys import canonical_id, lookup
 from yt_playlist.core.discovery_sources import reconcile_artist as reconcile_discovery_artist
-from yt_playlist.repos import artist_state
+from yt_playlist.core.artist_reconciliation import latest
+from yt_playlist.core.recommendation_invalidation import artist_reconciled
 from yt_playlist.util.matching import normalize
 
 
@@ -20,6 +21,30 @@ def ambiguous_context(conn, artist_id):
         return bool(conn.execute('SELECT 1 FROM artist_ambiguities WHERE artist_id=?', (artist_id,)).fetchone())
     return bool(conn.execute('SELECT 1 FROM identity_state_archive WHERE kind=? AND source_id=?',
                              ('ambiguous_album_artist',str(artist_id))).fetchone())
+
+
+def _reconcile_feature_state(conn, previous, target, source):
+    """Compatibility workflow for offline catalog preparation."""
+    conn.execute('UPDATE rec_feedback SET artist_id=? WHERE artist_id=?', (target, previous))
+    rows = [dict(row) for row in conn.execute(
+        'SELECT * FROM rec_artist_similar WHERE artist_id IN (?,?)', (previous, target))]
+    for row in rows:
+        legacy_evidence.retain(conn, 'artist_reconcile:rec_artist_similar',
+            json.dumps([previous, target, row['artist']]), json.dumps(row), source)
+    winner = latest(rows, 'fetched_at', target, legacy=True)
+    if winner is not None:
+        conn.execute('DELETE FROM rec_artist_similar WHERE artist_id IN (?,?)', (previous, target))
+        conn.execute('INSERT INTO rec_artist_similar (' + ','.join(winner) + ') VALUES (' +
+                     ','.join('?' for _ in winner) + ')', tuple(winner.values()))
+    edges = conn.execute('SELECT * FROM artist_similarity_targets WHERE source_artist_id=? OR target_artist_id=?',
+                         (previous, previous)).fetchall()
+    conn.execute('DELETE FROM artist_similarity_targets WHERE source_artist_id=? OR target_artist_id=?',
+                 (previous, previous))
+    conn.executemany('INSERT INTO artist_similarity_targets VALUES (?,?,?) '
+        'ON CONFLICT(source_artist_id,target_artist_id) DO UPDATE SET weight=MAX(weight,excluded.weight)',
+        [(target if edge['source_artist_id'] == previous else edge['source_artist_id'],
+          target if edge['target_artist_id'] == previous else edge['target_artist_id'], edge['weight']) for edge in edges])
+    artist_reconciled(conn)
 
 
 def reconcile_provisional(conn, previous, target, *, source, now=None):
@@ -52,7 +77,7 @@ def reconcile_provisional(conn, previous, target, *, source, now=None):
     conn.execute('INSERT OR IGNORE INTO artist_aliases SELECT ?,alias,source FROM artist_aliases WHERE artist_id=?',
                  (target,previous))
     reconcile_discovery_artist(conn,previous,target,source=source)
-    artist_state.reconcile_artist(conn,previous,target,source=source)
+    _reconcile_feature_state(conn, previous, target, source)
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name='spotify_history_listens'").fetchone():
         conn.execute('UPDATE main.spotify_history_listens SET artist_id=? WHERE artist_id=?', (target,previous))
 

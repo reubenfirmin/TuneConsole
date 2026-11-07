@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -61,3 +62,24 @@ def test_discover_modes_cold_start():
     assert tm.discover_modes(store, vector_space=(
         ['a|1'], np.ones((1, 4), dtype=np.float32), {'a|1': 0})) == []
     store.genres.feature_axes.assert_not_called()
+
+
+@pytest.mark.parametrize('count', [79, 80], ids=['below-admission', 'at-admission'])
+def test_mode_fit_keeps_the_eighty_recording_admission_boundary(count):
+    keys = [f'jazz|{index}' for index in range(count)]
+    matrix = np.tile(np.array([1., 0.], dtype=np.float32), (count, 1))
+    store = _reader()
+    modes = tm.discover_modes(store, k=1, min_members=8,
+        vector_space=(keys, matrix, {key: index for index, key in enumerate(keys)}))
+    if count == 79:
+        assert modes == []
+        store.genres.feature_axes.assert_not_called()
+    else:
+        assert len(modes) == 1
+        mode = modes[0]
+        assert mode['size'] == 80
+        assert mode['member_keys'] == keys
+        assert mode['families'] == [('jazz', 80)]
+        assert set(mode['rep_keys']) <= set(keys)
+        assert len(mode['rep_keys']) == 6
+        np.testing.assert_array_equal(mode['centroid'], [1., 0.])

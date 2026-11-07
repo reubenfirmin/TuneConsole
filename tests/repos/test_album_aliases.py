@@ -128,23 +128,27 @@ def test_retained_replaced_release_order_prevents_alias_merge(store):
         (store.collection.album_id(OLD),)).fetchone()[0]==2
 
 
-def test_interrupted_reconciliation_rolls_back_all_memberships_and_identity_changes(store, monkeypatch):
+def test_interrupted_collection_merge_keeps_identity_and_memberships_retryable(store, monkeypatch):
     payload = release()
     for bid in (OLD, ALIAS):
         store.collection.add_saved_album({'browse': bid, 'title': payload['title'], 'artist': 'All Them Witches'})
     store.collection.observe_album_representation(OLD, payload)
-    before = list(store.conn.iterdump())
-    merge = album_aliases._merge
+    before = [tuple(row) for row in store.conn.execute('SELECT * FROM unattributed_album_memberships')]
+    repository = store.collection.aliases.repository
+    merge = repository._move_memberships
 
     def interrupted(*args):
         merge(*args)
         raise RuntimeError('interrupted reconciliation')
 
-    monkeypatch.setattr(album_aliases, '_merge', interrupted)
+    monkeypatch.setattr(repository, '_move_memberships', interrupted)
     with pytest.raises(RuntimeError, match='interrupted reconciliation'):
         store.collection.observe_album_representation(ALIAS, payload)
-    assert list(store.conn.iterdump()) == before
+    assert [tuple(row) for row in store.conn.execute('SELECT * FROM unattributed_album_memberships')] == before
     assert store.collection.album_id(OLD) != store.collection.album_id(ALIAS)
+    monkeypatch.setattr(repository, '_move_memberships', merge)
+    assert store.collection.observe_album_representation(ALIAS, payload)
+    assert store.collection.album_id(OLD) == store.collection.album_id(ALIAS)
 
 
 def test_discovery_state_and_pending_tiles_resolve_either_alias_once(store):
@@ -159,6 +163,41 @@ def test_discovery_state_and_pending_tiles_resolve_either_alias_once(store):
     assert store.discovery.get_discovered_albums()[0]['offered_count'] == 1
     assert store.discovery.delete_discovered_albums([ALIAS]) == 1
     assert not store.discovery.get_discovered_albums()
+
+
+def test_retry_after_owner_commits_does_not_duplicate_discovery_or_feedback(store, monkeypatch):
+    store.accounts.upsert_account('Main', 'main.json', None, True)
+    for index, browse in enumerate((OLD, ALIAS)):
+        store.discovery.upsert_discovered_album(browse, 'All Them Witches', release()['title'], '2015', None, 1)
+        store.discovery.record_discovery_impressions('album', [browse], 'same-view', 10)
+        store.discovery.record_discovery_impressions('album', [browse], browse, 11 + index)
+        store.album_feedback.replace(browse, 'known' if index == 0 else 'more', 20 + index)
+    target, retired = store.collection.album_id(OLD), store.collection.album_id(ALIAS)
+    store.collection.observe_album_representation(OLD, release(), now=30)
+    repository = store.collection.aliases.repository
+    apply_merge = repository.apply_merge
+
+    def interrupted(*args):
+        assert not store.conn.in_transaction
+        raise RuntimeError('before identity publication')
+
+    monkeypatch.setattr(repository, 'apply_merge', interrupted)
+    with pytest.raises(RuntimeError, match='before identity publication'):
+        store.collection.observe_album_representation(ALIAS, release(), now=31)
+    assert store.collection.album_id(ALIAS) == retired
+    assert store.conn.execute('SELECT COUNT(*) FROM discovery_impressions WHERE album_id=?', (target,)).fetchone()[0] == 3
+    assert not store.conn.execute('SELECT 1 FROM discovery_impressions WHERE album_id=?', (retired,)).fetchone()
+    responses = [tuple(row) for row in store.conn.execute('SELECT * FROM album_feedback ORDER BY id')]
+    assert len(responses) == 2
+    assert store.conn.execute('SELECT source_browse_id FROM album_feedback WHERE withdrawn_at IS NULL').fetchone()[0] == ALIAS
+    original = legacy_evidence.original(store.conn, 'album', 'album_alias_reconciliation', str(retired))
+    assert len(json.loads(original)['album_discovery_memberships']) == 2
+    monkeypatch.setattr(repository, 'apply_merge', apply_merge)
+    assert store.collection.observe_album_representation(ALIAS, release(), now=32)
+    assert store.collection.album_id(ALIAS) == target
+    assert [tuple(row) for row in store.conn.execute('SELECT * FROM album_feedback ORDER BY id')] == responses
+    assert store.discovery.get_discovered_albums()[0]['offered_count'] == 3
+    assert legacy_evidence.original(store.conn, 'album', 'album_alias_reconciliation', str(retired)) == original
 
 
 def test_aliases_preserve_repeated_full_occurrences_and_each_frozen_share(store):

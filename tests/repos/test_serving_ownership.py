@@ -38,9 +38,7 @@ def test_proposals_and_policies_commit_before_the_publication_marker(tmp_path, f
         with store.read_snapshot() as snapshot:
             for owner in ("rec_ledger", "rec_proposals", "rec_signals",
                           "playlist_recipes", "artist_similarity"):
-                component = getattr(snapshot.store, owner)
-                repo = (component.repository if owner in ('rec_ledger', 'rec_signals', 'artist_similarity', 'playlist_recipes')
-                        else component)
+                repo = getattr(snapshot.store, owner).repository
                 assert repo.conn is snapshot.store.conn
                 assert repo._lock is snapshot.store._lock
 

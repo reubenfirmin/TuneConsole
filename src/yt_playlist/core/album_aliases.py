@@ -82,41 +82,46 @@ def observe(conn, browse_id, album, *, now=None):
 
 def _compatible(conn, aid, videos):
     from . import album_tracklists
+    revisions = []
     if album_tracklists.available(conn):
-        revisions = conn.execute("SELECT id,status,order_status FROM album_tracklists WHERE album_id=? "
+        rows = conn.execute("SELECT id,status,order_status FROM album_tracklists WHERE album_id=? "
             "AND capture_kind IN ('provider','legacy_full')",(aid,)).fetchall()
-        for revision in revisions:
+        for revision in rows:
             occurrences = conn.execute('SELECT o.position,coalesce(e.video_id,o.raw_source_ref) video_id '
                 'FROM album_track_occurrences o LEFT JOIN album_occurrence_sources s ON s.occurrence_id=o.id '
                 'LEFT JOIN catalog_entries e ON e.id=s.entry_id WHERE o.tracklist_id=? ORDER BY o.position,o.id',
                 (revision['id'],)).fetchall()
-            if any(row['video_id'] not in videos for row in occurrences):
-                return False
-            if revision['status']=='complete' and (revision['order_status']!='known' or
-                    [row['video_id'] for row in occurrences]!=videos):
-                return False
-            if any(row['position'] is not None and (row['position']>=len(videos) or
-                    videos[row['position']]!=row['video_id']) for row in occurrences):
-                return False
+            revisions.append({**dict(revision), 'occurrences': occurrences})
     rows = conn.execute('SELECT t.*,e.video_id FROM album_tracks t '
                         'LEFT JOIN catalog_entries e ON e.id=t.entry_id '
                         'WHERE t.album_id=? ORDER BY t.position IS NULL,t.position,t.id', (aid,)).fetchall()
-    allowed = set(videos)
-    if any(row['video_id'] not in allowed for row in rows):
-        return False  # Includes unresolved recording/key links and historical bonus tracks.
-    if any(not row['is_full'] and row['position'] is not None for row in rows):
+    state = conn.execute('SELECT complete,expected_track_count FROM album_fetch_state WHERE album_id=?',
+                         (aid,)).fetchone()
+    return compatible({'revisions': revisions, 'tracks': rows, 'state': state}, videos)
+
+
+def compatible(inputs, videos):
+    """Require every retained representation to agree with the complete response."""
+    for revision in inputs['revisions']:
+        occurrences = revision['occurrences']
+        if any(row['video_id'] not in videos for row in occurrences):
+            return False
+        if revision['status'] == 'complete' and (revision['order_status'] != 'known' or
+                [row['video_id'] for row in occurrences] != videos):
+            return False
+        if any(row['position'] is not None and (row['position'] >= len(videos) or
+                videos[row['position']] != row['video_id']) for row in occurrences):
+            return False
+    rows, state = inputs['tracks'], inputs['state']
+    if any(row['video_id'] not in videos or (not row['is_full'] and row['position'] is not None) for row in rows):
         return False
     full = [row for row in rows if row['is_full']]
     if full and (any(row['position'] is None for row in full) or
                  [row['video_id'] for row in full] != videos):
         return False
-    state = conn.execute('SELECT complete,expected_track_count FROM album_fetch_state WHERE album_id=?',
-                         (aid,)).fetchone()
     if full and (not state or not state['complete'] or state['expected_track_count'] != len(full)):
         return False
-    if not full and state and state['complete'] and state['expected_track_count']:
-        return False
-    return True
+    return not (not full and state and state['complete'] and state['expected_track_count'])
 
 
 def _merge(conn, target, retired, digest, now):

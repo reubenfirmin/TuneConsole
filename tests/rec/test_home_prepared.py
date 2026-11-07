@@ -1147,7 +1147,7 @@ def test_failed_menu_file_replacement_preserves_last_good_publication(
     def fail(*args, **kwargs):
         raise OSError('Controlled output-volume failure')
 
-    monkeypatch.setattr(home_cache.fao, 'write', fail)
+    monkeypatch.setattr(store.home_cache.files, 'write_cache', fail)
     with pytest.raises(OSError, match='output-volume'):
         home_prepared.prepare_mixes(store, 1001)
     assert home_cache.encoded(store, home_prepared.SURFACE) == original

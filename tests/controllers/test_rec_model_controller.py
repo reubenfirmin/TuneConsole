@@ -15,7 +15,7 @@ from yt_playlist.core import collection_recovery, embeddings
 from yt_playlist.core.rating_feedback import Rating
 from yt_playlist.core.rec_model_policy import VectorChanges
 from yt_playlist.repos.rec_model import RecModelRepo
-from yt_playlist.repos.settings import SettingsRepo
+from yt_playlist.controllers.settings import Settings
 
 pytestmark = pytest.mark.usefixtures('no_database')
 DAY = 86400
@@ -26,7 +26,7 @@ MODEL = json.dumps({'ncat': 1, 'cont': []})
 @pytest.fixture
 def model():
     repo = create_autospec(RecModelRepo, instance=True, spec_set=True)
-    settings = create_autospec(SettingsRepo, instance=True, spec_set=True)
+    settings = create_autospec(Settings, instance=True, spec_set=True)
     events = create_autospec(PlayerEvents, instance=True, spec_set=True)
     genres = create_autospec(Genres, instance=True, spec_set=True)
     vectors = create_autospec(Embeddings, instance=True, spec_set=True)

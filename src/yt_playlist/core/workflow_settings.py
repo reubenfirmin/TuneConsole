@@ -39,16 +39,50 @@ def _gc_owner(key):
 
 def gc_save(conn,account,remote,value,*,legacy=False):
     conn.execute('UPDATE playlist_gc_attempts SET revision=revision WHERE 0')
-    prior = conn.execute('SELECT id FROM playlist_gc_attempts WHERE captured_account_id=? AND provider_playlist_id_snapshot=?',
-                         (account,remote)).fetchone()
+    prepared = prepare_gc(account, remote, value, write_facts(conn, 'gc', account, remote), legacy=legacy)
+    reference = collection_recovery.publish(conn,'playlist-gc',prepared['identity'],value) if value is not None else None
+    register_gc(conn, prepared, reference)
+
+
+def write_facts(conn, kind, account, target):
+    from . import entity_names
+    if kind == 'gc':
+        table = 'playlist_gc_attempts'
+        prior = conn.execute('SELECT * FROM playlist_gc_attempts WHERE captured_account_id=? AND provider_playlist_id_snapshot=?',
+                             (account, target)).fetchone()
+    else:
+        table = 'spotify_transfer_receipts'
+        prior = conn.execute('SELECT * FROM spotify_transfer_receipts WHERE source_kind=? AND captured_account_id IS ? AND fingerprint=?',
+                             (kind, account, target)).fetchone()
+    known = conn.execute(f'SELECT id FROM {entity_names.accounts(conn)} WHERE id=?', (account,)).fetchone() if account is not None else None
+    return {'prior': dict(prior) if prior else None, 'known': known[0] if known else None,
+            'next_id': conn.execute('SELECT COALESCE(MAX(id),0)+1 FROM '+table).fetchone()[0]}
+
+
+def prepare_gc(account, remote, value, facts, *, legacy=False):
+    prior = facts['prior']
+    if value is not None:
+        if not isinstance(value,dict) or value.get('identity')!=account or value.get('ytm')!=remote:
+            raise ValueError('GC receipt disagrees with its captured target')
+        if facts['known'] is None and not legacy:
+            raise ValueError('New workflow receipts require their retained account')
+    return {'account': account, 'remote': remote, 'value': value, 'legacy': legacy,
+            'identity': prior['id'] if prior else facts['next_id'], 'prior_id': prior['id'] if prior else None}
+
+
+def register_gc(conn, prepared, reference):
+    account, remote, value = prepared['account'], prepared['remote'], prepared['value']
     if value is None:
         conn.execute('DELETE FROM playlist_gc_attempts WHERE captured_account_id=? AND provider_playlist_id_snapshot=?',(account,remote))
         return
-    if not isinstance(value,dict) or value.get('identity')!=account or value.get('ytm')!=remote:
-        raise ValueError('GC receipt disagrees with its captured target')
-    known,target_scope = scope(conn,account,remote,legacy=legacy)
-    identity = prior[0] if prior else conn.execute('SELECT COALESCE(MAX(id),0)+1 FROM playlist_gc_attempts').fetchone()[0]
-    reference = collection_recovery.publish(conn,'playlist-gc',identity,value)
+    prior = conn.execute('SELECT id FROM playlist_gc_attempts WHERE captured_account_id=? AND provider_playlist_id_snapshot=?',
+                         (account, remote)).fetchone()
+    if (prior[0] if prior else None) != prepared['prior_id']:
+        raise ValueError('GC receipt changed before it was saved')
+    known,target_scope = scope(conn,account,remote,legacy=prepared['legacy'])
+    identity = prepared['identity']
+    if prior is None and conn.execute('SELECT 1 FROM playlist_gc_attempts WHERE id=?', (identity,)).fetchone():
+        raise ValueError('GC receipt identity was already used')
     conn.execute('INSERT INTO playlist_gc_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET '
         'revision=excluded.revision,attempts=excluded.attempts,last_attempt_at=excluded.last_attempt_at,next_retry_at=excluded.next_retry_at,'
         'phase=excluded.phase,failure_class=excluded.failure_class,error=excluded.error,recovery_filename=excluded.recovery_filename,'
@@ -62,31 +96,67 @@ def gc_values(conn):
     result = {}
     for row in conn.execute('SELECT * FROM playlist_gc_attempts ORDER BY id'):
         value = collection_recovery.read(row['recovery_filename'],row['recovery_digest'],row['recovery_bytes'],kind='playlist-gc',owner=row['id'])
-        for field in ('attempts','last_attempt_at','next_retry_at','phase','failure_class','error'):
-            if field in value:
-                value[field] = row[field]
-        result[_gc_key(row['captured_account_id'],row['provider_playlist_id_snapshot'])] = value
+        result[_gc_key(row['captured_account_id'],row['provider_playlist_id_snapshot'])] = restore_gc(row, value)
     return result
+
+
+def restore_gc(row, value):
+    for field in ('attempts','last_attempt_at','next_retry_at','phase','failure_class','error'):
+        if field in value:
+            value[field] = row[field]
+    return value
 
 
 def receipt_save(conn,kind,account,fingerprint,value,*,legacy=False,expected_revision=None):
     conn.execute('UPDATE spotify_transfer_receipts SET revision=revision WHERE 0')
-    prior = conn.execute('SELECT * FROM spotify_transfer_receipts WHERE source_kind=? AND captured_account_id IS ? AND fingerprint=?',
-                         (kind,account,fingerprint)).fetchone()
+    prepared = prepare_receipt(kind, account, fingerprint, value, write_facts(conn, kind, account, fingerprint),
+                               legacy=legacy, expected_revision=expected_revision)
+    reference = collection_recovery.publish(conn,'spotify-transfer',prepared['identity'],prepared['value'])
+    return register_receipt(conn, prepared, reference)
+
+
+def _check_revision(prior, expected_revision):
     if (expected_revision=='' and prior is not None) or (expected_revision not in (None,'') and (prior is None or prior['revision']!=expected_revision)):
         raise ValueError('Spotify transfer completion belongs to a stale revision')
-    known,target_scope = scope(conn,account,value.get('ytm_playlist_id') if isinstance(value,dict) else None,legacy=legacy)
-    identity = prior['id'] if prior else conn.execute('SELECT COALESCE(MAX(id),0)+1 FROM spotify_transfer_receipts').fetchone()[0]
+
+
+def _check_target(prior, state):
+    if prior and ((prior['marker'] is not None and prior['marker']!=state.get('marker')) or
+                  (prior['provider_playlist_id_snapshot'] is not None and prior['provider_playlist_id_snapshot']!=state.get('ytm_playlist_id'))):
+        raise ValueError('A Spotify receipt cannot change its creation marker or destination')
+
+
+def prepare_receipt(kind, account, fingerprint, value, facts, *, legacy=False, expected_revision=None):
+    prior = facts['prior']
+    _check_revision(prior, expected_revision)
+    if facts['known'] is None and not legacy:
+        raise ValueError('New workflow receipts require their retained account')
     if not isinstance(value,(dict,type(None))):
         raise ValueError('Unsupported Spotify receipt format')
     state = dict(value or {})
     state.pop(TOKEN,None)
-    reference = collection_recovery.publish(conn,'spotify-transfer',identity,value if value is None else state)
-    revision = uuid4().hex
+    _check_target(prior, state)
+    positions = state.get('source_video_ids',[])
+    if not isinstance(positions,list) or any(v is not None and (not isinstance(v,str) or not v) for v in positions):
+        raise ValueError('Unsupported Spotify ordered source slots')
+    return {'kind': kind, 'account': account, 'fingerprint': fingerprint, 'value': None if value is None else state,
+            'legacy': legacy, 'expected_revision': expected_revision, 'revision': uuid4().hex,
+            'identity': prior['id'] if prior else facts['next_id'], 'prior_id': prior['id'] if prior else None}
+
+
+def register_receipt(conn, prepared, reference):
+    kind, account, fingerprint = prepared['kind'], prepared['account'], prepared['fingerprint']
+    state, identity, revision = prepared['value'] or {}, prepared['identity'], prepared['revision']
+    prior = conn.execute('SELECT * FROM spotify_transfer_receipts WHERE source_kind=? AND captured_account_id IS ? AND fingerprint=?',
+                         (kind, account, fingerprint)).fetchone()
+    _check_revision(prior, prepared['expected_revision'])
+    _check_target(prior, state)
+    if (prior['id'] if prior else None) != prepared['prior_id']:
+        raise ValueError('Spotify receipt changed before it was saved')
+    if prior is None and conn.execute('SELECT 1 FROM spotify_transfer_receipts WHERE id=?', (identity,)).fetchone():
+        raise ValueError('Spotify receipt identity was already used')
+    known,target_scope = scope(conn,account,state.get('ytm_playlist_id'),legacy=prepared['legacy'])
     phase = state.get('creation_phase','legacy')
-    if prior and ((prior['marker'] is not None and prior['marker']!=state.get('marker')) or
-                  (prior['provider_playlist_id_snapshot'] is not None and prior['provider_playlist_id_snapshot']!=state.get('ytm_playlist_id'))):
-        raise ValueError('A Spotify receipt cannot change its creation marker or destination')
     conn.execute('INSERT INTO spotify_transfer_receipts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
         'ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,creation_phase=excluded.creation_phase,marker=excluded.marker,'
         'playlist_scope_id=excluded.playlist_scope_id,provider_playlist_id_snapshot=excluded.provider_playlist_id_snapshot,'
@@ -95,8 +165,6 @@ def receipt_save(conn,kind,account,fingerprint,value,*,legacy=False,expected_rev
         (identity,kind,account,known,fingerprint,revision,phase,state.get('marker'),target_scope,state.get('ytm_playlist_id'),
          state.get('complete'),state.get('order_verified'),state.get('updated_at'),state.get('last_run_added'),*reference))
     positions = state.get('source_video_ids',[])
-    if not isinstance(positions,list) or any(v is not None and (not isinstance(v,str) or not v) for v in positions):
-        raise ValueError('Unsupported Spotify ordered source slots')
     conn.execute('DELETE FROM spotify_transfer_items WHERE receipt_id=?',(identity,))
     conn.executemany('INSERT INTO spotify_transfer_items VALUES (?,?,?)',[(identity,i,v) for i,v in enumerate(positions)])
     return revision
@@ -107,17 +175,22 @@ def receipts(conn,kind,account,*,token=False):
     result = {}
     for row in conn.execute('SELECT * FROM spotify_transfer_receipts WHERE source_kind=? AND captured_account_id IS ? ORDER BY id',(kind,account)):
         value = collection_recovery.read(row['recovery_filename'],row['recovery_digest'],row['recovery_bytes'],kind='spotify-transfer',owner=row['id'])
-        if isinstance(value,dict):
-            for column,field in (('creation_phase','creation_phase'),('marker','marker'),('provider_playlist_id_snapshot','provider_playlist_id'),
-                                  ('complete','complete'),('order_verified','order_verified'),('updated_at','updated_at'),('last_run_added','last_run_added')):
-                if field in value:
-                    value[field] = bool(row[column]) if field in ('complete','order_verified') and row[column] is not None else row[column]
-            if 'source_video_ids' in value:
-                value['source_video_ids'] = [item[0] for item in conn.execute('SELECT video_id_snapshot FROM spotify_transfer_items WHERE receipt_id=? ORDER BY position',(row['id'],))]
-            if token:
-                value[TOKEN] = row['revision']
-        result[row['fingerprint']] = value
+        slots = [item[0] for item in conn.execute('SELECT video_id_snapshot FROM spotify_transfer_items WHERE receipt_id=? ORDER BY position',(row['id'],))]
+        result[row['fingerprint']] = restore_receipt(row, value, slots, token=token)
     return result
+
+
+def restore_receipt(row, value, slots, *, token=False):
+    if isinstance(value,dict):
+        for column,field in (('creation_phase','creation_phase'),('marker','marker'),('provider_playlist_id_snapshot','provider_playlist_id'),
+                              ('complete','complete'),('order_verified','order_verified'),('updated_at','updated_at'),('last_run_added','last_run_added')):
+            if field in value:
+                value[field] = bool(row[column]) if field in ('complete','order_verified') and row[column] is not None else row[column]
+        if 'source_video_ids' in value:
+            value['source_video_ids'] = slots
+        if token:
+            value[TOKEN] = row['revision']
+    return value
 
 
 def receipt_key(key):

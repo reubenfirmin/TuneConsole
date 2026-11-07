@@ -1,5 +1,8 @@
-"""One populated frozen upgrade owns compatible publication archive domains."""
+"""Native cutovers retain each publication domain's exact original archive."""
 import json
+from contextlib import closing, contextmanager
+from dataclasses import replace
+import sqlite3
 
 import pytest
 
@@ -23,10 +26,93 @@ from tests.core import test_tv_publication as tv
 from tests.core import test_workflow_publication as workflows
 from tests.core.test_predecessor_writes import installed
 from tests.core.test_metadata_owner_cutover import predecessor
-from yt_playlist.core import collection_recovery
+from tests.core.test_genre_preferences_migration import bounded_vocabulary
+from yt_playlist.core import collection_recovery, genre_identity, group_evidence, group_storage, recommendation_custody, schema_definition
+from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.store import Store
 from yt_playlist.library import playlist_gc_retry
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Archive SQL/file tests never start the web lifespan or sync worker."""
+
+
+@pytest.fixture
+def archive_input(request, tmp_path, bounded_vocabulary):
+    """Exact empty predecessor input; each case owns its SQLite file and files.
+
+    The numbered definition supplies historical DDL directly. The real runner
+    admits it and executes the populated conversion under test, without
+    replaying every earlier empty migration and unrelated regular change.
+    """
+    version = request.param
+    store = Store(tmp_path / 'archive-input.db')
+    try:
+        with closing(sqlite3.connect(':memory:')) as source:
+            source.execute('PRAGMA foreign_keys=ON')
+            source.execute('BEGIN')
+            for sql in schema_definition.statements(version=version):
+                source.execute(sql)
+            source.executemany('INSERT INTO schema_migrations VALUES (?,?,1)',
+                [(item.version, item.name) for item in registry.MIGRATIONS[:version]])
+            source.executemany('INSERT INTO settings VALUES (?,?)',
+                               schema_definition.SEED_SETTINGS.items())
+            for sql in schema_definition.INITIAL_STATE:
+                source.execute(sql)
+            genre_identity.seed_catalog(source)
+            source.commit()
+            source.backup(store.conn)
+        store.conn.execute('PRAGMA journal_mode=WAL')
+        store._schema_compatibility = True
+        store._bind_repositories()
+        yield store
+    finally:
+        store.conn.close()
+
+
+@contextmanager
+def upgraded_archive(source, tmp_path, version):
+    """Run one genuine registered owner cutover and reopen its native readers.
+
+    Startup and pending regular changes are independent lower-layer owners;
+    the registered runner validates this predecessor and converted structure.
+    """
+    upgraded = Store(tmp_path / 'archive-upgrade.db')
+    try:
+        source.conn.backup(upgraded.conn)
+        upgraded.conn.execute('PRAGMA journal_mode=WAL')
+        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS[:version])
+        upgraded.conn.close()
+        upgraded = Store(tmp_path / 'archive-upgrade.db')
+        upgraded._schema_compatibility = True
+        upgraded._bind_repositories()
+        yield upgraded
+        assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
+    finally:
+        upgraded.conn.close()
+
+
+@pytest.mark.parametrize('archive_input', [93, 94, 97], indirect=True)
+def test_completed_archive_cutover_is_idempotent_and_admitted(archive_input):
+    store = archive_input
+    version = store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] + 1
+    store.settings.set_setting('retained-archive-control', 'Exact été original')
+    runner.migrate(store.conn, registry=registry.MIGRATIONS[:version])
+    history = [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations')]
+    store.conn.close()
+    reopened = Store(store._db_path)
+    try:
+        reopened.init_schema(defer_metadata=True)
+        before = reopened.conn.total_changes
+        runner.migrate(reopened.conn, registry=registry.MIGRATIONS[:version])
+        regular.validate(reopened.conn)
+        assert reopened.conn.total_changes == before
+        assert [tuple(row) for row in reopened.conn.execute('SELECT * FROM schema_migrations')] == history
+        assert reopened.settings.get_setting('retained-archive-control') == 'Exact été original'
+    finally:
+        reopened.conn.close()
 
 
 def test_v79_upgrade_preserves_metadata_conflicts_and_discovery(predecessor, tmp_path):
@@ -99,92 +185,181 @@ def test_v79_upgrade_preserves_metadata_conflicts_and_discovery(predecessor, tmp
         upgraded.conn.close()
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_populated_upgrade_preserves_archives_and_native_precedence(installed, tmp_path):
-    store, _ = installed
-    # Capture all continuing inputs before preparation: later catalog changes
-    # would legitimately invalidate another owner's previously selected proof.
-    tv_values, tv_originals = tv.seed(store)
-    # Establish the shared Song/Artist recording before creating the draft;
-    # otherwise a later alias merge legitimately rewrites that saved draft.
-    recipe, draft_raw = drafts.seed(store)
-    ranked_originals, run_id = clicked.seed(store)
-    # The draft fixture already owns the one master identity. Workflow receipt
-    # attribution uses its own explicit account, independently of that flag.
-    _, workflow_originals, account, _ = workflows.seed(store, master=False)
-    # Pair and clicked publication consume the same original ranked fixture.
-    # Capture real comparison roots after every catalog input is established.
-    pairs.roots(store, run_id)
+@pytest.mark.parametrize('archive_input', [93], indirect=True)
+def test_draft_archive_survives_registered_native_cutover(archive_input, tmp_path):
+    store = archive_input
+    recipe, raw = drafts.seed(store)
+    owner = drafts.publication.OWNER
+    stage = drafts.stage(store.conn)
+    owner.publish(store.conn, stage=stage)
+    assert owner.selected(store.conn) == stage
 
-    draft_owner, clicked_owner = drafts.publication.OWNER, clicked.publication.OWNER
-    pair_owner = pairs.publication.OWNER
-    draft_stage = drafts.stage(store.conn)
-    draft_owner.publish(store.conn, stage=draft_stage)
-    clicked_stage = clicked.ready(store.conn)
-    clicked_owner.publish(store.conn, stage=clicked_stage)
-    pair_stage = pairs.ready(store.conn)
-    pair_owner.publish(store.conn, stage=pair_stage)
-    tv.publish_all(store)
-    workflow_stages = {}
-    for name, owner in workflows.publication.OWNERS.items():
-        workflow_stages[name] = workflows.stage(owner, store.conn)
-        owner.publish(store.conn, stage=workflow_stages[name])
+    with upgraded_archive(store, tmp_path, 94) as upgraded:
+        assert owner.selected(upgraded.conn) is None
+        assert owner.value(upgraded.conn, stage, recipe) == raw
+        assert upgraded.road_trip.get_road_trip_draft(recipe) == json.loads(raw)
 
-    # Each archive must genuinely be selected before the single native upgrade.
-    assert draft_owner.selected(store.conn) == draft_stage
-    assert clicked_owner.selected(store.conn) == clicked_stage
-    assert pair_owner.selected(store.conn) == pair_stage
-    for owner in tv.publication.OWNERS.values():
-        assert owner.selected(store.conn) == 0
-    for name, owner in workflows.publication.OWNERS.items():
-        assert owner.selected(store.conn) == workflow_stages[name]
 
-    upgraded = Store(tmp_path / 'publication-archive-upgrade.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        upgraded.init_schema(defer_metadata=True)
-        regular.validate(upgraded.conn)
+@pytest.mark.parametrize('archive_input', [94], indirect=True)
+@pytest.mark.parametrize('surface', clicked.library_pool_state.SURFACES)
+def test_clicked_archive_survives_registered_native_cutover(archive_input, tmp_path, surface):
+    store = archive_input
+    originals, _ = clicked.seed(store)
+    # Each lane independently owns its exact original and native parameters.
+    with store.conn:
+        store.conn.execute('DELETE FROM rec_proposals WHERE surface<>?', (surface,))
+    owner = clicked.publication.OWNER
+    stage = clicked.ready(store.conn)
+    owner.publish(store.conn, stage=stage)
+    assert owner.selected(store.conn) == stage
 
-        assert draft_owner.selected(upgraded.conn) is None
-        assert draft_owner.value(upgraded.conn, draft_stage, recipe) == draft_raw
-        assert upgraded.road_trip.get_road_trip_draft(recipe) == json.loads(draft_raw)
-
+    with upgraded_archive(store, tmp_path, 95) as upgraded:
         assert clicked.publication.native(upgraded.conn)
-        assert clicked_owner.selected(upgraded.conn) is None
-        for surface in clicked.library_pool_state.SURFACES:
-            assert clicked_owner.value(upgraded.conn, clicked_stage, surface) == ranked_originals[surface]
-            assert (upgraded.rec_proposals.get_proposals(surface)['parameters']
-                    == json.loads(ranked_originals[surface])['parameters'])
+        assert owner.selected(upgraded.conn) is None
+        assert owner.value(upgraded.conn, stage, surface) == originals[surface]
+        assert upgraded.rec_proposals.get_proposals(surface)['parameters'] == (
+            json.loads(originals[surface])['parameters'])
 
-        assert pair_owner.selected(upgraded.conn) is None
-        for surface, raw in ranked_originals.items():
-            if surface.startswith('model_pair:'):
-                assert pair_owner.value(upgraded.conn, pair_stage, surface) == raw
-                assert upgraded.rec_proposals.get_proposals(surface) is not None
-        assert pair_owner.root_stage(upgraded.conn, pair_stage)['complete']
 
-        for surface, owner in tv.publication.SOURCES.items():
-            assert owner.selected(upgraded.conn) is None
-            assert owner.value(upgraded.conn, 0) == tv_originals[surface]
-            assert upgraded.rec_proposals.get_proposals(surface) == tv_values[surface]
+@pytest.mark.parametrize('archive_input', [94], indirect=True)
+@pytest.mark.parametrize('arm', ['incumbent', 'challenger'])
+@pytest.mark.parametrize('format', ['mixes', 'albums', 'radio'])
+def test_pair_archive_survives_registered_native_cutover(archive_input, tmp_path, arm, format):
+    store = archive_input
+    originals, run_id = clicked.seed(store)
+    surface = f'model_pair:{run_id}:{arm}:{format}'
+    with store.conn:
+        store.conn.execute('DELETE FROM rec_proposals WHERE surface<>?', (surface,))
+    owner = pairs.publication.OWNER
+    stage = pairs.ready(store.conn)
+    owner.publish(store.conn, stage=stage)
+    assert owner.selected(store.conn) == stage
 
-        for key, raw in workflow_originals.items():
-            owner = workflows.publication.owner_for(key)
-            assert owner.selected(upgraded.conn) is None
-            assert owner.value(upgraded.conn, workflow_stages[owner.name], key) == raw
-        receipts = upgraded.settings.spotify_transfer_receipts(account)
-        assert len(receipts['fingerprint:東京']['source_video_ids']) == 3
-        assert len(playlist_gc_retry.states(upgraded)) == 1
-        regular.migrate(upgraded.conn)
-        assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
+    with upgraded_archive(store, tmp_path, 95) as upgraded:
+        assert owner.selected(upgraded.conn) is None
+        assert owner.value(upgraded.conn, stage, surface) == originals[surface]
+        assert upgraded.rec_proposals.get_proposals(surface) is not None
+        assert owner.root_stage(upgraded.conn, stage)['complete']
 
+
+@pytest.mark.parametrize('archive_input', [94], indirect=True)
+def test_pair_archive_keeps_known_and_unresolved_custody_after_cutover(archive_input, tmp_path):
+    from tests.repos.test_typed_recommendation_publication import plan
+    from yt_playlist.controllers.recommendation_import import import_plan
+
+    store = archive_input
+    store._snapshot_revisions = Revisions(store.conn)
+    # Completed lower-layer output: no discovery, profiling or candidate ranking
+    # is needed to establish real FK-backed generation and version custody.
+    prepared = {'generation': 'archive-groups', 'policy': '{}', 'fingerprint': 'archive-input',
+        'at': 1000., 'serial': 0, 'payload': '{}', 'lineage': [], 'unknown': [], 'edges': [],
+        'groups': [{'group_id': 'archive-group', 'version': 'archive-version', 'parent_version': None,
+                    'payload': '{"leaf":true,"membership_known":true,"size":0}', 'members': []}]}
+    # Native atomic import is sufficient fixture construction; the leased
+    # producer's resumable orchestration has its own publication owners.
+    with store.conn.atomic():
+        manifest = group_storage.install_manifest(store.conn, {}, {}.get)
+        group_id = group_storage.install_header(store.conn, prepared, {}, {}, manifest)
+        group_storage.install_versions(store.conn, prepared, group_id, {}.get)
+        store.conn.execute('INSERT INTO group_publications VALUES (?,?)', (group_id, 1000.))
+        generation = import_plan(store.conn, replace(plan(store, candidates=[]), slots=()),
+                                 1000.)
+    surface = 'model_pair:1:incumbent:mixes'
+    known_key = 'proposal:' + surface + ':context'
+    unknown_key = 'proposal:' + surface + ':choice_context'
+    with store.conn.atomic():
+        store.conn.execute('INSERT INTO rec_proposals VALUES (?,?,NULL)',
+            (surface, '{"run_id":1,"data":{"items":[],"context":{},"caption":"東京"}}'))
+        group_evidence.retain(store.conn, 'comparison', known_key,
+            {'group_generation': 'archive-groups', 'musical_groups': [
+                {'version': 'archive-version', 'group_id': 'archive-group'}]}, 1000)
+        recommendation_custody.retain(store.conn, 'comparison', known_key, generation)
+        group_evidence.retain_unknown_context(store.conn, 'comparison', unknown_key,
+                                              'original:unavailable', 'missing_context', 1000)
+    owner = pairs.publication.OWNER
+    stage = pairs.ready(store.conn)
+    owner.publish(store.conn, stage=stage)
+    assert owner.selected(store.conn) == stage
+    expected = [tuple(row) for row in store.conn.execute(
+        'SELECT * FROM ' + owner.table('root_map') + ' WHERE stage=? ORDER BY owner,source_key', (stage,))]
+    assert len(expected) >= 5
+
+    with upgraded_archive(store, tmp_path, 95) as upgraded:
+        assert owner.selected(upgraded.conn) is None
+        assert owner.root_stage(upgraded.conn, stage)['complete']
+        assert [tuple(row) for row in upgraded.conn.execute(
+            'SELECT * FROM ' + owner.table('root_map') + ' WHERE stage=? ORDER BY owner,source_key', (stage,))] == expected
+        assert not upgraded.conn.execute('SELECT 1 FROM group_evidence_owners WHERE external_key IN (?,?)',
+                                         (known_key, unknown_key)).fetchone()
+        pin = owner.pin_key(stage, known_key)
+        assert upgraded.conn.execute('SELECT generation_id FROM group_evidence_generations '
+            'WHERE kind=\'comparison\' AND external_key=?', (pin,)).fetchone()
+        assert upgraded.conn.execute('SELECT external_version FROM group_evidence_versions '
+            'WHERE kind=\'comparison\' AND external_key=?', (pin,)).fetchone()[0] == 'archive-version'
+        assert upgraded.conn.execute('SELECT generation_id FROM recommendation_generation_refs '
+            'WHERE kind=\'comparison\' AND external_key=?', (pin,)).fetchone()[0] == generation
+        assert upgraded.conn.execute('SELECT source_context FROM unresolved_group_contexts '
+            'WHERE kind=\'comparison\' AND external_key=?', (owner.pin_key(stage, unknown_key),)).fetchone()[0] == 'original:unavailable'
+
+
+@pytest.mark.parametrize('archive_input', [94], indirect=True)
+@pytest.mark.parametrize('name', tuple(tv.publication.OWNERS))
+def test_tv_archive_survives_registered_native_cutover(archive_input, tmp_path, name):
+    store = archive_input
+    values, originals = tv.seed(store)
+    owner = tv.publication.OWNERS[name]
+    with store.conn:
+        store.conn.execute('DELETE FROM rec_proposals WHERE surface<>?', (owner.source,))
+    tv.aliases(store.conn)
+    revision = tv.prepare(owner, store.conn)
+    owner.publish(store.conn, revision=revision)
+    assert owner.selected(store.conn) == revision
+
+    with upgraded_archive(store, tmp_path, 95) as upgraded:
+        assert owner.selected(upgraded.conn) is None
+        assert owner.value(upgraded.conn, revision) == originals[owner.source]
+        assert upgraded.rec_proposals.get_proposals(owner.source) == values[owner.source]
+
+
+@pytest.mark.parametrize('archive_input', [97], indirect=True)
+@pytest.mark.parametrize('name', tuple(workflows.publication.OWNERS))
+def test_workflow_archive_survives_registered_native_cutover(archive_input, tmp_path, name):
+    store = archive_input
+    _, originals, account, _ = workflows.seed(store)
+    owner = workflows.publication.OWNERS[name]
+    stage = workflows.stage(owner, store.conn)
+    owner.publish(store.conn, stage=stage)
+    assert owner.selected(store.conn) == stage
+
+    with upgraded_archive(store, tmp_path, 98) as upgraded:
+        assert owner.selected(upgraded.conn) is None
+        for key, raw in originals.items():
+            if workflows.publication.owner_for(key) is owner:
+                assert owner.value(upgraded.conn, stage, key) == raw
+        if name == 'playlists':
+            receipts = upgraded.settings.spotify_transfer_receipts(account)
+            assert len(receipts['fingerprint:東京']['source_video_ids']) == 3
+        elif name == 'gc':
+            assert len(playlist_gc_retry.states(upgraded)) == 1
+
+
+@pytest.mark.parametrize('archive_input', [97], indirect=True)
+def test_native_workflow_archive_keeps_mapped_object_validation(archive_input, tmp_path):
+    store = archive_input
+    workflows.seed(store)
+    owner = workflows.publication.OWNERS['gc']
+    stage = workflows.stage(owner, store.conn)
+    owner.publish(store.conn, stage=stage)
+    with upgraded_archive(store, tmp_path, 98) as upgraded:
+        definition = upgraded.conn.execute('SELECT sql FROM sqlite_schema WHERE name=?',
+                                          (owner.header + '_mapped_delete',)).fetchone()[0]
         with upgraded.conn:
-            upgraded.conn.execute('DROP TRIGGER ' + workflows.publication.OWNERS['gc'].header + '_mapped_delete')
+            upgraded.conn.execute('DROP TRIGGER ' + owner.header + '_mapped_delete')
         with pytest.raises(MigrationError, match='mapped publication object'):
             regular.validate(upgraded.conn)
-    finally:
-        upgraded.conn.close()
+        # Restore the actual definition before the final integrity check.
+        with upgraded.conn:
+            upgraded.conn.execute(definition)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

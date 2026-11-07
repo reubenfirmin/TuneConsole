@@ -32,6 +32,17 @@ class RecommendationFiles:
         return recommendation_outputs.read(reference['filename'], reference['content_digest'],
             reference['byte_size'], surface=surface, chunk_key=chunk_key)
 
+    def read_original(self, reference):
+        """Read the retained plain-text format used by installed Radio checkpoints."""
+        from .schema_contract import MigrationError
+        with fao.read(reference['filename']) as stream:
+            encoded = stream.read(reference['byte_size'] + 1)
+        if (len(encoded) != reference['byte_size'] or
+                hashlib.sha256(encoded).hexdigest() != reference['digest'] or
+                Path(reference['filename']).stem != reference['digest']):
+            raise MigrationError('Prepared Radio file does not match its digest')
+        return encoded.decode('utf-8')
+
     def display(self, chunks, ranks, surface):
         wanted, result = set(ranks), {}
         for row in chunks:

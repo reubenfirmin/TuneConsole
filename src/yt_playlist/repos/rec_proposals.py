@@ -3,8 +3,6 @@
 The snapshot publisher owns the transaction for publish_prepared_* methods. Policy
 rows belong to rec_ledger and must participate in that same outer transaction.
 """
-import json
-
 from yt_playlist.core import choice_learning_state, home_outputs, json_cache
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
 from yt_playlist.repos import proposal_cache, proposal_storage
@@ -37,19 +35,14 @@ class RecProposalsRepo(Repo):
                 recommendation_setting_outputs.clear(self.conn)
 
     @snapshot_read
-    def _group_pools_json(self):
+    def group_pool_source(self):
         from yt_playlist.core.db_revisions import keyed_reads
 
         encoded = proposal_cache.read(self.conn, 'mode_bundles', store=self._store)
         if encoded is not None:
-            value = json.loads(encoded)
-            if isinstance(value, dict) and value.get(json_cache.MARKER) in (
-                    json_cache.FORMAT, json_cache.LEGACY_FORMAT):
-                return value.get('groups'), value[json_cache.MARKER], value.get('profiles')
-            value = value if isinstance(value, dict) else {}
-            return json.dumps({'all': value.get('all', {}), '_meta': value.get('_meta', {})}), None, None
+            return encoded, None
         with keyed_reads(self._store, 'rec_proposals', ('mode_bundles',)):
-            return self.conn.execute("SELECT CASE WHEN json_extract(payload,?) IN (?,?) "
+            row = self.conn.execute("SELECT CASE WHEN json_extract(payload,?) IN (?,?) "
                 "THEN json_extract(payload,'$.groups') ELSE "
                 "json_object('all',COALESCE(json_extract(payload,'$.all'),json('{}')),"
                 "'_meta',COALESCE(json_extract(payload,'$._meta'),json('{}'))) END,"
@@ -57,6 +50,7 @@ class RecProposalsRepo(Repo):
                 "WHERE surface='mode_bundles' AND json_valid(payload)",
                 ('$.' + json_cache.MARKER, json_cache.FORMAT, json_cache.LEGACY_FORMAT,
                  '$.' + json_cache.MARKER)).fetchone()
+            return None, row
 
     @lookup_read
     def group_checkpoint(self):
@@ -125,9 +119,9 @@ class RecProposalsRepo(Repo):
     @snapshot_read
     def has_proposals(self, surface):
         """Check dependency presence without reading or decoding a large display pool."""
-        return proposal_storage.read(self._store, surface, presence=True)
+        return proposal_storage.present(self._store, surface)
 
     @snapshot_read
-    def _proposal_json(self, surface):
-        return proposal_storage.read(self._store, surface)
+    def document(self, surface):
+        return proposal_storage.document(self._store, surface)
 

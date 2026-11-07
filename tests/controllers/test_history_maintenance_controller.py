@@ -14,7 +14,7 @@ from yt_playlist.core.repair import PHANTOM_PURGE_SEEN
 from yt_playlist.controllers.discovery import Discovery
 from yt_playlist.repos.history import HistoryRepo
 from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
-from yt_playlist.repos.settings import SettingsRepo
+from yt_playlist.controllers.settings import Settings
 
 pytestmark = pytest.mark.usefixtures('no_database')
 
@@ -23,7 +23,7 @@ pytestmark = pytest.mark.usefixtures('no_database')
 def maintenance():
     def mock(cls):
         return create_autospec(cls, instance=True, spec_set=True)
-    service = HistoryMaintenance(mock(HistoryRepo), mock(SettingsRepo), mock(Discovery),
+    service = HistoryMaintenance(mock(HistoryRepo), mock(Settings), mock(Discovery),
         mock(Embeddings), mock(ModelSelection), mock(RecommendationProposals), mock(HistoryRepairFiles), nullcontext,
         mock(ListeningCalendar))
     service.repository.calendar_accounts.return_value = [3, 4]

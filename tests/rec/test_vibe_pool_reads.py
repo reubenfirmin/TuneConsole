@@ -1,6 +1,6 @@
 """Selected prepared reads retain candidate order and current eligibility."""
 from copy import deepcopy
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from functools import wraps
 from tests.derived_rating_support import seed_dislike
 import json
@@ -9,9 +9,6 @@ import time
 import pytest
 
 from yt_playlist.core import bundle_plan, fao, json_cache
-from yt_playlist.core import profile_files
-from tests import prepared_fixture_support
-from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects, seed_publication_subjects
 from yt_playlist.rec import home_vibe, measurement, musical_character, musical_profiles, vibe_pools
 from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
@@ -62,23 +59,10 @@ def seed_costs(store, costs):
         yield
 
 
-@pytest.fixture(scope='module')
-def selected_vibe_costs():
-    return {}
-
-
 @pytest.fixture
-def vibe_read_costs(record_property, selected_vibe_costs):
+def vibe_read_costs(record_property):
     costs = {}
     yield costs
-    # Cold construction belongs in the file total, even when later reads reuse
-    # its template. Inclusive timers overlap and must not be added together.
-    if selected_vibe_costs and not selected_vibe_costs.get('_reported'):
-        for phase, (calls, wall, cpu) in selected_vibe_costs.items():
-            record_property('cold_' + phase + '_calls', calls)
-            record_property('cold_' + phase + '_wall_s', wall)
-            record_property('cold_' + phase + '_thread_cpu_s', cpu)
-        selected_vibe_costs['_reported'] = True
     for phase, (calls, wall, cpu) in costs.items():
         record_property(phase + '_calls', calls)
         record_property(phase + '_wall_s', wall)
@@ -143,47 +127,33 @@ def publish(store, value, *, costs=None):
         publish_bundles(store, value, 1)
 
 
-@pytest.fixture(scope='module')
-def selected_vibe_template(_pristine_current_schema, selected_vibe_costs):
-    def build(source):
-        # Two real pages per general pool and independent genre reserves retain
-        # the read boundary. Full-size payload preservation belongs to codecs.
-        value = bundles(count=8, reserve_count=2)
-        prepared = value['_vibes']
-        items = [item for lanes in prepared['pools'].values() for rows in lanes.values() for item in rows]
-        items += [item for lanes in prepared['genres'].values() for groups in lanes.values()
-                  for rows in groups.values() for item in rows]
-        for item in [*value['all']['fresh'], *items]:
-            item['reason'] = 'Prepared context for ' + item['key']
-        with measured(selected_vibe_costs, 'subject_seed'):
-            seed_publication_subjects(source, [*value['all']['fresh'], *items],
-                                      discoveries=[item['key'] for item in items])
-        profiles = {item['key']: item['musical'] for item in items}
-        with measured(selected_vibe_costs, 'profile_publication'):
-            source.musical_profiles.publish_recordings([
-                (key, musical_profiles.canonical(profile), profile['version'], musical_profiles.digest(profile))
-                for key, profile in profiles.items()], 1)
-        with measured(selected_vibe_costs, 'typed_publication'):
-            publish_bundles(source, value, 1)
-        return value
-
-    with ExitStack() as resources:
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(measurement, 'serving_policy',
-                          lambda *args, **kwargs: ('vibe-read-fixture', {'fixture': 'selected-vibe-read'}))
-            patch.setattr(bundle_plan, 'EXPLANATION_BYTES', 256)
-            patch.setattr(prepared_fixture_support, 'capture_template', timed(
-                selected_vibe_costs, 'template_export', prepared_fixture_support.capture_template))
-            with measured(selected_vibe_costs, 'template_initialization_build_export'):
-                template = resources.enter_context(prepared_template(_pristine_current_schema, build))
-        yield template
-
-
 @pytest.fixture
-def selected_vibe_inputs(store, selected_vibe_template, vibe_read_costs, monkeypatch):
-    monkeypatch.setattr(vibe_pools, 'POOL_LIMIT', 4)
-    with measured(vibe_read_costs, 'private_restore'):
-        return selected_vibe_template.restore(store)
+def selected_vibe_inputs(store, monkeypatch, vibe_read_costs):
+    # Cross native rank pages/chunks with complete genre reserves, without a
+    # prepared database export or a second inventory of private file copies.
+    value = bundles(count=4, reserve_count=2)
+    prepared = value['_vibes']
+    items = [item for lanes in prepared['pools'].values() for rows in lanes.values() for item in rows]
+    items += [item for lanes in prepared['genres'].values() for groups in lanes.values()
+              for rows in groups.values() for item in rows]
+    for item in [*value['all']['fresh'], *items]:
+        item['reason'] = 'Prepared context for ' + item['key']
+    with measured(vibe_read_costs, 'subject_seed'):
+        seed_publication_subjects(store, [*value['all']['fresh'], *items],
+                                  discoveries=[item['key'] for item in items])
+    profiles = {item['key']: item['musical'] for item in items}
+    with measured(vibe_read_costs, 'profile_publication'):
+        store.musical_profiles.publish_recordings([
+            (key, musical_profiles.canonical(profile), profile['version'], musical_profiles.digest(profile))
+            for key, profile in profiles.items()], 1)
+    monkeypatch.setattr(vibe_pools, 'POOL_LIMIT', 2)
+    monkeypatch.setattr(bundle_plan, 'EXPLANATION_BYTES', 128)
+    monkeypatch.setattr(measurement, 'serving_policy',
+                        lambda *args, **kwargs: ('vibe-read-fixture', {'fixture': 'selected-vibe-read'}))
+    with measured(vibe_read_costs, 'typed_publication'):
+        publish_bundles(store, value, 1)
+    assert store.conn.execute('SELECT count(*) FROM prepared_outputs WHERE first_rank>0').fetchone()[0] > 0
+    return value
 
 
 def full_decode(store, *, page_size=128):
@@ -281,7 +251,7 @@ def test_preparation_preserves_raw_genre_groups_and_refreshes_taxonomy(store):
 def test_selected_vibe_read_matches_full_decode_and_skips_unrelated_profiles(
         store, monkeypatch, lane, selected_vibe_inputs, vibe_read_costs):
     with measured(vibe_read_costs, 'full_decode'):
-        decoded = full_decode(store, page_size=4)
+        decoded = full_decode(store, page_size=2)
     load = musical_character.load
     # Each scenario reads the same immutable publication. Keep both lanes and
     # every filter combination, with a fresh spy for each bounded read.
@@ -312,60 +282,9 @@ def test_selected_vibe_read_matches_full_decode_and_skips_unrelated_profiles(
         assert visited, (lane, include, avoid)
         if include or avoid:
             # Filtering must traverse beyond the first selected native page.
-            assert any(int(key.rsplit(':', 1)[1]) >= 4 for key in visited)
+            assert any(int(key.rsplit(':', 1)[1]) >= 2 for key in visited)
 
 
-def test_selected_vibe_template_retains_complete_private_publications(
-        store, file_backed_store, selected_vibe_template, selected_vibe_costs, vibe_read_costs):
-    with measured(vibe_read_costs, 'private_restore'):
-        value = selected_vibe_template.restore(store)
-    with measured(vibe_read_costs, 'private_restore'):
-        second = selected_vibe_template.restore(file_backed_store)
-    assert value == second == selected_vibe_template.result
-    profiles = {}
-    assert len(value['all']['fresh']) == 8
-    assert set(value['_vibes']['pools']) == {'energize', 'relax'}
-    for preset in ('energize', 'relax'):
-        for lane in ('fresh', 'explore'):
-            rows = value['_vibes']['pools'][preset][lane]
-            assert len(rows) == 8
-            profiles.update((item['key'], item['musical']) for item in rows)
-            groups = value['_vibes']['genres'][preset][lane]
-            assert set(groups) == {'techno', 'jazz'}
-            for rows in groups.values():
-                assert len(rows) == 2
-                profiles.update((item['key'], item['musical']) for item in rows)
-    assert len(profiles) == 48
-    expected_subjects = set(profiles) | {item['key'] for item in value['all']['fresh']}
-    assert len(expected_subjects) == 56
-    for target in (selected_vibe_template.source, store, file_backed_store):
-        assert {row[0] for row in target.conn.execute('SELECT identity_key FROM recordings')} == expected_subjects
-        actual = {}
-        keys = list(profiles)
-        for offset in range(0, len(keys), 512):
-            actual.update(target.musical_profiles.by_keys(keys[offset:offset + 512]))
-        assert actual == profiles  # Includes the full retained provenance strings.
-        assert target.recommendations.heads() == selected_vibe_template.source.recommendations.heads()
-        assert target.conn.execute('PRAGMA foreign_key_check').fetchall() == []
-        assert target.conn.execute('SELECT count(*) FROM prepared_outputs '
-                                   'WHERE first_rank>0').fetchone()[0] > 0
-
-    # Prove the baseline's actual native file is copied, not borrowed or linked.
-    publication = store.conn.execute('SELECT publication FROM recording_profile_files LIMIT 1').fetchone()[0]
-    relative = profile_files.relative('recording', publication)
-    paths = [profile_files.directory(target.conn) / relative
-             for target in (store, file_backed_store, selected_vibe_template.source)]
-    assert len(set(paths)) == 3
-    assert len({(path.stat().st_dev, path.stat().st_ino) for path in paths}) == 3
-    original = paths[0].read_bytes()
-    assert all(path.read_bytes() == original for path in paths)
-    paths[0].write_bytes(b'Corrupted private fixture copy')
-    assert paths[1].read_bytes() == paths[2].read_bytes() == original
-    store.settings.set_setting('private_vibe_fixture', 'first consumer')
-    for target in (file_backed_store, selected_vibe_template.source):
-        assert target.settings.get_setting('private_vibe_fixture') is None
-    value['_vibes']['pools']['energize']['fresh'][0]['musical']['dimensions']['intensity']['value'] = -1
-    assert second == selected_vibe_template.result
 
 
 def test_vibe_candidate_retry_is_detached_invalidated_and_rechecks_dislikes(store, monkeypatch, vibe_read_costs):

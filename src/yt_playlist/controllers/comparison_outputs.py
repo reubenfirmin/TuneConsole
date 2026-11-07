@@ -15,6 +15,10 @@ class ComparisonOutputs:
         return self.repository.native()
 
     def put(self, surface, raw, at, *, input_revision=None):
+        if not self.native():
+            with self.files.retained():
+                roots = self.groups.prepare_references(surface, json.loads(raw), at)
+                return self.repository.publish_legacy(surface, raw, at, roots)
         prepared, inputs = model_projections.prepare_output(surface, json.loads(raw), at, input_revision=input_revision)
         with self.files.retained():
             roots = self.groups.prepare_references(surface, prepared.value, at)

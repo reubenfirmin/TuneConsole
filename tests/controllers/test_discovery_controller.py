@@ -20,7 +20,7 @@ from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.collection_recovery import RecoveryFiles
 from yt_playlist.repos.discovery import DiscoveryRepo
 from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
-from yt_playlist.repos.settings import SettingsRepo
+from yt_playlist.controllers.settings import Settings
 
 pytestmark = pytest.mark.usefixtures('no_database')
 
@@ -33,7 +33,7 @@ def discovery():
     files = create_autospec(RecoveryFiles, instance=True, spec_set=True)
     files.retained.side_effect = nullcontext
     proposals = create_autospec(RecommendationProposals, instance=True, spec_set=True)
-    settings = create_autospec(SettingsRepo, instance=True, spec_set=True)
+    settings = create_autospec(Settings, instance=True, spec_set=True)
     originals = create_autospec(RetainedOriginals, instance=True, spec_set=True)
     repository.origin_inputs.return_value = dict(video=None, album=None, artists=set(), account=False)
     return Discovery(repository, artists, eligibility, files, originals=originals, proposals=proposals, settings=settings,
@@ -78,6 +78,35 @@ def test_genre_origin_merge_retains_colliding_contributions_before_sql(discovery
     assert [call.args[1] for call in discovery.originals.retain.call_args_list] == [
         'discovery_origin_merge', 'discovery_source_origin_merge', 'discovery_artist_origin_merge']
     discovery.repository.apply_origin_merge.assert_called_once_with('genre_key', 'new', inputs)
+
+
+def test_album_merge_prepares_combined_membership_and_retains_distinct_impressions(discovery):
+    rows = [dict(album_id=2, found_at=5, first_shown=7, last_shown=10, legacy_first_shown=None,
+                 legacy_last_shown=None, offered_count=2, legacy_offered_count=0),
+            dict(album_id=1, found_at=3, first_shown=None, last_shown=8, legacy_first_shown=4,
+                 legacy_last_shown=6, offered_count=1, legacy_offered_count=3)]
+    inputs = dict(typed=True, memberships=rows, impressions=[dict(id=9, album_id=2, shown_at=7)],
+                  legacy=[dict(album_id=1, offered_count=3)])
+    discovery.repository.album_merge_inputs.return_value = inputs
+    discovery.repository.origin_merge_inputs.return_value = []
+    before = json.dumps(inputs, sort_keys=True)
+    discovery.merge_albums(2, 1)
+    member = discovery.repository.apply_album_merge.call_args.args[-1]
+    assert member == dict(album_id=1, found_at=3, first_shown=7, last_shown=10,
+                         legacy_first_shown=4, legacy_last_shown=6, offered_count=3, legacy_offered_count=3)
+    assert [call.args[1] for call in discovery.originals.retain.call_args_list] == [
+        'discovery_impression_merge', 'discovery_legacy_offer_merge']
+    assert json.dumps(inputs, sort_keys=True) == before
+
+
+def test_album_merge_cannot_destroy_originals_after_retention_failure(discovery):
+    discovery.repository.album_merge_inputs.return_value = dict(typed=True, memberships=[], legacy=[],
+        impressions=[dict(id=9, album_id=2, shown_at=7)])
+    discovery.repository.origin_merge_inputs.return_value = []
+    discovery.originals.retain.side_effect = OSError('unavailable')
+    with pytest.raises(OSError, match='unavailable'):
+        discovery.merge_albums(2, 1)
+    discovery.repository.apply_album_merge.assert_not_called()
 
 
 def test_artist_origin_collision_uses_rebound_sources_without_resurrecting_retired_artist(discovery):

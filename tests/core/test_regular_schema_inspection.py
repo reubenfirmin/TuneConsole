@@ -9,7 +9,34 @@ import time
 
 import pytest
 
+from tests.genre_catalog_support import bound_catalog
 from yt_playlist.core.migrations import MigrationError, regular, registry, runner
+from yt_playlist.core import genre_identity, schema_definition
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """SQL-only runner checks never start the web lifespan or sync worker."""
+
+
+@pytest.fixture(scope='module')
+def regular_layout():
+    """Build the exact empty installed input, without replaying empty upgrades."""
+    with pytest.MonkeyPatch.context() as patch, closing(sqlite3.connect(':memory:')) as source:
+        bound_catalog(patch)
+        source.execute('PRAGMA foreign_keys=ON')
+        source.execute('BEGIN')
+        for sql in schema_definition.statements(version=93):
+            source.execute(sql)
+        source.executemany('INSERT INTO schema_migrations VALUES (?,?,1)',
+            [(item.version, item.name) for item in registry.MIGRATIONS[:93]])
+        source.executemany('INSERT INTO settings VALUES (?,?)', schema_definition.SEED_SETTINGS.items())
+        for sql in schema_definition.INITIAL_STATE:
+            source.execute(sql)
+        genre_identity.seed_catalog(source)
+        source.commit()
+        source.execute('PRAGMA query_only=ON')
+        yield source
 
 
 class ReservationConnection(sqlite3.Connection):
@@ -24,21 +51,21 @@ class ReservationConnection(sqlite3.Connection):
 
 
 @pytest.fixture
-def installed(tmp_path, _pristine_installed_schema):
+def installed(tmp_path, regular_layout):
     path = tmp_path / 'installed.db'
     with closing(sqlite3.connect(path, factory=ReservationConnection)) as conn:
-        _pristine_installed_schema(93).backup(conn)
+        regular_layout.backup(conn)
         yield path, conn
 
 
 @pytest.fixture(scope='module')
-def regular_prefixes(_pristine_installed_schema):
+def regular_prefixes(regular_layout):
     """Freeze genuine successful prefixes once; failure cases own writable copies."""
     from tests.prepared_fixture_support import coordinates
 
     with ExitStack() as resources:
         builder = resources.enter_context(closing(sqlite3.connect(':memory:')))
-        _pristine_installed_schema(93).backup(builder)
+        regular_layout.backup(builder)
         history = list(builder.execute('SELECT * FROM schema_migrations ORDER BY version'))
         sources, fingerprints = {}, {}
 
@@ -220,19 +247,24 @@ def interrupted_change(conn, failed, failure, changes):
     return committed
 
 
-def test_each_change_rolls_back_and_can_retry(installed):
-    _, conn = installed
+@pytest.mark.parametrize('failed', regular.CHANGES[:-1], ids=lambda change: f'{change.version}-{change.name}')
+def test_each_change_rolls_back_and_can_retry(tmp_path, regular_prefixes, failed):
+    with closing(sqlite3.connect(tmp_path / 'retry.db')) as conn:
+        regular_prefixes(failed.version - 1).backup(conn)
+        check_change_retry(conn, failed)
+
+
+def check_change_retry(conn, failed):
     historical = list(conn.execute('SELECT * FROM schema_migrations ORDER BY version'))
-    # Advance one genuine chain. Each change gets independent post-apply and
-    # post-validator faults, then commits once; no successful suffix is replayed.
-    for failed in regular.CHANGES[:-1]:
-        prefix = regular.CHANGES[:failed.version]
-        for failure in ('apply', 'validate'):
-            committed = interrupted_change(conn, failed, failure, prefix)
-        regular.migrate(conn, changes=prefix)
-        assert applied(conn) == [(change.version, change.name) for change in prefix], failed.name
-        assert list(conn.execute('SELECT * FROM schema_changes WHERE version<? ORDER BY version',
-                                 (failed.version,))) == committed, failed.name
+    prefix = regular.CHANGES[:failed.version]
+    # Each independently diagnosed change keeps both genuine fault boundaries,
+    # its exact committed predecessor, successful retry and writable restart.
+    for failure in ('apply', 'validate'):
+        committed = interrupted_change(conn, failed, failure, prefix)
+    regular.migrate(conn, changes=prefix)
+    assert applied(conn) == [(change.version, change.name) for change in prefix], failed.name
+    assert list(conn.execute('SELECT * FROM schema_changes WHERE version<? ORDER BY version',
+                             (failed.version,))) == committed, failed.name
     assert list(conn.execute('SELECT * FROM schema_migrations ORDER BY version')) == historical
     assert conn.execute('PRAGMA integrity_check').fetchone() == ('ok',)
     assert not conn.execute('PRAGMA foreign_key_check').fetchall()

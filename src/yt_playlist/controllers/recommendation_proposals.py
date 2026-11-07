@@ -6,10 +6,11 @@ from yt_playlist.core import album_note_outputs, clicked_pool_policy, home_outpu
 from yt_playlist.core.proposal_codec import encode_proposals
 from yt_playlist.core.recommendation_work import finite
 from yt_playlist.core.recommendation_outputs import encode
+from yt_playlist.core.schema_contract import MigrationError
 
 
 class RecommendationProposals:
-    def __init__(self, repository, report_repository, note_repository, files, listening, home, publications):
+    def __init__(self, repository, report_repository, note_repository, files, listening, home, publications, comparisons):
         self.repository = repository
         self.report_repository = report_repository
         self.note_repository = note_repository
@@ -17,11 +18,14 @@ class RecommendationProposals:
         self.listening = listening
         self.home = home
         self.publications = publications
+        self.comparisons = comparisons
 
     def put_proposals(self, surface, data, now=None):
         self.put_encoded(surface, encode_proposals(surface, data), now)
 
     def put_encoded(self, surface, encoded, now):
+        if surface.startswith('model_pair:'):
+            return self.comparisons.put(surface, encoded, now)
         if surface in clicked_pool_policy.SURFACES and self.publications().native_clicked_pools():
             return self.publications().put_clicked_pool(surface, encoded, now)
         if surface == 'album_notes' and self.note_repository.native_outputs():
@@ -51,6 +55,8 @@ class RecommendationProposals:
         self.repository.put_encoded(surface, encoded, now)
 
     def _proposal_json(self, surface):
+        if surface.startswith('model_pair:') and self.comparisons.native():
+            return self.comparisons.encoded(surface)
         if surface in clicked_pool_policy.SURFACES and self.publications().native_clicked_pools():
             value = self.publications().clicked_pool(surface)
             return json.dumps(value) if value is not None else None
@@ -67,7 +73,19 @@ class RecommendationProposals:
             with self.files.retained():
                 return self.listening.encoded(surface)
         if surface not in reports.SURFACES:
-            return self.repository._proposal_json(surface)
+            with self.files.retained():
+                raw, manifest = self.repository.document(surface)
+                if manifest is None:
+                    return raw
+                parts = manifest['parts']
+                if [part['chunk_key'] for part in parts] != list(map(str, range(manifest['part_count']))):
+                    raise MigrationError('Prepared proposal original parts are incomplete')
+                raw = ''.join(self.files.read(part, surface=surface, chunk_key=manifest['prefix'] + part['chunk_key'])
+                              for part in parts)
+                if (len(raw.encode()) != manifest['total_bytes'] or
+                        hashlib.sha256(raw.encode()).hexdigest() != manifest['content_digest']):
+                    raise MigrationError('Prepared proposal differs from its original digest')
+                return raw
         with self.files.retained():
             raw, manifest = self.report_repository.document(surface)
             if manifest is None:
@@ -97,6 +115,8 @@ class RecommendationProposals:
         return json_cache.decode(payload, keys=set(fields)) if payload is not None else None
 
     def has_proposals(self, surface):
+        if surface.startswith('model_pair:') and self.comparisons.native():
+            return self.comparisons.present(surface)
         if surface in clicked_pool_policy.SURFACES and self.publications().native_clicked_pools():
             return self.publications().clicked_pool_present(surface)
         if surface == 'album_notes':
@@ -138,7 +158,15 @@ class RecommendationProposals:
         return json_cache.decode(payload, project=select) if payload is not None else {}
 
     def group_pools_json(self):
-        row = self.repository._group_pools_json()
+        encoded, row = self.repository.group_pool_source()
+        if encoded is not None:
+            value = json.loads(encoded)
+            if isinstance(value, dict) and value.get(json_cache.MARKER) in (
+                    json_cache.FORMAT, json_cache.LEGACY_FORMAT):
+                row = value.get('groups'), value[json_cache.MARKER], value.get('profiles')
+            else:
+                value = value if isinstance(value, dict) else {}
+                row = json.dumps({'all': value.get('all', {}), '_meta': value.get('_meta', {})}), None, None
         return json_cache.decode_groups(*row) if row is not None else None
 
     def choice_refresh_inputs(self):
@@ -168,6 +196,8 @@ class RecommendationProposals:
         return self.repository.publish_prepared_bundles(bundles_json, fresh_json, now)
 
     def publish_prepared_home(self, payload, now, *, surface='home_prepared', input_revision=None):
+        if surface.startswith('model_pair:'):
+            return self.comparisons.put(surface, payload, now, input_revision=input_revision)
         if surface in clicked_pool_policy.SURFACES and self.publications().native_clicked_pools():
             return self.publications().put_clicked_pool(surface, payload, now, input_revision=input_revision)
         if surface in home_outputs.SURFACES:

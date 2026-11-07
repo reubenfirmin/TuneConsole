@@ -1,7 +1,5 @@
 """Preference refreshes reuse the established models and update saved ranking provenance."""
-from contextlib import closing
 from pathlib import Path
-import sqlite3
 import time
 from types import SimpleNamespace
 from unittest.mock import Mock, call
@@ -13,12 +11,11 @@ import numpy as np
 import pytest
 
 from tests.conftest import seed_catalog_track
-from tests.prepared_fixture_support import prepared_template, roots
+from tests.prepared_fixture_support import prepared_template
+from tests.recommendation_support import seed_publication_subjects
 from tests.candidate_timing_support import candidate_costs, candidate_prefix_costs
 from tests.rec.test_model_refresh import refresh_costs, seed
-from yt_playlist.core import embeddings, model_contract
 from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.core.store import Store
 from yt_playlist.rec import candidate_refresh, embedding_training as embed, home_prepared, model_refresh, mode_surfaces, rec_params, surfaces
 from yt_playlist.util import genre_map
 
@@ -53,30 +50,6 @@ def candidate_library_template(_pristine_current_schema, candidate_prefix_costs)
         yield template
 
 
-def _assert_library_matches(store, original):
-    assert store.rec_query.library_keys() == original.rec_query.library_keys()
-    for name in ('library_keys', 'track_content', 'track_audio_features', 'play_counts'):
-        assert getattr(store.rec_query, name)() == getattr(original.rec_query, name)()
-    assert store.rec_evidence.rec_baskets() == original.rec_evidence.rec_baskets()
-    assert store.history.recent_plays_with_ts(limit=128) == original.history.recent_plays_with_ts(limit=128)
-    for name in embeddings.SPACES:
-        assert embeddings.rows(store.conn, name) == embeddings.rows(original.conn, name)
-    for name in {*model_contract.FIELDS, 'rec_dim', 'rec_refresh_version', 'rec_mode_fit_inputs'} - {
-            'rec_content_generation'}:
-        assert store.settings.get_setting(name) == original.settings.get_setting(name)
-    assert list(map(tuple, store.conn.execute('SELECT * FROM taste_modes ORDER BY mode_id'))) == list(
-        map(tuple, original.conn.execute('SELECT * FROM taste_modes ORDER BY mode_id')))
-    ranks = ('SELECT h.surface,m.mode_key,m.purpose,c.recording_id,c.rank,c.score,p.policy_version,'
-             'b.intensity_band,b.genre_key FROM recommendation_heads h '
-             'JOIN recommendation_surface_pools m ON m.generation_id=h.generation_id AND m.surface=h.surface '
-             'JOIN recommendation_pools p ON p.id=m.pool_id '
-             'JOIN recommendation_candidates c ON c.pool_id=p.id '
-             'LEFT JOIN recommendation_radio_bands b ON b.pool_id=p.id AND b.recording_id=c.recording_id '
-             'ORDER BY h.surface,m.mode_key,m.purpose,c.rank')
-    assert list(map(tuple, store.conn.execute(ranks))) == list(map(tuple, original.conn.execute(ranks)))
-    assert not store.rec_refresh.has_pending_changes()
-    assert not candidate_refresh.due(store, 2000)
-    assert store.conn.execute('PRAGMA foreign_key_check').fetchall() == []
 
 
 def no_fit(*args, **kwargs):
@@ -84,82 +57,94 @@ def no_fit(*args, **kwargs):
 
 
 @pytest.fixture
-def completed_ranking(store, monkeypatch):
+def completed_ranking_inputs(store, monkeypatch):
     """Clock admission consumes completed ranks; score changes are tested below."""
     key = 'completed candidate|artist'
-    seed_catalog_track(store, key, 'Completed candidate', 'Artist',
-                       video_id='completed-candidate', genre='Techno')
+    item = {'key': key, 'video_id': 'completed-candidate', 'title': 'Completed candidate',
+            'artist': 'Artist', 'genre': 'Techno', 'score': .8}
+    seed_publication_subjects(store, [item])
     store.rec_model.replace_rec_vectors([(key, np.array([1., 0.], np.float32).tobytes())])
     vectors = store.rec_model.get_rec_vectors()
     assert vectors
-    item = {'key': key, 'video_id': 'completed-candidate', 'title': 'Completed candidate',
-            'artist': 'Artist', 'genre': 'Techno', 'score': .8}
-
     def calculate(reader, now, policies):
         return {'all': {'wheelhouse': policies.stamp([dict(item)], 'wheelhouse')},
                 '_meta': {'full_pools': True, 'comfort_pool': 0}}, None
 
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', calculate)
     monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
+    return vectors
 
+
+@pytest.fixture
+def completed_ranking(store, completed_ranking_inputs):
     def publish(now=2000):
         assert mode_surfaces.prepare_bundles(store, now) is not None
 
     yield publish
     # Check the final durable output once; the tests exercise every intermediate
     # deadline, and no_fit rejects model work during any publication.
+    key = 'completed candidate|artist'
     assert candidate(store, key)['key'] == key
-    assert store.rec_model.get_rec_vectors() == vectors
+    assert store.rec_model.get_rec_vectors() == completed_ranking_inputs
+
+
+@pytest.mark.parametrize('projection', ['vibe', 'profile'])
+def test_projection_preparation_uses_current_versions_without_refitting(
+        store, monkeypatch, projection, completed_ranking_inputs):
+    from yt_playlist.rec import home_vibe, measurement, musical_character, vibe_pools
+
+    module = home_vibe if projection == 'vibe' else musical_character
+    monkeypatch.setattr(module, 'VERSION', module.VERSION + '-upgrade')
+    monkeypatch.setattr(measurement, 'serving_policy',
+                        lambda *args, **kwargs: ('projection-fixture', {'fixture': 'projection-upgrade'}))
+    with store.read_snapshot() as snapshot:
+        policies = measurement.PoolPolicies(snapshot.store, 2000)
+        bundle, _fresh = mode_surfaces._calculate_bundles(snapshot.store, 2000, policies)
+        vibe_pools.prepare(snapshot.store, bundle, 2000, policies)
+    prepared = bundle['_vibes']
+    assert prepared['version'] == home_vibe.VERSION
+    assert prepared['profile_version'] == musical_character.VERSION
+    assert set(prepared['pools']) == set(prepared['genres']) == set(home_vibe.PRESETS)
+    assert prepared['pools']['relax']['explore']
+    assert store.rec_model.get_rec_vectors() == completed_ranking_inputs
+    assert not store.recommendations.heads()
 
 
 @pytest.mark.parametrize('projection', ['vibe', 'profile'])
 def test_projection_upgrade_refreshes_legacy_pools_on_worker_without_refitting(
-        store, monkeypatch, projection, candidate_library_template, file_backed_store, tmp_path):
-    from yt_playlist.rec import home_vibe, musical_character
+        store, monkeypatch, projection, completed_ranking):
+    from yt_playlist.rec import home_vibe, measurement, musical_character
 
-    template = candidate_library_template
-    key = template.restore(store)
-    if projection == 'vibe':
-        # Keep one independent fresh producer and compare its full inputs/ranks.
-        producer = Store(tmp_path / 'producer.db')
-        with closing(producer.conn):
-            producer.init_schema()
-            assert library(producer) == key
-            _assert_library_matches(store, producer)
-        assert template.restore(file_backed_store) == key
-        for current in (store, file_backed_store):
-            _assert_library_matches(current, template.source)
-            assert current.recommendations.heads() == template.source.recommendations.heads()
-            assert current.rec_model.content_generation() == template.source.rec_model.content_generation()
-        assert len({current._evidence_key for current in (template.source, store, file_backed_store)}) == 3
-        assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-        with pytest.raises(sqlite3.OperationalError, match='readonly'):
-            template.source.conn.execute("INSERT INTO settings VALUES ('private_candidate_input','forbidden')")
-        destinations = [roots(current.conn) for current in (store, file_backed_store)]
-        copied = 0
-        for name, source in template.files.items():
-            assert len({source, *(owned[name] for owned in destinations)}) == 3
-            for path in source.rglob('*'):
-                if path.is_file():
-                    paths = [path, *(owned[name] / path.relative_to(source) for owned in destinations)]
-                    assert all(private.read_bytes() == path.read_bytes() for private in paths)
-                    assert len({(private.stat().st_dev, private.stat().st_ino) for private in paths}) == 3
-                    copied += 1
-        assert copied
-        file_backed_store.rec_model.set_weight('genre:techno', 0.5, now=2000)
-        assert file_backed_store.rec_model.weight_records()
-        assert not store.rec_model.weight_records() and not template.source.rec_model.weight_records()
+    # Completed preparation is the lower input. The independent check above
+    # owns its version derivation; this check owns actual worker admission,
+    # framing and native publication on both sides of the upgrade.
+    calculate = mode_surfaces._calculate_bundles
+
+    def with_vibes(reader, now, policies):
+        bundle, fresh = calculate(reader, now, policies)
+        items = bundle['all']['wheelhouse']
+        bundle['_vibes'] = {
+            'version': home_vibe.VERSION, 'profile_version': musical_character.VERSION,
+            'pools': {preset: {'explore': policies.stamp(items, 'vibe:' + preset)}
+                      for preset in home_vibe.PRESETS}, 'genres': {}}
+        return bundle, fresh
+
+    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', with_vibes)
+    # Fingerprint construction and retired-policy collection have separate
+    # owners; version-driven worker admission still uses its real preferences.
+    monkeypatch.setattr(measurement, 'serving_policy',
+                        lambda *args, **kwargs: ('projection-fixture', {'fixture': 'projection-upgrade'}))
+    monkeypatch.setattr(measurement, 'maintain_storage', lambda *args, **kwargs: True)
+    completed_ranking()
     vectors = store.rec_model.get_rec_vectors()
     previous = store.recommendations.head('home')['id']
-    # A published generation and its preference stamp can be current before
-    # an upgrade changes the projection used by the controls.
     assert not candidate_refresh.due(store, 2000)
+
     module = home_vibe if projection == 'vibe' else musical_character
     monkeypatch.setattr(module, 'VERSION', module.VERSION + '-upgrade')
-    monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
     assert candidate_refresh.due(store, 2000)
 
-    assert mode_surfaces.prepare_bundles(store, 2000) is not None
+    completed_ranking()
     assert store.recommendations.head('home')['id'] != previous
     refreshed = store.recommendations.framing('home')
     assert refreshed['vibe_version'] == home_vibe.VERSION

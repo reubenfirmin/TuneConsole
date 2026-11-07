@@ -9,7 +9,7 @@ from yt_playlist.controllers.enrichment_queue import EnrichmentQueue
 from yt_playlist.enrich import queue_policy
 from yt_playlist.repos.enrichment_queue import EnrichmentQueueRepo
 from yt_playlist.controllers.enrichment_state import EnrichmentState
-from yt_playlist.repos.settings import SettingsRepo
+from yt_playlist.controllers.settings import Settings
 
 pytestmark = pytest.mark.usefixtures('no_database')
 
@@ -17,7 +17,7 @@ pytestmark = pytest.mark.usefixtures('no_database')
 def queue(*, read_only=True):
     repository = create_autospec(EnrichmentQueueRepo, instance=True, spec_set=True)
     state = create_autospec(EnrichmentState, instance=True, spec_set=True)
-    settings = create_autospec(SettingsRepo, instance=True, spec_set=True)
+    settings = create_autospec(Settings, instance=True, spec_set=True)
     settings.get_setting.return_value = '100'
     return EnrichmentQueue(repository, state, settings, read_only=read_only,
         read_snapshot=Mock(), memoized_read=Mock(side_effect=lambda _, calculate: calculate()))

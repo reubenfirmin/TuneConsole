@@ -44,11 +44,12 @@ def test_preopened_and_reopened_readers_match_frozen_native_files(installed,tmp_
             assert publication.selected(other.conn,source) == revision
             assert other.settings.get_setting(source) == sources[source] == outputs.get(native.conn,source)
         reads = []
-        real_read = preparation.read_original
-        def reading(row):
-            reads.append(row['source'])
-            return real_read(row)
-        monkeypatch.setattr(preparation,'read_original',reading)
+        real_read = other.settings.files.read
+        def reading(reference, *, surface, chunk_key):
+            assert not other.conn.in_transaction
+            reads.append(surface)
+            return real_read(reference, surface=surface, chunk_key=chunk_key)
+        monkeypatch.setattr(other.settings.files, 'read', reading)
         assert {source:other.settings.get_setting(source) for source in sources} == sources
         assert set(reads) == set(sources)
         assert dict(store.conn.execute('SELECT key,value FROM main.settings')).items() >= sources.items()

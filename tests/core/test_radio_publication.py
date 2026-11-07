@@ -43,6 +43,7 @@ def test_preopened_readers_and_compatible_writer_keep_exact_checkpoint(tmp_path,
         real_read = preparation.read
         real_value = radio_reads.session_value
         real_prepared = RadioFiles.read_prepared
+        real_original = other.settings.files.read_original
         reads = []
         def reading(conn, revision, *args, **kwargs):
             reads.append(revision)
@@ -50,8 +51,13 @@ def test_preopened_readers_and_compatible_writer_keep_exact_checkpoint(tmp_path,
         def reading_prepared(files, header, *args, **kwargs):
             reads.append(header['generation'])
             return real_prepared(files, header, *args, **kwargs)
+        def reading_original(header):
+            assert not other.conn.in_transaction
+            reads.append(header['generation'])
+            return real_original(header)
         monkeypatch.setattr(radio_reads,'session_value',reading)
         monkeypatch.setattr(RadioFiles,'read_prepared',reading_prepared)
+        monkeypatch.setattr(other.settings.files, 'read_original', reading_original)
         assert other.settings.get_setting(preparation.KEY) == raw
         assert radio_storage.load_published(other.conn) == (state,None)
         assert radio_storage.load(other.conn) == (state,None)

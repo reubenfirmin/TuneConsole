@@ -310,7 +310,10 @@ class Store:
             file_paths.root_for_database(self._db_path, self._evidence_key, 'legacy-journals'),
             original_root(self._db_path, self._evidence_key)))
         self.overlaps = OverlapRepo(self)
-        self.settings = SettingsRepo(self)
+        from yt_playlist.controllers.settings import Settings
+        recommendation_files = RecommendationFiles(recommendation_outputs.root_for_database(self._db_path, self._evidence_key))
+        self.settings = Settings(SettingsRepo(self), recommendation_files, collection_recovery.RecoveryFiles(
+            collection_recovery.root_for_database(self._db_path, self._evidence_key)))
         self.metadata_deliveries = MetadataDeliveries(MetadataDeliveryRepo(self),
             MetadataDeliveryFiles(metadata_delivery_root(self._db_path, self._evidence_key)))
         self.metadata_choices = MetadataChoices(MetadataChoiceRepo(self),
@@ -325,7 +328,6 @@ class Store:
         from yt_playlist.repos.recommendation_reports import RecommendationReportsRepo
         from yt_playlist.repos.album_notes import AlbumNotesRepo
         from yt_playlist.core.preparation.listening_outputs import read_original as read_listening
-        recommendation_files = RecommendationFiles(recommendation_outputs.root_for_database(self._db_path, self._evidence_key))
         self.listening_analytics = ListeningAnalytics(ListeningAnalyticsRepo(self), recommendation_files.publish,
             recommendation_outputs.read, read_listening, recommendation_files.exists)
         from yt_playlist.controllers.group_evidence import GroupEvidence
@@ -338,9 +340,12 @@ class Store:
         from yt_playlist.controllers.home_outputs import HomeOutputs
         self.home_cache = HomeOutputs(HomeCacheRepo(self), self.group_evidence, recommendation_files,
                                       lambda *args: home_outputs.read_manifest(*args))
+        from yt_playlist.controllers.comparison_outputs import ComparisonOutputs
+        from yt_playlist.repos.comparison_outputs import ComparisonOutputsRepo
         self.rec_proposals = RecommendationProposals(RecProposalsRepo(self), RecommendationReportsRepo(self),
             AlbumNotesRepo(self), recommendation_files, self.listening_analytics, self.home_cache,
-            lambda: self.recommendations)
+            lambda: self.recommendations, ComparisonOutputs(ComparisonOutputsRepo(self), recommendation_files,
+                self.group_evidence, lambda: self.recommendations))
         from yt_playlist.controllers.choice_findings import ChoiceFindings
         self.choice_findings = ChoiceFindings(self.rec_proposals)
         from yt_playlist.controllers.album_notes import AlbumNotes
@@ -375,7 +380,6 @@ class Store:
         self.recap = Recap(RecapRepo(self), self.genres)
         self.radio_checkpoints = RadioCheckpoints(RadioCheckpointRepo(self), self.settings, self.tracks,
             RadioFiles(collection_recovery.root_for_database(self._db_path, self._evidence_key)), lambda: self._lock)
-        self.retention = Retention(self)
         from yt_playlist.core.published_documents import read_original
         self.sync = LibrarySync(SyncRepo(self), self.settings,
             collection_recovery.RecoveryFiles(collection_recovery.root_for_database(self._db_path, self._evidence_key)),
@@ -392,7 +396,11 @@ class Store:
         self.accounts = Accounts(AccountRepo(self), self.settings,
             paused=lambda: self.activity_paused,
             maintenance_accounts=lambda: getattr(self, '_maintenance_accounts', None))
-        self.collection = Collection(CollectionRepo(self), self.albums)
+        from yt_playlist.controllers.album_aliases import AlbumAliases
+        from yt_playlist.repos.album_aliases import AlbumAliasesRepo
+        aliases = AlbumAliases(AlbumAliasesRepo(self), self.albums, self.originals, self.discovery,
+            lambda target, retired, now: self.album_feedback.merge_albums(target, retired, now), lambda: self._lock)
+        self.collection = Collection(CollectionRepo(self), self.albums, aliases)
         self.album_feedback = AlbumFeedback(AlbumFeedbackRepo(self), self.collection,
             partial(album_feedback_outbox.fence, self), read_original)
         self.cluster_evidence = ClusterEvidence(ClusterEvidenceRepo(self))
@@ -482,6 +490,10 @@ class Store:
             self.enrichment, lambda: [provider['name'] for provider in load_config(self) if provider['enabled']],
             self.originals.files)
         self.conn._close_callbacks.append(self.enrichment_state.files.close)
+        from yt_playlist.core.maintenance_context import MaintenanceDatabase
+        maintenance = (self.retention.database if hasattr(self, 'retention') else
+            MaintenanceDatabase(lambda: self.conn, self._lock, self._db_path, lambda: self.activity_paused))
+        self.retention = Retention(maintenance, self.enrichment_state, self.vibe_models)
         self.enrichment_queue = EnrichmentQueue(EnrichmentQueueRepo(self), self.enrichment_state, self.settings,
             read_snapshot=self.read_snapshot, memoized_read=self.memoized_read,
             read_only=getattr(self, '_read_only', False))

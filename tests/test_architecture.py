@@ -1,26 +1,51 @@
 """Keep repository ownership and import direction explicit as the application grows."""
 import ast
+from collections.abc import Mapping
 from functools import cache
 from pathlib import Path
 import re
 
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src"
 
 
-@cache
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Static-source and Store checks never start the web sync worker."""
+
+
 def _source_tree(path):
     return ast.parse(path.read_text(), filename=str(path))
 
 
+class _ApplicationSources(Mapping):
+    """Retain source text, rather than every guard's temporary syntax trees."""
+    def __init__(self):
+        self.sources = {".".join(path.relative_to(SOURCE).with_suffix("").parts):
+                        (path, path.read_text())
+                        for path in (SOURCE / "yt_playlist").rglob("*.py")}
+
+    def __getitem__(self, name):
+        path, source = self.sources[name]
+        return ast.parse(source, filename=str(path))
+
+    def __iter__(self):
+        return iter(self.sources)
+
+    def __len__(self):
+        return len(self.sources)
+
+    def __contains__(self, name):
+        return name in self.sources
+
+
 @cache
 def _modules():
-    return {".".join(p.relative_to(SOURCE).with_suffix("").parts): _source_tree(p)
-            for p in (SOURCE / "yt_playlist").rglob("*.py")}
+    return _ApplicationSources()
 
 
-@cache
 def _import_nodes(tree):
     # Imports are statements. Walking expression operands, names and constants
     # again for this index adds no import edge, even for local imports.
@@ -58,14 +83,14 @@ def _flat_repository_references(tree, methods):
         if isinstance(node, ast.ImportFrom) and node.module == "yt_playlist.core.store":
             constructors.update(a.asname or a.name for a in node.names if a.name == "Store")
 
-    @cache
     def reference(node):
-        if isinstance(node, ast.Name):
-            return node.id
-        if isinstance(node, ast.Attribute) and isinstance(node.value, (ast.Name, ast.Attribute)):
-            parent = reference(node.value)
-            return f"{parent}.{node.attr}" if parent is not None else None
-        return None
+        parts = []
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if not isinstance(node, ast.Name):
+            return None
+        return '.'.join([node.id, *reversed(parts)])
 
     def is_store(node, stores):
         return ((isinstance(node, (ast.Name, ast.Attribute)) and reference(node) in stores)
@@ -95,15 +120,25 @@ def _flat_repository_references(tree, methods):
                     pending.append(node.value)
                 elif not isinstance(node, (ast.Name, ast.Constant, ast.alias)):
                     pending.extend(ast.iter_child_nodes(node))
-        aliases = set(inherited)
-        while True:
-            before = len(aliases)
-            for node in assignments:
-                if node.value is not None and is_store(node.value, aliases):
-                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                    aliases.update(reference(t) for t in targets if isinstance(t, (ast.Name, ast.Attribute)))
-            if len(aliases) == before:
-                break
+        # Resolve the alias graph once. Repeatedly rescanning all assignments
+        # makes reversed chains quadratic, although every edge is immutable.
+        aliases, edges = set(inherited), {}
+        for node in assignments:
+            if node.value is None:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            targets = {reference(t) for t in targets if isinstance(t, (ast.Name, ast.Attribute))}
+            if is_store(node.value, aliases):
+                aliases.update(targets)
+            source = reference(node.value)
+            if source is not None:
+                edges.setdefault(source, set()).update(targets)
+        pending = list(aliases)
+        while pending:
+            for target in edges.get(pending.pop(), ()):
+                if target not in aliases:
+                    aliases.add(target)
+                    pending.append(target)
         for node in attributes:
             if is_store(node.value, aliases):
                 yield node.lineno, ast.unparse(node)
@@ -116,10 +151,13 @@ def _flat_repository_references(tree, methods):
                     target = target.args[0]
                 if is_store(target, aliases):
                     yield node.lineno, "patch repository directly"
-        for child in nested:
-            yield from scope_references(child, aliases)
+        return nested, aliases
 
-    yield from scope_references(tree, stores)
+    scopes = [(tree, stores)]
+    while scopes:
+        scope, inherited = scopes.pop()
+        nested, aliases = yield from scope_references(scope, inherited)
+        scopes.extend((child, aliases) for child in reversed(nested))
 
 
 def test_repository_guard_finds_store_aliases_and_fixture_lookups():
@@ -163,6 +201,18 @@ def runtime_helper(store):
         tree, {'pending', 'close', 'load'})] == [(4, 's.pending')]
 
 
+@pytest.mark.parametrize('reverse', [False, True], ids=['forward', 'reversed'])
+def test_repository_guard_resolves_long_alias_chains_and_cycles(reverse):
+    assignments = [f'alias{index + 1} = alias{index}' for index in range(256)]
+    if reverse:
+        assignments.reverse()
+    source = '\n'.join(['alias0 = Store("library.db")', *assignments,
+                        'alias0 = alias256', 'alias256.pending()',
+                        'unrelated = Session()', 'unrelated.pending()'])
+    assert [reference for _, reference in _flat_repository_references(
+        ast.parse(source), {'pending'})] == ['alias256.pending']
+
+
 def test_application_import_graph_is_acyclic_including_local_imports():
     modules = _modules()
     # Frozen upgrades import the runner's error type; the runner lazily loads
@@ -197,28 +247,44 @@ def test_application_import_graph_is_acyclic_including_local_imports():
         visit(name)
 
 
-def test_callers_name_repository_owners_and_retired_modules_stay_retired():
-    modules = _modules()
-    methods = {node.name for name, tree in modules.items() if name.startswith("yt_playlist.repos.")
+@cache
+def _repository_methods():
+    # This guard needs repository declarations and Store's own API, rather
+    # than an eagerly parsed index of every application implementation.
+    repositories = [_source_tree(path) for path in (SOURCE / 'yt_playlist' / 'repos').rglob('*.py')]
+    store = _source_tree(SOURCE / 'yt_playlist' / 'core' / 'store.py')
+    methods = {node.name for tree in repositories
                for cls in tree.body if isinstance(cls, ast.ClassDef) and cls.name.endswith('Repo')
                for node in cls.body if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")
                and not any(isinstance(decorator, ast.Name) and decorator.id == 'property'
                            for decorator in node.decorator_list)}
     # Store's own lifetime and connection API is not a forwarded repository
     # method merely because a repository has a method with the same name.
-    methods -= {node.name for cls in modules['yt_playlist.core.store'].body
+    methods -= {node.name for cls in store.body
                 if isinstance(cls, ast.ClassDef) and cls.name == 'Store'
                 for node in cls.body if isinstance(node, ast.FunctionDef)}
-    methods -= {target.attr for node in ast.walk(modules['yt_playlist.core.store'])
+    methods -= {target.attr for node in ast.walk(store)
                 if isinstance(node, (ast.Assign, ast.AnnAssign))
                 for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
                 if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
                 and target.value.id == 'self'}
+    return methods
+
+
+def _caller_batches():
+    paths = sorted([*(SOURCE / 'yt_playlist').rglob('*.py'), *(ROOT / 'tests').rglob('*.py')])
+    return [paths[offset:offset + 16] for offset in range(0, len(paths), 16)]
+
+
+@pytest.mark.parametrize('paths', _caller_batches(), ids=lambda paths: str(paths[0].relative_to(ROOT)))
+def test_callers_name_repository_owners_and_retired_modules_stay_retired(paths):
+    methods = _repository_methods()
     retired = {"yt_playlist.repos.rec", "yt_playlist.rec.rec_dao", "yt_playlist.rec.recommend"}
     violations = []
-    files = [*(SOURCE / "yt_playlist").rglob("*.py"), *(ROOT / "tests").rglob("*.py")]
-    for path in files:
-        tree = _source_tree(path)
+    for path in paths:
+        # Each caller owns its tree only for this check. Keeping thousands of
+        # caller ASTs alive adds memory and garbage-collector scans without reuse.
+        tree = ast.parse(path.read_text(), filename=str(path))
         for dependency in _imports(tree):
             if dependency in retired:
                 violations.append(f"{path.relative_to(ROOT)} imports {dependency}")

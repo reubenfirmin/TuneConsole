@@ -7,6 +7,7 @@ import pytest
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.collection import Collection
 from yt_playlist.controllers.albums import Albums
+from yt_playlist.controllers.album_aliases import AlbumAliases
 from yt_playlist.repos.collection import CollectionRepo
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -16,7 +17,8 @@ pytestmark = pytest.mark.usefixtures('no_database')
 def collection():
     repository = create_autospec(CollectionRepo, instance=True, spec_set=True)
     repository.membership_transaction.side_effect = nullcontext
-    return Collection(repository, create_autospec(Albums, instance=True, spec_set=True))
+    return Collection(repository, create_autospec(Albums, instance=True, spec_set=True),
+                      create_autospec(AlbumAliases, instance=True, spec_set=True))
 
 
 def occurrence(identity=1, occurrence=1, key='song', **values):

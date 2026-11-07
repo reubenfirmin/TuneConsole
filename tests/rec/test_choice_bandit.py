@@ -113,21 +113,37 @@ def test_later_choices_from_held_menu_keep_days_and_do_not_reuse_old_completion(
     assert rows[1]['days'] == rows[2]['days'] == 3
 
 
-def test_findings_publish_atomically_and_corrections_recompute_support(store):
+def test_interrupted_findings_retain_completed_publications_and_retry_withdrawal(store):
     modes(store)
     oid = menu(store)
     choices.respond(store, oid, 'visible', 101, visible=['one', 'two'])
     choices.respond(store, oid, 'choice', 102, option_id='one')
     old = choices.compile_report(store, 103)
+    old_interests = store.rec_proposals.get_proposals('choice_interests')
+    assert old['bandit']['rows'] and old_interests['contexts']
     choices.respond(store, oid, 'withdraw', 104, details={'action_id': 'menu:choice:one'})
     store.conn.execute("CREATE TEMP TRIGGER fail_choice_publication BEFORE UPDATE ON choice_learning_heads "
                        "WHEN NEW.surface='choice_interests' BEGIN SELECT RAISE(ABORT,'interrupted'); END")
-    with pytest.raises(sqlite3.IntegrityError, match='interrupted'):
-        choices.compile_report(store, 105)
-    assert store.rec_proposals.get_proposals('listening_choices')['watermark'] == old['watermark']
-    assert store.rec_proposals.get_proposals('choice_bandit') == old['bandit']
-    store.conn.execute('DROP TRIGGER fail_choice_publication')
-    assert not evidence(store, 106)[1]
+    try:
+        with pytest.raises(sqlite3.IntegrityError, match='interrupted'):
+            choices.compile_report(store, 105)
+        # Completed repository publications survive a later owner's failure.
+        partial = store.rec_proposals.get_proposals('listening_choices')
+        assert partial['watermark'] != old['watermark']
+        assert partial['formats']['mixes']['choices'] == 0
+        assert not partial['bandit']['rows']
+        assert store.rec_proposals.get_proposals('choice_bandit') == partial['bandit']
+        assert store.rec_proposals.get_proposals('choice_interests') == old_interests
+        assert not store.conn.in_transaction
+    finally:
+        store.conn.execute('DROP TRIGGER fail_choice_publication')
+    report = choices.compile_report(store, 106)
+    assert not report['bandit']['rows']
+    assert store.rec_proposals.get_proposals('listening_choices') == report
+    assert store.rec_proposals.get_proposals('choice_bandit') == report['bandit']
+    interests = store.rec_proposals.get_proposals('choice_interests')
+    assert not interests['contexts']
+    assert interests['watermark'] == report['watermark']
 
 
 def test_unrelated_historical_group_components_are_not_mix_dependencies(store):

@@ -20,9 +20,15 @@ def seed_publication_subjects(store, items, *, discoveries=(), now=1):
     assert all(reason is None for _key, reason in resolved.values()), resolved
     first = store.conn.execute('SELECT COALESCE(MAX(id),0)+1 FROM recordings').fetchone()[0]
     subjects = [(rid, item) for rid, item in enumerate(items.values(), first)]
+    # Empty genre input also serves installed-v79 publication fixtures, before
+    # the keyed-genre column existed. Do not add a genre dependency to it.
+    genre_input = any(item.get('genre') is not None for item in items.values())
+    columns = 'id,identity_key,title,artist' + (',genre_key' if genre_input else '')
     with atomic_write(store):
-        store.conn.executemany('INSERT INTO recordings(id,identity_key,title,artist,genre_key) VALUES (?,?,?,?,?)',
-            [(rid, item['key'], item['title'], item['artist'], resolved[item.get('genre')][0])
+        store.conn.executemany('INSERT INTO recordings(' + columns + ') VALUES (' +
+            ','.join('?' for _ in columns.split(',')) + ')',
+            [(rid, item['key'], item['title'], item['artist']) +
+             ((resolved[item.get('genre')][0],) if genre_input else ())
              for rid, item in subjects])
         store.conn.executemany('INSERT INTO youtube_items(video_id,recording_id,title,artist,orig_title,orig_artist,'
             'album,mb_year,duration_s) VALUES (?,?,?,?,?,?,?,?,?)',

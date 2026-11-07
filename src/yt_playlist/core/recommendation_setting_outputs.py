@@ -28,10 +28,25 @@ def prepare(key, raw):
                for track in value.get('tracks', [])):
             raise ValueError('Radio seed has no exact video reference')
         home_outputs.policy_references(value)
+        menu = value.get('menu_id')
+        if menu is not None and (not isinstance(menu, str) or not 0 < len(menu.encode()) <= 4096):
+            raise ValueError('Invalid saved seed menu identity')
+        assignment = value.get('comparison') or {}
+        if not isinstance(assignment, dict):
+            raise ValueError('Invalid saved seed comparison')
+        run = assignment.get('run_id')
+        if run is not None and (type(run) is not int or not 0 < run < 2 ** 63):
+            raise ValueError('Invalid saved seed comparison run')
     observed = value.get('ran_at') if key == 'rec_autotune_result' and isinstance(value, dict) else None
     if observed is not None and (type(observed) not in (int, float) or not math.isfinite(observed)):
         observed = None
     return value, observed, files.encode(key, '', raw)
+
+
+def prepare_record(key, raw):
+    value, observed, encoded = prepare(key, raw)
+    return {'value': value, 'observed': observed, 'encoded': encoded,
+            'policies': home_outputs.policy_references(value) if key == 'radio_seed_offer' else ()}
 
 
 def put(conn, values):
@@ -39,44 +54,44 @@ def put(conn, values):
         raise ValueError('Saved recommendation output requires its outer transaction')
     if set(values) - KEYS:
         raise ValueError('Unknown saved recommendation owner')
-    prepared = {key: prepare(key, raw) if raw else None for key, raw in values.items()}
+    prepared = {key: prepare_record(key, raw) if raw else None for key, raw in values.items()}
     with policy_documents.retained_reader(files.directory(conn)):
-        for key, output in prepared.items():
-            if key == 'radio_seed_offer':
-                conn.execute('DELETE FROM radio_seed_policies')
-                conn.execute('DELETE FROM radio_seed_subjects')
-            conn.execute('DELETE FROM ' + TABLES[key])
-            if output is None:
-                continue
-            value, observed, encoded = output
-            filename, digest, size = files.publish(files.directory(conn), encoded)
-            if key == 'radio_seed_offer':
-                menu = value.get('menu_id')
-                if menu is not None and (not isinstance(menu, str) or not 0 < len(menu.encode()) <= 4096):
-                    raise ValueError('Invalid saved seed menu identity')
-                assignment = value.get('comparison') or {}
-                if not isinstance(assignment, dict):
-                    raise ValueError('Invalid saved seed comparison')
-                run = assignment.get('run_id')
-                if run is not None and (type(run) is not int or not 0 < run < 2 ** 63):
-                    raise ValueError('Invalid saved seed comparison run')
-                known = run is not None and conn.execute('SELECT 1 FROM rec_model_selection_runs WHERE id=?', (run,)).fetchone()
-                conn.execute('INSERT INTO radio_seed_output(id,menu_id,comparison_run_id,run_ref,run_resolution,filename,content_digest,byte_size) '
-                             'VALUES (1,?,?,?,?,?,?,?)', (menu, run, run if known else None,
-                             None if run is None or known else 'missing_run', filename, digest, size))
-                for position, track in enumerate(value.get('tracks', [])):
-                    row = conn.execute('SELECT id FROM catalog_entries WHERE video_id=? ORDER BY id LIMIT 1',
-                                       (track['video_id'],)).fetchone()
-                    conn.execute('INSERT INTO radio_seed_subjects VALUES (1,?,?,?,?)',
-                                 (position, track['video_id'], row[0] if row else None,
-                                  None if row else 'missing_entry'))
-                for policy in sorted(home_outputs.policy_references(value)):
-                    known = conn.execute('SELECT 1 FROM recommendation_policies WHERE version=?', (policy,)).fetchone()
-                    conn.execute('INSERT INTO radio_seed_policies VALUES (1,?,?,?)',
-                                 (policy, policy if known else None, None if known else 'missing_policy'))
-            else:
-                conn.execute('INSERT INTO model_autotune_output(id,observed_at,filename,content_digest,byte_size) VALUES (1,?,?,?,?)',
-                             (observed, filename, digest, size))
+        durable = {key: files.publish(files.directory(conn), output['encoded'])
+                   for key, output in prepared.items() if output is not None}
+        register(conn, prepared, durable)
+
+
+def register(conn, prepared, durable):
+    """Replace SQL rows using validated output fields and supplied file references."""
+    for key, output in prepared.items():
+        if key == 'radio_seed_offer':
+            conn.execute('DELETE FROM radio_seed_policies')
+            conn.execute('DELETE FROM radio_seed_subjects')
+        conn.execute('DELETE FROM ' + TABLES[key])
+        if output is None:
+            continue
+        value, observed = output['value'], output['observed']
+        filename, digest, size = durable[key]
+        if key == 'radio_seed_offer':
+            menu = value.get('menu_id')
+            run = (value.get('comparison') or {}).get('run_id')
+            known = run is not None and conn.execute('SELECT 1 FROM rec_model_selection_runs WHERE id=?', (run,)).fetchone()
+            conn.execute('INSERT INTO radio_seed_output(id,menu_id,comparison_run_id,run_ref,run_resolution,filename,content_digest,byte_size) '
+                         'VALUES (1,?,?,?,?,?,?,?)', (menu, run, run if known else None,
+                         None if run is None or known else 'missing_run', filename, digest, size))
+            for position, track in enumerate(value.get('tracks', [])):
+                row = conn.execute('SELECT id FROM catalog_entries WHERE video_id=? ORDER BY id LIMIT 1',
+                                   (track['video_id'],)).fetchone()
+                conn.execute('INSERT INTO radio_seed_subjects VALUES (1,?,?,?,?)',
+                             (position, track['video_id'], row[0] if row else None,
+                              None if row else 'missing_entry'))
+            for policy in sorted(output['policies']):
+                known = conn.execute('SELECT 1 FROM recommendation_policies WHERE version=?', (policy,)).fetchone()
+                conn.execute('INSERT INTO radio_seed_policies VALUES (1,?,?,?)',
+                             (policy, policy if known else None, None if known else 'missing_policy'))
+        else:
+            conn.execute('INSERT INTO model_autotune_output(id,observed_at,filename,content_digest,byte_size) VALUES (1,?,?,?,?)',
+                         (observed, filename, digest, size))
 
 
 def get(conn, key, default=None):
@@ -91,4 +106,4 @@ def get(conn, key, default=None):
 
 
 def clear(conn):
-    put(conn, {key: None for key in KEYS})
+    register(conn, {key: None for key in KEYS}, {})

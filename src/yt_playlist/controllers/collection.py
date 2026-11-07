@@ -4,8 +4,8 @@ from yt_playlist.core.metadata_contract import clock
 
 
 class Collection:
-    def __init__(self, repository, albums):
-        self.repository, self.albums = repository, albums
+    def __init__(self, repository, albums, aliases):
+        self.repository, self.albums, self.aliases = repository, albums, aliases
 
     def taste_album_contexts(self, *, include_browse=()):
         return views.taste_album_contexts(self.repository.taste_album_inputs(), include_browse)
@@ -130,7 +130,7 @@ class Collection:
         return self.repository.album_alias_revision()
 
     def observe_album_representation(self, browse_id, album, *, now=None):
-        return self.repository.observe_album_representation(browse_id, album, now=now)
+        return self.aliases.observe(browse_id, album, now=now)
 
     def add_saved_album(self, album, *, account_id=None):
         identity = self._observe_saved_album(album)

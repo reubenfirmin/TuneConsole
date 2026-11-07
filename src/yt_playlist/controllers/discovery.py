@@ -188,6 +188,18 @@ class Discovery:
         self._retain_origins(origins, target, 'explicit genre merge')
         self.repository.apply_origin_merge('genre_key', target, origins)
 
+    def merge_albums(self, previous, target):
+        reason = f'verified album reconciliation {previous} to {target}'
+        inputs = self.repository.album_merge_inputs(previous, target)
+        origins = self.repository.origin_merge_inputs('album_id', previous, target)
+        self._retain_origins(origins, target, reason)
+        for row in inputs['impressions']:
+            self._retain('discovery_impression_merge', ['album', previous, target, row['id']], row, reason)
+        if inputs['legacy']:
+            self._retain('discovery_legacy_offer_merge', ['album', previous, target], inputs['legacy'], reason)
+        member = policy.merged_album_membership(inputs['memberships'], target)
+        self.repository.apply_album_merge(previous, target, inputs, origins, member)
+
     def fetched_albums(self, browse_ids):
         return self.repository.fetched_albums(browse_ids)
 

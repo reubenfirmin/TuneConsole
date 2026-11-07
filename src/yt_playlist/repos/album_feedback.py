@@ -6,7 +6,7 @@ from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core.db_revisions import setting_reads
 from yt_playlist.core.db_writes import atomic_write, reserved_write
 from yt_playlist.core.published_documents import ALBUM_FEEDBACK
-from yt_playlist.repos.base import Repo, lookup_read
+from yt_playlist.repos.base import Repo, lookup_read, synchronized
 
 
 class AlbumFeedbackRepo(Repo):
@@ -77,6 +77,23 @@ class AlbumFeedbackRepo(Repo):
     def _save_intents(self, intents):
         for intent in intents:
             album_feedback_outbox.enqueue(self.conn, **intent)
+
+    @lookup_read
+    def merge_inputs(self, target, retired):
+        return [dict(row) for row in self.conn.execute('SELECT * FROM album_feedback '
+            'WHERE album_id IN (?,?) AND withdrawn_at IS NULL', (target, retired))]
+
+    @synchronized
+    def apply_merge(self, target, retired, withdrawals):
+        self.conn.executemany('UPDATE album_feedback SET withdrawn_at=? WHERE id=?', withdrawals)
+        self.conn.execute('UPDATE album_feedback SET album_id=? WHERE album_id=?', (target, retired))
+        self.conn.execute('INSERT INTO album_feedback_legacy_dismissals(account_id,album_id,dismissed_at) '
+            'SELECT account_id,?,dismissed_at FROM album_feedback_legacy_dismissals WHERE album_id=? '
+            'ON CONFLICT(account_id,album_id) DO UPDATE SET dismissed_at=MAX(dismissed_at,excluded.dismissed_at)',
+            (target, retired))
+        self.conn.execute('DELETE FROM album_feedback_legacy_dismissals WHERE album_id=?', (retired,))
+        self.conn.execute('UPDATE discovery_fetch_history SET album_id=? WHERE album_id=?', (target, retired))
+        self.conn.execute('UPDATE album_playback_intents SET album_id=? WHERE album_id=?', (target, retired))
 
     def retained_opportunities(self):
         with reserved_write(self._store, wait_seconds=0):
