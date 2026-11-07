@@ -154,7 +154,7 @@ def test_failures_are_safe_durable_and_shared_without_billed_retry(boundary, sto
         assert get(b, store, other_album(store, 'Other record'))[1]['status'] == status
     assert len(b.calls) == 1 and body.closed and len(errors) == 1
     assert errors[0].provider == 'deepseek' and errors[0].retry_at == deadline
-    store.rec_proposals.wake_album_descriptions(1000)
+    store.album_notes.wake(1000)
     b = boundary(lambda request: pytest.fail('Fresh IAO bypassed durable failure'))
     assert get(b, store)[1]['retry_at'] == deadline and not b.calls
     assert copy.settings(store, 1000)['requests_today'] == 1
@@ -176,7 +176,7 @@ def test_rejected_credential_remains_rejected_after_replacement_and_restart(boun
     try:
         assert get(b, db)[1]['status'] == 'auth'
         db.settings.set_setting('deepseek_api_key', 'sk-replacement-12345678')
-        db.rec_proposals.wake_album_descriptions(1000)
+        db.album_notes.wake(1000)
         assert get(b, db)[0]['text'] == TEXT
         assert copy.settings(db, 1000)['requests_today'] == 2
     finally:

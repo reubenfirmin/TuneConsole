@@ -8,12 +8,11 @@ Feature operations (receipts, artwork, paid requests) stay with their owners.
 from dataclasses import dataclass
 from functools import partial
 import json
-from pathlib import Path
 from typing import Callable
 
 from yt_playlist.core import (album_note_outputs, album_note_requests, choice_learning_state,
     home_offers, home_outputs, library_pool_state, listening_outputs, model_comparison_state,
-    model_projections, recommendation_reports, recommendation_requests, recommendation_work,
+    model_projections, recommendation_requests, recommendation_work,
     tv_recommendation_state)
 from yt_playlist.core.db_revisions import keyed_reads
 from yt_playlist.repos import proposal_cache
@@ -135,9 +134,6 @@ def select(store, surface, *, writing=False, validate_home=False):
             if revision is not None:
                 return _document(conn, owner, revision, lambda header: bool(header['field_mask']))
     elif surface in library_pool_state.SURFACES:
-        if store._clicked_library_pools:
-            return _typed(conn, surface, library_pool_state, partial(library_pool_state.read, store, surface),
-                          lambda: library_pool_state.read_parameters(conn, surface) is not None)
         if not writing:
             from yt_playlist.core.preparation.clicked_publication import OWNER
             revision = OWNER.selected(conn)
@@ -168,41 +164,6 @@ def select(store, surface, *, writing=False, validate_home=False):
                     return header is not None and bool(header['field_mask'])
                 return Storage(_json(partial(choice_publication.read, conn, surface)),
                                present)
-    elif surface in recommendation_reports.SURFACES:
-        if store._recommendation_reports or (not writing and recommendation_reports.prepared_owner(conn)):
-            def prepare(raw, now, revision):
-                return partial(recommendation_reports.publish, conn, recommendation_reports.prepare(surface, raw, now))
-            return Storage(partial(recommendation_reports.encoded, conn, surface),
-                           partial(recommendation_reports.present, conn, surface), prepare)
-    elif surface in home_outputs.SURFACES:
-        if store._home_display_files:
-            def prepare(raw, now, revision):
-                prepared = raw if isinstance(raw, home_outputs.Prepared) else home_outputs.prepare(surface, raw, now)
-                if prepared.surface != surface or prepared.built_at != now:
-                    raise ValueError('Prepared Home surface or observation time does not match')
-                return partial(home_outputs.publish, conn, prepared, store=store, input_revision=revision)
-            return Storage(partial(home_outputs.encoded, conn, surface),
-                           partial(home_outputs.present, conn, surface), prepare)
-        if not writing:
-            from yt_playlist.core.preparation import home_publication
-            handled, header = home_publication.header(conn, surface)
-            if handled:
-                return Storage(lambda: home_publication.read(conn, surface)[1],
-                               lambda: header is not None and bool(header['has_content']))
-    elif listening_outputs.owns(surface):
-        if store._listening_files:
-            return Storage(partial(listening_outputs.encoded, conn, surface),
-                partial(listening_outputs.present, conn, surface),
-                lambda raw, now, revision: partial(listening_outputs.publish_document, conn, surface, raw, now))
-        if not writing:
-            from yt_playlist.core.preparation import listening_publication
-            revision = listening_publication.OWNER.selected(conn)
-            if revision is not None:
-                def present():
-                    header = listening_publication.OWNER.capture(conn, revision, surface)
-                    return header is not None and Path(header['filename']).is_file()
-                return Storage(lambda: listening_publication.read(conn, surface)[1],
-                               present)
     elif surface in recommendation_requests.SURFACES:
         if store._recommendation_requests:
             return Storage(_json(partial(recommendation_requests.read, conn, surface)),
@@ -214,17 +175,10 @@ def select(store, surface, *, writing=False, validate_home=False):
             if revision is not None:
                 return Storage(_json(partial(demand_publication.read, conn, surface, revision)),
                                partial(demand_publication.present, conn, surface, revision))
-    elif surface in ('album_notes', 'album_note_requests'):
+    elif surface == 'album_note_requests':
         if store._album_note_demand:
-            owner = album_note_outputs if surface == 'album_notes' else album_note_requests
-            return Storage(_json(partial(owner.read, conn)), lambda: _exists(conn, surface if surface != 'album_notes' else 'album_note_outputs'),
-                lambda raw, now, revision: partial(owner.replace, conn, json.loads(raw), now))
-        if surface == 'album_notes' and not writing:
-            from yt_playlist.core.preparation import album_note_publication
-            revision = album_note_publication.selected(conn)
-            if revision is not None:
-                return Storage(lambda: album_note_publication.read(conn)[1],
-                    lambda: _exists(conn, album_note_publication.preparation.FILES, 'generation=?', (revision,)))
+            return Storage(_json(partial(album_note_requests.read, conn)), lambda: _exists(conn, surface),
+                lambda raw, now, revision: partial(album_note_requests.replace, conn, json.loads(raw), now))
     elif surface == 'home_shown' and home_offers.available(conn):
         prefix = 'prepared_' if home_offers.prepared_owner(conn) else ''
         return Storage(_json(partial(home_offers.read, conn)),

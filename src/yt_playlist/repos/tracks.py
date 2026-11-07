@@ -1,6 +1,6 @@
 """TrackRepo: track rows and their genre/year enrichment."""
 from contextlib import contextmanager
-from yt_playlist.core import catalog, entity_names, metadata
+from yt_playlist.core import association_work, catalog, entity_names, metadata
 from yt_playlist.core.catalog_keys import resolve_recording
 from yt_playlist.repos.base import Repo, synchronized, lookup_read, snapshot_read
 
@@ -92,8 +92,26 @@ class TrackRepo(Repo):
             'SELECT id,identity_key FROM recordings WHERE id IN (?,?)', (previous[0], target[0]))}
         remaining = self.conn.execute('SELECT MIN(id) FROM catalog_entries WHERE recording_id=? AND video_id IS NOT ?',
             (previous[0], video_id)).fetchone()[0]
+        aliases = [row[0] for row in self.conn.execute(
+            'SELECT alias FROM recording_aliases WHERE recording_id=?', (previous[0],))]
         return dict(previous=previous[0], target=target[0], previous_key=keys[previous[0]],
-            target_key=keys[target[0]], remaining=remaining)
+            target_key=keys[target[0]], remaining=remaining, aliases=aliases)
+
+    @synchronized
+    def association_work(self, video):
+        row = self.conn.execute('SELECT * FROM recording_association_work WHERE video_id=?', (video,)).fetchone()
+        return dict(row) if row else None
+
+    @synchronized
+    def save_association_work(self, video, association, plan_json):
+        with self.conn.atomic():
+            self.conn.execute('INSERT INTO recording_association_work(video_id,association_id,plan_json) VALUES (?,?,?)',
+                              (video, association, plan_json))
+
+    @synchronized
+    def finish_association_work(self, association):
+        with self.conn.atomic():
+            self.conn.execute('DELETE FROM recording_association_work WHERE association_id=?', (association,))
 
     @synchronized
     def record_association(self, video, previous, target, source, evidence_json, now):
@@ -102,7 +120,7 @@ class TrackRepo(Repo):
                 'source,evidence,at) VALUES (?,?,?,?,?,?)', (video, target, previous, source, evidence_json, now)).lastrowid
 
     @synchronized
-    def assign_recording(self, video, previous, target, target_key):
+    def assign_recording(self, video, previous, target, target_key, *, association=None):
         from yt_playlist.core import discovery_sources, embedding_files, listening_summaries
         with self.conn.atomic(join=True):
             self.conn.execute('DELETE FROM recording_embeddings WHERE recording_id IN (?,?)', (previous, target))
@@ -121,9 +139,10 @@ class TrackRepo(Repo):
             parameters = (target, video) if typed else (target, target_key, video)
             self.conn.execute(f'UPDATE main.play_events SET recording_id=?,{assignment} WHERE video_id=?', parameters)
             self.conn.execute('UPDATE recordings SET provisional=0 WHERE id=?', (target,))
+            association_work.complete(self.conn, association, 'assigned')
 
     @synchronized
-    def redirect_recording(self, previous, target, source, evidence_json):
+    def redirect_recording(self, previous, target, source, evidence_json, *, association=None):
         with self.conn.atomic(join=True):
             self.conn.execute('INSERT OR REPLACE INTO recording_redirects VALUES (?,?,?,?)', (previous, target, source, evidence_json))
             self.conn.execute('UPDATE recording_redirects SET recording_id=? WHERE recording_id=?', (target, previous))
@@ -131,6 +150,7 @@ class TrackRepo(Repo):
             self.conn.executemany('INSERT OR IGNORE INTO recording_aliases VALUES (?,?,?)',
                 [(row['alias'], target, row['source']) for row in aliases])
             self.conn.execute('DELETE FROM recording_aliases WHERE recording_id=?', (previous,))
+            association_work.complete(self.conn, association, 'redirected')
         return [row['alias'] for row in aliases]
 
     @synchronized

@@ -133,7 +133,7 @@ def build(ctx) -> APIRouter:
         if not re.fullmatch(r'sk-[A-Za-z0-9_-]{8,240}', key):
             return Response(status_code=400)
         store.settings.set_setting('deepseek_api_key', key)
-        store.rec_proposals.wake_album_descriptions(ctx.now_fn())
+        store.album_notes.wake(ctx.now_fn())
         if ctx.rec_worker:
             ctx.rec_worker.trigger_home_refresh()
         return Response(status_code=204)
@@ -162,7 +162,7 @@ def build(ctx) -> APIRouter:
                 if key:
                     values['deepseek_api_key'] = key
                 store.settings.set_values(values)
-                store.rec_proposals.wake_album_descriptions(ctx.now_fn())
+                store.album_notes.wake(ctx.now_fn())
                 if ctx.rec_worker:
                     ctx.rec_worker.trigger_home_refresh()
                 message = 'Album description settings saved.'

@@ -708,7 +708,7 @@ def test_installed_paid_owner_routes_default_settings_and_reader_without_legacy_
     assert deepseek.settings(store, 100)['requests_today'] == 1
     assert album_descriptions.read(store, {'browse_id': 'release-one'}) is None
     # Settings wake only the display worker; durable admission and usage survive.
-    store.rec_proposals.wake_album_descriptions(101)
+    store.album_notes.wake(101)
     assert store.album_descriptions.requests_today(101) == 1
     assert tuple(store.conn.execute('SELECT claim_token,status FROM album_description_requests').fetchone()) == (
         claim['token'], 'claimed')

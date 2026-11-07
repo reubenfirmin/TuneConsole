@@ -293,22 +293,20 @@ def test_resume_reconciles_lost_batch_response_after_restart(file_backed_store):
 
 
 def test_large_import_publishes_each_confirmed_suffix_once(store, monkeypatch):
-    from yt_playlist.core import catalog
-
     iid = store.accounts.upsert_account('Main', 'bridge', None, True)
     client = SongClient()
     titles = [f'Song {i:03}' for i in range(250)]
     upserts, commits = [], []
-    upsert = catalog.upsert
+    upsert = store.tracks.upsert_track
     publish = store.playlists.repository.publish_confirmed
     store.conn.execute('CREATE TEMP TABLE membership_writes(kind TEXT)')
     for op in ('INSERT', 'DELETE'):
         store.conn.execute(f"CREATE TEMP TRIGGER count_import_{op} AFTER {op} ON playlist_items "
                            f"BEGIN INSERT INTO membership_writes VALUES ('{op}'); END")
 
-    def track(conn, video, *args, **kwargs):
+    def track(video, *args, **kwargs):
         upserts.append(video)
-        return upsert(conn, video, *args, **kwargs)
+        return upsert(video, *args, **kwargs)
 
     def atomic(*args, **kwargs):
         statements = []
@@ -320,7 +318,7 @@ def test_large_import_publishes_each_confirmed_suffix_once(store, monkeypatch):
         commits.append(statements.count('COMMIT'))
         return result
 
-    monkeypatch.setattr(catalog, 'upsert', track)
+    monkeypatch.setattr(store.tracks, 'upsert_track', track)
     monkeypatch.setattr(store.playlists.repository, 'publish_confirmed', atomic)
     report = import_spotify_library(store, _playlists_zip(('Large', titles)), client, iid, 100)
     assert report['playlists_imported'] == 1 and report['tracks_imported'] == 250
@@ -335,20 +333,18 @@ def test_large_import_publishes_each_confirmed_suffix_once(store, monkeypatch):
 
 
 def test_failed_second_batch_rolls_back_locally_and_resumes_same_remote_destination(store, monkeypatch):
-    from yt_playlist.core import catalog
-
     iid = store.accounts.upsert_account('Main', 'bridge', None, True)
     client = SongClient()
     titles = [f'Song {i:03}' for i in range(250)]
     raw = _playlists_zip(('Large', titles))
-    upsert = catalog.upsert
+    upsert = store.tracks.upsert_track
 
-    def failing(conn, video, *args, **kwargs):
+    def failing(video, *args, **kwargs):
         if video == 'yt-Song 150':
             raise RuntimeError('injected second-batch failure')
-        return upsert(conn, video, *args, **kwargs)
+        return upsert(video, *args, **kwargs)
 
-    monkeypatch.setattr(catalog, 'upsert', failing)
+    monkeypatch.setattr(store.tracks, 'upsert_track', failing)
     assert import_spotify_library(store, raw, client, iid, 100)['playlists_failed'] == 1
     playlist, = store.playlists.get_playlists()
     assert playlist.track_count == 100
@@ -360,7 +356,7 @@ def test_failed_second_batch_rolls_back_locally_and_resumes_same_remote_destinat
                                   'WHERE e.video_id=?', ('yt-Song 100',)).fetchone()
     assert not store.conn.execute('SELECT 1 FROM playlist_items WHERE playlist_id=? AND video_id=?',
                                   (playlist.id, 'yt-Song 100')).fetchone()
-    monkeypatch.setattr(catalog, 'upsert', upsert)
+    monkeypatch.setattr(store.tracks, 'upsert_track', upsert)
     report = import_spotify_library(store, raw, client, iid, 200)
     assert report['playlists_imported'] == 1 and report['tracks_imported'] == 50
     assert len(client.created) == 1

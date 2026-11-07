@@ -11,7 +11,7 @@ from tests.rec.test_stored_fresh import fresh
 from yt_playlist.core import recommendation_outputs, recommendation_pools as pools
 from yt_playlist.rec import album_choices, home_prepared, home_themes, rec_params
 from yt_playlist.repos import recommendation_publication as publication
-from yt_playlist.repos.rec_proposals import RecProposalsRepo
+from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
 from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 from yt_playlist.repos.genres import GenreRepo
 
@@ -30,14 +30,14 @@ def home(fresh):
 
 
 def forbid_bundle_and_files(monkeypatch):
-    original = RecProposalsRepo._proposal_json
+    original = RecommendationProposals._proposal_json
     def read(self, surface):
         if surface in ('mode_bundles', 'fresh_pool'):
             pytest.fail('Typed Home inputs decoded a legacy recommendation pool')
         return original(self, surface)
     def file(*args, **kwargs):
         pytest.fail('Metadata/header read opened a prepared display file')
-    monkeypatch.setattr(RecProposalsRepo, '_proposal_json', read)
+    monkeypatch.setattr(RecommendationProposals, '_proposal_json', read)
     monkeypatch.setattr(recommendation_outputs, 'read', file)
 
 
@@ -126,11 +126,11 @@ def test_unprepared_home_hash_and_genres_need_no_bundle(recommendations, monkeyp
 def test_taste_examples_advance_past_an_unavailable_page_without_decoding_candidates(home, monkeypatch):
     from yt_playlist.rec import taste_viz
     store, generation, _ = home
-    original = RecProposalsRepo._proposal_json
+    original = RecommendationProposals._proposal_json
     def read(self, surface):
         assert surface not in ('mode_bundles', 'fresh_pool')
         return original(self, surface)
-    monkeypatch.setattr(RecProposalsRepo, '_proposal_json', read)
+    monkeypatch.setattr(RecommendationProposals, '_proposal_json', read)
     with store.conn:
         store.conn.execute('UPDATE youtube_items SET available=0 WHERE recording_id BETWEEN 3 AND 130')
     examples = taste_viz._stored_examples(store, 10)
@@ -145,11 +145,11 @@ def test_tv_seed_interleave_keeps_rare_mode_candidates_without_a_global_head_cut
     store, _ = fresh
     values = candidates(store)
     generation = publish_bundle(store, {'all': {'wheelhouse': values}, '1': {'wheelhouse': values[258:]}})
-    original = RecProposalsRepo._proposal_json
+    original = RecommendationProposals._proposal_json
     def read(self, surface):
         assert surface not in ('mode_bundles', 'fresh_pool')
         return original(self, surface)
-    monkeypatch.setattr(RecProposalsRepo, '_proposal_json', read)
+    monkeypatch.setattr(RecommendationProposals, '_proposal_json', read)
     page, requests = RecommendationPublications.candidate_page, []
     def bounded(self, *args, **kwargs):
         requests.append(kwargs['limit'])

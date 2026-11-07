@@ -329,7 +329,7 @@ def test_album_artwork_retains_last_good_projection_and_honors_vendor_deadline(b
     old = {'url': 'https://img.example/old.jpg',
            'source_url': 'https://music.youtube.com/channel/UCartist',
            'kind': 'artist', 'credit': ARTIST}
-    store.rec_proposals.publish_album_note(album['browse_id'],
+    store.album_notes.publish(album['browse_id'],
         {'editorial_version': 6, 'artwork': old}, NOW - 1)
     monkeypatch.setattr(album_editorial, 'lookup', lambda *a: None)
     monkeypatch.setattr(deepseek._iao, 'api_key', lambda *a: None)

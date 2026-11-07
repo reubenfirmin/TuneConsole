@@ -154,7 +154,7 @@ def build(ctx) -> APIRouter:
         editorial = {'browse_id': browse_id, 'title': (album or {}).get('title'),
                      'artist': (album or {}).get('artist')}
         if album and not inline and not getattr(store, 'activity_paused', False):
-            store.rec_proposals.request_album_notes([editorial], ctx.now_fn(), visible=True)
+            store.album_notes.request([editorial], ctx.now_fn(), visible=True)
             if ctx.rec_worker:
                 ctx.rec_worker.trigger_home_refresh()
         prepared = home_cache.read(store, 'home_prepared') or {}

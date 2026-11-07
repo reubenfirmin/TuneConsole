@@ -38,26 +38,3 @@ def read_parameters(conn, surface):
     return result
 
 
-def read(store, surface):
-    selected = read_parameters(store.conn, surface)
-    if selected is None:
-        return None
-    generation = store.recommendations.head(surface)['id']
-    tracks, cursor = [], -1
-    while True:
-        page = store.recommendations.candidate_page(surface, 'all', selected['lane'],
-            generation=generation, after=cursor, limit=512)
-        tracks.extend(page['tracks'])
-        if page['exhausted']:
-            return {'parameters': selected, 'tracks': tracks}
-        cursor = page['after']
-
-
-def write(conn, surface, value, at):
-    from yt_playlist.controllers import recommendation_import
-    plan = prepare(conn, surface, value, at)
-    if plan is None:
-        conn.execute('DELETE FROM recommendation_heads WHERE surface=?', (surface,))
-        return
-    recommendation_import.import_plan(conn, plan, plan.created_at,
-        before_publish=lambda generation: parameters(conn, generation, value['parameters'], at))

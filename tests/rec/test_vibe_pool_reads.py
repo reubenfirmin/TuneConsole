@@ -8,13 +8,14 @@ import time
 
 import pytest
 
-from yt_playlist.core import fao, json_cache
+from yt_playlist.core import bundle_plan, fao, json_cache
 from yt_playlist.core import profile_files
 from tests import prepared_fixture_support
 from tests.prepared_fixture_support import prepared_template
-from tests.recommendation_support import publish_bundles, seed_bundle_subjects
-from yt_playlist.rec import home_vibe, musical_character, musical_profiles, vibe_pools
-from yt_playlist.repos.rec_proposals import RecProposalsRepo, encode_proposals
+from tests.recommendation_support import publish_bundles, seed_bundle_subjects, seed_publication_subjects
+from yt_playlist.rec import home_vibe, measurement, musical_character, musical_profiles, vibe_pools
+from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
+from yt_playlist.core.proposal_codec import encode_proposals
 
 
 @contextmanager
@@ -84,8 +85,8 @@ def vibe_read_costs(record_property, selected_vibe_costs):
         record_property(phase + '_thread_cpu_s', cpu)
 
 
-def bundles():
-    def items(preset, lane, family='general', count=200):
+def bundles(*, count=200, reserve_count=12):
+    def items(preset, lane, family='general', count=count):
         return [{'key': f'{preset}:{lane}:{family}:{i}', 'video_id': f'v-{preset}-{lane}-{family}-{i}',
                  'title': f'{preset} {lane} {family} Song {i}', 'artist': f'Artist {i}',
                  'genre': 'Techno' if i % 2 else 'Jazz', 'score': i / 100,
@@ -97,7 +98,7 @@ def bundles():
             '_vibes': {'version': home_vibe.VERSION,
                 'pools': {preset: {lane: items(preset, lane) for lane in ('fresh', 'explore')}
                           for preset in ('energize', 'relax')},
-                'genres': {preset: {lane: {family: items(preset, lane, family, 12)
+                'genres': {preset: {lane: {family: items(preset, lane, family, reserve_count)
                                            for family in ('techno', 'jazz')}
                                     for lane in ('fresh', 'explore')}
                            for preset in ('energize', 'relax')}}}
@@ -145,12 +146,32 @@ def publish(store, value, *, costs=None):
 @pytest.fixture(scope='module')
 def selected_vibe_template(_pristine_current_schema, selected_vibe_costs):
     def build(source):
-        value = bundles()
-        publish(source, value, costs=selected_vibe_costs)
+        # Two real pages per general pool and independent genre reserves retain
+        # the read boundary. Full-size payload preservation belongs to codecs.
+        value = bundles(count=8, reserve_count=2)
+        prepared = value['_vibes']
+        items = [item for lanes in prepared['pools'].values() for rows in lanes.values() for item in rows]
+        items += [item for lanes in prepared['genres'].values() for groups in lanes.values()
+                  for rows in groups.values() for item in rows]
+        for item in [*value['all']['fresh'], *items]:
+            item['reason'] = 'Prepared context for ' + item['key']
+        with measured(selected_vibe_costs, 'subject_seed'):
+            seed_publication_subjects(source, [*value['all']['fresh'], *items],
+                                      discoveries=[item['key'] for item in items])
+        profiles = {item['key']: item['musical'] for item in items}
+        with measured(selected_vibe_costs, 'profile_publication'):
+            source.musical_profiles.publish_recordings([
+                (key, musical_profiles.canonical(profile), profile['version'], musical_profiles.digest(profile))
+                for key, profile in profiles.items()], 1)
+        with measured(selected_vibe_costs, 'typed_publication'):
+            publish_bundles(source, value, 1)
         return value
 
     with ExitStack() as resources:
         with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(measurement, 'serving_policy',
+                          lambda *args, **kwargs: ('vibe-read-fixture', {'fixture': 'selected-vibe-read'}))
+            patch.setattr(bundle_plan, 'EXPLANATION_BYTES', 256)
             patch.setattr(prepared_fixture_support, 'capture_template', timed(
                 selected_vibe_costs, 'template_export', prepared_fixture_support.capture_template))
             with measured(selected_vibe_costs, 'template_initialization_build_export'):
@@ -159,12 +180,13 @@ def selected_vibe_template(_pristine_current_schema, selected_vibe_costs):
 
 
 @pytest.fixture
-def selected_vibe_inputs(store, selected_vibe_template, vibe_read_costs):
+def selected_vibe_inputs(store, selected_vibe_template, vibe_read_costs, monkeypatch):
+    monkeypatch.setattr(vibe_pools, 'POOL_LIMIT', 4)
     with measured(vibe_read_costs, 'private_restore'):
         return selected_vibe_template.restore(store)
 
 
-def full_decode(store):
+def full_decode(store, *, page_size=128):
     """Reference: hydrate every preset, lane and genre before selecting one."""
     result = {'_vibes': {'version': home_vibe.VERSION, 'pools': {}, 'genres': {}}}
     with store.read_view() as reader:
@@ -176,7 +198,7 @@ def full_decode(store):
                     mode, after, rows = slot['mode_key'], -1, []
                     while True:
                         page = reader.recommendations.candidate_page(surface, mode, lane,
-                            generation=head['id'], after=after, limit=128)
+                            generation=head['id'], after=after, limit=page_size)
                         profiles = musical_character.load(reader, [item['key'] for item in page['tracks']])
                         rows.extend({**item, 'musical': profiles[item['key']]} for item in page['tracks'])
                         after = page['after']
@@ -259,7 +281,7 @@ def test_preparation_preserves_raw_genre_groups_and_refreshes_taxonomy(store):
 def test_selected_vibe_read_matches_full_decode_and_skips_unrelated_profiles(
         store, monkeypatch, lane, selected_vibe_inputs, vibe_read_costs):
     with measured(vibe_read_costs, 'full_decode'):
-        decoded = full_decode(store)
+        decoded = full_decode(store, page_size=4)
     load = musical_character.load
     # Each scenario reads the same immutable publication. Keep both lanes and
     # every filter combination, with a fresh spy for each bounded read.
@@ -288,33 +310,34 @@ def test_selected_vibe_read_matches_full_decode_and_skips_unrelated_profiles(
                 include_genres=include, avoid_genres=avoid) == expected, (lane, include, avoid)
         assert len(expected) <= vibe_pools.POOL_LIMIT
         assert visited, (lane, include, avoid)
+        if include or avoid:
+            # Filtering must traverse beyond the first selected native page.
+            assert any(int(key.rsplit(':', 1)[1]) >= 4 for key in visited)
 
 
 def test_selected_vibe_template_retains_complete_private_publications(
         store, file_backed_store, selected_vibe_template, selected_vibe_costs, vibe_read_costs):
-    assert selected_vibe_costs['subject_seed_commit'][0] == 1
-    assert 'subject_seed_rollback' not in selected_vibe_costs
     with measured(vibe_read_costs, 'private_restore'):
         value = selected_vibe_template.restore(store)
     with measured(vibe_read_costs, 'private_restore'):
         second = selected_vibe_template.restore(file_backed_store)
     assert value == second == selected_vibe_template.result
     profiles = {}
-    assert len(value['all']['fresh']) == 200
+    assert len(value['all']['fresh']) == 8
     assert set(value['_vibes']['pools']) == {'energize', 'relax'}
     for preset in ('energize', 'relax'):
         for lane in ('fresh', 'explore'):
             rows = value['_vibes']['pools'][preset][lane]
-            assert len(rows) == 200
+            assert len(rows) == 8
             profiles.update((item['key'], item['musical']) for item in rows)
             groups = value['_vibes']['genres'][preset][lane]
             assert set(groups) == {'techno', 'jazz'}
             for rows in groups.values():
-                assert len(rows) == 12
+                assert len(rows) == 2
                 profiles.update((item['key'], item['musical']) for item in rows)
-    assert len(profiles) == 896
+    assert len(profiles) == 48
     expected_subjects = set(profiles) | {item['key'] for item in value['all']['fresh']}
-    assert len(expected_subjects) == 1096
+    assert len(expected_subjects) == 56
     for target in (selected_vibe_template.source, store, file_backed_store):
         assert {row[0] for row in target.conn.execute('SELECT identity_key FROM recordings')} == expected_subjects
         actual = {}
@@ -324,6 +347,8 @@ def test_selected_vibe_template_retains_complete_private_publications(
         assert actual == profiles  # Includes the full retained provenance strings.
         assert target.recommendations.heads() == selected_vibe_template.source.recommendations.heads()
         assert target.conn.execute('PRAGMA foreign_key_check').fetchall() == []
+        assert target.conn.execute('SELECT count(*) FROM prepared_outputs '
+                                   'WHERE first_rank>0').fetchone()[0] > 0
 
     # Prove the baseline's actual native file is copied, not borrowed or linked.
     publication = store.conn.execute('SELECT publication FROM recording_profile_files LIMIT 1').fetchone()[0]
@@ -347,7 +372,7 @@ def test_vibe_candidate_retry_is_detached_invalidated_and_rechecks_dislikes(stor
     # This case inserts discovery records before publication and later replaces
     # its head. Thirteen rows leave a replacement after a twelve-track pick;
     # unrelated presets, lanes and genre reserves belong to the selected-read
-    # parity case above, which retains its full multi-page publication.
+    # parity case above, which crosses real pages with a controlled page size.
     value = bundles()
     pool = value['_vibes']['pools']['energize']['fresh'][:13]
     value['all'] = {}
@@ -360,13 +385,13 @@ def test_vibe_candidate_retry_is_detached_invalidated_and_rechecks_dislikes(stor
                 item['artist'], '', None, item['genre'], None, None, 1)
     with measured(vibe_read_costs, 'retry_initial_publication'):
         publish(store, value, costs=vibe_read_costs)
-    original_json = RecProposalsRepo._proposal_json
+    original_json = RecommendationProposals._proposal_json
     def no_legacy_bundle(repo, surface, *args, **kwargs):
         if surface == 'mode_bundles':
             raise AssertionError('Selected typed reads must not inflate the retired global bundle')
         return original_json(repo, surface, *args, **kwargs)
 
-    monkeypatch.setattr(RecProposalsRepo, '_proposal_json', no_legacy_bundle)
+    monkeypatch.setattr(RecommendationProposals, '_proposal_json', no_legacy_bundle)
     with measured(vibe_read_costs, 'retry_initial_read'), store.read_snapshot() as snapshot:
         first = vibe_pools.candidates(snapshot.store, 'energize', 'fresh')
         first[0]['musical']['dimensions']['intensity']['value'] = -1

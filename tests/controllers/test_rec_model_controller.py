@@ -38,24 +38,25 @@ def model():
 
 
 @pytest.mark.parametrize('polarity', ['LIKE', 'DISLIKE'])
-def test_association_keeps_earliest_feedback_expiry_and_graduation_guard(model, polarity):
+@pytest.mark.parametrize('association', [None, 20])
+def test_association_keeps_earliest_feedback_expiry_and_graduation_guard(model, polarity, association):
     kind = polarity.lower()
     surface = 'like' if kind == 'like' else 'sync'
     current = dict(surface=surface, item_key='target', kind=kind, scope='', reason='sync', created_at=30, until=90)
     donor = {**current, 'item_key': 'old', 'created_at': 10, 'until': 50}
     guard = {**donor, 'surface': 'like_grad', 'kind': 'like_grad', 'reason': 'learned'}
     model.repository.rating_rows.return_value = [current]
-    model.reassociate_rating_feedback({'target': Rating(polarity, 100, 'action')}, {'target': [donor, guard]})
+    model.reassociate_rating_feedback({'target': Rating(polarity, 100, 'action')}, {'target': [donor, guard]}, association=association)
     model.repository.publish_association_ratings.assert_called_once_with(
         [('target', kind)], [('target',)] if kind == 'like' else [], [],
-        [(10, 50, surface, 'target')], [('target', 'learned', 10)])
+        [(10, 50, surface, 'target')], [('target', 'learned', 10)], association=association)
     model.repository.publish_ratings.assert_not_called()
 
 
 def test_association_does_not_manufacture_feedback_for_pending_ratings(model):
     model.repository.rating_rows.return_value = []
     model.reassociate_rating_feedback({'target': Rating('DISLIKE', 100)}, {'target': []})
-    model.repository.publish_association_ratings.assert_called_once_with([('target', 'dislike')], [], [], [], [])
+    model.repository.publish_association_ratings.assert_called_once_with([('target', 'dislike')], [], [], [], [], association=None)
 
 
 def test_weight_reads_revert_by_age_preserving_mutes_and_unknown_age(model):

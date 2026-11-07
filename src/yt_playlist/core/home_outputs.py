@@ -143,7 +143,7 @@ def publish(conn, prepared, *, store=None, historical=False, input_revision=None
 
 
 def publish_files(conn, prepared, durable, *, store=None, historical=False, input_revision=None,
-                  policies=None, resolved_contexts=None, recommendation_generations=None):
+                  policies=None, resolved_contexts=None, recommendation_generations=None, roots=None):
     """Publish existing file descriptors and their SQL owners in one transaction."""
     if not conn.in_transaction:
         raise ValueError('Home display requires an outer transaction')
@@ -158,6 +158,8 @@ def publish_files(conn, prepared, durable, *, store=None, historical=False, inpu
                      'VALUES (?,?,?,?,?,?)', [(identity, *row) for row in durable])
     if historical:
         _copy_legacy_roots(conn, prepared.surface, identity)
+    elif roots is not None:
+        group_evidence.register_prepared(conn, *roots, owner_prefix='home-output:' + str(identity))
     elif store is not None:
         from . import prepared_references
         prepared_references.replace_prepared(store, prepared.surface, prepared.value, prepared.built_at,

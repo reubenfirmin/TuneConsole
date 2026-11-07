@@ -10,10 +10,11 @@ logger = logging.getLogger(__name__)
 
 
 class HistoryMaintenance:
-    def __init__(self, repository, settings, discovery, vectors, selection, proposals, files, guard):
+    def __init__(self, repository, settings, discovery, vectors, selection, proposals, files, guard, calendar):
         self.repository, self.settings, self.discovery = repository, settings, discovery
         self.vectors, self.selection, self.proposals = vectors, selection, proposals
         self.files, self.guard = files, guard
+        self.calendar = calendar
 
     def repair_verified_imports(self):
         with self.guard():
@@ -62,6 +63,8 @@ class HistoryMaintenance:
             self.repository.delete_spotify_receipts()
             for source in ('spotify_export', 'spotify'):
                 self.repository.remove_listening_source(source)
+            for account in self.repository.calendar_accounts():
+                self.calendar.reconcile(account)
             for key in ('spotify_imported_at', 'spotify_import_report'):
                 self.settings.delete_setting(key)
             return {**before, 'artists_removed': artists_removed}

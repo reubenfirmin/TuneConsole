@@ -171,6 +171,47 @@ def test_failed_predecessor_capture_keeps_existing_selection(metadata):
     metadata.repository.store.assert_not_called()
 
 
+def test_edit_captures_restore_evidence_before_opening_the_metadata_unit(metadata):
+    metadata.repository.input.return_value['layout'] = 'evidence'
+    depth = 0
+
+    @contextmanager
+    def transaction():
+        nonlocal depth
+        depth += 1
+        try:
+            yield
+        finally:
+            depth -= 1
+
+    def capture(*args, **kwargs):
+        assert depth == 0
+        return 15
+
+    def store(*args, **kwargs):
+        assert depth > 0
+
+    metadata.repository.transaction.side_effect = transaction
+    metadata.deliveries.capture_state.side_effect = capture
+    metadata.repository.store.side_effect = store
+    metadata.repository.store_base.side_effect = store
+    metadata.edit(7, [('title', 'restore', 'Original'), ('mb_year', 'choose', '2000')])
+    assert metadata.repository.store.call_count == 2
+    assert metadata.repository.store_base.call_args.kwargs == {'delivery_id': 15}
+    assert depth == 0
+
+
+def test_restored_base_title_resumes_provider_query_even_without_a_choice(metadata):
+    metadata.repository.input.side_effect = [
+        dict(metadata.repository.input.return_value),
+        dict(metadata.repository.input.return_value,
+             track={'id': 7, 'recording_id': 8, 'video_id': 'video', 'title': 'Original', 'artist': 'Artist'}),
+    ]
+    metadata.repository.query_identity.return_value = (8, 'Original', 'Artist')
+    metadata.edit(7, [('title', 'restore', 'Original')])
+    metadata.repository.resume_provider_query.assert_called_once_with(8, 'lastfm', status='retry')
+
+
 def test_supplied_observation_does_not_capture_another_delivery(metadata):
     metadata.repository.input.return_value['layout'] = 'evidence'
     metadata.select(7, 'title', 'Original', 'youtube', observation_id=20, now=10)

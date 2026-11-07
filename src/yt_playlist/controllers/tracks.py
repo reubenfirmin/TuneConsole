@@ -174,11 +174,11 @@ class Tracks:
         if current is None:
             self.upsert_track(video_id, **observation, library=False)
             current = self.repository.metadata_for_video(video_id)
-        for field, operation, value in track_policy.metadata_edits(current, values):
-            if operation == 'restore':
-                self.metadata_choices.restore(current['track_id'], field, value)
-            else:
-                self._choose(current['track_id'], field, value)
+        edits = list(track_policy.metadata_edits(current, values))
+        self.metadata_choices.edit(current['track_id'], edits)
+        artist = values.get('artist')
+        if artist and artist != current['orig_artist']:
+            self.artists.record_credit_choice(current['track_id'], artist)
 
     def set_track_year(self, track_id, year):
         self._choose(track_id, 'mb_year', str(year) if year is not None else '')

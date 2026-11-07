@@ -54,6 +54,39 @@ class RecommendationPublications:
         bundle, options = inputs
         return prepare_bundle(self.repository, bundle, None, **options)
 
+    def prepare_bundle(self, bundle, fresh, **options):
+        return prepare_bundle(self.repository, bundle, fresh, **options)
+
+    def native_clicked_pools(self):
+        return self.repository.native_clicked_pools()
+
+    def put_clicked_pool(self, surface, raw, at, *, input_revision=None):
+        value = clicked_pool_policy.decode(surface, raw)
+        plan = self.prepare_clicked_pool(surface, value, at, input_revision=input_revision)
+        if plan is None:
+            return self.repository.clear_surface(surface)
+        build = self.claim(plan)
+        self.remember_clicked_pool_parameters(build.generation_id, value['parameters'], at)
+        self.stage(plan, build)
+        return self.publish(build, plan.created_at)
+
+    def clicked_pool_present(self, surface):
+        return self.repository.clicked_pool_header(surface) is not None
+
+    def clicked_pool(self, surface):
+        header = self.repository.clicked_pool_header(surface)
+        if header is None:
+            return None
+        parameters = header['parameters']
+        tracks, cursor = [], -1
+        while True:
+            page = self.candidate_page(surface, 'all', parameters['lane'],
+                                       generation=header['generation'], after=cursor, limit=512)
+            tracks.extend(page['tracks'])
+            if page['exhausted']:
+                return {'parameters': parameters, 'tracks': tracks}
+            cursor = page['after']
+
     def remember_clicked_pool_parameters(self, generation, parameters, at):
         return self.repository.remember_clicked_pool_parameters(generation, parameters, at)
 

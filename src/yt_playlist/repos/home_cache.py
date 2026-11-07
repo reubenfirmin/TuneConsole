@@ -1,10 +1,14 @@
 """SQL metadata and atomic heads for the Home mix cache."""
-from yt_playlist.core import home_outputs, prepared_references
+from yt_playlist.core import group_evidence, home_outputs
 from yt_playlist.core.db_revisions import keyed_reads
-from yt_playlist.repos.base import Repo, snapshot_read, synchronized
+from yt_playlist.repos.base import Repo, lookup_read, snapshot_read, synchronized
 
 
 class HomeCacheRepo(Repo):
+    @lookup_read
+    def native(self):
+        return self._store._home_display_files
+
     @snapshot_read
     def document(self, surface):
         with keyed_reads(self._store, 'rec_proposals', (surface,)):
@@ -24,13 +28,33 @@ class HomeCacheRepo(Repo):
             return row[0] if row else None, None
 
     @synchronized
-    def publish(self, prepared, filenames, policies, contexts, recommendation_generations, *, input_revision=None):
-        if self._store._home_display_files:
-            return home_outputs.publish_files(self.conn, prepared, filenames, store=self._store,
-                policies=policies, resolved_contexts=contexts, recommendation_generations=recommendation_generations,
-                input_revision=input_revision)
-        prepared_references.replace_prepared(self._store, prepared.surface, prepared.value, prepared.built_at,
-            resolved_contexts=contexts, recommendation_generations=recommendation_generations)
+    def publish(self, prepared, filenames, policies, roots, *, input_revision=None):
+        with self.conn.atomic(join=True):
+            if self._store._home_display_files:
+                return home_outputs.publish_files(self.conn, prepared, filenames, policies=policies, roots=roots,
+                                                  input_revision=input_revision)
+            self._publish_legacy(prepared.surface, prepared.raw, prepared.built_at, roots)
+
+    def _publish_legacy(self, surface, raw, now, roots):
+        if roots is not None:
+            group_evidence.register_prepared(self.conn, *roots)
         self.conn.execute('INSERT INTO rec_proposals(surface,payload,built_at) VALUES (?,?,?) '
             'ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload,built_at=excluded.built_at',
-            (prepared.surface, prepared.raw, prepared.built_at))
+            (surface, raw, now))
+
+    @synchronized
+    def publish_legacy(self, surface, raw, now, roots):
+        with self.conn.atomic(join=True):
+            self._publish_legacy(surface, raw, now, roots)
+
+    @lookup_read
+    def present(self, surface):
+        with keyed_reads(self._store, 'rec_proposals', (surface,)):
+            if self._store._home_display_files:
+                return home_outputs.present(self.conn, surface)
+            from yt_playlist.core.preparation import home_publication
+            handled, header = home_publication.header(self.conn, surface)
+            if handled:
+                return header is not None and bool(header['has_content'])
+            return self.conn.execute("SELECT 1 FROM rec_proposals WHERE surface=? AND payload NOT IN ('null','{}')",
+                                     (surface,)).fetchone() is not None

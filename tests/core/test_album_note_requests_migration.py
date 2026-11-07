@@ -75,21 +75,21 @@ def test_preflight_failure_keeps_original_and_adds_no_owner(predecessor, value):
 
 
 def test_newer_visible_request_survives_old_worker_and_re_admission(store):
-    store.rec_proposals.request_album_notes([ALBUM], 100)
-    album, first = store.rec_proposals.next_album_note_request()
-    store.rec_proposals.request_album_notes([{**ALBUM, 'year': '2021'}], 101, visible=True)
-    assert not store.rec_proposals.publish_album_note(album['browse_id'], {'old': True}, 102,
+    store.album_notes.request([ALBUM], 100)
+    album, first = store.album_notes.next_request()
+    store.album_notes.request([{**ALBUM, 'year': '2021'}], 101, visible=True)
+    assert not store.album_notes.publish(album['browse_id'], {'old': True}, 102,
                                                       expected_request=first)
     assert store.rec_proposals.get_proposals('album_notes') is None
     assert store.rec_proposals.get_proposals('album_note_requests')[album['browse_id']]['requested_until'] == 1001
-    _, second = store.rec_proposals.next_album_note_request()
-    assert store.rec_proposals.publish_album_note(album['browse_id'], {'fresh': True}, 103,
+    _, second = store.album_notes.next_request()
+    assert store.album_notes.publish(album['browse_id'], {'fresh': True}, 103,
                                                  expected_request=second)
-    store.rec_proposals.request_album_notes([ALBUM], 104)
-    assert not store.rec_proposals.publish_album_note(album['browse_id'], {'stale': True}, 105,
+    store.album_notes.request([ALBUM], 104)
+    assert not store.album_notes.publish(album['browse_id'], {'stale': True}, 105,
                                                       expected_request=second)
     assert store.rec_proposals.get_proposals('album_notes') == {album['browse_id']: {'fresh': True}}
-    assert store.rec_proposals.next_album_note_request()[1][0] != second[0]
+    assert store.album_notes.next_request()[1][0] != second[0]
 
 
 def test_note_file_cutover_backup_and_restart_preserve_last_good_and_demand(predecessor, tmp_path):
@@ -125,25 +125,25 @@ def test_note_file_cutover_backup_and_restart_preserve_last_good_and_demand(pred
 
 
 def test_note_publication_file_failure_does_not_acknowledge_request_or_erase_last_good(store, monkeypatch):
-    store.rec_proposals.publish_album_note(ALBUM['browse_id'], {'label': 'Last good'}, 100)
-    store.rec_proposals.request_album_notes([ALBUM], 101)
-    _, token = store.rec_proposals.next_album_note_request()
+    store.album_notes.publish(ALBUM['browse_id'], {'label': 'Last good'}, 100)
+    store.album_notes.request([ALBUM], 101)
+    _, token = store.album_notes.next_request()
     def disk_failure(*args):
         raise OSError('Interrupted durable output write')
     monkeypatch.setattr(outputs, 'publish', disk_failure)
     with pytest.raises(OSError, match='Interrupted'):
-        store.rec_proposals.publish_album_note(ALBUM['browse_id'], {'label': 'Replacement'}, 102,
+        store.album_notes.publish(ALBUM['browse_id'], {'label': 'Replacement'}, 102,
                                                expected_request=token)
-    assert store.rec_proposals.next_album_note_request()[1] == token
+    assert store.album_notes.next_request()[1] == token
     assert store.rec_proposals.get_proposals('album_notes') == {ALBUM['browse_id']: {'label': 'Last good'}}
 
 
 def test_note_cache_eviction_keeps_visible_demand_and_reader_files(store):
-    store.rec_proposals.publish_album_note(ALBUM['browse_id'], {'label': 'Original'}, 100)
-    store.rec_proposals.request_album_notes([ALBUM], 101, visible=True)
+    store.album_notes.publish(ALBUM['browse_id'], {'label': 'Original'}, 100)
+    store.album_notes.request([ALBUM], 101, visible=True)
     with store.read_view() as reader:
         for number in range(128):
-            store.rec_proposals.publish_album_note(f'other-{number}', {'label': str(number)}, 102)
+            store.album_notes.publish(f'other-{number}', {'label': str(number)}, 102)
         assert len(store.rec_proposals.get_proposals('album_notes')) == 128
         assert ALBUM['browse_id'] not in store.rec_proposals.get_proposals('album_notes')
         assert outputs.collect_orphans(store.conn) == 0
@@ -165,25 +165,25 @@ def test_invalid_note_output_preserves_original_legacy_and_queue(predecessor, no
 
 
 def test_unchanged_demand_keeps_its_completion_fence_and_joins_rollback(store):
-    store.rec_proposals.request_album_notes([ALBUM], 100)
-    _, token = store.rec_proposals.next_album_note_request()
-    store.rec_proposals.request_album_notes([ALBUM], 101)
-    assert store.rec_proposals.next_album_note_request()[1] == token
+    store.album_notes.request([ALBUM], 100)
+    _, token = store.album_notes.next_request()
+    store.album_notes.request([ALBUM], 101)
+    assert store.album_notes.next_request()[1] == token
     store.conn.execute('BEGIN IMMEDIATE')
-    store.rec_proposals.publish_album_note(ALBUM['browse_id'], {'fresh': True}, 102, expected_request=token)
+    store.album_notes.publish(ALBUM['browse_id'], {'fresh': True}, 102, expected_request=token)
     store.conn.rollback()
-    assert store.rec_proposals.next_album_note_request()[1] == token
+    assert store.album_notes.next_request()[1] == token
     assert store.rec_proposals.get_proposals('album_notes') is None
 
 
 def test_visible_polling_extends_visibility_without_starving_an_inflight_worker(store):
-    store.rec_proposals.request_album_notes([ALBUM], 100, visible=True)
-    _, token = store.rec_proposals.next_album_note_request()
+    store.album_notes.request([ALBUM], 100, visible=True)
+    _, token = store.album_notes.next_request()
     for now in range(102, 120, 2):
-        store.rec_proposals.request_album_notes([ALBUM], now, visible=True)
-        assert store.rec_proposals.next_album_note_request()[1] == token
+        store.album_notes.request([ALBUM], now, visible=True)
+        assert store.album_notes.next_request()[1] == token
     assert store.rec_proposals.get_proposals('album_note_requests')[ALBUM['browse_id']]['requested_until'] == 1018
-    assert store.rec_proposals.publish_album_note(ALBUM['browse_id'], {'label': 'Current'}, 120, expected_request=token)
+    assert store.album_notes.publish(ALBUM['browse_id'], {'label': 'Current'}, 120, expected_request=token)
 
 
 def test_two_connections_can_acknowledge_one_request_only_once(tmp_path):
@@ -192,13 +192,13 @@ def test_two_connections_can_acknowledge_one_request_only_once(tmp_path):
     try:
         for store in stores:
             store.init_schema()
-        stores[0].rec_proposals.request_album_notes([ALBUM], 100)
-        _, token = stores[0].rec_proposals.next_album_note_request()
+        stores[0].album_notes.request([ALBUM], 100)
+        _, token = stores[0].album_notes.next_request()
         barrier = Barrier(2)
 
         def finish(index):
             barrier.wait()
-            return stores[index].rec_proposals.publish_album_note(ALBUM['browse_id'], {'worker': index}, 101,
+            return stores[index].album_notes.publish(ALBUM['browse_id'], {'worker': index}, 101,
                                                                   expected_request=token)
 
         with ThreadPoolExecutor(2) as pool:
@@ -210,7 +210,7 @@ def test_two_connections_can_acknowledge_one_request_only_once(tmp_path):
 
 
 def test_sql_owner_shape_revision_and_retired_bucket_are_enforced(store):
-    store.rec_proposals.request_album_notes([ALBUM], 100)
+    store.album_notes.request([ALBUM], 100)
     for sql, args in (
         ('UPDATE album_note_requests SET revision=0', ()),
         ('UPDATE album_note_requests SET title=?', ('Unfenced change',)),
@@ -226,11 +226,11 @@ def test_sql_owner_shape_revision_and_retired_bucket_are_enforced(store):
 
 @pytest.mark.parametrize('pause_flag', ['activity_paused', '_read_only'])
 def test_paused_work_preserves_demand_without_publication(store, pause_flag):
-    store.rec_proposals.request_album_notes([ALBUM], 100)
-    _, token = store.rec_proposals.next_album_note_request()
+    store.album_notes.request([ALBUM], 100)
+    _, token = store.album_notes.next_request()
     setattr(store, pause_flag, True)
     before = store.conn.total_changes
-    store.rec_proposals.request_album_notes([], 200, current_only=True)
-    assert not store.rec_proposals.publish_album_note(ALBUM['browse_id'], {}, 201, expected_request=token)
+    store.album_notes.request([], 200, current_only=True)
+    assert not store.album_notes.publish(ALBUM['browse_id'], {}, 201, expected_request=token)
     assert store.conn.total_changes == before
-    assert store.rec_proposals.next_album_note_request()[1] == token
+    assert store.album_notes.next_request()[1] == token

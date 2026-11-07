@@ -26,7 +26,7 @@ def ingest(store):
     store.tracks.associate_youtube_item('candidate', recording, source='review',
         evidence={'verified': True}, now=50, same_recording=True)
     assert store.tracks.catalog_subject(first)['title'] == 'My title'
-    assert store.tracks.catalog_subject(first)['genre'] == 'Jazz'
+    assert store.tracks.get_track_enrichment(first)[0] == 'Jazz'
     assert store.tracks.identity_key_for_video('candidate') == store.tracks.identity_key_for_video('one')
     assert len(store.discovery.get_discovered_tracks()) == 1
     assert not store.conn.in_transaction

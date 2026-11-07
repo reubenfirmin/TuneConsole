@@ -10,7 +10,7 @@ from yt_playlist.core.store import Store
 from yt_playlist.core import json_cache
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.rec import content_model, radio_candidates
-from yt_playlist.repos.rec_proposals import encode_proposals
+from yt_playlist.core.proposal_codec import encode_proposals
 from tests.recommendation_support import publish_bundles
 
 

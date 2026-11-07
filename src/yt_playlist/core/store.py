@@ -321,7 +321,33 @@ class Store:
         self.artists = Artists(ArtistRepo(self), self.artist_state,
             lambda previous, target, **options: self.discovery.reconcile_artist(previous, target, **options), self.originals)
         self.rec_eligibility = RecommendationEligibility(RecEligibilityRepo(self), self.settings)
-        self.rec_proposals = RecProposalsRepo(self)
+        from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
+        from yt_playlist.repos.recommendation_reports import RecommendationReportsRepo
+        from yt_playlist.repos.album_notes import AlbumNotesRepo
+        from yt_playlist.core.preparation.listening_outputs import read_original as read_listening
+        recommendation_files = RecommendationFiles(recommendation_outputs.root_for_database(self._db_path, self._evidence_key))
+        self.listening_analytics = ListeningAnalytics(ListeningAnalyticsRepo(self), recommendation_files.publish,
+            recommendation_outputs.read, read_listening, recommendation_files.exists)
+        from yt_playlist.controllers.group_evidence import GroupEvidence
+        from yt_playlist.core.group_evidence_files import GroupEvidenceFiles
+        from yt_playlist.core import group_admission, home_outputs
+        self.group_evidence = GroupEvidence(GroupEvidenceRepo(self), lambda: self.rec_ledger.evidence(),
+            partial(group_admission.admission, self), GroupEvidenceFiles(
+                group_documents.root_for_database(self._db_path, self._evidence_key), recommendation_files.root),
+            lambda: self._lock, enabled=self._compact_group_files, recommendations=self._recommendation_files)
+        from yt_playlist.controllers.home_outputs import HomeOutputs
+        self.home_cache = HomeOutputs(HomeCacheRepo(self), self.group_evidence, recommendation_files,
+                                      lambda *args: home_outputs.read_manifest(*args))
+        self.rec_proposals = RecommendationProposals(RecProposalsRepo(self), RecommendationReportsRepo(self),
+            AlbumNotesRepo(self), recommendation_files, self.listening_analytics, self.home_cache,
+            lambda: self.recommendations)
+        from yt_playlist.controllers.choice_findings import ChoiceFindings
+        self.choice_findings = ChoiceFindings(self.rec_proposals)
+        from yt_playlist.controllers.album_notes import AlbumNotes
+        self.album_notes = AlbumNotes(AlbumNotesRepo(self), self.rec_proposals, RecommendationFiles(
+            recommendation_outputs.root_for_database(self._db_path, self._evidence_key)),
+            installed=self._album_note_demand,
+            paused=lambda: self.activity_paused or getattr(self, '_read_only', False))
         self.genres = Genres(GenreRepo(self), lambda previous, target: self.discovery.merge_genre_origins(previous, target))
         from yt_playlist.controllers.albums import Albums
         from yt_playlist.repos.albums import AlbumRepo
@@ -356,22 +382,13 @@ class Store:
             read_original)
         self.radio_catalog = RadioCatalogRepo(self)
         self.summary_inputs = SummaryInputs(SummaryInputsRepo(self), self.settings)
-        from yt_playlist.core.preparation.listening_outputs import read_original as read_listening
-        self.listening_analytics = ListeningAnalytics(ListeningAnalyticsRepo(self),
-            partial(recommendation_outputs.publish,
-                    recommendation_outputs.root_for_database(self._db_path, self._evidence_key)),
-            recommendation_outputs.read, read_listening)
-        from yt_playlist.controllers.group_evidence import GroupEvidence
-        from yt_playlist.core.group_evidence_files import GroupEvidenceFiles
-        from yt_playlist.core import group_admission
-        self.group_evidence = GroupEvidence(GroupEvidenceRepo(self), lambda: self.rec_ledger.evidence(),
-            partial(group_admission.admission, self), GroupEvidenceFiles(
-                group_documents.root_for_database(self._db_path, self._evidence_key),
-                recommendation_outputs.root_for_database(self._db_path, self._evidence_key)),
-            lambda: self._lock, enabled=self._compact_group_files, recommendations=self._recommendation_files)
         self.playback_feedback = PlaybackFeedback(PlaybackFeedbackRepo(self),
             getattr(self, '_evidence_source', self)._playback_feedback, self)
-        self.actions = ActionRepo(self)
+        from yt_playlist.controllers.actions import Actions
+        from yt_playlist.core.action_backup_files import ActionBackupFiles
+        action_root = collection_recovery.root_for_database(self._db_path, self._evidence_key)
+        self.actions = Actions(ActionRepo(self), collection_recovery.RecoveryFiles(action_root), ActionBackupFiles(action_root),
+            str(self._db_path) if self._db_path else f'memory-{id(self.conn)}', lambda: self._lock)
         self.accounts = Accounts(AccountRepo(self), self.settings,
             paused=lambda: self.activity_paused,
             maintenance_accounts=lambda: getattr(self, '_maintenance_accounts', None))
@@ -388,7 +405,11 @@ class Store:
         from yt_playlist.controllers.recording_associations import RecordingAssociations
         self.recording_associations = RecordingAssociations(tracks, self.metadata_choices, self.recording_keys,
             self.discovery, self.listening_calendar, self.rec_model)
-        self.tv_preparation = TVPreparationRepo(self)
+        from yt_playlist.controllers.tv_preparation import TVPreparation
+        self.tv_preparation = TVPreparation(TVPreparationRepo(self), self.rec_proposals)
+        from yt_playlist.controllers.tv_state import TVState
+        from yt_playlist.repos.tv_state import TVStateRepo
+        self.tv = TVState(TVStateRepo(self), self.rec_proposals, installed=self._tv_recommendations)
         self.rec_query = RecommendationQuery(RecQueryRepo(self), self.genres, self.rec_eligibility, self.artists)
         self.readiness = Readiness(ReadinessRepo(self), self.rec_eligibility)
         self.rec_candidates = RecommendationCandidates(RecCandidatesRepo(self), self.rec_eligibility)
@@ -411,7 +432,6 @@ class Store:
                     album_description_files.root_for_database(self._db_path, self._evidence_key)),
             partial(policy_documents.publish, policy_documents.root_for_database(self._db_path, self._evidence_key)),
             proposals=self.rec_proposals, installed=self._paid_descriptions)
-        self.home_cache = HomeCacheRepo(self)
         self.rec_signals = RecommendationSignals(RecSignalsRepo(self))
         self.artist_similarity = ArtistSimilarity(ArtistSimilarityRepo(self), self.artists)
         self.rec_refresh = RecommendationRefresh(RecRefreshRepo(self), self.settings)
@@ -493,8 +513,8 @@ class Store:
         history = HistoryRepo(self)
         self.history = History(history, self.artists, HistoryMaintenance(
             history, self.settings, self.discovery, self.embeddings, self.model_selection,
-            self.rec_proposals, HistoryRepairFiles(), lambda: self._lock),
-            lambda: self.transient_radio_playlists, lambda: self._lock)
+            self.rec_proposals, HistoryRepairFiles(), lambda: self._lock, self.listening_calendar),
+            lambda: self.transient_radio_playlists, lambda: self._lock, self.listening_calendar)
 
     @classmethod
     def open_current(cls, db_path):

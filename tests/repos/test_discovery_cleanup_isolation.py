@@ -5,25 +5,26 @@ so deletion hides expired discoveries on every surface without rewriting ranking
 The retained legacy codec is checked separately, without reviving its old writer.
 """
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 import json
 import logging
 from pathlib import Path
+import re
 import sqlite3
 import threading
 from types import SimpleNamespace
 
 import pytest
 
-from yt_playlist.core import fao, json_cache
+from yt_playlist.core import bundle_plan, fao, json_cache
 from yt_playlist.core.activity import Activity, WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.rec import bundle_storage
+from yt_playlist.rec import bundle_storage, measurement
 from yt_playlist.repos import discovery_cache, proposal_cache
-from yt_playlist.core import discovery_cache_policy
-from yt_playlist.repos.rec_proposals import encode_proposals
+from yt_playlist.core import discovery_cache_policy, discovery_provenance
+from yt_playlist.core.proposal_codec import encode_proposals
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles
 
@@ -31,72 +32,81 @@ DAY = 86400
 
 
 @pytest.fixture(scope='module')
-def population_templates(_pristine_current_schema):
-    templates = {}
-    with ExitStack() as resources:
-        def template(count):
-            if count not in templates:
-                templates[count] = resources.enter_context(prepared_template(
-                    _pristine_current_schema, lambda source: populate(source, count)))
-            return templates[count]
+def population_template(_pristine_current_schema):
+    with prepared_template(_pristine_current_schema, populate) as template:
         yield template
 
 
 @pytest.fixture
-def database(file_backed_store, population_templates):
-    # Actual publication runs once for each unchanged size; every cleanup,
-    # staged successor, race and failure still uses independent WAL/files.
-    file_backed_store._fixture_cleanup_population = population_templates
-    return file_backed_store
+def database(tmp_path, population_template):
+    # Every consumer owns private SQL/files; the unchanged admitted publication
+    # is built once, without first cloning an empty Store for each consumer.
+    with population_template.open(tmp_path / 'library.db') as store:
+        store._fixture_cleanup_population = population_template.result
+        yield store
 
 
-def populate(store, count=200):
-    templates = getattr(store, '_fixture_cleanup_population', None)
-    if templates is not None:
-        return templates(count).restore(store)
-    key = store.discovery.upsert_discovered_track(
-        'gone', 'gone-video', 'Gone', 'Artist', None, None, 'House', '2000', 'old-album', 0)
+def populate(store, count=4):
+    population = getattr(store, '_fixture_cleanup_population', None)
+    if population is not None:
+        assert len(population[1]['all']['fresh']) == count
+        return deepcopy(population)
+    key = 'gone'
     items = [{'key': key if n == 0 else f'keep-{n}', 'title': f'Track {n}',
               'artist': 'Artist',
-              'reason': 'album context and independent listening evidence ' * 20} for n in range(count)]
+              'reason': 'album context and independent listening evidence ' * 10} for n in range(count)]
     # Cleanup consumes existing SQL subjects; artist-credit inference and
     # ingestion observers belong to their own tests. Import the required native
     # identities/memberships in batches before starting the cleanup race.
     owned = items[1:] + [{'key': 'owned', 'title': 'Owned', 'artist': 'Other artist'},
                          {'key': 'new-cache', 'title': 'New cache', 'artist': 'Other artist'}]
     first_id = store.conn.execute('SELECT COALESCE(MAX(id),0)+1 FROM recordings').fetchone()[0]
-    subjects = [(rid, item) for rid, item in enumerate(owned, first_id)]
+    subjects = [(rid, item) for rid, item in enumerate([items[0], *owned], first_id)]
+    def video(item):
+        return 'gone-video' if item['key'] == key else 'video-' + item['key']
+
     with atomic_write(store):
         store.conn.executemany('INSERT INTO recordings(id,identity_key,title,artist) VALUES (?,?,?,?)',
             [(rid, item['key'], item['title'], item['artist']) for rid, item in subjects])
         store.conn.executemany('INSERT INTO youtube_items(video_id,recording_id,title,artist,orig_title,orig_artist) '
-            'VALUES (?,?,?,?,?,?)', [('video-' + item['key'], rid, item['title'], item['artist'],
+            'VALUES (?,?,?,?,?,?)', [(video(item), rid, item['title'], item['artist'],
                                     item['title'], item['artist']) for rid, item in subjects])
         store.conn.executemany('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
-            [(rid, rid, 'video-' + item['key']) for rid, item in subjects])
+            [(rid, rid, video(item)) for rid, item in subjects])
         store.conn.executemany("INSERT INTO library_memberships VALUES (?,'fixture',NULL)",
-                               [(rid,) for rid, _ in subjects])
+                               [(rid,) for rid, item in subjects if item['key'] != key])
         store.conn.executemany("INSERT INTO recording_aliases VALUES (?,?,'fixture')",
                                [(item['key'], rid) for rid, item in subjects])
+        store.conn.execute('INSERT INTO discovery_memberships(recording_id,entry_id,found_at) VALUES (?,?,0)',
+                           (first_id, first_id))
+        origin = discovery_provenance.origin(store.conn, 'old-album')
+        discovery_provenance.retain(store.conn, first_id, origin, 'gone-video', 0)
     bundles = {'all': {'fresh': items, 'wheelhouse': [{'key': 'owned', 'title': 'Owned', 'artist': 'Other artist'}]},
                '1': {'fresh': items}, '_meta': {'full_pools': True, 'comfort_pool': 12},
                '_radio': {'members': {'1': [key, 'keep-1']}}}
-    publish_bundles(store, bundles, 1, fresh=items)
+    # Cleanup owns membership fencing, not policy/model calculation. Supply a
+    # completed policy input but keep policy identities, native SQL publication,
+    # explanation files and every serving slot real.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(measurement, 'serving_policy',
+                      lambda *args, **kwargs: ('cleanup-policy', {'fixture': 'cleanup'}))
+        # Cross real explanation-file boundaries without constructing thousands
+        # of unrelated candidates. Production encoding/publication stays real.
+        patch.setattr(bundle_plan, 'EXPLANATION_BYTES', 2048)
+        publish_bundles(store, bundles, 1, fresh=items)
     return key, bundles
 
 
 def stage_successor(store):
     """Leave a fully staged successor unpublished while cleanup uses committed heads."""
-    bundle = deepcopy(store._fixture_bundle_payload)
-    for mode, bucket in bundle.items():
-        if mode.startswith('_'):
-            continue
-        for lane, items in bucket.items():
-            version = store.recommendations.pool('home', mode, lane)['policy_version']
-            for item in items:
-                item['pool_policy'] = version
+    # One real staged pool proves unpublished membership is ignored. Repeating
+    # every committed surface here adds no cleanup state and rewrites the same
+    # explanations through unrelated publication paths.
+    item = deepcopy(store._fixture_bundle_payload['all']['fresh'][0])
+    item['pool_policy'] = store.recommendations.pool('home', 'all', 'fresh')['policy_version']
+    bundle = {'all': {'fresh': [item]}}
     head = store.recommendations.head('home')
-    plan = bundle_storage.prepare(store.conn, bundle, bundle['all']['fresh'],
+    plan = bundle_storage.prepare(store.conn, bundle, None,
         external_key='cleanup-unpublished', policy_version=head['policy_version'],
         input_revision=store.prepared_content.serial(), created_at=2)
     build = store.recommendations.claim(plan)
@@ -155,7 +165,7 @@ def _published_state(store):
 def served(store, surface, mode, lane):
     tracks, after = [], -1
     while True:
-        page = store.recommendations.candidate_page(surface, mode, lane, after=after, limit=512)
+        page = store.recommendations.candidate_page(surface, mode, lane, after=after, limit=2)
         tracks.extend(page['tracks'])
         if page['exhausted']:
             return tracks
@@ -174,16 +184,18 @@ def visible(store):
         return {slot: served(reader, *slot) for slot in SLOTS}
 
 
-@pytest.mark.parametrize('staged,count', [
-    (False, 8), (True, 8), (False, 8000),
-])
-def test_large_cleanup_prepares_after_reader_close_and_allows_foreground_writes(
-        database, monkeypatch, staged, count):
-    key, bundles = populate(database, count=count)
+def observed_state(store):
+    """Capture committed files, ranks and served pages from one pinned view."""
+    with store.read_view() as reader:
+        return _published_state(reader), {slot: served(reader, *slot) for slot in SLOTS}
+
+
+@pytest.mark.parametrize('staged', [False, True])
+def test_cleanup_prepares_after_reader_close_and_allows_foreground_writes(
+        database, monkeypatch, staged):
+    key, bundles = populate(database)
     successor = stage_successor(database) if staged else None
-    if count == 8000:
-        assert len(json.dumps(bundles).encode()) > 10 * 1024 * 1024
-    before, before_visible = published_state(database), visible(database)
+    before, before_visible = observed_state(database)
     expected_keys = [item['key'] for item in bundles['all']['fresh']]
     for slot in SLOTS:
         expected = (['owned'] if slot[2] == 'wheelhouse' else [key, 'keep-1']
@@ -233,23 +245,73 @@ def test_large_cleanup_prepares_after_reader_close_and_allows_foreground_writes(
         result = work.result(15)
     assert result == {'albums': 0, 'artists': 0, 'tracks': 1}
     assert database.discovery.get_discovered_tracks() == []
-    assert visible(database) == {slot: [row for row in rows if row['key'] != key]
-                                 for slot, rows in before_visible.items()}
+    after, after_visible = observed_state(database)
+    assert after_visible == {slot: [row for row in rows if row['key'] != key]
+                             for slot, rows in before_visible.items()}
     # Current policy IDs, metadata, explanation bytes, other lanes and framing
     # survive exactly; even the expired recording's historical rank is retained.
-    assert published_state(database) == before
+    assert after == before
     assert database.recommendations.framing('home')['comfort_pool'] == 12
     assert database.recommendations.framing('home')['full_pools'] == 1
     outputs = before['home']['outputs']
+    assert any(row['first_rank'] is not None and row['first_rank'] > 0 for row, _encoded in outputs)
     output_bytes = sum(len(fao.read(row['filename']).bytes) for row, _encoded in outputs)
     assert output_bytes > 0
-    if count == 8000:
-        assert output_bytes > 5 * 1024 * 1024
     assert all(row['byte_size'] < 128 * 1024 for row, _encoded in outputs)
     if successor:
         assert database.conn.execute('SELECT status FROM recommendation_generations WHERE id=?',
                                       (successor.generation_id,)).fetchone()[0] == 'ready'
     assert not database.conn.in_transaction
+
+
+def test_cleanup_does_not_read_or_rewrite_published_ranks_or_files(database, monkeypatch):
+    """Native cleanup cost is independent of the immutable publication's size.
+
+    The 8,000-candidate document transformation is owned by the codec cases
+    below. Here an attempted bulk read or file access fails, even for this small
+    native publication, rather than paying to construct unrelated large menus.
+    """
+    key, _bundles = populate(database)
+    before, before_visible = observed_state(database)
+    statements = []
+    original_snapshot = database.read_snapshot
+
+    @contextmanager
+    def traced_snapshot(**kwargs):
+        with original_snapshot(**kwargs) as snapshot:
+            snapshot.store.conn.set_trace_callback(statements.append)
+            yield snapshot
+
+    output_directories = {Path(row['filename']).parent for state in before.values()
+                          for row, _encoded in state['outputs']}
+
+    def guard_file_access(operation):
+        def guarded(filename, *args, **kwargs):
+            assert Path(filename).parent not in output_directories, (
+                'Discovery cleanup accessed immutable recommendation files')
+            # Opening a database reader still needs its independent handle
+            # lease. Guard recommendation files, not that lifetime protocol.
+            return operation(filename, *args, **kwargs)
+        return guarded
+
+    with monkeypatch.context() as patch:
+        patch.setattr(database, 'read_snapshot', traced_snapshot)
+        patch.setattr(fao, 'read', guard_file_access(fao.read))
+        patch.setattr(fao, 'write', guard_file_access(fao.write))
+        database.conn.set_trace_callback(statements.append)
+        try:
+            assert cleanup(database) == {'albums': 0, 'artists': 0, 'tracks': 1}
+        finally:
+            database.conn.set_trace_callback(None)
+
+    immutable = r'(?:recommendation_candidates|unresolved_recommendation_candidates|prepared_outputs)\b'
+    assert not [sql for sql in statements if re.search(
+        r'\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:main\.)?"?' + immutable, sql, re.IGNORECASE)]
+    after, after_visible = observed_state(database)
+    assert after == before
+    assert after_visible == {slot: [row for row in rows if row['key'] != key]
+                             for slot, rows in before_visible.items()}
+    assert database.discovery.discovered_tracks_by_keys([key]) == {}
 
 
 @pytest.mark.parametrize('change', ['cache', 'library', 'rediscovered'])
@@ -362,7 +424,7 @@ def test_cleanup_failure_preserves_sources_membership_and_rankings(database, mon
 
 
 def test_cleanup_retry_finishes_after_earlier_repository_commits(database, monkeypatch):
-    key, _bundles = populate(database, count=8)
+    key, _bundles = populate(database)
     database.settings.set_setting('enrich_attempts:' + key, 'old attempts')
 
     def fail(*args):

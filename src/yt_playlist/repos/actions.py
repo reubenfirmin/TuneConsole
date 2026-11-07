@@ -1,336 +1,336 @@
-"""ActionRepo: the undoable action log (merges, moves, dupe-deletes, undos)."""
-import hashlib
-import json
-from pathlib import Path
-from uuid import uuid4
+"""Action rows, detached recovery references, and conditional SQL claims."""
+from contextlib import contextmanager
+
+from yt_playlist.core import action_work, playlist_scopes
+from yt_playlist.core.preparation import action_publication, action_ledger
 from yt_playlist.repos.base import Repo, synchronized
-from yt_playlist.repos.models import Action
-from yt_playlist.core import action_work
 
 
 class ActionRepo(Repo):
+    @contextmanager
+    def transaction(self):
+        with self._lock, self.conn.atomic(join=True):
+            yield
+
     @synchronized
     def has_durable_targets(self):
-        """Whether action targets retain claims and backups across a restart."""
         return action_work.available(self.conn)
 
+    def _members(self, header, suffix, order):
+        return [dict(row) for row in action_publication.members(self.conn, header, suffix, order)]
+
+    def _prepared(self, header):
+        return dict(layout='prepared', row=dict(header),
+            backups=self._members(header, 'backups', 'position'), steps=self._members(header, 'steps', 'position'))
+
     def _legacy_action(self, row):
-        from yt_playlist.core.preparation.action_publication import legacy_undo
-        return Action(row['id'], row['kind'], row['params_json'], row['plan_json'], legacy_undo(self.conn, row),
-            row['status'], row['created_at'], row['executed_at'])
+        prepared = None
+        owner = action_publication.OWNER
+        if self.conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?', (owner.table('head'),)).fetchone():
+            header = self.conn.execute('SELECT g.* FROM '+owner.table('head')+' h JOIN '+owner.table('map')+
+                ' m ON m.stage=h.revision AND m.source=? JOIN '+owner.header+
+                ' g ON g.source=m.source AND g.preparation_revision=m.generation WHERE h.name=?',
+                (str(row['id']), owner.name)).fetchone()
+            if header and header['kind'] == row['kind'] and header['created_at'] == row['created_at']:
+                prepared = self._prepared(header)
+        return dict(layout='legacy', row=dict(row), prepared=prepared)
 
     def _prepared_records(self, where='', values=(), *, order='action_id DESC', limit=None):
-        from yt_playlist.core.preparation.action_publication import records
-        rows = records(self.conn, where, values, order=order, limit=limit)
-        return None if rows is None else [Action(row['action_id'], row['kind'], value['params'], value['plan'],
-            value['undo'], row['status'], row['created_at'], row['executed_at']) for row, value in rows]
-
-    def _owned_records(self,where='',values=(),*,order='id DESC'):
-        return [Action(row['id'],row['kind'],value['params'],value['plan'],value['undo'],
-                       row['status'],row['created_at'],row['executed_at'],row['revision'],row['execution_token'])
-                for row,value in action_work.records(self.conn,where,values,order=order)]
-
-    @synchronized
-    def undo_lock_key(self, action_id):
-        database = next(r[2] for r in self.conn.execute("PRAGMA database_list") if r[1] == "main")
-        database = str(Path(database).resolve()) if database else f"memory-{id(self.conn)}"
-        return hashlib.sha256(f"{database}:{action_id}".encode()).hexdigest()
-
-    @synchronized
-    def claim_undo(self, action_id, now):
-        """Claim under the matching OS lock, including a claim abandoned by a crashed process."""
-        action = self.get_action(action_id)
-        if action is None:
-            raise ValueError(f"no such action {action_id}")
-        from yt_playlist.util.action_kinds import is_undoable
-        if not is_undoable(action.kind) or action.status not in (
-                "executed", "delete_failed", "undo_failed", "undoing"):
-            raise ValueError(f"action {action_id} ({action.kind}/{action.status}) is not undoable")
-        if action_work.available(self.conn):
-            with self.conn:
-                changed = self.conn.execute(
-                    "UPDATE actions SET status='undoing',executed_at=?,execution_token=?,revision=? "
-                    'WHERE id=? AND revision=?',
-                    (now,uuid4().hex,uuid4().hex,action_id,action.revision)).rowcount
-                if changed!=1:
-                    raise ValueError('Undo was claimed by another request. Reload the Action Log.')
-            return self.get_action(action_id)
-        with self.conn:
-            changed = self.conn.execute(
-                "UPDATE actions SET status='undoing',executed_at=? WHERE id=? AND status=?",
-                (now, action_id, action.status)).rowcount
-        if changed != 1:
-            raise ValueError("Undo was claimed by another request. Reload the Action Log.")
-        return action
-
-    @synchronized
-    def save_undo_progress(self, action_id, undo, now, *, failed=False,claim_token=None,target_claims=()):
-        if action_work.available(self.conn):
-            with self.conn:
-                self._require_undo_claim(action_id,claim_token)
-                for target,token in target_claims:
-                    action_work.require_claim(self.conn,target,token)
-                action_work.update(self.conn,action_id,'undo_failed' if failed else 'undoing',now,undo_raw=json.dumps(undo))
-            return
-        with self.conn:
-            changed = self.conn.execute(
-                "UPDATE actions SET undo_json=?,status=?,executed_at=? WHERE id=? AND status='undoing'",
-                (json.dumps(undo), "undo_failed" if failed else "undoing", now, action_id)).rowcount
-        if changed != 1:
-            raise ValueError("Undo no longer owns this action. Reload the Action Log.")
-
-    @synchronized
-    def finish_undo(self, action_id, undo, now,*,claim_token=None,target_claims=()):
-        from yt_playlist.util.action_kinds import UNDO
-        if action_work.available(self.conn):
-            with self.conn:
-                self._require_undo_claim(action_id,claim_token)
-                for target,token in target_claims:
-                    action_work.require_claim(self.conn,target,token)
-                action_work.update(self.conn,action_id,'undone',now,undo_raw=json.dumps(undo))
-                self.conn.execute('UPDATE actions SET execution_token=NULL WHERE id=?',(action_id,))
-                action_work.insert(self.conn,UNDO,json.dumps({'undid':action_id}),'{}','executed','{}',now,
-                                   idempotency_key='undo:'+str(action_id))
-            return
-        with self.conn:
-            changed = self.conn.execute(
-                "UPDATE actions SET status='undone',undo_json=?,executed_at=? "
-                "WHERE id=? AND status='undoing'", (json.dumps(undo), now, action_id)).rowcount
-            if changed != 1:
-                raise ValueError("Undo no longer owns this action. Reload the Action Log.")
-            self.conn.execute(
-                "INSERT INTO actions(kind,params_json,plan_json,undo_json,status,created_at) "
-                "VALUES (?,?,?,?,?,?)", (UNDO, json.dumps({"undid": action_id}), "{}", "{}", "executed", now))
-
-    @synchronized
-    def record_action(self, kind, params_json, plan_json, status, undo_json, created_at,*,idempotency_key=None,reviewed_draft=None) -> int:
-        if action_work.available(self.conn):
-            with self.conn:
-                return action_work.insert(self.conn,kind,params_json,plan_json,status,undo_json,created_at,
-                                          idempotency_key=idempotency_key,reviewed_draft=reviewed_draft)
-        cur = self.conn.execute(
-            "INSERT INTO actions(kind,params_json,plan_json,undo_json,status,created_at) "
-            "VALUES (?,?,?,?,?,?)", (kind, params_json, plan_json, undo_json, status, created_at))
-        self.conn.commit()
-        return cur.lastrowid
-
-    @synchronized
-    def get_action(self, action_id) -> Action | None:
-        if action_work.available(self.conn):
-            rows = self._owned_records('WHERE id=?',(action_id,))
-            return rows[0] if rows else None
-        rows = self._prepared_records('action_id=?', (action_id,))
-        if rows is not None:
-            return rows[0] if rows else None
-        row = self.conn.execute("SELECT * FROM actions WHERE id=?", (action_id,)).fetchone()
-        if row is None:
+        owner = action_publication.OWNER
+        selected = owner.selected(self.conn)
+        if selected is None:
             return None
-        return self._legacy_action(row)
+        headers = self.conn.execute('SELECT g.* FROM '+owner.table('map')+' m JOIN '+owner.header+
+            ' g ON g.source=m.source AND g.preparation_revision=m.generation WHERE m.stage=?'+
+            (' AND ('+where+')' if where else '')+' ORDER BY '+order+(' LIMIT ?' if limit is not None else ''),
+            (selected, *values, *((limit,) if limit is not None else ()))).fetchall()
+        return [self._prepared(header) for header in headers]
+
+    def _owned_records(self, where='', values=(), *, order='id DESC'):
+        rows = self.conn.execute('SELECT * FROM actions '+where+' ORDER BY '+order, values).fetchall()
+        result = []
+        for row in rows:
+            identity = row['id']
+            facts = {name: [dict(item) for item in self.conn.execute(
+                'SELECT * FROM action_'+table+' WHERE action_id=?'+order_by, (identity,))]
+                for name, table, order_by in (
+                    ('targets', 'targets', ' ORDER BY role,position'), ('steps', 'steps', ' ORDER BY position'),
+                    ('backups', 'backups', ' ORDER BY position'), ('resolutions', 'plan_resolutions', ' ORDER BY position'),
+                    ('items', 'placement_items', ' ORDER BY position'), ('handles', 'placement_handles', ''))}
+            draft = self.conn.execute('SELECT * FROM action_drafts WHERE id=?', (identity,)).fetchone()
+            placement = self.conn.execute('SELECT * FROM action_placement_intents WHERE action_id=?', (identity,)).fetchone()
+            result.append(dict(layout='owned', row=dict(row), **facts,
+                draft=dict(draft) if draft else None, placement=dict(placement) if placement else None))
+        return result
 
     @synchronized
-    def update_action(self, action_id, status, executed_at, undo_json=None, *, params_json=None,expected_revision=None,target_claims=()) -> None:
-        if action_work.available(self.conn):
-            with self.conn:
-                self.conn.execute('UPDATE actions SET revision=revision WHERE 0')
-                for target,token in target_claims:
-                    action_work.require_claim(self.conn,target,token)
-                action_work.update(self.conn,action_id,status,executed_at,undo_raw=undo_json,params_raw=params_json,
-                                   expected_revision=expected_revision)
-            return
-        fields, values = ["status=?", "executed_at=?"], [status, executed_at]
-        if undo_json is not None:
-            fields.append("undo_json=?")
-            values.append(undo_json)
-        if params_json is not None:
-            fields.append("params_json=?")
-            values.append(params_json)
-        self.conn.execute(f"UPDATE actions SET {', '.join(fields)} WHERE id=?", (*values, action_id))
-        self.conn.commit()
-
-    @synchronized
-    def get_draft(self, signature: str) -> Action | None:
-        if action_work.available(self.conn):
-            rows = self._owned_records('WHERE id IN (SELECT id FROM action_drafts WHERE signature=?)',(signature,))
-            return rows[0] if rows else None
-        rows = self._prepared_records("kind='merge_draft' AND draft_signature=?", (signature,), order='action_id', limit=1)
-        if rows is not None:
-            return rows[0] if rows else None
-        row = self.conn.execute("SELECT * FROM actions WHERE kind='merge_draft' AND plan_json=?",
-                              (signature,)).fetchone()
-        if row is None:
-            return None
-        return self._legacy_action(row)
-
-    @synchronized
-    def update_draft(self, action_id, params_json) -> None:
-        if action_work.available(self.conn):
-            with self.conn:
-                action_work.update_draft(self.conn,action_id,params_json)
-            return
-        self.conn.execute("UPDATE actions SET params_json=? WHERE id=?",
-                          (params_json, action_id))
-        self.conn.commit()
-
-    @synchronized
-    def delete_action(self, action_id) -> None:
-        self.conn.execute("DELETE FROM actions WHERE id=?", (action_id,))
-        self.conn.commit()
-
-    @synchronized
-    def get_actions(self) -> list[Action]:
-        if action_work.available(self.conn):
-            return self._owned_records()
-        rows = self._prepared_records()
-        if rows is not None:
-            return rows
-        rows = self.conn.execute("SELECT * FROM actions ORDER BY id DESC").fetchall()
-        return [self._legacy_action(row) for row in rows]
-
-    @synchronized
-    def get_pending_deletion(self, account_id, provider_playlist_id) -> Action | None:
-        """Read only the newest pending owner for this account and remote playlist.
-
-        The partial index excludes completed history before inspecting intent JSON.
-        Query afresh for every admission so a collection sweep sees intervening writes.
-        """
-        return self._get_deletion(account_id, provider_playlist_id, 'delete_pending')
-
-    @synchronized
-    def get_failed_deletion(self, account_id, provider_playlist_id) -> Action | None:
-        """Find a failed owner for GC recovery without changing manual retry admission."""
-        return self._get_deletion(account_id, provider_playlist_id, 'delete_failed')
-
-    def _get_deletion(self, account_id, provider_playlist_id, status):
-        if action_work.available(self.conn):
-            return self._deletion_owner(account_id, provider_playlist_id, status)
-        rows = self._prepared_deletion(account_id, provider_playlist_id, status)
-        if rows is not None:
-            return rows[0] if rows else None
-        row = self.conn.execute(
-            "SELECT a.* FROM actions a WHERE a.status=? AND EXISTS ("
-            "SELECT 1 FROM json_each(a.undo_json,'$.deletions') d "
-            "WHERE json_extract(d.value,'$.identity')=? AND json_extract(d.value,'$.ytm')=?) "
-            "ORDER BY a.id DESC LIMIT 1", (status, account_id, provider_playlist_id)).fetchone()
-        if row is None:
-            return None
-        return self._legacy_action(row)
-
-    @synchronized
-    def get_pending_actions(self, kind) -> list[Action]:
-        if action_work.available(self.conn):
-            return self._owned_records("WHERE kind=? AND status='pending'",(kind,),order='id')
-        rows = self._prepared_records("kind=? AND status='pending'", (kind,), order='action_id')
-        if rows is not None:
-            return rows
-        rows = self.conn.execute(
-            "SELECT * FROM actions WHERE kind=? AND status='pending' ORDER BY id", (kind,)).fetchall()
-        return [self._legacy_action(row) for row in rows]
-
-    @synchronized
-    def get_pending_placements(self,membership_id):
-        if not action_work.available(self.conn):
-            return [action for action in self.get_pending_actions('add_tracks')
-                    if json.loads(action.plan_json).get('playlist_id')==membership_id]
-        return self._owned_records("WHERE kind='add_tracks' AND status='pending' AND id IN ("
-            "SELECT action_id FROM action_targets WHERE role='placement' AND membership_ref_id=?)",
-            (membership_id,),order='id')
-
-    def _require_undo_claim(self,action_id,token):
-        self.conn.execute('UPDATE actions SET revision=revision WHERE 0')
-        if token is None or not self.conn.execute(
-                "SELECT 1 FROM actions WHERE id=? AND status='undoing' AND execution_token=?",(action_id,token)).fetchone():
-            raise ValueError('Undo completion belongs to a stale worker. Reload the Action Log.')
-
-    def _deletion_owner(self,account,remote,status):
-        rows = self._owned_records('WHERE status=? AND id=(SELECT MAX(s.action_id) FROM action_targets t '
-            'JOIN action_steps s ON s.target_id=t.id JOIN actions a ON a.id=s.action_id '
-            "WHERE t.account_id=? AND t.provider_playlist_id_snapshot=? AND s.operation='delete_playlist' AND a.status=?)",
-            (status,account,remote,status))
+    def get_action(self, action_id):
+        if self.has_durable_targets():
+            rows = self._owned_records('WHERE id=?', (action_id,))
+        else:
+            rows = self._prepared_records('action_id=?', (action_id,))
+            if rows is None:
+                row = self.conn.execute('SELECT * FROM actions WHERE id=?', (action_id,)).fetchone()
+                return self._legacy_action(row) if row else None
         return rows[0] if rows else None
 
-    def _prepared_deletion(self, account, remote, status):
-        from yt_playlist.core.preparation.action_ledger import table
-        return self._prepared_records('status=? AND EXISTS (SELECT 1 FROM '+table('targets')+
-            " t WHERE t.source=g.source AND t.preparation_revision=g.preparation_revision AND t.role='deletion' "
-            'AND COALESCE(t.account_id,t.unresolved_account_id)=? AND t.provider_playlist_id_snapshot=?)',
-            (status, account, remote), limit=1)
+    @synchronized
+    def get_actions(self):
+        if self.has_durable_targets():
+            return self._owned_records()
+        rows = self._prepared_records()
+        return rows if rows is not None else [self._legacy_action(row) for row in self.conn.execute('SELECT * FROM actions ORDER BY id DESC')]
 
     @synchronized
-    def claim_undo_targets(self,action_id,execution_token,now):
-        if not action_work.available(self.conn):
-            return []
-        with self.conn:
-            self._require_undo_claim(action_id,execution_token)
-            targets = self.conn.execute('SELECT t.* FROM action_targets t WHERE t.action_id=? '
-                "AND t.role='recovery' AND EXISTS (SELECT 1 FROM action_steps s WHERE s.target_id=t.id AND s.phase<>'complete') "
-                'ORDER BY t.account_id,t.playlist_scope_id,t.id',(action_id,)).fetchall()
-            claims,scopes = [],set()
-            for target in targets:
-                scope = (target['account_id'],target['playlist_scope_id'])
-                if scope in scopes:
-                    continue
-                scopes.add(scope)
-                claims.append((target['id'],action_work.claim_target(self.conn,target['id'],now,reconcile=True)))
-            return claims
+    def get_draft(self, signature):
+        if self.has_durable_targets():
+            rows = self._owned_records('WHERE id IN (SELECT id FROM action_drafts WHERE signature=?)', (signature,))
+        else:
+            rows = self._prepared_records("kind='merge_draft' AND draft_signature=?", (signature,), order='action_id', limit=1)
+            if rows is None:
+                row = self.conn.execute("SELECT * FROM actions WHERE kind='merge_draft' AND plan_json=?", (signature,)).fetchone()
+                return self._legacy_action(row) if row else None
+        return rows[0] if rows else None
 
     @synchronized
-    def target_lock_keys(self,action_id,role):
-        if not action_work.available(self.conn):
-            return []
-        return list(self.conn.execute('SELECT DISTINCT account_id,provider_playlist_id_snapshot FROM action_targets '
-            'WHERE action_id=? AND role=? AND account_id IS NOT NULL ORDER BY account_id,provider_playlist_id_snapshot',
-            (action_id,role)))
+    def deletion_owner(self, account, remote, status):
+        if self.has_durable_targets():
+            rows = self._owned_records('WHERE status=? AND id=(SELECT MAX(s.action_id) FROM action_targets t '
+                'JOIN action_steps s ON s.target_id=t.id JOIN actions a ON a.id=s.action_id '
+                "WHERE t.account_id=? AND t.provider_playlist_id_snapshot=? AND s.operation='delete_playlist' AND a.status=?)",
+                (status, account, remote, status))
+        else:
+            rows = self._prepared_records('status=? AND EXISTS (SELECT 1 FROM '+action_ledger.table('targets')+
+                " t WHERE t.source=g.source AND t.preparation_revision=g.preparation_revision AND t.role='deletion' "
+                'AND COALESCE(t.account_id,t.unresolved_account_id)=? AND t.provider_playlist_id_snapshot=?)',
+                (status, account, remote), limit=1)
+            if rows is None:
+                row = self.conn.execute('SELECT a.* FROM actions a WHERE a.status=? AND EXISTS ('
+                    "SELECT 1 FROM json_each(a.undo_json,'$.deletions') d "
+                    "WHERE json_extract(d.value,'$.identity')=? AND json_extract(d.value,'$.ytm')=?) "
+                    'ORDER BY a.id DESC LIMIT 1', (status, account, remote)).fetchone()
+                return self._legacy_action(row) if row else None
+        return rows[0] if rows else None
 
     @synchronized
-    def require_known_remote_outcome(self, account, remote):
-        action_work.require_known_remote_outcome(self.conn, account, remote)
+    def pending_actions(self, kind):
+        if self.has_durable_targets():
+            return self._owned_records("WHERE kind=? AND status='pending'", (kind,), order='id')
+        rows = self._prepared_records("kind=? AND status='pending'", (kind,), order='action_id')
+        return rows if rows is not None else [self._legacy_action(row) for row in self.conn.execute(
+            "SELECT * FROM actions WHERE kind=? AND status='pending' ORDER BY id", (kind,))]
 
     @synchronized
-    def claim_forward_targets(self,action_id,role,now):
-        if not action_work.available(self.conn):
-            return []
-        with self.conn:
-            self.conn.execute('UPDATE action_target_claims SET lease_until=lease_until WHERE 0')
-            targets = self.conn.execute('SELECT id FROM action_targets WHERE action_id=? AND role=? '
-                'ORDER BY account_id,playlist_scope_id,id',(action_id,role)).fetchall()
-            return [(target[0],action_work.claim_target(self.conn,target[0],now)) for target in targets]
+    def pending_placements(self, membership):
+        return self._owned_records("WHERE kind='add_tracks' AND status='pending' AND id IN ("
+            "SELECT action_id FROM action_targets WHERE role='placement' AND membership_ref_id=?)", (membership,), order='id')
 
     @synchronized
-    def begin_deletion(self,action_id,account,remote,now,*,reconcile=False):
-        if not action_work.available(self.conn):
-            return None
-        with self.conn:
-            self.conn.execute('UPDATE action_steps SET phase=phase WHERE 0')
-            step = self.conn.execute('SELECT s.* FROM action_steps s JOIN action_targets t ON t.id=s.target_id '
-                "WHERE s.action_id=? AND s.operation='delete_playlist' AND t.account_id=? AND t.provider_playlist_id_snapshot=?",
-                (action_id,account,remote)).fetchone()
-            if step is None:
-                raise ValueError('Deletion has no committed account target and recovery step')
-            if not reconcile:
-                if step['phase']!='pending' or step['outcome']!='not_sent' or step['backup_status']!='verified':
-                    raise ValueError('Deletion requires its verified backup and an unsent intent')
-                reference,_ = action_work.backup_reference(step['backup_filename'])
-                if reference[:3]!=(step['backup_filename'],step['backup_digest'],step['backup_bytes']):
-                    raise ValueError('Deletion backup changed after the intent was committed')
-            token = action_work.claim_target(self.conn,step['target_id'],now,reconcile=reconcile)
-            if not reconcile:
-                self.conn.execute("UPDATE action_steps SET phase='uncertain',outcome='unknown' WHERE id=?",(step['id'],))
-            return step['target_id'],token
+    def header(self, identity):
+        row = self.conn.execute('SELECT * FROM actions WHERE id=?', (identity,)).fetchone()
+        return dict(row) if row else None
 
     @synchronized
-    def release_deletion(self,claim):
-        if claim is not None:
-            with self.conn:
-                self.conn.execute('DELETE FROM action_target_claims WHERE action_target_id=? AND claim_token=?',claim)
+    def prior_intent(self, key):
+        row = self.conn.execute('SELECT id,intent_digest FROM actions WHERE idempotency_key=?', (key,)).fetchone()
+        return dict(row) if row else None
 
     @synchronized
-    def save_deletion_progress(self,action_id,undo,now,claims):
-        from yt_playlist.library.playlist_deletion import deletion_status
-        if not action_work.available(self.conn):
-            self.update_action(action_id,deletion_status(undo),now,undo_json=json.dumps(undo))
+    def next_action_id(self):
+        return self.conn.execute("SELECT MAX(COALESCE((SELECT MAX(id) FROM actions),0),"
+            "COALESCE((SELECT seq FROM sqlite_sequence WHERE name='actions'),0))+1").fetchone()[0]
+
+    @synchronized
+    def reviewed_draft(self, identity, revision):
+        row = self.conn.execute('SELECT * FROM action_drafts WHERE id=? AND revision=?', (identity, revision)).fetchone()
+        if row is None:
+            raise ValueError('The merge draft changed. Reload it before applying the merge.')
+        if self.conn.execute('SELECT 1 FROM actions WHERE reviewed_draft_id=? AND reviewed_draft_revision=?', (identity, revision)).fetchone():
+            raise ValueError('This draft revision already has an action. Check the Action Log before continuing.')
+        return dict(row)
+
+    @synchronized
+    def insert_action(self, kind, params, plan, status, undo, created_at, *, identity=None, revision=None,
+                      idempotency_key=None, intent_digest=None, undo_of=None, mode=None, reference=None, reviewed=None):
+        if reference is None:
+            return self.conn.execute('INSERT INTO actions(kind,params_json,plan_json,undo_json,status,created_at) '
+                'VALUES (?,?,?,?,?,?)', (kind, params, plan, undo, status, created_at)).lastrowid
+        self.conn.execute('INSERT INTO actions(id,kind,status,revision,idempotency_key,intent_digest,undo_of_action_id,'
+            'execution_mode,created_at,recovery_filename,recovery_digest,recovery_bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+            (identity,kind,status,revision,idempotency_key,intent_digest,undo_of,mode,created_at,*reference))
+        if reviewed is not None:
+            self.conn.execute('UPDATE actions SET reviewed_draft_id=?,reviewed_draft_revision=?,reviewed_draft_signature=? WHERE id=?',
+                (reviewed['id'], reviewed['revision'], reviewed['signature'], identity))
+        return identity
+
+    @synchronized
+    def store_draft(self, identity, signature, revision, now, reference):
+        self.conn.execute('INSERT INTO action_drafts(id,signature,revision,updated_at,recovery_filename,recovery_digest,recovery_bytes) '
+            'VALUES (?,?,?,?,?,?,?)', (identity,signature,revision,now,*reference))
+
+    @synchronized
+    def update_draft(self, identity, params, revision, now, reference):
+        if reference is None:
+            self.conn.execute('UPDATE actions SET params_json=? WHERE id=?', (params, identity))
             return
-        with self.conn:
-            self.conn.execute('UPDATE action_steps SET phase=phase WHERE 0')
-            for target,token in claims.values():
-                action_work.require_claim(self.conn,target,token)
-            action_work.update(self.conn,action_id,deletion_status(undo),now,undo_raw=json.dumps(undo))
+        self.conn.execute('UPDATE action_drafts SET revision=?,updated_at=?,recovery_filename=?,recovery_digest=?,recovery_bytes=? WHERE id=?',
+            (revision,now,*reference,identity))
+        self.conn.execute('UPDATE actions SET revision=? WHERE id=?', (revision, identity))
+
+    @synchronized
+    def update_action(self, identity, status, now, *, undo=None, params=None, revision=None, reference=None):
+        if reference is not None:
+            self.conn.execute('UPDATE actions SET status=?,executed_at=?,revision=?,recovery_filename=?,recovery_digest=?,recovery_bytes=? '
+                'WHERE id=?', (status,now,revision,*reference,identity))
+        else:
+            fields, values = ['status=?', 'executed_at=?'], [status, now]
+            for field, value in (('undo_json', undo), ('params_json', params)):
+                if value is not None:
+                    fields.append(field+'=?')
+                    values.append(value)
+            self.conn.execute('UPDATE actions SET '+','.join(fields)+' WHERE id=?', (*values, identity))
+
+    @synchronized
+    def delete_action(self, identity):
+        with self.conn.atomic(join=True):
+            self.conn.execute('DELETE FROM actions WHERE id=?', (identity,))
+
+    @synchronized
+    def claim_execution(self, identity, status, now, *, previous_status, previous_revision, token, revision):
+        if self.has_durable_targets():
+            changed = self.conn.execute('UPDATE actions SET status=?,executed_at=?,execution_token=?,revision=? WHERE id=? AND revision=?',
+                (status,now,token,revision,identity,previous_revision)).rowcount
+        else:
+            changed = self.conn.execute('UPDATE actions SET status=?,executed_at=? WHERE id=? AND status=?',
+                (status,now,identity,previous_status)).rowcount
+        if changed != 1:
+            raise ValueError('Undo was claimed by another request. Reload the Action Log.')
+
+    @synchronized
+    def require_execution(self, identity, token):
+        if token is None or not self.conn.execute(
+                "SELECT 1 FROM actions WHERE id=? AND status='undoing' AND execution_token=?", (identity,token)).fetchone():
+            raise ValueError('Undo completion belongs to a stale worker. Reload the Action Log.')
+
+    @synchronized
+    def clear_execution(self, identity):
+        self.conn.execute('UPDATE actions SET execution_token=NULL WHERE id=?', (identity,))
+
+    @synchronized
+    def store_target(self, action, role, position, **values):
+        return action_work._target(self.conn, action, role, position, **values)
+
+    @synchronized
+    def backups(self, action):
+        return [dict(row) for row in self.conn.execute('SELECT * FROM action_backups WHERE action_id=? ORDER BY position', (action,))]
+
+    @synchronized
+    def store_backup(self, action, position, reference, retained):
+        self.conn.execute('INSERT INTO action_backups(action_id,position,filename,retained_filename,digest,bytes,availability) '
+            'VALUES (?,?,?,?,?,?,?)', (action,position,reference[0],retained,*reference[1:]))
+
+    @synchronized
+    def step_input(self, action, position):
+        row = self.conn.execute('SELECT * FROM action_steps WHERE action_id=? AND position=?', (action,position)).fetchone()
+        identity = row['id'] if row else self.conn.execute('SELECT COALESCE(MAX(id),0)+1 FROM action_steps').fetchone()[0]
+        return identity, dict(row) if row else None
+
+    @synchronized
+    def store_step(self, identity, action, target, position, operation, value, phase, outcome, observed, backup, evidence, now):
+        created, created_scope = value.get('created_id'), None
+        if created is not None:
+            owner = self.conn.execute('SELECT account_id FROM action_targets WHERE id=?', (target,)).fetchone()
+            if owner and owner[0] is not None:
+                created_scope = playlist_scopes.ensure(self.conn, created, owner[0])
+        self.conn.execute('INSERT INTO action_steps(id,action_id,target_id,position,operation,phase,outcome,creation_marker,'
+            'created_provider_id_snapshot,created_playlist_scope_id,original_survived,observed_status,backup_filename,backup_digest,'
+            'backup_bytes,backup_status,updated_at,recovery_filename,recovery_digest,recovery_bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+            'ON CONFLICT(id) DO UPDATE SET phase=excluded.phase,outcome=excluded.outcome,backup_filename=excluded.backup_filename,'
+            'backup_digest=excluded.backup_digest,backup_bytes=excluded.backup_bytes,backup_status=excluded.backup_status,updated_at=excluded.updated_at,'
+            'creation_marker=excluded.creation_marker,created_provider_id_snapshot=excluded.created_provider_id_snapshot,'
+            'created_playlist_scope_id=excluded.created_playlist_scope_id,original_survived=excluded.original_survived,observed_status=excluded.observed_status,'
+            'recovery_filename=excluded.recovery_filename,recovery_digest=excluded.recovery_digest,recovery_bytes=excluded.recovery_bytes',
+            (identity,action,target,position,operation,phase,outcome,value.get('marker'),created,created_scope,
+             value.get('original_survived'),observed,*backup,now,*evidence))
+
+    @synchronized
+    def store_placement(self, action, target, videos, handles, after, handles_present):
+        if self.conn.execute('SELECT 1 FROM action_placement_intents WHERE action_id=?', (action,)).fetchone():
+            return
+        self.conn.execute('INSERT INTO action_placement_intents VALUES (?,?,?,?)', (action,target,after,int(handles_present)))
+        self.conn.executemany('INSERT INTO action_placement_items VALUES (?,?,?)', [(action,index,video) for index,video in enumerate(videos)])
+        self.conn.executemany('INSERT INTO action_placement_handles VALUES (?,?,?)', [(action,video,handle) for video,handle in handles.items()])
+
+    @synchronized
+    def store_resolutions(self, action, resolutions):
+        if self.conn.execute('SELECT 1 FROM action_plan_resolutions WHERE action_id=?', (action,)).fetchone():
+            return
+        for list_kind, position, item in resolutions:
+            recording = self.conn.execute('SELECT id FROM recordings WHERE identity_key=?', (item['identity_key'],)).fetchone()
+            self.conn.execute('INSERT INTO action_plan_resolutions VALUES (?,?,?,?,?,?,?,?,?)',
+                (action,list_kind,position,recording[0] if recording else None,None if recording else item['identity_key'],
+                 item['identity_key'],item['source_video_id'],item['target_video_id'],item['method']))
+
+    @synchronized
+    def targets(self, action, role, *, incomplete=False):
+        return [dict(row) for row in self.conn.execute('SELECT t.* FROM action_targets t WHERE t.action_id=? AND t.role=? '+
+            ("AND EXISTS (SELECT 1 FROM action_steps s WHERE s.target_id=t.id AND s.phase<>'complete') " if incomplete else '')+
+            'ORDER BY t.account_id,t.playlist_scope_id,t.id', (action,role))]
+
+    @synchronized
+    def target_lock_keys(self, action, role):
+        return list(self.conn.execute('SELECT DISTINCT account_id,provider_playlist_id_snapshot FROM action_targets '
+            'WHERE action_id=? AND role=? AND account_id IS NOT NULL ORDER BY account_id,provider_playlist_id_snapshot', (action,role)))
+
+    @synchronized
+    def uncertain_owner(self, account, remote, finished):
+        marks = ','.join('?' for _ in finished)
+        if self.has_durable_targets():
+            row = self.conn.execute('SELECT s.action_id FROM action_targets t JOIN action_steps s ON s.target_id=t.id '
+                'JOIN actions a ON a.id=s.action_id WHERE t.account_id=? AND t.provider_playlist_id_snapshot=? '
+                f'AND a.status NOT IN ({marks}) '+
+                "AND (s.outcome='unknown' OR (s.operation='delete_playlist' AND s.phase='pending' "
+                "AND s.outcome='not_sent' AND a.idempotency_key='legacy-action:'||a.id)) LIMIT 1", (account,remote,*finished)).fetchone()
+        else:
+            row = self.conn.execute("SELECT a.id FROM actions a WHERE a.status='delete_pending' AND EXISTS ("
+                "SELECT 1 FROM json_each(a.undo_json,'$.deletions') d WHERE json_extract(d.value,'$.identity')=? "
+                "AND json_extract(d.value,'$.ytm')=? AND json_extract(d.value,'$.phase') IN ('pending','uncertain')) LIMIT 1",
+                (account,remote)).fetchone()
+        return row[0] if row else None
+
+    @synchronized
+    def claim_facts(self, target, finished):
+        row = self.conn.execute('SELECT * FROM action_targets WHERE id=?', (target,)).fetchone()
+        if row is None:
+            return None, None, None
+        prior = self.conn.execute('SELECT * FROM action_target_claims WHERE account_id=? AND playlist_scope_id=?',
+            (row['account_id'],row['playlist_scope_id'])).fetchone()
+        uncertain = self.uncertain_owner(row['account_id'],row['provider_playlist_id_snapshot'],finished)
+        return dict(row), dict(prior) if prior else None, uncertain
+
+    @synchronized
+    def claim_target(self, target, account, scope, token, until):
+        self.conn.execute('INSERT INTO action_target_claims VALUES (?,?,?,?,?) ON CONFLICT(account_id,playlist_scope_id) '
+            'DO UPDATE SET action_target_id=excluded.action_target_id,claim_token=excluded.claim_token,lease_until=excluded.lease_until',
+            (account,scope,target,token,until))
+        self.conn.execute('UPDATE action_steps SET claim_token=? WHERE target_id=?', (token,target))
+
+    @synchronized
+    def require_claim(self, target, token):
+        action_work.require_claim(self.conn,target,token)
+
+    @synchronized
+    def deletion_step(self, action, account, remote):
+        row = self.conn.execute('SELECT s.* FROM action_steps s JOIN action_targets t ON t.id=s.target_id '
+            "WHERE s.action_id=? AND s.operation='delete_playlist' AND t.account_id=? AND t.provider_playlist_id_snapshot=?",
+            (action,account,remote)).fetchone()
+        return dict(row) if row else None
+
+    @synchronized
+    def mark_step(self, identity, phase, outcome):
+        self.conn.execute('UPDATE action_steps SET phase=?,outcome=? WHERE id=?', (phase,outcome,identity))
+
+    @synchronized
+    def release_deletion(self, claim):
+        with self.conn.atomic(join=True):
+            self.conn.execute('DELETE FROM action_target_claims WHERE action_target_id=? AND claim_token=?', claim)

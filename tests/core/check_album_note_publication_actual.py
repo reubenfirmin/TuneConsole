@@ -158,7 +158,7 @@ def check(actual_path, fixture_path, report_path):
         publication.repair(store.conn)
         assert list(store.conn.execute('SELECT * FROM '+preparation.FILES+' WHERE generation=? ORDER BY position', (revision,))) == rows
         publish('recovered-files', revision)
-        _, report['compatible_source_writer'] = timed(lambda:store.rec_proposals.publish_album_note('controlled-0', {'description':'Continuing display result'}, 300))
+        _, report['compatible_source_writer'] = timed(lambda:store.album_notes.publish('controlled-0', {'description':'Continuing display result'}, 300))
         assert publication.selected(store.conn) is None
         def fail(*args):
             raise OSError('controlled note file failure')

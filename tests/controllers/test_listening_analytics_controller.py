@@ -19,7 +19,7 @@ def analytics():
     repository.uses_files.return_value = True
     repository.output.return_value = {'source': 'file', 'reference': None}
     publisher = Mock(side_effect=lambda raw: ('file', hashlib.sha256(raw).hexdigest(), len(raw)))
-    return ListeningAnalytics(repository, publisher, Mock(), Mock())
+    return ListeningAnalytics(repository, publisher, Mock(), Mock(), Mock())
 
 
 def bundle():
@@ -43,6 +43,25 @@ def test_chunk_identity_is_normalized_before_the_sql_lookup(analytics):
     key = 'a' * 24
     analytics.encoded('listening_chunk:' + key)
     analytics.repository.output.assert_called_once_with('listening_chunk:' + key, 'listening_chunk', key)
+
+
+@pytest.mark.parametrize('source', ['file', 'prepared'])
+@pytest.mark.parametrize('exists', [False, True])
+def test_presence_checks_detached_filename_without_decoding_content(analytics, source, exists):
+    analytics.repository.output.return_value = {'source': source, 'header': {'filename': 'document'},
+                                               'reference': ('document', 'digest', 100)}
+    analytics.exists_file.return_value = exists
+    assert analytics.present('listening_edition') is exists
+    analytics.exists_file.assert_called_once_with('document')
+    analytics.read_file.assert_not_called()
+    analytics.read_prepared.assert_not_called()
+
+
+@pytest.mark.parametrize('raw,expected', [(None, False), ('null', False), ('{}', False), ('{"text":"Ready"}', True)])
+def test_legacy_presence_uses_installed_bytes(analytics, raw, expected):
+    analytics.repository.output.return_value = {'source': 'legacy', 'raw': raw}
+    assert analytics.present('listening_edition') is expected
+    analytics.exists_file.assert_not_called()
 
 
 @pytest.mark.parametrize('key', ['', 'a' * 23, 'A' * 24, '../' + 'a' * 21])

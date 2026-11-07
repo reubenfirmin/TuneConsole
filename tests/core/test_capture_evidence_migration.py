@@ -212,7 +212,7 @@ def test_converted_capture_removal_and_reset_preserve_other_accounts_and_exact_p
     current.validate(store.conn)
 
 
-def test_converted_capture_reassociation_retains_raw_evidence_and_rolls_back(
+def test_converted_capture_reassociation_retains_completed_evidence_after_later_failure(
         monkeypatch, converted_capture, converted_capture_template):
     store = converted_capture
     first, target = converted_capture_template.result['entries']
@@ -220,19 +220,19 @@ def test_converted_capture_reassociation_retains_raw_evidence_and_rolls_back(
     receipt_id = converted_capture_template.result['receipt_id']
     original = dict(store.conn.execute(
         'SELECT * FROM listening_observations WHERE capture_id=?', (receipt_id,)).fetchone())
-    before = list(store.conn.iterdump())
-    invalidate = catalog.invalidate_derived
+    invalidate = store.recording_keys.invalidate_catalog
 
-    def interrupted(conn):
-        invalidate(conn)
+    def interrupted():
+        assert not store.conn.in_transaction
+        invalidate()
         raise RuntimeError('interrupted reassociation')
 
-    monkeypatch.setattr(catalog, 'invalidate_derived', interrupted)
+    monkeypatch.setattr(store.recording_keys, 'invalidate_catalog', interrupted)
     recording_id = store.tracks.catalog_subject(target)['recording_id']
     with pytest.raises(RuntimeError, match='interrupted reassociation'):
         store.tracks.associate_youtube_item('old', recording_id, source='verified', evidence={'same': True}, now=1)
-    assert list(store.conn.iterdump()) == before
-    monkeypatch.setattr(catalog, 'invalidate_derived', invalidate)
+    assert not store.conn.in_transaction
+    monkeypatch.setattr(store.recording_keys, 'invalidate_catalog', invalidate)
     store.tracks.associate_youtube_item('old', recording_id, source='verified', evidence={'same': True}, now=1)
     observed = dict(store.conn.execute(
         'SELECT * FROM listening_observations WHERE capture_id=?', (receipt_id,)).fetchone())

@@ -150,7 +150,7 @@ def test_taste_workflows_keep_one_view_without_blocking_writes(installed, monkey
         start, entered, release = (threading.Event() for _ in range(3))
         observed = []
         family = genre_identity.family
-        axis_matches = genre_identity.axis_matches
+        axis_matches = genre_identity.axis_match_rows
 
         def writer():
             assert start.wait(5), name
@@ -177,17 +177,9 @@ def test_taste_workflows_keep_one_view_without_blocking_writes(installed, monkey
                 release.set()
                 work.result(5)
 
-        def resolve(conn, value):
-            if value == 'Owned Seed' and not observed:
-                with concurrent_edit(conn):
-                    result = family(conn, value)
-                    observed.append((result, conn is store.conn))
-                return result
-            return family(conn, value)
-
         def resolve_matches(conn, labels):
             labels = list(labels)
-            if 'Owned Seed' in labels and not observed:
+            if any(label == 'Owned Seed' for label, _ in labels) and not observed:
                 with concurrent_edit(conn):
                     result = axis_matches(conn, labels)
                     axes = genre_identity.axes_from_matches(result)
@@ -196,8 +188,7 @@ def test_taste_workflows_keep_one_view_without_blocking_writes(installed, monkey
             return axis_matches(conn, labels)
 
         with monkeypatch.context() as patch, ThreadPoolExecutor(max_workers=1) as pool:
-            patch.setattr(genre_identity, 'family', resolve)
-            patch.setattr(genre_identity, 'axis_matches', resolve_matches)
+            patch.setattr(genre_identity, 'axis_match_rows', resolve_matches)
             work = pool.submit(writer)
             try:
                 result = calculate()
@@ -323,7 +314,7 @@ def test_http_candidates_survive_concurrent_genre_edits(installed, monkeypatch, 
             assert entered.wait(5)
         return result
 
-    axis_matches = genre_identity.axis_matches
+    axis_matches = genre_identity.axis_match_rows
 
     def resolve(conn, labels):
         labels = list(labels)
@@ -338,7 +329,7 @@ def test_http_candidates_survive_concurrent_genre_edits(installed, monkeypatch, 
     app = create_app(store, lambda: {account: LocalOnly()}, now_fn=lambda: 100, background_work=False)
     with TestClient(app, base_url='http://127.0.0.1') as client:
         monkeypatch.setattr(owner, method, after_metadata)
-        monkeypatch.setattr(genre_identity, 'axis_matches', resolve)
+        monkeypatch.setattr(genre_identity, 'axis_match_rows', resolve)
         with ThreadPoolExecutor(max_workers=1) as pool:
             work = pool.submit(writer)
             try:

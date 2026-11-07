@@ -49,7 +49,7 @@ class DiscoveryRepo(Repo):
                 'SELECT * FROM discovery_legacy_offers WHERE recording_id IN (?,?)', (previous, target))] if typed and remaining is None else [])
 
     @synchronized
-    def finish_track_reassociation(self, inputs, *, retain_member, membership_found, source_identities):
+    def finish_track_reassociation(self, inputs, *, retain_member, membership_found, source_identities, association=None):
         previous, target, video = inputs['previous'], inputs['target'], inputs['video']
         with self.conn.atomic(join=True):
             member, remaining = inputs['member'], inputs['remaining']
@@ -91,6 +91,8 @@ class DiscoveryRepo(Repo):
                     self.conn.execute('DELETE FROM discovery_impressions WHERE recording_id=?', (previous,))
                     self.conn.execute('DELETE FROM discovery_legacy_offers WHERE recording_id=?', (previous,))
                 provenance.refresh_counts(self.conn, 'track', target)
+            from yt_playlist.core.association_work import complete
+            complete(self.conn, association, 'discovery')
 
 
     @snapshot_read

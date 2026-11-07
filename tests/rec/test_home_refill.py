@@ -335,7 +335,7 @@ def test_retry_reuses_completed_card_work_without_publishing_partial_set(
 
 def test_typed_adaptive_pools_survive_deferred_setup_and_follow_replacement(
         store, monkeypatch, adaptive_library_template, one_menu_per_attempt):
-    from yt_playlist.repos.rec_proposals import RecProposalsRepo
+    from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
     from yt_playlist.rec import group_serving
     adaptive_library_template.restore(store)
     # This retry owns captured typed framing and its invalidation. Selection
@@ -368,7 +368,7 @@ def test_typed_adaptive_pools_survive_deferred_setup_and_follow_replacement(
     def defer(*args, **kwargs):
         raise WorkBudgetExceeded('Completed pool capture must survive later setup deferral')
 
-    monkeypatch.setattr(RecProposalsRepo, 'group_pools_json', retired)
+    monkeypatch.setattr(RecommendationProposals, 'group_pools_json', retired)
     monkeypatch.setattr(mode_surfaces, 'bundle_metadata', counted)
     with monkeypatch.context() as patch:
         patch.setattr(home_prepared, 'tuning_key', defer)

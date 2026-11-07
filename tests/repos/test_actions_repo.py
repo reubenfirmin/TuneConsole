@@ -59,7 +59,7 @@ def test_pending_deletion_excludes_completed_payloads_and_only_materializes_matc
     # This checks the installed JSON owner and its partial index. Native v98
     # admission has separate required fields and typed-target query coverage.
     store, _ = installed
-    from yt_playlist.repos import actions
+    from yt_playlist.controllers import action_documents as actions
 
     with store.conn:
         store.conn.executemany(

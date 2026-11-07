@@ -5,20 +5,21 @@ import time
 from collections import Counter, OrderedDict
 
 from yt_playlist.core.history_policy import (
-    EXACT_TOLERANCE_S, LIVE_DEDUP_S, UNDATED_BUCKETS, parse_played_date as _parse_played_date,
-    removable_source,
+    EXACT_TOLERANCE_S, UNDATED_BUCKETS, parse_played_date as _parse_played_date,
+    removable_source, repeats_live_event, play_subject,
 )
 from yt_playlist.core.listening import machine_timezone
-from yt_playlist.core.listening_calendar import zone
+from yt_playlist.core.listening_calendar import zone, day_at
 from yt_playlist.repos.base import GENERATED_GROUP
 
 logger = logging.getLogger(__name__)
 
 
 class History:
-    def __init__(self, repository, artists, maintenance, transient_playlists, guard):
+    def __init__(self, repository, artists, maintenance, transient_playlists, guard, calendar):
         self.repository, self.artists, self.maintenance = repository, artists, maintenance
         self.transient_playlists, self.guard = transient_playlists, guard
+        self.calendar = calendar
         self._bucket_warnings = OrderedDict()
 
     def _calendar(self, account_id, source_timezone=None):
@@ -28,7 +29,11 @@ class History:
         current = self.repository.calendar_facts(account_id)
         if current is None or (explicit and not current['confirmed']):
             name = source_timezone if explicit else machine_timezone()
-            self.repository.set_calendar(account_id, name, confirmed=explicit, reproject=current is not None)
+            event_days = [(row['id'], day_at(row['played_at'], name), name)
+                for row in self.repository.calendar_events(account_id)] if current is not None else None
+            self.repository.set_calendar(account_id, name, confirmed=explicit, event_days=event_days)
+            if current is not None:
+                self.calendar.reconcile(account_id)
             return name
         return current['timezone']
 
@@ -36,7 +41,7 @@ class History:
         with self.guard():
             calendar = self._calendar(account_id, source_timezone)
             source_zone = source_timezone if zone(source_timezone) else calendar
-            parsed, skipped, observations = {}, Counter(), []
+            parsed, skipped, observations, subjects, foreign = {}, Counter(), [], {}, set()
             for item in items:
                 bare = isinstance(item, str)
                 key, played = (item, 'today') if bare else item
@@ -50,8 +55,17 @@ class History:
                     skipped[bucket] += 1
                     continue
                 day = datetime.datetime.fromtimestamp(stamp, datetime.timezone.utc).date().isoformat()
-                observations.append((key, day, 'independent' if bare else 'ytm_history'))
-            result = self.repository.record_days(account_id, taken_at, observations, source_zone)
+                if key not in subjects:
+                    subjects[key] = self._subject(key, None)
+                subject, recording = subjects[key]
+                observations.append((key, subject, recording, day, day if source_zone == calendar else None,
+                                     'independent' if bare else 'ytm_history'))
+                if source_zone != calendar:
+                    foreign.add((subject, day, source_zone))
+            before = self.repository.day_count(account_id)
+            self.repository.record_days(account_id, taken_at, observations, source_zone)
+            self.calendar.reconcile(account_id, observations=foreign)
+            result = max(0, self.repository.day_count(account_id) - before)
             self._log_undated_buckets(account_id, skipped)
             return result
 
@@ -81,21 +95,62 @@ class History:
                            'other_categories=%d; skipped without inventing play dates',
                            account_id, sum(report.values()), sample, max(0, len(report) - 8))
 
+    def _subject(self, key, video):
+        return play_subject(key, video, self.repository.subject_facts(key, video))
+
     def record_play_event(self, account_id, identity_key, video_id, played_at,
                           playlist_ytm_id=None, like_status=None, *, source_timezone=None,
                           context_choice=False):
         with self.guard():
-            self._calendar(account_id, source_timezone)
+            calendar = self._calendar(account_id, source_timezone)
             quarantined = self.repository.playlist_quarantined(account_id, playlist_ytm_id, GENERATED_GROUP)
             transient = (playlist_ytm_id or '').removeprefix('RDAMPL') in self.transient_playlists()
-            return self.repository.record_live(account_id, identity_key, video_id, played_at,
-                playlist_ytm_id, like_status, is_generated=int(bool(quarantined or context_choice or transient)),
-                exact_tolerance=EXACT_TOLERANCE_S, live_window=LIVE_DEDUP_S)
+            subject, recording = self._subject(identity_key, video_id)
+            with self.repository.transaction():
+                row = self.repository.matching_event(account_id, subject, video_id, played_at, EXACT_TOLERANCE_S)
+                if row is None:
+                    latest = self.repository.latest_event(account_id)
+                    if repeats_live_event(latest, subject, video_id, played_at):
+                        row = latest
+                generated = int(bool(quarantined or context_choice or transient))
+                if row is None:
+                    event = self.repository.append_event(account_id, identity_key, played_at, video_id=video_id,
+                        playlist_ytm_id=playlist_ytm_id, like_status=like_status, is_generated=generated,
+                        subject=subject, recording=recording)
+                    timestamp = played_at
+                else:
+                    event, timestamp = row['id'], row['played_at']
+                    self.repository.update_event(event, account_id, video_id, playlist_ytm_id, like_status, generated)
+                self.repository.project_event(event, day_at(timestamp, calendar), calendar, 'live')
+                self.repository.invalidate_first_play()
+            self.calendar.reconcile(account_id, events={(subject, timestamp)})
+            return row is None
 
     def import_listening_events(self, account_id, rows, *, source='takeout', source_timezone=None):
         with self.guard():
-            self._calendar(account_id, source_timezone)
-            return self.repository.import_events(account_id, rows, source=source, exact_tolerance=EXACT_TOLERANCE_S)
+            calendar = self._calendar(account_id, source_timezone)
+            before, added, affected = self.repository.day_count(account_id), 0, set()
+            with self.repository.transaction():
+                for key, video, timestamp in rows:
+                    if not key:
+                        continue
+                    subject, recording = self._subject(key, video)
+                    event, timestamp, new = self._import_event(account_id, key, subject, recording, video, timestamp, source, calendar)
+                    added += new
+                    affected.add((subject, timestamp))
+                self.repository.invalidate_first_play()
+            self.calendar.reconcile(account_id, events=affected)
+            return max(0, self.repository.day_count(account_id) - before), added
+
+    def _import_event(self, account, key, subject, recording, video, timestamp, source, calendar):
+        row = self.repository.matching_event(account, subject, video, timestamp, EXACT_TOLERANCE_S)
+        if row is None:
+            event = self.repository.append_event(account, key, timestamp, video_id=video, subject=subject, recording=recording)
+        else:
+            event, timestamp = row['id'], row['played_at']
+            self.repository.update_event(event, account, video, None, None, None)
+        self.repository.project_event(event, day_at(timestamp, calendar), calendar, source)
+        return event, timestamp, row is None
 
     def import_plays(self, account_id, plays, *, source='takeout', source_timezone=None):
         return self.import_listening_events(account_id, ((key, None, at) for key, at in plays),
@@ -106,17 +161,34 @@ class History:
 
     def import_spotify_listens(self, account_id, rows):
         with self.guard():
-            self._calendar(account_id)
+            calendar = self._calendar(account_id)
             artists, prepared = {}, []
             for uri, at, artist, key in rows:
                 if not key and artist not in artists:
                     artists[artist] = self.artists.state_id(artist)
                 prepared.append((uri, at, artists[artist] if not key else None, key))
-            return self.repository.import_spotify_receipts(account_id, prepared,
-                source='spotify_export', exact_tolerance=EXACT_TOLERANCE_S)
+            before, added, listens_added, affected = self.repository.day_count(account_id), 0, 0, set()
+            with self.repository.transaction():
+                for uri, at, artist, key in prepared:
+                    receipt = self.repository.spotify_receipt(account_id, uri, at)
+                    if receipt and (receipt['event_id'] is not None or not key):
+                        continue
+                    listens_added += receipt is None
+                    event = None
+                    if key:
+                        subject, recording = self._subject(key, None)
+                        event, timestamp, new = self._import_event(account_id, key, subject, recording, None, at, 'spotify_export', calendar)
+                        added += new
+                        affected.add((subject, timestamp))
+                    self.repository.store_spotify_receipt(account_id, uri, at, event, artist)
+                self.repository.invalidate_first_play()
+            self.calendar.reconcile(account_id, events=affected)
+            return max(0, self.repository.day_count(account_id) - before), added, listens_added
 
     def remove_listening_source(self, source, account_id=None):
-        return self.repository.remove_listening_source(removable_source(source), account_id)
+        self.repository.remove_listening_source(removable_source(source), account_id)
+        for account in self.repository.calendar_accounts(account_id):
+            self.calendar.reconcile(account)
 
     def repair_verified_imports(self):
         return self.maintenance.repair_verified_imports()

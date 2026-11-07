@@ -7,12 +7,13 @@ import pytest
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.embeddings import Embeddings
 from yt_playlist.controllers.history_maintenance import HistoryMaintenance
+from yt_playlist.controllers.listening_calendar import ListeningCalendar
 from yt_playlist.controllers.model_selection import ModelSelection
 from yt_playlist.core.history_files import HistoryRepairFiles
 from yt_playlist.core.repair import PHANTOM_PURGE_SEEN
 from yt_playlist.controllers.discovery import Discovery
 from yt_playlist.repos.history import HistoryRepo
-from yt_playlist.repos.rec_proposals import RecProposalsRepo
+from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
 from yt_playlist.repos.settings import SettingsRepo
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -23,7 +24,9 @@ def maintenance():
     def mock(cls):
         return create_autospec(cls, instance=True, spec_set=True)
     service = HistoryMaintenance(mock(HistoryRepo), mock(SettingsRepo), mock(Discovery),
-        mock(Embeddings), mock(ModelSelection), mock(RecProposalsRepo), mock(HistoryRepairFiles), nullcontext)
+        mock(Embeddings), mock(ModelSelection), mock(RecommendationProposals), mock(HistoryRepairFiles), nullcontext,
+        mock(ListeningCalendar))
+    service.repository.calendar_accounts.return_value = [3, 4]
     service.repository.verified_imports.return_value = [
         {'id': 1, 'account_id': 3, 'coverage_start': 10 * 86400 + 10, 'coverage_end': 20 * 86400 + 10},
         {'id': 2, 'account_id': 4, 'coverage_start': 40 * 86400, 'coverage_end': 50 * 86400}]
@@ -95,13 +98,16 @@ def test_removal_invalidates_derived_state_before_deleting_evidence(maintenance)
                          ('settings', maintenance.settings.delete_setting),
                          ('discovery', maintenance.discovery.remove_spotify_origins),
                          ('receipts', maintenance.repository.delete_spotify_receipts),
-                         ('source', maintenance.repository.remove_listening_source)]:
+                         ('source', maintenance.repository.remove_listening_source),
+                         ('calendar', maintenance.calendar.reconcile)]:
         order.attach_mock(method, name)
     assert maintenance.remove_spotify_history() == {'events': 5, 'artists_removed': 2}
     calls = [call[0] for call in order.mock_calls]
     assert calls[:3] == ['outputs', 'selection', 'vectors']
     assert calls.index('discovery') < calls.index('receipts') < calls.index('source')
     assert [call.args[0] for call in maintenance.repository.remove_listening_source.call_args_list] == ['spotify_export', 'spotify']
+    assert [call.args[0] for call in maintenance.calendar.reconcile.call_args_list] == [3, 4]
+    assert max(i for i, name in enumerate(calls) if name == 'source') < calls.index('calendar')
     assert [call.args[0] for call in maintenance.settings.delete_setting.call_args_list][-2:] == [
         'spotify_imported_at', 'spotify_import_report']
 

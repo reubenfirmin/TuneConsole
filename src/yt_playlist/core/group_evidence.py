@@ -66,6 +66,37 @@ def retain(conn, kind, identity, context, created_at, *, strict=True):
     return retain_owner(conn, prepare(kind, identity, context, created_at), strict=strict)
 
 
+def register_prepared(conn, kind, surface, operations, generations, *, historical=False, owner_prefix=None):
+    """Persist explicitly prepared reference rows under their SQL publication owner."""
+    from dataclasses import replace
+    from . import recommendation_custody, recommendation_references
+
+    source = 'proposal:' + surface
+    prefix = owner_prefix or source
+    if generations is not None:
+        identity = prefix + ':recommendations'
+        recommendation_custody.release(conn, kind, identity)
+        recommendation_references.retain(conn, kind, identity, generations)
+    for identity, owner, unknown, references in operations:
+        identity = prefix + identity[len(source):]
+        existing = conn.execute('SELECT reference_digest FROM group_evidence_owners '
+                               'WHERE kind=? AND external_key=?', (kind, identity)).fetchone()
+        if historical and existing is not None:
+            continue
+        if generations is not None:
+            recommendation_custody.release(conn, kind, identity)
+        if unknown is not None:
+            retain_unknown_context(conn, kind, identity, *unknown)
+        elif owner is None:
+            release(conn, kind, identity)
+        else:
+            if existing is not None and existing[0] != owner.digest:
+                release(conn, kind, identity)
+            retain_owner(conn, replace(owner, identity=identity), strict=not historical and owner.generation is not None)
+        if unknown is None and generations is not None:
+            recommendation_references.retain(conn, kind, identity, references)
+
+
 def retain_owner(conn, owner, *, strict=True):
     group_storage._writer(conn)
     kind, identity, generation, versions, digest, created_at = (

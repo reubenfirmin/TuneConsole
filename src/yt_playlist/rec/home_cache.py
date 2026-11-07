@@ -1,23 +1,11 @@
 """Home mix cache: file preparation outside the SQL publication transaction."""
 from contextlib import contextmanager, ExitStack, nullcontext
-from dataclasses import dataclass
-import hashlib
 
-from yt_playlist.core import fao, home_outputs, json_cache, policy_documents, prepared_references
+from yt_playlist.core import home_outputs, json_cache, policy_documents
 from yt_playlist.core import recommendation_outputs as files
-from yt_playlist.core import recommendation_references
 from yt_playlist.core.db_writes import atomic_write
 
 SURFACES = frozenset({'home_prepared', 'home_tuned', 'home_choice'})
-
-
-@dataclass(frozen=True)
-class Publication:
-    prepared: home_outputs.Prepared
-    filenames: tuple
-    policies: frozenset
-    contexts: dict
-    recommendation_generations: tuple | None
 
 
 def root(store):
@@ -43,28 +31,11 @@ def prepare(store, surface, raw, now):
     """Prepare inside writing(), before entering the SQL publication transaction."""
     if surface not in SURFACES:
         raise ValueError('Unknown Home mix cache surface')
-    prepared = home_outputs.prepare(surface, raw, now)
-    contexts = {}
-    if isinstance(prepared.value, dict) and prepared.value.get('context') and store._compact_group_files:
-        contexts['context'] = prepared_references.context(store, prepared.value['context'])
-    generations = (tuple(recommendation_references.prepared_generations(
-        surface, prepared.value if isinstance(prepared.value, dict) else {}))
-        if store._recommendation_files else None)
-    filenames = []
-    if store._home_display_files:
-        for position, encoded in enumerate(prepared.parts):
-            digest = hashlib.sha256(encoded).hexdigest()
-            path = root(store) / digest[:2] / (digest + '.json')
-            fao.write(path, encoded)
-            filenames.append((surface, str(position), str(path), digest, len(encoded)))
-    return Publication(prepared, tuple(filenames), frozenset(home_outputs.policy_references(prepared.value)),
-                       contexts, generations)
+    return store.home_cache.prepare(surface, raw, now, cache=True)
 
 
 def publish(store, publication, *, input_revision=None):
-    return store.home_cache.publish(publication.prepared, publication.filenames,
-        publication.policies, publication.contexts, publication.recommendation_generations,
-        input_revision=input_revision)
+    return store.home_cache.publish(publication, input_revision=input_revision)
 
 
 def put(store, surface, value, now=None):

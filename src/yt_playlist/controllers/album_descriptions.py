@@ -58,6 +58,75 @@ class AlbumDescriptions:
         policy.validate_time(now)
         return policy.availability(self.repository.access_rows(credential, now, 'auth'))
 
+    def legacy_availability(self, credential, now):
+        waits = ([self.repository.legacy_record('deepseek_host') or {},
+                  self.repository.legacy_record('deepseek_credential:' + credential) or {}] if credential else [])
+        usage = self.repository.legacy_record('album_description_usage') or {}
+        if usage.get('status') == 'unavailable' or (usage.get('credential') == credential
+                and usage.get('status') in ('auth', 'balance', 'rate_limit')):
+            waits.append({'status': usage['status'], 'retry_at': usage.get('retry_at', 0)})
+        return policy.availability([{'status': wait['status'], 'retry_at': wait.get('retry_at', 0)}
+            for wait in waits if wait.get('status') == 'auth' or wait.get('retry_at', 0) > now])
+
+    def legacy_claim(self, identity, credential, daily_limit, now):
+        """Keep the installed pre-request-table protocol in the description owner."""
+        with self.repository.transaction():
+            record = self.repository.legacy_record('album_description:' + identity) or {}
+            if record.get('description') or (record.get('status') in ('unknown', 'invalid_response')
+                    and record.get('retry_at', 0) > now):
+                return {'status': 'cached', 'record': record}
+            usage = self.repository.legacy_record('album_description_usage') or {}
+            if usage.get('lease_until', 0) > now:
+                return {'status': 'busy', 'retry_at': usage['lease_until']}
+            wait = self.legacy_availability(credential, now)
+            if wait:
+                return wait
+            day = policy.period(now)
+            count = usage.get('requests', 0) if usage.get('day') == day else 0
+            if count >= daily_limit:
+                return {'status': 'daily_limit', 'retry_at': (day + 1) * 86400}
+            records = []
+            if usage.get('credential') and usage.get('status') in ('auth', 'balance', 'rate_limit'):
+                records.append(('deepseek_credential:' + usage['credential'], {
+                    'status': usage['status'], 'retry_at': usage.get('retry_at', 0)}))
+            token = uuid.uuid4().hex
+            usage = {**usage, 'day': day, 'requests': count + 1, 'credential': credential,
+                'lease_until': now + policy.LEASE_SECONDS, 'token': token, 'status': 'pending',
+                'retry_at': 0, 'send_authorized': False}
+            self.repository.store_legacy_records([*records, ('album_description_usage', usage)], now)
+            return {'status': 'reserved', 'token': token}
+
+    def legacy_authorize(self, token, credential, daily_limit, now):
+        with self.repository.transaction():
+            usage = self.repository.legacy_record('album_description_usage') or {}
+            if (usage.get('token') != token or usage.get('credential') != credential
+                    or usage.get('day') != policy.period(now) or usage.get('lease_until', 0) <= now
+                    or usage.get('status') != 'pending' or usage.get('send_authorized')
+                    or not 0 < usage.get('requests', 0) <= daily_limit):
+                return False
+            usage.update(send_authorized=True, lease_until=max(usage['lease_until'], now + policy.LEASE_SECONDS))
+            self.repository.store_legacy_records([('album_description_usage', usage)], now)
+            return True
+
+    def legacy_finish(self, identity, token, record, now):
+        with self.repository.transaction():
+            current = self.repository.legacy_record('album_description:' + identity) or {}
+            usage = self.repository.legacy_record('album_description_usage') or {}
+            records = []
+            if not current.get('description') and (record.get('description') or usage.get('token') == token):
+                records.append(('album_description:' + identity, record))
+            if usage.get('token') == token:
+                status = record['status']
+                if status in ('auth', 'balance', 'rate_limit', 'unavailable'):
+                    surface = 'deepseek_host' if status == 'unavailable' else 'deepseek_credential:' + usage['credential']
+                    previous = self.repository.legacy_record(surface) or {}
+                    records.append((surface, {'status': status,
+                        'retry_at': max(record['retry_at'], previous.get('retry_at', 0))}))
+                usage.update(status=status, lease_until=0, token=None,
+                    retry_at=record.get('retry_at', 0) if status not in ('ready', 'unknown', 'invalid_response') else 0)
+                records.append(('album_description_usage', usage))
+            self.repository.store_legacy_records(records, now)
+
     def claim(self, album_id, configuration, credential, daily_limit, now):
         return self.claim_version(album_id, policy.policy_version(configuration), credential, daily_limit, now,
                                   configuration=configuration)

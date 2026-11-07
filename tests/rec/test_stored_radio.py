@@ -17,7 +17,7 @@ from yt_playlist.rec.radio_candidates import RadioCandidates, CLUSTER_POOL_LIMIT
 from yt_playlist.rec.radio_genres import GenrePolicy
 from yt_playlist.rec.stored_radio import PreparedRadio
 from yt_playlist.repos import recommendation_publication as publication
-from yt_playlist.repos.rec_proposals import RecProposalsRepo
+from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
 from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 
 
@@ -94,12 +94,12 @@ def radio(fresh):
 
 
 def forbid_bundle(monkeypatch):
-    original = RecProposalsRepo._proposal_json
+    original = RecommendationProposals._proposal_json
     def read(self, surface):
         if surface in ('mode_bundles', 'fresh_pool'):
             pytest.fail('Typed Radio decoded a complete legacy pool')
         return original(self, surface)
-    monkeypatch.setattr(RecProposalsRepo, '_proposal_json', read)
+    monkeypatch.setattr(RecommendationProposals, '_proposal_json', read)
 
 
 def test_small_initial_lookahead_uses_point_ppr_ranks_and_keeps_exact_publication(radio, monkeypatch):

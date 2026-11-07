@@ -36,10 +36,10 @@ class Discovery:
         identities = [None if inputs['typed'] else source_identity(row['source_token']) for row in sources]
         return inputs, retain_member, membership_found, identities
 
-    def finish_track_reassociation(self, prepared):
+    def finish_track_reassociation(self, prepared, *, association=None):
         inputs, retain_member, found, identities = prepared
         self.repository.finish_track_reassociation(inputs, retain_member=retain_member,
-            membership_found=found, source_identities=identities)
+            membership_found=found, source_identities=identities, association=association)
 
     def __init__(self, repository, artists, eligibility, files, *, originals, tracks, albums, genres,
                  metadata, keys, proposals=None, settings=None):

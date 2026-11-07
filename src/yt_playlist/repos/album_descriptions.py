@@ -6,6 +6,19 @@ from yt_playlist.repos.base import Repo, lookup_read, synchronized
 
 
 class AlbumDescriptionsRepo(Repo):
+    @lookup_read
+    def legacy_record(self, surface):
+        import json
+        row = self.conn.execute('SELECT payload FROM rec_proposals WHERE surface=?', (surface,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    @synchronized
+    def store_legacy_records(self, records, now):
+        import json
+        self.conn.executemany('INSERT INTO rec_proposals(surface,payload,built_at) VALUES (?,?,?) '
+            'ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload,built_at=excluded.built_at',
+            [(surface, json.dumps(value), now) for surface, value in records])
+
     @contextmanager
     def transaction(self):
         """Reserve this repository's writer; callers keep file I/O outside it."""

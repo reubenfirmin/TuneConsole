@@ -75,7 +75,7 @@ def test_cutover_retains_exact_shapes_clocks_and_explicit_unresolved_references(
     assert tuple(store.conn.execute('SELECT requested_at,resolution_reason FROM tv_artist_requests').fetchone()) == (None, 'missing_artist')
     assert tuple(store.conn.execute('SELECT source_ref,target_ref,source_resolution,target_resolution,built_at FROM tv_continuation_receipts').fetchone()) == (
         None, None, 'missing_playlist', 'missing_playlist', None)
-    assert store.rec_proposals.tv_static_ids(2) == {'visual00001'}
+    assert store.tv.static_ids(2) == {'visual00001'}
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
@@ -92,29 +92,29 @@ def test_artwork_stale_completion_cannot_acknowledge_a_replaced_request(store):
     store.tracks.upsert_track('video', 'Song', 'Artist', None, 100)
     cutover(store)
     assert tv_artwork.request(store, 'Artist', 10)
-    observed = store.rec_proposals.tv_artwork_observation('artist')
+    observed = store.tv.artwork_observation('artist')
     assert tv_artwork.request(store, 'Artist', 11)
-    assert store.rec_proposals.tv_artwork_observation('artist') == observed
+    assert store.tv.artwork_observation('artist') == observed
     with store.conn.atomic():
         store.conn.execute('DELETE FROM tv_artist_requests')
     assert tv_artwork.request(store, 'Artist', 12)
-    replacement = store.rec_proposals.tv_artwork_observation('artist')
+    replacement = store.tv.artwork_observation('artist')
     assert replacement[0] > observed[0]
     value = {'images': ['https://example.test/photo'], 'at': 10, 'retry_at': 20}
-    assert not store.rec_proposals.publish_tv_artwork('artist', value, 13, observed, complete=True)
-    assert store.rec_proposals.tv_artwork_observation('artist') == replacement
-    assert store.rec_proposals.publish_tv_artwork('artist', value, 14, replacement, complete=True)
+    assert not store.tv.publish_artwork('artist', value, 13, observed, complete=True)
+    assert store.tv.artwork_observation('artist') == replacement
+    assert store.tv.publish_artwork('artist', value, 14, replacement, complete=True)
     assert store.rec_proposals.get_proposals('tv_artist_artwork_requests') == {}
 
 
 def test_visual_publication_merges_videos_and_rejects_invalid_measurements(store):
     cutover(store)
     value = {'version': 2, 'verdict': 'static', 'difference': .2, 'changed_fraction': .01, 'sample_times': [20, 60]}
-    store.rec_proposals.publish_tv_visual('visual00001', value, 10)
-    store.rec_proposals.publish_tv_visual('visual00002', value, 11)
-    assert store.rec_proposals.tv_static_ids(2) == {'visual00001', 'visual00002'}
+    store.tv.publish_visual('visual00001', value, 10)
+    store.tv.publish_visual('visual00002', value, 11)
+    assert store.tv.static_ids(2) == {'visual00001', 'visual00002'}
     with pytest.raises((ValueError, sqlite3.IntegrityError)):
-        store.rec_proposals.publish_tv_visual('visual00001', {**value, 'changed_fraction': 2}, 12)
+        store.tv.publish_visual('visual00001', {**value, 'changed_fraction': 2}, 12)
     assert store.rec_proposals.get_proposals('tv_visual_checks')['visual00001'] == value
 
 
@@ -134,7 +134,7 @@ def test_lost_create_response_cannot_create_a_second_playlist(store, stream, mon
     with pytest.raises(ValueError, match='has not confirmed'):
         tv_stream.refill(store, client, iid, playlist, recipe, input_stream, 'lost', items[7:11], 11)
     assert len(client.created) == created
-    assert store.rec_proposals.tv_receipt(f'{playlist.id}:{input_stream}:lost')['pending']
+    assert store.tv.receipt(f'{playlist.id}:{input_stream}:lost')['pending']
     with pytest.raises(sqlite3.IntegrityError, match='must be retained'), store.conn.atomic():
         store.conn.execute('DELETE FROM tv_continuation_receipts')
 

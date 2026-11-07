@@ -19,7 +19,7 @@ from yt_playlist.core import discovery_policy
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.collection_recovery import RecoveryFiles
 from yt_playlist.repos.discovery import DiscoveryRepo
-from yt_playlist.repos.rec_proposals import RecProposalsRepo
+from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
 from yt_playlist.repos.settings import SettingsRepo
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -32,7 +32,7 @@ def discovery():
     eligibility = create_autospec(RecommendationEligibility, instance=True, spec_set=True)
     files = create_autospec(RecoveryFiles, instance=True, spec_set=True)
     files.retained.side_effect = nullcontext
-    proposals = create_autospec(RecProposalsRepo, instance=True, spec_set=True)
+    proposals = create_autospec(RecommendationProposals, instance=True, spec_set=True)
     settings = create_autospec(SettingsRepo, instance=True, spec_set=True)
     originals = create_autospec(RetainedOriginals, instance=True, spec_set=True)
     repository.origin_inputs.return_value = dict(video=None, album=None, artists=set(), account=False)
@@ -225,7 +225,7 @@ def cleanup_snapshot(discovery):
     repository.cleanup_track_details.return_value = {'sources': {'source'}, 'unowned': {'gone'}}
     eligibility = create_autospec(RecommendationEligibility, instance=True, spec_set=True)
     eligibility.generated_track_keys.return_value = {'generated'}
-    proposals = create_autospec(RecProposalsRepo, instance=True, spec_set=True)
+    proposals = create_autospec(RecommendationProposals, instance=True, spec_set=True)
     proposals.cache_rows.return_value = []
     snapshot = SimpleNamespace(store=SimpleNamespace(discovery=SimpleNamespace(repository=repository),
         rec_eligibility=eligibility, rec_proposals=proposals), release_reader=Mock(),

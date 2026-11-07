@@ -84,7 +84,7 @@ def build(ctx):
             ctx.rec_worker.trigger_tv_refresh()
         result = {'ready': ready, 'max_minutes': tv.max_minutes(ctx.store)}
         account = next((a for a in ctx.store.accounts.get_accounts() if a.is_master), None)
-        if account and (pending := ctx.store.rec_proposals.pending_tv_launch(account.id)):
+        if account and (pending := ctx.store.tv.pending_launch(account.id)):
             result['pending_launch'] = pending
         if not ready and (message := preparation_message()):
             result['message'] = message
@@ -123,8 +123,8 @@ def build(ctx):
             return JSONResponse({'pending': True}, status_code=400)
         if not request_id:
             account = next((a for a in ctx.store.accounts.get_accounts() if a.is_master), None)
-            request_id = (ctx.store.rec_proposals.pending_tv_launch(account.id) if account else None) or uuid.uuid4().hex
-        previous = ctx.store.rec_proposals.tv_launch(request_id)
+            request_id = (ctx.store.tv.pending_launch(account.id) if account else None) or uuid.uuid4().hex
+        previous = ctx.store.tv.launch(request_id)
         items = [] if previous else tv.queue(ctx.store, ctx.now_fn())
         if not previous and not items:
             if ctx.rec_worker:
@@ -137,7 +137,7 @@ def build(ctx):
             pid, stream = activity_for(ctx).wrap('start TV session', tv_launch.start,
                 ctx.store, ctx.client_provider(), request_id, items, ctx.now_fn())()
             playlist, videos = playlist_items(ctx.store, pid)
-            state = ctx.store.rec_proposals.tv_launch(request_id)
+            state = ctx.store.tv.launch(request_id)
             wanted = set(state['outcome']['confirmed'])
             videos = [t for t in videos if t['video_id'] in wanted]
             return {'playlist_id': playlist.id, 'title': playlist.title, 'items': videos, 'stream': stream}

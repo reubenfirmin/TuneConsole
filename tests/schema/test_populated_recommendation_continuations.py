@@ -30,7 +30,7 @@ from yt_playlist.rec import group_preparation, group_roots, group_similarity, gr
 from yt_playlist.rec.radio_candidates import RadioCandidates
 from yt_playlist.repos import compact_group_publication, group_publication
 from yt_playlist.repos import recommendation_publication as publication
-from yt_playlist.repos.rec_proposals import RecProposalsRepo
+from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
 from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 from yt_playlist.util import genre_catalog, genre_map
 
@@ -365,14 +365,14 @@ def test_one_actual_fresh_pool_update_preserves_other_pools_and_measures_serving
             pages[phase[0] + '_max_limit'] = max(pages[phase[0] + '_max_limit'], kwargs.get('limit', 128))
             assert len(value['tracks']) <= kwargs.get('limit', 128) <= 128
             return value
-        old_proposal = RecProposalsRepo._proposal_json
+        old_proposal = RecommendationProposals._proposal_json
         def no_bundle(repo, surface):
             assert surface not in ('mode_bundles', 'fresh_pool'), 'Serving decoded a retired full bundle'
             return old_proposal(repo, surface)
         monkeypatch.setattr(recommendation_outputs, '_decode', observed_decode)
         monkeypatch.setattr(recommendation_outputs, '_read', observed_read)
         monkeypatch.setattr(RecommendationPublications, 'candidate_page', observed_page)
-        monkeypatch.setattr(RecProposalsRepo, '_proposal_json', no_bundle)
+        monkeypatch.setattr(RecommendationProposals, '_proposal_json', no_bundle)
         started = time.monotonic()
         fresh = store.recommendations.candidate_page(*selected_slot, limit=128)
         report['fresh_useful_output_seconds'] = time.monotonic() - started

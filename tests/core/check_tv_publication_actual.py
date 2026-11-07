@@ -145,19 +145,19 @@ def check(path, report_path):
         assert pool.worker.progress(conn) == failed
         pool.worker.step(conn, retry=True)
         publish('recovered', pool, pool.worker.progress(conn).prepared_revision)
-        write('request-artwork', lambda:store.rec_proposals.request_tv_artwork('controlled-new', artist, 99))
-        write('publish-artwork-and-complete-request', lambda:store.rec_proposals.publish_tv_artwork('controlled-new',
+        write('request-artwork', lambda:store.tv.request_artwork('controlled-new', artist, 99))
+        write('publish-artwork-and-complete-request', lambda:store.tv.publish_artwork('controlled-new',
             {'images':['https://example.test/new'], 'at':99}, 99, (None, None), complete=True))
-        write('publish-visual', lambda:store.rec_proposals.publish_tv_visual('visual00240', {'verdict':'moving', 'version':2}, 99))
-        write('complete-receipt', lambda:store.rec_proposals.complete_tv_receipt('3000000:s:r',
+        write('publish-visual', lambda:store.tv.publish_visual('visual00240', {'verdict':'moving', 'version':2}, 99))
+        write('complete-receipt', lambda:store.tv.complete_receipt('3000000:s:r',
             {'playlist_id':3000001, 'stream':'real-writer', 'items':items[:1]}, 99))
         write('replace-pool', lambda:store.rec_proposals.put_proposals('tv_pool', {'items':items[:1], 'at':99}, 99))
         for owner in publication.OWNERS.values():
             assert owner.selected(other.conn) is None
             publish('continuing-writes', owner, finish(owner.worker))
         assert 'controlled-new' not in other.rec_proposals.get_proposals('tv_artist_artwork_requests')
-        assert other.rec_proposals.tv_receipt('3000000:s:r')['stream'] == 'real-writer'
-        assert 'visual00240' not in other.rec_proposals.tv_static_ids(2)
+        assert other.tv.receipt('3000000:s:r')['stream'] == 'real-writer'
+        assert 'visual00240' not in other.tv.static_ids(2)
         regular.validate(conn)
         report.update(status='passed', interrupted_cutover_rolled_back=True, stale_cutover_rejected=True,
             explicit_file_recovery=True, preopened_readers_use_publications=True)

@@ -84,6 +84,11 @@ def publish(conn, prepared):
         raise ValueError('Report publication requires prepared output and an outer transaction')
     durable = [(prepared.surface, str(position), *files.publish(files.directory(conn), encoded))
                for position, encoded in enumerate(prepared.parts)]
+    return register(conn, prepared, durable)
+
+
+def register(conn, prepared, durable):
+    """Install references to already durable report parts."""
     previous = conn.execute('SELECT publication_id FROM recommendation_report_heads WHERE surface=?',
                             (prepared.surface,)).fetchone()
     identity = conn.execute('INSERT INTO recommendation_report_publications('
@@ -102,6 +107,33 @@ def publish(conn, prepared):
     if previous:
         _retire(conn, previous[0])
     return identity
+
+
+def manifest(conn, surface):
+    """Capture the selected report's SQL references without opening files."""
+    prepared = prepared_owner(conn)
+    if prepared:
+        from .report_reads import selected
+        row = selected(conn, surface)
+        if row is None:
+            return None
+        parts = conn.execute('SELECT CAST(position AS TEXT) AS chunk_key,filename,'
+            'digest AS content_digest,byte_size FROM prepared_report_parts '
+            'WHERE generation=? AND surface=? ORDER BY position LIMIT 65',
+            (row['generation'], surface)).fetchall()
+        metadata = (row['content_digest'], row['total_bytes'], row['part_count'])
+    else:
+        row = conn.execute('SELECT p.id,p.content_digest,p.total_bytes,p.part_count '
+            'FROM recommendation_report_heads h JOIN recommendation_report_publications p '
+            'ON p.id=h.publication_id WHERE h.surface=?', (surface,)).fetchone()
+        if row is None:
+            return None
+        parts = conn.execute('SELECT chunk_key,filename,content_digest,byte_size '
+            'FROM recommendation_report_files WHERE publication_id=? ORDER BY CAST(chunk_key AS INTEGER)',
+            (row[0],)).fetchall()
+        metadata = tuple(row[1:])
+    return {'content_digest': metadata[0], 'total_bytes': metadata[1], 'part_count': metadata[2],
+            'prepared': prepared, 'parts': [dict(part) for part in parts]}
 
 
 def _retire(conn, identity):

@@ -80,7 +80,7 @@ def album_context(ctx, views, now):
                 context={**payload.get("context", {}), 'album_menu': policy}, window=epoch)
         except Exception:
             ctx.logger.warning("Album choice capture failed", exc_info=True)
-    writer.rec_proposals.request_album_notes(items, now)
+    writer.album_notes.request(items, now)
     queued_notes = writer.rec_proposals.get_proposals('album_note_requests') or {}
     if ctx.rec_worker and queued_notes:
         views.schedule()
@@ -178,7 +178,7 @@ def build(ctx, views):
         album = next((row for row in albums if row.get('browse_id') == browse), None)
         if album is None:
             return Response(status_code=404)
-        store.rec_proposals.request_album_notes([album], now_fn(), visible=True)
+        store.album_notes.request([album], now_fn(), visible=True)
         if ctx.rec_worker:
             views.schedule()
         pending = browse in (store.rec_proposals.get_proposals('album_note_requests') or {})

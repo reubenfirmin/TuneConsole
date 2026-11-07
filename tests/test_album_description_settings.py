@@ -71,8 +71,8 @@ def test_remove_key_pauses_generation_and_preserves_paid_description(store):
 
 def test_settings_save_wakes_missing_notes_without_resetting_counts_or_success(store):
     client = _client(store, lambda: {})
-    store.rec_proposals.publish_album_note('missing', {'retry_at': 999999, 'editorial_version': 6}, 1)
-    store.rec_proposals.publish_album_note('ready', {'retry_at': 999999, 'editorial_version': 6,
+    store.album_notes.publish('missing', {'retry_at': 999999, 'editorial_version': 6}, 1)
+    store.album_notes.publish('ready', {'retry_at': 999999, 'editorial_version': 6,
         'description': {'kind': 'generated', 'text': 'Saved prose.'}}, 1)
     for n in range(20):
         paid_copy(store, {'browse_id': f'paid-{n}', 'artist': 'A', 'title': f'Album {n}'},

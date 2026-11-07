@@ -61,14 +61,14 @@ def test_album_tab_visibility_and_remembered_default(live_app, store, page, widt
     from tests.conftest import FakeClient
     from tests.test_album_web import _album
     monkeypatch.setattr(FakeClient, 'get_album', lambda self, browse: _album()["MPREb_x"])
-    store.rec_proposals.publish_album_note('album-0', {'description': {
+    store.album_notes.publish('album-0', {'description': {
         'text': 'An album shaped by intricate rhythms and patient melodic development.',
         'source': 'Discogs release notes', 'url': 'https://www.discogs.com/release/123',
         'acquisition': 'automatic'}, 'rating': {
         'value': 4.3, 'count': 28, 'scale': 5, 'source': 'Discogs community',
         'url': 'https://www.discogs.com/release/123'}, 'retry_at': 1000}, 1)
     for index in range(1, 4):
-        store.rec_proposals.publish_album_note(f'album-{index}', {'artwork': {
+        store.album_notes.publish(f'album-{index}', {'artwork': {
             'url': f'https://album-images.test/scene-{index}.svg',
             'source_url': 'https://example.com/photographer', 'kind': 'artist',
             'credit': f'Artist {index} · Photographer · CC BY-SA 4.0'}, 'retry_at': 1000}, 1)

@@ -392,7 +392,7 @@ def test_deferred_full_fit_reuses_exact_svd_inputs_then_retrains_on_changed_bask
     store.tracks.set_track_genre(ids[0], 'Classical')
     assert model_refresh.rebuild(store, 1003, fit_cache=cache)
     assert calls == ['svd', 'svd']
-    assert store.rec_model.rec_vectors_count() == 96
+    assert store.rec_model.rec_vectors_count() == len(ids)
 
 
 def test_unresolved_metadata_capture_notifies_full_models_without_eager_rebuild(store):

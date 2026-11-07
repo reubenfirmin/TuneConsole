@@ -123,7 +123,7 @@ def test_failed_learning_publication_never_acknowledges_or_releases(store, monke
     age_artifacts(store)
     def fail(*args, **kwargs):
         raise OSError('publication failed')
-    monkeypatch.setattr(store.rec_proposals, 'publish_choice_findings', fail)
+    monkeypatch.setattr(store.choice_findings, 'publish', fail)
     with pytest.raises(OSError, match='publication failed'):
         choices.maintain_storage(store, 31 * DAY)
     ledger = store.rec_ledger.evidence()

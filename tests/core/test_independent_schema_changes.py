@@ -69,6 +69,40 @@ def test_wrong_album_feedback_outbox_is_rejected_without_stamping_change(install
                                 ('durable_album_feedback_responses',)).fetchone()
 
 
+def test_association_checkpoint_installation_rolls_back_and_retries(installed, monkeypatch):
+    from yt_playlist.core import association_work
+    with closing(sqlite3.connect(installed)) as conn:
+        regular.migrate(conn, changes=regular.CHANGES[:34])
+        before = list(conn.iterdump())
+        install = association_work.install
+
+        def interrupted(*args):
+            install(*args)
+            raise OSError('interrupted association checkpoint installation')
+
+        with monkeypatch.context() as stopped:
+            stopped.setattr(association_work, 'install', interrupted)
+            with pytest.raises(OSError, match='interrupted association checkpoint'):
+                regular.migrate(conn)
+        assert list(conn.iterdump()) == before
+        regular.migrate(conn)
+        association_work.validate(conn)
+        completed = list(conn.iterdump())
+        regular.migrate(conn)
+        assert list(conn.iterdump()) == completed
+
+
+def test_wrong_association_checkpoint_is_rejected_without_stamping(installed):
+    with closing(sqlite3.connect(installed)) as conn:
+        regular.migrate(conn, changes=regular.CHANGES[:34])
+        with conn:
+            conn.execute('CREATE TABLE recording_association_work(video_id TEXT)')
+        before = list(conn.iterdump())
+        with pytest.raises(MigrationError, match='recording association checkpoints'):
+            regular.migrate(conn)
+        assert list(conn.iterdump()) == before
+
+
 def test_routine_runner_never_starts_real_metadata_conversion(installed, monkeypatch):
     def failed_conversion(conn):
         raise RuntimeError('Conversion deliberately suspended for retry')

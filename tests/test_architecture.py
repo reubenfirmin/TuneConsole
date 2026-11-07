@@ -209,6 +209,11 @@ def test_callers_name_repository_owners_and_retired_modules_stay_retired():
     methods -= {node.name for cls in modules['yt_playlist.core.store'].body
                 if isinstance(cls, ast.ClassDef) and cls.name == 'Store'
                 for node in cls.body if isinstance(node, ast.FunctionDef)}
+    methods -= {target.attr for node in ast.walk(modules['yt_playlist.core.store'])
+                if isinstance(node, (ast.Assign, ast.AnnAssign))
+                for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+                if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
+                and target.value.id == 'self'}
     retired = {"yt_playlist.repos.rec", "yt_playlist.rec.rec_dao", "yt_playlist.rec.recommend"}
     violations = []
     files = [*(SOURCE / "yt_playlist").rglob("*.py"), *(ROOT / "tests").rglob("*.py")]
@@ -364,15 +369,14 @@ def _unguarded_connection_access(method):
             return False
         if isinstance(node, ast.With):
             # A lock elsewhere in the method does not protect SQL outside its body.
-            if any(unguarded(item.context_expr, locked) for item in node.items):
-                return True
-            locked = locked or any(
-                ast.unparse(item.context_expr) == "self._lock" or (
+            for item in node.items:
+                if unguarded(item.context_expr, locked):
+                    return True
+                locked = locked or ast.unparse(item.context_expr) == "self._lock" or (
                     isinstance(item.context_expr, ast.Call)
                     and ast.unparse(item.context_expr.func) in {'atomic_write', 'reserved_write'}
                     and len(item.context_expr.args) == 1
                     and ast.unparse(item.context_expr.args[0]) == 'self._store')
-                for item in node.items)
             return any(unguarded(statement, locked) for statement in node.body)
         if isinstance(node, ast.Attribute) and ast.unparse(node) == "self.conn":
             return not locked
@@ -402,6 +406,13 @@ def reconciled(self):
             self.conn.execute("RELEASE setup_identities")
 ''').body[0]
     assert not _unguarded_connection_access(protected)
+    combined = ast.parse('''
+@contextmanager
+def transaction(self):
+    with self._lock, self.conn.atomic():
+        yield
+''').body[0]
+    assert not _unguarded_connection_access(combined)
     for guard in ('atomic_write', 'reserved_write'):
         method = ast.parse(f'def query(self):\n    with {guard}(self._store, wait_seconds=0):\n        self.conn.execute("SELECT 1")').body[0]
         assert not _unguarded_connection_access(method), guard
@@ -420,6 +431,7 @@ def query(self):
         'def query(self):\n    with self._lock:\n        pass\n    self.conn.execute("SELECT 1")',
         'def query(self):\n    self.conn.execute("SELECT 1")\n    with self._lock:\n        pass',
         'def query(self):\n    with self.other_lock:\n        self.conn.execute("SELECT 1")',
+        'def query(self):\n    with self.conn.atomic(), self._lock:\n        yield',
         'def query(self):\n    with atomic_write(other):\n        self.conn.execute("SELECT 1")',
         'def query(self):\n    with unrelated_write(self._store):\n        self.conn.execute("SELECT 1")',
         'def query(self):\n    if not self._lock.acquire(blocking=False):\n        pass\n    self.conn.execute("SELECT 1")',

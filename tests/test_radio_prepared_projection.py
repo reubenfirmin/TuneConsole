@@ -12,7 +12,7 @@ from yt_playlist.core import json_cache
 from yt_playlist.rec import embedding_vectors, musical_character, musical_profiles, radio_candidates, radio_tuning
 from yt_playlist.rec.stored_radio import PreparedRadio
 from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
-from yt_playlist.repos.rec_proposals import encode_proposals
+from yt_playlist.core.proposal_codec import encode_proposals
 
 
 def _bundles():

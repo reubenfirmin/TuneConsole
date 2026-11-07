@@ -1,5 +1,5 @@
 """Owned paired menus and captured Radio modes; ranked universes use #486."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
@@ -36,8 +36,8 @@ class Prepared:
     policies: frozenset
 
 
-def prepare(conn, surface, envelope, at, *, pending_policies=(), input_revision=None, historical=False, capture_only=False):
-    from yt_playlist.rec import bundle_storage, comparison_storage
+def prepare_output(surface, envelope, at, *, pending_policies=(), input_revision=None, capture_only=False):
+    from yt_playlist.rec import comparison_storage
     run, arm, format = address(surface)
     if at is not None and (type(at) not in (int, float) or not math.isfinite(at)):
         raise ValueError('Invalid comparison observation time')
@@ -71,7 +71,7 @@ def prepare(conn, surface, envelope, at, *, pending_policies=(), input_revision=
         value['modes'] = display
     if len({mode[0] for mode in modes}) != len(modes):
         raise ValueError('Duplicate captured Radio mode')
-    plan = None
+    inputs = None
     if bundle is not None:
         # Declared candidate policy paths are inspected once at import. No
         # arbitrary JSON scan or synthesized policy substitutes for provenance.
@@ -88,7 +88,7 @@ def prepare(conn, surface, envelope, at, *, pending_policies=(), input_revision=
             if bundle:
                 raise ValueError('Historical Radio candidates have no recorded policy')
         else:
-            plan = bundle_storage.prepare(conn, bundle, None, external_key='comparison:' + uuid.uuid4().hex,
+            inputs = bundle, dict(external_key='comparison:' + uuid.uuid4().hex,
                 policy_version=root, input_revision=input_revision,
                 created_at=at if capture_only or at is not None else time.time(),
                 pending_policies=pending_policies, surface_prefix=surface + ':', allow_unobserved=capture_only)
@@ -101,7 +101,18 @@ def prepare(conn, surface, envelope, at, *, pending_policies=(), input_revision=
     if len(parts) > 128:
         raise ValueError('Comparison display exceeds its part budget')
     return Prepared(surface, value, raw, hashlib.sha256(raw.encode()).hexdigest(), parts, at,
-                    tuple(modes), plan, frozenset(policies))
+                    tuple(modes), None, frozenset(policies)), inputs
+
+
+def prepare(conn, surface, envelope, at, *, pending_policies=(), input_revision=None, historical=False, capture_only=False):
+    """Compatibility preparation for isolated imports and installed-format conversion."""
+    from yt_playlist.rec import bundle_storage
+    prepared, inputs = prepare_output(surface, envelope, at, pending_policies=pending_policies,
+                                     input_revision=input_revision, capture_only=capture_only)
+    if inputs is not None:
+        bundle, options = inputs
+        prepared = replace(prepared, plan=bundle_storage.prepare(conn, bundle, None, **options))
+    return prepared
 
 
 def _root(identity, field):
@@ -125,12 +136,26 @@ def retire(conn, identity):
 
 def publish(conn, prepared, *, store=None, generation=None, historical=False):
     from yt_playlist.controllers import recommendation_import
-    from yt_playlist.repos import recommendation_publication
-    if not conn.in_transaction or not isinstance(prepared, Prepared):
-        raise ValueError('Comparison publication requires prepared output and its outer transaction')
-    run, arm, format = address(prepared.surface)
     if prepared.plan is not None and generation is None:
         generation = recommendation_import.import_plan(conn, prepared.plan, prepared.plan.created_at)
+    roots = store.group_evidence.prepare_references(prepared.surface, prepared.value, prepared.at,
+                                                   historical=historical) if store is not None else None
+    with policy_documents.retained_reader(files.directory(conn)):
+        durable = [files.publish(files.directory(conn), part) for part in prepared.parts]
+        return publish_files(conn, prepared, durable, generation=generation, historical=historical,
+                             roots=roots, copy_legacy=store is None)
+
+
+def publish_files(conn, prepared, durable, *, generation=None, historical=False, roots=None, copy_legacy=False):
+    """Register supplied file references and switch the SQL-owned comparison head."""
+    from yt_playlist.repos import recommendation_publication
+    if not conn.in_transaction or not isinstance(prepared, Prepared):
+        raise ValueError('Comparison publication requires prepared output and its owning transaction')
+    if len(durable) != len(prepared.parts):
+        raise ValueError('Incomplete comparison output files')
+    if prepared.plan is not None and generation is None:
+        raise ValueError('Comparison ranked generation has not been published')
+    run, arm, format = address(prepared.surface)
     known = conn.execute('SELECT id FROM rec_model_selection_runs WHERE id=?', (run,)).fetchone()
     identity = conn.execute('INSERT INTO model_pair_publications(run_id,run_ref,run_resolution,arm,format,'
         'generation_id,encoding_model,built_at,output_digest,part_count) VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING id',
@@ -159,11 +184,10 @@ def publish(conn, prepared, *, store=None, generation=None, historical=False):
         context = prepared.value.get(field)
         if isinstance(context, dict) and context.get('artifact'):
             conn.execute('INSERT INTO model_pair_contexts VALUES (?,?,?)', (identity, field, context['artifact']))
-    if store is not None:
-        from .prepared_references import replace_prepared
-        replace_prepared(store, prepared.surface, prepared.value, prepared.at,
-                         historical=historical, owner_prefix=f'comparison-output:{identity}')
-    else:
+    if roots is not None:
+        group_evidence.register_prepared(conn, *roots, historical=historical,
+                                         owner_prefix=f'comparison-output:{identity}')
+    elif copy_legacy:
         # Registered earlier versions resolved these exact legacy references.
         # Copy them verbatim rather than guessing an artifact's current contents.
         for field in (*CONTEXTS, 'recommendations'):
@@ -182,11 +206,9 @@ def publish(conn, prepared, *, store=None, generation=None, historical=False):
                      "WHERE kind='comparison' AND external_key=?", (identity, field, key))
         conn.execute("INSERT INTO model_pair_recommendation_roots SELECT ?,?,'comparison',external_key,generation_id "
                      "FROM recommendation_generation_refs WHERE kind='comparison' AND external_key=?", (identity, field, key))
-    with policy_documents.retained_reader(files.directory(conn)):
-        for index, encoded in enumerate(prepared.parts):
-            filename, digest, size = files.publish(files.directory(conn), encoded)
-            conn.execute('INSERT INTO model_pair_files(publication_id,surface,chunk_key,filename,content_digest,byte_size) '
-                         'VALUES (?,?,?,?,?,?)', (identity, prepared.surface, str(index), filename, digest, size))
+    for index, (filename, digest, size) in enumerate(durable):
+        conn.execute('INSERT INTO model_pair_files(publication_id,surface,chunk_key,filename,content_digest,byte_size) '
+                     'VALUES (?,?,?,?,?,?)', (identity, prepared.surface, str(index), filename, digest, size))
     previous = conn.execute('SELECT publication_id FROM model_pair_heads WHERE run_id=? AND arm=? AND format=?',
                             (run, arm, format)).fetchone()
     conn.execute("UPDATE model_pair_publications SET status='published' WHERE id=?", (identity,))

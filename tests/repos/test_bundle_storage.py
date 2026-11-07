@@ -16,7 +16,7 @@ from yt_playlist.rec import home_vibe, musical_character, vibe_pools
 from yt_playlist.rec import bundle_storage
 from yt_playlist.repos import recommendation_publication as publication
 from yt_playlist.controllers import recommendation_import
-from yt_playlist.repos.rec_proposals import RecProposalsRepo
+from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
 
 
 @pytest.fixture
@@ -430,7 +430,7 @@ def test_serving_hydrates_only_a_rank_page_from_current_canonical_metadata(recom
     publish(store, prepare(store, bundle(store)))
     def forbidden(*args, **kwargs):
         pytest.fail('Bounded candidate serving attempted to decode the legacy bundle')
-    monkeypatch.setattr(RecProposalsRepo, '_proposal_json', forbidden)
+    monkeypatch.setattr(RecommendationProposals, '_proposal_json', forbidden)
     page = store.recommendations.candidate_page('home', 'all', 'wheelhouse', limit=1)
     assert page['after'] == 0 and not page['exhausted']
     assert len(page['tracks']) == 1
@@ -486,7 +486,7 @@ def test_vibe_reader_reaches_selected_genre_pool_outside_main_head_without_legac
     publish(store, prepare(store, value))
     def forbidden(*args, **kwargs):
         pytest.fail('Typed vibe serving opened the legacy bundle')
-    monkeypatch.setattr(RecProposalsRepo, '_proposal_json', forbidden)
+    monkeypatch.setattr(RecommendationProposals, '_proposal_json', forbidden)
     monkeypatch.setattr(musical_character, 'load', lambda store, keys: {})
     candidates = vibe_pools.candidates(store, 'relax', 'comfort', include_genres=('jazz',))
     assert [(row['key'], row['genre'], row['video_id']) for row in candidates] == [('two', 'jazz', 'two-current')]

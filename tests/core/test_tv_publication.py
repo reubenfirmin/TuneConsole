@@ -65,8 +65,8 @@ def test_all_owners_work_for_preopened_and_reopened_readers(installed):
             assert other.rec_proposals.get_proposals(surface) == values[surface]
             assert other.rec_proposals.has_proposals(surface)
         assert not other._tv_recommendations
-        assert other.rec_proposals.tv_static_ids(2) == {'visual00001'}
-        assert other.rec_proposals.tv_receipt('10::request:with:colons') == values['tv_continuations']['10::request:with:colons']
+        assert other.tv.static_ids(2) == {'visual00001'}
+        assert other.tv.receipt('10::request:with:colons') == values['tv_continuations']['10::request:with:colons']
         regular.validate(other.conn)
     finally:
         other.conn.close()
@@ -189,28 +189,28 @@ def test_real_continuing_writers_withdraw_selections_and_reconcile(installed):
     values, originals = seed(store)
     publish_all(store)
     with store.read_snapshot() as snapshot:
-        assert snapshot.store.rec_proposals.tv_receipt('10::request:with:colons') == values['tv_continuations']['10::request:with:colons']
-        store.rec_proposals.complete_tv_receipt('11:stream:next', {'playlist_id':21, 'stream':'continued', 'items':[video(3)]}, 99)
+        assert snapshot.store.tv.receipt('10::request:with:colons') == values['tv_continuations']['10::request:with:colons']
+        store.tv.complete_receipt('11:stream:next', {'playlist_id':21, 'stream':'continued', 'items':[video(3)]}, 99)
         assert not snapshot.publish(lambda:None)
     assert publication.OWNERS['continuations'].selected(store.conn) is None
     assert publication.OWNERS['pool'].selected(store.conn) == 0
-    store.rec_proposals.request_tv_artwork('new', 'Artist', 99)
+    store.tv.request_artwork('new', 'Artist', 99)
     assert publication.OWNERS['artwork-requests'].selected(store.conn) is None
-    assert store.rec_proposals.publish_tv_artwork('new', {'images':['https://example.test/new'], 'at':99}, 99, (None, None), complete=True)
+    assert store.tv.publish_artwork('new', {'images':['https://example.test/new'], 'at':99}, 99, (None, None), complete=True)
     assert publication.OWNERS['artwork'].selected(store.conn) is None
     assert 'new' not in store.rec_proposals.get_proposals('tv_artist_artwork_requests')
-    store.rec_proposals.publish_tv_visual('visual00002', {'verdict':'moving', 'version':2}, 99)
+    store.tv.publish_visual('visual00002', {'verdict':'moving', 'version':2}, 99)
     store.rec_proposals.put_proposals('tv_pool', {'items':[video(4)], 'at':99}, 99)
     for owner in publication.OWNERS.values():
         owner.publish(store.conn, revision=prepare(owner, store.conn))
         assert owner.value(store.conn, 0) == originals[owner.source]
-    assert store.rec_proposals.tv_static_ids(2) == {'visual00001'}
-    assert store.rec_proposals.tv_receipt('11:stream:next')['items'] == [video(3)]
+    assert store.tv.static_ids(2) == {'visual00001'}
+    assert store.tv.receipt('11:stream:next')['items'] == [video(3)]
     regular.validate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_legacy_writers_reserve_before_read_and_artwork_failure_rolls_back_both_owners(installed, monkeypatch):
+def test_legacy_artwork_publication_survives_later_request_removal_failure(installed, monkeypatch):
     store, _ = installed
     values, _ = seed(store)
     publish_all(store)
@@ -218,29 +218,29 @@ def test_legacy_writers_reserve_before_read_and_artwork_failure_rolls_back_both_
     read = store.rec_proposals.get_proposals
     writes = store.rec_proposals.put_proposals
     checked = []
-    def reserved(surface):
-        assert store.conn.in_transaction
-        with pytest.raises(sqlite3.OperationalError, match='locked'):
-            other.execute('BEGIN IMMEDIATE')
+    def outside_transaction(surface):
+        assert not store.conn.in_transaction
+        other.execute('BEGIN IMMEDIATE')
+        other.rollback()
         checked.append(surface)
         return read(surface)
-    monkeypatch.setattr(store.rec_proposals, 'get_proposals', reserved)
+    monkeypatch.setattr(store.rec_proposals, 'get_proposals', outside_transaction)
     try:
-        store.rec_proposals.request_tv_artwork('new', 'Artist', 99)
-        store.rec_proposals.publish_tv_visual('visual00002', {'verdict':'moving'}, 99)
-        store.rec_proposals.complete_tv_receipt('11:s:r', {'playlist_id':21, 'stream':'next'}, 99)
+        store.tv.request_artwork('new', 'Artist', 99)
+        store.tv.publish_visual('visual00002', {'verdict':'moving'}, 99)
+        store.tv.complete_receipt('11:s:r', {'playlist_id':21, 'stream':'next'}, 99)
         def fail(surface, value, now):
             if surface == 'tv_artist_artwork_requests':
                 raise RuntimeError('controlled request removal failure')
             return writes(surface, value, now)
         monkeypatch.setattr(store.rec_proposals, 'put_proposals', fail)
         with pytest.raises(RuntimeError, match='controlled request removal failure'):
-            store.rec_proposals.publish_tv_artwork('new', {'images':[]}, 99, (None, None), complete=True)
+            store.tv.publish_artwork('new', {'images':[]}, 99, (None, None), complete=True)
         monkeypatch.setattr(store.rec_proposals, 'get_proposals', read)
         assert checked
-        assert read('tv_artist_artwork') == values['tv_artist_artwork']
+        assert read('tv_artist_artwork') == {**values['tv_artist_artwork'], 'new': {'images': []}}
         assert read('tv_artist_artwork_requests')['new'] == 'Artist'
-        assert publication.OWNERS['artwork'].selected(store.conn) == 0
+        assert publication.OWNERS['artwork'].selected(store.conn) is None
         assert not store.conn.in_transaction
     finally:
         other.close()

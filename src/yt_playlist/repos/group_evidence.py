@@ -10,28 +10,7 @@ class GroupEvidenceRepo(Repo):
     @synchronized
     def replace_prepared(self, kind, surface, operations, generations, *, historical=False):
         with self.conn.atomic(join=True):
-            if generations is not None:
-                identity = 'proposal:' + surface + ':recommendations'
-                recommendation_custody.release(self.conn, kind, identity)
-                recommendation_references.retain(self.conn, kind, identity, generations)
-            for identity, owner, unknown, references in operations:
-                existing = self.conn.execute('SELECT reference_digest FROM group_evidence_owners '
-                                              'WHERE kind=? AND external_key=?', (kind, identity)).fetchone()
-                if historical and existing is not None:
-                    continue
-                if generations is not None:
-                    recommendation_custody.release(self.conn, kind, identity)
-                if unknown is not None:
-                    group_evidence.retain_unknown_context(self.conn, kind, identity, *unknown)
-                elif owner is None:
-                    group_evidence.release(self.conn, kind, identity)
-                else:
-                    if existing is not None and existing[0] != owner.digest:
-                        group_evidence.release(self.conn, kind, identity)
-                    group_evidence.retain_owner(self.conn, owner,
-                                                strict=not historical and owner.generation is not None)
-                if unknown is None and generations is not None:
-                    recommendation_references.retain(self.conn, kind, identity, references)
+            return group_evidence.register_prepared(self.conn, kind, surface, operations, generations, historical=historical)
 
     def retain(self, owner, *, strict, recommendations):
         with writer(self._store) as conn:

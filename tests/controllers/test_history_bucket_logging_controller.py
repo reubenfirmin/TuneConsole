@@ -2,7 +2,7 @@
 import logging
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import create_autospec
+from unittest.mock import Mock, create_autospec
 
 import pytest
 
@@ -17,7 +17,9 @@ pytestmark = pytest.mark.usefixtures('no_database')
 def listening_history():
     repo = create_autospec(HistoryRepo, instance=True, spec_set=True)
     repo.calendar_facts.return_value = {'timezone': 'UTC', 'confirmed': 1}
-    return history.History(repo, None, None, lambda: set(), nullcontext)
+    repo.day_count.return_value = 0
+    repo.subject_facts.return_value = {'direct': None, 'exact': None, 'aliases': []}
+    return history.History(repo, None, None, lambda: set(), nullcontext, Mock())
 
 
 def test_repeated_weekly_scans_are_summarized_and_parse_each_bucket_once(listening_history, monkeypatch, caplog):
@@ -42,7 +44,7 @@ def test_repeated_weekly_scans_are_summarized_and_parse_each_bucket_once(listeni
     assert all(r.args[1:3] == (67, {'last week': 13, 'this week': 54}) for r in caplog.records)
     assert listening_history.repository.record_days.call_count == 2
     listening_history.repository.record_days.assert_called_with(identity, 10 * 86400,
-        [('dated|artist', '1970-01-10', 'ytm_history')], 'UTC')
+        [('dated|artist', 'dated|artist', None, '1970-01-10', '1970-01-10', 'ytm_history')], 'UTC')
 
 
 def test_unknown_categories_warn_once_and_again_after_cooldown(listening_history, monkeypatch, caplog):

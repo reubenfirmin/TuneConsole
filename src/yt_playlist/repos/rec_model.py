@@ -136,7 +136,7 @@ class RecModelRepo(Repo):
                               "VALUES (?,?,?,?,'',?,?)", inserted)
 
     @synchronized
-    def publish_association_ratings(self, deleted, actions, inserted, ages, guards):
+    def publish_association_ratings(self, deleted, actions, inserted, ages, guards, *, association=None):
         with self.conn.atomic():
             self._publish_ratings(deleted, actions, inserted)
             self.conn.executemany("UPDATE rec_feedback SET created_at=?,until=? WHERE surface=? AND item_key=? AND scope=''", ages)
@@ -144,6 +144,8 @@ class RecModelRepo(Repo):
                 "VALUES ('like_grad',?,'like_grad',?,'',NULL,?) ON CONFLICT(surface,item_key,scope) "
                 'DO UPDATE SET created_at=excluded.created_at,reason=excluded.reason '
                 'WHERE rec_feedback.created_at IS NULL OR excluded.created_at<rec_feedback.created_at', guards)
+            from yt_playlist.core.association_work import complete
+            complete(self.conn, association, 'model')
 
     @lookup_read
     def unban_facts(self, key):

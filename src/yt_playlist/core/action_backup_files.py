@@ -26,6 +26,33 @@ def retain(conn,filename):
     return _publish_encoded(collection_recovery.directory(conn),encoded,digest,age=age),digest,size
 
 
+class ActionBackupFiles:
+    def __init__(self, root):
+        self.root = root
+
+    def reference(self, filename, *, historical=False):
+        if filename is None:
+            return (None, None, None, 'none'), None
+        if not isinstance(filename, str) or not filename:
+            raise ValueError('Action backup requires a filename')
+        try:
+            encoded, digest, size = verified(filename)
+        except FileNotFoundError:
+            if historical:
+                return (filename, None, None, 'missing_historical'), None
+            raise ValueError('Action backup is missing; remote mutation was not admitted') from None
+        import json
+        value = json.loads(encoded)
+        if (not isinstance(value, dict) or value.get('snapshot_version', 1) not in (1, 2)
+                or not isinstance(value.get('tracks'), list) or not value.get('ytm_playlist_id')):
+            raise ValueError('Unsupported playlist recovery backup')
+        return (filename, digest, size, 'verified'), value
+
+    def retain(self, filename):
+        (encoded, digest, size), age = verified(filename, with_age=True)
+        return _publish_encoded(self.root, encoded, digest, age=age), digest, size
+
+
 def inventory(conn):
     return [dict(row) for row in conn.execute('SELECT * FROM action_backups ORDER BY action_id,position')]
 

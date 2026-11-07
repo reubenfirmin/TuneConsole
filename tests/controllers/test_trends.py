@@ -8,7 +8,7 @@ import pytest
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.trends import Trends
 from yt_playlist.rec import trend_rollups
-from yt_playlist.repos.rec_proposals import RecProposalsRepo
+from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
 from yt_playlist.repos.trends import TrendsRepo
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -17,7 +17,7 @@ pytestmark = pytest.mark.usefixtures('no_database')
 @pytest.fixture
 def trends():
     return Trends(create_autospec(TrendsRepo, instance=True, spec_set=True),
-                  create_autospec(RecProposalsRepo, instance=True, spec_set=True))
+                  create_autospec(RecommendationProposals, instance=True, spec_set=True))
 
 
 def test_local_hours_use_each_events_retained_timezone(trends):

@@ -7,7 +7,7 @@ from yt_playlist.core.metadata_contract import clock
 from yt_playlist.core import metadata_values, enrichment_selection_policy
 from yt_playlist.core.metadata_deliveries import Delivery
 from yt_playlist.core.evidence_ledger import canonical
-from yt_playlist.util.matching import normalize
+from yt_playlist.util.genre_catalog import normalize
 
 
 class MetadataChoices:
@@ -118,6 +118,33 @@ class MetadataChoices:
     def restore(self, entry, field, value, *, now=None):
         self.select(entry, field, value, 'youtube', now=now)
         return self.choose(entry, field, withdraw=True, now=now)
+
+    def edit(self, entry, edits):
+        """Commit one metadata edit; capture provider evidence before its SQL unit."""
+        edits = list(edits)
+        if not edits:
+            return
+        restored = {}
+        at = clock(None)
+        for field, operation, value in edits:
+            if operation != 'restore':
+                continue
+            prepared = self._prepare(field, value)
+            inputs = self.repository.input(entry, field)
+            delivery = None
+            if inputs['layout'] == 'evidence':
+                delivery = self.deliveries.capture_state(entry, 'youtube', 'selected-field:' + field,
+                    {'format': 'catalog-field-capture-1', 'field': field, 'value': value}, now=at)
+            restored[field] = inputs, prepared, delivery
+        with self.repository.transaction():
+            for field, operation, value in edits:
+                if operation == 'restore':
+                    inputs, prepared, delivery = restored[field]
+                    self.repository.store_base(inputs, field, value, prepared, 'youtube', at, delivery_id=delivery)
+                    self._resume_query(field, inputs['track'])
+                    self.choose(entry, field, withdraw=True, now=at)
+                else:
+                    self.choose(entry, field, value, now=at)
 
     def _resume_query(self, field, track):
         if field in ('title', 'artist'):

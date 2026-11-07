@@ -2,7 +2,6 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core import catalog
 from yt_playlist.library.playlist_metadata import content_hash
 from yt_playlist.util.matching import identity_key
 
@@ -65,11 +64,11 @@ def test_append_writes_only_new_catalog_and_membership(store, monkeypatch, size)
         for operation in ["INSERT", "DELETE", "UPDATE"]:
             store.conn.execute(f"CREATE TEMP TRIGGER count_playlist_{operation} AFTER {operation} ON playlist_items "
                                f"BEGIN INSERT INTO publication_writes VALUES ('{operation}'); END")
-    original, calls = catalog.upsert, []
-    def observed(conn, video, *args, **kwargs):
+    original, calls = store.tracks.upsert_track, []
+    def observed(video, *args, **kwargs):
         calls.append(video)
-        return original(conn, video, *args, **kwargs)
-    monkeypatch.setattr(catalog, "upsert", observed)
+        return original(video, *args, **kwargs)
+    monkeypatch.setattr(store.tracks, "upsert_track", observed)
     expected = [t["video_id"] for t in tracks]
     tracks.append(_track(size))
     store.playlists.publish_confirmed_tracks(pid, "Radio", tracks, 3, expected_prefix=expected)
@@ -88,12 +87,12 @@ def test_confirmed_publication_rolls_back_all_changes(store, monkeypatch, increm
     pid = _playlist(store)
     store.playlists.publish_confirmed_tracks(pid, "Radio", [_track(0)], 2)
     before = store.playlists.get_playlist(pid)
-    original = catalog.upsert
-    def fail_second(conn, video, *args, **kwargs):
+    original = store.tracks.upsert_track
+    def fail_second(video, *args, **kwargs):
         if video == "v2":
             raise RuntimeError("catalog failure")
-        return original(conn, video, *args, **kwargs)
-    monkeypatch.setattr(catalog, "upsert", fail_second)
+        return original(video, *args, **kwargs)
+    monkeypatch.setattr(store.tracks, "upsert_track", fail_second)
     with pytest.raises(RuntimeError, match="catalog failure"):
         store.playlists.publish_confirmed_tracks(pid, "Changed", [_track(i) for i in range(3)], 3,
                                                 expected_prefix=["v0"] if incremental else None)
@@ -103,7 +102,7 @@ def test_confirmed_publication_rolls_back_all_changes(store, monkeypatch, increm
     assert not store.conn.execute("SELECT 1 FROM youtube_items WHERE video_id='v2'").fetchone()
     store.settings.set_setting('unrelated', 'committed')
     assert _library_videos(store) == {'v0'}
-    monkeypatch.setattr(catalog, 'upsert', original)
+    monkeypatch.setattr(store.tracks, 'upsert_track', original)
     store.playlists.publish_confirmed_tracks(pid, 'Changed', [_track(i) for i in range(3)], 3,
                                             expected_prefix=['v0'] if incremental else None)
     assert _videos(store, pid) == ['v0', 'v1', 'v2']
@@ -116,17 +115,19 @@ def test_other_connection_sees_only_complete_publication(file_backed_store, monk
     pid = _playlist(store)
     tracks = [_track(0)]
     store.playlists.publish_confirmed_tracks(pid, "Radio", tracks, 2)
-    original = catalog.upsert
+    original = store.tracks.upsert_track
     with sqlite3.connect(path) as reader:
-        def observed(conn, video, *args, **kwargs):
-            result = original(conn, video, *args, **kwargs)
+        def observed(video, *args, **kwargs):
+            result = original(video, *args, **kwargs)
             assert reader.execute("SELECT title,track_count FROM playlists WHERE id=?",
                                   (pid,)).fetchone() == ("Radio", 1)
             assert reader.execute("SELECT video_id FROM playlist_items WHERE playlist_id=? ORDER BY position",
                                   (pid,)).fetchall() == [("v0",)]
-            assert reader.execute("SELECT 1 FROM youtube_items WHERE video_id='v1'").fetchone() is None
+            assert reader.execute("SELECT 1 FROM youtube_items WHERE video_id='v1'").fetchone()
+            assert reader.execute('SELECT 1 FROM library_memberships m JOIN catalog_entries e ON e.id=m.entry_id '
+                                  "WHERE e.video_id='v1'").fetchone() is None
             return result
-        monkeypatch.setattr(catalog, "upsert", observed)
+        monkeypatch.setattr(store.tracks, "upsert_track", observed)
         store.playlists.publish_confirmed_tracks(pid, "Changed", [*tracks, _track(1)], 3,
                                                 expected_prefix=["v0"])
         assert reader.execute("SELECT title,track_count FROM playlists WHERE id=?",

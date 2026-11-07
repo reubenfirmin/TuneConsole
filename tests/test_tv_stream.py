@@ -102,11 +102,11 @@ def test_pending_append_is_confirmed_later_without_replaying_it(store, stream, m
         monkeypatch.setattr(client, 'create_playlist', unknown_create if failure == 'create' else original_create)
         with pytest.raises(tv_stream.PendingTV):
             tv_launch.start(store, {iid: client}, failure, selected, 10)
-        retained = store.rec_proposals.tv_launch(failure)
+        retained = store.tv.launch(failure)
         count = (len(client.created), len(client.added))
         with pytest.raises(tv_stream.PendingTV):
             tv_launch.start(store, {iid: client}, failure, items[40:52], 11)
-        assert store.rec_proposals.tv_launch(failure) == retained
+        assert store.tv.launch(failure) == retained
         assert (len(client.created), len(client.added)) == count
         lagging[0] = False
         if failure == 'partial':
@@ -127,8 +127,8 @@ def test_pending_append_is_confirmed_later_without_replaying_it(store, stream, m
     monkeypatch.setattr(client, 'create_playlist', original_create)
     pid, _ = tv_launch.start(store, {iid: client}, 'intentional-new-session', items[40:52], 14)
     assert len(store.charts.playlist_tracks_detail(pid)) == 12
-    assert store.rec_proposals.tv_launch('create')['provider_playlist_id'] is None
-    assert store.rec_proposals.tv_launch('create')['state'] == 'pending'
+    assert store.tv.launch('create')['provider_playlist_id'] is None
+    assert store.tv.launch('create')['state'] == 'pending'
 
 
 @pytest.mark.parametrize('rollover', ['saved', 'full'])

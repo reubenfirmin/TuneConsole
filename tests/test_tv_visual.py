@@ -151,7 +151,7 @@ def test_inspector_reuses_result_published_between_cache_read_and_lock(store, mo
         reads.append(previous)
         if len(reads) == 1:
             # The first read missed just before another inspection completed.
-            actual_store.rec_proposals.publish_tv_visual(video_id, result, now)
+            actual_store.tv.publish_visual(video_id, result, now)
         return previous
 
     def unexpected_network_call(_):

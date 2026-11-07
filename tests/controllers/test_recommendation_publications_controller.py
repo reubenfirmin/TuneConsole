@@ -2,6 +2,7 @@
 from unittest.mock import Mock
 from contextlib import contextmanager, nullcontext
 import hashlib
+import json
 
 import pytest
 
@@ -299,3 +300,45 @@ def test_empty_clicked_pool_without_policy_has_no_publication(publications):
     value = {'parameters': {'lane': 'comfort', 'epoch': 0, 'include_genres': [], 'avoid_genres': []}, 'tracks': []}
     assert publications.prepare_clicked_pool('home_pool:comfort', value, 100) is None
     publications.repository.recording_ids.assert_not_called()
+
+
+def test_empty_clicked_pool_clears_only_its_head(publications):
+    value = {'parameters': {'lane': 'comfort', 'epoch': 0, 'include_genres': [], 'avoid_genres': []}, 'tracks': []}
+    publications.put_clicked_pool('home_pool:comfort', json.dumps(value), 100)
+    publications.repository.clear_surface.assert_called_once_with('home_pool:comfort')
+    publications.repository.claim.assert_not_called()
+
+
+def test_clicked_pool_uses_pinned_generation_across_missing_candidate_pages(publications):
+    parameters = {'lane': 'comfort', 'epoch': 0, 'include_genres': [], 'avoid_genres': []}
+    publications.repository.clicked_pool_header.return_value = {'generation': 7, 'parameters': parameters}
+    publications.candidate_page = Mock(side_effect=[
+        {'tracks': [], 'after': 511, 'exhausted': False},
+        {'tracks': [{'key': 'one'}], 'after': 512, 'exhausted': True}])
+    assert publications.clicked_pool('home_pool:comfort') == {'parameters': parameters, 'tracks': [{'key': 'one'}]}
+    assert [call.kwargs for call in publications.candidate_page.call_args_list] == [
+        {'generation': 7, 'after': -1, 'limit': 512}, {'generation': 7, 'after': 511, 'limit': 512}]
+
+
+def test_clicked_pool_presence_does_not_read_candidates_or_files(publications):
+    publications.repository.clicked_pool_header.return_value = {'generation': 7, 'parameters': {}}
+    assert publications.clicked_pool_present('home_pool:comfort')
+    publications.repository.candidate_rows.assert_not_called()
+    publications.files.read.assert_not_called()
+    publications.repository.clicked_pool_header.return_value = None
+    assert not publications.clicked_pool_present('home_pool:comfort')
+    assert publications.clicked_pool('home_pool:comfort') is None
+
+
+def test_clicked_pool_stage_failure_keeps_existing_head(publications):
+    value = {'parameters': {'lane': 'comfort', 'epoch': 0, 'include_genres': [], 'avoid_genres': []},
+             'tracks': [{'key': 'one', 'pool_policy': 'policy'}]}
+    publications.repository.recording_ids.return_value = {'one': 1}
+    publications.repository.policy_families.return_value = {'policy': 'shared'}
+    publications.repository.claim.return_value = Mock(generation_id=7)
+    publications.stage = Mock(side_effect=OSError('disk full'))
+    with pytest.raises(OSError, match='disk full'):
+        publications.put_clicked_pool('home_pool:comfort', json.dumps(value), 100)
+    publications.repository.remember_clicked_pool_parameters.assert_called_once_with(7, value['parameters'], 100)
+    publications.repository.publish.assert_not_called()
+    publications.repository.clear_surface.assert_not_called()

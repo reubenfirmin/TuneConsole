@@ -334,7 +334,7 @@ def test_invalid_metadata_does_not_partially_save(songs, change):
 
 
 @pytest.mark.parametrize('video_id', ['owned-song', 'uncached-song'])
-def test_metadata_write_failure_rolls_back_the_entire_edit(songs, monkeypatch, video_id):
+def test_metadata_write_failure_rolls_back_fields_and_retry_completes(songs, monkeypatch, video_id):
     before = songs['store'].tracks.metadata_for_video(video_id)
     repository = songs['store'].metadata_choices.repository
     store_choice = repository.store
@@ -353,4 +353,18 @@ def test_metadata_write_failure_rolls_back_the_entire_edit(songs, monkeypatch, v
     with pytest.raises(RuntimeError, match='write failed'):
         songs['http'].post('/songs/metadata', json=body)
     assert {'title', 'artist', 'genre'} <= set(written)
-    assert songs['store'].tracks.metadata_for_video(video_id) == before
+    failed = songs['store'].tracks.metadata_for_video(video_id)
+    if before is not None:
+        assert failed == before
+    else:
+        # Catalog observation is independently committed and does not join the
+        # metadata repository's write unit or acquire library membership.
+        assert failed['title'] == 'Original' and failed['artist'] == 'Original artist'
+        assert not failed['genre'] and not failed['year']
+        assert not songs['store'].conn.execute('SELECT 1 FROM library_memberships WHERE entry_id=?',
+                                               (failed['track_id'],)).fetchone()
+    monkeypatch.setattr(repository, 'store', store_choice)
+    assert songs['http'].post('/songs/metadata', json=body).status_code == 200
+    saved = songs['store'].tracks.metadata_for_video(video_id)
+    assert (saved['title'], saved['artist'], saved['genre'], saved['year']) == (
+        'Updated', 'Updated artist', 'Jazz', '2000')

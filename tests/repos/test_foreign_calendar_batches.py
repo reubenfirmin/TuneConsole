@@ -25,13 +25,13 @@ def test_history_batch_reconciles_once_with_one_exact_lookup_per_scope(store, mo
     keys = [f'song-{i}' for i in range(size)]
     store.history.import_listening_events(iid, [(key, None, at) for key in keys])
     calls = []
-    original = listening.reconcile_foreign_days
+    original = store.listening_calendar.reconcile
 
     def reconcile(*args, **kwargs):
         calls.append(kwargs)
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(listening, 'reconcile_foreign_days', reconcile)
+    monkeypatch.setattr(store.listening_calendar, 'reconcile', reconcile)
     sql = []
     store.conn.set_trace_callback(sql.append)
     try:
@@ -79,14 +79,13 @@ def test_exact_ingestion_revisits_only_affected_recording_and_source_date(store,
         for key, day in [('song', '2026-10-20'), ('song', '2026-10-21'), ('other', '2026-10-21')]:
             listening.observe_day(store.conn, iid, key, day, 'ytm_history', 'UTC', at, reconcile=False)
     visited = []
-    original = listening_calendar._foreign_rows
+    original = store.listening_calendar.repository.exact_days
 
-    def rows(*args):
-        for row in original(*args):
-            visited.append((row['identity_key'], row['source_day']))
-            yield row
+    def rows(account_id, key, start, end):
+        visited.append((key, dt.datetime.fromtimestamp(start, dt.timezone.utc).date().isoformat()))
+        return original(account_id, key, start, end)
 
-    monkeypatch.setattr(listening_calendar, '_foreign_rows', rows)
+    monkeypatch.setattr(store.listening_calendar.repository, 'exact_days', rows)
 
     def record(timestamp):
         if ingest == 'live':

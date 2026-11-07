@@ -87,7 +87,7 @@ def test_existing_historical_owner_is_never_reinterpreted(evidence):
     service.repository.has_owner.return_value = True
     service.replace_prepared('home_prepared', {'context': {'artifact': 'missing'}}, 10, historical=True)
     ledger.get.assert_not_called()
-    assert service.repository.replace_prepared.call_args.args[2] == []
+    assert service.repository.replace_prepared.call_args.args[2] == ()
 
 
 def test_choice_contexts_do_not_create_group_dependencies(evidence):

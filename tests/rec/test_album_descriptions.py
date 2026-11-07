@@ -70,10 +70,10 @@ def test_durable_copy_survives_database_reopen_and_home_cache_eviction(file_back
     path = first._db_path
     own_album(first)
     description = copy.get(first, ALBUM, 100)[0]
-    assert first.rec_proposals.publish_album_note(ALBUM['browse_id'], {'description': description}, 100)
+    assert first.album_notes.publish(ALBUM['browse_id'], {'description': description}, 100)
     assert first.rec_proposals.get_proposals('album_notes')[ALBUM['browse_id']]['description'] == description
     for number in range(130):
-        assert first.rec_proposals.publish_album_note(str(number), {'description': None}, 200)
+        assert first.album_notes.publish(str(number), {'description': None}, 200)
     cache = first.rec_proposals.get_proposals('album_notes')
     assert len(cache) == 128 and ALBUM['browse_id'] not in cache
     first.conn.close()
@@ -102,7 +102,7 @@ def test_daily_limit_counts_failures_survives_restart_and_does_not_reset_on_new_
     try:
         store.init_schema()
         monkeypatch.setattr(deepseek._iao, 'api_key', lambda *args: 'another-key')
-        store.rec_proposals.wake_album_descriptions(200)
+        store.album_notes.wake(200)
         deferred = copy.get(store, other_album(store, 'Another release'), 200)[1]
         assert deferred == {'status': 'daily_limit', 'retry_at': 86400}
         assert copy.settings(store, 200)['requests_today'] == 1

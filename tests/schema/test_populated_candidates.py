@@ -16,7 +16,7 @@ from yt_playlist.core.store import Store
 from yt_playlist.rec import home_vibe, mode_surfaces
 from yt_playlist.rec.radio_candidates import RadioCandidates
 from yt_playlist.repos import proposal_cache
-from yt_playlist.repos.rec_proposals import RecProposalsRepo
+from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
 from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 
 
@@ -126,11 +126,11 @@ def test_all_populated_ranks_and_representative_serving_survive_cutover(populate
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
         store._bind_repositories()
         store._snapshot_revisions = Revisions(store.conn)
-        original = RecProposalsRepo._proposal_json
+        original = RecommendationProposals._proposal_json
         def read(self, surface):
             assert surface not in ('mode_bundles', 'fresh_pool'), 'Foreground decoded the retired bundle'
             return original(self, surface)
-        monkeypatch.setattr(RecProposalsRepo, '_proposal_json', read)
+        monkeypatch.setattr(RecommendationProposals, '_proposal_json', read)
         original_page, pages = RecommendationPublications.candidate_page, []
         def page(self, *args, **kwargs):
             result = original_page(self, *args, **kwargs)

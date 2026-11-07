@@ -11,7 +11,7 @@ import pytest
 
 from tests.derived_rating_support import seed_dislike
 from tests.prepared_fixture_support import prepared_template
-from tests.recommendation_support import publish_bundles
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.rec.test_model_refresh import seed
 from yt_playlist.core import db_handles, fao, listening
 from yt_playlist.rec import (bundle_storage, candidate_refresh, discover, home_prepared,
@@ -31,17 +31,17 @@ def seed_discoveries(store):
 def playback_library(store):
     # These cases coordinate captured rankings with listening writes. Three
     # owned recordings and one discovery retain every mutation below. The
-    # independent concurrent-ranker case retains the full 96-track pipeline.
+    # independent concurrent-ranker case retains the 80-track fitting floor.
     account = store.accounts.upsert_account('Listener', 'fixture', None, True)
-    for index, genre in ((0, 'Techno'), (10, 'Jazz'), (11, 'Rock')):
-        tid = store.tracks.upsert_track(f'v{index}', f'Song {index:03}',
-                                       f'Artist {index}', 'Album', None)
-        store.tracks.set_track_genre(tid, genre)
+    tracks = [{'key': f'song {index:03}|artist {index}', 'title': f'Song {index:03}',
+               'artist': f'Artist {index}', 'video_id': f'v{index}', 'genre': genre}
+              for index, genre in ((0, 'Techno'), (10, 'Jazz'), (11, 'Rock'))]
+    fresh = {'key': 'new song 0|new artist 0', 'video_id': 'new0', 'title': 'New song 0',
+             'artist': 'New artist 0', 'genre': 'Techno', 'year': '1990', 'duration_s': 200}
+    seed_publication_subjects(store, [*tracks, fresh], discoveries=[fresh['key']], now=1800)
     store.history.import_play_events(account, [('song 000|artist 0', 'v0', 1000)], source='takeout')
     other = store.accounts.upsert_account('Other listener', 'other fixture', None, False)
     store.history.import_play_events(other, [('song 011|artist 11', 'v11', 500)], source='takeout')
-    store.discovery.upsert_discovered_track('new song 0|new artist 0', 'new0', 'New song 0',
-        'New artist 0', 'New album 0', None, 'Techno', '1990', None, 1800, duration_s=200)
     store.rec_model.replace_rec_content_vectors([
         ('song 000|artist 0', np.array([1., 0.], dtype=np.float32).tobytes())])
     bundle, fresh = completed_rankings(store)
@@ -90,6 +90,7 @@ def library(tmp_path, playback_library_template, monkeypatch):
     # test_candidate_refresh. These checks own publication and its schema fence.
     monkeypatch.setattr(candidate_refresh, 'prepared_settings',
                         lambda reader, now: {'rec_candidate_preferences': 'captured-fixture-inputs'})
+    # Reuse only the four-subject admitted publication, not a fitted library.
     with playback_library_template.open(tmp_path / 'playback.db') as store:
         yield store
 
@@ -192,7 +193,7 @@ def test_bundle_publication_keeps_one_coherent_generation_during_playback(
         library, monkeypatch, change, record_property):
     prepare_change(library, change)
     # The unchanged account is an input, not a transition under test. Its real
-    # retained listening evidence is part of the private immutable prefix.
+    # retained listening evidence is present before the captured transition.
     other = next(account.id for account in library.accounts.get_accounts()
                  if account.label == 'Other listener')
     other_evidence = tuple(row for row in evidence(library) if row[0] == other)

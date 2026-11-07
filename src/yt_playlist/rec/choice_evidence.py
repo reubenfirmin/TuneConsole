@@ -560,7 +560,7 @@ def compile_report(store, now, *, refresh=None):
         deadlines.extend(state['expires_at'] for state in (bandit, group_bandit)
                          if state and state.get('expires_at') is not None and state['expires_at'] > now)
         report['refresh'] = {**refresh, 'next_at': min(deadlines)}
-    store.rec_proposals.publish_choice_findings(report, projection, now, bandit=bandit, group_bandit=group_bandit)
+    store.choice_findings.publish(report, projection, now, bandit=bandit, group_bandit=group_bandit)
     return report
 
 

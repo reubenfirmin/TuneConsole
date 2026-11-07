@@ -204,7 +204,7 @@ def test_album_notes_use_cached_sources_without_request_network_and_keep_held_id
     store.wiki.put('artist:artist x', 'artist', 'Artist X', {
         'title': 'Artist X', 'extract': 'An artist with a distinctive sound.',
         'url': 'https://en.wikipedia.org/wiki/Artist_X'}, 1)
-    store.rec_proposals.publish_album_note('record', {'rating': {
+    store.album_notes.publish('record', {'rating': {
         'value': 4.2, 'scale': 5, 'count': 18, 'source': 'Discogs community',
         'url': 'https://www.discogs.com/release/123'}, 'retry_at': 100}, 1)
     def forbidden(*args):

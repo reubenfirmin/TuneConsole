@@ -208,6 +208,45 @@ def test_failed_file_publication_leaves_request_and_usage_untouched(descriptions
     descriptions.repository.complete.assert_not_called()
 
 
+@pytest.mark.parametrize('usage,now,status,count', [
+    ({'day': 0, 'requests': 2}, 100, 'daily_limit', None),
+    ({'day': 0, 'requests': 2}, 86400, 'reserved', 1),
+    ({'day': 0, 'requests': 1}, 100, 'reserved', 2),
+    ({'day': 0, 'requests': 1, 'lease_until': 101}, 100, 'busy', None),
+])
+def test_legacy_admission_keeps_day_budget_and_active_reservation(descriptions, usage, now, status, count):
+    values = {'album_description_usage': usage}
+    descriptions.repository.legacy_record.side_effect = values.get
+    result = descriptions.legacy_claim('release', 'credential', 2, now)
+    assert result['status'] == status
+    if count is None:
+        descriptions.repository.store_legacy_records.assert_not_called()
+    else:
+        saved = dict(descriptions.repository.store_legacy_records.call_args.args[0])['album_description_usage']
+        assert saved['requests'] == count and saved['day'] == int(now // 86400)
+        assert saved['token'] == result['token'] and not saved['send_authorized']
+
+
+@pytest.mark.parametrize('changes', [
+    {'token': 'other'}, {'credential': 'other'}, {'day': -1}, {'lease_until': 100},
+    {'status': 'ready'}, {'send_authorized': True}, {'requests': 3},
+])
+def test_legacy_authorization_rejects_changed_or_consumed_reservations(descriptions, changes):
+    usage = {'token': 'owner', 'credential': 'credential', 'day': 0, 'lease_until': 101,
+             'status': 'pending', 'requests': 1, 'send_authorized': False, **changes}
+    descriptions.repository.legacy_record.return_value = usage
+    assert not descriptions.legacy_authorize('owner', 'credential', 2, 100)
+    descriptions.repository.store_legacy_records.assert_not_called()
+
+
+def test_legacy_completion_cannot_replace_successful_paid_copy(descriptions):
+    descriptions.repository.legacy_record.side_effect = {
+        'album_description:release': {'description': 'Purchased copy'},
+        'album_description_usage': {'token': 'other'}}.get
+    descriptions.legacy_finish('release', 'owner', {'status': 'unavailable', 'retry_at': 200}, 100)
+    descriptions.repository.store_legacy_records.assert_called_once_with([], 100)
+
+
 def test_unsent_claim_cannot_accept_paid_output(descriptions):
     descriptions.repository.request.return_value = request(status='claimed')
     with pytest.raises(ValueError, match='authorized transport'):

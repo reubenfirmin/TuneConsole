@@ -19,7 +19,7 @@ from yt_playlist.repos.modes import ModesRepo
 from yt_playlist.controllers.rec_model import RecommendationModel
 from yt_playlist.controllers.recommendation_query import RecommendationQuery
 from yt_playlist.controllers.recommendation_ledger import RecommendationLedger
-from yt_playlist.repos.rec_proposals import RecProposalsRepo
+from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
 from yt_playlist.repos.settings import SettingsRepo
 from yt_playlist.rec.mode_selection import PROTO_SIZE, ROTATION_POOL, CARD_LABELS as _CARD_LABELS
 from yt_playlist.util import genre_map
@@ -34,7 +34,7 @@ class HomeRepositories(Protocol):
     rec_model: RecommendationModel
     rec_query: RecommendationQuery
     rec_ledger: RecommendationLedger
-    rec_proposals: RecProposalsRepo
+    rec_proposals: RecommendationProposals
     settings: SettingsRepo
 
 

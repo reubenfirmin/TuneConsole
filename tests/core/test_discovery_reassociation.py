@@ -140,19 +140,28 @@ def test_unknown_source_and_offer_state_stay_with_partial_original(store):
     assert s.discovery.discovery_sources_for_track(row['identity_key'])[0]['input_video_id'] is None
 
 
-def test_failed_partial_move_rolls_back_representative_sources_and_events(store,monkeypatch):
+def test_partial_move_keeps_completed_owners_when_final_invalidation_fails(store,monkeypatch):
     a = store.tracks.upsert_track('a','a','Artist',None,200)
     b = store.tracks.upsert_track('b','b','Artist',None,200)
     target = store.tracks.upsert_track('target','target','Artist',None,200)
     move(store,'b',a)
     discover(store,'a','radio:seed',1)
-    before = list(store.conn.iterdump())
-    def fail(conn):
+    previous = subject(store, a)['recording_id']
+    recording = subject(store, target)['recording_id']
+    original = dict(store.conn.execute("SELECT * FROM discovery_sources WHERE input_video_id='a'").fetchone())
+    def fail():
+        assert not store.conn.in_transaction
         raise RuntimeError('interrupted association')
-    monkeypatch.setattr(catalog,'invalidate_derived',fail)
+    monkeypatch.setattr(store.recording_keys,'invalidate_catalog',fail)
     with pytest.raises(RuntimeError,match='interrupted association'):
         move(store,'a',target)
-    assert list(store.conn.iterdump())==before
+    assert not store.conn.in_transaction
+    assert subject(store, a)['recording_id'] == recording
+    assert subject(store, b)['recording_id'] == previous
+    memberships = {row['recording_id']: row['entry_id'] for row in store.conn.execute('SELECT * FROM discovery_memberships')}
+    assert memberships == {previous: b, recording: a}
+    assert retained_source(store, 'a', original) == original
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
 def test_membership_and_entry_guards_reject_inconsistent_writes(store):

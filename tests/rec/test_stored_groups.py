@@ -13,17 +13,17 @@ from tests.repos.test_typed_recommendation_publication import recommendations, p
 from tests.rec.test_stored_fresh import fresh
 from tests.rec.test_stored_home import publish_bundle, candidates
 from yt_playlist.rec import group_home, group_serving, home_vibe, stored_groups
-from yt_playlist.repos.rec_proposals import RecProposalsRepo
+from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
 from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 
 
 def forbid_bundle(monkeypatch):
-    original = RecProposalsRepo._proposal_json
+    original = RecommendationProposals._proposal_json
     def read(self, surface):
         assert surface not in ('mode_bundles', 'fresh_pool'), 'Decoded the retired global candidate bundle'
         return original(self, surface)
-    monkeypatch.setattr(RecProposalsRepo, '_proposal_json', read)
-    monkeypatch.setattr(RecProposalsRepo, 'group_pools_json', lambda *args: pytest.fail('Decoded group pools'))
+    monkeypatch.setattr(RecommendationProposals, '_proposal_json', read)
+    monkeypatch.setattr(RecommendationProposals, 'group_pools_json', lambda *args: pytest.fail('Decoded group pools'))
 
 
 @pytest.mark.parametrize('preset', ['', 'energize'])

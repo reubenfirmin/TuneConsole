@@ -14,7 +14,7 @@ class PendingTV(Exception):
 def refill(store, client, account_id, playlist, recipe, token, request_id, items, now):
     """Never replay an uncertain append, mutate an adopted/saved source, or grow beyond 60 videos."""
     receipt_key = f'{playlist.id}:{token}:{request_id}'
-    if receipt := store.rec_proposals.tv_receipt(receipt_key):
+    if receipt := store.tv.receipt(receipt_key):
         if receipt.get('pending'):
             raise ValueError('YouTube has not confirmed the new TV playlist. Reset TV to start a fresh session.')
         return receipt['playlist_id'], receipt['stream'], receipt['items']
@@ -22,7 +22,7 @@ def refill(store, client, account_id, playlist, recipe, token, request_id, items
     # Retain the response at the original request address as well as the target
     # playlist. Retrying a lost rollover response must not create another list.
     pid, stream, confirmed = result
-    store.rec_proposals.complete_tv_receipt(receipt_key, {'playlist_id': pid, 'stream': stream, 'items': confirmed}, now)
+    store.tv.complete_receipt(receipt_key, {'playlist_id': pid, 'stream': stream, 'items': confirmed}, now)
     tv.record_draw(store, confirmed)
     return result
 
@@ -46,7 +46,7 @@ def _refill(store, client, account_id, playlist, recipe, token, request_id, item
         # Opening a saved video playlist never grants permission to alter it.
         # A long stream rolls to another bounded Generated playlist as needed.
         token = uuid.uuid4().hex
-        if not store.rec_proposals.begin_tv_rollover(receipt_key, token, now):
+        if not store.tv.begin_rollover(receipt_key, token, now):
             raise PendingTV()
         recipe = {'lane': 'tv', 'media': 'video', 'tv_stream': token,
                   'max_minutes': tv.max_minutes(store), 'videos': items,

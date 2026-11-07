@@ -60,10 +60,10 @@ def test_actual_release_notes_preserve_paid_results_and_resume_demand(request, t
         # after checking stale completion so this library remains usable later.
         queue_before = store.rec_proposals.get_proposals('album_note_requests')
         assert not queue_before
-        store.rec_proposals.request_album_notes([album], 1793289600, visible=True)
-        _, old = store.rec_proposals.next_album_note_request()
-        store.rec_proposals.request_album_notes([{**album, 'year': 'changed metadata'}], 1793289601, visible=True)
-        assert not store.rec_proposals.publish_album_note(album['browse_id'], {'label': 'stale'}, 1793289602,
+        store.album_notes.request([album], 1793289600, visible=True)
+        _, old = store.album_notes.next_request()
+        store.album_notes.request([{**album, 'year': 'changed metadata'}], 1793289601, visible=True)
+        assert not store.album_notes.publish(album['browse_id'], {'label': 'stale'}, 1793289602,
                                                           expected_request=old)
         pending = store.rec_proposals.get_proposals('album_note_requests')
         restarted = Store(target)

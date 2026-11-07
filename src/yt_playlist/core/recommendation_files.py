@@ -1,5 +1,8 @@
 """Opaque recommendation output access, independent of SQLite owners."""
-from . import recommendation_outputs, policy_documents
+from pathlib import Path
+import hashlib
+
+from . import fao, recommendation_outputs, policy_documents
 
 
 def decode_display(chunks, ranks, surface):
@@ -15,6 +18,15 @@ class RecommendationFiles:
 
     def publish(self, encoded):
         return recommendation_outputs.publish(self.root, encoded)
+
+    def exists(self, filename):
+        return Path(filename).is_file()
+
+    def write_cache(self, encoded):
+        digest = hashlib.sha256(encoded).hexdigest()
+        path = self.root / digest[:2] / (digest + '.json')
+        fao.write(path, encoded)
+        return str(path), digest, len(encoded)
 
     def read(self, reference, *, surface, chunk_key):
         return recommendation_outputs.read(reference['filename'], reference['content_digest'],

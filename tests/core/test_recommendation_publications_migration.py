@@ -52,7 +52,7 @@ def seed(store, *, fresh_only=False):
     else:
         # Exercise the real staged envelope, not only a plain legacy JSON row.
         bundle['all']['wheelhouse'][0]['reason'] += 'x' * 100_000
-        from yt_playlist.repos.rec_proposals import encode_proposals
+        from yt_playlist.core.proposal_codec import encode_proposals
         encoded = encode_proposals('mode_bundles', bundle)
         assert json.loads(encoded)[json_cache.MARKER] == json_cache.FORMAT
         prepared = store.rec_proposals.stage_prepared_bundles(encoded, encode_proposals('fresh_pool', items))

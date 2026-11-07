@@ -428,6 +428,16 @@ def _validate_joint_metadata_guards(conn):
     vibe_models.validate_metadata_guards(conn)
 
 
+def _install_association_work(conn, context):
+    from .. import association_work
+    association_work.install(conn, context)
+
+
+def _validate_association_work(conn):
+    from .. import association_work
+    association_work.validate(conn)
+
+
 CHANGES = (
     Change(1, 'independent_playback_feedback_receipts', _install_receipts, validate_receipts),
     Change(2, 'group_preparation_failure_progress', _install_group_progress, _validate_group_progress),
@@ -463,6 +473,7 @@ CHANGES = (
     Change(32, 'bounded_embedding_basis_guards', _install_embedding_basis_guards, _validate_embedding_basis_guards),
     Change(33, 'durable_initial_tv_launches', _install_tv_launches, _validate_tv_launches),
     Change(34, 'masked_vibe_metadata_guards', _install_joint_metadata_guards, _validate_joint_metadata_guards),
+    Change(35, 'resumable_recording_associations', _install_association_work, _validate_association_work),
 )
 
 

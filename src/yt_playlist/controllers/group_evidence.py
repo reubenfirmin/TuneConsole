@@ -15,6 +15,11 @@ class GroupEvidence:
         self._orphan_after = ''
 
     def replace_prepared(self, surface, data, at, *, historical=False, resolved_contexts=None):
+        prepared = self.prepare_references(surface, data, at, historical=historical, resolved_contexts=resolved_contexts)
+        if prepared is not None:
+            return self.repository.replace_prepared(*prepared, historical=historical)
+
+    def prepare_references(self, surface, data, at, *, historical=False, resolved_contexts=None):
         if not self.enabled or surface not in PREPARED and not surface.startswith('model_pair:'):
             return
         at = time.time() if at is None else at
@@ -52,7 +57,7 @@ class GroupEvidence:
                     if generation is not None or versions:
                         owner = group_evidence.prepare(kind, identity, value, at)
             operations.append((identity, owner, unknown, references))
-        return self.repository.replace_prepared(kind, surface, operations, generations, historical=historical)
+        return kind, surface, tuple(operations), generations
 
     def retain(self, kind, identity, value, at, *, strict, recommendations):
         owner = group_evidence.prepare(kind, identity, value, at)

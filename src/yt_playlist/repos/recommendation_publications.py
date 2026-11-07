@@ -9,6 +9,24 @@ from . import recommendation_publication as publication, proposal_cache
 
 
 class RecommendationPublicationsRepo(Repo):
+    def native_clicked_pools(self):
+        return self._store._clicked_library_pools
+
+    @snapshot_read
+    def clicked_pool_header(self, surface):
+        from yt_playlist.core import library_pool_state
+        parameters = library_pool_state.read_parameters(self.conn, surface)
+        if parameters is None:
+            return None
+        generation = self.conn.execute('SELECT generation_id FROM recommendation_heads WHERE surface=?',
+                                       (surface,)).fetchone()[0]
+        return {'generation': generation, 'parameters': parameters}
+
+    @synchronized
+    def clear_surface(self, surface):
+        with self.conn.atomic():
+            self.conn.execute('DELETE FROM recommendation_heads WHERE surface=?', (surface,))
+
     @synchronized
     def remember_clicked_pool_parameters(self, generation, parameters, at):
         from yt_playlist.core import library_pool_state

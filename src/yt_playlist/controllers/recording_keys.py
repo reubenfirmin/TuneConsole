@@ -59,11 +59,11 @@ class RecordingKeys:
         self.recipes.rekey_recordings({old_key: new_key})
         return inputs, modes
 
-    def finish_reassociation(self, old_key, new_key, previous, target, prepared):
+    def finish_reassociation(self, old_key, new_key, previous, target, prepared, *, association=None):
         inputs, modes = prepared
         self.resolve_mood(old_key)
         feedback = [row for row in inputs['feedback'] if row['kind'] not in ('like', 'dislike', 'like_grad')]
-        self.repository.apply_rekey(old_key, new_key, target, feedback, modes, previous=previous)
+        self.repository.apply_rekey(old_key, new_key, target, feedback, modes, previous=previous, association=association)
 
     def resolve_listening(self, recording):
         keys = [key for key in self.repository.listening_keys(recording)

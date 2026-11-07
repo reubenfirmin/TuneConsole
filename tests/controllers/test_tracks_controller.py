@@ -170,8 +170,7 @@ def test_metadata_edit_ignores_unchanged_values_and_restores_originals(tracks):
         'track_id': 7, 'title': 'Edited', 'artist': 'Artist', 'genre': 'Jazz', 'year': '2000',
         'orig_title': 'Original', 'orig_artist': 'Artist'}
     tracks.update_metadata('video', {'title': 'Original', 'genre': 'Jazz', 'year': ''}, observation={})
-    tracks.metadata_choices.restore.assert_called_once_with(7, 'title', 'Original')
-    tracks.metadata_choices.choose.assert_called_once_with(7, 'mb_year', '')
+    tracks.metadata_choices.edit.assert_called_once_with(7, [('title', 'restore', 'Original'), ('mb_year', 'choose', '')])
     tracks.repository.catalog_transaction.assert_not_called()
 
 
@@ -182,7 +181,16 @@ def test_unknown_edit_observes_catalog_without_acquiring_library_membership(trac
     tracks.upsert_track = Mock()
     tracks.update_metadata('video', {'genre': 'Jazz'}, observation={'title': 'Song', 'artist': 'Artist'})
     tracks.upsert_track.assert_called_once_with('video', title='Song', artist='Artist', library=False)
-    tracks.metadata_choices.choose.assert_called_once_with(7, 'genre', 'Jazz')
+    tracks.metadata_choices.edit.assert_called_once_with(7, [('genre', 'choose', 'Jazz')])
+
+
+def test_retry_of_an_edited_artist_finishes_credit_publication(tracks):
+    tracks.repository.metadata_for_video.return_value = {
+        'track_id': 7, 'title': 'Song', 'artist': 'Edited', 'genre': '', 'year': '',
+        'orig_title': 'Song', 'orig_artist': 'Original'}
+    tracks.update_metadata('video', {'artist': 'Edited'}, observation={})
+    tracks.metadata_choices.edit.assert_called_once_with(7, [])
+    tracks.artists.record_credit_choice.assert_called_once_with(7, 'Edited')
 
 
 def test_metadata_title_setter_cannot_blank_title_and_year_can_be_cleared(tracks):

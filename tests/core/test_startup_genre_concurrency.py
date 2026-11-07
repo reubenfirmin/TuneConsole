@@ -21,7 +21,7 @@ def test_startup_genres_read_committed_identity_while_writer_is_busy(installed, 
     store.genres.set_genre_family('synth pop', 'jazz')
     key = identity_key('Owned genre', 'Artist')
     track = {'key': key, 'video_id': 'genre-concurrency', 'genre': 'Renamed Synth'}
-    original = genre_identity.axis_matches
+    original = genre_identity.axis_match_rows
     reads, metadata_reads, statements = [], [], []
     locked, release = threading.Event(), threading.Event()
 
@@ -38,7 +38,7 @@ def test_startup_genres_read_committed_identity_while_writer_is_busy(installed, 
         assert genre_identity.axes_from_matches(result) == {expected_label: ('jazz', 'synth pop')}
         return result
 
-    monkeypatch.setattr(genre_identity, 'axis_matches', owned_read)
+    monkeypatch.setattr(genre_identity, 'axis_match_rows', owned_read)
     if consumer == 'facets':
         for method in ('track_genres', 'track_decades', 'track_artists'):
             metadata = getattr(RecQueryRepo, method)

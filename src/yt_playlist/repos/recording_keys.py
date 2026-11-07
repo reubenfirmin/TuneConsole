@@ -19,7 +19,7 @@ class RecordingKeysRepo(Repo):
             'modes': [dict(row) for row in self.conn.execute('SELECT mode_id,rep_keys FROM taste_modes')]}
 
     @synchronized
-    def apply_rekey(self, old_key, new_key, recording, feedback, modes, *, previous=None):
+    def apply_rekey(self, old_key, new_key, recording, feedback, modes, *, previous=None, association=None):
         subject = recording if previous is None else previous
         with self.conn.atomic(join=True):
             if album_tracklists.available(self.conn):
@@ -58,6 +58,8 @@ class RecordingKeysRepo(Repo):
             self.conn.executemany('UPDATE taste_modes SET rep_keys=? WHERE mode_id=?', modes)
             if previous is None:
                 self.conn.execute('UPDATE recordings SET identity_key=? WHERE id=?', (new_key, recording))
+            from yt_playlist.core.association_work import complete
+            complete(self.conn, association, 'keys')
 
     @snapshot_read
     def key_candidates(self, key):

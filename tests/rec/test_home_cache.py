@@ -135,13 +135,13 @@ def test_response_reuse_returns_detached_values_and_reopens_on_next_request(file
 
 def test_publication_resolves_artifact_context_before_sql_and_retains_actual_roots(store, monkeypatch):
     from tests.core.test_home_publication import real_roots
-    from yt_playlist.core import prepared_references
+    from yt_playlist.controllers import group_evidence
 
     real_roots(store)
     group = store.conn.execute('SELECT external_key FROM group_generations LIMIT 1').fetchone()[0]
     generation = store.conn.execute('SELECT generation_id FROM recommendation_generation_refs LIMIT 1').fetchone()[0]
     store.rec_ledger.evidence().put('artifact', 'home-context', {'group_generation': group})
-    resolve = prepared_references.context
+    resolve = group_evidence.resolve
     resolved = []
 
     def outside_sql(*args, **kwargs):
@@ -149,7 +149,7 @@ def test_publication_resolves_artifact_context_before_sql_and_retains_actual_roo
         resolved.append(True)
         return resolve(*args, **kwargs)
 
-    monkeypatch.setattr(prepared_references, 'context', outside_sql)
+    monkeypatch.setattr(group_evidence, 'resolve', outside_sql)
     value = {'context': {'artifact': 'home-context'}, 'menus': [{'protos': [{'tracks': [
         {'serving_context': {'recommendation_generation_id': generation}}]}]}]}
     home_cache.put(store, 'home_prepared', value, 2)

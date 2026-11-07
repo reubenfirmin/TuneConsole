@@ -10,7 +10,7 @@ from yt_playlist.controllers.embeddings import Embeddings
 from yt_playlist.controllers.model_selection import ModelSelection
 from yt_playlist.repos.model_selection import ModelSelectionRepo
 from yt_playlist.controllers.radio_checkpoints import RadioCheckpoints
-from yt_playlist.repos.rec_proposals import RecProposalsRepo
+from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
 from yt_playlist.repos.settings import SettingsRepo
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -20,7 +20,7 @@ pytestmark = pytest.mark.usefixtures('no_database')
 def selection():
     repo = create_autospec(ModelSelectionRepo, instance=True, spec_set=True)
     settings = create_autospec(SettingsRepo, instance=True, spec_set=True)
-    proposals = create_autospec(RecProposalsRepo, instance=True, spec_set=True)
+    proposals = create_autospec(RecommendationProposals, instance=True, spec_set=True)
     radio = create_autospec(RadioCheckpoints, instance=True, spec_set=True)
     vectors = create_autospec(Embeddings, instance=True, spec_set=True)
     vectors.retained.side_effect = nullcontext

@@ -377,7 +377,7 @@ def test_saved_tv_failure_recovery_preserves_eligibility_and_cancellation(store,
     items[3]['duration'] = 901
     store.rec_model.record_feedback('for_you', 'artist:Muted singer', 'mute', now=1000)
     seed_dislike(store, items[4]['source_key'], until=None, now=1000)
-    store.rec_proposals.publish_tv_visual(items[5]['video_id'], {
+    store.tv.publish_visual(items[5]['video_id'], {
         'version': tv.tv_visual.VERSION, 'verdict': 'static', 'at': 1000}, 1000)
     recipe = {'lane': 'tv', 'media': 'video', 'videos': items}
     store.playlist_recipes.set_recipe('saved-tv', recipe, 1000)

@@ -17,11 +17,12 @@ class ListeningGeneration:
 
 
 class ListeningAnalytics:
-    def __init__(self, repository, publish_file, read_file, read_prepared):
+    def __init__(self, repository, publish_file, read_file, read_prepared, exists_file):
         self.repository = repository
         self.publish_file = publish_file
         self.read_file = read_file
         self.read_prepared = read_prepared
+        self.exists_file = exists_file
 
     def catalog_rows(self):
         return self.repository.catalog_rows()
@@ -72,6 +73,19 @@ class ListeningAnalytics:
     def prepared(self, surface='listening_analytics'):
         raw = self.encoded(surface)
         return json.loads(raw) if raw else None
+
+    def present(self, surface):
+        identity = policy.output_identity(surface)
+        if identity is None:
+            return False
+        facts = self.repository.output(surface, *identity)
+        if facts['source'] == 'legacy':
+            return facts['raw'] is not None and facts['raw'] not in ('null', '{}')
+        if facts['source'] == 'prepared':
+            header = facts['header']
+            return header is not None and self.exists_file(header['filename'])
+        reference = facts['reference']
+        return reference is not None and self.exists_file(reference[0])
 
     def prepare_generation(self, chunks, manifest, edition, now, *, input_revision):
         if self.repository.uses_files():

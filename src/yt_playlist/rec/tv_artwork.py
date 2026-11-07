@@ -17,7 +17,7 @@ def request(store, name, now):
     if store.artists.resolve(name) is None:
         return False
     key = search_squash(name)
-    return store.rec_proposals.request_tv_artwork(key, name, now)
+    return store.tv.request_artwork(key, name, now)
 
 
 def images(store, name):
@@ -53,7 +53,7 @@ def prepare(store, client, names, now):
         return False
     name = pending[0]
     key = search_squash(name)
-    observation = store.rec_proposals.tv_artwork_observation(key)
+    observation = store.tv.artwork_observation(key)
     photos, _ = images(store, name)
     failed = False
     try:
@@ -82,5 +82,5 @@ def prepare(store, client, names, now):
     vendor_retry_at = max([vendor_retry_at, *(net.retry_after(error, now) for error in errors)])
     value = {'images': list(dict.fromkeys(photos))[:6],
         'retry_at': max(now + (60 if failed else 86400), vendor_retry_at), 'at': now}
-    published = store.rec_proposals.publish_tv_artwork(key, value, now, observation, complete=not failed)
+    published = store.tv.publish_artwork(key, value, now, observation, complete=not failed)
     return len(pending) > 1 or not published

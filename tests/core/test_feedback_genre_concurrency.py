@@ -23,7 +23,7 @@ def test_feedback_ignores_a_concurrent_rolled_back_family(installed, monkeypatch
     key = identity_key('Feedback song', 'Artist')
     assert _feedback_axis(store, {}, 'vibe', key) == 'genre:pop'
     begin, locked, resolved = (threading.Event() for _ in range(3))
-    metadata, axis_matches = RecQueryRepo.track_genres, genre_identity.axis_matches
+    metadata, axis_matches = RecQueryRepo.track_genres, genre_identity.axis_match_rows
     observed = []
 
     def pause_after_metadata(repo, keys):
@@ -56,7 +56,7 @@ def test_feedback_ignores_a_concurrent_rolled_back_family(installed, monkeypatch
     app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
     with TestClient(app, base_url='http://127.0.0.1') as client:
         monkeypatch.setattr(RecQueryRepo, 'track_genres', pause_after_metadata)
-        monkeypatch.setattr(genre_identity, 'axis_matches', observe_family)
+        monkeypatch.setattr(genre_identity, 'axis_match_rows', observe_family)
         with ThreadPoolExecutor(max_workers=1) as pool:
             work = pool.submit(writer)
             try:
@@ -70,7 +70,7 @@ def test_feedback_ignores_a_concurrent_rolled_back_family(installed, monkeypatch
                 resolved.set()
             work.result(5)
     monkeypatch.setattr(RecQueryRepo, 'track_genres', metadata)
-    monkeypatch.setattr(genre_identity, 'axis_matches', axis_matches)
+    monkeypatch.setattr(genre_identity, 'axis_match_rows', axis_matches)
     assert observed == ['pop']
     assert _feedback_axis(store, {}, 'vibe', key) == 'genre:pop'
     if http:

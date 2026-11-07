@@ -55,3 +55,21 @@ def removable_source(source):
     if source in {'unknown', 'independent', ''}:
         raise ValueError('Unknown legacy provenance cannot be assigned to a removable source')
     return source
+
+
+def play_subject(key, video, facts):
+    """Exact upload evidence wins; ambiguous text never identifies a recording."""
+    if video and video.strip():
+        chosen = facts['exact']
+        unresolved = '@unresolved-video:' + video if facts['direct'] else key
+    else:
+        aliases = facts['aliases']
+        chosen = facts['direct'] or (aliases[0] if len(aliases) == 1 else None)
+        unresolved = key
+    return (chosen['identity_key'], chosen['id']) if chosen else (unresolved, None)
+
+
+def repeats_live_event(latest, subject, video, timestamp):
+    return bool(latest and latest['identity_key'] == subject
+        and (not video or not latest['video_id'] or video == latest['video_id'])
+        and 0 <= timestamp - latest['played_at'] < LIVE_DEDUP_S and latest['live'])

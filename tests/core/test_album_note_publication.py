@@ -50,7 +50,7 @@ def test_held_menu_poll_keeps_visible_demand_with_published_notes(installed):
             context={}, window=0)
         response = client.get('/home/album-notes', params={'browse':'release', 'opportunity':opportunity})
     assert response.status_code == 200
-    store.rec_proposals.request_album_notes([], 2, current_only=True)
+    store.album_notes.request([], 2, current_only=True)
     assert 'release' in store.rec_proposals.get_proposals('album_note_requests')
     assert store.rec_proposals.get_proposals('album_notes') == notes
 
@@ -138,7 +138,7 @@ def test_large_map_resume_snapshot_real_writer_and_custody(installed):
     old = header(store.conn)['generation']
     with store.read_snapshot() as snapshot:
         assert snapshot.store.rec_proposals.get_proposals('album_notes') == value
-        store.rec_proposals.publish_album_note('0', {'description':'Continuing result'}, 200)
+        store.album_notes.publish('0', {'description':'Continuing result'}, 200)
         assert snapshot.store.rec_proposals.get_proposals('album_notes') == value
         assert not snapshot.publish(lambda:None)
     assert publication.selected(store.conn) is None

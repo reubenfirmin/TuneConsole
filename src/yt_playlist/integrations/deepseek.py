@@ -92,7 +92,7 @@ class DeepSeekIAO:
         if paid:
             candidates.append(store.album_descriptions.availability(digest, now))
         else:
-            candidates.extend(store.rec_proposals.deepseek_availability(digest))
+            candidates.append(store.album_descriptions.legacy_availability(digest, now))
         blocked = [wait for wait in candidates if wait.get('status') == 'auth'
                    or wait.get('retry_at', 0) > now]
         return max(blocked, key=lambda wait: (wait.get('status') == 'auth', wait.get('retry_at', 0)),
@@ -166,7 +166,7 @@ class DeepSeekIAO:
             return dict(wait)
         digest = credential_id(key)
         claim = (store.album_descriptions.claim(identity, policy, digest, config['daily_limit'], admitted_at)
-                 if paid else store.rec_proposals.claim_album_description(
+                 if paid else store.album_descriptions.legacy_claim(
                      identity, digest, config['daily_limit'], admitted_at))
         if claim['status'] != 'reserved':
             return claim.get('record') or claim
@@ -191,7 +191,7 @@ class DeepSeekIAO:
                 raise DescriptionUnavailable(wait['status'], wait['retry_at'])
             authorized = (store.album_descriptions.authorize(
                 claim['request_id'], claim['token'], digest, current['daily_limit'], clock())
-                if paid else store.rec_proposals.authorize_album_description_send(
+                if paid else store.album_descriptions.legacy_authorize(
                     claim['token'], digest, current['daily_limit'], clock()))
             if not authorized:
                 raise _AdmissionChanged()
@@ -217,5 +217,5 @@ class DeepSeekIAO:
             if not store.album_descriptions.finish(claim['request_id'], claim['token'], record, clock()):
                 return {'status': 'stale'}
         else:
-            store.rec_proposals.finish_album_description(identity, claim['token'], record, clock())
+            store.album_descriptions.legacy_finish(identity, claim['token'], record, clock())
         return record

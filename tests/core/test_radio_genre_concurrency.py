@@ -21,7 +21,7 @@ def test_radio_selection_owns_genre_reads_while_sync_owns_writer(installed, monk
     store, _ = installed
     store.genres.rename_genre('synth pop', 'Renamed Synth')
     store.genres.set_genre_family('synth pop', 'jazz')
-    original = genre_identity.axis_matches
+    original = genre_identity.axis_match_rows
     reads = []
     locked, release = threading.Event(), threading.Event()
 
@@ -31,11 +31,11 @@ def test_radio_selection_owns_genre_reads_while_sync_owns_writer(installed, monk
         assert conn is not store.conn or store._lock.held_by_current_thread, 'Radio genre read borrowed the serving connection'
         assert locked.is_set() and not release.is_set() and not writer.done()
         labels = list(labels)
-        reads.append((conn, labels))
+        reads.append((conn, [label for label, _ in labels]))
         return original(conn, labels)
 
     # Observe SQL after lookup_read has acquired a lock or a private reader.
-    monkeypatch.setattr(genre_identity, 'axis_matches', owned_read)
+    monkeypatch.setattr(genre_identity, 'axis_match_rows', owned_read)
     track = {'key': 'one', 'video_id': 'v1', 'genre': 'Renamed Synth'}
     other = {'key': 'two', 'video_id': 'v2', 'genre': 'Synth Pop'}
 
@@ -114,16 +114,16 @@ def test_home_album_readiness_owns_genre_reads(installed, monkeypatch):
     from yt_playlist.rec import album_choices
 
     store, _ = installed
-    original = genre_identity.axis_matches
+    original = genre_identity.axis_match_rows
     reads = []
 
     def owned_read(conn, labels):
         assert conn is not store.conn or store._lock.held_by_current_thread, 'Unowned album genre read'
         labels = list(labels)
-        reads.append(labels)
+        reads.append([label for label, _ in labels])
         return original(conn, labels)
 
-    monkeypatch.setattr(genre_identity, 'axis_matches', owned_read)
+    monkeypatch.setattr(genre_identity, 'axis_match_rows', owned_read)
     with pytest.raises(AssertionError, match='Unowned album genre read'):
         genre_identity.axis_matches(store.conn, ['Synth Pop'])
     assert not reads

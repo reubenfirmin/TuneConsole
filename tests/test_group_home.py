@@ -373,8 +373,8 @@ def test_muting_and_suppression_are_checked_again_after_group_preparation(store,
 
 def test_active_preparation_freezes_graph_inputs_and_does_not_capture_legacy_models(store, monkeypatch, adaptive_library):
     _tracks, head = adaptive_library
-    from yt_playlist.repos.rec_proposals import RecProposalsRepo
-    original = RecProposalsRepo.get_proposals
+    from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
+    original = RecommendationProposals.get_proposals
     preview_reads = []
 
     def read(self, surface):
@@ -384,7 +384,7 @@ def test_active_preparation_freezes_graph_inputs_and_does_not_capture_legacy_mod
 
     def legacy_capture(*args, **kwargs):
         raise AssertionError('Graph offers must not capture the unused legacy selection model')
-    monkeypatch.setattr(RecProposalsRepo, 'get_proposals', read)
+    monkeypatch.setattr(RecommendationProposals, 'get_proposals', read)
     monkeypatch.setattr(choice_evidence, 'model_context', legacy_capture)
     prepared = home_prepared.prepare(store, 1200)
     assert prepared and prepared['choice_context']['group_generation'] == head['generation']

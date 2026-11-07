@@ -224,9 +224,7 @@ def test_playlist_counts_and_taste_weights_ignore_confirmed_alternate_upload(lis
     assert s.recommendations.repository.candidate_play_counts([key, other]) == {key: 2, other: 1}
 
 
-def test_reassociation_preserves_coarse_sources_and_first_play_atomically(listening_store,monkeypatch):
-    from yt_playlist.core import catalog
-
+def test_reassociation_preserves_completed_listening_changes_when_final_invalidation_fails(listening_store,monkeypatch):
     s = listening_store
     first = s.tracks.upsert_track('a','Old','Artist',None,200)
     target = s.tracks.upsert_track('b','Correct','Artist',None,200)
@@ -234,17 +232,20 @@ def test_reassociation_preserves_coarse_sources_and_first_play_atomically(listen
     s.history.record_history_plays(1,10*86400,[(old,'Today'),(key,'Today')],source_timezone='UTC')
     s.history.import_listening_events(1,[(key,'b',20*86400)])
     s.trends.refresh_first_play()
-    previous = list(s.conn.iterdump())
-    original = catalog.invalidate_derived
-    def fail(conn):
-        original(conn)
+    original = s.recording_keys.invalidate_catalog
+    def fail():
+        assert not s.conn.in_transaction
+        original()
         raise RuntimeError('interrupt association')
-    monkeypatch.setattr(catalog,'invalidate_derived',fail)
+    monkeypatch.setattr(s.recording_keys,'invalidate_catalog',fail)
     with pytest.raises(RuntimeError,match='interrupt association'):
         s.tracks.associate_youtube_item('a',s.tracks.catalog_subject(target)['recording_id'],
                                        source='review',evidence={'same':True},now=1)
-    assert list(s.conn.iterdump())==previous
-    monkeypatch.setattr(catalog,'invalidate_derived',original)
+    assert not s.conn.in_transaction
+    assert s.tracks.catalog_subject(first)['recording_id']==s.tracks.catalog_subject(target)['recording_id']
+    assert s.history.listening_day_counts()=={key:2}
+    assert not s.conn.execute('PRAGMA foreign_key_check').fetchall()
+    monkeypatch.setattr(s.recording_keys,'invalidate_catalog',original)
     s.tracks.associate_youtube_item('a',s.tracks.catalog_subject(target)['recording_id'],
                                    source='review',evidence={'same':True},now=1)
     assert s.settings.get_setting('trend_first_play_watermark') is None
@@ -280,21 +281,19 @@ def test_successful_draft_upgrade_reopens_without_rewriting_data(tmp_path):
 
 
 def test_import_failure_keeps_calendar_setup_and_rolls_back_event_projection(listening_store,monkeypatch):
-    from yt_playlist.core import listening
-
     s = listening_store
     tables = ('play_events', 'play_event_sources', 'play_event_calendar')
     before = {table: [tuple(row) for row in s.conn.execute('SELECT * FROM ' + table)] for table in tables}
-    original = listening.project_event
+    original = s.history.repository.project_event
     def fail(*args,**kwargs):
         original(*args,**kwargs)
         raise RuntimeError('interrupt event projection')
-    monkeypatch.setattr(listening,'project_event',fail)
+    monkeypatch.setattr(s.history.repository,'project_event',fail)
     with pytest.raises(RuntimeError,match='interrupt event projection'):
         s.history.import_listening_events(1,[('song',None,1000)],source_timezone='America/Costa_Rica')
     assert s.history.repository.calendar_facts(1) == {'timezone': 'America/Costa_Rica', 'confirmed': 1}
     assert {table: [tuple(row) for row in s.conn.execute('SELECT * FROM ' + table)] for table in tables} == before
-    monkeypatch.setattr(listening, 'project_event', original)
+    monkeypatch.setattr(s.history.repository, 'project_event', original)
     assert s.history.import_listening_events(1, [('song', None, 1000)], source_timezone='America/Costa_Rica') == (1, 1)
     assert s.conn.execute('SELECT count(*) FROM listening_calendars').fetchone()[0] == 1
 

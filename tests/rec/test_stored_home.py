@@ -10,7 +10,7 @@ from tests.repos.test_typed_recommendation_publication import recommendations, p
 from tests.rec.test_stored_fresh import fresh, forbid_legacy
 from yt_playlist.rec import bundle_storage, mode_surfaces, rec_params
 from yt_playlist.controllers.recommendation_publications import RecommendationPublications
-from yt_playlist.repos.rec_proposals import RecProposalsRepo
+from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
 
 
 def modes(store, families):
@@ -46,12 +46,12 @@ def test_real_initial_import_prepares_and_serves_home_before_modes_without_legac
     from yt_playlist.rec import home_prepared, surfaces
     for index in range(24):
         store.tracks.upsert_track(f'import-{index}', f'Song {index}', f'Artist {index}', None, None)
-    original = RecProposalsRepo._proposal_json
+    original = RecommendationProposals._proposal_json
     def read(self, surface):
         assert surface not in ('mode_bundles', 'fresh_pool'), 'Decoded an obsolete candidate bundle'
         return original(self, surface)
-    monkeypatch.setattr(RecProposalsRepo, '_proposal_json', read)
-    monkeypatch.setattr(RecProposalsRepo, 'group_pools_json', lambda *args: pytest.fail('Decoded group pools'))
+    monkeypatch.setattr(RecommendationProposals, '_proposal_json', read)
+    monkeypatch.setattr(RecommendationProposals, 'group_pools_json', lambda *args: pytest.fail('Decoded group pools'))
     bundles = mode_surfaces.prepare_bundles(store, 1000)
     assert bundles['all']['explore'] and not store.modes.list_modes(active_only=True)
     def forbidden(*args, **kwargs):
@@ -83,11 +83,11 @@ def test_unmodeled_genre_selection_reaches_complete_tail_with_bounded_pages(fres
         reads.append((kwargs['limit'], len(result['tracks'])))
         return result
     monkeypatch.setattr(RecommendationPublications, 'candidate_page', page)
-    original_read = RecProposalsRepo._proposal_json
+    original_read = RecommendationProposals._proposal_json
     def read(self, surface):
         assert surface not in ('mode_bundles', 'fresh_pool')
         return original_read(self, surface)
-    monkeypatch.setattr(RecProposalsRepo, '_proposal_json', read)
+    monkeypatch.setattr(RecommendationProposals, '_proposal_json', read)
     from yt_playlist.rec.home_cards import _carded
     cards = stored_home.unmodeled_cards(store, 10, include=('jazz',), card_builder=_carded)
     assert len(cards) == 1 and cards[0]['lane'] == 'explore'

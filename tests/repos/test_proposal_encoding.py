@@ -6,7 +6,7 @@ import pytest
 from yt_playlist.core import json_cache, policy_config
 from yt_playlist.rec import home_prepared, mode_surfaces, candidate_refresh
 from yt_playlist.repos import policy_storage
-from yt_playlist.repos.rec_proposals import encode_proposals
+from yt_playlist.core.proposal_codec import encode_proposals
 from tests.publication_support import plan, publish, stage
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
 

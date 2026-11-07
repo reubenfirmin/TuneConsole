@@ -8,7 +8,7 @@ from tests.repos.test_compact_group_publication import database
 from tests.repos.test_typed_recommendation_publication import recommendations, publish, plan
 from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
 from yt_playlist.rec import fresh_pool
-from yt_playlist.repos.rec_proposals import RecProposalsRepo
+from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
 from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 from yt_playlist.repos import recommendation_publication as publication
 
@@ -40,13 +40,13 @@ def fresh(recommendations):
 
 
 def forbid_legacy(monkeypatch):
-    original = RecProposalsRepo._proposal_json
+    original = RecommendationProposals._proposal_json
 
     def forbidden(self, surface, *args, **kwargs):
         if surface in ('mode_bundles', 'fresh_pool'):
             pytest.fail('Typed Fresh serving attempted to decode a legacy candidate proposal')
         return original(self, surface, *args, **kwargs)
-    monkeypatch.setattr(RecProposalsRepo, '_proposal_json', forbidden)
+    monkeypatch.setattr(RecommendationProposals, '_proposal_json', forbidden)
 
 
 def test_rare_family_after_the_global_head_remains_reachable_in_bounded_reads(fresh, monkeypatch):
