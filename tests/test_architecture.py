@@ -88,7 +88,13 @@ def _flat_repository_references(tree, methods):
                 elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                       and node.func.attr == 'setattr'):
                     patches.append(node)
-                pending.extend(ast.iter_child_nodes(node))
+                # Names/constants cannot contain a constructor assignment,
+                # access or patch. Attribute contexts are also terminal; only
+                # its value can contain another relevant expression.
+                if isinstance(node, ast.Attribute):
+                    pending.append(node.value)
+                elif not isinstance(node, (ast.Name, ast.Constant, ast.alias)):
+                    pending.extend(ast.iter_child_nodes(node))
         aliases = set(inherited)
         while True:
             before = len(aliases)

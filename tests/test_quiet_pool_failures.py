@@ -29,13 +29,13 @@ def test_fresh_failure_preserves_menu_genres_and_requires_explicit_retry(quiet_p
     job = ctx.jobs.latest('fresh_pool', parameters)
     assert job.done and job.outcome == 'failed' and DIAGNOSTIC in job.error
     assert job.validation_code is None and DIAGNOSTIC in caplog.text
-    for response in (http.get(f'/home/fresh-pool/{job.id}'), http.get('/home/cards')):
+    refreshed = http.get('/home/cards')
+    for response in (http.get(f'/home/fresh-pool/{job.id}'), refreshed):
         assert response.status_code == 200 and DIAGNOSTIC not in response.text
         assert 'Fresh mix not completed. You can try again.' in response.text
         assert 'Not enough matching songs yet' not in response.text
         assert 'hx-trigger="every 2s"' not in response.text
         assert 'aria-label="Find fresh songs"' in response.text
-    refreshed = http.get('/home/cards')
     assert re.findall(r'data-title="([^"]*)"', refreshed.text) == titles
     assert 'data-requested-genres=\'["jazz"]\'' in refreshed.text
     assert case.calls == [parameters] and not case.refreshes

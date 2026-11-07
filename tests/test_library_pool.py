@@ -2,10 +2,10 @@ import html
 import json
 import re
 import threading
-import time
 
 import pytest
 
+from tests.conftest import seed_catalog_track
 from tests.test_home_other_genres import _client as _home_client, genre_routes, seed_genres, template_bytecode
 from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.home_fixture_support import home_routes_only, returning_listener
@@ -72,14 +72,13 @@ def test_catalog_skeleton_click_ranks_once_preserves_genres_and_survives_restart
         for i in range(30):
             title, artist = f"Catalog song {i}", f"Catalog artist {i}"
             key, genre = identity_key(title, artist), "Jazz" if i < 15 else "Classical"
-            tid = store.tracks.upsert_track(f"v{i}", title, artist, None, None)
-            store.tracks.set_track_genre(tid, genre)
+            seed_catalog_track(store, key, title, artist, video_id=f"v{i}", genre=genre)
             rows.append(surfaces.ForYouItem(title, artist, "", f"v{i}", None, 0, "", key=key, genre=genre))
     calls = []
     def rank(store, now, limit):
         calls.append(limit)
         started.set()
-        release.wait(5)
+        assert release.wait(5), 'Catalog ranker was not released'
         return rows
     monkeypatch.setattr(surfaces, "explore_for_you", rank)
     client = _client(store)
@@ -98,11 +97,8 @@ def test_catalog_skeleton_click_ranks_once_preserves_genres_and_survives_restart
         assert client.get("/openapi.json").status_code == 200
     finally:
         release.set()
-    for _ in range(200):
-        ready = client.get(f"/home/library-pool/{job_id}")
-        if 'class="fresh-pool-art"' not in ready.text:
-            break
-        time.sleep(.01)
+    assert client.app.state.ctx.work.wait(5), 'Catalog work did not finish'
+    ready = client.get(f"/home/library-pool/{job_id}")
     assert 'data-title="Catalog song ' in ready.text
     assert 'data-title="Catalog song 0"' not in ready.text
     assert 'data-title="Catalog song 15"' not in ready.text
@@ -206,8 +202,7 @@ def test_catalog_build_reaches_unmodeled_library_beyond_other_genres(store, monk
             # Only matching candidates need SQL metadata in this unit. The
             # complete library inventory is the controlled DAO result below.
             if i >= 310:
-                tid = store.tracks.upsert_track(f"v{i}", title, artist, None, None)
-                store.tracks.set_track_genre(tid, genre)
+                seed_catalog_track(store, key, title, artist, video_id=f"v{i}", genre=genre)
             keys.append(key)
             rows.append(surfaces.ForYouItem(title, artist, '', f'v{i}', None,
                                            0, '', key=key, genre=genre))

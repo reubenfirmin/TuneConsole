@@ -3,7 +3,6 @@
 Installed histories keep their old readers/writers until explicit preparation.
 The SQL owners below are bounded by current subjects/fields, not lookup count.
 """
-from dataclasses import dataclass
 import json
 import os
 import sqlite3
@@ -11,7 +10,7 @@ import time
 
 from . import fao, metadata_runtime_files as files
 from .catalog_identity import RECORDING_FIELDS, ITEM_FIELDS
-from .metadata_contract import ALTERNATIVE_SECONDS, PROVIDER_FIELDS, clock, runtime_active as active
+from .metadata_contract import ALTERNATIVE_SECONDS, PROVIDER_FIELDS, Capture, clock, runtime_active as active
 
 # Append new names; these persisted numeric field codes must never be reordered.
 FIELDS = ('genre', 'bpm', 'energy', 'danceability', 'mb_recording_id', 'music_key', 'music_scale',
@@ -249,21 +248,6 @@ def scoped_fields(conn, entry, data):
     return {field: value for field, value in data.get('fields', {}).items()
             if field in RECORDING_FIELDS or inputs.get(field,
                 [data.get('entry_id'), data.get('input_video_id')]) == [entry, video]}
-
-
-@dataclass(frozen=True)
-class Capture:
-    entry: int
-    recording: int
-    video: str | None
-    provider: str
-    encoded: bytes
-    run: str | None
-    at: float
-
-    @property
-    def fields(self):
-        return json.loads(self.encoded)
 
 
 def capture(conn, entry, provider, fields, *, run_id=None, now=None):

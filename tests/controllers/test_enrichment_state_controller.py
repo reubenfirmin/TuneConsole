@@ -7,6 +7,7 @@ import pytest
 
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.enrichment_state import EnrichmentState, RECONCILE_BATCH
+from yt_playlist.controllers.metadata_choices import MetadataChoices
 from yt_playlist.repos.enrichment_state import EnrichmentStateRepo
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -21,7 +22,7 @@ def state():
     repo.configuration_inputs.return_value = {'runtime': False, 'last_attempt': 20, 'configuration': {}, 'frontiers': {}}
     repo.provider_refresh_pending.return_value = False
     repo.missing_provider_coverage.return_value = []
-    return EnrichmentState(repo)
+    return EnrichmentState(repo, create_autospec(MetadataChoices, instance=True, spec_set=True))
 
 
 @pytest.mark.parametrize(('previous', 'retry_after', 'failures', 'deadline'), [

@@ -158,3 +158,57 @@ def test_failed_observation_write_does_not_repeat_the_delivery_capture_implicitl
     with pytest.raises(RuntimeError, match='interrupted'):
         metadata.capture_fields(7, 'a', {'bpm': 120}, purpose='provider-fields', body={}, now=10)
     metadata.deliveries.capture_state.assert_called_once()
+
+
+def test_provider_result_retains_delivery_before_typed_observations(metadata):
+    events = []
+    metadata.deliveries.record.side_effect = lambda delivery: events.append('delivery') or 15
+    metadata.repository.store_observations.side_effect = lambda *args, **kw: events.append('observations') or {'mb_year': 20}
+    assert metadata.capture_result(7, 'provider', {'year': '2000'}, run_id='run', now=10) == (15, {'mb_year': 20})
+    assert events == ['delivery', 'observations']
+    delivery, = metadata.deliveries.record.call_args.args
+    assert (delivery.delivery_key, delivery.input_entry_id, delivery.input_recording_id) == ('enrichment-result:run', 7, 8)
+    assert delivery.response == {'format': 'enrichment-result-1', 'fields': {'year': '2000'}}
+    prepared = metadata.repository.store_observations.call_args.args[1]['mb_year']
+    assert prepared.text == '2000'
+    assert metadata.repository.store_observations.call_args.kwargs == {'source_run_id': 'run'}
+    metadata.repository.transaction.assert_not_called()
+
+
+@pytest.mark.parametrize('fields', [{'bpm': True}, {'year': 2000, 'mb_year': 2001}, {'unsupported': 1}])
+def test_invalid_provider_result_never_publishes_evidence(metadata, fields):
+    with pytest.raises(ValueError):
+        metadata.capture_result(7, 'provider', fields, run_id='run', now=10)
+    metadata.deliveries.record.assert_not_called()
+    metadata.repository.store_observations.assert_not_called()
+
+
+@pytest.fixture
+def result_evidence(metadata):
+    metadata.repository.delivery_evidence.return_value = {
+        'provider': 'provider', 'key_contract': 'capture', 'delivery_key': 'enrichment-result:run',
+        'input_entry_id': 7, 'input_recording_id': 8, 'input_video_id': 'video', 'observations': {'bpm': 20}}
+    metadata.deliveries.response.return_value = {'format': 'enrichment-result-1', 'fields': {'bpm': 120, 'gain': 2}}
+    return metadata
+
+
+def test_provider_result_evidence_requires_exact_values_but_allows_field_subset(result_evidence):
+    metadata = result_evidence
+    assert metadata.result_evidence(7, 'provider', 15, {'bpm': 120}, run_id='run') == {'bpm': 20}
+    with pytest.raises(ValueError, match='fields differ'):
+        metadata.result_evidence(7, 'provider', 15, {'bpm': 120}, run_id='run', complete=True)
+    with pytest.raises(ValueError, match='fields differ'):
+        metadata.result_evidence(7, 'provider', 15, {'bpm': 121}, run_id='run')
+    metadata.repository.transaction.assert_not_called()
+
+
+@pytest.mark.parametrize('changed', [
+    {'input_recording_id': 9}, {'input_entry_id': 9}, {'input_video_id': 'other'},
+    {'provider': 'other'}, {'key_contract': 'legacy_record'}, {'delivery_key': 'enrichment-result:other'},
+])
+def test_provider_result_evidence_rejects_other_subjects_and_runs_before_reading_files(result_evidence, changed):
+    metadata = result_evidence
+    metadata.repository.delivery_evidence.return_value.update(changed)
+    with pytest.raises(ValueError):
+        metadata.result_evidence(7, 'provider', 15, {'bpm': 120}, run_id='run')
+    metadata.deliveries.response.assert_not_called()

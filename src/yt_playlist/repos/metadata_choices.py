@@ -40,14 +40,24 @@ class MetadataChoiceRepo(Repo):
         return metadata_runtime.next_identity(self.conn, 'metadata_runtime_choices')
 
     @synchronized
-    def store_observations(self, delivery, prepared):
+    def store_observations(self, delivery, prepared, *, source_run_id=None):
         with self.conn.atomic():
-            return metadata_evidence.record_prepared(self.conn, delivery, prepared)
+            return metadata_evidence.record_prepared(self.conn, delivery, prepared, source_run_id=source_run_id)
 
     @synchronized
     def transfer_recording_observation(self, entry, observation, at):
         with self.conn.atomic():
             return metadata_evidence.reuse_recording_observation(self.conn, entry, observation, now=at)
+
+    @synchronized
+    def delivery_evidence(self, identity):
+        row = self.conn.execute('SELECT provider,input_entry_id,input_recording_id,input_video_id,key_contract,delivery_key '
+                                'FROM metadata_deliveries WHERE id=?', (identity,)).fetchone()
+        if row is None:
+            return None
+        observations = {row['field']: row['id'] for row in self.conn.execute(
+            "SELECT field,id FROM metadata_observations WHERE delivery_id=? AND origin='provider'", (identity,))}
+        return {**dict(row), 'observations': observations}
 
     @synchronized
     def store(self, inputs, field, value, prepared, *, withdraw, source, at, identity=None, revision=None):

@@ -24,16 +24,6 @@ class EnrichmentRepo(Repo):
                             for field in (*metadata_values.ITEM_FIELDS, *metadata_values.RECORDING_FIELDS)}}
 
     @snapshot_read
-    def delivery_evidence(self, identity):
-        row = self.conn.execute('SELECT provider,input_entry_id,input_recording_id,input_video_id,key_contract '
-                                'FROM metadata_deliveries WHERE id=?', (identity,)).fetchone()
-        if row is None:
-            return None
-        observations = {row['field']: row['id'] for row in self.conn.execute(
-            "SELECT field,id FROM metadata_observations WHERE delivery_id=? AND origin='provider'", (identity,))}
-        return {**dict(row), 'observations': observations}
-
-    @snapshot_read
     def reuse_inputs(self, recording, provider, fields):
         if not fields:
             return {}

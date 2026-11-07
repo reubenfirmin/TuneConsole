@@ -8,6 +8,7 @@ import pytest
 
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.metadata_deliveries import MetadataDeliveries
+from yt_playlist.core.metadata_deliveries import Delivery
 from yt_playlist.core.metadata_delivery_files import MetadataDeliveryFiles
 from yt_playlist.repos.metadata_deliveries import MetadataDeliveryRepo
 
@@ -22,6 +23,7 @@ def captures():
     files.retained.side_effect = nullcontext
     repo.subject.return_value = {'recording_id': 8, 'video_id': 'video', 'source_ref': None}
     repo.capture_head.return_value = None
+    repo.by_contract.return_value = None
     repo.response_reference.return_value = None
     repo.insert.return_value = 10
     files.encode.return_value = b'encoded'
@@ -105,3 +107,58 @@ def test_delivery_without_a_response_does_not_read_files(captures):
     captures.repository.delivery_reference.return_value = (None, None, None, None)
     assert captures.response(10) is NO_RESPONSE
     captures.files.read_encoded.assert_not_called()
+
+
+def test_provider_delivery_commits_only_after_its_response_is_published(captures):
+    events = []
+    reference = captures.files.publish.return_value
+    captures.files.publish.side_effect = lambda encoded: events.append('file') or reference
+    captures.repository.insert.side_effect = lambda values: events.append('row') or 10
+    delivery = Delivery('provider', 'result:run', 'item', 'video', 20, 7, 8, 'video', response={'bpm': 120})
+    assert captures.record(delivery) == 10
+    assert events == ['file', 'row']
+    values, = captures.repository.insert.call_args.args
+    assert values[:10] == ('provider', 'capture', 'result:run', 'item', 'video', 7, 8, 'video', 20, delivery.contract_digest())
+    captures.repository.set_capture_head.assert_not_called()
+
+
+def test_provider_delivery_rejects_reassociated_input_before_publishing(captures):
+    captures.repository.subject.return_value['recording_id'] = 9
+    with pytest.raises(ValueError, match='subject changed'):
+        captures.record(Delivery('provider', 'result:run', 'item', 'video', 20, 7, 8, 'video', response={}))
+    captures.files.publish.assert_not_called()
+    captures.repository.insert.assert_not_called()
+
+
+@pytest.mark.parametrize('changed', [{}, {'raw_digest': 'changed'}, {'input_recording_id': 9}])
+def test_provider_delivery_replay_verifies_exact_evidence_and_keeps_first_capture(captures, changed):
+    digest = hashlib.sha256(b'encoded').hexdigest()
+    captures.repository.by_contract.return_value = {
+        'id': 4, 'provider': 'provider', 'key_contract': 'capture', 'delivery_key': 'result:run',
+        'provider_entity_type': 'item', 'provider_entity_id': 'video', 'input_entry_id': 7,
+        'input_recording_id': 8, 'input_video_id': 'video', 'raw_digest': digest,
+        'raw_filename': 'file', 'raw_byte_size': 7, 'raw_offset': 100, **changed}
+    captures.files.read_encoded.return_value = b'encoded'
+    delivery = Delivery('provider', 'result:run', 'item', 'video', 99, 7, 8, 'video', response={})
+    if changed:
+        with pytest.raises(sqlite3.IntegrityError, match='captured evidence'):
+            captures.record(delivery)
+    else:
+        assert captures.record(delivery) == 4
+    captures.files.publish.assert_not_called()
+    captures.repository.insert.assert_not_called()
+
+
+def test_provider_delivery_without_response_has_no_file_reference(captures):
+    assert captures.record(Delivery('provider', 'lookup:run', 'lookup', None, 20)) == 10
+    values, = captures.repository.insert.call_args.args
+    assert values[10:14] == (None, None, None, None)
+    captures.files.encode.assert_not_called()
+    captures.files.publish.assert_not_called()
+
+
+def test_invalid_provider_delivery_never_acquires_a_writer(captures):
+    with pytest.raises(ValueError, match='contract'):
+        captures.record(Delivery('', 'lookup:run', 'lookup', None, 20))
+    captures.repository.transaction.assert_not_called()
+    captures.files.encode.assert_not_called()

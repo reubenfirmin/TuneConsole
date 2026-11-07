@@ -1,20 +1,35 @@
 """Coordinate provider evidence, retries and restartable configuration refreshes."""
 from yt_playlist.core import enrichment_state_policy as policy
+from yt_playlist.core import enrichment_selection_policy as selections, metadata_values
 from yt_playlist.core.activity import check_cancellable_work
-from yt_playlist.core.metadata_contract import clock
+from yt_playlist.core.evidence_ledger import canonical
+from yt_playlist.core.metadata_contract import Capture, clock
+from yt_playlist.core.metadata_runtime_files import MAX_BYTES
 
 RECONCILE_BATCH = 64
 
 
 class EnrichmentState:
-    def __init__(self, repository):
-        self.repository = repository
+    def __init__(self, repository, choices):
+        self.repository, self.choices = repository, choices
 
     def subject_guard(self, entry_id, recording_id):
         return self.repository.subject_guard(entry_id, recording_id)
 
     def capture_provider_result(self, entry_id, provider, fields, *, run_id, now=None):
-        return self.repository.capture_provider_result(entry_id, provider, fields, run_id=run_id, now=now)
+        inputs = self.repository.capture_inputs(entry_id)
+        if inputs['layout'] == 'runtime':
+            captured = selections.result_fields(provider, fields, run_id)
+            for field, value in captured.items():
+                metadata_values.prepare_value(field, value,
+                    unit=metadata_values.DEFAULT_UNIT.get(field) if value not in (None, '') else None)
+            encoded = canonical(fields)
+            if len(encoded) > MAX_BYTES - 4096:
+                raise ValueError('Provider result exceeds its byte budget')
+            return Capture(inputs['entry_id'], inputs['recording_id'], inputs['video_id'], provider, encoded, run_id, clock(now)), {}
+        if not inputs['attempts']:
+            return None
+        return self.choices.capture_result(inputs['entry_id'], provider, fields, run_id=run_id, now=now)
 
     def record_metadata_observations(self, entry_id, provider, observations, **options):
         return self.repository.record_metadata_observations(entry_id, provider, observations, **options)
@@ -116,4 +131,18 @@ class EnrichmentState:
         return self.repository.enrichment_attempts(identity_key, video_id)
 
     def log_enrichment(self, track_id, run_id, provider, field, value, now=None, *, delivery_id=None):
-        return self.repository.log_enrichment(track_id, run_id, provider, field, value, now, delivery_id=delivery_id)
+        inputs, at = self.repository.capture_inputs(track_id), clock(now)
+        observation = None
+        if inputs['layout'] == 'runtime':
+            selections.validate_capture(inputs, provider, {field: value}, delivery_id, run_id=run_id)
+        elif inputs['attempts']:
+            if delivery_id is None:
+                delivery_id, observations = self.choices.capture_result(inputs['entry_id'], provider, {field: value},
+                    run_id=run_id, now=at, part='log:' + field)
+            else:
+                observations = self.choices.result_evidence(inputs['entry_id'], provider, delivery_id, {field: value}, run_id=run_id)
+            observation = observations.get('mb_year' if field == 'year' else field)
+        scheme, identifiers = policy.identifiers(field, value, strict=inputs['layout'] == 'evidence')
+        self.repository.store_enrichment_log(inputs, run_id, provider, field, value, at, scope=policy.log_scope(field),
+            scheme=scheme, identifiers=identifiers, delivery_id=delivery_id if inputs['attempts'] else None, observation_id=observation)
+        return observation

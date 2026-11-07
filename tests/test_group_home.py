@@ -16,7 +16,7 @@ from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.recommendation_support import publish_bundles
 from yt_playlist.core import mix_choices
 from yt_playlist.rec import (choice_evidence, group_home, group_serving, group_viz,
-                             home_cards, home_prepared, taste_viz)
+                             home_cache, home_cards, home_prepared, taste_viz)
 from yt_playlist.web.app import create_app
 
 
@@ -62,8 +62,51 @@ def adaptive_menu(store, adaptive_menu_template):
     return adaptive_menu_template.restore(store)
 
 
-def test_default_home_offers_use_exact_graph_definitions_without_legacy_ids(store, adaptive_menu):
-    _tracks, head, result = adaptive_menu
+@pytest.fixture(scope='module')
+def adaptive_batch_template(_pristine_current_schema, adaptive_menu_template):
+    def build(source):
+        _tracks, head, completed = adaptive_menu_template.restore(source)
+        # Establish the initial learning report before freezing the first menu.
+        # Its first publication initializes preference state even with no choices.
+        choice_evidence.refresh_report(source, 1200)
+        # History retention depends on menu/graph identities, not twelve songs
+        # per card. The exact-membership owner retains the complete selection.
+        selected = deepcopy(completed)
+        for proto in selected.protos:
+            proto['tracks'] = proto['tracks'][:1]
+        clock = [100]
+
+        def one_menu(self, request):
+            result = deepcopy(selected)
+            result.epoch = request.epoch
+            clock[0] += 6
+            return result
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(home_prepared.time, 'monotonic', lambda: clock[0])
+            patch.setattr(home_prepared, 'PREPARE_BUDGET_S', 10)
+            patch.setattr(home_cards.HomeCards, 'cards', one_menu)
+            payload = home_prepared.prepare_mixes(source, 1200)
+        assert payload and len(payload['menus']) == 1
+        return head, completed, payload
+
+    with prepared_template(_pristine_current_schema, build) as template:
+        yield template
+
+
+@pytest.fixture
+def adaptive_batch(adaptive_batch_template):
+    with adaptive_batch_template.open(':memory:') as store:
+        yield store, deepcopy(adaptive_batch_template.result)
+
+
+def test_default_home_offers_use_exact_graph_definitions_without_legacy_ids(adaptive_batch):
+    store, (head, result, payload) = adaptive_batch
+    # Own both the real initial graph selection and its first usable worker
+    # checkpoint; history cases consume independent clones of this state.
+    assert home_prepared._valid(payload)
+    assert home_cache.read(store, home_prepared.SURFACE) == payload
+    assert payload['choice_context']['group_generation'] == head['generation']
     assert len(result.protos) >= 2
     by_version = {g['version']: g for g in head['groups']}
     for proto in result.protos:
@@ -233,11 +276,21 @@ def test_prepared_home_and_real_menu_capture_preserve_group_context(store, adapt
         assert 'Server-rendered Home offers' not in choices.text
 
 
-def test_history_only_refresh_and_retirement_accumulate_all_adaptive_menus(store, monkeypatch, adaptive_menu):
+@pytest.mark.parametrize('prior_menus', [0, 1, home_prepared.MAX_MENUS - 1, home_prepared.MAX_MENUS],
+                         ids=['empty', 'partial', 'last-slot', 'full'])
+def test_history_only_refresh_and_retirement_accumulate_all_adaptive_menus(
+        adaptive_batch, monkeypatch, prior_menus):
     from yt_playlist.rec import candidate_refresh, rec_params
-    _tracks, head, completed = adaptive_menu
-    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) is None
-    choice_evidence.refresh_report(store, 1200)
+    store, (head, completed, previous) = adaptive_batch
+    # Exercise the transition boundaries instead of recompiling/retiring the
+    # same unanswered history fourteen times. The real twelve-attempt cursor
+    # progression is owned by test_small_preparation_batches_accumulate_alternatives_across_attempts.
+    previous['menus'] = [{**deepcopy(previous['menus'][0]), 'epoch': index}
+                         for index in range(prior_menus)]
+    previous['next_menu'] = prior_menus % home_prepared.MAX_MENUS
+    assert not prior_menus or home_prepared._valid(previous)
+    home_cache.put(store, home_prepared.SURFACE, previous if prior_menus else {}, 1200)
+    assert home_cache.read(store, home_prepared.SURFACE) == (previous if prior_menus else {})
     pools = ('mode_bundles', 'fresh_pool', group_serving.SURFACE)
     original_pools = {name: store.rec_proposals._proposal_json(name) for name in pools}
     preferences = candidate_refresh.preferences(store, 1200)
@@ -253,37 +306,35 @@ def test_history_only_refresh_and_retirement_accumulate_all_adaptive_menus(store
         clock[0] += 6
         return result
 
-    # Keep all twelve real publication batches and the over-capacity retries,
-    # with real graph inputs, reports, evidence retention and immutable menus.
     # Each attempt has room for exactly one completed lower-layer selection.
     monkeypatch.setattr(home_prepared.time, 'monotonic', lambda: clock[0])
     monkeypatch.setattr(home_prepared, 'PREPARE_BUDGET_S', 10)
     monkeypatch.setattr(home_cards.HomeCards, 'cards', one_menu)
-    generation = None
-    for index in range(home_prepared.MAX_MENUS + 2):
-        at = 1200 + index
-        current, expired = f'admission:{index}', f'expired:{index}'
-        old = at - (rec_params.get_param(store, 'choice_retention_d') + 1) * 86400
-        for oid, offered_at in ((current, at), (expired, old)):
-            assert choice_evidence.issue(store, 'albums', [{'id': oid}], offered_at,
-                                         context={}, opportunity_id=oid) == oid
-        choice_evidence.refresh_report(store, at)
-        choice_evidence.maintain_storage(store, at)
-        assert store.rec_ledger.evidence().get('opportunity', expired) is None
-        assert store.rec_ledger.evidence().get('opportunity', current)
-        choice_evidence.refresh_report(store, at)
-        # Discovery/revisit summaries have independent preparation owners;
-        # this regression concerns accumulation of the mix batches themselves.
-        payload = home_prepared.prepare_mixes(store, at)
-        assert payload and payload['group_policy'] == 'adaptive'
-        assert any(menu['protos'] for menu in payload['menus'])
-        assert len(payload['menus']) == min(index + 1, home_prepared.MAX_MENUS)
-        generation = generation or payload['generation']
-        assert payload['generation'] == generation
-        assert original_pools == {name: store.rec_proposals._proposal_json(name) for name in pools}
-        assert candidate_refresh.preferences(store, at) == preferences
-    assert {menu['epoch'] for menu in payload['menus']} == set(range(home_prepared.MAX_MENUS))
-    assert attempts == [index % home_prepared.MAX_MENUS for index in range(home_prepared.MAX_MENUS + 2)]
+    at = 1201
+    current, expired = 'admission', 'expired'
+    old = at - (rec_params.get_param(store, 'choice_retention_d') + 1) * 86400
+    for oid, offered_at in ((current, at), (expired, old)):
+        assert choice_evidence.issue(store, 'albums', [{'id': oid}], offered_at,
+                                     context={}, opportunity_id=oid) == oid
+    choice_evidence.maintain_storage(store, at)
+    assert store.rec_ledger.evidence().get('opportunity', expired) is None
+    assert store.rec_ledger.evidence().get('opportunity', current)
+    choice_evidence.refresh_report(store, at)
+    # Discovery/revisit summaries have independent preparation owners;
+    # this regression concerns accumulation of the mix batches themselves.
+    if prior_menus:
+        assert home_cache.read(store, home_prepared.SURFACE) == previous
+    payload = home_prepared.prepare_mixes(store, at)
+    assert payload and payload['group_policy'] == 'adaptive'
+    assert any(menu['protos'] for menu in payload['menus'])
+    expected = min(prior_menus + 1, home_prepared.MAX_MENUS)
+    assert {menu['epoch'] for menu in payload['menus']} == set(range(expected))
+    assert payload['generation'] == previous['generation']
+    assert payload['tuning'] == previous['tuning']
+    assert payload['next_menu'] == (prior_menus + 1) % home_prepared.MAX_MENUS
+    assert attempts == [prior_menus % home_prepared.MAX_MENUS]
+    assert original_pools == {name: store.rec_proposals._proposal_json(name) for name in pools}
+    assert candidate_refresh.preferences(store, at) == preferences
     assert payload['choice_context']['group_generation'] == head['generation']
 
 

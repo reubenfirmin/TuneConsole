@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pytest
 
 from tests.radio_candidate_support import intensity_inputs
-from tests.radio_session_support import memory_checkpoint_files, radio_controller, play
+from tests.radio_session_support import controlled_radio_checkpoints, radio_controller, play
 from yt_playlist.core import catalog
 from yt_playlist.rec import embedding_vectors, musical_character, radio_tuning
 from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, RadioCandidates
@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture
-def intensity_controller(store, intensity_inputs, monkeypatch, memory_checkpoint_files):
+def intensity_controller(store, intensity_inputs, monkeypatch, controlled_radio_checkpoints):
     # Controller/persistence/HTTP behavior uses a real small database. Prepared
     # recommendation inputs are controlled below RadioCandidates, as above.
     # Four six-song directions need 24 quiet alternatives. The separate refill

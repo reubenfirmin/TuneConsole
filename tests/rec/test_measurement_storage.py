@@ -4,6 +4,7 @@ import json
 import pytest
 
 from yt_playlist.rec import measurement, scorecard
+from yt_playlist.repos.discovery import DiscoveryRepo
 
 
 @pytest.mark.parametrize("membership", ["library", "discovery", "cached", "unknown"])
@@ -23,7 +24,7 @@ def test_action_resolution_preserves_membership_without_loading_pool(store, monk
         pytest.fail("action lookup must not materialize discovery metadata")
 
     monkeypatch.setattr(store.discovery, "get_discovered_tracks", unexpected)
-    monkeypatch.setattr(store.discovery, "_dtrack_row", unexpected)
+    monkeypatch.setattr(DiscoveryRepo, "_dtrack_row", unexpected)
     if membership == "library":
         monkeypatch.setattr(store.discovery, "identity_keys_for_video", unexpected)
     for _ in range(2):

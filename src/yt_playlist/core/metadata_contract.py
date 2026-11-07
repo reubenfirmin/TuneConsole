@@ -1,11 +1,28 @@
 """Shared metadata admission rules, independent of evidence and file writers."""
 import time
+import json
+from dataclasses import dataclass
 
 from .metadata_values import RECORDING_FIELDS, ITEM_FIELDS
 
 
 ALTERNATIVE_SECONDS = 7 * 86400
 PROVIDER_FIELDS = (*RECORDING_FIELDS, *ITEM_FIELDS, 'year', 'art', 'isrc', 'mb_release_ids', 'cover_url')
+
+
+@dataclass(frozen=True)
+class Capture:
+    entry: int
+    recording: int
+    video: str | None
+    provider: str
+    encoded: bytes
+    run: str | None
+    at: float
+
+    @property
+    def fields(self):
+        return json.loads(self.encoded)
 
 
 def clock(now):

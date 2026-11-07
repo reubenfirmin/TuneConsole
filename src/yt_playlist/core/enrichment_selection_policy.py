@@ -1,6 +1,8 @@
 """Provider precedence and reuse rules, independent of storage."""
 import json
+from collections.abc import Mapping
 
+from yt_playlist.core.metadata_contract import Capture, PROVIDER_FIELDS
 from yt_playlist.core.metadata_values import ITEM_FIELDS, RECORDING_FIELDS, scope
 from yt_playlist.util import genre_catalog
 
@@ -8,6 +10,40 @@ from yt_playlist.util import genre_catalog
 def canonical_fields(fields):
     return {'mb_year' if field == 'year' else field: value for field, value in fields.items()
             if ('mb_year' if field == 'year' else field) in (*ITEM_FIELDS, *RECORDING_FIELDS)}
+
+
+def result_fields(provider, fields, run_id):
+    if not isinstance(fields, Mapping) or len(fields) > len(PROVIDER_FIELDS) or fields.keys() - set(PROVIDER_FIELDS):
+        raise ValueError('Unsupported provider result fields')
+    if not isinstance(provider, str) or not 0 < len(provider.encode()) <= 4096:
+        raise ValueError('A provider result needs a bounded provider identity')
+    if run_id is not None and (not isinstance(run_id, str) or not run_id.strip() or len(run_id.encode()) > 4096):
+        raise ValueError('A provider result needs a bounded run identity')
+    if 'year' in fields and 'mb_year' in fields:
+        validate_fields({'year': fields['mb_year']}, {'year': fields['year']})
+    return canonical_fields(fields)
+
+
+def validate_capture(subject, provider, fields, captured, *, run_id=None, complete=False):
+    if captured is None:
+        return
+    if (not isinstance(captured, Capture) or
+            (captured.entry, captured.recording, captured.video, captured.provider) !=
+            (subject['entry_id'], subject['recording_id'], subject['video_id'], provider) or
+            run_id is not None and captured.run != run_id):
+        raise ValueError('Provider result has a different captured input or fields')
+    validate_fields(captured.fields, fields)
+    if complete and captured.fields != fields:
+        raise ValueError('Provider completion must account for its whole captured result')
+
+
+def validate_delivery(subject, provider, delivery, *, run_id=None):
+    if (delivery is None or delivery['key_contract'] == 'legacy_record' or
+            (delivery['provider'], delivery['input_entry_id'], delivery['input_recording_id'], delivery['input_video_id']) !=
+            (provider, subject['id'], subject['recording_id'], subject['video_id'])):
+        raise ValueError('Provider result has a different provider or captured input')
+    if run_id is not None and delivery['delivery_key'] != 'enrichment-result:' + run_id:
+        raise ValueError('Provider result belongs to a different run')
 
 
 def provider_wins(field, value, provider, previous, current_genre, providers):

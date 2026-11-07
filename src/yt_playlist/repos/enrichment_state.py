@@ -33,18 +33,14 @@ class EnrichmentStateRepo(Repo):
             yield
 
     @synchronized
-    def capture_provider_result(self, entry_id, provider, fields, *, run_id, now=None):
-        """Capture one result for logging, selections, identifiers and retry state."""
-        if metadata_runtime.active(self.conn):
-            entry_id = catalog.resolve_entry(self.conn, entry_id)
-            return metadata_runtime.capture(self.conn, entry_id, provider, fields, run_id=run_id, now=now), {}
-        if not metadata_attempts.available(self.conn):
-            return None
+    def capture_inputs(self, entry_id):
         entry_id = catalog.resolve_entry(self.conn, entry_id)
-        with self.conn:
-            if not self.conn.in_transaction:
-                self.conn.execute('BEGIN IMMEDIATE')
-            return metadata_attempts.capture_result(self.conn, entry_id, provider, fields, run_id=run_id, now=now)
+        row = self.conn.execute('SELECT recording_id,video_id FROM catalog_entries WHERE id=?', (entry_id,)).fetchone()
+        if row is None:
+            raise ValueError('Unknown provider result input')
+        return {'entry_id': entry_id, **dict(row), 'attempts': metadata_attempts.available(self.conn),
+                'layout': 'runtime' if metadata_runtime.active(self.conn) else
+                          'evidence' if metadata_attempts.available(self.conn) else 'legacy'}
 
     @synchronized
     def record_metadata_observations(self, entry_id, provider, observations, *, run_id, now=None,
@@ -443,49 +439,33 @@ class EnrichmentStateRepo(Repo):
         return result
 
     @synchronized
-    def log_enrichment(self, track_id, run_id, provider, field, value, now=None, *, delivery_id=None):
-        track_id = catalog.resolve_entry(self.conn, track_id)
-        if metadata_runtime.active(self.conn):
-            metadata_runtime.validate_capture(self.conn, track_id, provider, {field: value}, delivery_id, run_id=run_id)
-            if value and field in ('mb_recording_id', 'isrc'):
-                recording, video = metadata_runtime.subject(self.conn, track_id)
-                scheme = 'musicbrainz' if field == 'mb_recording_id' else 'isrc'
-                with self.conn:
-                    for identifier in value if isinstance(value, (list, tuple)) else [value]:
-                        self.conn.execute("INSERT INTO recording_identifiers(recording_id,scheme,entity_type,value,source,input_video_id,status,observed_at) "
-                            "SELECT ?,?,'recording',?,?,?,'candidate',? WHERE NOT EXISTS (SELECT 1 FROM recording_identifiers "
-                            "WHERE recording_id=? AND scheme=? AND entity_type='recording' AND value=? AND source=? AND input_video_id IS ?)",
-                            (recording,scheme,str(identifier),provider,video,time.time() if now is None else now,
-                             recording,scheme,str(identifier),provider,video))
-            return None
-        if metadata_attempts.available(self.conn):
-            at = time.time() if now is None else now
-            with self.conn:
-                if not self.conn.in_transaction:
-                    self.conn.execute('BEGIN IMMEDIATE')
-                if delivery_id is None:
-                    delivery_id, observations = metadata_attempts.capture_result(self.conn, track_id, provider,
-                        {field: value}, run_id=run_id, now=at, part='log:' + field)
-                else:
-                    observations = metadata_attempts.result_evidence(self.conn, track_id, provider,
-                                                                     delivery_id, {field: value}, run_id=run_id)
-                observation = observations.get(metadata_attempts.canonical(field))
-                metadata_identifiers.record(self.conn, track_id, provider, field, value, delivery_id,
-                                            observation_id=observation, now=at)
-            return observation
-        subject = self.conn.execute('SELECT recording_id,video_id FROM catalog_entries WHERE id=?', (track_id,)).fetchone()
-        scope = ('release' if field in ('year','label','mb_release_ids','cover_url') else
-                 'item' if field in ('popularity','gain','loudness','dynamic_complexity') else 'recording')
-        self.conn.execute(
-            "INSERT INTO enrichment_log(track_id, run_id, provider, field, value, created_at,recording_id,input_video_id,field_scope) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            (track_id, run_id, provider, field,
-             None if value is None else str(value), time.time() if now is None else now,
-             subject['recording_id'],subject['video_id'],scope))
-        if value and field in ('mb_recording_id','isrc'):
-            scheme = 'musicbrainz' if field == 'mb_recording_id' else 'isrc'
-            values = value if isinstance(value,(list,tuple)) else [value]
-            for identifier in values:
-                self.conn.execute("INSERT INTO recording_identifiers(recording_id,scheme,entity_type,value,source,input_video_id,status,observed_at) VALUES (?,?, 'recording',?,?,?,'candidate',?)",
-                                  (subject['recording_id'],scheme,str(identifier),provider,subject['video_id'],time.time() if now is None else now))
-        self.conn.commit()
+    def store_enrichment_log(self, inputs, run_id, provider, field, value, at, *, scope, scheme, identifiers,
+                             delivery_id, observation_id):
+        entry, recording, video = inputs['entry_id'], inputs['recording_id'], inputs['video_id']
+        with self.conn.atomic():
+            current = self.conn.execute('SELECT recording_id,video_id FROM catalog_entries WHERE id=?', (entry,)).fetchone()
+            if current is None or tuple(current) != (recording, video):
+                raise metadata_observations.SubjectChanged('Enrichment catalog subject changed during lookup')
+            if inputs['attempts'] and identifiers:
+                delivery = self.conn.execute('SELECT provider,input_entry_id,input_recording_id,input_video_id,observed_at '
+                                            'FROM metadata_deliveries WHERE id=?', (delivery_id,)).fetchone()
+                if delivery is None or tuple(delivery[:4]) != (provider, entry, recording, video):
+                    raise ValueError('Identifier evidence has a different delivery or captured input')
+                if field == 'mb_recording_id' and observation_id is None:
+                    raise ValueError('A recording MBID requires its supplying catalog observation')
+                for identifier in identifiers:
+                    self.conn.execute('INSERT INTO recording_identifiers(recording_id,scheme,entity_type,value,source,input_video_id,status,'
+                        "observed_at,delivery_id,observation_id) VALUES (?,?,'recording',?,?,?,'candidate',?,?,?) "
+                        'ON CONFLICT(delivery_id,scheme,entity_type,value) WHERE delivery_id IS NOT NULL DO NOTHING',
+                        (recording, scheme, identifier, provider, video, delivery['observed_at'], delivery_id, observation_id if field == 'mb_recording_id' else None))
+            elif inputs['layout'] == 'runtime':
+                for identifier in identifiers:
+                    self.conn.execute("INSERT INTO recording_identifiers(recording_id,scheme,entity_type,value,source,input_video_id,status,observed_at) "
+                        "SELECT ?,?,'recording',?,?,?,'candidate',? WHERE NOT EXISTS (SELECT 1 FROM recording_identifiers "
+                        "WHERE recording_id=? AND scheme=? AND entity_type='recording' AND value=? AND source=? AND input_video_id IS ?)",
+                        (recording, scheme, identifier, provider, video, at, recording, scheme, identifier, provider, video))
+            elif not inputs['attempts']:
+                self.conn.execute('INSERT INTO enrichment_log(track_id,run_id,provider,field,value,created_at,recording_id,input_video_id,field_scope) '
+                    'VALUES (?,?,?,?,?,?,?,?,?)', (entry, run_id, provider, field, None if value is None else str(value), at, recording, video, scope))
+                self.conn.executemany("INSERT INTO recording_identifiers(recording_id,scheme,entity_type,value,source,input_video_id,status,observed_at) "
+                    "VALUES (?,?,'recording',?,?,?,'candidate',?)", [(recording, scheme, identifier, provider, video, at) for identifier in identifiers])

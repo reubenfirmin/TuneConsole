@@ -5,36 +5,24 @@ from yt_playlist.core.enrichment_contract import FIELD_COLUMN
 from yt_playlist.core.metadata_contract import clock
 from yt_playlist.core.metadata_contract import ALTERNATIVE_SECONDS
 from yt_playlist.core.metadata_values import scope
-from yt_playlist.core.metadata_runtime import Capture
 
 
 class Enrichment:
-    def __init__(self, repository, choices, files, deliveries):
+    def __init__(self, repository, choices, files):
         self.repository, self.choices, self.files = repository, choices, files
-        self.deliveries = deliveries
 
     def apply_provider_fields(self, track_id, provider, fields, *, providers=(), delivery_id=None, now=None):
         at = clock(now)
         facts = self.repository.provider_inputs(track_id, provider)
         observations = {}
         if facts['layout'] == 'runtime' and delivery_id is not None:
-            if (not isinstance(delivery_id, Capture) or
-                    (delivery_id.entry, delivery_id.recording, delivery_id.video, delivery_id.provider) !=
-                    (facts['entry_id'], facts['recording_id'], facts['video_id'], provider)):
-                raise ValueError('Provider result has a different captured input or fields')
-            selections.validate_fields(delivery_id.fields, fields)
+            selections.validate_capture(facts, provider, fields, delivery_id)
             if facts['provider_at'] is not None and facts['provider_at'] >= delivery_id.at:
                 return {}
         captured = selections.canonical_fields(fields)
         if facts['layout'] == 'evidence':
             if delivery_id is not None:
-                delivery = self.repository.delivery_evidence(delivery_id)
-                if (delivery is None or delivery['key_contract'] == 'legacy_record' or
-                        (delivery['provider'], delivery['input_entry_id'], delivery['input_recording_id'], delivery['input_video_id']) !=
-                        (provider, facts['entry_id'], facts['recording_id'], facts['video_id'])):
-                    raise ValueError('Provider result has a different provider or captured input')
-                selections.validate_fields(selections.delivery_fields(self.deliveries.response(delivery_id)), fields)
-                observations = delivery['observations']
+                observations = self.choices.result_evidence(facts['entry_id'], provider, delivery_id, fields)
             elif captured:
                 _, observations = self.choices.capture_fields(facts['entry_id'], provider, captured, purpose='provider-fields',
                     body={'format': 'catalog-provider-fields-1', 'fields': captured}, now=at)

@@ -7,7 +7,6 @@ import pytest
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.enrichment import Enrichment
 from yt_playlist.controllers.metadata_choices import MetadataChoices
-from yt_playlist.controllers.metadata_deliveries import MetadataDeliveries
 from yt_playlist.core.metadata_contract import ALTERNATIVE_SECONDS
 from yt_playlist.core.metadata_runtime import Capture
 from yt_playlist.core.metadata_values import Value
@@ -26,8 +25,7 @@ def enrichment():
     repo.conflict_inputs.return_value = {'entry_id': 7, 'recording_id': 2, 'layout': 'evidence', 'conflicts': []}
     repo.provider_inputs.return_value = {'entry_id': 7, 'recording_id': 2, 'video_id': 'video',
         'layout': 'runtime', 'attempts': False, 'sources': {}, 'genre': None, 'provider_at': None}
-    return Enrichment(repo, choices, create_autospec(RuntimeMetadataFiles, instance=True, spec_set=True),
-                      create_autospec(MetadataDeliveries, instance=True, spec_set=True))
+    return Enrichment(repo, choices, create_autospec(RuntimeMetadataFiles, instance=True, spec_set=True))
 
 
 @pytest.mark.parametrize(('field', 'value', 'column', 'prepared'), [
@@ -278,13 +276,12 @@ def test_runtime_selection_rejects_a_different_captured_input_or_value(enrichmen
 
 def test_provider_selection_follows_the_exact_delivery_and_observations(enrichment):
     enrichment.repository.provider_inputs.return_value['layout'] = 'evidence'
-    enrichment.repository.delivery_evidence.return_value = {'provider': 'a', 'input_entry_id': 7,
-        'input_recording_id': 2, 'input_video_id': 'video', 'key_contract': 'provider', 'observations': {'genre': 14}}
-    enrichment.deliveries.response.return_value = {'format': 'enrichment-result-1', 'fields': {'genre': 'Jazz'}}
+    enrichment.choices.result_evidence.return_value = {'genre': 14}
     assert enrichment.apply_provider_fields(7, 'a', {'genre': 'Jazz'}, delivery_id=3, now=10) == {'genre': 14}
     enrichment.choices.capture_fields.assert_not_called()
+    enrichment.choices.result_evidence.assert_called_once_with(7, 'a', 3, {'genre': 'Jazz'})
     enrichment.choices.select.assert_called_once_with(7, 'genre', 'Jazz', 'a', now=10, observation_id=14)
-    enrichment.deliveries.response.return_value['fields']['genre'] = 'Rock'
+    enrichment.choices.result_evidence.side_effect = ValueError('Provider fields differ from their supplying result')
     enrichment.choices.select.reset_mock()
     with pytest.raises(ValueError, match='differ'):
         enrichment.apply_provider_fields(7, 'a', {'genre': 'Jazz'}, delivery_id=3, now=10)

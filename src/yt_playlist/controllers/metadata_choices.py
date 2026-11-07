@@ -1,9 +1,12 @@
 """Publish explicit metadata decisions before installing their SQL head."""
 from dataclasses import replace
 from collections.abc import Mapping
+from uuid import uuid4
 
 from yt_playlist.core.metadata_contract import clock
-from yt_playlist.core import metadata_values
+from yt_playlist.core import metadata_values, enrichment_selection_policy
+from yt_playlist.core.metadata_deliveries import Delivery
+from yt_playlist.core.evidence_ledger import canonical
 
 
 class MetadataChoices:
@@ -62,6 +65,27 @@ class MetadataChoices:
         prepared = {field: self._prepare(field, value) for field, value in fields.items()}
         delivery = self.deliveries.capture_state(entry, provider, purpose, body, now=clock(now))
         return delivery, self.repository.store_observations(delivery, prepared)
+
+    def capture_result(self, entry, provider, fields, *, run_id=None, now=None, part='result'):
+        captured = enrichment_selection_policy.result_fields(provider, fields, run_id)
+        prepared = {field: self._prepare(field, value) for field, value in captured.items()}
+        track = self.repository.input(entry, 'title')['track']
+        delivery = Delivery(provider, 'enrichment-' + part + ':' + (run_id or uuid4().hex),
+            'item' if track['video_id'] else 'recording', track['video_id'] or 'catalog-recording:' + str(track['recording_id']),
+            clock(now), track['id'], track['recording_id'], track['video_id'],
+            response={'format': 'enrichment-result-1', 'fields': dict(fields)})
+        identity = self.deliveries.record(delivery)
+        return identity, self.repository.store_observations(identity, prepared, source_run_id=run_id)
+
+    def result_evidence(self, entry, provider, delivery, fields, *, run_id=None, complete=False):
+        track = self.repository.input(entry, 'title')['track']
+        evidence = self.repository.delivery_evidence(delivery)
+        enrichment_selection_policy.validate_delivery(track, provider, evidence, run_id=run_id)
+        supplied = enrichment_selection_policy.delivery_fields(self.deliveries.response(delivery))
+        enrichment_selection_policy.validate_fields(supplied, fields)
+        if complete and canonical(supplied) != canonical(fields):
+            raise ValueError('Provider fields differ from their supplying result')
+        return evidence['observations']
 
     def reuse_recording_observation(self, entry, observation, *, now=None):
         return self.repository.transfer_recording_observation(entry, observation, clock(now))

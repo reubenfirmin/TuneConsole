@@ -1,6 +1,8 @@
 """Real Fresh worker/preparation with controlled failures below their boundaries."""
 import json
 import threading
+from copy import deepcopy
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -8,7 +10,7 @@ import pytest
 from tests.home_fixture_support import prepared_client, returning_listener
 from tests.prepared_fixture_support import prepared_template
 from tests.test_home_other_genres import _publish_menu
-from yt_playlist.rec import fresh_pool, home_cards, mode_surfaces, road_trip_candidates
+from yt_playlist.rec import fresh_pool, home_cards, measurement, mode_surfaces, road_trip_candidates
 
 
 DIAGNOSTIC = 'internal-diagnostic-879-fresh: invalid stored ranking document'
@@ -16,11 +18,26 @@ DIAGNOSTIC = 'internal-diagnostic-879-fresh: invalid stored ranking document'
 
 @pytest.fixture
 def quiet_pool(store, quiet_home_template, monkeypatch, home_routes_only, without_metadata_providers):
-    quiet_home_template.restore(store)
-    # Recovery preserves a selected menu. Journey ordering has its own real
-    # owners in test_journeys and does not affect worker failure or retry state.
-    monkeypatch.setattr(home_cards, '_order_by_journey',
-                        lambda owner, items, *args, **kwargs: list(items))
+    selected = quiet_home_template.restore(store)
+    # Job recovery consumes a completed Jazz selection. Keep HomeCards itself
+    # real: it owns job/error slots and must preserve the actual saved request.
+    # Genre filtering and card framing have independent real owners in
+    # test_home_other_genres and test_journeys.
+    def assemble(owner, now, epoch, **parameters):
+        assert parameters.get('include_genres') == {'jazz'}
+        assert not parameters.get('avoid_genres')
+        return deepcopy(selected)
+
+    monkeypatch.setattr(mode_surfaces, 'assemble_cards', assemble)
+    monkeypatch.setattr(home_cards, '_complete_card',
+                        lambda owner, card, *args: deepcopy(card))
+    # Retry/error state does not depend on refingerprinting every fitted model
+    # or collecting old policies. Their real owners are test_measurement_isolation
+    # and test_measurement_storage. Policy records and publication remain real.
+    monkeypatch.setattr(measurement, 'serving_policy', lambda owner, now, **kwargs:
+        ('quiet-fresh-inputs', {'schema': 4, 'algorithm': 'quiet-fresh-fixture',
+                              'genres': owner.rec_proposals.get_proposals('home_genre_request')}))
+    monkeypatch.setattr(measurement, 'maintain_storage', lambda *args, **kwargs: None)
     # Explicit Fresh jobs remain real. Periodic model/choice workers own
     # separate tests and must not replace this controlled listener's history.
     http = prepared_client(store, background_work=False)
@@ -96,6 +113,18 @@ def quiet_home_template(_pristine_current_schema, fresh_genre_candidates_templat
         # Retain the real initial selection and SQL/file cache writer. These
         # recovery checks do not need to enumerate alternative worker menus.
         _publish_menu(source, 1000)
+        source.rec_proposals.put_proposals('home_genre_request', {
+            'include_genres': ['jazz'], 'epoch': home_cards._epoch(source, 'cards')}, 1000)
+        selected = home_cards.HomeCards(source, _NoJobs(), logging.getLogger(__name__)).cards(
+            home_cards.CardsRequest(1000, record=False)).protos
+        assert selected and all(track['genre'] == 'Jazz' for card in selected for track in card['tracks'])
+        source.rec_proposals.put_proposals('home_genre_request', {}, 1000)
+        return selected
 
     with prepared_template(_pristine_current_schema, build) as template:
         yield template
+
+
+class _NoJobs:
+    def latest(self, *args, **kwargs):
+        return None

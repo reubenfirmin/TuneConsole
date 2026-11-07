@@ -20,6 +20,21 @@ def coverage_status(configured, state, pending):
     return state or ('pending' if pending else 'unknown')
 
 
+def log_scope(field):
+    return ('release' if field in ('year', 'label', 'mb_release_ids', 'cover_url') else
+            'item' if field in ('popularity', 'gain', 'loudness', 'dynamic_complexity') else 'recording')
+
+
+def identifiers(field, value, *, strict):
+    if not value or field not in ('mb_recording_id', 'isrc'):
+        return None, []
+    supplied = value if isinstance(value, (list, tuple)) else [value]
+    if strict and (len(supplied) > 1024 or any(not isinstance(identifier, str) or
+            not 0 < len(identifier.encode()) <= 4096 for identifier in supplied)):
+        raise ValueError('Identifier evidence requires bounded nonempty text')
+    return 'musicbrainz' if field == 'mb_recording_id' else 'isrc', [str(identifier) for identifier in supplied]
+
+
 def configuration_changes(configuration, inputs):
     changes = []
     for provider, current in configuration.items():
