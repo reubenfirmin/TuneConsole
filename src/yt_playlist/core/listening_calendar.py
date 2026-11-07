@@ -60,7 +60,8 @@ def _subject_rows(conn, account_id, values, *, observations):
     return conn.execute(query,(*parameters,account_id,*((account_id,) if indexed else ()),account_id)).fetchall()
 
 
-def _foreign_rows(conn, account_id, observations, events):
+def foreign_rows(conn, account_id, *, observations=None, keys=None):
+    """Read foreign observations for bounded, already prepared subject scopes."""
     observation_table,_,account = _subjects(conn)
     query = (f'SELECT o.id,o.identity_key,o.source_day,o.timezone,o.day FROM {observation_table} o '
              f'JOIN listening_calendars c ON c.{account}=o.{account} '
@@ -78,26 +79,34 @@ def _foreign_rows(conn, account_id, observations, events):
                 f'WITH affected(identity_key,source_day,timezone) AS (VALUES {placeholders}) '
                 + query.format(scope_join=join),
                 (*(value for scope in batch for value in scope), account_id)).fetchall()
-    elif events is not None:
-        by_key = defaultdict(set)
-        for key, timestamp in events:
-            by_key[key].add(timestamp)
-        source_days = {}
-        for batch in _chunks(by_key, 400):
+    elif keys is not None:
+        for batch in _chunks(set(keys), 400):
             if observation_table=='listening_observation_subjects':
                 rows = _subject_rows(conn,account_id,batch,observations=False)
             else:
                 placeholders = ','.join('?' for _ in batch)
                 rows = conn.execute(query.format(scope_join='') + f' AND o.identity_key IN ({placeholders})',
                                     (account_id, *batch)).fetchall()
-            for row in rows:
-                pair = row['identity_key'], row['timezone']
-                if pair not in source_days:
-                    source_days[pair] = {day_at(at, pair[1]) for at in by_key[pair[0]]}
-                if row['source_day'] in source_days[pair]:
-                    yield row
+            yield from rows
     else:
         yield from conn.execute(query.format(scope_join=''), (account_id,)).fetchall()
+
+
+def _foreign_rows(conn, account_id, observations, events):
+    by_key = defaultdict(set)
+    for key, timestamp in events or ():
+        by_key[key].add(timestamp)
+    rows = foreign_rows(conn, account_id, observations=observations,
+                        keys=by_key if events is not None and observations is None else None)
+    source_days = {}
+    for row in rows:
+        if events is not None and observations is None:
+            pair = row['identity_key'], row['timezone']
+            if pair not in source_days:
+                source_days[pair] = {day_at(at, pair[1]) for at in by_key[pair[0]]}
+            if row['source_day'] not in source_days[pair]:
+                continue
+        yield row
 
 
 def reconcile_foreign_days(conn, account_id, *, observations=None, events=None):

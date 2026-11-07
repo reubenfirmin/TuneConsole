@@ -187,6 +187,17 @@ class RoadTripRepo(Repo):
                 (recipe_id, raw, now))
             return True
 
+    @snapshot_read
+    def draft_updated_ats(self):
+        return dict(self.conn.execute('SELECT recipe_id,updated_at FROM road_trip_drafts'))
+
+    @synchronized
+    def rekey_draft_reference(self, identity, expected_revision, revision, reference):
+        with self.conn.atomic(join=True):
+            return bool(self.conn.execute('UPDATE road_trip_drafts SET revision=?,recovery_filename=?,'
+                'recovery_digest=?,recovery_bytes=? WHERE id=? AND revision=?',
+                (revision, *reference, identity, expected_revision)).rowcount)
+
     @synchronized
     def delete_road_trip_draft(self, recipe_id):
         self.conn.execute('DELETE FROM road_trip_drafts WHERE recipe_id=?', (recipe_id,))

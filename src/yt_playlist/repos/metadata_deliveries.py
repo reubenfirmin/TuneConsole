@@ -9,7 +9,9 @@ class MetadataDeliveryRepo(Repo):
     @contextmanager
     def transaction(self):
         with self._lock:
-            with self.conn.atomic():
+            # Captures made while observing/editing a catalog item must roll
+            # back with that owning write, including its earlier field edits.
+            with self.conn.atomic(join=True):
                 if metadata_locator_contract.retired(self.conn):
                     raise ValueError('Installed delivery writes are retired; use runtime metadata')
                 yield

@@ -104,6 +104,11 @@ class RecommendationModel:
             self.repository.publish_ratings(deleted, actions, inserted)
             return likes
 
+    def reassociate_rating_feedback(self, states, prior_feedback):
+        rows = self.repository.rating_rows(list(states))
+        changes = rating_feedback.association_changes(states, rows, prior_feedback)
+        self.repository.publish_association_ratings(*changes)
+
     def unban(self, identity_key, now):
         with self.guard():
             key, recording, latest = self.repository.unban_facts(identity_key)

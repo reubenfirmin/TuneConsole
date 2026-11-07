@@ -1,5 +1,6 @@
 """Saved recipe and append policy use mocked file and SQL owners."""
 from contextlib import nullcontext
+import json
 from unittest.mock import Mock, create_autospec
 
 import pytest
@@ -20,6 +21,30 @@ def recipes():
     repo.document_owner.return_value = {'native': True, 'scope': 'TV', 'id': 8}
     files.publish.return_value = ('file', 'digest', 12)
     return PlaylistRecipes(repo, files, nullcontext)
+
+
+def test_catalog_rekey_changes_declared_keys_and_preserves_labels_media_and_created_time(recipes):
+    recipes.repository.document_created_ats.side_effect = [{'scope': 10}, {'canvas': 20}]
+    original = {'keys': ['old'], 'label': 'old', 'video_id': 'old'}
+    recipes.get_recipe = Mock(return_value=original)
+    recipes.get_cluster_canvas = Mock(return_value=json.dumps({'nodes': [{'key': 'old', 'title': 'old'}]}))
+    recipes.set_recipe, recipes.set_cluster_canvas = Mock(), Mock()
+    recipes.rekey_recordings({'old': 'new'})
+    args = recipes.set_recipe.call_args.args
+    assert args[0] == 'scope' and args[2] == 10
+    assert args[1]['keys'] == ['new'] and args[1]['label'] == args[1]['video_id'] == 'old'
+    assert original['keys'] == ['old']
+    scope, raw, created = recipes.set_cluster_canvas.call_args.args
+    assert (scope, created) == ('canvas', 20)
+    assert json.loads(raw)['nodes'] == [{'key': 'new', 'title': 'old', 'catalog_identity_version': 2}]
+
+
+def test_catalog_rekey_preserves_future_document_formats(recipes):
+    recipes.repository.document_created_ats.side_effect = [{'scope': 10}, {}]
+    recipes.get_recipe = Mock(return_value={'catalog_state_version': 999, 'keys': ['old']})
+    recipes.set_recipe = Mock()
+    recipes.rekey_recordings({'old': 'new'})
+    recipes.set_recipe.assert_not_called()
 
 
 def test_recipe_and_append_files_exist_before_sql_publication(recipes):

@@ -24,7 +24,6 @@ from yt_playlist.rec import bundle_storage
 from yt_playlist.repos import discovery_cache, proposal_cache
 from yt_playlist.core import discovery_cache_policy
 from yt_playlist.repos.rec_proposals import encode_proposals
-from tests.conftest import seed_catalog_track
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles
 
@@ -60,12 +59,25 @@ def populate(store, count=200):
     items = [{'key': key if n == 0 else f'keep-{n}', 'title': f'Track {n}',
               'artist': 'Artist',
               'reason': 'album context and independent listening evidence ' * 20} for n in range(count)]
-    # Fixture construction is one catalog import, before the cleanup race starts.
-    # Avoid committing the unchanged source once for every recording.
+    # Cleanup consumes existing SQL subjects; artist-credit inference and
+    # ingestion observers belong to their own tests. Import the required native
+    # identities/memberships in batches before starting the cleanup race.
+    owned = items[1:] + [{'key': 'owned', 'title': 'Owned', 'artist': 'Other artist'},
+                         {'key': 'new-cache', 'title': 'New cache', 'artist': 'Other artist'}]
+    first_id = store.conn.execute('SELECT COALESCE(MAX(id),0)+1 FROM recordings').fetchone()[0]
+    subjects = [(rid, item) for rid, item in enumerate(owned, first_id)]
     with atomic_write(store):
-        for item in items[1:] + [{'key': 'owned', 'title': 'Owned', 'artist': 'Other artist'},
-                               {'key': 'new-cache', 'title': 'New cache', 'artist': 'Other artist'}]:
-            seed_catalog_track(store, item['key'], item['title'], item['artist'], video_id='video-' + item['key'])
+        store.conn.executemany('INSERT INTO recordings(id,identity_key,title,artist) VALUES (?,?,?,?)',
+            [(rid, item['key'], item['title'], item['artist']) for rid, item in subjects])
+        store.conn.executemany('INSERT INTO youtube_items(video_id,recording_id,title,artist,orig_title,orig_artist) '
+            'VALUES (?,?,?,?,?,?)', [('video-' + item['key'], rid, item['title'], item['artist'],
+                                    item['title'], item['artist']) for rid, item in subjects])
+        store.conn.executemany('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
+            [(rid, rid, 'video-' + item['key']) for rid, item in subjects])
+        store.conn.executemany("INSERT INTO library_memberships VALUES (?,'fixture',NULL)",
+                               [(rid,) for rid, _ in subjects])
+        store.conn.executemany("INSERT INTO recording_aliases VALUES (?,?,'fixture')",
+                               [(item['key'], rid) for rid, item in subjects])
     bundles = {'all': {'fresh': items, 'wheelhouse': [{'key': 'owned', 'title': 'Owned', 'artist': 'Other artist'}]},
                '1': {'fresh': items}, '_meta': {'full_pools': True, 'comfort_pool': 12},
                '_radio': {'members': {'1': [key, 'keep-1']}}}
@@ -117,6 +129,11 @@ def cleanup(store):
 
 def published_state(store):
     """Exact committed rank facts, file bytes and framing, excluding staged successors."""
+    with store.read_view() as reader:
+        return _published_state(reader)
+
+
+def _published_state(store):
     result = {}
     for surface in ('home', 'fresh', 'radio'):
         head = store.recommendations.head(surface)
@@ -151,7 +168,10 @@ SLOTS = (('home', 'all', 'fresh'), ('home', '1', 'fresh'),
 
 
 def visible(store):
-    return {slot: served(store, *slot) for slot in SLOTS}
+    # All pages share one pinned SQL/file view. Opening a fresh reader for each
+    # 512-row page repeats owner construction and permits inconsistent pages.
+    with store.read_view() as reader:
+        return {slot: served(reader, *slot) for slot in SLOTS}
 
 
 @pytest.mark.parametrize('staged,count', [

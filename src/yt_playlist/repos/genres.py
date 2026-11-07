@@ -1,7 +1,7 @@
 """Canonical genre identities, sourced labels, and the user's enabled vocabulary."""
 from contextlib import contextmanager
 
-from yt_playlist.repos.base import Repo, lookup_read, synchronized
+from yt_playlist.repos.base import Repo, lookup_read, synchronized, snapshot_read
 from yt_playlist.core import genre_identity, recommendation_invalidation as invalidation, taste_axes
 
 
@@ -25,7 +25,7 @@ class GenreRepo(Repo):
 
     @lookup_read
     def axis_matches(self, labels):
-        return genre_identity.axis_matches(self.conn, labels)
+        return genre_identity.axis_match_rows(self.conn, labels)
 
     @lookup_read
     def family_members(self, families):
@@ -52,9 +52,12 @@ class GenreRepo(Repo):
         row = self.conn.execute('SELECT name FROM genre_catalog WHERE key=?', (key,)).fetchone()
         return row[0] if row else None
 
-    @synchronized
-    def resolve(self, name):
-        return genre_identity.resolve(self.conn, name)
+    @lookup_read
+    def label_matches(self, label, normalized):
+        return {genre_identity.current_key(self.conn, row[0]) for row in self.conn.execute(
+            'SELECT key FROM genre_catalog WHERE key=? OR name=? COLLATE NOCASE '
+            'UNION SELECT genre_key FROM genre_alias WHERE label_key=? OR label=? COLLATE NOCASE',
+            (label, label, normalized, label))}
 
     @synchronized
     def insert_custom(self, key, name):

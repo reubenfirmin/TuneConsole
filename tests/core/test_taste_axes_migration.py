@@ -3,14 +3,15 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core.migrations import current, migrate, registry
+from yt_playlist.core.migrations import migrate, registry
+from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.store import Store
 
 
-def test_upgrade_preserves_typed_axes_and_original_events(tmp_path):
+def test_upgrade_preserves_typed_axes_and_original_events(tmp_path, _pristine_installed_schema):
     old = Store(tmp_path / 'axes.db')
     try:
-        migrate(old.conn, registry=registry.MIGRATIONS[:87])
+        _pristine_installed_schema(87).backup(old.conn)
         old._bind_repositories()
         old.genres.configure_catalog()
         old.rec_model.set_lean('genre:Drum And Bass', 1.4, 10)
@@ -21,7 +22,9 @@ def test_upgrade_preserves_typed_axes_and_original_events(tmp_path):
         old.rec_signals.set_play_graduated_day('genre:Drum And Bass', '2026-10-28')
         old.rec_signals.set_play_graduated_day('genre:Drum & Bass', '2026-10-29')
         old.rec_signals.bump_theme('genre:Drum & Bass', -0.5, 11)
-        migrate(old.conn, registry=registry.MIGRATIONS)
+        # v088 owns conversion of string axes and their retained events. The
+        # installed-genre contract separately exercises later archive upgrades.
+        migrate(old.conn, registry=registry.MIGRATIONS[:88])
         old._bind_repositories()
         assert old.rec_model.get_lean('genre:drum bass') == 1.4
         assert old.rec_model.hidden_facets() == {'genre:jazz'}
@@ -36,7 +39,7 @@ def test_upgrade_preserves_typed_axes_and_original_events(tmp_path):
         assert old.rec_model.get_leans() == {'genre:drum bass': 1.4}
         assert old.rec_signals.recent_graduations()[0]['axis'] == 'genre:drum bass'
         assert old.conn.execute("SELECT raw_axis FROM taste_axis_legacy WHERE table_name='rec_grad_log'").fetchone()[0] == 'genre:Drum And Bass'
-        current.validate(old.conn)
+        validate_version(old.conn, 88)
     finally:
         old.conn.close()
 

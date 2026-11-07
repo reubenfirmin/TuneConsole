@@ -200,10 +200,22 @@ def test_worker_readiness_reads_compact_output_and_one_live_eligibility_batch(st
     assert len(calls) == 1
 
 
-def test_readiness_follows_normal_worker_updates_between_menu_publications(store, vibe_menus):
+@pytest.mark.parametrize('inferred_support', [False, True])
+def test_readiness_follows_normal_worker_updates_between_menu_publications(
+        store, vibe_menus, monkeypatch, inferred_support):
     from yt_playlist.core import metadata_evidence
     from yt_playlist.rec import home_vibe, musical_preparation, vibe_pools
     from yt_playlist.rec.progressive import Preparation
+    from yt_playlist.rec import vibe_joint_preparation
+    from yt_playlist.controllers.vibe_predictions import VibePredictions
+
+    if not inferred_support:
+        # Exercise genuinely unavailable support separately from the qualified
+        # model's valid predictions. Keep real metadata edits, capture, profile
+        # publication and readiness reads; only inferred evidence is unavailable.
+        monkeypatch.setattr(VibePredictions, 'groups', lambda _, keys: {
+            key: {'stats': {}, 'inputs': {}} for key in keys})
+        monkeypatch.setattr(vibe_joint_preparation, 'posterior', lambda *_: None)
 
     lanes = vibe_menus
     # Three supported Fresh candidates cannot fill the four-supported-song
@@ -246,10 +258,11 @@ def test_readiness_follows_normal_worker_updates_between_menu_publications(store
 
     check(True)
     update_inputs(withdraw=False)
-    check(False)
-    # Withdrawn support must fail even while the old menu is retained.
+    check(inferred_support)
+    # Republishing the retained menu cannot invent unavailable support; valid
+    # model inference can still support songs whose own measurements are null.
     publish_bundles(store, deepcopy(store._fixture_bundle_payload), vibes=True)
-    check(False)
+    check(inferred_support)
     update_inputs(withdraw=True)
     # Restored evidence revalidates the retained menu immediately, without
     # waiting for an unrelated complete recommendation publication.

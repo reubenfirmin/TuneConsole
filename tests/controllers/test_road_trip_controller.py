@@ -54,6 +54,36 @@ def trips():
                      Mock(return_value=json.dumps({'revision':'prepared'})))
 
 
+def test_catalog_rekey_preserves_exact_draft_selections_and_compares_the_current_revision(trips):
+    trips.repository.draft_updated_ats.return_value = {3: 10}
+    trips.repository.draft_facts.return_value = {'recipe_id': 3,
+        'row': {'id': 'draft', 'revision': 'current', 'recovery_filename': 'file', 'recovery_digest': 'digest', 'recovery_bytes': 5},
+        'selections': [('picked', 'old')]}
+    trips.recovery.read.side_effect = None
+    trips.recovery.read.return_value = {'revision': 'stale-file', 'pool': [{'key': 'old', 'video_id': 'old'}]}
+    trips.repository.rekey_draft_reference.return_value = True
+    trips.rekey_recordings({'old': 'new'})
+    kind, identity, payload = trips.recovery.publish.call_args.args
+    assert (kind, identity) == ('road-trip-draft', 'draft')
+    assert payload['pool'][0]['key'] == 'new' and payload['pool'][0]['video_id'] == 'old'
+    assert 'picks' not in payload and 'banned' not in payload
+    trips.repository.rekey_draft_reference.assert_called_once_with(
+        'draft', 'current', payload['revision'], ('file', 'digest', 50))
+    trips.repository.save_draft.assert_not_called()
+    trips.repository.captured_video.assert_not_called()
+
+
+def test_catalog_rekey_does_not_publish_a_reference_after_file_failure(trips):
+    trips.repository.draft_updated_ats.return_value = {3: 10}
+    trips.repository.draft_facts.return_value = {'recipe_id': 3,
+        'row': {'id': 'draft', 'revision': 'current', 'recovery_filename': 'file', 'recovery_digest': 'digest', 'recovery_bytes': 5},
+        'selections': []}
+    trips.recovery.publish.side_effect = OSError('full')
+    with pytest.raises(OSError, match='full'):
+        trips.rekey_recordings({'old': 'new'})
+    trips.repository.rekey_draft_reference.assert_not_called()
+
+
 def save_recipe(trips, **kwargs):
     return trips.save_road_trip_recipe(None, 'Trip', kwargs.pop('own_pct', 50), kwargs.pop('artists', []),
         kwargs.pop('genres', []), kwargs.pop('minutes', 60), kwargs.pop('now', 100), **kwargs)

@@ -14,7 +14,7 @@ import tempfile
 
 from .evidence_ledger import canonical
 from .activity import check_cancellable_work, WorkBudgetExceeded
-from . import fao
+from . import fao, policy_documents
 from .metadata_contract import ALTERNATIVE_SECONDS, runtime_active
 
 MAX_BYTES = 8 * 1024 * 1024
@@ -106,6 +106,10 @@ class RuntimeMetadataFiles:
 
     def __init__(self, root):
         self.root = Path(root)
+        self._alternatives_gc = None
+
+    def retained(self):
+        return policy_documents.retained_reader(self.root)
 
     def publish(self, kind, owner, revision, data, *, current_revision=None):
         path, encoded = _prepared_at(self.root, kind, owner, revision, data,
@@ -116,6 +120,60 @@ class RuntimeMetadataFiles:
 
     def read(self, kind, owner, revision, *, missing=False):
         return read_at(self.root, kind, owner, revision, missing=missing)
+
+    def collecting(self):
+        from .file_collection import collector
+        return collector(self.root)
+
+    def close(self):
+        if self._alternatives_gc is not None:
+            self._alternatives_gc[1].close()
+            self._alternatives_gc = None
+
+    def expire_alternatives(self, shard, now, *, budget=128):
+        """Charge directory entries and shard transitions against the same budget."""
+        removed = 0
+        for _ in range(budget):
+            if self._alternatives_gc is None or self._alternatives_gc[0] != shard:
+                self.close()
+                self._alternatives_gc = shard, _walk_alternatives(self.root / 'alternatives' / str(shard).zfill(2))
+            try:
+                entry, depth = next(self._alternatives_gc[1])
+            except StopIteration:
+                self.close()
+                shard = (shard + 1) % 100
+                continue
+            if depth != 2 or not entry.name.endswith('.json') or not entry.is_file(follow_symlinks=False):
+                continue
+            try:
+                at = float.fromhex(entry.name[:-5])
+            except ValueError:
+                continue
+            if at <= now - ALTERNATIVE_SECONDS:
+                removed += fao.delete(entry.path, missing_ok=True)
+        return removed, shard
+
+    def prune_revisions(self, kind, owner, keep, *, budget=128):
+        parent = (self.root / relative(kind, owner, keep[0])).parent
+        removed = 0
+        for index, path in enumerate(parent.iterdir()):
+            if index == budget:
+                break
+            if path.suffix == '.json' and path.stem.isdecimal() and int(path.stem) not in keep:
+                removed += fao.delete(path, missing_ok=True)
+        return removed
+
+
+def _walk_alternatives(root, depth=0):
+    import os
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                yield entry, depth
+                if depth < 2 and entry.is_dir(follow_symlinks=False):
+                    yield from _walk_alternatives(entry.path, depth + 1)
+    except FileNotFoundError:
+        return
 
 
 def publish_many(conn, documents):

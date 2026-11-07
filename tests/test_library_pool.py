@@ -2,17 +2,19 @@ import html
 import json
 import re
 import threading
+from copy import deepcopy
 
 import pytest
 
 from tests.conftest import seed_catalog_track
-from tests.test_home_other_genres import _client as _home_client, genre_routes, seed_genres, template_bytecode
+from tests.test_home_other_genres import (_client as _home_client, genre_bundles, genre_routes,
+                                         seed_genres, template_bytecode)
 from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.home_fixture_support import home_routes_only, returning_listener
 from tests.prepared_fixture_support import prepared_template
-from tests.recommendation_support import publish_bundles
+from tests.recommendation_support import publish_bundles, seed_bundle_subjects
 from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.rec import library_pool, mode_surfaces, surfaces
+from yt_playlist.rec import choice_evidence, home_cards, library_pool, measurement, mode_surfaces, surfaces
 from yt_playlist.util.matching import identity_key
 
 
@@ -25,8 +27,22 @@ pytestmark = pytest.mark.usefixtures('genre_routes', 'one_menu_per_attempt')
 def genre_candidates_template(_pristine_current_schema):
     # These job cases request three families and consume a completed sibling
     # card. Other genre families and twenty candidates per lane add no state.
-    with prepared_template(_pristine_current_schema, lambda source: seed_genres(
-            source, genres=['Jazz', 'Techno', 'Trance'], tracks_per_lane=4)) as template:
+    def seed(source):
+        bundles = genre_bundles(source, genres=['Jazz', 'Techno', 'Trance'], tracks_per_lane=4)
+        # The same owned recordings can be framed by different library lanes.
+        # Keep Fresh's distinct, unowned candidates and all real typed pools.
+        bundles['all'] = {}
+        for mode in range(3):
+            bucket = bundles[str(mode)]
+            for lane in mode_surfaces.CARD_SURFACES:
+                if lane != 'fresh':
+                    bucket[lane] = [{**track, 'lane': lane} for track in bucket['wheelhouse']]
+                bundles['all'].setdefault(lane, []).extend(bucket[lane])
+        seed_bundle_subjects(source, bundles)
+        publish_bundles(source, bundles, 1.0)
+        return bundles
+
+    with prepared_template(_pristine_current_schema, seed) as template:
         yield template
 
 
@@ -40,9 +56,20 @@ def two_ready_cards(store, monkeypatch, *, bundles=None):
     if bundles is None:
         bundles = seed_genres(store)
     tracks = bundles["0"]["wheelhouse"][:12]
+    completed = home_cards._proto(store, 'wheelhouse', 'More in your wheelhouse', tracks, 1000)
+    completed.update(mode_id=0, ranker='cosine', recipe={
+        'model': 'mode', 'mode_id': 0, 'lane': 'wheelhouse', 'journey': 'shuffle', 'dj': {}})
     monkeypatch.setattr(mode_surfaces, "assemble_cards", lambda *a, **kw: [
         {"lane": "wheelhouse", "label": "More in your wheelhouse", "mode_id": 0,
          "ranker": "cosine", "tracks": tracks}])
+    # Job state and rendering consume a completed sibling card. Journey
+    # construction, learning and model fingerprints have independent owners in
+    # test_journeys, test_choice_evidence and test_measurement_isolation.
+    monkeypatch.setattr(home_cards, '_complete_card', lambda *args: deepcopy(completed))
+    monkeypatch.setattr(choice_evidence, 'present', lambda *args, **kwargs: None)
+    monkeypatch.setattr(measurement, 'serving_policy', lambda owner, now, **kwargs:
+        ('library-job-inputs', {'schema': 4, 'algorithm': 'library-job-fixture',
+                               'genres': owner.rec_proposals.get_proposals('home_genre_request')}))
     return tracks
 
 

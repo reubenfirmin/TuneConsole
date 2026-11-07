@@ -48,7 +48,7 @@ def destination_selected(conn, *, store=None):
         return revision if row and row[0] == revision else None
 
 
-def operational_fields(conn, owner, key):
+def operational_reference(conn, owner, key):
     revision = destination_selected(conn)
     if revision is None:
         return None
@@ -56,10 +56,18 @@ def operational_fields(conn, owner, key):
         ' d ON d.id=r.delivery_id WHERE r.stage=? AND r.owner=? AND r.source_key=?', (revision, owner, key)).fetchone()
     if row is None:
         return None
-    original = metadata_delivery_files.read(row['filename'], row['digest'], row['byte_size'], row['byte_offset'])['row']
-    values = json.loads(original['fields_json'])
     fields = conn.execute('SELECT field FROM '+destination_table('fields')+
         ' WHERE stage=? AND owner=? AND source_key=? ORDER BY position', (revision, owner, key)).fetchall()
-    if not isinstance(values, dict) or list(values) != [row[0] for row in fields]:
+    return {'reference': tuple(row[name] for name in ('filename', 'digest', 'byte_size', 'byte_offset')),
+            'fields': [row[0] for row in fields]}
+
+
+def operational_fields(conn, owner, key):
+    reference = operational_reference(conn, owner, key)
+    if reference is None:
+        return None
+    original = metadata_delivery_files.read(*reference['reference'])['row']
+    values = json.loads(original['fields_json'])
+    if not isinstance(values, dict) or list(values) != reference['fields']:
         raise MigrationError('Metadata operational fields differ from their retained delivery')
     return values

@@ -70,6 +70,11 @@ def origin_fields(conn, token, *, account_id=None, import_key=None):
 
 def origin(conn, token, *, account_id=None, import_key=None, create=True):
     fields = origin_fields(conn, token, account_id=account_id, import_key=import_key)
+    return store_origin(conn, fields, create=create)
+
+
+def store_origin(conn, fields, *, create=True):
+    """Intern an explicit origin supplied by its caller."""
     identity = {k:v for k,v in fields.items() if k not in ('resolution_status','resolution_reason')}
     where = ' AND '.join(k+' IS ?' for k in identity)
     existing = conn.execute('SELECT id FROM discovery_origins WHERE '+where,tuple(identity.values())).fetchone()

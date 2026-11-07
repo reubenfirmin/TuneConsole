@@ -7,6 +7,7 @@ from yt_playlist.core.metadata_contract import clock
 from yt_playlist.core import metadata_values, enrichment_selection_policy
 from yt_playlist.core.metadata_deliveries import Delivery
 from yt_playlist.core.evidence_ledger import canonical
+from yt_playlist.util.matching import normalize
 
 
 class MetadataChoices:
@@ -17,7 +18,7 @@ class MetadataChoices:
         prepared = metadata_values.prepare_value(field, value,
             unit=metadata_values.DEFAULT_UNIT.get(field) if value not in (None, '') else None)
         if field == 'genre' and prepared.kind == 'value':
-            matches = self.repository.genre_matches(value)
+            matches = self.repository.genre_matches(value, normalize(value))
             prepared = replace(prepared, genre_key=next(iter(matches)) if len(matches) == 1 else None,
                 resolution_reason=None if len(matches) == 1 else 'ambiguous_genre' if matches else 'unknown_genre')
         return prepared
@@ -89,6 +90,30 @@ class MetadataChoices:
 
     def reuse_recording_observation(self, entry, observation, *, now=None):
         return self.repository.transfer_recording_observation(entry, observation, clock(now))
+
+    def reuse_recording_selections(self, previous, target):
+        inputs = self.repository.recording_reuse_inputs(previous, target)
+        for field in enrichment_selection_policy.reusable_recording_fields(inputs):
+            if inputs['layout'] == 'runtime':
+                self.select(inputs['target_entry'], field, inputs['before'][field], inputs['sources'].get(field) or 'legacy_unknown')
+            else:
+                self.repository.copy_recording_selection(inputs['layout'], previous, target, field)
+
+    def fill_import(self, entry, fields, source, *, hint_source, now=None):
+        at = clock(now)
+        prepared = {field: self._prepare(field, value) for field, value in fields.items()}
+        inputs = self.repository.import_inputs(entry, hint_source)
+        for field, value in fields.items():
+            if value is not None and inputs['track'][field] is None:
+                self.select(entry, field, value, source, now=at)
+            if value is None or inputs['layout'] == 'runtime' or field in inputs['hints']:
+                continue
+            observation = None
+            if inputs['layout'] == 'evidence':
+                delivery = self.deliveries.capture_state(entry, 'catalog_import', 'hint:' + field + ':' + hint_source,
+                    {'format': 'catalog-import-hint-1', 'source': hint_source, 'field': field, 'value': value}, now=at)
+                observation = self.repository.store_observations(delivery, {field: prepared[field]})[field]
+            self.repository.store_hint(inputs['layout'], entry, field, hint_source, value, observation)
 
     def restore(self, entry, field, value, *, now=None):
         self.select(entry, field, value, 'youtube', now=now)

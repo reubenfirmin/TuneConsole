@@ -88,7 +88,7 @@ def test_expiry_preserves_completion_selected_values_and_model_inputs(runtime_st
     key = store.conn.execute('SELECT source_key FROM rec_musical_sources').fetchone()[0]
     before = metadata_native.source_values(store.conn, key)
     with store.conn:
-        assert runtime.expire(store.conn, now=now) == 1
+        assert store.enrichment_state.expire_provider_alternatives(now) == 1
     assert runtime.alternatives(store.conn, recording, 'a', now=now) == {}
     assert store.enrichment_state.enrichment_provider_state(recording)['a']['status'] == 'found'
     assert store.conn.execute('SELECT genre FROM catalog_tracks WHERE id=?', (track,)).fetchone()[0] == 'Jazz'
@@ -318,11 +318,11 @@ def test_expiry_collects_deleted_subjects_and_is_bounded(runtime_store):
     # No SQL provider owns these files: failed publications/configuration changes
     # and deleted inputs must not leave expired alternatives indefinitely.
     with store.conn:
-        removed = runtime.expire(store.conn, now=now+runtime.ALTERNATIVE_SECONDS+1)
+        removed = store.enrichment_state.expire_provider_alternatives(now+runtime.ALTERNATIVE_SECONDS+1)
     assert 0 < removed <= 128 < before
     for _ in range(4):
         with store.conn:
-            runtime.expire(store.conn, now=now+runtime.ALTERNATIVE_SECONDS+1)
+            store.enrichment_state.expire_provider_alternatives(now+runtime.ALTERNATIVE_SECONDS+1)
     assert not list(root.rglob('*.json'))
     assert len(store.conn._close_callbacks) <= 1
 

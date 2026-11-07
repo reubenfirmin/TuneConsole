@@ -4,11 +4,10 @@ Installed histories keep their old readers/writers until explicit preparation.
 The SQL owners below are bounded by current subjects/fields, not lookup count.
 """
 import json
-import os
 import sqlite3
 import time
 
-from . import fao, metadata_runtime_files as files
+from . import metadata_runtime_files as files
 from .catalog_identity import RECORDING_FIELDS, ITEM_FIELDS
 from .metadata_contract import ALTERNATIVE_SECONDS, PROVIDER_FIELDS, Capture, clock, runtime_active as active
 
@@ -413,105 +412,3 @@ def native_page(conn, identity_key, *, after_id=0, limit=100):
     return result
 
 
-def expire(conn, *, now=None, limit=16):
-    from . import policy_documents
-    root = files.directory(conn)
-    root.mkdir(parents=True, exist_ok=True)
-    with (root / '.readers.lock').open('a+b') as stream:
-        unlock = policy_documents._try_file_lock(stream, exclusive=True)
-        if unlock is None:
-            return 0
-        try:
-            return _expire(conn, now=now, limit=limit)
-        finally:
-            unlock()
-
-
-def _expire(conn, *, now=None, limit=16):
-    """Bounded round-robin file collection; completion/retry SQL is unchanged."""
-    now=time.time() if now is None else now
-    state=conn.execute('SELECT gc_cursor,gc_after,gc_shard FROM metadata_runtime_state WHERE id=1').fetchone()
-    removed = _expire_alternatives(conn, state['gc_shard'], now)
-    if state['gc_after']>now:
-        return removed
-    rows=conn.execute('SELECT id FROM recordings WHERE id>? ORDER BY id LIMIT ?',
-                      (state['gc_cursor'],limit)).fetchall()
-    for (recording,) in rows:
-        # Candidate bodies follow the same expiry; the compact conflict/status
-        # remains useful even when all alternatives have expired.
-        conflicts = conn.execute('SELECT * FROM metadata_runtime_conflicts WHERE recording_id=? OR entry_id IN '
-            '(SELECT id FROM catalog_entries WHERE recording_id=?)', (recording, recording)).fetchall()
-        for row in conflicts:
-            data = files.read(conn, 'conflicts', (row['id'],), row['revision'])
-            current = conflict_details(conn, row, now=now)
-            if current != data:
-                files.publish(conn, 'conflicts', (row['id'],), row['revision']+1, current)
-                conn.execute('UPDATE metadata_runtime_conflicts SET revision=revision+1 WHERE id=?', (row['id'],))
-            parent = (files.directory(conn)/files.relative('conflicts', (row['id'],), row['revision'])).parent
-            for index, path in enumerate(parent.iterdir()):
-                if index == 128:
-                    break
-                keep = (row['revision'], row['revision']+1) if current != data else (row['revision'],)
-                if path.suffix == '.json' and path.stem.isdecimal() and int(path.stem) not in keep:
-                    removed += fao.delete(path, missing_ok=True)
-        for key, revision in conn.execute('SELECT s.source_key,s.revision FROM rec_musical_sources s '
-            'JOIN rec_musical_links l ON l.source_key=s.source_key WHERE l.recording_id=?', (recording,)).fetchall():
-            parent = (files.directory(conn)/files.relative('native', (key,), revision)).parent
-            for index, path in enumerate(parent.iterdir()):
-                if index == 128:
-                    break
-                if path.suffix == '.json' and path.stem.isdecimal() and int(path.stem) != revision:
-                    removed += fao.delete(path, missing_ok=True)
-    conn.execute('UPDATE metadata_runtime_state SET gc_cursor=?,gc_after=? WHERE id=1',
-                 (rows[-1][0] if rows else 0,0 if rows else now+3600))
-    return removed
-
-
-def _walk_alternatives(root, depth=0):
-    """Yield directory entries too, so empty/orphan trees consume the budget."""
-    try:
-        with os.scandir(root) as entries:
-            for entry in entries:
-                yield entry, depth
-                if depth < 2 and entry.is_dir(follow_symlinks=False):
-                    yield from _walk_alternatives(entry.path, depth+1)
-    except FileNotFoundError:
-        return
-
-
-def _expire_alternatives(conn, shard, now, *, budget=128):
-    # Filesystem traversal includes recordings/providers already deleted from
-    # SQL. Persist the completed shard; keep only a bounded-depth iterator in
-    # memory while a shard is being visited. A restart safely repeats that shard.
-    current = getattr(conn, '_metadata_alternatives_gc', None)
-    if current is None or current[0] != shard:
-        if current is not None:
-            current[1].close()
-            conn._close_callbacks.remove(current[1].close)
-        root = files.directory(conn)/'alternatives'/str(shard).zfill(2)
-        current = shard, _walk_alternatives(root)
-        conn._metadata_alternatives_gc = current
-        conn._close_callbacks.append(current[1].close)
-    removed = 0
-    for position in range(budget):
-        try:
-            entry, depth = next(current[1])
-        except StopIteration:
-            conn.execute('UPDATE metadata_runtime_state SET gc_shard=? WHERE id=1', ((shard+1)%100,))
-            conn._metadata_alternatives_gc = None
-            conn._close_callbacks.remove(current[1].close)
-            # Empty shards cost one step, allowing small libraries to collect
-            # files on this tick rather than needing a hundred worker ticks.
-            remaining = budget-position-1
-            if remaining:
-                removed += _expire_alternatives(conn, (shard+1)%100, now, budget=remaining)
-            break
-        if depth != 2 or not entry.name.endswith('.json') or not entry.is_file(follow_symlinks=False):
-            continue
-        try:
-            at = float.fromhex(entry.name[:-5])
-        except ValueError:
-            continue
-        if at <= now-ALTERNATIVE_SECONDS:
-            removed += fao.delete(entry.path, missing_ok=True)
-    return removed

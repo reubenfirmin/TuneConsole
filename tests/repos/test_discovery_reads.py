@@ -39,7 +39,7 @@ def test_membership_reads_canonical_keys_without_hydrating_track_fields(installe
         def unexpected_hydration(row):
             pytest.fail('Membership reads must not decode track metadata or audio')
 
-        monkeypatch.setattr(type(reader.discovery), '_dtrack_row', staticmethod(unexpected_hydration))
+        monkeypatch.setattr(type(reader.discovery.repository), '_dtrack_row', staticmethod(unexpected_hydration))
         reader.conn.set_authorizer(authorize)
         try:
             assert reader.discovery.discovered_track_keys() == {key}
@@ -52,7 +52,7 @@ def test_membership_reads_canonical_keys_without_hydrating_track_fields(installe
 def test_full_reads_reuse_detached_rows_and_keep_pinned_state(store, monkeypatch, tracked):
     key = seed(store)
     decoded = []
-    repo = type(store.discovery)
+    repo = type(store.discovery.repository)
     original = repo._dtrack_row
 
     def decode(row):
@@ -111,7 +111,7 @@ def test_tracked_full_read_invalidates_each_changed_input(store, change):
         store.discovery.prune_discovered_tracks({key})
     with store.read_view(tracked=True) as reader:
         relation = read_owners(reader.conn).relation('discovered_tracks')
-        expected = [reader.discovery._dtrack_row(row) for row in
+        expected = [reader.discovery.repository._dtrack_row(row) for row in
                     reader.conn.execute('SELECT * FROM ' + relation)]
         assert expected != before
         assert reader.discovery.get_discovered_tracks() == expected
@@ -135,7 +135,7 @@ def test_reads_follow_prepared_discovery_selection_and_continuing_writes(install
                                            'Techno', '2020', 'radio:seed', 40)
     with store.read_view(tracked=True) as reader:
         relation = read_owners(reader.conn).relation('discovered_tracks')
-        expected = [reader.discovery._dtrack_row(row) for row in
+        expected = [reader.discovery.repository._dtrack_row(row) for row in
                     reader.conn.execute('SELECT * FROM ' + relation)]
         assert len(expected) == len(before) + 1
         assert reader.discovery.get_discovered_tracks() == expected

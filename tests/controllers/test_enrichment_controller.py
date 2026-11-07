@@ -28,6 +28,34 @@ def enrichment():
     return Enrichment(repo, choices, create_autospec(RuntimeMetadataFiles, instance=True, spec_set=True))
 
 
+@pytest.mark.parametrize(('previous', 'answers', 'expected'), [
+    ('a', {'a': None, 'b': 'Jazz'}, ('Jazz', 'b')),
+    ('a', {'a': None, 'b': None}, None), ('a', {'a': 'Rock', 'b': 'Jazz'}, None),
+    ('unknown', {'a': None, 'b': 'Jazz'}, None),
+])
+def test_refresh_preserves_a_previous_genre_until_its_provider_has_a_replacement(enrichment, previous, answers, expected):
+    enrichment.repository.genre_refresh_input.return_value = {'entry_id': 7, 'source': previous, 'attempts': False}
+    enrichment.refresh_genre(2, answers, ['a', 'b'], now=10)
+    if expected:
+        enrichment.choices.select.assert_called_once_with(7, 'genre', *expected, now=10, observation_id=None)
+    else:
+        enrichment.choices.select.assert_not_called()
+    enrichment.repository.conflict_transaction.assert_not_called()
+
+
+@pytest.mark.parametrize('proven', [False, True])
+def test_refresh_uses_proven_retained_observations_without_recapturing_results(enrichment, proven):
+    enrichment.repository.genre_refresh_input.return_value = {'entry_id': 7, 'source': 'a', 'attempts': True}
+    enrichment.repository.provider_inputs.return_value.update(layout='evidence', attempts=True)
+    enrichment.repository.reuse_inputs.return_value = {'genre': {'id': 14, 'value': Value('value', text='Jazz'),
+        'recording_id': 2 if proven else 99, 'field_scope': 'recording', 'entry_id': 7}}
+    enrichment.refresh_genre(2, {'a': None, 'b': 'Jazz'}, ['a', 'b'], now=10)
+    assert enrichment.choices.select.called is proven
+    if proven:
+        enrichment.choices.select.assert_called_once_with(7, 'genre', 'Jazz', 'b', now=10, observation_id=14)
+    enrichment.choices.capture_fields.assert_not_called()
+
+
 @pytest.mark.parametrize(('field', 'value', 'column', 'prepared'), [
     ('year', '1995', 'mb_year', '1995'), ('genre', '', 'genre', ''),
     ('bpm', '120', 'bpm', 120.0), ('bpm', '', 'bpm', None),

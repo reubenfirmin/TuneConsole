@@ -1,7 +1,7 @@
 """Recording matching and rating decisions use supplied repository facts."""
 from contextlib import contextmanager
 from math import inf, nextafter
-from unittest.mock import create_autospec
+from unittest.mock import Mock, create_autospec
 
 import pytest
 
@@ -9,6 +9,8 @@ from tests.repository_mock_support import no_database
 from yt_playlist.controllers.tracks import Tracks
 from yt_playlist.controllers.metadata_choices import MetadataChoices
 from yt_playlist.controllers.artists import Artists
+from yt_playlist.controllers.albums import Albums
+from yt_playlist.controllers.recording_keys import RecordingKeys
 from yt_playlist.repos.tracks import TrackRepo
 from yt_playlist.util.matching import identity_key
 
@@ -24,11 +26,14 @@ def tracks():
         yield
 
     repo.rating_transaction.side_effect = transaction
+    repo.catalog_transaction.side_effect = transaction
     repo.item_rating_inputs.return_value = ({}, {})
     repo.rating_rows.return_value = []
     repo.rating_feedback_rows.return_value = []
     return Tracks(repo, create_autospec(MetadataChoices, instance=True, spec_set=True),
-                  create_autospec(Artists, instance=True, spec_set=True))
+                  create_autospec(Artists, instance=True, spec_set=True),
+                  create_autospec(Albums, instance=True, spec_set=True),
+                  create_autospec(RecordingKeys, instance=True, spec_set=True), Mock())
 
 
 @pytest.mark.parametrize(('changes', 'same'), [
@@ -167,15 +172,16 @@ def test_metadata_edit_ignores_unchanged_values_and_restores_originals(tracks):
     tracks.update_metadata('video', {'title': 'Original', 'genre': 'Jazz', 'year': ''}, observation={})
     tracks.metadata_choices.restore.assert_called_once_with(7, 'title', 'Original')
     tracks.metadata_choices.choose.assert_called_once_with(7, 'mb_year', '')
-    tracks.repository.upsert_track.assert_not_called()
+    tracks.repository.catalog_transaction.assert_not_called()
 
 
 def test_unknown_edit_observes_catalog_without_acquiring_library_membership(tracks):
     tracks.repository.metadata_for_video.side_effect = [None, {
         'track_id': 7, 'title': 'Song', 'artist': 'Artist', 'genre': '', 'year': '',
         'orig_title': 'Song', 'orig_artist': 'Artist'}]
+    tracks.upsert_track = Mock()
     tracks.update_metadata('video', {'genre': 'Jazz'}, observation={'title': 'Song', 'artist': 'Artist'})
-    assert tracks.repository.upsert_track.call_args.kwargs == {'library': False}
+    tracks.upsert_track.assert_called_once_with('video', title='Song', artist='Artist', library=False)
     tracks.metadata_choices.choose.assert_called_once_with(7, 'genre', 'Jazz')
 
 
@@ -213,3 +219,76 @@ def test_unknown_artwork_target_is_ignored(tracks):
     tracks.repository.artwork_inputs.return_value = None
     tracks.set_track_art(99, 'https://covers/real')
     tracks.metadata_choices.select.assert_not_called()
+
+
+def catalog_inputs(tracks, *, evidence=True, sources=None):
+    tracks.repository.entry_for_source.return_value = {'id': 7, 'recording_id': 12}
+    tracks.repository.catalog_metadata_inputs.side_effect = lambda entry, fields: {
+        'evidence': evidence, 'sources': {field: (sources or {}).get(field) for field in fields}}
+    tracks.repository.artwork_inputs.return_value = None
+    tracks.metadata_choices.capture_fields.return_value = (20, {'title': 21, 'artist': 22, 'album': 23})
+
+
+def test_catalog_ingestion_calls_other_components_only_after_its_identity_transaction(tracks):
+    catalog_inputs(tracks)
+    writing = False
+
+    @contextmanager
+    def transaction():
+        nonlocal writing
+        writing = True
+        try:
+            yield
+        finally:
+            writing = False
+
+    def independent(*args, **kwargs):
+        assert not writing, 'Catalog identity transactions cannot include another component'
+
+    tracks.repository.catalog_transaction.side_effect = transaction
+    for operation in (tracks.keys.add_alias, tracks.metadata_choices.select, tracks.artists.observe,
+                      tracks.albums.link, tracks.keys.resolve_listening):
+        operation.side_effect = independent
+    assert tracks.upsert_track('video', 'Song', 'Artist', 'Album', 180, album_browse_id='release', created_at=10) == 7
+    tracks.artists.observe.assert_called_once_with(7, 'Artist', None, browse_id=None, now=10, metadata_delivery_id=20)
+    tracks.albums.link.assert_called_once_with(7, 'release', title='Album', artist='Artist')
+    tracks.repository.add_library_membership.assert_called_once_with(7, 10)
+
+
+def test_catalog_refresh_retains_selected_provider_fields_and_original_reset_values(tracks):
+    catalog_inputs(tracks, sources={'title': 'youtube', 'artist': 'youtube', 'orig_title': 'youtube',
+        'orig_artist': 'youtube', 'album': 'user', 'duration_s': 'youtube'})
+    tracks.upsert_track('video', 'Changed title', 'Changed credit', 'Changed album', 181, created_at=10)
+    assert [call.args for call in tracks.metadata_choices.select.call_args_list] == [(7, 'duration_s', 181, 'youtube')]
+    tracks.metadata_choices.capture_fields.assert_called_once()
+
+
+def test_explicit_observation_does_not_acquire_library_membership(tracks):
+    catalog_inputs(tracks, evidence=False)
+    tracks.repository.entry_key.return_value = 'song|artist'
+    assert tracks.observe_track('video', 'Song', 'Artist', now=10) == 'song|artist'
+    tracks.repository.add_library_membership.assert_not_called()
+    tracks.metadata_choices.capture_fields.assert_not_called()
+
+
+@pytest.mark.parametrize('bound', [False, True])
+def test_refresh_retries_a_retained_preferred_alias_without_admitting_an_unrelated_one(tracks, bound):
+    catalog_inputs(tracks, evidence=False)
+    tracks.repository.alias_binding_exists.return_value = bound
+    tracks.upsert_track('video', 'Song', 'Artist', preferred_key='imported|credit', created_at=10)
+    tracks.repository.alias_binding_exists.assert_called_once_with('imported|credit', 12)
+    assert [call.args[0] for call in tracks.keys.add_alias.call_args_list] == (
+        ['imported|credit', 'song|artist'] if bound else ['song|artist'])
+
+
+def test_upload_correction_delegates_to_its_workflow(tracks):
+    tracks.associate_youtube_item('video', 10, source='review', evidence={'matched': True}, now=100, same_recording=True)
+    tracks.associate_item.assert_called_once_with('video', 10, source='review', evidence={'matched': True}, now=100, same_recording=True)
+
+
+@pytest.mark.parametrize('available', ['yes', 2, -1, 0.5])
+def test_invalid_catalog_availability_cannot_create_an_entry(tracks, available):
+    with pytest.raises(ValueError, match='Availability'):
+        tracks.upsert_track('video', 'Song', 'Artist', available=available)
+    tracks.repository.catalog_transaction.assert_not_called()
+    tracks.keys.add_alias.assert_not_called()

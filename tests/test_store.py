@@ -319,9 +319,10 @@ def test_shared_store_ownership_check_rejects_unserialized_write(store):
     store.conn.set_trace_callback(lambda sql: statements.append((
         threading.current_thread().name, store._lock.held_by_current_thread, sql)))
     try:
-        # A real catalog publication with only the repository's serialization
+        # A real catalog row write with only the repository's serialization
         # decorator bypassed. SQLite's per-call lock and durability stay intact.
-        store.tracks.upsert_track.__wrapped__(store.tracks, "unowned", "Song", "Artist", "Alb", 200)
+        repo = store.tracks.repository
+        assert repo.create_recording.__wrapped__(repo, "unowned", "Song", "Artist", 0) > 0
     finally:
         store.conn.set_trace_callback(None)
     with pytest.raises(AssertionError, match="SQL without Store ownership"):

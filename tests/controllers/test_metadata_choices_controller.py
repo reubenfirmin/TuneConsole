@@ -1,6 +1,6 @@
 """Metadata choices coordinate mocked storage and files without opening SQLite."""
 from contextlib import contextmanager
-from unittest.mock import create_autospec
+from unittest.mock import Mock, create_autospec
 
 import pytest
 
@@ -27,8 +27,53 @@ def metadata():
                                'layout': 'runtime', 'choice': None}
     repo.reserve_identity.return_value = 12
     repo.query_identity.return_value = (8, 'Song', 'Artist')
+    repo.genre_matches.return_value = {'jazz': {}}
     return MetadataChoices(repo, create_autospec(RuntimeMetadataFiles, instance=True, spec_set=True),
                            create_autospec(MetadataDeliveries, instance=True, spec_set=True))
+
+
+@pytest.mark.parametrize('layout', ['legacy', 'evidence', 'runtime'])
+def test_import_fills_missing_fields_and_retains_hints_without_overwriting_selections(metadata, layout):
+    metadata.repository.import_inputs.return_value = dict(layout=layout,
+        track={'genre': '', 'mb_year': None, 'bpm': 120}, hints={'bpm'})
+    metadata.select = Mock()
+    metadata.deliveries.capture_state.return_value = 20
+    metadata.repository.store_observations.side_effect = lambda delivery, fields: {field: 21 for field in fields}
+    metadata.fill_import(7, {'genre': 'Jazz', 'mb_year': '2000', 'bpm': 121}, 'discovery_import', hint_source='release', now=10)
+    metadata.select.assert_called_once_with(7, 'mb_year', '2000', 'discovery_import', now=10)
+    if layout == 'runtime':
+        metadata.repository.store_hint.assert_not_called()
+        metadata.deliveries.capture_state.assert_not_called()
+    else:
+        assert [call.args for call in metadata.repository.store_hint.call_args_list] == [
+            (layout, 7, 'genre', 'release', 'Jazz', 21 if layout == 'evidence' else None),
+            (layout, 7, 'mb_year', 'release', '2000', 21 if layout == 'evidence' else None)]
+        assert metadata.deliveries.capture_state.call_count == (2 if layout == 'evidence' else 0)
+
+
+def test_import_hint_file_failure_does_not_publish_its_reference(metadata):
+    metadata.repository.import_inputs.return_value = dict(layout='evidence', track={'mb_year': '1999'}, hints=set())
+    metadata.deliveries.capture_state.side_effect = OSError('full')
+    with pytest.raises(OSError, match='full'):
+        metadata.fill_import(7, {'mb_year': '2000'}, 'discovery_import', hint_source='release', now=10)
+    metadata.repository.store_hint.assert_not_called()
+    metadata.repository.store_observations.assert_not_called()
+
+
+@pytest.mark.parametrize('layout', ['runtime', 'evidence', 'legacy'])
+def test_equivalent_recording_reuses_only_genuinely_missing_base_fields(metadata, layout):
+    metadata.repository.recording_reuse_inputs.return_value = dict(layout=layout, target_entry=9,
+        before={'genre': 'Jazz', 'mb_year': '2000', 'bpm': 120, 'energy': .8},
+        after={'genre': None, 'mb_year': None, 'bpm': 125, 'energy': ''},
+        selected={'mb_year', 'energy'}, sources={'genre': 'provider'})
+    metadata.select = Mock()
+    metadata.reuse_recording_selections(7, 12)
+    if layout == 'runtime':
+        metadata.select.assert_called_once_with(9, 'genre', 'Jazz', 'provider')
+        metadata.repository.copy_recording_selection.assert_not_called()
+    else:
+        metadata.repository.copy_recording_selection.assert_called_once_with(layout, 7, 12, 'genre')
+        metadata.select.assert_not_called()
 
 
 def test_runtime_choice_publishes_file_before_installing_sql_head(metadata):

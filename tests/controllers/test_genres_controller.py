@@ -28,13 +28,13 @@ def genres(monkeypatch):
     repository.transaction.side_effect = nullcontext
     repository.uses_keyed_preferences.return_value = True
     repository.current_key.side_effect = lambda key: key
-    repository.resolve.side_effect = lambda name: (genre_catalog.normalize(name), None)
+    repository.label_matches.side_effect = lambda label, normalized: {normalized}
     repository.genre_name.return_value = None
     repository.alias_conflicts.return_value = False
     repository.get_genre_whitelist.return_value = ['Jazz', 'Custom']
     repository.configuration_settings.return_value = {'genres_seeded': '1', 'genre_catalog_revision': 'old',
                                                      'genre_defaults': json.dumps(['Rock', 'Jazz'])}
-    return Genres(repository, create_autospec(Discovery, instance=True, spec_set=True))
+    return Genres(repository, create_autospec(Discovery, instance=True, spec_set=True).merge_genre_origins)
 
 
 @pytest.mark.parametrize('name', [None, '', '  ', 'é' * 513])
@@ -46,19 +46,19 @@ def test_invalid_rename_does_not_start_a_write(genres, name):
 
 def test_rename_preserves_original_alias_and_invalidates_after_write(genres):
     genres.repository.genre_name.return_value = 'Original Name'
-    genres.repository.resolve.side_effect = None
-    genres.repository.resolve.return_value = ('rock', None)
+    genres.repository.label_matches.side_effect = None
+    genres.repository.label_matches.return_value = {'rock'}
     genres.rename_genre('rock', 'New Name')
     genres.repository.rename.assert_called_once_with('rock', 'New Name', old_label_key='original name',
                                                      old_label='Original Name')
     genres.repository.invalidate.assert_called_once_with()
 
 
-@pytest.mark.parametrize('resolution', [('another', None), (None, 'ambiguous_genre')])
+@pytest.mark.parametrize('resolution', [{'another'}, {'rock', 'another'}])
 def test_rename_cannot_capture_another_identity_or_ambiguous_name(genres, resolution):
     genres.repository.genre_name.return_value = 'Original'
-    genres.repository.resolve.side_effect = None
-    genres.repository.resolve.return_value = resolution
+    genres.repository.label_matches.side_effect = None
+    genres.repository.label_matches.return_value = resolution
     with pytest.raises(ValueError, match='conflicts'):
         genres.rename_genre('rock', 'Taken')
     genres.repository.rename.assert_not_called()
@@ -75,8 +75,8 @@ def test_alias_conflict_cannot_change_identity_or_invalidate(genres):
 
 
 def test_custom_addition_resolves_before_admitting_a_new_identity(genres):
-    genres.repository.resolve.side_effect = None
-    genres.repository.resolve.return_value = (None, 'unknown_genre')
+    genres.repository.label_matches.side_effect = None
+    genres.repository.label_matches.return_value = set()
     genres.add_genre('Custom Style')
     genres.repository.insert_custom.assert_called_once_with('custom style', 'Custom Style')
     genres.repository.save_preference.assert_called_once_with('custom style', enabled=True, origin='user')
@@ -88,8 +88,8 @@ def test_custom_addition_resolves_before_admitting_a_new_identity(genres):
     ('Collision', 'unknown_genre', 'Another display name', 'collides'),
 ])
 def test_invalid_custom_identity_cannot_change_preferences(genres, name, reason, existing, error):
-    genres.repository.resolve.side_effect = None
-    genres.repository.resolve.return_value = (None, reason)
+    genres.repository.label_matches.side_effect = None
+    genres.repository.label_matches.return_value = {'first', 'second'} if reason == 'ambiguous_genre' else set()
     genres.repository.genre_name.return_value = existing
     with pytest.raises(ValueError, match=error):
         genres.add_genre(name)
@@ -98,7 +98,7 @@ def test_invalid_custom_identity_cannot_change_preferences(genres, name, reason,
 
 
 def test_missing_removal_is_harmless_but_ambiguous_removal_rejects(genres):
-    genres.repository.resolve.side_effect = [(None, 'unknown_genre'), (None, 'ambiguous_genre')]
+    genres.repository.label_matches.side_effect = [set(), {'first', 'second'}]
     genres.remove_genre('Missing')
     with pytest.raises(ValueError, match='Ambiguous'):
         genres.remove_genre('Ambiguous')
@@ -174,6 +174,8 @@ def test_model_axes_reject_ambiguity_and_use_catalog_family_changes(genres, monk
         'Custom': ('other:custom', 'custom'), 'Rock': ('rock-classic', None),
     }
     fallback.assert_called_once_with('Rock')
+    genres.repository.axis_matches.assert_called_once_with(
+        [('Alias', 'alias'), ('Ambiguous', 'ambiguous'), ('Custom', 'custom'), ('Rock', 'rock')])
 
 
 @pytest.mark.parametrize('preferences,expected', [
@@ -210,7 +212,7 @@ def test_merge_preference_is_explicit_and_discovery_finishes_before_taxonomy_wri
     genres.repository.genre_axis.return_value = None
     genres.repository.preferences.return_value = preferences
     genres.repository.apply_merge.side_effect = taxonomy
-    genres.discovery.merge_genre_origins.side_effect = discovery
+    genres.reconcile_origins.side_effect = discovery
     genres.merge_genres('previous', 'target', now=100)
     assert calls == ['discovery', 'taxonomy']
     genres.repository.apply_merge.assert_called_once_with('previous', 'target', expected,
@@ -225,7 +227,7 @@ def test_conflicting_axes_reject_before_any_discovery_or_taxonomy_write(genres):
     genres.repository.axis_counts.return_value = {'rec_lean': 2}
     with pytest.raises(ValueError, match='Conflicting current taste axes in rec_lean'):
         genres.merge_genres('previous', 'target')
-    genres.discovery.merge_genre_origins.assert_not_called()
+    genres.reconcile_origins.assert_not_called()
     genres.repository.transaction.assert_not_called()
     genres.repository.apply_merge.assert_not_called()
 

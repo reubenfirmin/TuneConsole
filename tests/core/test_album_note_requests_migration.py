@@ -37,7 +37,9 @@ def test_registered_upgrade_retains_order_values_and_exact_provider_owner(predec
     second = {**ALBUM, 'browse_id': 'unadmitted', 'year': 1999, 'requested_until': 1800}
     value = {ALBUM['browse_id']: ALBUM, second['browse_id']: second}
     seed(predecessor, value)
-    migrate(predecessor.conn, registry=registry.MIGRATIONS)
+    # v084 owns request conversion. Ordinary native-format reopening below
+    # proves the new owner without replaying unrelated numbered migrations.
+    migrate(predecessor.conn, registry=registry.MIGRATIONS[:84])
     predecessor._bind_repositories()
     assert predecessor.rec_proposals.get_proposals('album_note_requests') == value
     rows = list(predecessor.conn.execute('SELECT * FROM album_note_requests ORDER BY id'))
@@ -96,7 +98,7 @@ def test_note_file_cutover_backup_and_restart_preserve_last_good_and_demand(pred
     seed(predecessor, {ALBUM['browse_id']: ALBUM})
     with predecessor.conn:
         predecessor.conn.execute('INSERT INTO rec_proposals VALUES (?,?,?)', ('album_notes', json.dumps(value), 99.5))
-    migrate(predecessor.conn, registry=registry.MIGRATIONS)
+    migrate(predecessor.conn, registry=registry.MIGRATIONS[:84])
     predecessor._bind_repositories()
     assert predecessor.rec_proposals.get_proposals('album_notes') == value
     row = predecessor.conn.execute('SELECT * FROM album_note_outputs').fetchone()

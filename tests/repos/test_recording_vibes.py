@@ -136,15 +136,17 @@ def test_current_scores_have_exact_original_inputs_and_no_json_score_copy(versio
     assert (current['score'], current['support']) == (prediction['score'], prediction['support'])
     assert current['id'] != prediction['id']  # Equal scores do not identify different input versions.
     rid = store.conn.execute('SELECT id FROM recordings WHERE identity_key=?', (target,)).fetchone()[0]
-    assert store.vibe_predictions._current(rid)['version'] == vibe_preparation.version()
-    assert store.vibe_predictions.overlay({target: {}})[target]['vibes']['inputs_version'] == vibe_preparation.version()
+    from yt_playlist.rec import vibe_joint_model
+    expected_version = vibe_preparation.version() + '/' + vibe_joint_model.VERSION
+    assert store.vibe_predictions._current(rid)['version'] == expected_version
+    assert store.vibe_predictions.overlay({target: {}})[target]['vibes']['inputs_version'] == expected_version
     if vibe_versions.normalized(store.conn):
         with pytest.raises(sqlite3.IntegrityError, match='immutable'), store.conn:
             store.conn.execute("UPDATE vibe_versions SET value='changed' WHERE id=1")
         reopened = Store(store._db_path)
         try:
             reopened.init_schema()
-            assert reopened.vibe_predictions._current(rid)['version'] == vibe_preparation.version()
+            assert reopened.vibe_predictions._current(rid)['version'] == expected_version
         finally:
             reopened.conn.close()
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()

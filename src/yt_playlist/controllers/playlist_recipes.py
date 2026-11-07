@@ -3,6 +3,7 @@ import json
 import uuid
 
 from yt_playlist.core import playlist_recipe_policy as policy
+from yt_playlist.core.catalog_state import rekey_state
 
 
 class PlaylistRecipes:
@@ -88,3 +89,23 @@ class PlaylistRecipes:
 
     def get_recipe_created_ats(self):
         return self.repository.get_recipe_created_ats()
+
+    def rekey_recordings(self, keymap):
+        with self.guard():
+            self._rekey_recordings(keymap)
+
+    def _rekey_recordings(self, keymap):
+        for name in ('recipes', 'canvases'):
+            for scope, created in self.repository.document_created_ats(name).items():
+                original = self.get_recipe(scope) if name == 'recipes' else self.get_cluster_canvas(scope)
+                try:
+                    value = original if name == 'recipes' else json.loads(original)
+                    revised = rekey_state(value, keymap)
+                except (ValueError, TypeError):
+                    continue
+                if revised == value:
+                    continue
+                if name == 'recipes':
+                    self.set_recipe(scope, revised, created)
+                else:
+                    self.set_cluster_canvas(scope, json.dumps(revised), created)

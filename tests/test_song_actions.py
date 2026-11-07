@@ -335,19 +335,22 @@ def test_invalid_metadata_does_not_partially_save(songs, change):
 
 @pytest.mark.parametrize('video_id', ['owned-song', 'uncached-song'])
 def test_metadata_write_failure_rolls_back_the_entire_edit(songs, monkeypatch, video_id):
-    from yt_playlist.core import catalog
-
     before = songs['store'].tracks.metadata_for_video(video_id)
-    choose_field = catalog.choose_field
+    repository = songs['store'].metadata_choices.repository
+    store_choice = repository.store
+    written = []
 
-    def fail_year(conn, entry_id, field, value, *args, **kwargs):
+    def fail_year(inputs, field, value, *args, **kwargs):
         if field == 'mb_year':
             raise RuntimeError('write failed')
-        return choose_field(conn, entry_id, field, value, *args, **kwargs)
+        result = store_choice(inputs, field, value, *args, **kwargs)
+        written.append(field)
+        return result
 
-    monkeypatch.setattr(catalog, 'choose_field', fail_year)
+    monkeypatch.setattr(repository, 'store', fail_year)
     body = {'song': {'video_id': video_id, 'title': 'Original', 'artist': 'Original artist'},
             'title': 'Updated', 'artist': 'Updated artist', 'genre': 'Jazz', 'year': '2000'}
     with pytest.raises(RuntimeError, match='write failed'):
         songs['http'].post('/songs/metadata', json=body)
+    assert {'title', 'artist', 'genre'} <= set(written)
     assert songs['store'].tracks.metadata_for_video(video_id) == before

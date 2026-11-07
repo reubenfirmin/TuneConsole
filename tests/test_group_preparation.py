@@ -241,8 +241,15 @@ def test_fresh_library_publishes_from_real_capture_before_either_queue_drains(st
     assert progress['prepared'] == 3 and progress['pending_recordings'] == 9
     assert progress['sources'] == {'artist': 11}
     # More inputs improve the initial graph while both queues remain nonempty.
-    assert preparation.capture(1060) and preparation.capture(1061)
-    assert preparation.groups.step(1062)
-    assert group_serving.prepare(store, 1063)
+    # Qualified models share the bounded worker with source/recording turns.
+    # Require useful progress before either queue drains, without fixing which
+    # kind of work the next two turns must perform.
+    for turn in range(32):
+        preparation.capture(1060 + turn)
+        if store.prepared_content.progress()['prepared'] == 6:
+            break
+    assert store.prepared_content.progress()['prepared'] == 6
+    assert preparation.groups.step(1100), group_preparation.status(store)
+    assert group_serving.prepare(store, 1101)
     assert group_serving.view(store)['counts']['known'] == 6
     assert store.prepared_content.has_pending() and store.musical_profiles.pending()

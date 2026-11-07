@@ -199,17 +199,17 @@ def test_failed_publication_rolls_back_freshness_and_allows_retry(runtime_store,
     record(store, track, [observation()], 'first', 10)
     record(store, track, [observation()], 'newest', 30)
     before = list(store.conn.iterdump())
-    publish = files.publish
+    publish = store.enrichment_state.files.publish
 
     def interrupt(*args, **kwargs):
         publish(*args, **kwargs)
         raise RuntimeError('interrupted publication')
 
-    monkeypatch.setattr(files, 'publish', interrupt)
+    monkeypatch.setattr(store.enrichment_state.files, 'publish', interrupt)
     with pytest.raises(RuntimeError, match='interrupted publication'):
         record(store, track, [observation(.2)], 'failed', 40)
     assert list(store.conn.iterdump()) == before
-    monkeypatch.setattr(files, 'publish', publish)
+    monkeypatch.setattr(store.enrichment_state.files, 'publish', publish)
     record(store, track, [observation(.3)], 'retry', 40)
     record(store, track, [observation(.1)], 'late', 35)
     assert inputs(store)['mood_party']['value'] == .3

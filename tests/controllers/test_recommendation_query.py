@@ -6,7 +6,7 @@ from tests.repository_mock_support import no_database
 from yt_playlist.controllers.genres import Genres
 from yt_playlist.controllers.recommendation_eligibility import RecommendationEligibility
 from yt_playlist.controllers.recommendation_query import RecommendationQuery
-from yt_playlist.repos.artists import ArtistRepo
+from yt_playlist.controllers.artists import Artists
 from yt_playlist.repos.rec_query import RecQueryRepo
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -18,7 +18,7 @@ def query():
         create_autospec(RecQueryRepo, instance=True, spec_set=True),
         create_autospec(Genres, instance=True, spec_set=True),
         create_autospec(RecommendationEligibility, instance=True, spec_set=True),
-        create_autospec(ArtistRepo, instance=True, spec_set=True))
+        create_autospec(Artists, instance=True, spec_set=True))
 
 
 def test_artist_genres_choose_dominant_and_preserve_ambiguous_identities(query):
@@ -35,10 +35,12 @@ def test_artist_genres_choose_dominant_and_preserve_ambiguous_identities(query):
 def test_artist_fallback_uses_dominant_genre_and_earliest_valid_year(query):
     rows = [{'genre': 'Jazz', 'mb_year': '2003-01-01'}, {'genre': 'Techno', 'mb_year': 'bad'},
             {'genre': 'Techno', 'mb_year': '1991'}, {'genre': '', 'mb_year': None}]
-    query.repository.artist_metadata_for.return_value = {'Artist': rows, 'No Tags': []}
-    assert query.artist_genre_years_for(['Artist', 'Missing'], per_artist=12) == {
+    query.artists.resolve_many.return_value = {'Artist': 7, 'No Tags': 8, 'Missing': None}
+    query.repository.artist_metadata_for.return_value = {7: rows, 8: []}
+    assert query.artist_genre_years_for(['Artist', 'No Tags', 'Missing'], per_artist=12) == {
         'Artist': {'genre': 'Techno', 'year': 1991}, 'No Tags': {'genre': '', 'year': None}}
-    query.repository.artist_metadata_for.assert_called_once_with(['Artist', 'Missing'], per_artist=12)
+    query.artists.resolve_many.assert_called_once_with(['Artist', 'No Tags', 'Missing'], exact=True)
+    query.repository.artist_metadata_for.assert_called_once_with({7, 8}, per_artist=12)
     query.repository.artist_metadata.return_value = [
         *[{'artist': 'Artist', **row} for row in rows], {'artist': 'Unknown', 'genre': '', 'mb_year': 'bad'}]
     assert query.artist_genre_years() == {'Artist': {'genre': 'Techno', 'year': 1991}}
@@ -113,3 +115,17 @@ def test_catalog_queries_receive_resolved_duration(query):
     query.repository.library_songs.return_value = [{'key': 'song'}]
     assert query.library_songs() == [{'key': 'song'}]
     query.repository.library_songs.assert_called_once_with(maximum_duration=600)
+
+
+def test_library_artist_names_are_composed_after_the_database_read(query):
+    query.repository.library_artist_ids.return_value = [7, 8, 9]
+    query.artists.public_keys.return_value = {7: 'unique', 8: '@artist:8', 9: '@artist:9'}
+    assert query.library_artists() == {'unique', '@artist:8', '@artist:9'}
+    query.artists.public_keys.assert_called_once_with([7, 8, 9])
+
+
+def test_artist_track_query_passes_only_resolved_identities_to_sql(query):
+    query.artists.resolve_many.return_value = {'Alias': 7, 'Artist': 7, 'Ambiguous': None}
+    query.repository.tracks_by_artists.return_value = [{'key': 'song'}]
+    assert query.tracks_by_artists(['Alias', 'Artist', 'Ambiguous']) == [{'key': 'song'}]
+    query.repository.tracks_by_artists.assert_called_once_with({7})

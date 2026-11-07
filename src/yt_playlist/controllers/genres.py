@@ -8,19 +8,29 @@ from yt_playlist.util import genre_catalog
 
 
 class Genres:
-    def __init__(self, repository, discovery):
+    def __init__(self, repository, reconcile_origins):
         self.repository = repository
-        self.discovery = discovery
+        self.reconcile_origins = reconcile_origins
 
     def taxonomy(self):
         return genre_policy.taxonomy(self.repository.taxonomy_facts())
+
+    def resolve(self, label):
+        if label is None or label == '':
+            return None, None
+        if not isinstance(label, str):
+            raise ValueError('A genre label must be text or null')
+        matches = self.repository.label_matches(label, genre_catalog.normalize(label))
+        if len(matches) == 1:
+            return next(iter(matches)), None
+        return None, 'ambiguous_genre' if matches else 'unknown_genre'
 
     def enabled_matcher(self):
         return genre_policy.matcher(self.repository.matcher_facts())
 
     def _admit(self, name):
         genre_policy.validate_name(name, custom=True)
-        resolved, reason = self.repository.resolve(name)
+        resolved, reason = self.resolve(name)
         key = genre_policy.custom_key(name, resolved, reason)
         if resolved is None:
             if self.repository.genre_name(key) is not None:
@@ -35,7 +45,7 @@ class Genres:
             old = self.repository.genre_name(key)
             if old is None:
                 raise ValueError('Unknown genre identity')
-            resolved, reason = self.repository.resolve(name)
+            resolved, reason = self.resolve(name)
             if reason == 'ambiguous_genre' or resolved not in (None, key):
                 raise ValueError('Genre name conflicts with another identity')
             self.repository.rename(key, name, old_label_key=genre_catalog.normalize(old), old_label=old)
@@ -103,7 +113,7 @@ class Genres:
     def remove_genre(self, name):
         with self.repository.transaction():
             if self.repository.uses_keyed_preferences():
-                key, reason = self.repository.resolve(name)
+                key, reason = self.resolve(name)
                 if reason == 'ambiguous_genre':
                     raise ValueError('Ambiguous genre label: ' + name)
                 if key is not None:
@@ -112,7 +122,11 @@ class Genres:
                 self.repository.remove_legacy_genre(name)
 
     def feature_axes(self, labels):
-        return axes_from_matches(self.repository.axis_matches(labels))
+        labels = list(dict.fromkeys(label for label in labels if label))
+        if any(not isinstance(label, str) for label in labels):
+            raise ValueError('A genre label must be text or null')
+        prepared = [(label, genre_catalog.normalize(label)) for label in labels]
+        return axes_from_matches(self.repository.axis_matches(prepared))
 
     def family_members(self, families):
         return self.repository.family_members(families)
@@ -124,7 +138,7 @@ class Genres:
         self._merge_plan(source, target)
         # Preserve originals and move discovery provenance before retiring the
         # taxonomy key. A failed taxonomy write leaves that key available to retry.
-        self.discovery.merge_genre_origins(source, target)
+        self.reconcile_origins(source, target)
         with self.repository.transaction():
             old_axis, new_axis, kind, preference = self._merge_plan(source, target)
             if old_axis is not None and new_axis is None:

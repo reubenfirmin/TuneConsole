@@ -11,6 +11,19 @@ class Enrichment:
     def __init__(self, repository, choices, files):
         self.repository, self.choices, self.files = repository, choices, files
 
+    def refresh_genre(self, recording_id, answers, providers, *, now=None):
+        inputs = self.repository.genre_refresh_input(recording_id)
+        if inputs is None:
+            return
+        replacement = selections.refreshed_genre(inputs['source'], answers, providers)
+        if replacement is None:
+            return
+        genre, source = replacement
+        observations = self.reuse_provider_fields(inputs['entry_id'], source, {'genre': genre}, now=now, select=False) if inputs['attempts'] else {}
+        if inputs['attempts'] and 'genre' not in observations:
+            return
+        self.choices.select(inputs['entry_id'], 'genre', genre, source, now=now, observation_id=observations.get('genre'))
+
     def apply_provider_fields(self, track_id, provider, fields, *, providers=(), delivery_id=None, now=None):
         at = clock(now)
         facts = self.repository.provider_inputs(track_id, provider)

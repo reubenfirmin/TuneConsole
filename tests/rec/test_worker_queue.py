@@ -204,6 +204,12 @@ def test_model_backoff_preserves_retry_without_delaying_ratings(scheduled, monke
 
     monkeypatch.setattr(worker, "_do_rebuild", fail)
     monkeypatch.setattr(worker.tasks, 'ratings', lambda: calls.append('rating') or set())
+    # Ratings enqueue Home publication separately. Its provider work and retry
+    # clock are independent of the full-model backoff exercised here.
+    monkeypatch.setattr(worker.tasks, 'home', lambda: False)
+    monkeypatch.setattr(worker.tasks, 'tv', lambda: False)
+    monkeypatch.setattr(worker.preparation, 'due', lambda *_: False)
+    worker.ctx.store.settings.set_setting('rec_group_shadow', '0')
     worker.trigger()
     targets.pop()()
     assert calls == ['full', 'rating']

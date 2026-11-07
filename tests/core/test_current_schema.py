@@ -71,7 +71,7 @@ def predecessor_templates(tmp_path_factory):
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv('YT_PLAYLIST_HOME', str(root / 'app-home'))
         with closing(connect(root / 'chain.db')) as chain:
-            for version in sorted(set(PREDECESSOR_VERSIONS + FOREIGN_KEY_VERSIONS)):
+            for version in sorted(set(PREDECESSOR_VERSIONS + FOREIGN_KEY_VERSIONS + (64,))):
                 migrate(chain, registry=registry.MIGRATIONS[:version])
                 from tests.prepared_fixture_support import coordinates
                 assert not coordinates(chain), 'Empty predecessor retains external files'
@@ -154,6 +154,14 @@ def policy_predecessor(conn):
                  'identity_key TEXT NOT NULL,video_id TEXT,played_at REAL NOT NULL,playlist_ytm_id TEXT,like_status TEXT)')
     migrate(conn, registry=registry.MIGRATIONS[:31])
     populate(conn, 31)
+
+
+@pytest.fixture(scope='module')
+def policy_template():
+    with closing(connect()) as source:
+        policy_predecessor(source)
+        source.execute('PRAGMA query_only=ON')
+        yield source
 
 
 @pytest.mark.parametrize('version', FOREIGN_KEY_VERSIONS)
@@ -407,6 +415,22 @@ def test_populated_historical_chain_preserves_each_boundary(
             assert objects(conn) == expected, version
             assert tuple(conn.execute('SELECT id,title,artist FROM tracks').fetchone()) == (17, 'Song', 'Artist'), version
             assert conn.execute("SELECT value FROM settings WHERE key='personal-setting'").fetchone()[0] == 'retain', version
+            if version == 31:
+                with conn:
+                    conn.executemany(
+                        'INSERT INTO play_events(identity_id,identity_key,video_id,played_at,is_generated,source) '
+                        "VALUES (1,'song|artist','song',?,?, 'live')", [(1, None), (2, 0), (3, 1)])
+                events = list(map(tuple, conn.execute(
+                    'SELECT id,video_id,played_at,is_generated FROM play_events ORDER BY id')))
+                calendar = list(map(tuple, conn.execute('SELECT event_id,day FROM play_event_calendar ORDER BY event_id')))
+                sources = list(map(tuple, conn.execute('SELECT event_id,source FROM play_event_sources ORDER BY event_id')))
+            if version >= 31:
+                assert list(map(tuple, conn.execute(
+                    'SELECT id,video_id,played_at,is_generated FROM play_events ORDER BY id'))) == events, version
+                assert list(map(tuple, conn.execute(
+                    'SELECT event_id,day FROM play_event_calendar ORDER BY event_id'))) == calendar, version
+                assert list(map(tuple, conn.execute(
+                    'SELECT event_id,source FROM play_event_sources ORDER BY event_id'))) == sources, version
             if version < 33:
                 assert tuple(conn.execute('SELECT snapshot_id,identity_key FROM history_items').fetchone()) == (
                     1, 'song|artist'), version
@@ -621,10 +645,12 @@ def test_populated_historical_replay_admits_regular_schema_without_losing_rows(
 
 
 @pytest.mark.parametrize('has_counts_view', [False, True])
-def test_v037_installed_during_home_work_upgrades_without_losing_evidence(has_counts_view, monkeypatch):
+def test_v037_installed_during_home_work_upgrades_without_losing_evidence(
+        has_counts_view, monkeypatch, predecessor_templates):
     monkeypatch.setenv('TZ', 'UTC')
     conn = connect()
-    migrate(conn, registry=registry.MIGRATIONS[:37])
+    with closing(connect(predecessor_templates[37])) as source:
+        source.backup(conn)
     populate(conn, 37)
     if has_counts_view:
         conn.execute('CREATE VIEW listening_day_counts AS SELECT identity_key,COUNT(*) plays '
@@ -633,13 +659,15 @@ def test_v037_installed_during_home_work_upgrades_without_losing_evidence(has_co
         conn.commit()
     fields = [row[1] for row in conn.execute('PRAGMA table_info(listening_observations)')]
     evidence = list(map(tuple, conn.execute('SELECT * FROM listening_observations')))
-    replay(conn)
-    projection = ','.join('account_id' if field == 'identity_id' else field for field in fields)
-    assert list(map(tuple, conn.execute('SELECT '+projection+' FROM listening_observation_subjects'))) == evidence
+    # v038 owns replacing either installed view shape. Later representation
+    # changes have one populated full-history owner above, rather than another
+    # identical suffix for each optional-view variant.
+    migrate(conn, registry=registry.MIGRATIONS[:38])
+    assert list(map(tuple, conn.execute('SELECT '+','.join(fields)+' FROM listening_observations'))) == evidence
     assert tuple(conn.execute('SELECT * FROM listening_day_counts').fetchone()) == ('song|artist', 1)
-    assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == LATEST_VERSION
+    assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 38
     before = list(conn.iterdump())
-    migrate(conn)
+    migrate(conn, registry=registry.MIGRATIONS[:38])
     assert list(conn.iterdump()) == before
     conn.close()
 
@@ -718,30 +746,32 @@ def test_existing_store_rebinds_owners_after_upgrade_and_both_memory_readers_use
 
 
 @pytest.mark.parametrize('missing_lookup', [False, True])
-def test_installed_v64_with_earlier_group_definition_gets_library_lookup(missing_lookup):
+def test_installed_v64_with_earlier_group_definition_gets_library_lookup(missing_lookup, predecessor_templates):
     with connect() as conn:
-        migrate(conn, registry=registry.MIGRATIONS[:64])
+        with closing(connect(predecessor_templates[64])) as source:
+            source.backup(conn)
         populate(conn, 64)
         if missing_lookup:
             conn.execute('DROP INDEX ix_group_library_inputs')
             conn.commit()
         fields = ','.join(row['name'] for row in conn.execute('PRAGMA table_info(recordings)'))
         before = list(map(tuple, conn.execute('SELECT * FROM recordings')))
-        replay(conn)
-        from yt_playlist.core.genre_classifications import expression
-        projected = ','.join(expression('r')+' AS genre' if field == 'genre' else 'r.'+field
-                             for field in fields.split(','))
-        assert list(map(tuple, conn.execute('SELECT '+projected+' FROM recordings r'))) == before
+        # v065 repairs the missing lookup; v069 and subsequent catalog owners
+        # retain their populated full-history checks above.
+        migrate(conn, registry=registry.MIGRATIONS[:65])
+        assert list(map(tuple, conn.execute('SELECT '+fields+' FROM recordings'))) == before
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='ix_group_library_inputs'").fetchone()
-        current.validate(conn)
-        with connect() as fresh:
-            migrate(fresh)
-            assert objects(conn, canonical_versions=True) == objects(fresh, canonical_versions=True)
+        from yt_playlist.core.migrations import runner, v065_group_library_lookup
+        runner.validate_version(conn, 65)
+        v065_group_library_lookup.validate(conn)
+        unchanged = list(conn.iterdump())
+        migrate(conn, registry=registry.MIGRATIONS[:65])
+        assert list(conn.iterdump()) == unchanged
 
 
-def test_installed_optional_generated_column_is_migrated_with_all_event_evidence():
+def test_installed_optional_generated_column_is_migrated_with_all_event_evidence(policy_template):
     with connect() as conn:
-        policy_predecessor(conn)
+        policy_template.backup(conn)
         conn.executemany('INSERT INTO play_events(identity_id,identity_key,video_id,played_at,is_generated,source) '
                          "VALUES (1,'song|artist','song',?,?, 'live')", [(1, None), (2, 0), (3, 1)])
         conn.execute("INSERT INTO spotify_history_listens VALUES (1,'spotify:track:one',1,1,NULL)")
@@ -750,24 +780,27 @@ def test_installed_optional_generated_column_is_migrated_with_all_event_evidence
         events = list(map(tuple, conn.execute(f'SELECT {fields} FROM play_events ORDER BY id')))
         evidence = {table: list(map(tuple, conn.execute(f'SELECT * FROM {table}'))) for table in (
             'play_event_calendar', 'play_event_sources', 'spotify_history_listens')}
-        replay(conn)
-        projected = ','.join('s.source' if f=='source' else 'p.account_id' if f=='identity_id' else 'p.'+f for f in fields.split(','))
-        assert list(map(tuple, conn.execute(f'SELECT {projected} FROM play_event_subjects p JOIN play_event_sources s ON s.event_id=p.id ORDER BY p.id'))) == events
+        # This missing-CHECK repair belongs to v032. The populated chain above
+        # independently carries all three policies, calendars and sources to
+        # the latest layout.
+        migrate(conn, registry=registry.MIGRATIONS[:32])
+        assert list(map(tuple, conn.execute(f'SELECT {fields} FROM play_events ORDER BY id'))) == events
         for table, rows in evidence.items():
             assert list(map(tuple, conn.execute(f'SELECT * FROM {table}'))) == rows
-        current.validate(conn)
+        from yt_playlist.core.migrations import runner
+        runner.validate_version(conn, 32)
         with pytest.raises(sqlite3.IntegrityError, match='CHECK constraint failed'):
             conn.execute('UPDATE play_events SET is_generated=2')
         conn.rollback()
         before = list(conn.iterdump())
-        migrate(conn)
+        migrate(conn, registry=registry.MIGRATIONS[:32])
         assert list(conn.iterdump()) == before
 
 
-def test_policy_repair_failure_restores_column_data_and_history_without_backups(tmp_path, monkeypatch):
+def test_policy_repair_failure_restores_column_data_and_history_without_backups(tmp_path, monkeypatch, policy_template):
     path = tmp_path / 'state.db'
     with connect(path) as conn:
-        policy_predecessor(conn)
+        policy_template.backup(conn)
         conn.execute("INSERT INTO play_events(identity_id,identity_key,played_at,is_generated) VALUES (1,'song|artist',1,1)")
         conn.commit()
         before = list(conn.iterdump())
@@ -782,8 +815,9 @@ def test_policy_repair_failure_restores_column_data_and_history_without_backups(
         assert not (tmp_path / 'backups').exists()
         assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
         monkeypatch.setattr(registry, 'MIGRATIONS', original)
-        replay(conn)
-        current.validate(conn)
+        migrate(conn, registry=registry.MIGRATIONS[:32])
+        from yt_playlist.core.migrations import runner
+        runner.validate_version(conn, 32)
 
 
 def test_policy_repair_refuses_invalid_values_without_discarding_them():

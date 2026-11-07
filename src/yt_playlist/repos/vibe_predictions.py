@@ -247,9 +247,11 @@ class VibePredictionsRepo(Repo):
 
     @synchronized
     def joint_album_facts(self, keys):
-        ids = {key: row[0] for key in keys for row in self.conn.execute(
-            'SELECT id FROM recordings WHERE identity_key=?', (key,))}
-        albums = vibe_models.album_facts(self.conn, ids.values())
+        with keyed_reads(self._store, 'recordings', keys):
+            ids = {key: row[0] for key in keys for row in self.conn.execute(
+                'SELECT id FROM recordings WHERE identity_key=?', (key,))}
+        with keyed_reads(self._store, 'catalog_entries', ids.values()):
+            albums = vibe_models.album_facts(self.conn, ids.values())
         return ids, albums
 
     @synchronized

@@ -7,6 +7,14 @@ from yt_playlist.core import metadata_runtime, metadata_values, genre_classifica
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read
 
 class EnrichmentRepo(Repo):
+    @synchronized
+    def genre_refresh_input(self, recording_id):
+        entry = self.conn.execute('SELECT id FROM catalog_entries WHERE recording_id=? ORDER BY id LIMIT 1', (recording_id,)).fetchone()
+        if entry is None:
+            return None
+        return {'entry_id': entry[0], 'source': metadata.selected_source(self.conn, entry[0], 'genre'),
+                'attempts': metadata_attempts.available(self.conn)}
+
     @snapshot_read
     def provider_inputs(self, entry, provider):
         entry = catalog.resolve_entry(self.conn, entry)

@@ -66,6 +66,11 @@ def axis_matches(conn, labels):
     labels = list(dict.fromkeys(label for label in labels if label))
     if any(not isinstance(label, str) for label in labels):
         raise ValueError('A genre label must be text or null')
+    return axis_match_rows(conn, [(label, normalize(label)) for label in labels])
+
+
+def axis_match_rows(conn, labels):
+    """Read canonical identity/family candidates for supplied label/normalized pairs."""
     if not labels:
         return {}
     redirected = conn.execute("SELECT 1 FROM sqlite_schema WHERE name='genre_redirects'").fetchone() is not None
@@ -89,8 +94,8 @@ def axis_matches(conn, labels):
             'UNION SELECT w.label,a.genre_key FROM wanted w JOIN aliases a ON a.label=w.label COLLATE NOCASE) '
             'SELECT m.label,' + current + ',c.family_key FROM matches m ' + redirects +
             'JOIN genre_catalog c ON c.key=' + current,
-            [value for label in page for value in (label, normalize(label))])
-        matches = {label: {} for label in page}
+            [value for pair in page for value in pair])
+        matches = {label: {} for label, normalized in page}
         for label, key, family_key in rows:
             matches[label][key] = family_key
         result.update(matches)

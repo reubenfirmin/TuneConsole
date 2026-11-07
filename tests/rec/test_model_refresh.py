@@ -27,9 +27,9 @@ from tests.home_fixture_support import (home_routes_only, publish_menu, returnin
 from tests.prepared_fixture_support import prepared_template
 
 
-def seed(store, *, distinct_albums=False, track_count=96, mode_count=3):
-    # Ingest one complete input batch. Keep all recordings, eight overlapping
-    # baskets and audio values; per-field commits are unrelated to model fits.
+def seed(store, *, distinct_albums=False, track_count=80, mode_count=3):
+    # Keep the actual eighty-subject mode-admission boundary, three distinct
+    # genres, eight overlapping baskets and audio for real numerical parity.
     with atomic_write(store):
         iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
         tids = []

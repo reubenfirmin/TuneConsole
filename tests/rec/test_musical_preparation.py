@@ -295,8 +295,8 @@ def test_recording_snapshot_rejects_override_race_and_explicit_null_blocks_fallb
     with store.conn:
         catalog.choose_field(store.conn, tid, 'energy', .2)
     original = MusicalProfiles.recording_inputs
-    def change(repo, keys):
-        result = original(repo, keys)
+    def change(repo, keys, **kwargs):
+        result = original(repo, keys, **kwargs)
         with store.conn:
             catalog.choose_field(store.conn, tid, 'energy', None)
         return result

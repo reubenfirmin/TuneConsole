@@ -127,10 +127,23 @@ class RecModelRepo(Repo):
     @synchronized
     def publish_ratings(self, deleted, actions, inserted):
         with self.conn.atomic():
-            self.conn.executemany("DELETE FROM rec_feedback WHERE item_key=? AND kind IN ('like','dislike') AND kind<>?", deleted)
-            self.conn.executemany("UPDATE rec_feedback SET reason='action' WHERE surface='like' AND item_key=? AND scope=''", actions)
+            self._publish_ratings(deleted, actions, inserted)
+
+    def _publish_ratings(self, deleted, actions, inserted):
+        self.conn.executemany("DELETE FROM rec_feedback WHERE item_key=? AND kind IN ('like','dislike') AND kind<>?", deleted)
+        self.conn.executemany("UPDATE rec_feedback SET reason='action' WHERE surface='like' AND item_key=? AND scope=''", actions)
+        self.conn.executemany('INSERT INTO rec_feedback(surface,item_key,kind,reason,scope,until,created_at) '
+                              "VALUES (?,?,?,?,'',?,?)", inserted)
+
+    @synchronized
+    def publish_association_ratings(self, deleted, actions, inserted, ages, guards):
+        with self.conn.atomic():
+            self._publish_ratings(deleted, actions, inserted)
+            self.conn.executemany("UPDATE rec_feedback SET created_at=?,until=? WHERE surface=? AND item_key=? AND scope=''", ages)
             self.conn.executemany('INSERT INTO rec_feedback(surface,item_key,kind,reason,scope,until,created_at) '
-                                  "VALUES (?,?,?,?,'',?,?)", inserted)
+                "VALUES ('like_grad',?,'like_grad',?,'',NULL,?) ON CONFLICT(surface,item_key,scope) "
+                'DO UPDATE SET created_at=excluded.created_at,reason=excluded.reason '
+                'WHERE rec_feedback.created_at IS NULL OR excluded.created_at<rec_feedback.created_at', guards)
 
     @lookup_read
     def unban_facts(self, key):

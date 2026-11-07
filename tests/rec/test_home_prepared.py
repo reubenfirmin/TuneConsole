@@ -1074,7 +1074,7 @@ def test_hydrated_menus_accumulate_losslessly_and_serve_after_reopen(file_backed
                 # profile preservation and a logical document over four MB.
                 value['musical']['captured_features'] = {
                     f'feature-{i}': (i + 1) / 137 for i in range(3)}
-                value['musical']['captured_source'] = 'fixture-source-observation|' * 1000
+                value['musical']['captured_source'] = 'fixture-source-observation|' * 800
             for item in value.values():
                 hydrate(item)
         elif isinstance(value, list):
@@ -1128,26 +1128,30 @@ def test_hydrated_menus_accumulate_losslessly_and_serve_after_reopen(file_backed
         assert home_prepared.load(reopened, 1001) == payload
         offer = home_prepared.cards(reopened, payload, 1001, service(reopened), record=False)
         assert offer.protos
-        key = offer.protos[0]['tracks'][0]['key']
-        seed_dislike(reopened, key, until=None, now=1002)
-        served = home_prepared.cards(reopened, payload, 1002, service(reopened), record=False)
-        assert [p['tracks'] for p in served.protos] == [p['tracks'] for p in offer.protos]
-        # A failed replacement cannot hide the fully accumulated publication.
-        def fail(*args, **kwargs):
-            raise OSError('Controlled output-volume failure')
-        monkeypatch.setattr(home_cache.fao, 'write', fail)
-
-        def replacement(self, request):
-            result = original(self, request)
-            clock[0] += home_prepared.PREPARE_BUDGET_S * .6
-            return result
-
-        monkeypatch.setattr(home_cards.HomeCards, 'cards', replacement)
-        with pytest.raises(OSError, match='output-volume'):
-            home_prepared.prepare_mixes(reopened, 1003)
-        assert reopened.rec_proposals.get_proposals(home_prepared.SURFACE) == payload
+        menu = next(menu for menu in payload['menus'] if menu['epoch'] == offer.protos[0]['assignment']['menu'])
+        assert [proto['tracks'] for proto in offer.protos] == [proto['tracks'] for proto in menu['protos']]
     finally:
         reopened.conn.close()
+
+
+def test_failed_menu_file_replacement_preserves_last_good_publication(
+        publication_inputs, one_menu_per_attempt, monkeypatch):
+    # Failure retention does not require twelve multi-megabyte alternatives.
+    # The large-document owner above checks exact accumulation and disk reopen;
+    # test_capacity_projection_preserves_worker_menu_after_feedback owns feedback.
+    store = publication_inputs.store
+    previous = home_prepared.prepare_mixes(store, 1000)
+    assert previous and previous['menus'][0]['protos']
+    original = home_cache.encoded(store, home_prepared.SURFACE)
+
+    def fail(*args, **kwargs):
+        raise OSError('Controlled output-volume failure')
+
+    monkeypatch.setattr(home_cache.fao, 'write', fail)
+    with pytest.raises(OSError, match='output-volume'):
+        home_prepared.prepare_mixes(store, 1001)
+    assert home_cache.encoded(store, home_prepared.SURFACE) == original
+    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == previous
 
 
 def test_preparation_can_publish_while_ordinary_unrelated_ui_writes_continue(

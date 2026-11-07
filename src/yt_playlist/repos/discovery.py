@@ -9,8 +9,7 @@ from contextlib import contextmanager, ExitStack
 from yt_playlist.core import album_aliases, album_memberships, discovery_provenance as provenance
 
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
-from yt_playlist.core import catalog, artists, albums, genre_classifications, metadata, metadata_evidence, metadata_hints, metadata_runtime
-from yt_playlist.core.discovery_sources import retain as retain_source
+from yt_playlist.core import artist_keys, entity_names, genre_classifications
 from yt_playlist.repos import proposal_cache
 from yt_playlist.core.preparation.discovery_publication import read_owners
 
@@ -27,18 +26,192 @@ _GENERATED_PL = "(SELECT playlist_scope_id FROM quarantined_playlists)"
 
 
 class DiscoveryRepo(Repo):
+    @snapshot_read
+    def track_reassociation_inputs(self, video, previous, target):
+        typed = provenance.available(self.conn)
+        member = self.conn.execute('SELECT * FROM discovery_memberships WHERE recording_id=?', (previous,)).fetchone()
+        remaining = self.conn.execute('SELECT MIN(id) FROM catalog_entries WHERE recording_id=? AND video_id IS NOT ?',
+            (previous, video)).fetchone()[0]
+        sources = [dict(row) for row in self.conn.execute('SELECT * FROM discovery_sources WHERE recording_id=? ' +
+            ('' if remaining is None else 'AND input_video_id=?'), (previous,) if remaining is None else (previous, video))]
+        originals = []
+        for row in sources:
+            predicate = 'origin_id=? AND input_video_id IS ?' if typed else 'source_token=?'
+            parameters = (row['origin_id'], row['input_video_id']) if typed else (row['source_token'],)
+            collision = self.conn.execute('SELECT * FROM discovery_sources WHERE recording_id=? AND ' + predicate,
+                (target, *parameters)).fetchone()
+            originals.extend([row] + ([dict(collision)] if collision else []))
+        return dict(typed=typed, previous=previous, target=target, video=video, remaining=remaining,
+            member=dict(member) if member else None, sources=sources, originals=originals,
+            impressions=[dict(row) for row in self.conn.execute(
+                'SELECT * FROM discovery_impressions WHERE recording_id IN (?,?)', (previous, target))] if typed and remaining is None else [],
+            legacy=[dict(row) for row in self.conn.execute(
+                'SELECT * FROM discovery_legacy_offers WHERE recording_id IN (?,?)', (previous, target))] if typed and remaining is None else [])
+
+    @synchronized
+    def finish_track_reassociation(self, inputs, *, retain_member, membership_found, source_identities):
+        previous, target, video = inputs['previous'], inputs['target'], inputs['video']
+        with self.conn.atomic(join=True):
+            member, remaining = inputs['member'], inputs['remaining']
+            if retain_member:
+                entry = self.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?', (video,)).fetchone()[0]
+                if inputs['typed']:
+                    self.conn.execute('INSERT INTO discovery_memberships(recording_id,entry_id,found_at) VALUES (?,?,?) '
+                        'ON CONFLICT(recording_id) DO UPDATE SET found_at=min(coalesce(found_at,excluded.found_at),'
+                        'coalesce(excluded.found_at,found_at))', (target, entry, membership_found))
+                elif remaining is None:
+                    from yt_playlist.core.discovery_sources import merge_membership
+                    merge_membership(self.conn, target, {**member, 'entry_id': entry})
+                else:
+                    self.conn.execute('INSERT INTO discovery_memberships(recording_id,entry_id,found_at) VALUES (?,?,?) '
+                        'ON CONFLICT(recording_id) DO NOTHING', (target, entry, membership_found))
+            for row, identity in zip(inputs['sources'], source_identities, strict=True):
+                if inputs['typed']:
+                    provenance.retain(self.conn, target, row['origin_id'], row['input_video_id'],
+                        row['last_found_at'], first_found_at=row['first_found_at'])
+                    self.conn.execute('DELETE FROM discovery_sources WHERE id=?', (row['id'],))
+                else:
+                    self.conn.execute('INSERT INTO discovery_sources(recording_id,source_token,input_video_id,found_at,'
+                        'source_type,source_id,last_found_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(recording_id,source_token) '
+                        'DO UPDATE SET found_at=min(coalesce(found_at,excluded.found_at),coalesce(excluded.found_at,found_at)),'
+                        'last_found_at=max(coalesce(last_found_at,excluded.last_found_at),coalesce(excluded.last_found_at,last_found_at))',
+                        (target, row['source_token'], row['input_video_id'], row['found_at'], *identity, row['last_found_at']))
+                    self.conn.execute('DELETE FROM discovery_sources WHERE recording_id=? AND source_token=?',
+                        (previous, row['source_token']))
+            if inputs['typed']:
+                for row in inputs['impressions']:
+                    if row['recording_id'] == previous:
+                        self.conn.execute('INSERT INTO discovery_impressions(view_id,recording_id,shown_at) VALUES (?,?,?) '
+                            'ON CONFLICT(view_id,recording_id) WHERE recording_id IS NOT NULL '
+                            'DO UPDATE SET shown_at=min(shown_at,excluded.shown_at)', (row['view_id'], target, row['shown_at']))
+                for row in inputs['legacy']:
+                    if row['recording_id'] == previous:
+                        provenance.retain_legacy(self.conn, 'track', target, row['offered_count'], row['first_shown'], row['last_shown'])
+                if remaining is None:
+                    self.conn.execute('DELETE FROM discovery_impressions WHERE recording_id=?', (previous,))
+                    self.conn.execute('DELETE FROM discovery_legacy_offers WHERE recording_id=?', (previous,))
+                provenance.refresh_counts(self.conn, 'track', target)
+
+
+    @snapshot_read
+    def artist_reconciliation_inputs(self, previous, target):
+        typed = provenance.available(self.conn)
+        rows = {table: [dict(row) for row in self.conn.execute(
+            'SELECT * FROM '+table+' WHERE artist_id IN (?,?)', (previous, target))]
+            for table in ('artist_scans', 'discovered_artists')}
+        inputs = {'typed': typed, **rows, 'duplicates': 0,
+                  'sources': [], 'impressions': [], 'legacy': []}
+        if typed:
+            inputs['sources'] = [dict(row) for row in self.conn.execute(
+                'SELECT * FROM discovery_artist_sources WHERE artist_id IN (?,?)', (previous, target))]
+            inputs['impressions'] = [dict(row) for row in self.conn.execute(
+                'SELECT * FROM discovery_impressions WHERE artist_id IN (?,?)', (previous, target))]
+            inputs['legacy'] = [dict(row) for row in self.conn.execute(
+                'SELECT * FROM discovery_legacy_offers WHERE artist_id IN (?,?)', (previous, target))]
+        else:
+            lifecycles = {row['artist_id']: row['first_shown'] for row in rows['discovered_artists']}
+            inputs['duplicates'] = self.conn.execute(
+                'SELECT COUNT(*) FROM discovery_visible_impressions a '
+                'JOIN discovery_visible_impressions b ON a.view_id=b.view_id AND a.kind=b.kind '
+                "WHERE a.kind='artist' AND a.item_id=? AND b.item_id=? AND a.shown_at>=? AND b.shown_at>=?",
+                (str(previous), str(target), lifecycles.get(previous), lifecycles.get(target))).fetchone()[0]
+        return inputs
+
+    @snapshot_read
+    def origin_merge_inputs(self, column, previous, target):
+        if column not in ('artist_id', 'album_id', 'genre_key'):
+            raise ValueError('Unsupported discovery origin identity')
+        if not provenance.available(self.conn):
+            return []
+        inputs = []
+        for row in self.conn.execute('SELECT * FROM discovery_origins WHERE '+column+'=?', (previous,)):
+            current = self.conn.execute('SELECT id FROM discovery_origins WHERE kind=? AND '+column+'=?',
+                                        (row['kind'], target)).fetchone()
+            inputs.append({'origin': dict(row), 'target': current[0] if current else None,
+                'sources': [dict(source) for source in self.conn.execute(
+                    'SELECT * FROM discovery_sources WHERE origin_id=?', (row['id'],))] if current else [],
+                'artists': [dict(source) for source in self.conn.execute(
+                    'SELECT * FROM discovery_artist_sources WHERE origin_id=?', (row['id'],))]})
+        return inputs
+
+    @synchronized
+    def apply_origin_merge(self, column, target, origins):
+        if column not in ('artist_id', 'album_id', 'genre_key'):
+            raise ValueError('Unsupported discovery origin identity')
+        with self.conn.atomic(join=True):
+            self._move_origins(column, target, origins)
+
+    def _move_origins(self, column, target, origins):
+        for item in origins:
+            old, current = item['origin']['id'], item['target']
+            if current is None:
+                self.conn.execute('UPDATE discovery_origins SET '+column+'=? WHERE id=?', (target, old))
+            else:
+                for row in item['sources']:
+                    provenance.retain(self.conn, row['recording_id'], current, row['input_video_id'],
+                        row['last_found_at'], first_found_at=row['first_found_at'])
+                for row in item['artists']:
+                    provenance.retain_artist(self.conn, row['artist_id'], current, row['score'])
+                self.conn.execute('DELETE FROM discovery_sources WHERE origin_id=?', (old,))
+                self.conn.execute('DELETE FROM discovery_artist_sources WHERE origin_id=?', (old,))
+                self.conn.execute('DELETE FROM discovery_origins WHERE id=?', (old,))
+            for row in item['artists']:
+                provenance.invalidate_explanation(self.conn, row['artist_id'])
+
+    @synchronized
+    def apply_artist_reconciliation(self, previous, target, inputs, origins, scan, candidate):
+        with self.conn.atomic(join=True):
+            if inputs['typed']:
+                for row in inputs['sources']:
+                    if row['artist_id'] == previous:
+                        provenance.retain_artist(self.conn, target, row['origin_id'], row['score'])
+                self.conn.execute('DELETE FROM discovery_artist_sources WHERE artist_id=?', (previous,))
+                self._move_origins('artist_id', target, origins)
+            elif self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='discovery_artist_sources'").fetchone():
+                if not self.conn.execute('SELECT 1 FROM discovered_artists WHERE artist_id=?', (target,)).fetchone():
+                    self.conn.execute('DELETE FROM discovery_artist_sources WHERE artist_id=?', (target,))
+                columns = {row[1] for row in self.conn.execute('PRAGMA table_info(discovery_artist_sources)')}
+                account = 'account_id' if 'account_id' in columns else 'identity_id'
+                self.conn.execute(f'INSERT INTO discovery_artist_sources SELECT ?,s.source,s.{account},s.score '
+                    'FROM discovery_artist_sources s JOIN discovered_artists d ON d.artist_id=s.artist_id '
+                    'WHERE s.artist_id=? ON CONFLICT(artist_id,source) DO UPDATE SET score=MAX(score,excluded.score)',
+                    (target, previous))
+                self.conn.execute('DELETE FROM discovery_artist_sources WHERE artist_id=?', (previous,))
+            if self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='discovery_artist_image_state'").fetchone():
+                self.conn.execute('INSERT INTO discovery_artist_image_state(artist_id,retry_at) SELECT ?,retry_at '
+                    'FROM discovery_artist_image_state WHERE artist_id=? ON CONFLICT(artist_id) DO UPDATE SET '
+                    'retry_at=MAX(retry_at,excluded.retry_at)', (target, previous))
+                self.conn.execute('DELETE FROM discovery_artist_image_state WHERE artist_id=?', (previous,))
+            for table, row in (('artist_scans', scan), ('discovered_artists', candidate)):
+                if row is not None:
+                    self.conn.execute('DELETE FROM '+table+' WHERE artist_id IN (?,?)', (previous, target))
+                    self.conn.execute('INSERT INTO '+table+'('+','.join(row)+') VALUES ('+
+                                      ','.join('?' for _ in row)+')', tuple(row.values()))
+            if inputs['typed']:
+                for row in inputs['impressions']:
+                    if row['artist_id'] == previous:
+                        self.conn.execute('INSERT INTO discovery_impressions(view_id,artist_id,shown_at) VALUES (?,?,?) '
+                            'ON CONFLICT(view_id,artist_id) WHERE artist_id IS NOT NULL DO UPDATE '
+                            'SET shown_at=MIN(shown_at,excluded.shown_at)', (row['view_id'], target, row['shown_at']))
+                self.conn.execute('DELETE FROM discovery_impressions WHERE artist_id=?', (previous,))
+                for row in inputs['legacy']:
+                    if row['artist_id'] == previous:
+                        provenance.retain_legacy(self.conn, 'artist', target, row['offered_count'], row['first_shown'], row['last_shown'])
+                self.conn.execute('DELETE FROM discovery_legacy_offers WHERE artist_id=?', (previous,))
+                provenance.refresh_counts(self.conn, 'artist', target)
+                provenance.invalidate_explanation(self.conn, target)
+            else:
+                self.conn.execute("INSERT INTO discovery_visible_impressions SELECT view_id,'artist',?,shown_at "
+                    "FROM discovery_visible_impressions WHERE kind='artist' AND item_id=? "
+                    'ON CONFLICT(view_id,kind,item_id) DO UPDATE SET shown_at=MIN(shown_at,excluded.shown_at)',
+                    (str(target), str(previous)))
+                self.conn.execute("DELETE FROM discovery_visible_impressions WHERE kind='artist' AND item_id=?", (str(previous),))
 
     @synchronized
     def remove_spotify_origins(self):
         from yt_playlist.core.discovery_sources import remove_spotify_artists
         with self.conn.atomic():
             return remove_spotify_artists(self.conn)
-
-    @synchronized
-    def merge_genre_origins(self, previous, target):
-        with self.conn.atomic(join=True):
-            if provenance.available(self.conn):
-                provenance.merge_origins(self.conn, 'genre_key', previous, target, reason='explicit genre merge')
 
     @lookup_read
     def fetched_albums(self, browse_ids):
@@ -84,8 +257,7 @@ class DiscoveryRepo(Repo):
                                  'WHERE ' + starter + ' AND artist_id<>?', (excluding,)).fetchone()[0]
 
     @synchronized
-    def set_starter_artist(self, aid, browse_id, thumbnail, selected, now, *, score, maximum):
-        from yt_playlist.core.discovery_sources import retain_artist
+    def set_starter_artist(self, aid, browse_id, thumbnail, selected, now, *, score, maximum, source, origin):
         with self.conn:
             typed = provenance.available(self.conn)
             starter = ("origin_id IN (SELECT id FROM discovery_origins WHERE kind='artist_start')" if typed else
@@ -96,7 +268,7 @@ class DiscoveryRepo(Repo):
                 if count >= maximum:
                     raise ValueError('Choose up to 12 artists to start.')
                 self.conn.execute('DELETE FROM main.discovery_artist_sources WHERE artist_id=? AND '+starter, (aid,))
-                retain_artist(self.conn, aid, 'artist_start:' + browse_id, score)
+                self._store_artist_source(aid, score, source, origin)
                 self.conn.execute(
                     'INSERT INTO discovered_artists(artist_id,score,thumbnail,found_at'+('' if typed else ',artist')+') '
                     'VALUES (?,?,?,?'+('' if typed else ',?')+') ON CONFLICT(artist_id) DO UPDATE SET '
@@ -185,9 +357,8 @@ class DiscoveryRepo(Repo):
         return result
 
     @snapshot_read
-    def discovered_albums_for_artist(self, artist) -> dict:
+    def discovered_albums_for_artist(self, aid) -> dict:
         """{browse_id: offered_count} for one artist's pooled albums (#52 rotation input)."""
-        aid = artists.lookup(self.conn,artist)
         return {r["browse_id"]: (r["offered_count"] or 0) for r in self.conn.execute(
             "SELECT browse_id, offered_count FROM "+read_owners(self.conn).relation('discovered_albums')+" WHERE artist_id=?", (aid,))}
 
@@ -228,26 +399,29 @@ class DiscoveryRepo(Repo):
 
     # --- the accumulating pools ---
     @synchronized
-    def upsert_discovered_album(self, browse_id, artist, title, year, thumbnail, now, genre=None, *, artist_id=None) -> None:
-        """Add an album to the pool (first-seen found_at is preserved on re-discovery). `genre` is the
-        candidate genre for the #18 facet overlay; a later re-discovery with a genre fills it in."""
-        aid = artists.state_id(self.conn,artist_id if artist_id is not None else artist)
+    def add_album_membership(self, album_id, now):
         with self.conn:
-            album_id = albums.observe(self.conn,browse_id,title=title,artist=artist,year=year,
-                                      thumbnail=thumbnail,genre=genre,artist_id=aid,rank=1)
             self.conn.execute('INSERT INTO album_discovery_memberships(album_id,found_at) VALUES (?,?) ON CONFLICT(album_id) DO NOTHING', (album_id,now))
             provenance.refresh_counts(self.conn,'album',album_id)
+
+    @snapshot_read
+    def origin_inputs(self, value, account):
+        video = self.conn.execute('SELECT video_id FROM youtube_items WHERE video_id=?', (value,)).fetchone()
+        album = self.conn.execute("SELECT album_id FROM album_provider_ids WHERE provider='youtube' AND provider_id=?", (value,)).fetchone()
+        return dict(video=video[0] if video else None, album=album[0] if album else None,
+            account=self.conn.execute(f'SELECT 1 FROM {entity_names.accounts(self.conn)} WHERE id=?', (account,)).fetchone() is not None,
+            artists={artist_keys.canonical_id(self.conn, row[0]) for row in self.conn.execute(
+                "SELECT artist_id FROM artist_provider_ids WHERE provider='youtube' AND provider_id=?", (value,))})
 
     @lookup_read
     def explanation_files(self):
         return provenance.available(self.conn)
 
     @synchronized
-    def store_discovered_artist(self, aid, score, thumbnail, now, genre, *, source, reference, encoded):
-        from yt_playlist.core.discovery_sources import retain_artist
+    def store_discovered_artist(self, aid, score, thumbnail, now, genre, *, source, reference, encoded, origin, genre_key):
         with self.conn:
-            retain_artist(self.conn,aid,source,score)
             typed = provenance.available(self.conn)
+            self._store_artist_source(aid, score, source, origin)
             self.conn.execute(
                 'INSERT INTO discovered_artists(artist_id,score,thumbnail,found_at'+('' if typed else ',artist')+') '
                 'VALUES (?,?,?,?'+('' if typed else ',?')+') ON CONFLICT(artist_id) DO UPDATE SET score=excluded.score, '
@@ -260,7 +434,7 @@ class DiscoveryRepo(Repo):
                 self.conn.execute('UPDATE main.discovered_artists SET because=?,fits=? WHERE artist_id=?', (*encoded, aid))
             provenance.refresh_counts(self.conn,'artist',aid)
             if genre is not None:
-                genre_classifications.write(self.conn, 'discovered_artists', aid, genre)
+                genre_classifications.write_prepared(self.conn, 'discovered_artists', aid, genre, genre_key)
 
     @lookup_read
     def artist_images_due(self, artist_ids, now):
@@ -304,42 +478,52 @@ class DiscoveryRepo(Repo):
                                   "AND COALESCE(thumbnail,'')=''", (thumbnail, artist_id))
 
     @synchronized
-    def retain_discovered_artist(self, aid, score):
+    def retain_discovered_artist(self, aid, score, *, source, origin, excluded_kinds):
         """Retain independent interest without overwriting an existing suggestion's metadata."""
-        from yt_playlist.core.discovery_sources import retain_artist
         if self.conn.execute(
                 'SELECT 1 FROM discovered_artists WHERE artist_id=?', (aid,)).fetchone():
             with self.conn:
                 if not self.conn.execute("SELECT 1 FROM sqlite_master WHERE name='discovery_artist_sources'").fetchone():
                     return
-                # When an independent import adopts a Spotify-only suggestion,
-                # its score must also survive without retaining Spotify's count.
-                independent = ("origin_id IN (SELECT id FROM discovery_origins WHERE kind NOT IN ('spotify_export','spotify_model'))"
-                               if provenance.available(self.conn) else "source NOT LIKE 'spotify_export:%' AND source<>'spotify_model'")
+                independent = self._other_source_predicate(excluded_kinds)
                 self.conn.execute('UPDATE discovered_artists SET score=? WHERE artist_id=? '
                     'AND NOT EXISTS (SELECT 1 FROM discovery_artist_sources WHERE artist_id=? '
-                    'AND '+independent+')', (score,aid,aid))
-                retain_artist(self.conn,aid,'discovery',score)
+                    'AND '+independent+')', (score, aid, aid, *excluded_kinds))
+                self._store_artist_source(aid, score, source, origin)
+
+    def _other_source_predicate(self, excluded_kinds):
+        slots = ','.join('?' for _ in excluded_kinds)
+        if provenance.available(self.conn):
+            return f'origin_id IN (SELECT id FROM discovery_origins WHERE kind NOT IN ({slots}))'
+        return ("CASE WHEN instr(source,':')>0 THEN substr(source,1,instr(source,':')-1) ELSE source END "
+                f'NOT IN ({slots})')
+
+    def _store_artist_source(self, aid, score, source, origin, account_id=None):
+        if provenance.available(self.conn):
+            provenance.retain_artist(self.conn, aid, provenance.store_origin(self.conn, origin), score)
+        elif self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='discovery_artist_sources'").fetchone():
+            if not self.conn.execute('SELECT 1 FROM discovered_artists WHERE artist_id=?', (aid,)).fetchone():
+                self.conn.execute('DELETE FROM discovery_artist_sources WHERE artist_id=?', (aid,))
+            self.conn.execute('INSERT INTO discovery_artist_sources VALUES (?,?,?,?) '
+                'ON CONFLICT(artist_id,source) DO UPDATE SET score=MAX(score,excluded.score)', (aid, source, account_id, score or 0))
 
     @synchronized
-    def seed_spotify_artists(self, account_id, rows, now, *, import_key=None):
+    def seed_spotify_artists(self, account_id, rows, now, *, source, origin, excluded_kinds):
         """Retain import provenance even when an artist was independently discovered."""
-        from yt_playlist.core.discovery_sources import retain_artist
         seeded = 0
         typed = provenance.available(self.conn)
         with self.conn:
             for aid, plays in rows:
-                retain_artist(self.conn,aid,f'spotify_export:{account_id}',float(plays),account_id,import_key=import_key)
+                self._store_artist_source(aid, plays, source, origin, account_id)
                 seeded += self.conn.execute(
                     'INSERT INTO discovered_artists(artist_id,score,found_at'+('' if typed else ',artist')+') '
                     'VALUES (?,?,?'+('' if typed else ',?')+') ON CONFLICT(artist_id) DO NOTHING',
                     (aid,float(plays),now) + (() if typed else (f'@artist:{aid}',))).rowcount
-                independent = ("origin_id IN (SELECT id FROM discovery_origins WHERE kind<>'spotify_export')"
-                               if typed else "source NOT LIKE 'spotify_export:%'")
+                independent = self._other_source_predicate(excluded_kinds)
                 self.conn.execute('UPDATE discovered_artists SET score=('
                     'SELECT MAX(score) FROM discovery_artist_sources WHERE artist_id=?) WHERE artist_id=? '
                     'AND NOT EXISTS (SELECT 1 FROM discovery_artist_sources WHERE artist_id=? '
-                    'AND '+independent+')', (aid,aid,aid))
+                    'AND '+independent+')', (aid, aid, aid, *excluded_kinds))
                 provenance.refresh_counts(self.conn,'artist',aid)
         return seeded
 
@@ -379,39 +563,31 @@ class DiscoveryRepo(Repo):
     def _artist_genre(self):
         return genre_classifications.read_expression(self.conn, 'd', 'discovered_artists')
 
-    # --- #13 Phase 2: out-of-corpus candidate tracks (for the Clusters "reach for new music" mode) ---
     @synchronized
-    def upsert_discovered_track(self, identity_key, video_id, title, artist, album, thumbnail,
-                                genre, year, source_browse_id, now, audio=None, *, credits=None,
-                                duration_s=None) -> str:
+    def add_track_membership(self, rid, entry_id, now):
         with self.conn:
-            entry_id = catalog.upsert(self.conn, video_id, title, artist, album,
-                                      thumbnail=thumbnail, created_at=now, library=False,
-                                      preferred_key=identity_key,credits=credits,duration_s=duration_s)
-            row = self.conn.execute("SELECT recording_id,identity_key FROM catalog_tracks WHERE id=?", (entry_id,)).fetchone()
-            rid = row["recording_id"]
-            catalog.add_alias(self.conn, identity_key, rid, "discovery")
             self.conn.execute(
                 "INSERT INTO discovery_memberships(recording_id,entry_id,found_at) VALUES (?,?,?) "
                 "ON CONFLICT(recording_id) DO NOTHING", (rid,entry_id,now))
             provenance.refresh_counts(self.conn,'track',rid)
-            if source_browse_id:
-                retain_source(self.conn, rid, source_browse_id, video_id or None, now)
-                if self.conn.execute("SELECT 1 FROM discovered_albums WHERE browse_id=?",
-                                     (album_aliases.primary_id(self.conn, source_browse_id),)).fetchone():
-                    albums.link(self.conn,entry_id,source_browse_id,source='discovery')
-            metadata.fill(self.conn,entry_id,{'genre':genre,'mb_year':year,
-                **{field:value for field,value in (audio or {}).items() if field in _DTRACK_AUDIO}},
-                'discovery_import',now=now)
-            for field,value in {'genre':genre,'mb_year':year,**(audio or {})}.items():
-                if value is not None and field in {'genre','mb_year',*_DTRACK_AUDIO}:
-                    if metadata_evidence.available(self.conn):
-                        metadata_hints.put(self.conn, entry_id, field, source_browse_id or 'discovery', value, now=now)
-                    elif not metadata_runtime.active(self.conn):
-                        self.conn.execute(
-                            'INSERT OR IGNORE INTO catalog_field_hints(entry_id,field,source,value_json) VALUES (?,?,?,?)',
-                            (entry_id,field,source_browse_id or 'discovery',json.dumps(value)))
-            return self.conn.execute("SELECT identity_key FROM recordings WHERE id=?", (rid,)).fetchone()[0]
+
+    @lookup_read
+    def pooled_album(self, browse):
+        return self.conn.execute('SELECT 1 FROM discovered_albums WHERE browse_id=?',
+            (album_aliases.primary_id(self.conn, browse),)).fetchone() is not None
+
+    @synchronized
+    def retain_track_source(self, rid, token, kind, identifier, video, now, origin):
+        with self.conn:
+            if provenance.available(self.conn):
+                provenance.retain(self.conn, rid, provenance.store_origin(self.conn, origin), video, now)
+            else:
+                self.conn.execute('INSERT INTO discovery_sources(recording_id,source_token,input_video_id,found_at,'
+                    'source_type,source_id,last_found_at) VALUES (?,?,?,?,?,?,?) '
+                    'ON CONFLICT(recording_id,source_token) DO UPDATE SET '
+                    'found_at=MIN(COALESCE(found_at,excluded.found_at),COALESCE(excluded.found_at,found_at)),'
+                    'last_found_at=MAX(COALESCE(last_found_at,excluded.last_found_at),COALESCE(excluded.last_found_at,last_found_at))',
+                    (rid, token, video, now, kind, identifier, now))
 
     @snapshot_read
     def discovery_sources_for_track(self, key) -> list:

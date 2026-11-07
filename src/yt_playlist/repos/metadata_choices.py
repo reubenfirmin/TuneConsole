@@ -13,7 +13,7 @@ class MetadataChoiceRepo(Repo):
         # Reserve this metadata writer before assigning a file revision. Other
         # writers cannot publish different content at the same revision.
         with self._lock:
-            with self.conn.atomic():
+            with self.conn.atomic(join=True):
                 yield
 
     @synchronized
@@ -32,22 +32,78 @@ class MetadataChoiceRepo(Repo):
         return {'track': dict(row), 'layout': layout, 'choice': dict(choice) if choice else None}
 
     @synchronized
-    def genre_matches(self, label):
-        return genre_identity.axis_matches(self.conn, [label]).get(label, {})
+    def genre_matches(self, label, normalized):
+        return genre_identity.axis_match_rows(self.conn, [(label, normalized)]).get(label, {})
 
     @synchronized
     def reserve_identity(self):
         return metadata_runtime.next_identity(self.conn, 'metadata_runtime_choices')
 
     @synchronized
+    def import_inputs(self, entry, source):
+        inputs = self.input(entry, 'title')
+        table = 'metadata_hints' if inputs['layout'] == 'evidence' else 'catalog_field_hints'
+        return {**inputs, 'hints': set() if inputs['layout'] == 'runtime' else {row[0] for row in self.conn.execute(
+            f'SELECT field FROM {table} WHERE entry_id=? AND source=?', (inputs['track']['id'], source))}}
+
+    @synchronized
+    def store_hint(self, layout, entry, field, source, value, observation):
+        with self.conn.atomic(join=True):
+            if layout == 'evidence':
+                self.conn.execute('INSERT OR IGNORE INTO metadata_hints(entry_id,field,source,observation_id) VALUES (?,?,?,?)',
+                    (entry, field, source, observation))
+            else:
+                self.conn.execute('INSERT OR IGNORE INTO catalog_field_hints(entry_id,field,source,value_json) VALUES (?,?,?,?)',
+                    (entry, field, source, json.dumps(value)))
+
+    @synchronized
     def store_observations(self, delivery, prepared, *, source_run_id=None):
-        with self.conn.atomic():
+        with self.conn.atomic(join=True):
             return metadata_evidence.record_prepared(self.conn, delivery, prepared, source_run_id=source_run_id)
 
     @synchronized
     def transfer_recording_observation(self, entry, observation, at):
         with self.conn.atomic():
             return metadata_evidence.reuse_recording_observation(self.conn, entry, observation, now=at)
+
+    @synchronized
+    def recording_reuse_inputs(self, previous, target):
+        layout = ('runtime' if metadata_runtime.active(self.conn) else
+                  'evidence' if metadata_evidence.available(self.conn) else 'legacy')
+        before = dict(self.conn.execute('SELECT * FROM recordings WHERE id=?', (previous,)).fetchone())
+        after = dict(self.conn.execute('SELECT * FROM recordings WHERE id=?', (target,)).fetchone())
+        before['genre'] = genre_classifications.read(self.conn, 'recordings', previous)
+        after['genre'] = genre_classifications.read(self.conn, 'recordings', target)
+        entry = self.conn.execute('SELECT id FROM catalog_entries WHERE recording_id=? ORDER BY id LIMIT 1', (target,)).fetchone()
+        if layout == 'runtime':
+            rows = self.conn.execute('SELECT s.recording_id,s.field,p.name source FROM metadata_runtime_recording_sources s '
+                'JOIN metadata_runtime_providers p ON p.id=s.provider_id WHERE s.recording_id IN (?,?)', (previous, target)).fetchall()
+            names = {metadata_runtime.code(field): field for field in RECORDING_FIELDS}
+            selected = {names[row['field']] for row in rows if row['recording_id'] == target}
+            sources = {names[row['field']]: row['source'] for row in rows if row['recording_id'] == previous}
+        else:
+            table = 'recording_metadata_selections' if layout == 'evidence' else 'recording_field_sources'
+            rows = self.conn.execute(f'SELECT * FROM {table} WHERE recording_id IN (?,?)', (previous, target)).fetchall()
+            selected = {row['field'] for row in rows if row['recording_id'] == target}
+            sources = {}
+        return dict(layout=layout, before=before, after=after, sources=sources, selected=selected, target_entry=entry[0] if entry else None)
+
+    @synchronized
+    def copy_recording_selection(self, layout, previous, target, field):
+        if field not in RECORDING_FIELDS:
+            raise ValueError('Only recording selections can be copied')
+        with self.conn.atomic(join=True):
+            if layout == 'evidence':
+                metadata_evidence.transfer_recording_selection(self.conn, previous, target, field)
+            else:
+                if field == 'genre':
+                    genre_classifications.copy_recording(self.conn, previous, target)
+                else:
+                    self.conn.execute(f'UPDATE recordings SET {field}=(SELECT {field} FROM recordings WHERE id=?) WHERE id=?',
+                        (previous, target))
+                self.conn.execute('INSERT INTO recording_field_sources(recording_id,field,source,selected_at) '
+                    'SELECT ?,field,source,selected_at FROM recording_field_sources WHERE recording_id=? AND field=?',
+                    (target, previous, field))
 
     @synchronized
     def delivery_evidence(self, identity):

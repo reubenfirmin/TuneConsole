@@ -34,6 +34,14 @@ def _write(conn, table, subject, key, unresolved):
                  (key, unresolved, subject, key, unresolved))
 
 
+def write_prepared(conn, table, subject, label, key):
+    if available(conn):
+        _write(conn, table, subject, key, label if key is None else None)
+    else:
+        column = OWNERS[table]
+        conn.execute(f'UPDATE {table} SET genre=? WHERE {column}=? AND genre IS NOT ?', (label, subject, label))
+
+
 def write_evidence(conn, table, subject, value):
     """Project the captured identity, including a deliberately unresolved label.
 

@@ -2,15 +2,15 @@
 import json
 import threading
 from copy import deepcopy
-import logging
 from types import SimpleNamespace
 
 import pytest
 
 from tests.home_fixture_support import prepared_client, returning_listener
 from tests.prepared_fixture_support import prepared_template
-from tests.test_home_other_genres import _publish_menu
-from yt_playlist.rec import fresh_pool, home_cards, measurement, mode_surfaces, road_trip_candidates
+from tests.test_home_other_genres import seed_genres
+from yt_playlist.rec import (choice_evidence, fresh_pool, home_cache, home_cards,
+                             home_prepared, measurement, mode_surfaces, road_trip_candidates)
 
 
 DIAGNOSTIC = 'internal-diagnostic-879-fresh: invalid stored ranking document'
@@ -38,6 +38,9 @@ def quiet_pool(store, quiet_home_template, monkeypatch, home_routes_only, withou
         ('quiet-fresh-inputs', {'schema': 4, 'algorithm': 'quiet-fresh-fixture',
                               'genres': owner.rec_proposals.get_proposals('home_genre_request')}))
     monkeypatch.setattr(measurement, 'maintain_storage', lambda *args, **kwargs: None)
+    # Choice learning is below the rendered job/error state and is not consumed
+    # by these assertions. Actual capture has its own test_choice_evidence owners.
+    monkeypatch.setattr(choice_evidence, 'present', lambda *args, **kwargs: None)
     # Explicit Fresh jobs remain real. Periodic model/choice workers own
     # separate tests and must not replace this controlled listener's history.
     http = prepared_client(store, background_work=False)
@@ -48,7 +51,6 @@ def quiet_pool(store, quiet_home_template, monkeypatch, home_routes_only, withou
     local = threading.local()
     populate = fresh_pool.populate
     keys = store.discovery.discovered_track_keys
-    from yt_playlist.rec import home_cache
     completed = home_cache.read(store, 'home_prepared')['menus'][0]['protos']
 
     def fail():
@@ -105,26 +107,32 @@ def quiet_pool(store, quiet_home_template, monkeypatch, home_routes_only, withou
 
 
 @pytest.fixture(scope='module')
-def quiet_home_template(_pristine_current_schema, fresh_genre_candidates_template):
+def quiet_home_template(_pristine_current_schema):
     def build(source):
-        fresh_genre_candidates_template.restore(source)
+        # Three complete four-song lanes and two contrasting genres are enough
+        # for retained titles/genre requests. Queue capacity is owned separately.
+        bundles = seed_genres(source, genres=['Jazz', 'Techno'], tracks_per_lane=4, fresh=False)
         returning_listener(source, 'mixes', now=1000)
         source.accounts.upsert_account('main', 'cred', None, True)
-        # Retain the real initial selection and SQL/file cache writer. These
-        # recovery checks do not need to enumerate alternative worker menus.
-        _publish_menu(source, 1000)
-        source.rec_proposals.put_proposals('home_genre_request', {
-            'include_genres': ['jazz'], 'epoch': home_cards._epoch(source, 'cards')}, 1000)
-        selected = home_cards.HomeCards(source, _NoJobs(), logging.getLogger(__name__)).cards(
-            home_cards.CardsRequest(1000, record=False)).protos
-        assert selected and all(track['genre'] == 'Jazz' for card in selected for track in card['tracks'])
-        source.rec_proposals.put_proposals('home_genre_request', {}, 1000)
+        # Recovery consumes completed lower-layer cards, not the selection
+        # producer. Keep real subjects, typed pools and the SQL/file cache writer;
+        # actual initial selection belongs to test_stored_home and genre controls.
+        selected = []
+        for lane, tracks in bundles['0'].items():
+            proto = home_cards._proto(source, lane, lane.title(), tracks, 1000)
+            proto.update(mode_id=0, ranker='cosine', recipe={
+                'model': 'mode', 'mode_id': 0, 'lane': lane, 'journey': 'shuffle', 'dj': {}})
+            selected.append(proto)
+        result = home_cards.CardsResult(selected, [], None, None, [
+            {'family': 'jazz', 'label': 'Jazz'}, {'family': 'techno', 'label': 'Techno'}],
+            [], home_cards._epoch(source, 'cards'), None)
+        home_prepared.remember(source, None, result, 1000)
+        payload = home_cache.read(source, 'home_tuned')
+        assert home_prepared._valid(payload)
+        home_cache.put(source, home_prepared.SURFACE, payload, 1000)
+        home_cache.put(source, 'home_tuned', {}, 1000)
+        home_cache.put(source, 'home_choice', {}, 1000)
         return selected
 
     with prepared_template(_pristine_current_schema, build) as template:
         yield template
-
-
-class _NoJobs:
-    def latest(self, *args, **kwargs):
-        return None

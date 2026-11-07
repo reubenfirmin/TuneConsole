@@ -121,7 +121,7 @@ def test_recommendation_retention_checkpoints_each_bounded_repository_turn(
     store._compact_group_files = True
     store._db_path = tmp_path / 'never-opened.sqlite'
     store._lock = RLock()
-    store.recommendations = Mock(spec=['checkpoint_retirement'])
+    store.recommendations = Mock(spec=['checkpoint_retirement', 'cleanup_generations', 'cleanup_pools'])
     store.taste_groups = Mock(spec=['cleanup_builds', 'retire_history'])
     store.taste_groups.cleanup_builds.return_value = False
     store.taste_groups.retire_history.return_value = False
@@ -132,22 +132,22 @@ def test_recommendation_retention_checkpoints_each_bounded_repository_turn(
     events = []
     generations = iter([SimpleNamespace(rows=3, generations=1, pools=0)])
 
-    def generation_turn(repo, *, checkpoint):
-        assert repo is store.recommendations and checkpoint is False
+    def generation_turn(*, checkpoint):
+        assert checkpoint is False
         events.append('generations')
         if progress := next(generations, None):
             return progress
         raise WorkBudgetExceeded('This committed prefix exhausted its turn')
 
-    def pool_turn(repo, *, checkpoint):
-        assert repo is store.recommendations and checkpoint is False
+    def pool_turn(*, checkpoint):
+        assert checkpoint is False
         events.append('pools')
         return None
 
     store.recommendations.checkpoint_retirement.side_effect = lambda: events.append('checkpoint')
     monkeypatch.setattr(recommendation_roots, 'enabled', lambda value: True)
-    monkeypatch.setattr(recommendation_publication, 'cleanup_generations', generation_turn)
-    monkeypatch.setattr(recommendation_publication, 'cleanup_pools', pool_turn)
+    store.recommendations.cleanup_generations.side_effect = generation_turn
+    store.recommendations.cleanup_pools.side_effect = pool_turn
     # OS lifetime-file reaping is a separate integration obligation.
     monkeypatch.setattr(group_roots, 'reap_pending', lambda value: None)
 

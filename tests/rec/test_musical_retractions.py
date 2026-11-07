@@ -72,7 +72,11 @@ def test_delivery_contraction_and_replacement_rebuild_from_current_links(store, 
     if len(initial) == 2:
         assert source_rows(store) == before
         assert store.musical_profiles.pending() is None
-        assert not vibe_preparation.due(store)
+        # Removing a source link invalidates the joint model's masked metadata
+        # inputs immediately, even though no source profile needs rebuilding.
+        from yt_playlist.rec import vibe_joint_preparation
+        assert store.vibe_predictions.pending() is None
+        assert vibe_preparation.due(store) == vibe_joint_preparation.due(store)
     settled(store)
     current = source_rows(store)
     assert set(versions(store)) == {current[entity]['digest'] for entity in corrected}

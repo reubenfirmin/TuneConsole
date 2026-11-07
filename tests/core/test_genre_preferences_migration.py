@@ -3,8 +3,8 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core.migrations import current, migrate, registry
-from yt_playlist.core.migrations.runner import MigrationError
+from yt_playlist.core.migrations import migrate, registry, regular
+from yt_playlist.core.migrations.runner import MigrationError, validate_version
 from yt_playlist.core.store import Store
 
 
@@ -22,19 +22,23 @@ def test_upgrade_restart_and_seeding_keep_disabled_defaults_and_custom(predecess
     predecessor.genres.remove_genre('Rock')
     predecessor.genres.add_genre('Local listening style')
     before = predecessor.genres.get_genre_whitelist()
-    migrate(predecessor.conn, registry=registry.MIGRATIONS)
+    # Exercise the keyed-preference conversion itself, followed by ordinary
+    # native-format admission. Later explicit upgrades have their own owners
+    # in test_installed_genre_contract.
+    migrate(predecessor.conn, registry=registry.MIGRATIONS[:85])
     predecessor._bind_repositories()
     predecessor.genres.configure_catalog()
     assert predecessor.genres.get_genre_whitelist() == before
     assert tuple(predecessor.conn.execute('SELECT enabled,origin FROM genre_preferences '
         "WHERE genre_key='rock'").fetchone()) == (0, 'default')
     assert not predecessor.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='genre_whitelist'").fetchone()
+    validate_version(predecessor.conn, 85)
     reopened = Store(predecessor._db_path)
     try:
         reopened.init_schema()
         reopened.genres.configure_catalog()
         assert reopened.genres.get_genre_whitelist() == before
-        current.validate(reopened.conn)
+        regular.validate(reopened.conn)
     finally:
         reopened.conn.close()
 

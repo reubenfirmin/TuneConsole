@@ -6,19 +6,14 @@ matching documents into a second historical payload store.
 """
 from collections import OrderedDict
 from contextlib import ExitStack
-import hashlib
 import json
 
 from . import metadata_deliveries as deliveries
 from .activity import WorkBudgetExceeded
 from .db_revisions import keyed_reads
-from .evidence_ledger import canonical
+from .native_metadata_policy import (FORMAT, FIELDS, MAX_OBSERVATIONS,
+                                     profile_value as _profile_value, result_hash as _result_hash)
 
-FORMAT = 'native-metadata-observations-1'
-FIELDS = frozenset(('tags', 'bpm', 'energy', 'danceability', 'mood_party', 'mood_aggressive',
-                    'music_key', 'music_scale', 'mood_happy', 'mood_sad', 'mood_relaxed',
-                    'mood_acoustic', 'instrumental', 'loudness', 'dynamic_complexity'))
-MAX_OBSERVATIONS = 64
 RUNTIME_HEAD_SQL = '''CREATE TABLE metadata_native_delivery_heads (
     source_key TEXT PRIMARY KEY NOT NULL REFERENCES rec_musical_sources(source_key) ON DELETE CASCADE,
     run_id TEXT NOT NULL,accepted_at REAL NOT NULL,
@@ -36,13 +31,6 @@ def validate_runtime_heads(conn):
     row = conn.execute("SELECT sql FROM sqlite_schema WHERE name='metadata_native_delivery_heads'").fetchone()
     if row is None or _tokens(row[0]) != _tokens(RUNTIME_HEAD_SQL):
         raise MigrationError('Incompatible native metadata delivery heads')
-
-
-def _result_hash(values):
-    # This source owns normalized model evidence. Input-title matching details
-    # can differ between recordings sharing an artist/release in the same run.
-    normalized = {payload['field']: _profile_value(payload) for payload in values}
-    return hashlib.sha256(canonical(normalized)).digest()
 
 
 def installed_runtime_head(conn, key, previous):
@@ -78,26 +66,15 @@ def available(conn):
     return conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='native_metadata_observations'").fetchone() is not None
 
 
-def _profile_value(payload):
-    provenance = {key: value for key, value in payload.items() if key not in ('field', 'value')}
-    provenance.pop('delivery_id', None)
-    match = dict(provenance.get('match_evidence') or {})
-    for key in ('input_title', 'input_artist', 'returned_title', 'returned_artist', 'recording_mbid', 'search_score'):
-        match.pop(key, None)
-    if 'match_evidence' in provenance:
-        provenance['match_evidence'] = match
-    return {'value': payload['value'], 'provenance': provenance}
-
-
 def read(conn, observation_id):
     row = conn.execute('SELECT o.*,d.key_contract,d.raw_byte_size FROM native_metadata_observations o '
                        'JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE o.id=?', (observation_id,)).fetchone()
     if row is None:
         raise ValueError('Unknown native metadata observation')
-    return _payload(row, deliveries.response(conn, row['delivery_id']))
+    return decode_observation(row, deliveries.response(conn, row['delivery_id']))
 
 
-def _payload(row, body):
+def decode_observation(row, body):
     if row['legacy_finding_id'] is not None:
         if (not isinstance(body, dict) or body.get('format') != 'legacy-metadata-record-1'
                 or body.get('owner') != 'metadata_findings'
@@ -120,7 +97,7 @@ def _payload(row, body):
 
 def decode_source(observations, bodies):
     """Interpret detached observation references against their original responses."""
-    return {row['field']: _profile_value(_payload(row, bodies[row['delivery_id']])) for row in observations}
+    return {row['field']: _profile_value(decode_observation(row, bodies[row['delivery_id']])) for row in observations}
 
 
 def source_values(conn, source_key, max_bytes=256 * 1024, *, store=None):
@@ -182,7 +159,7 @@ def installed_source_values(conn, source_key, max_bytes=256 * 1024, *, store=Non
             identity = row['delivery_id']
             if identity not in bodies:
                 bodies[identity] = deliveries.response(conn, identity)
-            payload = _payload(row, bodies[identity])
+            payload = decode_observation(row, bodies[identity])
             result[payload['field']] = _profile_value(payload)
         return result
 

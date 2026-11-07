@@ -133,12 +133,17 @@ class PlaylistRecipesRepo(Repo):
 
     @snapshot_read
     def get_recipe_created_ats(self):
+        return self.document_created_ats('recipes')
+
+    @snapshot_read
+    def document_created_ats(self, name):
         native = playlist_recipe_state.available(self.conn)
         if not native:
-            owner = OWNERS['recipes']
+            owner = OWNERS[name]
             stage = owner.selected(self.conn)
             if stage is not None:
                 return {row[0]: row[1] for row in self.conn.execute('SELECT m.source,g.created_at FROM '+owner.table('map')+
                     ' m JOIN '+owner.header+' g ON g.source=m.source AND g.preparation_revision=m.generation WHERE m.stage=?', (stage,))}
         column = 'playlist_scope_id' if native else 'playlist_ytm'
-        return dict(self.conn.execute(f'SELECT {column},created_at FROM rec_recipes'))
+        table = 'rec_recipes' if name == 'recipes' else 'cluster_canvas'
+        return dict(self.conn.execute(f'SELECT {column},created_at FROM {table}'))

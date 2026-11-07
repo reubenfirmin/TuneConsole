@@ -78,18 +78,29 @@ def test_native_source_selection_rejects_a_different_provider_entity(catalog):
             store.conn.execute('UPDATE musical_source_observations SET observation_id=? WHERE source_key=?', (other, key))
 
 
-def test_interrupted_native_publication_rolls_back_delivery_history_and_source_selection(catalog, monkeypatch):
+def test_interrupted_native_publication_preserves_selection_and_reuses_the_committed_delivery(catalog, monkeypatch):
     store, entry = catalog, _entry(catalog)
     _record(store, entry, [_observation()])
-    before = list(store.conn.iterdump())
-    publish = metadata_native._publish_source
-    def interrupt(*args):
-        publish(*args)
+    tables = ('native_metadata_observations', 'musical_source_observations', 'rec_musical_sources', 'rec_musical_links')
+    before = {table: list(map(tuple, store.conn.execute('SELECT * FROM ' + table))) for table in tables}
+    deliveries = store.conn.execute('SELECT COUNT(*) FROM metadata_deliveries').fetchone()[0]
+    repository = store.enrichment_state.repository
+    publish = repository.store_native_observation
+
+    def interrupt(*args, **kwargs):
+        publish(*args, **kwargs)
         raise RuntimeError('interrupted native source publication')
-    monkeypatch.setattr(metadata_native, '_publish_source', interrupt)
+
+    monkeypatch.setattr(repository, 'store_native_observation', interrupt)
     with pytest.raises(RuntimeError, match='interrupted native'):
         _record(store, entry, [_observation(.7)], run='interrupted')
-    assert list(store.conn.iterdump()) == before
+    assert {table: list(map(tuple, store.conn.execute('SELECT * FROM ' + table))) for table in tables} == before
+    assert store.conn.execute('SELECT COUNT(*) FROM metadata_deliveries').fetchone()[0] == deliveries + 1
+    assert [row['value'] for row in store.enrichment_state.metadata_observations('song|artist')] == [.2]
+    monkeypatch.setattr(repository, 'store_native_observation', publish)
+    _record(store, entry, [_observation(.7)], run='interrupted')
+    assert store.conn.execute('SELECT COUNT(*) FROM metadata_deliveries').fetchone()[0] == deliveries + 1
+    assert [row['value'] for row in store.enrichment_state.metadata_observations('song|artist')] == [.2, .7]
 
 
 @pytest.mark.parametrize('unit', [True, 42, {}, '', 'x' * 257])

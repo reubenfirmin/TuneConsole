@@ -13,7 +13,6 @@ from yt_playlist.core.migrations import v029_artist_provisional_names as names_u
 from yt_playlist.core.store import Store
 from yt_playlist.library.sync import refresh_playlist
 from yt_playlist.rec import model_refresh
-from yt_playlist.repos import artist_state
 
 
 REGISTRY = (*MIGRATIONS[:28],Migration(29,'artist_provisional_names',names_upgrade.apply))
@@ -109,28 +108,31 @@ def test_existing_provider_reconciles_state_and_old_handles_atomically(store,oth
     assert store.conn.execute('SELECT artist_id,scanned_at FROM artist_scans').fetchone()[:]==(target,50)
 
 
-def test_failed_contextual_reconciliation_rolls_back_all_state(store,monkeypatch):
+def test_completed_artist_reconciliation_survives_a_later_ingestion_failure(store,monkeypatch):
     tid = store.tracks.upsert_track('v','Song','Artist',None,200)
     old = store.artists.track_credits(tid)[0]['artist_id']
-    refresh(store,'known')
+    target = store.artists.track_credits(refresh(store,'known'))[0]['artist_id']
     mute(store,old)
-    before = list(store.conn.iterdump())
-    reconcile = artists.reconcile_provisional
+    reconcile = store.artists.reconcile_provisional
     def fail(*args,**kwargs):
         reconcile(*args,**kwargs)
         raise RuntimeError('interrupted artist reconciliation')
-    monkeypatch.setattr(artists,'reconcile_provisional',fail)
+    monkeypatch.setattr(store.artists,'reconcile_provisional',fail)
     with pytest.raises(RuntimeError,match='interrupted artist'):
         refresh(store)
-    assert list(store.conn.iterdump())==before
+    assert not store.conn.in_transaction
+    assert store.artists.resolve(old) == target
+    assert store.artists.track_credits(tid)[0]['artist_id'] == target
+    monkeypatch.setattr(store.artists, 'reconcile_provisional', reconcile)
+    assert refresh(store) == tid
+    assert store.tracks.identity_key_for_video('v') in store.rec_model.suppressed_keys('for_you', 30)
 
 
-@pytest.mark.parametrize('via', ['track', 'release'])
 @pytest.mark.parametrize('feature', ['discovery', 'recommendations'])
-def test_feature_reconciliation_failure_rolls_back_ingestion_and_exact_release(store, monkeypatch, via, feature):
+def test_feature_reconciliation_failure_keeps_completed_writes_and_retries_track_ingestion(store, monkeypatch, feature):
     tid = store.tracks.upsert_track('v','Song','Artist','Album',200,album_browse_id='album')
     old = store.artists.track_credits(tid)[0]['artist_id']
-    refresh(store,'known')
+    target = store.artists.track_credits(refresh(store,'known'))[0]['artist_id']
     store.collection.add_saved_album({'browse':'album','title':'Album','artist':'Artist'})
     mute(store,old)
     store.discovery.upsert_discovered_artist('Artist',1,[],[],None,20,artist_id=old)
@@ -140,21 +142,25 @@ def test_feature_reconciliation_failure_rolls_back_ingestion_and_exact_release(s
     with store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
         store.rec_proposals.publish_prepared_home(json.dumps({'artist':artists.token(old)}),20)
-    before = list(store.conn.iterdump())
-    owner, name = ((artists,'reconcile_discovery_artist') if feature=='discovery'
-                   else (artist_state,'reconcile_artist'))
+    owner, name = ((store.discovery,'reconcile_artist') if feature=='discovery'
+                   else (store.artist_state,'reconcile_artist'))
     original = getattr(owner,name)
     def interrupted(*args,**kwargs):
+        assert not store.conn.in_transaction
         original(*args,**kwargs)
         raise RuntimeError('interrupted feature reconciliation')
     monkeypatch.setattr(owner,name,interrupted)
     with pytest.raises(RuntimeError,match='interrupted feature'):
-        if via=='track':
-            refresh(store)
-        else:
-            store.collection.cache_album_tracklist('album','Album','Artist',None,[],
-                credits=[{'name':'Artist','id':'verified'}])
-    assert list(store.conn.iterdump())==before
+        refresh(store)
+    assert not store.conn.in_transaction
+    assert store.artists.resolve(old) == old
+    assert store.conn.execute('SELECT count(*) FROM discovered_artists WHERE artist_id=?', (old,)).fetchone()[0] == 0
+    monkeypatch.setattr(owner, name, original)
+    assert refresh(store) == tid
+    assert store.artists.resolve(old) == target
+    candidate, = store.discovery.get_discovered_artists()
+    assert candidate['artist_id'] == target and candidate['offered_count'] == 1
+    assert store.artist_similarity.cached_similar(target, 30) == [['Neighbor', .8]]
 
 
 @pytest.mark.parametrize('via', ['track', 'release'])

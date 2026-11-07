@@ -1,12 +1,18 @@
 import copy
+from contextlib import ExitStack
+from dataclasses import replace
+from types import SimpleNamespace
 from tests.enrichment_support import seed_audio
 
 import pytest
 
 from tests.conftest import seed_catalog_track
+from tests.home_fixture_support import home_routes_only, without_metadata_providers
+from tests.home_prepared_support import publication_inputs
 from tests.test_home_other_genres import genre_bundles, offered
 from tests.test_home_tuning import home_clients, prepare_tuning_home
 from tests.musical_support import prepare_profiles, prepare_vibes
+from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles
 from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import home_vibe, mix_tuning, mode_surfaces, musical_character, musical_profiles, rec_params
@@ -17,7 +23,8 @@ def select_vibe(client, value, *, expected_phase='ready'):
     assert accepted.status_code == 200
     assert accepted.headers['HX-Reswap'] == 'none'
     assert client.app.state.ctx.work.wait(20), 'Vibe worker did not finish'
-    assert client.get('/home/vibe/status').json()['phase'] == expected_phase
+    if expected_phase is not None:
+        assert client.get('/home/vibe/status').json()['phase'] == expected_phase
     return client.get('/home/cards')
 
 
@@ -42,6 +49,147 @@ def established_vibe_access(monkeypatch):
     monkeypatch.setattr(account_growth, 'view', lambda *_args, **_kwargs: {
         'vibes_ready': True, 'ready_areas': {'directions': True},
         'ready_formats': {'mixes': True}})
+
+
+def sound_inputs(*, by_mode=False):
+    """Detached lower inputs for real selection, without unrelated producers."""
+    genres = ('Jazz', 'Techno', 'Trance', 'Indie Rock', 'Ambient', 'Classical')
+    profiles, pools = {}, {}
+    for lane in mode_surfaces.CARD_SURFACES:
+        items = []
+        for mid, genre in enumerate(genres):
+            for index in range(20):
+                energy = mid / 5 if by_mode else .1 if index >= 12 else .9
+                identity = energy, index >= 12
+                if identity not in profiles:
+                    profiles[identity] = musical_character.compact(musical_profiles.resolve([], selected={
+                        'energy': energy, 'bpm': 70 if index >= 12 else 160, 'mood_relaxed': 1 - energy}))
+                key = f'{lane}-{mid}-{index}'
+                items.append({'key': key, 'video_id': key, 'title': key, 'artist': f'Artist {mid}-{index}',
+                              'genre': genre, 'musical': profiles[identity]})
+        pools[lane] = items
+    return pools
+
+
+def select_sounds(pools, preset, monkeypatch):
+    from yt_playlist.rec import vibe_pools
+
+    # SQL membership/feedback and native score/profile reads have separate
+    # owners in test_vibe_serving_batch. All selection/order/caps stay real.
+    owned = {item['key']: item for lane, items in pools.items() if lane != 'fresh' for item in items}
+    discovered = {item['key']: item for item in pools['fresh']}
+    axes = {item['genre']: (item['genre'].lower(), None) for items in pools.values() for item in items}
+    monkeypatch.setattr(vibe_pools, 'eligibility_inputs', lambda *_args, **_kwargs:
+                        (set(), owned, discovered, {}, {}, 3600, set(), axes))
+    reader = SimpleNamespace(settings=SimpleNamespace(get_setting=lambda _key: None),
+                             musical_profiles=SimpleNamespace(by_keys=lambda _keys: {}))
+    bundles = {'_meta': {'comfort_pool': 100},
+               '_vibes': {'version': home_vibe.VERSION, 'pools': {preset: pools}}}
+    return vibe_pools.assemble(reader, 1000, preset, bundles=bundles)
+
+
+def test_relax_selects_measured_tail_before_limiting_each_card(monkeypatch):
+    pools = sound_inputs()
+    before = copy.deepcopy(pools)
+    cards = select_sounds(pools, 'relax', monkeypatch)
+    assert {card['lane'] for card in cards} == set(mode_surfaces.CARD_SURFACES)
+    for card in cards:
+        assert len(card['tracks']) == 12
+        assert all(musical_character.intensity(track) < .5 for track in card['tracks'])
+        assert all(int(track['key'].rsplit('-', 1)[1]) >= 12 for track in card['tracks'])
+    assert pools == before
+
+
+def vibe_http_calculation(completed, selection):
+    from yt_playlist.rec import home_cards
+    def cards(calculation, request):
+        vibe = home_vibe.current(calculation.store, request.now)
+        result = completed(calculation, replace(request,
+            epoch=home_cards._epoch(calculation.store, 'cards') if request.epoch is None else request.epoch,
+            mode_order=selection.order if vibe else None))
+        result.vibe = vibe
+        for proto in result.protos:
+            proto['recipe'] = {'lane': proto['lane'], 'vibe': vibe, 'vibe_policy': home_vibe.VERSION,
+                               'musical_version': musical_character.VERSION}
+        return result
+
+    return cards
+
+
+@pytest.fixture(scope='module')
+def vibe_http_template(_pristine_current_schema):
+    from yt_playlist.rec import home_cache, home_cards, home_prepared, measurement
+
+    def seed(store):
+        with pytest.MonkeyPatch.context() as patch:
+            publication_inputs(store, patch)
+            store.rec_model.set_weight('genre:jazz', 1.3, now=1000)
+            completed = home_cards.HomeCards.cards
+            cards = vibe_http_calculation(completed, SimpleNamespace(order=(4, 5, 0, 1, 2, 3)))
+            patch.setattr(home_cards.HomeCards, 'cards', cards)
+            with store.read_view() as reader:
+                baseline = cards(home_cards.HomeCards(reader, home_prepared._NoJobs(), None),
+                                 home_cards.CardsRequest(1000, record=False))
+            home_prepared.remember(store, None, baseline, 1000)
+            payload = home_cache.read(store, 'home_tuned')
+            assert home_prepared._valid(payload)
+            home_cache.put(store, home_prepared.SURFACE, payload, 1000)
+            home_cache.put(store, 'home_tuned', {}, 1000)
+            home_cache.put(store, 'home_choice', {}, 1000)
+            # A genuine typed head detects unintended candidate publication.
+            # Its policy is an input to this HTTP consumer, not a ranking build.
+            patch.setattr(measurement, 'serving_policy', lambda _store, _now, ranker='lane':
+                          ('controlled', {'schema': 4, 'algorithm': 'vibe-http-fixture', 'ranker': ranker}))
+            publish_bundles(store, {'all': {'wheelhouse': baseline.protos[0]['tracks']}}, 1000)
+            return SimpleNamespace(payload=payload, completed=completed)
+
+    with prepared_template(_pristine_current_schema, seed) as template:
+        yield template
+
+
+@pytest.fixture
+def vibe_http_inputs(monkeypatch, vibe_http_template,
+                     home_routes_only, without_metadata_providers):
+    from yt_playlist.rec import home_cards
+
+    inputs = vibe_http_template.result
+    selection = SimpleNamespace(order=(4, 5, 0, 1, 2, 3))
+    cards = vibe_http_calculation(inputs.completed, selection)
+
+    monkeypatch.setattr(home_cards.HomeCards, 'cards', cards)
+    monkeypatch.setattr(home_cards.HomeCards, 'audit', lambda *_args, **_kwargs: None)
+    with vibe_http_template.open(':memory:') as store:
+        yield SimpleNamespace(store=store, payload=copy.deepcopy(inputs.payload), cards=cards,
+                              selection=selection)
+
+
+@pytest.fixture
+def vibe_clients(vibe_http_inputs, vibe_template_bytecode):
+    from fastapi.testclient import TestClient
+    from tests.conftest import FakeClient
+    from yt_playlist.web.app import create_app
+
+    store = vibe_http_inputs.store
+    with ExitStack() as clients:
+        def open_client(clock):
+            identity = store.accounts.upsert_account('main', 'cred', None, True)
+            app = create_app(store, lambda: {identity: FakeClient()},
+                             now_fn=lambda: clock[0], background_work=False)
+            # Reuse compiled source only. Every app retains its own environment,
+            # store-bound globals, requests and rendered response data.
+            app.state.ctx.templates.env.bytecode_cache = vibe_template_bytecode
+            client = TestClient(app, base_url='http://127.0.0.1', backend_options={'use_uvloop': True})
+            clients.callback(client.close)
+            return clients.enter_context(client)
+
+        yield open_client
+
+
+@pytest.fixture(scope='module')
+def vibe_template_bytecode(tmp_path_factory):
+    from jinja2 import FileSystemBytecodeCache
+
+    return FileSystemBytecodeCache(str(tmp_path_factory.mktemp('vibe-template-bytecode')))
 
 
 def test_saved_vibe_requires_a_configured_access_policy(store, monkeypatch):
@@ -167,13 +315,10 @@ def test_mix_journey_uses_profiles_and_keeps_visible_choice_after_preparation_ch
     assert 'tracks' not in option and 'recipe' not in option
 
 
-def test_vibe_changes_offered_styles_as_well_as_track_order(store, prepared_client):
-    seed_sounds(store, by_mode=True)
-    client = prepared_client([1000.0])
-    assert select_vibe(client, 'relax').status_code == 200
-    gentle = mode_surfaces.assemble_cards(store, 1000, 0)
-    assert select_vibe(client, 'energize').status_code == 200
-    boost = mode_surfaces.assemble_cards(store, 1000, 0)
+def test_vibe_changes_offered_styles_as_well_as_track_order(monkeypatch):
+    pools = sound_inputs(by_mode=True)
+    gentle = select_sounds(pools, 'relax', monkeypatch)
+    boost = select_sounds(pools, 'energize', monkeypatch)
     for menu in (gentle, boost):
         assert {card['lane'] for card in menu} == set(mode_surfaces.CARD_SURFACES)
         assert len(menu) == 4
@@ -209,18 +354,16 @@ def seed_sounds(store, *, by_mode=False):
     publish_bundles(store, bundles, 1, fresh=bundles['all']['fresh'], vibes=True)
 
 
-def test_vibe_changes_rendered_tracks_persists_and_expires_without_learning(
-        store, measured_home_store, monkeypatch, home_clients):
+def test_vibe_renders_changed_selection_with_visible_choice_evidence(vibe_http_inputs, vibe_clients):
     import html
     import json
     import re
-    from yt_playlist.rec import choice_evidence
-
+    store = vibe_http_inputs.store
     clock = [1000.0]
-    client = home_clients(clock)
+    client = vibe_clients(clock)
     before = store.recommendations.head('home')
     learned = store.rec_model.get_weights()
-    response = select_vibe(client, 'relax')
+    response = select_vibe(client, 'relax', expected_phase=None)
     assert response.status_code == 200
     assert 'data-vibe="relax"' in response.text
     assert '"vibe": "relax"' in response.text
@@ -238,30 +381,68 @@ def test_vibe_changes_rendered_tracks_persists_and_expires_without_learning(
     assert [option['genres'] for option in options] == [sorted(set(g)) for g in rendered_genres]
     assert all(option['label'] and option['intent'] and 'recipe' not in option
                and 'tracks' not in option for option in options)
-    cards = mode_surfaces.assemble_cards(store, clock[0], 0)
-    assert cards
-    assert all(sum(musical_character.intensity(t) < .5 for t in card['tracks']) >= 8 for card in cards)
+    baseline_keys = {track['key'] for proto in vibe_http_inputs.payload['menus'][0]['protos']
+                     for track in proto['tracks']}
+    rendered_keys = set(re.findall(r'data-key="([^"]*)"', response.text))
+    assert rendered_keys and rendered_keys != baseline_keys
     assert store.rec_model.get_weights() == learned and store.rec_model.get_leans() == {}
     assert store.recommendations.head('home') == before
-    assert 'data-vibe="relax"' in client.get("/home/cards").text
-    assert 'data-vibe="relax"' in client.post("/home/refresh-cards").text
 
-    monkeypatch.setattr(home_vibe, 'VERSION', home_vibe.VERSION + '/changed-policy')
-    # A policy change is prepared by the worker before its new menu is served.
-    publish_bundles(store, store._fixture_bundle_payload, clock[0], vibes=True)
-    response = select_vibe(client, 'relax')
-    match = re.search(r"hx-vals='([^']*opportunity_id[^']*)'", response.text)
-    assert match
-    revised = choice_evidence.opportunity(store, json.loads(html.unescape(match[1]))['opportunity_id'])
-    assert revised['id'] != offered['id']
-    assert all('recipe' not in option and 'tracks' not in option for option in revised['options'])
+
+def test_vibe_persists_through_reads_and_refresh_without_learning(vibe_http_inputs, vibe_clients):
+    store = vibe_http_inputs.store
+    clock = [1000.0]
+    client = vibe_clients(clock)
+    learned = store.rec_model.get_weights()
+    before = store.recommendations.head('home')
+    response = select_vibe(client, 'relax', expected_phase=None)
+    offered = store.rec_ledger.evidence().records('opportunity')[-1]
+    assert 'data-vibe="relax"' in response.text
+    assert 'data-vibe="relax"' in client.post("/home/refresh-cards").text
+    assert store.rec_model.get_weights() == learned
+    assert store.recommendations.head('home') == before
     assert store.rec_ledger.evidence().get('opportunity', offered['id']) == offered
 
+
+def test_vibe_expires_without_learning_or_rewriting_history(vibe_http_inputs, vibe_clients):
+    store = vibe_http_inputs.store
+    clock = [1000.0]
+    client = vibe_clients(clock)
+    learned = store.rec_model.get_weights()
+    before = store.recommendations.head('home')
+    select_vibe(client, 'relax', expected_phase=None)
+    offered = store.rec_ledger.evidence().records('opportunity')[-1]
     clock[0] += mix_tuning.TTL_S
     response = client.get("/home/fingerprint")
     assert 'data-vibe="relax"' not in response.text
     assert store.settings.get_setting(home_vibe.SETTING) is None
     assert store.rec_model.get_weights() == learned
+    assert store.recommendations.head('home') == before
+    assert store.rec_ledger.evidence().get('opportunity', offered['id']) == offered
+
+
+def test_vibe_policy_change_reissues_choice_without_rewriting_history(
+        vibe_http_inputs, vibe_clients, monkeypatch):
+    import html
+    import json
+    import re
+    from yt_playlist.rec import choice_evidence
+
+    store = vibe_http_inputs.store
+    client = vibe_clients([1000.0])
+    select_vibe(client, 'relax', expected_phase=None)
+    offered = store.rec_ledger.evidence().records('opportunity')[-1]
+    monkeypatch.setattr(home_vibe, 'VERSION', home_vibe.VERSION + '/changed-policy')
+    # Supply the changed policy's new visible menu below the request controller.
+    # A private version stamp alone cannot create different visible evidence.
+    vibe_http_inputs.selection.order = (5, 4, 1, 0, 2, 3)
+    response = select_vibe(client, 'relax', expected_phase=None)
+    match = re.search(r"hx-vals='([^']*opportunity_id[^']*)'", response.text)
+    assert match
+    revised = choice_evidence.opportunity(store, json.loads(html.unescape(match[1]))['opportunity_id'])
+    assert revised['id'] != offered['id']
+    assert revised['options'] != offered['options']
+    assert all('recipe' not in option and 'tracks' not in option for option in revised['options'])
     assert store.rec_ledger.evidence().get('opportunity', offered['id']) == offered
 
 

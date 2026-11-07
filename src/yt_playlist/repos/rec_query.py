@@ -4,7 +4,7 @@ Listening evidence and training baskets belong to RecEvidenceRepo, exclusions to
 RecEligibilityRepo, and ranked library candidates to RecCandidatesRepo. This owner
 only projects recorded library metadata; it does not forward those other APIs.
 """
-from yt_playlist.core import artists, album_memberships
+from yt_playlist.core import album_memberships
 
 from yt_playlist.library.rating_policy import LIKED_EXISTS
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
@@ -113,27 +113,21 @@ class RecQueryRepo(Repo):
             "SELECT DISTINCT identity_key FROM tracks")}
 
     @snapshot_read
-    def library_artists(self) -> set:
-        """Normalized artist names already in the library, to exclude from new-artist discovery."""
-        from yt_playlist.core import artists
-        ids = [r[0] for r in self.conn.execute(
+    def library_artist_ids(self) -> list:
+        return [r[0] for r in self.conn.execute(
             f'SELECT DISTINCT ta.artist_id FROM {self.entry_artists_table} ta JOIN tracks t ON t.id=ta.entry_id')]
-        return set(artists.public_keys(self.conn, ids).values())
 
     @snapshot_read
-    def tracks_by_artists(self, artists) -> list:
+    def tracks_by_artists(self, artist_ids) -> list:
         """Playable owned recordings credited to requested artists, on a private reader.
 
         Constrain recordings through the credit index before choosing each one's
         first playable library entry. Credits and display fields come from that
         same entry, preserving the playable-library representative contract.
         """
-        from yt_playlist.core import artists as artist_catalog
-        want = {artist_catalog.lookup(self.conn,a) for a in artists}
-        want.discard(None)
-        if not want:
+        if not artist_ids:
             return []
-        wanted = sorted(want)
+        wanted = sorted(set(artist_ids))
         out = {}
         for offset in range(0, len(wanted), 400):
             batch = wanted[offset:offset + 400]
@@ -335,20 +329,15 @@ class RecQueryRepo(Repo):
         return out
 
     @lookup_read
-    def artist_metadata_for(self, names, *, per_artist):
+    def artist_metadata_for(self, artist_ids, *, per_artist):
         """Recorded metadata from a bounded sample of each exact artist credit."""
         result = {}
-        for name in set(names):
-            # Description fallback uses exact recorded credits. A missing credit
-            # must not trigger lookup's normalized scan of every artist alias.
-            aid = artists.lookup(self.conn, name, exact=True)
-            if aid is None:
-                continue
+        for aid in set(artist_ids):
             rows = self.conn.execute(
                 f'SELECT t.genre,t.mb_year FROM (SELECT entry_id FROM {self.entry_artists_table} '
                 'WHERE artist_id=? ORDER BY entry_id LIMIT ?) a '
                 'JOIN tracks t ON t.id=a.entry_id', (aid, per_artist)).fetchall()
-            result[name] = [dict(row) for row in rows]
+            result[aid] = [dict(row) for row in rows]
         return result
 
     @synchronized

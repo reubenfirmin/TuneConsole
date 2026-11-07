@@ -41,3 +41,6 @@ def explanation_owner(row):
     if 'preparation_artist_id' in row:
         return row['preparation_artist_id'] if row['preparation_artist_id'] is not None else row['artist']
     return row['artist_id']
+TRACK_AUDIO_FIELDS = frozenset(('bpm', 'energy', 'danceability', 'mood_happy', 'mood_sad', 'mood_relaxed',
+    'mood_acoustic', 'instrumental', 'loudness', 'dynamic_complexity', 'music_key', 'music_scale'))
+

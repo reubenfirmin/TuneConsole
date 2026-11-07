@@ -192,14 +192,14 @@ def test_alias_collisions_do_not_reproject_unrelated_foreign_history(store, monk
         for source in ['ytm_history', 'independent']:
             listening.observe_day(store.conn, iid, key, '2026-10-20', source,
                                   'America/New_York', at)
-    visited, original = [], listening_calendar._foreign_rows
+    visited, original = [], listening_calendar.foreign_rows
 
-    def rows(*args):
-        for row in original(*args):
+    def rows(*args, **kwargs):
+        for row in original(*args, **kwargs):
             visited.append(row['identity_key'])
             yield row
 
-    monkeypatch.setattr(listening_calendar, '_foreign_rows', rows)
+    monkeypatch.setattr(listening_calendar, 'foreign_rows', rows)
     store.tracks.upsert_track('second', 'Wise One', 'Artist', '', 180)
     new = store.tracks.catalog_subject(first)['identity_key']
     assert visited == [new, new]
@@ -235,14 +235,14 @@ def test_recording_association_scopes_accounts_sources_dst_and_ambiguity(store, 
                                       'ytm_history', 'America/New_York', at)
     raw = list(map(tuple, store.conn.execute('SELECT id,raw_identity_key,source_day,source,timezone '
                                              'FROM listening_observations ORDER BY id')))
-    visited, original = [], listening_calendar._foreign_rows
+    visited, original = [], listening_calendar.foreign_rows
 
-    def rows(*args):
-        for row in original(*args):
+    def rows(*args, **kwargs):
+        for row in original(*args, **kwargs):
             visited.append(row['identity_key'])
             yield row
 
-    monkeypatch.setattr(listening_calendar, '_foreign_rows', rows)
+    monkeypatch.setattr(listening_calendar, 'foreign_rows', rows)
     store.tracks.associate_youtube_item('old', recording, source='review', evidence={'same': True},
                                       now=max(times) + 1, same_recording=not partial)
     assert 'unrelated' not in visited and len(visited) == 8

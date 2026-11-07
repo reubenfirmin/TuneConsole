@@ -1,5 +1,5 @@
 """Catalog rekeys preserve exact draft decisions and fence earlier workers."""
-from yt_playlist.core import catalog, road_trip_draft_documents, road_trip_draft_storage
+from yt_playlist.core import catalog, road_trip_draft_storage
 
 
 def test_draft_admission_retains_labels_without_replacing_existing_corrections(store):
@@ -43,8 +43,7 @@ def test_rekey_draft_changes_only_declared_keys_and_fences_stale_completion(stor
     before = dict(store.conn.execute('SELECT * FROM road_trip_drafts').fetchone())
     selections = [tuple(row) for row in store.conn.execute(
         'SELECT * FROM road_trip_draft_entries ORDER BY selection_state,position')]
-    with store.conn:
-        catalog.add_alias(store.conn, old, target['recording_id'], 'test')
+    store.recording_keys.add_alias(old, target['recording_id'], 'test')
     revised = road_trip_draft_storage.get(store.conn, recipe)
     current_key = store.tracks.catalog_subject(first)['identity_key']
     assert current_key != old
@@ -79,7 +78,6 @@ def test_rekey_preserves_unknown_draft_format_verbatim(store):
     with store.conn:
         road_trip_draft_storage.save(store.conn, recipe, future, 10)
     before = tuple(store.conn.execute('SELECT * FROM road_trip_drafts').fetchone())
-    with store.conn:
-        road_trip_draft_documents.rekey(store.conn, {'original': 'replacement'})
+    store.road_trip.rekey_recordings({'original': 'replacement'})
     assert tuple(store.conn.execute('SELECT * FROM road_trip_drafts').fetchone()) == before
     assert road_trip_draft_storage.get(store.conn, recipe) == future

@@ -1,7 +1,7 @@
 """Recommendation catalog features composed from repository facts."""
 from collections import defaultdict
 
-from yt_playlist.core.artists import token
+from yt_playlist.core.artist_policy import token
 from yt_playlist.rec import catalog_features
 from yt_playlist.repos.rec_query import RecQueryRepo
 from yt_playlist.util.years import decade
@@ -26,8 +26,11 @@ class RecommendationQuery:
         return {artist: genre for artist, (genre, _) in best.items()}
 
     def artist_genre_years_for(self, names, *, per_artist=64):
-        return {name: catalog_features.artist_features(rows) for name, rows in
-                self.repository.artist_metadata_for(names, per_artist=per_artist).items()}
+        resolved = self.artists.resolve_many(names, exact=True)
+        metadata = self.repository.artist_metadata_for(
+            {identity for identity in resolved.values() if identity is not None}, per_artist=per_artist)
+        return {name: catalog_features.artist_features(metadata[identity])
+                for name, identity in resolved.items() if identity is not None}
 
     def artist_genre_years(self):
         by_artist = defaultdict(list)
@@ -112,10 +115,11 @@ class RecommendationQuery:
         return self.repository.library_keys()
 
     def library_artists(self):
-        return self.repository.library_artists()
+        return set(self.artists.public_keys(self.repository.library_artist_ids()).values())
 
     def tracks_by_artists(self, artists):
-        return self.repository.tracks_by_artists(artists)
+        identities = {identity for identity in self.artists.resolve_many(artists).values() if identity is not None}
+        return self.repository.tracks_by_artists(identities)
 
     def track_content(self):
         return self.repository.track_content()

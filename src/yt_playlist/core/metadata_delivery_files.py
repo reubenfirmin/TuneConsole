@@ -133,6 +133,9 @@ class MetadataDeliveryFiles:
     def read_encoded(self, reference):
         return _read(*reference)
 
+    def read(self, reference):
+        return read(*reference)
+
     def publish(self, encoded):
         return next(publish_encoded(self.root, [encoded]))
 

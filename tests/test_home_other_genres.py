@@ -12,7 +12,7 @@ from tests.conftest import FakeClient
 from tests.home_fixture_support import home_routes_only
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
-from yt_playlist.rec import home_cache, home_prepared, home_themes, mode_surfaces
+from yt_playlist.rec import choice_evidence, home_cache, home_prepared, home_themes, measurement, mode_surfaces
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
 from yt_playlist.rec import home_cards as home
@@ -122,7 +122,29 @@ def _client(store, now=1000.0, *, prepare=True):
         _publish_menu(store, now)
     return TestClient(create_app(store, lambda: {identity: FakeClient()},
                                 now_fn=lambda: now, background_work=False),
-                      base_url='http://127.0.0.1')
+                      base_url='http://127.0.0.1', backend_options={'use_uvloop': True})
+
+
+@pytest.fixture
+def genre_http_inputs(monkeypatch):
+    # These routes own genre selection, saved requests, rotation and rendering.
+    # Journey numerics and learning capture have independent owners in
+    # test_journeys, test_choice_evidence and test_measurement_isolation.
+    def complete(owner, card, now, epoch, prepared, selection_data):
+        # Consume the actual genre-filtered selection; only the independently
+        # tested journey recipe/order is supplied as a completed lower input.
+        return home._proto(owner, card['lane'], card['label'], card['tracks'], now,
+                           catalog=selection_data['journey_catalog']) | {
+            'mode_id': card['mode_id'], 'ranker': card['ranker'],
+            'recipe': {'model': 'mode', 'lane': card['lane'],
+                       'mode_id': card['mode_id'], 'ranker': card['ranker'],
+                       'journey': 'shuffle', 'dj': {}}}
+
+    monkeypatch.setattr(home, '_complete_card', complete)
+    monkeypatch.setattr(choice_evidence, 'present', lambda *args, **kwargs: None)
+    monkeypatch.setattr(measurement, 'serving_policy', lambda owner, now, **kwargs:
+        ('genre-http-inputs', {'schema': 4, 'algorithm': 'genre-http-fixture',
+                             'genres': owner.rec_proposals.get_proposals('home_genre_request')}))
 
 
 def seed_genres(store, *, genres=None, tracks_per_lane=20, fresh=True):
@@ -158,7 +180,7 @@ def offered(response):
             for g in json.loads(html.unescape(value))}
 
 
-def test_other_genres_changes_actual_themes_without_changing_taste(store, genre_controls):
+def test_other_genres_changes_actual_themes_without_changing_taste(store, genre_controls, genre_http_inputs):
     client = _client(store)
     before = client.get("/home/cards")
     current = offered(before)
@@ -271,7 +293,7 @@ def test_genre_filter_resolves_library_metadata_without_mutating_candidates(stor
     assert items[0]["genre"] == "Jazz"
 
 
-def test_chosen_genres_constrain_tracks_and_expire_without_changing_taste(store, genre_controls):
+def test_chosen_genres_constrain_tracks_and_expire_without_changing_taste(store, genre_controls, genre_http_inputs):
     client = _client(store)
     weights, leans = store.rec_model.get_weights(), store.rec_model.get_leans()
     generation = store.recommendations.head('home')
@@ -319,7 +341,7 @@ def test_chosen_genres_validate_before_advancing_the_menu(store, monkeypatch):
     assert store.rec_proposals.get_proposals("home_genre_request") is None
 
 
-def test_chosen_genres_keep_a_fresh_skeleton_when_the_pool_cannot_fill_a_mix(store):
+def test_chosen_genres_keep_a_fresh_skeleton_when_the_pool_cannot_fill_a_mix(store, genre_http_inputs):
     # Four Techno tracks per lane keep the usual menu usable. The requested
     # Jazz pool remains genuinely underfilled without preparing four unused
     # genre families or duplicate candidate tracks.

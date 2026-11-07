@@ -256,7 +256,7 @@ def capture_template(source, result, *, logical_coordinates=()):
 
 
 @contextmanager
-def historical_template(pristine, seed, *, database, logical_coordinates=()):
+def historical_template(pristine, seed, *, database, logical_coordinates=(), schema_replay=False):
     """Freeze a real installed prefix without advancing its historical owners."""
     with ExitStack() as resources:
         home = resources.enter_context(TemporaryDirectory(prefix='tuneconsole-historical-home-'))
@@ -269,8 +269,14 @@ def historical_template(pristine, seed, *, database, logical_coordinates=()):
             resources.callback(source.conn.close)
             pristine.backup(source.conn)
             source._bind_repositories()
-            source._snapshot_revisions = Revisions(source.conn)
+            if not schema_replay:
+                source._snapshot_revisions = Revisions(source.conn)
             result = seed(source)
+            # Explicit migration replay must precede current TEMP guards, which
+            # could otherwise retain columns retired by historical DDL. Ordinary
+            # seeders keep real snapshot guards available during construction.
+            if schema_replay:
+                source._snapshot_revisions = Revisions(source.conn)
             cleanup_memory_files(source, roots(source.conn))
             template = capture_template(source, result, logical_coordinates=logical_coordinates)
         yield template

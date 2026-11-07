@@ -1,6 +1,7 @@
 """TrackRepo: track rows and their genre/year enrichment."""
 from contextlib import contextmanager
 from yt_playlist.core import catalog, entity_names, metadata
+from yt_playlist.core.catalog_keys import resolve_recording
 from yt_playlist.repos.base import Repo, synchronized, lookup_read, snapshot_read
 
 
@@ -80,12 +81,58 @@ class TrackRepo(Repo):
             (recording_id, recording_id, limit + 1, page * limit)).fetchall()
         return [dict(row) for row in rows[:limit]], len(rows) > limit
 
+    @snapshot_read
+    def association_subjects(self, video_id, recording_id):
+        recording_id = resolve_recording(self.conn, recording_id)
+        previous = self.conn.execute('SELECT recording_id FROM youtube_items WHERE video_id=?', (video_id,)).fetchone()
+        target = self.conn.execute('SELECT id FROM recordings WHERE id=?', (recording_id,)).fetchone()
+        if previous is None or target is None:
+            raise ValueError('Unknown item or recording')
+        keys = {row['id']: row['identity_key'] for row in self.conn.execute(
+            'SELECT id,identity_key FROM recordings WHERE id IN (?,?)', (previous[0], target[0]))}
+        remaining = self.conn.execute('SELECT MIN(id) FROM catalog_entries WHERE recording_id=? AND video_id IS NOT ?',
+            (previous[0], video_id)).fetchone()[0]
+        return dict(previous=previous[0], target=target[0], previous_key=keys[previous[0]],
+            target_key=keys[target[0]], remaining=remaining)
+
     @synchronized
-    def associate_youtube_item(self, video_id, recording_id, *, source, evidence, now,
-                              same_recording=False):
-        with self.conn:
-            catalog.associate_item(self.conn,video_id,recording_id,source=source,evidence=evidence,
-                                   now=now,same_recording=same_recording)
+    def record_association(self, video, previous, target, source, evidence_json, now):
+        with self.conn.atomic(join=True):
+            return self.conn.execute('INSERT INTO item_recording_associations(video_id,recording_id,previous_recording_id,'
+                'source,evidence,at) VALUES (?,?,?,?,?,?)', (video, target, previous, source, evidence_json, now)).lastrowid
+
+    @synchronized
+    def assign_recording(self, video, previous, target, target_key):
+        from yt_playlist.core import discovery_sources, embedding_files, listening_summaries
+        with self.conn.atomic(join=True):
+            self.conn.execute('DELETE FROM recording_embeddings WHERE recording_id IN (?,?)', (previous, target))
+            if embedding_files.available(self.conn):
+                self.conn.execute('DELETE FROM recording_embedding_files WHERE recording_id IN (?,?)', (previous, target))
+            self.conn.execute('DELETE FROM prepared_recording_inputs WHERE recording_id IN (?,?)', (previous, target))
+            discovery_sources.prepare_reassociation(self.conn, video, previous)
+            self.conn.execute('UPDATE youtube_items SET recording_id=? WHERE video_id=?', (target, video))
+            self.conn.execute('UPDATE catalog_entries SET recording_id=? WHERE video_id=?', (target, video))
+            for owner in ('road_trip_draft_entries', 'radio_queue_items'):
+                if self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?", (owner,)).fetchone():
+                    self.conn.execute(f'UPDATE {owner} SET recording_id=? WHERE video_id=?', (target, video))
+            self.conn.execute('UPDATE legacy_track_refs SET recording_id=? WHERE video_id=?', (target, video))
+            typed = listening_summaries.available(self.conn)
+            assignment = 'unresolved_subject_key=NULL' if typed else 'identity_key=?'
+            parameters = (target, video) if typed else (target, target_key, video)
+            self.conn.execute(f'UPDATE main.play_events SET recording_id=?,{assignment} WHERE video_id=?', parameters)
+            self.conn.execute('UPDATE recordings SET provisional=0 WHERE id=?', (target,))
+
+    @synchronized
+    def redirect_recording(self, previous, target, source, evidence_json):
+        with self.conn.atomic(join=True):
+            self.conn.execute('INSERT OR REPLACE INTO recording_redirects VALUES (?,?,?,?)', (previous, target, source, evidence_json))
+            self.conn.execute('UPDATE recording_redirects SET recording_id=? WHERE recording_id=?', (target, previous))
+            aliases = [dict(row) for row in self.conn.execute('SELECT alias,source FROM recording_aliases WHERE recording_id=?', (previous,))]
+            self.conn.executemany('INSERT OR IGNORE INTO recording_aliases VALUES (?,?,?)',
+                [(row['alias'], target, row['source']) for row in aliases])
+            self.conn.execute('DELETE FROM recording_aliases WHERE recording_id=?', (previous,))
+        return [row['alias'] for row in aliases]
+
     @synchronized
     def resolve_identity_key(self, key, video_id=None):
         return catalog.resolve_key(self.conn, key, video_id)
@@ -101,20 +148,78 @@ class TrackRepo(Repo):
     def catalog_subject(self, track_id):
         return self.track_for_waterfall(track_id)
 
-    @synchronized
-    def observe_track(self, video_id, title, artist, *, now=None, album=None, album_browse_id=None, credits=None):
-        entry_id = self.observe_track_entry(video_id,title,artist,now=now,album=album,
-                                           album_browse_id=album_browse_id,credits=credits)
-        return self.conn.execute('SELECT identity_key FROM catalog_tracks WHERE id=?', (entry_id,)).fetchone()[0]
+    @contextmanager
+    def catalog_transaction(self):
+        with self._lock, self.conn.atomic(join=True):
+            self.conn.execute('UPDATE recordings SET identity_key=identity_key WHERE 0')
+            yield
 
     @synchronized
-    def observe_track_entry(self, video_id, title, artist, *, now=None, album=None, album_browse_id=None, credits=None,
-                            duration_s=None, thumbnail=None, preferred_key=None):
-        """Retain an exact source entry without acquiring library membership."""
-        with self.conn:
-            return catalog.upsert(self.conn,video_id,title,artist,album=album,
-                                      album_browse_id=album_browse_id,created_at=now,library=False,credits=credits,
-                                      duration_s=duration_s,thumbnail=thumbnail,preferred_key=preferred_key)
+    def entry_for_source(self, video_id, source_ref):
+        row = self.conn.execute('SELECT * FROM catalog_entries WHERE video_id=?' if video_id else
+            'SELECT * FROM catalog_entries WHERE source_ref=?', (video_id or source_ref,)).fetchone()
+        return dict(row) if row else None
+
+    @synchronized
+    def alias_exists(self, alias):
+        return self.conn.execute('SELECT 1 FROM recording_aliases WHERE alias=? LIMIT 1', (alias,)).fetchone() is not None
+
+    @lookup_read
+    def alias_binding_exists(self, alias, recording):
+        return self.conn.execute('SELECT 1 FROM recording_aliases WHERE alias=? AND recording_id=?',
+            (alias, recording)).fetchone() is not None
+
+    @synchronized
+    def create_recording(self, temporary_key, title, artist, now):
+        return self.conn.execute('INSERT INTO recordings(identity_key,title,artist,created_at) VALUES (?,?,?,?)',
+            (temporary_key, title, artist, now)).lastrowid
+
+    @synchronized
+    def create_entry(self, recording, key, video_id, source_ref, title, artist):
+        self.conn.execute('UPDATE recordings SET identity_key=? WHERE id=?', (key, recording))
+        if video_id:
+            self.conn.execute('INSERT INTO youtube_items(video_id,recording_id,title,artist,orig_title,orig_artist) '
+                'VALUES (?,?,?,?,?,?)', (video_id, recording, title, artist, title, artist))
+        entry = self.conn.execute('INSERT INTO catalog_entries(recording_id,video_id,source_ref) VALUES (?,?,?)',
+            (recording, video_id, source_ref)).lastrowid
+        if not video_id:
+            self.conn.execute('INSERT INTO unresolved_items(entry_id,title,artist,orig_title,orig_artist) VALUES (?,?,?,?,?)',
+                (entry, title, artist, title, artist))
+        return entry
+
+    @synchronized
+    def reconcile_admission(self, recording, video_id, now):
+        from yt_playlist.core import listening_summaries
+        with self.conn.atomic(join=True):
+            key = self.conn.execute('SELECT identity_key FROM recordings WHERE id=?', (recording,)).fetchone()[0]
+            typed = listening_summaries.available(self.conn)
+            if video_id:
+                self.conn.execute('INSERT INTO item_recording_associations(video_id,recording_id,source,evidence,at) '
+                    "SELECT ?,?,'new_upload','{}',? WHERE NOT EXISTS(SELECT 1 FROM item_recording_associations WHERE video_id=?)",
+                    (video_id, recording, now, video_id))
+                assignment = 'unresolved_subject_key=NULL' if typed else 'identity_key=?'
+                parameters = (recording, video_id) if typed else (recording, key, video_id)
+                self.conn.execute(f'UPDATE main.play_events SET recording_id=?,{assignment} '
+                    'WHERE video_id=? AND recording_id IS NULL', parameters)
+            column = 'unresolved_subject_key' if typed else 'identity_key'
+            self.conn.execute(f"UPDATE main.play_events SET {column}='@unresolved-video:'||video_id "
+                f'WHERE recording_id IS NULL AND {column}=? AND NULLIF(trim(video_id),\'\') IS NOT NULL '
+                'AND NOT EXISTS(SELECT 1 FROM youtube_items y WHERE y.video_id=play_events.video_id)', (key,))
+
+    @snapshot_read
+    def catalog_metadata_inputs(self, entry, fields):
+        from yt_playlist.core import metadata_evidence
+        return {'evidence': metadata_evidence.available(self.conn),
+                'sources': {field: metadata.selected_source(self.conn, entry, field) for field in fields}}
+
+    @synchronized
+    def add_library_membership(self, entry, now):
+        with self.conn.atomic(join=True):
+            self.conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'observed',?)", (entry, now))
+
+    @lookup_read
+    def entry_key(self, entry):
+        return self.conn.execute('SELECT identity_key FROM catalog_tracks WHERE id=?', (entry,)).fetchone()[0]
 
     @contextmanager
     def rating_transaction(self):
@@ -207,16 +312,6 @@ class TrackRepo(Repo):
         from yt_playlist.core.rating_feedback import feedback_rows
 
         return feedback_rows(self.conn, keys)
-
-    @synchronized
-    def upsert_track(self, video_id, title, artist, album, duration_s, available=None,
-                     video_type=None, artist_browse_id=None, album_browse_id=None, thumbnail=None,
-                     created_at=None, *, source_ref=None, credits=None, library=True) -> int:
-        with self.conn:
-            return catalog.upsert(
-                self.conn, video_id, title, artist, album, duration_s, available,
-                video_type, artist_browse_id, album_browse_id, thumbnail, created_at,
-                library=library, source_ref=source_ref,credits=credits)
 
     @lookup_read
     def identity_key_for_video(self, video_id) -> str | None:

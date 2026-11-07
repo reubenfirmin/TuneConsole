@@ -146,7 +146,7 @@ def test_overlapping_normal_feedback_writers_keep_each_release(
 
     def hold_native(repo, browse, account_id):
         if repo._store is store:
-            hold_first(store.collection, [browse])
+            hold_first(store.collection.repository, [browse])
         return original_facts(repo, browse, account_id)
 
     monkeypatch.setattr(CollectionRepo, 'preferred_album_ids', hold_first)

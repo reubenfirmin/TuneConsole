@@ -49,7 +49,7 @@ def upgraded_relationship_template(v24_template):
     # not need to replay the same historical conversions for every assertion.
     with closing(sqlite3.connect(v24_template)) as predecessor:
         with historical_template(predecessor, upgrade_relationship_fixture,
-                                 database=':memory:') as template:
+                                 database=':memory:', schema_replay=True) as template:
             yield template
 
 

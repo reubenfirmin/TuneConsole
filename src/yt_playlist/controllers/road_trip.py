@@ -3,6 +3,7 @@ import json
 from uuid import uuid4
 
 from yt_playlist.core import road_trip_contract as policy
+from yt_playlist.core.catalog_state import rekey_state
 from yt_playlist.util.genre_catalog import normalize
 
 
@@ -127,6 +128,32 @@ class RoadTrips:
 
     def delete_road_trip_draft(self, recipe_id):
         self.repository.delete_road_trip_draft(recipe_id)
+
+    def rekey_recordings(self, keymap):
+        with self.recovery.retained():
+            for recipe, updated in self.repository.draft_updated_ats().items():
+                facts = self.repository.draft_facts(recipe, include_raw=True)
+                if facts is None:
+                    continue
+                value = self._read(facts)
+                try:
+                    revised = rekey_state(value, keymap)
+                except ValueError:
+                    continue
+                if revised == value:
+                    continue
+                if 'row' in facts:
+                    row = facts['row']
+                    revision = revised['revision'] = uuid4().hex
+                    revised.pop('picks')
+                    revised.pop('banned')
+                    reference = self.recovery.publish('road-trip-draft', row['id'], revised)
+                    saved = self.repository.rekey_draft_reference(row['id'], row['revision'], revision, reference)
+                else:
+                    saved = self.repository.save_legacy_draft(recipe, json.dumps(revised), updated,
+                        expected_raw=facts['raw'], conditional=True)
+                if not saved:
+                    raise RuntimeError('Draft changed during catalog key update')
 
     def set_road_trip_last_playlist(self, recipe_id, playlist_ytm):
         self.repository.set_road_trip_last_playlist(recipe_id, playlist_ytm)

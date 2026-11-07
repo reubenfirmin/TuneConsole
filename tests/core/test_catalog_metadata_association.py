@@ -70,23 +70,32 @@ def test_correction_does_not_reuse_old_recording_facts(store):
     assert metadata.selected_source(store.conn, target, 'genre') is None
 
 
-def test_association_failure_rolls_back_value_and_provenance_together(store, monkeypatch):
+def test_completed_metadata_reuse_survives_a_later_failure_and_association_can_retry(store, monkeypatch):
     old, target, recording = pair(store)
     previous = store.tracks.catalog_subject(old)['recording_id']
     with store.conn:
         metadata.select(store.conn, old, 'genre', 'House', 'first', now=42)
-    original = metadata.reuse_recording_selections
+    original = store.metadata_choices.reuse_recording_selections
 
-    def fail(conn, before, after):
-        original(conn, before, after)
+    def fail(before, after):
+        assert not store.conn.in_transaction
+        original(before, after)
         raise RuntimeError('after selection copy')
 
-    monkeypatch.setattr(metadata, 'reuse_recording_selections', fail)
+    monkeypatch.setattr(store.metadata_choices, 'reuse_recording_selections', fail)
     associations = list(map(tuple, store.conn.execute('SELECT * FROM item_recording_associations')))
     with pytest.raises(RuntimeError, match='after selection copy'):
         associate(store, recording)
     assert store.tracks.catalog_subject(old)['recording_id'] == previous
-    assert genre_classifications.read(store.conn,'recordings',recording) is None
-    assert metadata.selected_source(store.conn, target, 'genre') is None
+    assert genre_classifications.read(store.conn,'recordings',recording) == 'House'
+    assert metadata.selected_source(store.conn, target, 'genre') == 'first'
     assert metadata.selected_source(store.conn, old, 'genre') == 'first'
     assert list(map(tuple, store.conn.execute('SELECT * FROM item_recording_associations'))) == associations
+    selection = store.conn.execute("SELECT observation_id FROM recording_metadata_selections WHERE recording_id=? AND field='genre'",
+        (recording,)).fetchone()[0]
+    monkeypatch.setattr(store.metadata_choices, 'reuse_recording_selections', original)
+    associate(store, recording)
+    assert store.tracks.catalog_subject(old)['recording_id'] == recording
+    assert store.conn.execute("SELECT observation_id FROM recording_metadata_selections WHERE recording_id=? AND field='genre'",
+        (recording,)).fetchone()[0] == selection
+    assert not store.conn.in_transaction

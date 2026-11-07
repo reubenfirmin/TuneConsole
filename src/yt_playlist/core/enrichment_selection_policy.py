@@ -56,6 +56,17 @@ def provider_wins(field, value, provider, previous, current_genre, providers):
     return refinement or previous not in rank or rank[previous] >= rank.get(provider, len(rank))
 
 
+def refreshed_genre(previous, answers, providers):
+    if not previous or previous not in answers or answers[previous]:
+        return None
+    genre, source = None, None
+    for name in providers:
+        candidate = answers.get(name)
+        if candidate and (genre is None or genre_catalog.is_subgenre(candidate, genre)):
+            genre, source = candidate, name
+    return (genre, source) if genre else None
+
+
 def validate_fields(supplied, fields):
     encode = lambda value: json.dumps(value, sort_keys=True, allow_nan=False)
     if any(field not in supplied or encode(supplied[field]) != encode(value) for field, value in fields.items()):
@@ -100,3 +111,12 @@ def replaces_hint(layout, source, current, hints):
         return source in ('catalog_import', 'discovery_import')
     return any(hint['value'].kind not in ('unresolved', 'withdrawn') and hint['value'].selected() == current
                for hint in hints)
+
+
+def reusable_recording_fields(inputs):
+    """An equivalent recording may supply absent base selections only."""
+    if inputs['layout'] == 'runtime' and inputs['target_entry'] is None:
+        return ()
+    return tuple(field for field in RECORDING_FIELDS
+        if inputs['before'].get(field) not in (None, '') and inputs['after'].get(field) in (None, '')
+        and field not in inputs['selected'])

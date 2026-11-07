@@ -10,7 +10,7 @@ import pytest
 
 from tests.conftest import seed_catalog_track
 from tests.musical_support import prepare_profiles
-from tests.prepared_fixture_support import prepared_template, roots
+from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles
 from yt_playlist.core import catalog
 from yt_playlist.core.db_writes import atomic_write
@@ -157,6 +157,15 @@ def publish_recording_profiles(store, now):
         assert snapshot.publish_ordered(lambda: store.musical_profiles.publish_recordings(profiles, now))
 
 
+@pytest.fixture
+def profile_stamp_store(profile_stamp_template):
+    # This application contract needs one private consumer. Complete file-copy,
+    # inode, payload and two-consumer isolation belong to
+    # test_prepared_fixture_support's profile-bearing fixture owners.
+    with profile_stamp_template.open(':memory:') as store:
+        yield store
+
+
 def test_fit_precedes_mode_heads_within_explicit_genres_in_every_cached_fallback(
         character_consumer, controlled_profiles, monkeypatch):
     store = character_consumer
@@ -208,43 +217,21 @@ def test_fit_precedes_mode_heads_within_explicit_genres_in_every_cached_fallback
 
 
 def test_prepared_profile_stamp_survives_a_new_profile_until_menu_publication(
-        store, profile_stamp_template, file_backed_store):
+        profile_stamp_store, profile_stamp_template):
+    store = profile_stamp_store
     template = profile_stamp_template
-    opportunities = template.restore(store)
-    second = file_backed_store
-    other_pools = template.restore(second)
-    keys = [item['key'] for items in opportunities.values() for item in items]
+    keys = [item['key'] for items in template.result.values() for item in items]
     original_profiles = template.source.musical_profiles.by_keys(keys)
-    heads = template.source.recommendations.heads()
-    for target in (store, second):
-        assert target.musical_profiles.by_keys(keys) == original_profiles
-        assert target.recommendations.heads() == heads
-        assert target.conn.execute('PRAGMA foreign_key_check').fetchall() == []
-    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert opportunities == other_pools == template.result
-    assert store._fixture_bundle_payload == second._fixture_bundle_payload == template.bundles
-
-    # All retained owners must be copied, including profile evidence and typed
-    # publication bodies. SQL-only backups and hard links are not private.
-    destinations = [roots(target.conn) for target in (store, second)]
-    copied = []
-    for name, directory in template.files.items():
-        for source in directory.rglob('*'):
-            if source.is_file():
-                paths = [source, *(owned[name] / source.relative_to(directory) for owned in destinations)]
-                expected = source.read_bytes()
-                assert all(path.read_bytes() == expected for path in paths)
-                assert len({(path.stat().st_dev, path.stat().st_ino) for path in paths}) == 3
-                copied.append((paths, expected))
-    assert copied
+    assert store.musical_profiles.by_keys(keys) == original_profiles
 
     # Candidate pools resolve current catalog/profile owners (#486). The
     # immutable output is the published Home menu (#487), not a new pick from
     # that pool. Exercise the actual publication and serving boundary.
     def publish(now, previous=None):
-        tracks = vibe_pools.candidates(store, 'relax', 'wheelhouse')
-        tracks = home_cards._order_by_journey(store, tracks, 'warm_up', 1)
-        proto = home_cards._proto(store, 'wheelhouse', 'Your mix', tracks, now, vibe='relax')
+        with store.read_view() as reader:
+            tracks = vibe_pools.candidates(reader, 'relax', 'wheelhouse')
+            tracks = home_cards._order_by_journey(reader, tracks, 'warm_up', 1)
+            proto = home_cards._proto(reader, 'wheelhouse', 'Your mix', tracks, now, vibe='relax')
         proto['recipe'] = {'lane': 'wheelhouse', 'vibe': 'relax'}
         result = home_cards.CardsResult([proto], [{'proto': proto, 'pool': None}],
             None, None, [], [], home_cards._epoch(store, 'cards'), 'relax')
@@ -291,18 +278,8 @@ def test_prepared_profile_stamp_survives_a_new_profile_until_menu_publication(
     profiles = musical_character.load(store, [t['key'] for t in refreshed])
     assert all(t['musical']['digest'] == profiles[t['key']]['digest'] for t in refreshed)
 
-    # The real profile edit and replacement publication above affect only this
-    # consumer. Returned payloads and managed files must be private as well.
-    opportunities['library'][0]['title'] = 'Private returned payload'
-    store._fixture_bundle_payload['all']['wheelhouse'][0]['title'] = 'Private bundle'
-    copied[0][0][1].write_bytes(b'Private file mutation')
-    assert other_pools == template.result
-    for target in (template.source, second):
-        assert target.musical_profiles.by_keys(keys) == original_profiles
-        assert target.recommendations.heads() == heads
-        assert target._fixture_bundle_payload == template.bundles
-    for paths, expected in copied:
-        assert paths[0].read_bytes() == paths[2].read_bytes() == expected
+    assert template.source.musical_profiles.by_keys(keys) == original_profiles
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
 def _controlled_eligibility(monkeypatch, store, library, fresh):
