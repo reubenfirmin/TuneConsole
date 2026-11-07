@@ -52,7 +52,7 @@ def sources():
     directory = Path(__file__).parent
     paths = [directory / 'vibe_specialist_models.py', Path(__file__),
              directory / 'test_vibe_specialists.py',
-             EXPERIMENTS / 'run.py', LAB / 'PER_VIBE_ROUND.md']
+             EXPERIMENTS / 'run.py']
     paths += sorted(TOOLS.rglob('external_*.py'))
     paths += sorted(TOOLS.rglob('__init__.py'))
     return {str(path.relative_to(EXPERIMENTS)): digest(path) for path in paths}

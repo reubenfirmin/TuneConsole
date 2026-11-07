@@ -18,7 +18,6 @@ from ..studies.individual_experiment import compact
 
 PREVIOUS = LAB / 'local/focus-615-20261030/round-1'
 DEFAULT = LAB / 'local/focus-counts-711-20261101/round-1'
-DOCUMENT = LAB / 'FOCUS_COUNTS_PLAN.md'
 METHODS = ('binomial', 'beta_binomial', 'ridge', 'training_mean', 'adopted_full')
 
 
@@ -47,14 +46,14 @@ def freeze(directory):
     inputs.update({f'prior-outer-{f}.npz': PREVIOUS / f'outer-{f}.npz' for f in range(5)})
     for f in range(5):
         check_receipt(PREVIOUS, f'outer-{f}.receipt.json')
-    plan = evidence.freeze(directory, 711, {'document_sha256': digest(DOCUMENT),
+    plan = evidence.freeze(directory, 711, {
         'alphas': models.ALPHAS, 'kappas': models.KAPPAS, 'outer_folds': 5, 'inner_folds': 3,
         'bootstrap_draws': 1000, 'native_rows': len(data['y']), 'common_rows': 450,
         'decision': {'ndcg_gain': .02, 'top_lift_gain': .01, 'native_mse_regression': .01,
                      'adopted_full_ranking_regression': .01},
         'budgets': {'seconds': 7200, 'rss_bytes': 1024 ** 3, 'artifact_bytes': 1024 ** 2}}, inputs,
         references=[*refs, PREVIOUS / 'plan.json', PREVIOUS / 'evaluation.receipt.json'],
-        documents=[DOCUMENT, Path(__file__).with_name('test_focus_counts.py')])
+        documents=[Path(__file__).with_name('test_focus_counts.py')])
     np.savez_compressed(directory / 'inputs/counts.npz', yes=yes, total=total)
     save(directory / 'inputs/count-audit.json', audit)
     for name in ('inputs/counts.npz', 'inputs/count-audit.json'):

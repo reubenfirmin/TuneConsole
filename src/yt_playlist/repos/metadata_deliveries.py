@@ -35,6 +35,14 @@ class MetadataDeliveryRepo(Repo):
         return tuple(row) if row else None
 
     @synchronized
+    def delivery_reference(self, identity):
+        row = self.conn.execute('SELECT raw_filename,raw_digest,raw_byte_size,raw_offset '
+                                'FROM metadata_deliveries WHERE id=?', (identity,)).fetchone()
+        if row is None:
+            raise ValueError('Unknown metadata delivery')
+        return tuple(row)
+
+    @synchronized
     def insert(self, values):
         return self.conn.execute('INSERT INTO metadata_deliveries(provider,key_contract,delivery_key,'
             'provider_entity_type,provider_entity_id,input_entry_id,input_recording_id,input_video_id,'

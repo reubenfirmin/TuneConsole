@@ -123,6 +123,11 @@ def test_frozen_affine_calibration_reconciles_actual_results_and_abstention(tmp_
             current = EXPERIMENTS.parent / product[relative] if relative in product else EXPERIMENTS / relative
             if relative.startswith('audio_lab_tools/'):
                 current = source_path(Path(relative).name)
+            if current.suffix == '.md' and not current.exists():
+                current_references[relative] = {'historical_sha256': expected,
+                    'current_sha256': None, 'executed_by_review': False,
+                    'exact_source_identity': False}
+                continue
             read(current)
             current_references[relative] = {'historical_sha256': expected,
                 'current_sha256': files[str(current)], 'executed_by_review': False,

@@ -31,7 +31,7 @@ def code_paths():
              if (name == 'experiments.audio_lab_tools' or name.startswith('experiments.audio_lab_tools.'))
              and getattr(m, '__file__', None)}
     paths.update((Path(__file__).resolve(), EXPERIMENTS / 'run.py',
-                  LAB / 'RELAX_CONSENSUS_PLAN.md', Path(__file__).with_name('test_relax_consensus.py')))
+                  Path(__file__).with_name('test_relax_consensus.py')))
     return {str(p.relative_to(EXPERIMENTS)): p for p in sorted(paths)}
 
 

@@ -20,7 +20,6 @@ from ..audio.quality_reference_audio import response
 ROOT = LAB / 'local/chroma-810'
 PYTHON = ROOT / 'venv/bin/python'
 DEFAULT = LAB / 'local/chroma-810-20261101/round-1'
-DOCUMENT = LAB / 'CHROMA_PLAN.md'
 WORKER = source_path('chroma_worker.py')
 
 
@@ -44,7 +43,7 @@ def freeze(directory):
     inputs.update({'baseline-features.npz': study.ORIGINAL / 'features.npz',
         'baseline-predictions.npz': study.ORIGINAL / 'predictions.npz',
         'baseline-rows.json': study.ORIGINAL / 'extraction.json'})
-    specification = {'document_sha256': digest(DOCUMENT), 'baseline_variant': 'musicnn',
+    specification = {'baseline_variant': 'musicnn',
         'new_variants': ['chroma', 'combined'], 'variants': ['musicnn', 'chroma', 'combined'],
         'cohort': old['protocol'], 'acceptance': old['protocol']['acceptance'],
         'dimensions': {'musicnn': 200, 'chroma': 72, 'combined': 272},
@@ -54,7 +53,7 @@ def freeze(directory):
         references=[study.ORIGINAL / 'plan.json', study.ORIGINAL / 'extraction.receipt.json',
                     study.ORIGINAL / 'predictions.receipt.json', study.ORIGINAL / 'pcm-audit.json',
                     study.ORIGINAL / 'pcm-audit.receipt.json', ROOT / 'requirements.lock'],
-        documents=[DOCUMENT, WORKER, LAB.parent / 'investigations/chroma_810.py'])
+        documents=[WORKER, LAB.parent / 'investigations/chroma_810.py'])
     print(json.dumps({'plan_sha256': digest(directory / 'plan.json')}), flush=True)
 
 

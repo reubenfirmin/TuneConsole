@@ -11,6 +11,7 @@ from tests.conftest import FakeClient, seed_catalog_track
 from tests.group_support import publish, recordings
 from tests.home_fixture_support import returning_listener
 from tests.playlist_fixture_support import library_catalog
+from tests.prepared_fixture_support import prepared_template
 from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.recommendation_support import publish_bundles
 from yt_playlist.core import mix_choices
@@ -43,9 +44,26 @@ def service(store):
     return home_cards.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__))
 
 
-def test_default_home_offers_use_exact_graph_definitions_without_legacy_ids(store, adaptive_library):
-    _tracks, head = adaptive_library
-    result = service(store).cards(home_cards.CardsRequest(1200, record=False))
+@pytest.fixture(scope='module')
+def adaptive_menu_template(_pristine_current_schema, adaptive_library_template):
+    def build(source):
+        tracks, head = adaptive_library_template.restore(source)
+        result = service(source).cards(home_cards.CardsRequest(1200, record=False))
+        return tracks, head, result
+
+    # The unchanged initial selection is shared by its exact-membership check
+    # and the regrouping consumer. Every consumer still owns private SQL/files.
+    with prepared_template(_pristine_current_schema, build) as template:
+        yield template
+
+
+@pytest.fixture
+def adaptive_menu(store, adaptive_menu_template):
+    return adaptive_menu_template.restore(store)
+
+
+def test_default_home_offers_use_exact_graph_definitions_without_legacy_ids(store, adaptive_menu):
+    _tracks, head, result = adaptive_menu
     assert len(result.protos) >= 2
     by_version = {g['version']: g for g in head['groups']}
     for proto in result.protos:
@@ -215,23 +233,29 @@ def test_prepared_home_and_real_menu_capture_preserve_group_context(store, adapt
         assert 'Server-rendered Home offers' not in choices.text
 
 
-def test_history_only_refresh_and_retirement_accumulate_all_adaptive_menus(store, monkeypatch, adaptive_library):
+def test_history_only_refresh_and_retirement_accumulate_all_adaptive_menus(store, monkeypatch, adaptive_menu):
     from yt_playlist.rec import candidate_refresh, rec_params
+    _tracks, head, completed = adaptive_menu
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) is None
     choice_evidence.refresh_report(store, 1200)
     pools = ('mode_bundles', 'fresh_pool', group_serving.SURFACE)
     original_pools = {name: store.rec_proposals._proposal_json(name) for name in pools}
     preferences = candidate_refresh.preferences(store, 1200)
     clock = [100]
-    original_cards = home_cards.HomeCards.cards
+    attempts = []
 
     def one_menu(self, request):
-        result = original_cards(self, request)
+        # History churn coordinates completed selection results. Exact graph
+        # selection and membership are checked by the initial-menu owner above.
+        result = deepcopy(completed)
+        result.epoch = request.epoch
+        attempts.append(request.epoch)
         clock[0] += 6
         return result
 
-    # Exercise partial, immediately usable batches with the real graph, report,
-    # ledger and menu assembler. Each attempt has room for exactly one menu.
+    # Keep all twelve real publication batches and the over-capacity retries,
+    # with real graph inputs, reports, evidence retention and immutable menus.
+    # Each attempt has room for exactly one completed lower-layer selection.
     monkeypatch.setattr(home_prepared.time, 'monotonic', lambda: clock[0])
     monkeypatch.setattr(home_prepared, 'PREPARE_BUDGET_S', 10)
     monkeypatch.setattr(home_cards.HomeCards, 'cards', one_menu)
@@ -248,7 +272,9 @@ def test_history_only_refresh_and_retirement_accumulate_all_adaptive_menus(store
         assert store.rec_ledger.evidence().get('opportunity', expired) is None
         assert store.rec_ledger.evidence().get('opportunity', current)
         choice_evidence.refresh_report(store, at)
-        payload = home_prepared.prepare(store, at)
+        # Discovery/revisit summaries have independent preparation owners;
+        # this regression concerns accumulation of the mix batches themselves.
+        payload = home_prepared.prepare_mixes(store, at)
         assert payload and payload['group_policy'] == 'adaptive'
         assert any(menu['protos'] for menu in payload['menus'])
         assert len(payload['menus']) == min(index + 1, home_prepared.MAX_MENUS)
@@ -257,6 +283,8 @@ def test_history_only_refresh_and_retirement_accumulate_all_adaptive_menus(store
         assert original_pools == {name: store.rec_proposals._proposal_json(name) for name in pools}
         assert candidate_refresh.preferences(store, at) == preferences
     assert {menu['epoch'] for menu in payload['menus']} == set(range(home_prepared.MAX_MENUS))
+    assert attempts == [index % home_prepared.MAX_MENUS for index in range(home_prepared.MAX_MENUS + 2)]
+    assert payload['choice_context']['group_generation'] == head['generation']
 
 
 def test_home_worker_retries_partial_adaptive_menus_until_full(store, adaptive_library):
@@ -336,11 +364,15 @@ def test_recent_listening_is_mapped_to_exact_graph_memberships_without_vectors(s
 
 
 def test_definitions_survive_regrouping_and_held_offers_keep_their_context(
-        store, adaptive_library, one_menu_per_attempt):
-    tracks, head = adaptive_library
+        store, adaptive_menu, one_menu_per_attempt, monkeypatch):
+    tracks, head, assembled = adaptive_menu
+    # Reordering selected songs does not establish historical group custody.
+    # Keep the real graph selection, card/group framing and cache publication;
+    # journey ordering has independent checks in test_journeys.
+    monkeypatch.setattr(home_cards, '_order_by_journey',
+                        lambda owner, items, *args, **kwargs: list(items))
     # Consume one real assembled menu through the ordinary cache writer.
     # Batch enumeration is independent of retaining an already displayed offer.
-    assembled = service(store).cards(home_cards.CardsRequest(1200, record=False))
     assert assembled.protos and assembled.choice_context['group_generation'] == head['generation']
     assert home_prepared.remember(store, None, assembled, 1200)
     with store.read_view() as reader:

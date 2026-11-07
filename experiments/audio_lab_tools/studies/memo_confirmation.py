@@ -28,7 +28,6 @@ from ..relax.relax_experiment import global_groups
 DEFAULT = LAB / 'local/memo-confirmation-710-20261101/round-1'
 PREVIOUS = LAB / 'local/individual-20261030/remaining-1'
 META = DATA / 'discovery/memo2496/metadata'
-DOCUMENT = LAB / 'MEMO_CONFIRMATION_PLAN.md'
 VIBES = ('cruise', 'relax', 'uplift', 'energize')
 LIMIT = 1024 ** 3
 
@@ -98,7 +97,7 @@ def freeze(directory):
                  for r in csv.DictReader(stream)}
     selected = [{'id':'memo2496:' + songs[r['name']]['song_id'], **songs[r['name']], 'member':r,
         'artist':'', 'title':'', 'group':'memo2496:' + songs[r['name']]['song_id']} for r in reservation['selected']]
-    plan = evidence.freeze(directory, 710, {'document_sha256': digest(DOCUMENT), 'selection':reservation['rule'],
+    plan = evidence.freeze(directory, 710, {'selection':reservation['rule'],
         'maximum_recordings':128, 'requested_byte_budget':LIMIT, 'minimum_recordings':80, 'minimum_components':60,
         'interval':[15,75], 'chunks':list(range(15,75,10)), 'attribute_names':load(PREVIOUS / 'plan.json')['attribute_names'],
         'extraction':provenance(), 'bootstrap_draws':1000,
@@ -108,7 +107,7 @@ def freeze(directory):
         'prior_cruise':'Original remaining-1 DEAM native VA heads, unchanged; native clip per chunk, mean VA, fixed Cruise mapping.',
         'aggregation':'All six exact chunks, native clip then average then fixed mapping; shared control mean embedding then exact two-stage six-label normalization.',
         'outcomes':'Never fit, calibrate or select. Seal all predictions before opening selected VA trajectories.'}, inputs,
-        references=[GRAPH,PACKAGE/'METADATA',PACKAGE/'RECORD'], documents=[DOCUMENT,WORKER,Path(__file__).with_name('test_memo_confirmation.py')])
+        references=[GRAPH,PACKAGE/'METADATA',PACKAGE/'RECORD'], documents=[WORKER,Path(__file__).with_name('test_memo_confirmation.py')])
     save(directory/'inputs/selection.json', {'rows':selected,'known':known,
         'exposure':'Additional filenames absent from all prior Memo pilot selections; all nonpilot Memo reserved. Artist names absent; same-corpus coverage, not artist or domain independence. Unknown aliases and encoder pretraining overlap unresolved.'})
     plan['inputs']['inputs/selection.json'] = digest(directory/'inputs/selection.json')

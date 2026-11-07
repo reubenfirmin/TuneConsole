@@ -58,7 +58,7 @@ def source_paths():
              if (name == 'experiments.audio_lab_tools' or name.startswith('experiments.audio_lab_tools.'))
              and getattr(module, '__file__', None)}
     paths.update((Path(__file__).resolve(), EXPERIMENTS / 'run.py',
-                  LAB / 'FOCUS_EXPERIMENT_PLAN.md', Path(__file__).with_name('test_focus_experiment.py')))
+                  Path(__file__).with_name('test_focus_experiment.py')))
     return {str(path.relative_to(EXPERIMENTS)): path for path in sorted(paths)}
 
 

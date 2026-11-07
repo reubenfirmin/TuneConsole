@@ -30,8 +30,7 @@ SEED = 53031
 
 def codes():
     paths = [Path(__file__), source_path('dataset_windows.py'),
-             Path(__file__).with_name('test_candidate_followup.py'),
-             LAB / 'CANDIDATE_FOLLOWUP_PLAN.md']
+             Path(__file__).with_name('test_candidate_followup.py')]
     return {**engine.sources(), **{str(p.relative_to(EXPERIMENTS)): digest(p) for p in paths}}
 
 

@@ -1,5 +1,6 @@
 """Publish explicit metadata decisions before installing their SQL head."""
 from dataclasses import replace
+from collections.abc import Mapping
 
 from yt_playlist.core.metadata_contract import clock
 from yt_playlist.core import metadata_values
@@ -54,6 +55,16 @@ class MetadataChoices:
             self.repository.store_base(inputs, field, value, prepared, source, at,
                                        delivery_id=delivery, observation_id=observation_id)
             self._resume_query(field, inputs['track'])
+
+    def capture_fields(self, entry, provider, fields, *, purpose, body, now=None):
+        if not isinstance(fields, Mapping) or len(fields) > len(metadata_values.ITEM_FIELDS) + len(metadata_values.RECORDING_FIELDS):
+            raise ValueError('Metadata evidence exceeds its finite field budget')
+        prepared = {field: self._prepare(field, value) for field, value in fields.items()}
+        delivery = self.deliveries.capture_state(entry, provider, purpose, body, now=clock(now))
+        return delivery, self.repository.store_observations(delivery, prepared)
+
+    def reuse_recording_observation(self, entry, observation, *, now=None):
+        return self.repository.transfer_recording_observation(entry, observation, clock(now))
 
     def restore(self, entry, field, value, *, now=None):
         self.select(entry, field, value, 'youtube', now=now)

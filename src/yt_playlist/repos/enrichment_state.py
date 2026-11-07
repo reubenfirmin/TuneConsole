@@ -1,27 +1,23 @@
-"""Provider attempts, configuration, cooldowns, retained evidence and artwork retries.
-
-Writes own their transaction on the Store connection. Completing a provider refresh also
-reselects genre and clears its job in that transaction; metadata policy lives in core.metadata.
-"""
+"""SQL state for provider attempts, configuration, cooldowns and artwork retries."""
 import json
 import time
 import uuid
 from contextlib import contextmanager
 
 from yt_playlist.core import catalog, metadata, metadata_observations, metadata_native, metadata_attempts, metadata_identifiers, legacy_evidence
-from yt_playlist.core.db_diagnostics import database_operation
-from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core import provider_frontiers
 from yt_playlist.core import metadata_runtime, provider_queries
 from yt_playlist.core.preparation import metadata_destinations, metadata_publication
 from yt_playlist.repos.base import Repo, snapshot_read, synchronized
 
-REFRESH_KEY = 'enrich_provider_refresh:'
-RECONCILE_BATCH = 64
-
-
 class EnrichmentStateRepo(Repo):
+    @contextmanager
+    def state_transaction(self):
+        with self._lock:
+            with self.conn.atomic():
+                self.conn.execute('UPDATE enrichment_provider_config SET provider=provider WHERE 0')
+                yield
+
     @contextmanager
     def subject_guard(self, entry_id, recording_id):
         """Publish a complete result/attempt before another thread can reassociate its entry.
@@ -106,17 +102,10 @@ class EnrichmentStateRepo(Repo):
         return dict(row) if row else None
 
     @synchronized
-    def defer_integration(self, provider, *, now, retry_after, error):
-        """An IAO publishes a host outage before any dependent caller can retry it."""
-        with self.conn:
-            self.conn.execute('BEGIN IMMEDIATE')
-            old = self.integration_cooldown(provider)
-            failures = (old['failures'] if old else 0) + 1
-            deadline = max(retry_after, now + min(3600, 30 * 2 ** min(failures - 1, 7)),
-                           old['retry_at'] if old else 0)
+    def store_integration_cooldown(self, result):
+        with self.conn.atomic(join=True):
             self.conn.execute('INSERT OR REPLACE INTO enrichment_provider_cooldowns VALUES (?,?,?,?)',
-                              (provider, failures, deadline, error))
-        return dict(provider=provider, failures=failures, retry_at=deadline, error=error)
+                              tuple(result[key] for key in ('provider', 'failures', 'retry_at', 'error')))
 
     @synchronized
     def clear_integration_cooldown(self, provider, admitted_deadline):
@@ -273,14 +262,16 @@ class EnrichmentStateRepo(Repo):
                 "error": rows[0]["error"] if rows else ""}
 
     @synchronized
-    def record_artwork_result(self, entry_id, release_ids, outcome, now):
+    def artwork_state(self, entry_id):
         previous = self.conn.execute("SELECT failures FROM enrichment_artwork WHERE entry_id=?",
                                      (entry_id,)).fetchone()
-        failures = (previous[0] if previous else 0) + 1 if outcome.status == "retry" else 0
-        retry_at = now + max(outcome.retry_in, min(900,60 * 2 ** min(failures-1,4))) if failures else 0
-        self.conn.execute("INSERT OR REPLACE INTO enrichment_artwork VALUES (?,?,?,?,?,?)",
-                          (entry_id,json.dumps(release_ids),outcome.status,failures,retry_at,outcome.error))
-        self.conn.commit()
+        return dict(previous) if previous else None
+
+    @synchronized
+    def store_artwork_result(self, entry_id, release_ids, result):
+        with self.conn.atomic(join=True):
+            self.conn.execute('INSERT OR REPLACE INTO enrichment_artwork VALUES (?,?,?,?,?,?)',
+                (entry_id, json.dumps(release_ids), *(result[key] for key in ('status', 'failures', 'retry_at', 'error'))))
 
     @synchronized
     def due_artwork_retries(self, now, limit=1):
@@ -298,114 +289,74 @@ class EnrichmentStateRepo(Repo):
             "EXISTS (SELECT 1 FROM discovery_memberships d WHERE d.recording_id=e.recording_id))").fetchone()
         return dict(row)
 
-    def reconcile_provider_configuration(self, configuration):
-        """Catch up on a reader; refresh changed providers in restartable bounded writes."""
-        with database_operation('EnrichmentStateRepo.reconcile_provider_configuration'):
-            self._configure_providers(configuration)
-            for provider, current in configuration.items():
-                if current['status'] != 'available':
-                    continue
-                while self._advance_provider_refresh(provider, current):
-                    pass
-                candidates = self._missing_provider_coverage(provider)
-                for start in range(0, len(candidates), RECONCILE_BATCH):
-                    if not self._admit_provider_coverage(provider, current,
-                                                       candidates[start:start + RECONCILE_BATCH]):
-                        break
-
     def _provider_matches(self, provider, current):
         row = self.conn.execute('SELECT fingerprint,status FROM enrichment_provider_config WHERE provider=?',
                                 (provider,)).fetchone()
         return row is not None and tuple(row) == (current['fingerprint'], current['status'])
 
-    def _configure_providers(self, configuration):
-        with self._lock:
-            check_cancellable_work()
-            check = all(self._provider_matches(provider, current) and (
-                current['status'] == 'available' or provider_frontiers.read(self.conn, provider) is None)
-                for provider, current in configuration.items())
-            if check:
-                return
-        with database_operation('EnrichmentStateRepo._configure_providers'), atomic_write(self._store):
-            for provider, current in configuration.items():
-                previous = self.conn.execute("SELECT * FROM enrichment_provider_config WHERE provider=?",
-                                             (provider,)).fetchone()
-                changed = previous is not None and (previous["fingerprint"] != current["fingerprint"]
-                          or previous["status"] != "available" and current["status"] == "available")
-                if previous is None or (previous['fingerprint'], previous['status']) != (
-                        current['fingerprint'], current['status']):
+    @synchronized
+    def configuration_inputs(self, providers):
+        runtime = metadata_runtime.active(self.conn)
+        return {'runtime': runtime,
+                'last_attempt': 0 if runtime else self.conn.execute('SELECT COALESCE(MAX(id),0) FROM provider_attempts').fetchone()[0],
+                'configuration': {row['provider']: {'fingerprint': row['fingerprint'], 'status': row['status']}
+                                  for row in self.conn.execute('SELECT * FROM enrichment_provider_config')},
+                'frontiers': {provider: provider_frontiers.read(self.conn, provider) for provider in providers}}
+
+    @synchronized
+    def store_configuration_changes(self, changes, cutoff):
+        with self.conn.atomic(join=True):
+            for change in changes:
+                provider, current = change['provider'], change['current']
+                if change['replace']:
                     self.conn.execute("INSERT INTO enrichment_provider_config VALUES (?,?,?) "
                                       "ON CONFLICT(provider) DO UPDATE SET fingerprint=excluded.fingerprint,status=excluded.status",
                                       (provider,current["fingerprint"],current["status"]))
-                if current["status"] != "available":
-                    provider_frontiers.clear(self.conn,provider)
-                    continue
-                if changed:
+                if change['clear']:
+                    provider_frontiers.clear(self.conn, provider)
+                if change['restart']:
                     self.conn.execute("DELETE FROM enrichment_provider_cooldowns WHERE provider=?", (provider,))
-                    # Save the frontier with the configuration. A restart must not
-                    # mistake an incompletely scheduled revision for an unchanged one.
-                    cutoff = (int(time.time() * 1_000_000) if metadata_runtime.active(self.conn) else
-                              self.conn.execute('SELECT COALESCE(MAX(id),0) FROM provider_attempts').fetchone()[0])
-                    provider_frontiers.start(self.conn,provider,cutoff,current['fingerprint'])
+                    provider_frontiers.start(self.conn, provider, cutoff, current['fingerprint'])
 
-    def _advance_provider_refresh(self, provider, current):
-        with self._lock:
-            check_cancellable_work()
-            if provider_frontiers.read(self.conn, provider) is None:
-                return False
-        with database_operation('EnrichmentStateRepo._advance_provider_refresh'), atomic_write(self._store):
-            if not self._provider_matches(provider, current):
-                return False
-            refresh = provider_frontiers.read(self.conn,provider)
-            if refresh is None:
-                return False
-            if refresh['fingerprint'] != current['fingerprint']:
-                raise RuntimeError('Provider refresh does not match its configuration')
-            rows = self.conn.execute('SELECT id FROM recordings WHERE id>? ORDER BY id LIMIT ?',
-                                     (refresh['cursor'], RECONCILE_BATCH)).fetchall()
-            if not rows:
-                provider_frontiers.clear(self.conn,provider)
-                return False
-            params = dict(ids=json.dumps([r[0] for r in rows]), provider=provider, cutoff=refresh['cutoff'])
-            # Attempts after this configuration change may already have completed
-            # or established a retry. Never erase that newer state or its cooldown.
-            stale = ('SELECT s.recording_id FROM enrichment_provider_state s WHERE s.provider=:provider '
-                     'AND s.recording_id IN (SELECT value FROM json_each(:ids)) AND NOT EXISTS ('
-                     'SELECT 1 FROM provider_attempts p WHERE p.recording_id=s.recording_id '
-                     'AND p.provider=:provider AND p.id>:cutoff)')
-            if metadata_runtime.active(self.conn):
-                stale = ('SELECT s.recording_id FROM enrichment_provider_state s WHERE s.provider=:provider '
-                         'AND s.recording_id IN (SELECT value FROM json_each(:ids)) AND s.at*1000000<=:cutoff')
-            # Runtime activation retires legacy reads, but their child rows can
-            # still reference the state being refreshed.
-            if self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' "
-                                 "AND name='provider_state_fields'").fetchone():
-                self.conn.execute('DELETE FROM provider_state_fields WHERE provider=:provider '
-                                  'AND recording_id IN (' + stale + ')', params)
+    @synchronized
+    def refresh_inputs(self, provider, limit):
+        refresh = provider_frontiers.read(self.conn, provider)
+        configuration = self.conn.execute('SELECT fingerprint,status FROM enrichment_provider_config WHERE provider=?', (provider,)).fetchone()
+        runtime = metadata_runtime.active(self.conn)
+        rows = []
+        if refresh is not None:
+            attempts = ('0 last_attempt,0 completed_attempt' if runtime else
+                '(SELECT COALESCE(MAX(p.id),0) FROM provider_attempts p WHERE p.recording_id=r.id AND p.provider=:provider) last_attempt,'
+                '(SELECT COALESCE(MAX(p.id),0) FROM provider_attempts p WHERE p.recording_id=r.id AND p.provider=:provider '
+                "AND p.status<>'retry') completed_attempt")
+            rows = [dict(row) for row in self.conn.execute('SELECT r.id,r.first_enriched_at,s.at,s.status,' + attempts +
+                ' FROM recordings r LEFT JOIN enrichment_provider_state s ON s.recording_id=r.id AND s.provider=:provider '
+                'WHERE r.id>:cursor ORDER BY r.id LIMIT :limit', dict(provider=provider, cursor=refresh['cursor'], limit=limit))]
+        return {'frontier': refresh, 'configuration': dict(configuration) if configuration else None, 'runtime': runtime, 'rows': rows}
+
+    @synchronized
+    def clear_provider_refresh(self, provider):
+        with self.conn.atomic(join=True):
+            provider_frontiers.clear(self.conn, provider)
+
+    @synchronized
+    def store_refresh_page(self, provider, refresh, stale, jobs, cursor):
+        with self.conn.atomic(join=True):
+            params = dict(ids=json.dumps(stale), provider=provider)
+            if self.conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='provider_state_fields'").fetchone():
+                self.conn.execute('DELETE FROM provider_state_fields WHERE provider=:provider AND recording_id IN '
+                                  '(SELECT value FROM json_each(:ids))', params)
             self.conn.execute('DELETE FROM enrichment_provider_state WHERE provider=:provider '
-                              'AND recording_id IN (' + stale + ')', params)
-            # Jobs for temporarily absent recordings remain dormant until membership
-            # returns. This also avoids losing refresh intent across membership changes.
-            if metadata_runtime.active(self.conn):
-                self.conn.execute('INSERT OR IGNORE INTO enrichment_provider_jobs SELECT id,:provider FROM recordings r '
-                    'WHERE id IN (SELECT value FROM json_each(:ids)) AND first_enriched_at IS NOT NULL '
-                    'AND NOT EXISTS (SELECT 1 FROM enrichment_provider_state s WHERE s.recording_id=r.id '
-                    "AND s.provider=:provider AND s.at*1000000>:cutoff AND s.status<>'retry')", params)
-                provider_frontiers.advance(self.conn,provider,refresh,rows[-1][0])
-                return True
-            self.conn.execute('INSERT OR IGNORE INTO enrichment_provider_jobs '
-                'SELECT id,:provider FROM recordings r WHERE id IN (SELECT value FROM json_each(:ids)) '
-                'AND first_enriched_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM provider_attempts p '
-                "WHERE p.recording_id=r.id AND p.provider=:provider AND p.id>:cutoff AND p.status<>'retry')", params)
-            provider_frontiers.advance(self.conn,provider,refresh,rows[-1][0])
-        return True
+                              'AND recording_id IN (SELECT value FROM json_each(:ids))', params)
+            self.conn.executemany('INSERT OR IGNORE INTO enrichment_provider_jobs VALUES (?,?)', [(identity, provider) for identity in jobs])
+            provider_frontiers.advance(self.conn, provider, refresh, cursor)
 
     @snapshot_read
     def provider_refresh_pending(self, provider):
         return provider_frontiers.read(self.conn,provider) is not None
 
     @snapshot_read
-    def _missing_provider_coverage(self, provider):
+    def missing_provider_coverage(self, provider):
         if metadata_runtime.active(self.conn):
             return [row[0] for row in self.conn.execute('SELECT r.id FROM recordings r '
                 'WHERE first_enriched_at IS NOT NULL AND EXISTS (SELECT 1 FROM enrichment_provider_state s WHERE s.recording_id=r.id) '
@@ -424,8 +375,9 @@ class EnrichmentStateRepo(Repo):
             'WHERE e.recording_id=r.id) OR EXISTS (SELECT 1 FROM discovery_memberships d '
             'WHERE d.recording_id=r.id))', (provider, provider))]
 
-    def _admit_provider_coverage(self, provider, current, candidates):
-        with database_operation('EnrichmentStateRepo._admit_provider_coverage'), atomic_write(self._store):
+    @synchronized
+    def admit_provider_coverage(self, provider, current, candidates):
+        with self.conn.atomic():
             if not self._provider_matches(provider, current):
                 return False
             if metadata_runtime.active(self.conn):
@@ -453,18 +405,10 @@ class EnrichmentStateRepo(Repo):
             "ON c.provider=j.provider WHERE j.recording_id=? AND c.status='available'", (recording_id,))]
 
     @synchronized
-    def provider_coverage(self, recording_id):
-        """Per-subject configuration, pending work and actual outcomes."""
-        pending = set(self.enrichment_provider_jobs(recording_id))
-        states = self.enrichment_provider_state(recording_id, include_previous=True)
-        result = {}
-        for row in self.conn.execute("SELECT provider,status FROM enrichment_provider_config"):
-            name, status = row["provider"], row["status"]
-            state = states.get(name, {})
-            result[name] = (status if status != "available" else
-                            state.get("status", "pending") if name in pending else
-                            state.get("status", "unknown"))
-        return result
+    def coverage_inputs(self, recording_id):
+        return [dict(row) for row in self.conn.execute('SELECT c.provider,c.status configured,s.status,j.provider IS NOT NULL pending '
+            'FROM enrichment_provider_config c LEFT JOIN enrichment_provider_state s ON s.provider=c.provider AND s.recording_id=? '
+            'LEFT JOIN enrichment_provider_jobs j ON j.provider=c.provider AND j.recording_id=?', (recording_id, recording_id))]
 
     @synchronized
     def enrichment_attempts(self, identity_key, video_id=None):

@@ -1,4 +1,5 @@
 """Exercise the source archive through a real disposable python -m process."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -7,7 +8,8 @@ import sys
 
 import pytest
 
-from experiments.audio_lab_tools.support.quality_round import EXPERIMENTS, seal, verify
+from experiments.audio_lab_tools.support import research_artifacts
+from experiments.audio_lab_tools.support.quality_round import EXPERIMENTS, seal, validate, verify
 
 
 @pytest.fixture
@@ -55,6 +57,52 @@ def test_corrupt_original_or_admitted_provenance_fails(completed_round, stage, c
         (completed_round / (stage + '.json')).write_text('changed output')
     with pytest.raises(ValueError, match='Receipt (plan identity differs|output changed)'):
         verify_completed(completed_round)
+
+
+@pytest.mark.parametrize('location', ['source', 'local'])
+def test_removed_protocol_references_keep_their_original_hash_checks(tmp_path, monkeypatch, location):
+    original = tmp_path / 'experiments/audio_lab/OLD_PLAN.md'
+    archive = tmp_path / 'protocols'
+    monkeypatch.setattr(research_artifacts, 'LEGACY_PROTOCOLS', archive)
+    path = tmp_path / 'source/audio_lab/OLD_PLAN.md' if location == 'source' else archive / original.name
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'original frozen protocol\n')
+    expected = hashlib.sha256(path.read_bytes()).hexdigest()
+    plan = {'inputs': {}, 'code': {}, 'references': {str(original): expected}}
+    (tmp_path / 'plan.json').write_text(json.dumps(plan))
+    assert validate(tmp_path) == plan
+    assert not original.exists()
+    path.write_bytes(b'changed protocol\n')
+    with pytest.raises(ValueError, match='Archived protocol changed'):
+        validate(tmp_path)
+
+
+def test_corrupt_source_protocol_cannot_be_hidden_by_an_intact_local_copy(tmp_path, monkeypatch):
+    archive = tmp_path / 'protocols'
+    archive.mkdir()
+    monkeypatch.setattr(research_artifacts, 'LEGACY_PROTOCOLS', archive)
+    original = archive / 'OLD_PLAN.md'
+    original.write_bytes(b'original frozen protocol\n')
+    expected = hashlib.sha256(original.read_bytes()).hexdigest()
+    snapshot = tmp_path / 'source/audio_lab/OLD_PLAN.md'
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_bytes(b'corrupted archive\n')
+    with pytest.raises(ValueError, match='Archived protocol changed'):
+        research_artifacts.legacy_protocol(tmp_path, original.name, expected)
+
+
+def test_missing_protocol_and_unrelated_references_still_fail(tmp_path, monkeypatch):
+    archive = tmp_path / 'protocols'
+    archive.mkdir()
+    monkeypatch.setattr(research_artifacts, 'LEGACY_PROTOCOLS', archive)
+    with pytest.raises(FileNotFoundError, match='absent from local artifacts'):
+        research_artifacts.legacy_protocol(tmp_path, 'MISSING.md', 'missing')
+    unrelated = tmp_path / 'datasets/MISSING.md'
+    (archive / unrelated.name).write_bytes(b'not the referenced document')
+    (tmp_path / 'plan.json').write_text(json.dumps({
+        'inputs': {}, 'code': {}, 'references': {str(unrelated): 'missing'}}))
+    with pytest.raises(FileNotFoundError):
+        validate(tmp_path)
 
 
 def test_real_main_is_archived_and_changed_execution_is_rejected(tmp_path):

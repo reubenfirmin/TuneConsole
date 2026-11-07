@@ -16,7 +16,7 @@ BASE_FREEZE = engine.freeze
 
 def sources():
     files = BASE_SOURCES()
-    for path in (Path(__file__), LAB / 'PER_VIBE_ALL_SOURCES.md',
+    for path in (Path(__file__),
                  Path(__file__).with_name('test_vibe_specialist_all.py')):
         files[str(path.relative_to(engine.EXPERIMENTS))] = digest(path)
     return files

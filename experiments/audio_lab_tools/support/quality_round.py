@@ -7,6 +7,7 @@ import shutil
 import sys
 
 from .external_experiment import DATA, LAB, digest, save, stamp
+from .research_artifacts import legacy_protocol
 from ..focus.focus_experiment import inside, load, runtime
 
 EXPERIMENTS = LAB.parent
@@ -95,7 +96,11 @@ def validate(directory, execution=False):
         if execution and digest(EXPERIMENTS / name) != checksum:
             raise ValueError('Executing code changed; freeze a new round: ' + name)
     for name, checksum in plan['references'].items():
-        if digest(name) != checksum:
+        path = Path(name)
+        if (not path.exists() and path.suffix == '.md'
+                and path.parts[-3:-1] == ('experiments', 'audio_lab')):
+            path = legacy_protocol(directory, path.name, checksum)
+        if digest(path) != checksum:
             raise ValueError('Referenced evidence changed: ' + name)
     return plan
 

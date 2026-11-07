@@ -53,9 +53,10 @@ archives to reproduce frozen runs; changed source requires a new run directory.
   there when they explain a result. Do not copy them into narrative source docs.
 - Keep ticket descriptions, handoffs, review queues and progress diaries in
   tickets. Do not maintain repository copies or add per-ticket Markdown files.
-- Preserve protocols and supporting documents whose exact bytes participate in
-  frozen evidence hashes. They are reproducibility inputs, not growing logs.
-  Define a new protocol for a changed experiment rather than rewriting history.
+- Freeze experiment settings in machine-readable plans alongside their source
+  snapshots. Historical documents required by old evidence hashes belong in
+  ignored artifacts (`audio_lab/local/protocols/`), not separate tracked plans.
+  Preserve those bytes; a changed experiment needs a new frozen plan.
 
 The audio history summarizes the previous reports. Historical prose remains in Git
 history; detailed machine-readable evidence remains under the existing ignored

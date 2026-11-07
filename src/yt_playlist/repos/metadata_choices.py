@@ -40,6 +40,16 @@ class MetadataChoiceRepo(Repo):
         return metadata_runtime.next_identity(self.conn, 'metadata_runtime_choices')
 
     @synchronized
+    def store_observations(self, delivery, prepared):
+        with self.conn.atomic():
+            return metadata_evidence.record_prepared(self.conn, delivery, prepared)
+
+    @synchronized
+    def transfer_recording_observation(self, entry, observation, at):
+        with self.conn.atomic():
+            return metadata_evidence.reuse_recording_observation(self.conn, entry, observation, now=at)
+
+    @synchronized
     def store(self, inputs, field, value, prepared, *, withdraw, source, at, identity=None, revision=None):
         track, layout = inputs['track'], inputs['layout']
         entry, recording, video = track['id'], track['recording_id'], track['video_id']

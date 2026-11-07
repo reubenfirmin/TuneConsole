@@ -131,3 +131,30 @@ def test_supplied_observation_does_not_capture_another_delivery(metadata):
     metadata.select(7, 'title', 'Original', 'youtube', observation_id=20, now=10)
     metadata.deliveries.capture_state.assert_not_called()
     assert metadata.repository.store_base.call_args.kwargs == {'delivery_id': None, 'observation_id': 20}
+
+
+def test_capture_fields_validates_before_publishing_and_stores_typed_observations_afterwards(metadata):
+    events = []
+    metadata.deliveries.capture_state.side_effect = lambda *args, **kwargs: events.append('capture') or 15
+    metadata.repository.store_observations.side_effect = lambda *args: events.append('observations') or {'bpm': 20}
+    body = {'format': 'catalog-provider-fields-1', 'fields': {'bpm': 120}}
+    assert metadata.capture_fields(7, 'a', {'bpm': 120}, purpose='provider-fields', body=body, now=10) == (15, {'bpm': 20})
+    assert events == ['capture', 'observations']
+    prepared = metadata.repository.store_observations.call_args.args[1]['bpm']
+    assert (prepared.number, prepared.unit) == (120, 'bpm')
+    metadata.repository.transaction.assert_not_called()
+
+
+def test_invalid_captured_field_cannot_publish_a_delivery(metadata):
+    with pytest.raises(ValueError):
+        metadata.capture_fields(7, 'a', {'bpm': True}, purpose='provider-fields', body={}, now=10)
+    metadata.deliveries.capture_state.assert_not_called()
+    metadata.repository.store_observations.assert_not_called()
+
+
+def test_failed_observation_write_does_not_repeat_the_delivery_capture_implicitly(metadata):
+    metadata.deliveries.capture_state.return_value = 15
+    metadata.repository.store_observations.side_effect = RuntimeError('interrupted')
+    with pytest.raises(RuntimeError, match='interrupted'):
+        metadata.capture_fields(7, 'a', {'bpm': 120}, purpose='provider-fields', body={}, now=10)
+    metadata.deliveries.capture_state.assert_called_once()

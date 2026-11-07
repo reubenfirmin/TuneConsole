@@ -1,15 +1,21 @@
 """Capture predecessor metadata response files and commit their SQL references."""
 import hashlib
+import json
 import sqlite3
 from uuid import uuid4
 
-from yt_playlist.core.metadata_deliveries import Delivery
+from yt_playlist.core.metadata_deliveries import Delivery, NO_RESPONSE
 from yt_playlist.core.metadata_delivery_files import FORMAT
 
 
 class MetadataDeliveries:
     def __init__(self, repository, files):
         self.repository, self.files = repository, files
+
+    def response(self, identity):
+        with self.files.retained():
+            reference = self.repository.delivery_reference(identity)
+            return NO_RESPONSE if reference[0] is None else json.loads(self.files.read_encoded(reference))['value']
 
     def capture_state(self, entry, provider, slot, body, *, now):
         if not isinstance(slot, str) or not 0 < len(slot.encode()) <= 256:

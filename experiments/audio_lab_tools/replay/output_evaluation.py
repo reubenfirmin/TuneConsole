@@ -18,6 +18,7 @@ from threadpoolctl import threadpool_limits
 
 from .. import TOOLS, source_path
 from ..support.external_experiment import ROOT, digest, save, stamp
+from ..support.research_artifacts import legacy_protocol
 from . import replay_runtime
 
 WORK = ROOT / 'experiments/audio_lab/local/output-evaluation-587-20261030'
@@ -48,11 +49,11 @@ def freeze(directory, database):
         raise ValueError('Freeze a complete runtime first')
     plan = {'created_at': stamp(), 'ticket': 587, 'arms': ARMS, 'seed': SEED, 'clock': NOW,
         **replay_runtime.runtime_identity(), 'runtime_files': replay_runtime.runtime_hashes(),
-        'protocol_sha256': digest(ROOT / 'experiments/audio_lab/OUTPUT_EVALUATION_PLAN.md'),
         'script_sha256': digest(__file__), 'database': str(database),
         'package_sha256': digest(TOOLS / '__init__.py'),
         'helpers': {name: digest(source_path(name)) for name in
-                    ('external_propagation.py', 'external_experiment.py', 'replay_runtime.py')},
+                    ('external_propagation.py', 'external_experiment.py', 'replay_runtime.py',
+                     'research_artifacts.py')},
         'models': {m.__name__: {'path': str(m.DEFAULT_PATH), 'sha256': digest(m.DEFAULT_PATH)} for m in modules()},
         'budgets': {'publication': 180, 'consumer': 30, 'arm': 900},
         'access': 'Pinned read-only native transaction; all restores/writes in this experiment directory.'}
@@ -131,14 +132,12 @@ def verify(directory, *, check_script=True):
             or plan['samples_sha256'] != digest(directory / 'samples.json')
             or plan['manifests_sha256'] != digest(directory / 'files.json')):
         raise ValueError('Pinned evaluation inputs changed')
-    if plan['protocol_sha256'] != digest(ROOT / 'experiments/audio_lab/OUTPUT_EVALUATION_PLAN.md'):
-        raise ValueError('Pinned protocol changed')
-    if plan.get('continuation_sha256') and plan['continuation_sha256'] != digest(
-            ROOT / 'experiments/audio_lab/OUTPUT_EVALUATION_CONTINUATION_PLAN.md'):
-        raise ValueError('Pinned continuation protocol changed')
-    if plan.get('consumer_continuation_sha256') and plan['consumer_continuation_sha256'] != digest(
-            ROOT / 'experiments/audio_lab/OUTPUT_EVALUATION_CONSUMER_PLAN.md'):
-        raise ValueError('Pinned consumer continuation protocol changed')
+    for field, filename in (
+            ('protocol_sha256', 'OUTPUT_EVALUATION_PLAN.md'),
+            ('continuation_sha256', 'OUTPUT_EVALUATION_CONTINUATION_PLAN.md'),
+            ('consumer_continuation_sha256', 'OUTPUT_EVALUATION_CONSUMER_PLAN.md')):
+        if plan.get(field):
+            legacy_protocol(directory, filename, plan[field])
     for name, expected in plan['helpers'].items():
         if digest(source_path(name)) != expected:
             raise ValueError('Pinned evaluation helper changed: ' + name)
@@ -180,14 +179,13 @@ def revise(source, directory, *, continuation=False, consumer_continuation=False
         shutil.copyfile(source / name, directory / name)
     plan.update(created_at=stamp(), script_sha256=digest(__file__),
                 previous_plan={'path': str(source / 'plan.json'), 'sha256': digest(source / 'plan.json')})
+    plan['helpers']['research_artifacts.py'] = digest(source_path('research_artifacts.py'))
     if continuation:
         plan.update(budgets={'publication': 600, 'consumer': 30, 'arm': 1800},
             original_budgets={'publication': 180, 'consumer': 30, 'arm': 900},
-            continuation_sha256=digest(ROOT / 'experiments/audio_lab/OUTPUT_EVALUATION_CONTINUATION_PLAN.md'),
             prior_attempts={str(p): digest(p) for p in source.glob('*/report.json')})
     if consumer_continuation:
         plan.update(budgets={'publication': 600, 'consumer': 180, 'arm': 1800},
-            consumer_continuation_sha256=digest(ROOT / 'experiments/audio_lab/OUTPUT_EVALUATION_CONSUMER_PLAN.md'),
             prior_attempts={**plan.get('prior_attempts', {}),
                             **{str(p): digest(p) for p in source.glob('*/report.json')}})
     for name in ('radio-seed.json', 'radio-exclusions.json'):

@@ -418,11 +418,12 @@ class Store:
         self.search = Search(SearchRepo(self))
         from yt_playlist.controllers.enrichment import Enrichment
         self.enrichment = Enrichment(EnrichmentRepo(self), self.metadata_choices,
-            RuntimeMetadataFiles(metadata_runtime_root(self._db_path, self._evidence_key)))
+            RuntimeMetadataFiles(metadata_runtime_root(self._db_path, self._evidence_key)), self.metadata_deliveries)
         self.enrichment_reports = EnrichmentReports(EnrichmentReportsRepo(self),
             partial(metadata_runtime_files.read_at,
                     metadata_runtime_files.root_for_database(self._db_path, self._evidence_key)))
-        self.enrichment_state = EnrichmentStateRepo(self)
+        from yt_playlist.controllers.enrichment_state import EnrichmentState
+        self.enrichment_state = EnrichmentState(EnrichmentStateRepo(self))
         self.enrichment_queue = EnrichmentQueue(EnrichmentQueueRepo(self), self.enrichment_state, self.settings,
             read_snapshot=self.read_snapshot, memoized_read=self.memoized_read,
             read_only=getattr(self, '_read_only', False))

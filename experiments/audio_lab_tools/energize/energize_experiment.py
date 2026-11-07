@@ -65,7 +65,7 @@ def code_paths():
     paths = {Path(m.__file__).resolve() for name, m in list(sys.modules.items())
              if (name == 'experiments.audio_lab_tools' or name.startswith('experiments.audio_lab_tools.'))
              and getattr(m, '__file__', None)}
-    paths.update((EXPERIMENTS / 'run.py', LAB / 'ENERGIZE_CONSENSUS_PLAN.md',
+    paths.update((EXPERIMENTS / 'run.py',
                   Path(__file__).with_name('test_energize_consensus.py')))
     return {str(p.relative_to(EXPERIMENTS)): p for p in sorted(paths)}
 

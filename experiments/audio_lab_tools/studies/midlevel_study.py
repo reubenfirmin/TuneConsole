@@ -17,7 +17,6 @@ from ..focus.focus_experiment import inside, load
 
 DEFAULT = LAB / 'local/midlevel-811-20261101/round-1'
 DISCOVERY = LAB / 'local/datasets/discovery/research-20261101'
-DOCUMENT = LAB / 'MIDLEVEL_PLAN.md'
 EXPECTED = 'f0a36e901ed6d9e4f21d61d49cd2631642140e3329bb7e41c7524e09688fe1ac'
 FILE_ID = '5b20bd6eba5d13000f092ab8'
 URLS = [
@@ -31,12 +30,11 @@ URLS = [
 
 
 def freeze(directory):
-    evidence.freeze(directory, 811, {'document_sha256': digest(DOCUMENT), 'urls': URLS,
+    evidence.freeze(directory, 811, {'urls': URLS,
         'expected_sha256': EXPECTED, 'expected_bytes': 318090,
         'metadata_seconds': 300, 'response_bytes': 2 * 1024**2, 'total_bytes': 16 * 1024**2,
         'repositories': ['shreyanc/midlevel_general', 'CPJKU/robustness_mer_bottleneck']},
-        {n: DISCOVERY / n for n in ('midlevel-node.response', 'midlevel-files.response', 'midlevel-file-info.response')},
-        documents=[DOCUMENT])
+        {n: DISCOVERY / n for n in ('midlevel-node.response', 'midlevel-files.response', 'midlevel-file-info.response')})
     print(json.dumps({'plan_sha256': digest(directory / 'plan.json')}), flush=True)
 
 

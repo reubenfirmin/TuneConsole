@@ -24,7 +24,6 @@ from .memo_confirmation import holdout_pairs
 from ..audio.quality_reference_audio import response
 
 DEFAULT = LAB / 'local/mert-layers-809-20261101/round-2'
-DOCUMENT = LAB / 'MERT_LAYERS_PLAN.md'
 WORKER = source_path('mert_layers_worker.py')
 
 
@@ -36,7 +35,7 @@ def freeze(directory, extraction_source=None):
                    'baseline-predictions.npz': ORIGINAL / 'predictions.npz',
                    'baseline-rows.json': ORIGINAL / 'extraction.json',
                    'baseline-trace.json': ORIGINAL / 'fit-trace.json'})
-    specification = {'document_sha256': digest(DOCUMENT), 'baseline': str(ORIGINAL),
+    specification = {'baseline': str(ORIGINAL),
         'baseline_plan_sha256': digest(ORIGINAL / 'plan.json'),
         'comparison': 'middle versus mert final; matched musicnn secondary',
         'baseline_variant': 'mert', 'new_variants': ['middle'],
@@ -64,7 +63,7 @@ def freeze(directory, extraction_source=None):
                     ORIGINAL / 'pcm-audit.receipt.json', ASSETS / 'assets.json',
                     ASSETS / 'requirements.lock', *reuse_references,
                     *[MODEL / r['name'] for r in load(ASSETS / 'assets.json')['files']]],
-        documents=[DOCUMENT, WORKER, Path(__file__).with_name('test_representation_study.py'),
+        documents=[WORKER, Path(__file__).with_name('test_representation_study.py'),
                    LAB.parent / 'investigations/representation_809.py'])
     print(json.dumps({'frozen': str(directory), 'plan_sha256': digest(directory / 'plan.json')}), flush=True)
 

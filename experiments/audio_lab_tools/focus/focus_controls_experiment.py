@@ -73,7 +73,7 @@ def freeze(directory):
     paths = {Path(m.__file__).resolve() for name, m in list(sys.modules.items())
              if (name == 'experiments.audio_lab_tools' or name.startswith('experiments.audio_lab_tools.'))
              and getattr(m, '__file__', None)}
-    paths.update((EXPERIMENTS / 'run.py', LAB / 'FOCUS_CONTROLS_PLAN.md',
+    paths.update((EXPERIMENTS / 'run.py',
                   Path(__file__).with_name('test_focus_controls.py')))
     code = {}
     for path in sorted(paths):

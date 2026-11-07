@@ -41,8 +41,7 @@ def sources():
              *(source_path(name) for name in (
                  'test_mapped_vibes.py', 'vibe_specialist_models.py', 'vibe_specialist_round.py',
                  'transfer_identity.py', 'library_replay.py', 'consumer_replay.py',
-                 'replay_runtime.py', 'replay_storage.py')), EXPERIMENTS / 'run.py',
-             LAB / 'EXTERNAL_VIBE_PIPELINE_PLAN.md']
+                 'replay_runtime.py', 'replay_storage.py')), EXPERIMENTS / 'run.py']
     paths += list(TOOLS.rglob('external_*.py'))
     return {str(p.relative_to(EXPERIMENTS)): digest(p) for p in sorted(set(paths))}
 

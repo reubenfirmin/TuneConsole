@@ -23,7 +23,6 @@ from .midlevel_study import DEFAULT as ACQUISITION
 
 ROOT = LAB / 'local/midlevel-811-20261101'
 DEFAULT = ROOT / 'pilot-1'
-DOCUMENT = LAB / 'MIDLEVEL_PILOT_PLAN.md'
 PROPERTIES = ['melody', 'articulation', 'rhythm_complexity', 'rhythm_stability', 'dissonance', 'atonality', 'mode']
 VARIANTS = ('direct', 'bottleneck', 'augmented', 'oracle')
 SEED = 8111101
@@ -108,14 +107,14 @@ def prepare():
 
 def freeze(directory):
     audit = load(ROOT / 'pilot-audit.json')
-    evidence.freeze(directory, 811, {'document_sha256': digest(DOCUMENT), 'seed': SEED,
+    evidence.freeze(directory, 811, {'seed': SEED,
         'properties': PROPERTIES, 'variants': VARIANTS, 'rows': 360, 'components': audit['components'],
         'budget_seconds': 3600, 'rss_bytes': 4 * 1024**3, 'model_bytes': 64 * 1024**2},
         {'audit.json': ROOT / 'pilot-audit.json', 'data.npz': ROOT / 'pilot-inputs.npz'},
         references=[ACQUISITION / 'acquisition.receipt.json', ACQUISITION / 'metadata_annotations.zip',
             ORIGINAL / 'plan.json', ORIGINAL / 'inputs/soundtracks-all.json', ORIGINAL / 'inputs/soundtracks-all.npz',
             *[Path(r['feature_file']) for r in audit['rows']], *[Path(r['audio']) for r in audit['rows']]],
-        documents=[DOCUMENT, LAB.parent / 'investigations/midlevel_811.py'])
+        documents=[LAB.parent / 'investigations/midlevel_811.py'])
     print(json.dumps({'plan_sha256': digest(directory / 'plan.json')}))
 
 

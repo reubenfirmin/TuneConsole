@@ -3,7 +3,9 @@ import re
 
 import pytest
 
-from tests.quiet_pool_support import DIAGNOSTIC, quiet_pool
+from tests.quiet_pool_support import DIAGNOSTIC, quiet_home_template, quiet_pool
+from tests.home_fixture_support import home_routes_only, without_metadata_providers
+from tests.test_home_other_genres import genre_routes, template_bytecode
 from yt_playlist.core.action_errors import ActionInputError
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.rec import candidate_refresh, fresh_pool

@@ -13,14 +13,13 @@ from experiments.audio_lab_tools.focus.focus_experiment import arrays, load
 from experiments.audio_lab_tools.support.quality_round import verify
 
 OUTPUT = LAB / 'local/chroma-810-20261101/focus-permutation'
-DOCUMENT = LAB / 'CHROMA_FOCUS_DIAGNOSTIC.md'
 
 
 def test_paired_activity_permutation_diagnostic():
     verify(DEFAULT, required_stages=['extraction', 'predictions', 'evaluation'])
     OUTPUT.mkdir(exist_ok=True)
     assert not (OUTPUT / 'report.json').exists(), 'Preserve completed diagnostics; do not overwrite.'
-    frozen = {'document_sha256': digest(DOCUMENT), 'source_sha256': digest(Path(__file__)),
+    frozen = {'source_sha256': digest(Path(__file__)),
               'plan_sha256': digest(DEFAULT / 'plan.json'), 'draws': 99, 'seed': 8101101,
               'notice': 'Post-result diagnostic; conditions on the repeated component.'}
     save(OUTPUT / 'plan.json', frozen)

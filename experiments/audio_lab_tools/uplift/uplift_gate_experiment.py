@@ -20,7 +20,6 @@ from .uplift_experiment import OMISSIONS, PRIMARY, add_controls
 
 OLD = LAB / 'local/uplift-618-20261030/round-1'
 DEFAULT = LAB / 'local/uplift-gate-712-20261101/round-2'
-DOCUMENT = LAB / 'UPLIFT_GATE_PLAN.md'
 
 
 def freeze(directory):
@@ -54,7 +53,7 @@ def freeze(directory):
     if dict(zip(constant['expert_names'], constant['learned_weights'])) != {
             s: models.CONSTANT.get(s, 0.) for s in native.EXPERTS}:
         raise ValueError('Previously frozen constant weights changed')
-    plan = evidence.freeze(directory, 712, {'document_sha256': digest(DOCUMENT),
+    plan = evidence.freeze(directory, 712, {
         'grid': models.GRID, 'penalty': models.PENALTY, 'bootstrap_draws': 1000,
         'minimum_contrast_rows': 15, 'minimum_contrast_groups': 10,
         'acceptance': {'ndcg_gain': .02, 'lift_gain': .01, 'ranking_loss': .01, 'mse_loss': .005},
@@ -62,7 +61,7 @@ def freeze(directory):
         'head_policy': 'Same #618 native targets and fitting procedure, refitted for complete identity exclusions; arousal context uses DEAM/PMEmo native arousal.'},
         inputs, references=[OLD / 'plan.json', OLD / 'evaluation.receipt.json',
                             LAB / 'local/uplift-gate-712-20261101/round-1/plan.json'],
-        documents=[DOCUMENT, Path(__file__).with_name('test_uplift_gate.py')])
+        documents=[Path(__file__).with_name('test_uplift_gate.py')])
     prepared = {}
     for source, d in original.items():
         d['groups'] = groups[boundaries[source]]

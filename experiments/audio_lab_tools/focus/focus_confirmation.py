@@ -36,7 +36,6 @@ CHROMA = LAB / 'local/chroma-810-20261101/round-1'
 ENVIRONMENT = LAB / 'local/chroma-810'
 PYTHON = ENVIRONMENT / 'venv/bin/python'
 WORKER = source_path('chroma_worker.py')
-DOCUMENT = LAB / 'FOCUS_CONFIRMATION_PLAN.md'
 METHODS = ('ridge', 'chroma', 'combined', 'training_mean', 'adopted_full')
 DOWNLOADS = (
     ('HumMusQA.csv', 'https://zenodo.org/records/18462524/files/HumMusQA.csv?download=1',
@@ -192,7 +191,7 @@ def freeze(directory):
     refs.extend(Path(p) for p in load(SOURCES / 'audit.json')['hummusqa']['prior_inventories'])
     if load(SOURCES / 'audit.json')['independent_confirmation_rows'] != 0:
         raise ValueError('This frozen development diagnostic requires a new plan for independent references')
-    evidence.freeze(directory, 815, {'document_sha256': digest(DOCUMENT),
+    evidence.freeze(directory, 815, {
         'outer_folds': 5, 'inner_folds': 3, 'bootstrap_draws': 1000,
         'native_rows': 494, 'common_rows': 450, 'methods': METHODS,
         'chroma_dimensions': 72, 'old_chroma_ids': sorted(old_ids),
@@ -202,7 +201,7 @@ def freeze(directory):
                      'adopted_full_ranking_regression': .01},
         'budgets': {'extract_seconds': 1800, 'fit_evaluate_seconds': 1800,
                     'rss_bytes': 2 * 1024**3, 'feature_bytes': 8 * 1024**2}},
-        inputs, references=refs, documents=[DOCUMENT, WORKER,
+        inputs, references=refs, documents=[WORKER,
             LAB.parent / 'investigations/focus_confirmation_815.py'])
     # Derived identities are frozen before extraction or outcome evaluation.
     save(directory / 'inputs/rows.json', rows)

@@ -77,3 +77,31 @@ def test_failed_publication_cannot_advance_sql_capture_head(captures):
         captures.capture_state(7, 'youtube', 'catalog-input', {}, now=20)
     captures.repository.insert.assert_not_called()
     captures.repository.set_capture_head.assert_not_called()
+
+
+def test_response_acquires_file_retention_before_reading_its_sql_reference(captures):
+    from contextlib import contextmanager
+
+    events = []
+
+    @contextmanager
+    def retained():
+        events.append('retain')
+        yield
+        events.append('release')
+
+    captures.files.retained.side_effect = retained
+    reference = ('file', 'digest', 80, 100)
+    captures.repository.delivery_reference.side_effect = lambda identity: events.append('reference') or reference
+    captures.files.read_encoded.side_effect = lambda ref: events.append('read') or b'{"value":{"fields":{"genre":"Jazz"}}}'
+    assert captures.response(10) == {'fields': {'genre': 'Jazz'}}
+    assert events == ['retain', 'reference', 'read', 'release']
+    captures.files.read_encoded.assert_called_once_with(reference)
+
+
+def test_delivery_without_a_response_does_not_read_files(captures):
+    from yt_playlist.core.metadata_deliveries import NO_RESPONSE
+
+    captures.repository.delivery_reference.return_value = (None, None, None, None)
+    assert captures.response(10) is NO_RESPONSE
+    captures.files.read_encoded.assert_not_called()

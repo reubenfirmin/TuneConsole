@@ -32,7 +32,6 @@ from ..uplift.uplift_consensus import native_average
 
 DEFAULT = LAB/'local/encoder-comparison-708-20261101/round-3'
 PREVIOUS = LAB/'local/individual-20261030/remaining-1'
-DOCUMENT = LAB/'ENCODER_COMPARISON_PLAN.md'
 WORKER = source_path('mert_worker.py')
 MAX_SECONDS = 7200
 
@@ -92,7 +91,7 @@ def freeze(directory,feature_source=None):
         artifact = load(inputs[f'adopted-{vibe}.json'])
         weights[vibe] = ({models.CAL:1.} if vibe=='focus' else {models.JAM:1.} if vibe=='release'
             else {s:1/len(experts(artifact)) for s in experts(artifact)} if vibe=='cruise' else artifact['weights'])
-    protocol_spec = {'document_sha256':digest(DOCUMENT),'cohort_seed':'encoder-708-v1/source/id',
+    protocol_spec = {'cohort_seed':'encoder-708-v1/source/id',
         'maximum_per_source':32,'maximum_per_component_per_source':2,'outer_folds':5,'inner_folds':3,'seed':models.SEED,
         'native_targets':models.NATIVE,'weights':weights,'ridge_alphas':[.1,1,10,100,1000],'constant_control':True,
         'musicnn':provenance(),'mert':load(ASSETS/'assets.json'),
@@ -119,7 +118,7 @@ def freeze(directory,feature_source=None):
         references.extend([feature_source/'plan.json',feature_source/'extraction.receipt.json',
             *[feature_source/name for name in receipt['outputs']]])
     plan = evidence.freeze(directory,708,protocol_spec,inputs,references=references,
-        documents=[DOCUMENT,WORKER,Path(__file__).with_name('test_encoder_models.py'),
+        documents=[WORKER,Path(__file__).with_name('test_encoder_models.py'),
             LAB.parent/'investigations/encoder_comparison_708.py'])
     save(directory/'inputs/selection.json',{'rows':selected,'audit':excluded,'weights':weights})
     plan['inputs']['inputs/selection.json'] = digest(directory/'inputs/selection.json')

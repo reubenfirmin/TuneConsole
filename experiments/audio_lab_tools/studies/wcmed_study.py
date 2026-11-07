@@ -25,7 +25,6 @@ from .memo_confirmation import holdout_pairs
 DEFAULT = LAB / 'local/wcmed-812-20261101/round-3'
 DISCOVERY = LAB / 'local/datasets/discovery/research-20261101'
 METADATA = LAB / 'local/datasets/ccmed-wcmed/source/CCMED_WCMED/WCMED'
-DOCUMENT = LAB / 'WCMED_PLAN.md'
 VIBES = ('cruise', 'relax', 'uplift', 'energize')
 
 
@@ -78,13 +77,13 @@ def freeze(directory, reuse=None):
             inputs['reuse-features.npz'] = reuse / 'features.npz'
             references.extend([reuse / 'features.receipt.json',
                 *[reuse / p for p in load(reuse / 'features.receipt.json')['outputs']]])
-    p = evidence.freeze(directory, 812, {'document_sha256': digest(DOCUMENT),
+    p = evidence.freeze(directory, 812, {
         'metadata_rows': len(rows), 'metadata_components': len(set(components(rows))),
         'maximum_download_bytes': 1024**3, 'maximum_source_bytes': 64*1024**2,
         'acquisition_seconds': 1800, 'extraction_seconds': 7200,
         'bootstrap_draws': 1000, 'extraction': provenance(), 'target_fit': False},
         inputs, references=references,
-        documents=[DOCUMENT, LAB.parent / 'investigations/wcmed_812.py'])
+        documents=[LAB.parent / 'investigations/wcmed_812.py'])
     print(json.dumps({'plan_sha256': digest(directory / 'plan.json'),
                       'metadata_components': p['protocol']['metadata_components']}), flush=True)
 

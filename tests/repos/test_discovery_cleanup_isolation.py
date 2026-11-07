@@ -19,6 +19,7 @@ import pytest
 
 from yt_playlist.core import fao, json_cache
 from yt_playlist.core.activity import Activity, WorkBudgetExceeded, WorkClosing
+from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import bundle_storage
 from yt_playlist.repos import discovery_cache, proposal_cache
 from yt_playlist.core import discovery_cache_policy
@@ -59,9 +60,12 @@ def populate(store, count=200):
     items = [{'key': key if n == 0 else f'keep-{n}', 'title': f'Track {n}',
               'artist': 'Artist',
               'reason': 'album context and independent listening evidence ' * 20} for n in range(count)]
-    for item in items[1:] + [{'key': 'owned', 'title': 'Owned', 'artist': 'Other artist'},
-                           {'key': 'new-cache', 'title': 'New cache', 'artist': 'Other artist'}]:
-        seed_catalog_track(store, item['key'], item['title'], item['artist'], video_id='video-' + item['key'])
+    # Fixture construction is one catalog import, before the cleanup race starts.
+    # Avoid committing the unchanged source once for every recording.
+    with atomic_write(store):
+        for item in items[1:] + [{'key': 'owned', 'title': 'Owned', 'artist': 'Other artist'},
+                               {'key': 'new-cache', 'title': 'New cache', 'artist': 'Other artist'}]:
+            seed_catalog_track(store, item['key'], item['title'], item['artist'], video_id='video-' + item['key'])
     bundles = {'all': {'fresh': items, 'wheelhouse': [{'key': 'owned', 'title': 'Owned', 'artist': 'Other artist'}]},
                '1': {'fresh': items}, '_meta': {'full_pools': True, 'comfort_pool': 12},
                '_radio': {'members': {'1': [key, 'keep-1']}}}

@@ -7,7 +7,7 @@ import pytest
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.core.store import Store
 from yt_playlist.core import provider_frontiers
-from yt_playlist.repos import enrichment_state
+from yt_playlist.controllers import enrichment_state
 
 ORIGINAL = {'deezer': {'fingerprint': 'original', 'status': 'available'}}
 CHANGED = {'deezer': {'fingerprint': 'changed', 'status': 'available'}}

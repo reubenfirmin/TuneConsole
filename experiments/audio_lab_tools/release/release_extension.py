@@ -25,7 +25,6 @@ from ..relax.relax_experiment import global_groups
 
 DEFAULT = LAB / 'local/release-extension-709-20261101/round-3'
 PREVIOUS = LAB / 'local/individual-20261030/remaining-1'
-DOCUMENT = LAB / 'RELEASE_EXTENSION_PLAN.md'
 JAM, SOUND = 'jamendo-human-4shards', 'soundtracks-all'
 RAW = JAMENDO_SOURCE / 'derived/music-classification-annotations/music-classification-annotations-raw.tsv'
 DOWNLOAD = JAMENDO_SOURCE / 'data/download'
@@ -117,17 +116,17 @@ def freeze(directory):
     assigned = artist_partition([r for r in selected if r['eligible']])
     by_id = {r['id']: r for r in assigned}
     selected = [by_id.get(r['id'], {**r, 'partition': 'excluded_known_component'}) for r in selected]
-    specification = {'document_sha256': digest(DOCUMENT), 'shards': ['70', '63'],
+    specification = {'shards': ['70', '63'],
         'transfer_byte_limit': LIMIT, 'selection': SEED, 'alpha': 1000., 'bootstrap_draws': 1000,
         'extraction': provenance(), 'minimum_test_recordings': 20, 'minimum_test_components': 15,
         'acceptance': {'ndcg_gain': .02, 'lift_gain': .01, 'maximum_mse_increase': .005, 'transfer_ranking_loss': .01},
         'budgets': {'acquisition_seconds': 1800, 'extraction_fit_seconds': 3600, 'rss_bytes': 1024 ** 3},
         'outcome_order': 'Metadata/completeness only at freeze. Training targets after acquisition. Evaluation vote fractions only after predictions.receipt.json.'}
     plan = evidence.freeze(directory, 709, specification, inputs,
-        references=[GRAPH, PACKAGE / 'METADATA', PACKAGE / 'RECORD', LAB / 'RELEASE_LABEL_AUDIT.md',
+        references=[GRAPH, PACKAGE / 'METADATA', PACKAGE / 'RECORD',
             LAB / 'local/release-extension-709-20261101/round-1/plan.json',
             LAB / 'local/release-extension-709-20261101/round-1/acquisition.json'],
-        documents=[DOCUMENT, Path(__file__).with_name('test_release_extension.py')])
+        documents=[Path(__file__).with_name('test_release_extension.py')])
     selection = {'rows': selected, 'components': {s: groups[b].tolist() for s, b in boundaries.items()},
         'local_components': sorted(set(map(int, groups[local_start:]))),
         'known_component_exclusions': [r['id'] for r in selected if not r['eligible']],

@@ -24,7 +24,6 @@ from ..relax.relax_experiment import global_groups
 
 DEFAULT = LAB / 'local/many-windows-707-20261101/round-5'
 PREVIOUS = LAB / 'local/individual-20261030/remaining-1'
-DOCUMENT = LAB / 'MANY_WINDOWS_PLAN.md'
 KINDS = ('natural', 'generated')
 VIBES = ('cruise', 'relax', 'energize', 'uplift')
 VA = ('valence', 'arousal')
@@ -75,15 +74,15 @@ def freeze(directory):
         inputs['adopted-' + vibe + '.json'] = LAB.parent.parent / f'src/yt_playlist/rec/data/{vibe}-vibes.json'
     extraction = provenance()
     refs = [Path(r['audio']) for r in {r['audio']: r for r in rows}.values()]
-    refs += [GRAPH, PACKAGE / 'METADATA', PACKAGE / 'RECORD', LAB / 'PREPROCESSING_QUALITY_424.md']
+    refs += [GRAPH, PACKAGE / 'METADATA', PACKAGE / 'RECORD']
     refs += [LAB / f'local/many-windows-707-20261101/round-{n}/plan.json' for n in range(1, 5)]
-    plan = evidence.freeze(directory, 707, {'document_sha256': digest(DOCUMENT), 'selected_window_rule': 'new-audio-pilot-1',
+    plan = evidence.freeze(directory, 707, {'selected_window_rule': 'new-audio-pilot-1',
         'alphas': models.ALPHAS, 'extraction': extraction, 'bootstrap_draws': 1000,
         'budgets': {'extraction_seconds': 7200, 'workers': 2, 'feature_bytes': 1024 ** 3, 'fit_seconds': 7200, 'rss_bytes': 1024 ** 3},
         'resource_revision': 'Earlier Node attempts preserved before any fits. Round 5 uses the previously accepted #424 C++ MusiCNN path uniformly for every window, with two single-thread workers. Before fitting, every selected-window embedding must agree with the original within the existing .0005 feature tolerance. No Node chunks are mixed into the new training features.',
         'eligibility_revision_before_fits': 'The metadata-only audit finds natural recordings have 5-10 windows and all 95 generated recordings have exactly one. Require meaningful additional-window gain on natural music; generated music is an unchanged negative control, never an additional-window gain claim. No fitted or evaluation outcomes inspected before this correction.',
         'native_targets': list(VA), 'vibes': VIBES, 'components': 'All raw windows, thirteen-source inventories, prior pilot/transfer identities and local rows.'},
-        inputs, references=refs, documents=[DOCUMENT, Path(__file__).with_name('test_many_windows.py')])
+        inputs, references=refs, documents=[Path(__file__).with_name('test_many_windows.py')])
     save(directory / 'inputs/window-plan.json', {'rows': prepared, 'components': components,
         'audit': {'rated_windows': len(rows), 'recordings': len({r['recording_id'] for r in rows}),
                   'selected_windows': len(selected), 'known_local_components': len(protected),

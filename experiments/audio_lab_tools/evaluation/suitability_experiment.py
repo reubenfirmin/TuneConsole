@@ -22,7 +22,6 @@ DEFAULT = ROUND / 'score-contract-1'
 SOURCE = 'manymusic-natural'
 TRANSFERS = ('manymusic-generated', 'memo2496-pilot')
 CONTROLS = ('checkpoint', 'refresh_calibration', 'refresh_both')
-PROTOCOL = LAB / 'VIBE_SCORE_CONTRACT.md'
 
 
 def code_paths():
@@ -33,7 +32,7 @@ def code_paths():
              'vibe_specialist_round.py')
     paths = {str(source_path(name).relative_to(EXPERIMENTS)): source_path(name) for name in names}
     paths.update({str(path.relative_to(EXPERIMENTS)): path for path in TOOLS.rglob('__init__.py')})
-    paths.update({'run.py': EXPERIMENTS / 'run.py', 'audio_lab/VIBE_SCORE_CONTRACT.md': PROTOCOL,
+    paths.update({'run.py': EXPERIMENTS / 'run.py',
                   'product/audio_vibe_external.py': Path(specialist.shared.__file__),
                   'product/audio_embedding.py': Path(specialist.audio_embedding.__file__),
                   'product/build_runtime.py': EXPERIMENTS.parent / 'scripts/audio_model/build_runtime.py'})
@@ -137,7 +136,7 @@ def freeze(directory):
     hashes = {relative: copy(path, directory / 'source' / relative) for relative, path in paths.items()}
     inputs = {str(p.relative_to(directory)): digest(p) for p in (directory / 'inputs').rglob('*') if p.is_file()}
     save(directory / 'plan.json', {'format': 'vibe-score-contract-1', 'created_at': stamp(),
-         'protocol_sha256': digest(PROTOCOL), 'code': hashes, 'inputs': inputs, 'references': references,
+         'code': hashes, 'inputs': inputs, 'references': references,
          'runtime': versions(), 'source': SOURCE, 'transfers': list(TRANSFERS), 'cohorts': cohort,
          'calibrators': list(calibration.FAMILIES), 'seed': calibration.SEED, 'bootstrap_draws': 1000,
          'thresholds': list(calibration.THRESHOLDS), 'product_adoption': False,

@@ -19,7 +19,6 @@ from ..focus.focus_experiment import arrays, check_receipt, constant, inside, lo
 DEFAULT = LAB / 'local/situnes-813-20261101/round-2'
 DISCOVERY = LAB / 'local/datasets/discovery/research-20261101'
 SOURCE = DISCOVERY / 'situnes'
-DOCUMENT = LAB / 'SITUNES_PLAN.md'
 SEED = 8131101
 AXES = ('valence', 'arousal')
 FAMILIES = ('pre', 'context', 'pre-context', 'pre-context-user', 'pre-context-user-music')
@@ -68,13 +67,13 @@ def freeze(directory):
         if digest(path) != intersection['inputs'][str(path.relative_to(LAB.parents[1]))]:
             raise ValueError('Candidate metadata changed: ' + source)
         inputs['candidates/' + source] = path
-    evidence.freeze(directory, 813, {'document_sha256': digest(DOCUMENT), 'seed': SEED,
+    evidence.freeze(directory, 813, {'seed': SEED,
         'families': FAMILIES, 'music_numeric_columns': MUSIC, 'bootstrap_draws': 1000,
         'outer_user': 'leave-one-out', 'outer_track': 5, 'inner_folds': 3,
         'maximum_seconds': 3600, 'maximum_rss_bytes': 2*1024**3,
         'maximum_model_bytes': 64*1024**2, 'no_audio_model': True},
         inputs, references=references,
-        documents=[DOCUMENT, LAB.parent / 'investigations/situnes_813.py'])
+        documents=[LAB.parent / 'investigations/situnes_813.py'])
     print({'plan_sha256': digest(directory / 'plan.json')}, flush=True)
 
 
