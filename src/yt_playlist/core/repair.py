@@ -4,14 +4,12 @@ Event timestamps describe observations, not an export's account scope or complet
 Takeout uploads therefore never authorize deletion. Legacy daily rows also lack source proof and
 are preserved; only observations known to come solely from YouTube's history window are eligible.
 """
-import hashlib
 import json
 import logging
 import math
 import os
 from pathlib import Path
 import tempfile
-import time
 
 CORROBORATION_TOLERANCE_DAYS = 1
 PHANTOM_PURGE_SEEN = "repair_phantom_verified_import_seen"
@@ -45,7 +43,7 @@ def takeout_windows(conn, account_id):
     return windows
 
 
-def _phantom_rows(conn, account_id, lo, hi):
+def _phantom_rows(conn, account_id, lo, hi, *, tolerance=CORROBORATION_TOLERANCE_DAYS):
     # Any exact event corroborates, regardless of its source. Unknown and independently observed
     # daily rows cannot be disproved by a YouTube export and must survive even without an event.
     return conn.execute(
@@ -60,7 +58,7 @@ def _phantom_rows(conn, account_id, lo, hi):
         "  WHERE pe.account_id=o.account_id AND pe.identity_key=o.identity_key "
         "  AND ABS(CAST(pe.played_at / 86400 AS INTEGER) "
         "          - CAST(c.captured_at / 86400 AS INTEGER)) <= ?)",
-        (account_id, lo, hi, CORROBORATION_TOLERANCE_DAYS)).fetchall()
+        (account_id, lo, hi, tolerance)).fetchall()
 
 
 def _publish_backup(backup_path, rows):
@@ -117,21 +115,4 @@ def purge_phantom_history(conn, backup_path=None) -> int:
 
 def run_once(store) -> None:
     """Repair once per verified import, leaving ordinary, incomplete uploads non-destructive."""
-    with store._lock:
-        imports = _verified_imports(store.conn)
-        if not imports:
-            return
-        # An older upload can be verified later, or have its verified interval corrected.
-        # The newest id alone would hide those changes once a newer upload had been repaired.
-        evidence = [tuple(row) for row in imports]
-        watermark = hashlib.sha256(json.dumps(evidence).encode()).hexdigest()
-        if watermark == store.settings.get_setting(PHANTOM_PURGE_SEEN):
-            return
-        try:
-            from yt_playlist.core import paths
-            backup = paths.backups_dir() / f'phantom_history_purge_{watermark}_{time.time_ns()}.jsonl'
-            purge_phantom_history(store.conn, backup)
-        except Exception:
-            logger.warning('repair skipped; history preserved, no successful purge recorded', exc_info=True)
-            return
-        store.settings.set_setting(PHANTOM_PURGE_SEEN, watermark)
+    store.history.repair_verified_imports()

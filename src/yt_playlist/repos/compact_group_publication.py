@@ -3,12 +3,11 @@
 This is the v72 implementation of group_publication's stage/finish/cleanup
 operations. The public repository switches to it only with the schema cutover.
 """
-from contextlib import nullcontext
 from itertools import islice
 import time
 import uuid
 
-from yt_playlist.core import group_content as content, group_documents, group_storage
+from yt_playlist.core import group_content as content, group_storage
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core.evidence_ledger import canonical
 from . import group_publication as publication
@@ -29,65 +28,8 @@ def _touch(conn, generation_id, owner):
         raise RuntimeError('Musical group build is no longer owned by this worker')
 
 
-def _plan(repo, prepared, *, atomic=False):
-    if atomic and not repo.conn.in_transaction:
-        raise RuntimeError('Group publication requires an outer transaction')
-    # Resolve only actual canonical identities. A guessed recording association
-    # would change historical membership and is never a deduplication rule.
-    policy = content.document(prepared['policy'], 'Musical group policy')
-    metadata = content.document(prepared['payload'], 'Musical group generation')
-    keys, used = set(metadata.get('recording_inputs', {})), len(prepared['payload'].encode())
-    for group in prepared['groups']:
-        used += len(group['payload'].encode()) + sum(len(key.encode()) + 32 for key, _a, _b in group['members'])
-        if used > MAX_PLAN_BYTES:
-            raise publication.WorkBudgetExceeded('Musical group publication exceeds its admitted memory')
-        keys.update(key for key, _a, _b in group['members'])
-        keys.update(content.document(group['payload'], 'Musical group definition').get('rep_keys', []))
-    keys.update(key for key, _reason in prepared['unknown'])
-    keys.update(key for left, right, _a, _b in prepared['edges'] for key in (left, right))
-    ids = {}
-    context = nullcontext(repo._store) if atomic else repo._store.read_snapshot()
-    with context as view:
-        conn = view.conn if atomic else view.store.conn
-        for batch in publication._batches((key,) for key in sorted(keys)):
-            placeholders = ','.join('?' for _row in batch)
-            ids.update(conn.execute(f'SELECT identity_key,id FROM recordings WHERE identity_key IN ({placeholders})',
-                                    [row[0] for row in batch]))
-    inputs = group_storage.normalized_inputs(metadata.pop('recording_inputs', {}), ids.get)
-    parents, groups = {}, set()
-    for group in prepared['groups']:
-        if group['version'] in parents or group['group_id'] in groups:
-            raise ValueError('Duplicate musical group or external version in a generation')
-        parents[group['version']] = group.get('parent_version')
-        groups.add(group['group_id'])
-    for version in parents:
-        visited, parent = {version}, parents[version]
-        while parent is not None:
-            if parent in visited or parent not in parents:
-                raise ValueError('Invalid musical group parent graph')
-            visited.add(parent)
-            parent = parents[parent]
-    plans = []
-    for position, group in enumerate(prepared['groups']):
-        check_cancellable_work()
-        value = content.document(group['payload'], 'Musical group definition')
-        fields = group_storage.definition_fields(value, group['members'])
-        digest = content.digest(content.prepared_rows(prepared, group, ids.get))
-        plans.append((position, group, value, fields, digest))
-    # The unchanged publication header covers all ordered output, including
-    # caches and temporal lineage. It fences resumption after a code change.
-    prepared.pop('_stage_digest', None)
-    header = publication._header(prepared)
-    metadata = content.document(header[-1], 'Musical group generation')
-    metadata.pop('recording_inputs', None)
-    metadata.pop('_staging_digest', None)
-    metadata.pop('_staging_parent', None)
-    return ids.get, inputs, plans, policy, metadata
-
-
-def _claim(repo, prepared, inputs, policy, metadata):
+def _claim(repo, prepared, inputs, policy_version, policy_reference, metadata_reference):
     owner = prepared.setdefault('_stage_owner', uuid.uuid4().hex)
-    policy_version = group_storage.policy_version(prepared['policy'])
     manifest_digest = content.digest(canonical([key, digest]) for key, digest in inputs)
     parent = prepared.get('_stage_parent')
     expected = (policy_version, prepared['fingerprint'], prepared['at'], prepared['serial'],
@@ -132,7 +74,16 @@ def _claim(repo, prepared, inputs, policy, metadata):
             if selected is None:
                 raise ValueError('Missing published musical group staging parent')
             parent_id = selected[0]
-        generation_id = group_storage.install_header(conn, prepared, policy, metadata, manifest_id)
+        filename, digest, size, offset = policy_reference
+        existing = conn.execute('SELECT content_digest FROM recommendation_policies WHERE version=?',
+                                (policy_version,)).fetchone()
+        if existing is not None and existing[0] != digest:
+            raise ValueError('Conflicting immutable musical group policy')
+        conn.execute('INSERT INTO recommendation_policies(version,configuration_filename,content_digest,'
+            'byte_size,configuration_offset,created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(version) DO NOTHING',
+            (policy_version, filename, digest, size, offset, prepared['at']))
+        generation_id = group_storage.install_header_reference(
+            conn, prepared, policy_version, metadata_reference, manifest_id)
         conn.execute('INSERT INTO group_builds VALUES (?,?,?,0,?,?)',
                      (generation_id, owner, time.time() + publication.LEASE_SECONDS, prepared['_stage_digest'], parent_id))
         return generation_id, manifest_id, owner, False
@@ -213,7 +164,7 @@ def _clear_foreign_conflicts(repo, prepared, plans):
                 raise publication.BuildUnavailable('Musical group version still belongs to another build')
 
 
-def _group(repo, prepared, generation_id, owner, plan, resolve):
+def group_state(repo, generation_id, owner, plan):
     position, group, value, fields, digest = plan
     with publication._write(repo) as conn:
         _touch(conn, generation_id, owner)
@@ -223,7 +174,7 @@ def _group(repo, prepared, generation_id, owner, plan, resolve):
         if selected is not None:
             if selected[0] != group['version']:
                 raise ValueError('Musical group staged selection changed')
-            return
+            return None
         version = conn.execute('SELECT id FROM group_versions WHERE group_id=? AND content_digest=?',
                                (group_id, digest)).fetchone()
         if version is None:
@@ -237,95 +188,55 @@ def _group(repo, prepared, generation_id, owner, plan, resolve):
                               (version_id,)).fetchone() is not None
         if pending is None and not sealed:
             raise publication.BuildUnavailable('Unfinished musical group content is awaiting cleanup')
-    if not sealed:
-        with repo._store.read_snapshot() as snapshot:
-            conn = snapshot.store.conn
-            count = _count(conn, version_id, ('group_members', 'unresolved_group_members'), 'group_version_id')
-            reps = _count(conn, version_id, ('group_representatives',), 'group_version_id')
-        if count > len(group['members']) or reps > len(value.get('rep_keys', [])):
-            raise RuntimeError('Musical group content prefix exceeds its retained plan')
-        for batch in publication._batches(islice(group['members'], count, None)):
-            with publication._write(repo) as conn:
-                _touch(conn, generation_id, owner)
-                group_storage.insert_members(conn, version_id, batch, resolve,
-                    content._prepared_document(prepared, 'payload', 'Musical group generation').get('recording_inputs', {}))
-        for batch in publication._batches(enumerate(value.get('rep_keys', [])[reps:], reps)):
-            with publication._write(repo) as conn:
-                _touch(conn, generation_id, owner)
-                group_storage.insert_representatives(conn, version_id, batch, resolve)
     with repo._store.read_snapshot() as snapshot:
-        if not content.equal(group_storage.version_rows(snapshot.store.conn, version_id),
-                             content.prepared_rows(prepared, group, resolve)):
-            raise ValueError('Musical group version digest collision or incomplete staged content')
+        conn = snapshot.store.conn
+        count = _count(conn, version_id, ('group_members', 'unresolved_group_members'), 'group_version_id')
+        reps = _count(conn, version_id, ('group_representatives',), 'group_version_id')
+    return {'version_id': version_id, 'group_id': group_id, 'sealed': sealed, 'members': count, 'representatives': reps}
+
+
+def link_group(repo, generation_id, owner, group_id, version_id, position, alias):
     with publication._write(repo) as conn:
         _touch(conn, generation_id, owner)
-        _link(conn, generation_id, group_id, version_id, position, group['version'])
+        _link(conn, generation_id, group_id, version_id, position, alias)
         conn.execute('DELETE FROM group_build_versions WHERE generation_id=? AND group_version_id=?',
                      (generation_id, version_id))
 
 
-def _groups(repo, prepared, generation_id, owner, plans, resolve):
-    # Pack definition output by bounded bytes, including only new content. File
-    # publication precedes SQL references; interrupted batches leave safe orphans.
-    positions = {row[0]: row for row in plans}
-    for batch in publication._batches((row[0], row[1]['group_id'], row[4], row[1]['payload']) for row in plans):
-        with publication._write(repo) as conn:
-            _touch(conn, generation_id, owner)
-            new = []
-            for position, key, digest, _raw in batch:
-                group_id = conn.execute('SELECT id FROM taste_groups WHERE external_key=?', (key,)).fetchone()[0]
-                if conn.execute('SELECT 1 FROM group_versions WHERE group_id=? AND content_digest=?',
-                                (group_id, digest)).fetchone() is None:
-                    new.append((position, group_id))
-            root = group_documents.directory(conn)
-            files = group_documents.publish_many(root, (('definition', positions[p][2]) for p, _group_id in new))
-            for (position, group_id), file in zip(new, files):
-                _position, group, _value, fields, digest = positions[position]
-                version_id = group_storage.create_version(conn, prepared, group, generation_id, group_id, digest, fields, file)
-                conn.execute('INSERT INTO group_build_versions VALUES (?,?,?,?)',
-                             (generation_id, version_id, position, group['version']))
-        for position, _key, _digest, _raw in batch:
-            _group(repo, prepared, generation_id, owner, positions[position], resolve)
+def definition_candidates(repo, generation_id, owner, batch):
+    with publication._write(repo) as conn:
+        _touch(conn, generation_id, owner)
+        new = []
+        for position, key, digest, _raw in batch:
+            group_id = conn.execute('SELECT id FROM taste_groups WHERE external_key=?', (key,)).fetchone()[0]
+            if conn.execute('SELECT 1 FROM group_versions WHERE group_id=? AND content_digest=?',
+                            (group_id, digest)).fetchone() is None:
+                new.append((position, group_id))
+        return new
 
 
-def _lineage_value(raw):
-    value = content.document(raw, 'Musical group lineage')
-    for field in ('old_share', 'new_share'):
-        if value.get(field) is not None:
-            content.score(value[field])
-    if value.get('compatible') is not None and type(value['compatible']) is not bool:
-        raise ValueError('Invalid musical group lineage compatibility')
-    if value.get('overlap') is not None and (type(value['overlap']) is not int or value['overlap'] < 0):
-        raise ValueError('Invalid musical group lineage overlap')
-    return value
-
-
-def _lineage(repo, prepared, generation_id, owner):
-    with repo._store.read_snapshot() as snapshot:
-        count = _count(snapshot.store.conn, generation_id, ('group_generation_lineage',))
-    if count > len(prepared['lineage']):
-        raise RuntimeError('Musical group lineage prefix exceeds its retained plan')
-    for batch in publication._batches(islice(prepared['lineage'], count, None)):
-        with publication._write(repo) as conn:
-            _touch(conn, generation_id, owner)
-            insert_lineage(conn, generation_id, batch)
+def install_definitions(repo, prepared, generation_id, owner, rows):
+    with publication._write(repo) as conn:
+        _touch(conn, generation_id, owner)
+        for plan, group_id, file in rows:
+            position, group, _value, fields, digest = plan
+            if conn.execute('SELECT 1 FROM group_versions WHERE group_id=? AND content_digest=?',
+                            (group_id, digest)).fetchone():
+                continue
+            version_id = group_storage.create_version(conn, prepared, group, generation_id, group_id, digest, fields, file)
+            conn.execute('INSERT INTO group_build_versions VALUES (?,?,?,?)',
+                         (generation_id, version_id, position, group['version']))
 
 
 def insert_lineage(conn, generation_id, rows):
-    pending = []
-    for source, target, relation, raw in rows:
-        value = _lineage_value(raw)
+    for source, target, relation, value, file in rows:
         existing = conn.execute('SELECT * FROM group_lineage WHERE source_alias=? AND target_alias=?',
                                 (source, target)).fetchone()
-        if existing is None:
-            pending.append((source, target, relation, value))
-        else:
-            if (existing['relation'] != relation or group_documents.read(existing['evidence_filename'],
-                    existing['evidence_digest'], existing['evidence_bytes'], existing['evidence_offset'], 'lineage') != value):
+        if existing is not None:
+            if (existing['relation'], existing['evidence_digest'], existing['evidence_bytes']) != (relation, file[1], file[2]):
                 raise ValueError('Temporal musical group evidence changed')
             conn.execute('INSERT INTO group_generation_lineage VALUES (?,?,?)', (generation_id, source, target))
-    files = group_documents.publish_many(group_documents.directory(conn), (('lineage', row[3]) for row in pending))
-    for (source, target, relation, value), file in zip(pending, files):
+            continue
         source_row = conn.execute('SELECT group_version_id FROM group_version_aliases WHERE external_version=?',
                                   (source,)).fetchone()
         target_row = conn.execute('SELECT group_version_id FROM group_version_aliases WHERE external_version=?',
@@ -377,29 +288,12 @@ def insert_cache(conn, generation_id, table, rows, resolve):
             raise ValueError('Unknown musical group cache owner')
 
 
-def stage(repo, prepared):
-    resolve, inputs, plans, policy, metadata = _plan(repo, prepared)
-    _clear_foreign_conflicts(repo, prepared, plans)
-    while True:
-        try:
-            generation_id, manifest_id, owner, ready = _claim(repo, prepared, inputs, policy, metadata)
-            break
-        except publication._BuildBeingCleaned:
-            while cleanup(repo, generation=prepared['generation']):
-                check_cancellable_work()
-    if ready:
-        return owner
-    _inputs(repo, generation_id, manifest_id, owner, inputs)
-    _identities(repo, prepared, generation_id, owner)
-    _groups(repo, prepared, generation_id, owner, plans, resolve)
-    _lineage(repo, prepared, generation_id, owner)
-    _caches(repo, prepared, generation_id, owner, resolve)
+def mark_ready(repo, generation_id, owner, count):
     with publication._write(repo) as conn:
         _touch(conn, generation_id, owner)
-        if _count(conn, generation_id, ('generation_groups',)) != len(plans):
+        if _count(conn, generation_id, ('generation_groups',)) != count:
             raise RuntimeError('Musical group staged selection is incomplete')
         conn.execute('UPDATE group_builds SET ready=1 WHERE generation_id=?', (generation_id,))
-    return owner
 
 
 def finish(conn, generation, owner=None):
@@ -416,27 +310,6 @@ def finish(conn, generation, owner=None):
     conn.execute('INSERT INTO group_head VALUES (1,?) ON CONFLICT(id) DO UPDATE SET generation_id=excluded.generation_id',
                  (generation_id,))
     conn.execute('DELETE FROM group_builds WHERE generation_id=?', (generation_id,))
-
-
-def publish(repo, prepared):
-    """Atomic import for already bounded callers; preparation uses leased stage."""
-    resolve, inputs, _plans, policy, metadata = _plan(repo, prepared, atomic=True)
-    conn = repo.conn
-    manifest_id = group_storage.install_manifest(conn, dict(content.input_manifest(
-        content.document(prepared['payload'], 'Musical group generation').get('recording_inputs', {}))), resolve)
-    parent = prepared.get('_stage_parent')
-    parent_row = conn.execute('SELECT g.id FROM group_generations g JOIN group_publications p '
-                             'ON p.generation_id=g.id WHERE g.external_key=?', (parent,)).fetchone()
-    if parent is not None and parent_row is None:
-        raise ValueError('Missing published musical group staging parent')
-    generation_id = group_storage.install_header(conn, prepared, policy, metadata, manifest_id)
-    group_storage.install_versions(conn, prepared, generation_id, resolve)
-    for batch in publication._batches(prepared['lineage']):
-        insert_lineage(conn, generation_id, batch)
-    for table, rows in (('group_unknown', prepared['unknown']), ('group_graph', prepared['edges'])):
-        for batch in publication._batches(rows):
-            insert_cache(conn, generation_id, table, batch, resolve)
-    finish(conn, prepared['generation'])
 
 
 def abandon(repo, prepared):

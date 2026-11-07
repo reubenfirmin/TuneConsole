@@ -316,9 +316,9 @@ def test_refresh_notifications_do_not_write_model_or_serving_state():
 
 
 def test_model_publication_keeps_settings_and_modes_in_their_repositories():
-    tree = _modules()['yt_playlist.repos.rec_model']
+    tree = _modules()['yt_playlist.repos.embeddings']
     method = next(node for node in ast.walk(tree)
-                  if isinstance(node, ast.FunctionDef) and node.name == 'publish_training_generation')
+                  if isinstance(node, ast.FunctionDef) and node.name == 'publish')
     for node in ast.walk(method):
         if isinstance(node, ast.Attribute):
             assert node.attr not in {'_store', 'settings', 'modes'}

@@ -434,7 +434,7 @@ def test_installed_writes_survive_deferred_fit_restart_correction_and_retraction
         tmp_path, _pristine_installed_schema, monkeypatch, qualified_candidate, installed_version):
     """Exercise genuine installed layouts, rather than the current empty schema."""
     from yt_playlist.core import vibe_model_files
-    from yt_playlist.repos import vibe_models
+    from yt_playlist.core import vibe_models
 
     path = tmp_path / 'installed.db'
     store = Store(path)
@@ -475,7 +475,7 @@ def test_installed_writes_survive_deferred_fit_restart_correction_and_retraction
         with monkeypatch.context() as patch:
             patch.setattr(joint, 'fit', lambda *_a, **_k: pytest.fail('Restart refitted the model'))
             store.init_schema()
-            patch.setattr(vibe_models, 'read', lambda *_a, **_k: pytest.fail('Serving loaded a model'))
+            patch.setattr(vibe_model_files.VibeModelFiles, 'read', lambda *_a, **_k: pytest.fail('Serving loaded a model'))
             assert fits(store, target)['relax'] == before
             assert store.vibe_predictions.fit_scores([target], 'relax') == {target: before['score']}
         assert joint.fit is original_fit
@@ -595,8 +595,8 @@ def test_prediction_queue_retries_after_committed_derived_state_and_restart(tmp_
     capture(store, 'one')
     from yt_playlist.repos.vibe_predictions import VibePredictionsRepo
     original = VibePredictionsRepo.publish_prepared
-    def fail(repo, *args):
-        original(repo, *args)
+    def fail(repo, *args, **kwargs):
+        original(repo, *args, **kwargs)
         raise RuntimeError('interrupted prediction publication')
     with monkeypatch.context() as patch:
         patch.setattr(VibePredictionsRepo, 'publish_prepared', fail)
@@ -646,8 +646,8 @@ def test_artist_tags_never_become_recording_measurements_or_propagation_seeds(fi
     store = file_backed_store
     monkeypatch.setattr(vibe_joint_preparation, 'QUALIFICATIONS', {})
     monkeypatch.setattr(joint, 'fit', lambda *a, **k: pytest.fail('Unqualified candidate fit'))
-    from yt_playlist.repos.vibe_predictions import VibePredictionsRepo
-    monkeypatch.setattr(VibePredictionsRepo, 'joint_model', lambda *a, **k: pytest.fail('Unqualified model read'))
+    from yt_playlist.controllers.vibe_predictions import VibePredictions
+    monkeypatch.setattr(VibePredictions, 'joint_model', lambda *a, **k: pytest.fail('Unqualified model read'))
     tid, own = track(store, 'one')
     _tid, target = track(store, 'two')
     store.enrichment_state.record_metadata_observations(tid, 'lastfm', [
@@ -727,7 +727,7 @@ def test_first_new_score_and_reopened_home_do_not_require_joint_fit(
         file_backed_store, monkeypatch, originals, qualified):
     from fastapi.testclient import TestClient
 
-    from yt_playlist.repos import vibe_models
+    from yt_playlist.core import vibe_model_files
     from yt_playlist.web.app import create_app
 
     store = file_backed_store
@@ -744,7 +744,7 @@ def test_first_new_score_and_reopened_home_do_not_require_joint_fit(
         pytest.fail('First usable output or a reopened Home request required a joint model')
 
     monkeypatch.setattr(joint, 'fit', forbidden)
-    monkeypatch.setattr(vibe_models, 'read', forbidden)
+    monkeypatch.setattr(vibe_model_files.VibeModelFiles, 'read', forbidden)
     _entry, target = track(store, 'startup-new-target')
     assert not store.vibe_predictions.fit_scores([target], 'relax')
     worker = Preparation(store)
@@ -884,7 +884,7 @@ def test_joint_input_batches_release_readers_and_preserve_heads(
         file_backed_store, monkeypatch, interruption):
     from yt_playlist.core import file_collection, vibe_model_files
     from yt_playlist.rec import progressive
-    from yt_playlist.repos import vibe_models
+    from yt_playlist.core import vibe_models
 
     store = file_backed_store
     monkeypatch.setattr(vibe_joint_preparation, 'QUALIFICATIONS', {})
@@ -938,7 +938,7 @@ def test_joint_score_turns_release_posteriors_and_retry_unpublished_work(
     import weakref
     from yt_playlist.core import file_collection
     from yt_playlist.rec import progressive
-    from yt_playlist.repos import vibe_models
+    from yt_playlist.core import vibe_models
 
     store = file_backed_store
     track(store, 'sliced-original')

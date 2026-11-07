@@ -29,7 +29,7 @@ class Retention:
         with self._lock:
             vibe_provenance.collect(self.conn, now)
             if vibe_models.available(self.conn):
-                vibe_models.collect(self.conn, now)
+                self._store.vibe_models.collect(now)
         return expired + retired
 
     def collect_musical_profiles(self, now):

@@ -8,7 +8,7 @@ domain writers still own eligibility, exact contents and atomic publication.
 import hashlib
 import json
 
-from .. import legacy_evidence, legacy_journals, policy_history
+from .. import legacy_evidence, legacy_journals, policy_history, policy_config
 from ...repos import policy_storage
 from .build import Batch, Stage, quote
 
@@ -34,7 +34,7 @@ def stages(now):
             count += target.execute('INSERT INTO '+WORK+" SELECT 'policies',rebuild_archive_route(version),version "
                 'FROM recommendation_policies p WHERE created_at<? AND '+policy_storage.operational_protection(target)
                 +' AND EXISTS(SELECT 1 FROM recommendation_impression_policies i WHERE i.policy_version=p.version)',
-                (now-policy_storage.GRACE_SECONDS,)).rowcount
+                (now-policy_config.GRACE_SECONDS,)).rowcount
         finally:
             target.create_function('rebuild_archive_route',1,None)
             target.create_function('rebuild_archive_key',2,None)

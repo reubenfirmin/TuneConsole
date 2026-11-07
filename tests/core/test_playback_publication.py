@@ -135,25 +135,18 @@ def test_compatible_bindings_and_pending_writes_reconcile_without_admitting_unkn
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
 @pytest.mark.parametrize('published', [False, True])
-def test_binding_writer_excludes_independent_writes_before_read_and_keeps_external_fields(installed, monkeypatch, published):
+def test_binding_writer_reads_committed_settings_and_keeps_external_fields(installed, monkeypatch, published):
     store, _ = installed
     seed(store)
     owner = publication.OWNERS['bindings']
     if published:
         owner.publish(store.conn, revision=prepare(store.conn, owner))
-    other = sqlite3.connect(store._db_path, timeout=.01)
     real_get = store.settings.get_setting
     def reading(key, default=None):
-        assert store.conn.in_transaction
-        with pytest.raises(sqlite3.OperationalError, match='locked'):
-            other.execute('UPDATE settings SET value=value WHERE key=?', (key,))
-        other.rollback()
+        assert not store.conn.in_transaction
         return real_get(key, default)
-    try:
-        monkeypatch.setattr(store.settings, 'get_setting', reading)
-        store.rec_ledger.bind_choice_playback(1, 'LM', 'video', 'new-choice', 9, 15, 100)
-    finally:
-        other.close()
+    monkeypatch.setattr(store.settings, 'get_setting', reading)
+    store.rec_ledger.bind_choice_playback(1, 'LM', 'video', 'new-choice', 9, 15, 100)
     monkeypatch.undo()
     rows = json.loads(store.settings.get_setting(owner.source))
     assert all('identity_id' in row and 'account_id' not in row for row in rows)

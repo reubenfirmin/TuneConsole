@@ -13,7 +13,8 @@ from yt_playlist.core.migrations import migrate
 from yt_playlist.core.migrations import v072_compact_groups as migration
 from yt_playlist.core.store import Store
 from yt_playlist.rec import group_root_backfill
-from yt_playlist.repos import compact_group_publication as compact, group_publication, group_queries
+from yt_playlist.core import group_reads as group_queries
+from yt_playlist.repos import compact_group_publication as compact, group_publication
 
 
 CONTENT = ('group_versions', 'group_members', 'unresolved_group_members',
@@ -76,7 +77,7 @@ def test_populated_unchanged_updates_reuse_content_and_inventory_actual_evidence
                          serial=prepared['serial'] + serial, _stage_parent=expected_head[0])
             before, files = storage(store.conn), file_bytes(store.conn)
             started = time.monotonic()
-            owner = compact.stage(store.taste_groups, value)
+            owner = store.taste_groups.stage(value)
             assert group_queries.head_generation(store.conn) == expected_head[0]
             with store.conn:
                 store.conn.execute('BEGIN IMMEDIATE')

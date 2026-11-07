@@ -19,7 +19,7 @@ from yt_playlist.core import fao, vibe_provenance
 from yt_playlist.core.store import Store
 from yt_playlist.rec import home_vibe, musical_preparation
 from yt_playlist.rec import vibe_joint_model as model, vibe_joint_preparation as preparation, vibe_preparation
-from yt_playlist.repos import vibe_models
+from yt_playlist.core import vibe_models
 from .vibe_pooling_operations import storage
 
 
@@ -39,6 +39,11 @@ def run(output, *, all_vibes=False):
         'experiments/audio_lab_tools/vibe_pooling_operations.py', 'tests/file_custody_support.py',
         'src/yt_playlist/core/vibe_model_files.py', 'src/yt_playlist/core/vibe_provenance.py',
         'src/yt_playlist/repos/vibe_models.py', 'src/yt_playlist/repos/vibe_predictions.py',
+        'src/yt_playlist/controllers/vibe_models.py', 'src/yt_playlist/core/vibe_models.py',
+        'src/yt_playlist/core/vibe_model_queries.py',
+        'src/yt_playlist/controllers/vibe_predictions.py', 'src/yt_playlist/core/vibe_publication.py',
+        'src/yt_playlist/core/vibe_manifest.py', 'src/yt_playlist/controllers/musical_profiles.py',
+        'src/yt_playlist/core/profile_files.py', 'src/yt_playlist/core/audio_metadata_files.py',
         'src/yt_playlist/rec/vibe_joint_model.py', 'src/yt_playlist/rec/vibe_joint_calibrated.py',
         'src/yt_playlist/rec/vibe_joint_common.py',
         'src/yt_playlist/rec/musical_preparation.py', 'src/yt_playlist/rec/vibe_joint_preparation.py')

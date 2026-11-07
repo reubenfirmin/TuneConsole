@@ -31,7 +31,7 @@ from yt_playlist.rec.radio_candidates import RadioCandidates
 from yt_playlist.repos import compact_group_publication, group_publication
 from yt_playlist.repos import recommendation_publication as publication
 from yt_playlist.repos.rec_proposals import RecProposalsRepo
-from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
+from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 from yt_playlist.util import genre_catalog, genre_map
 
 
@@ -304,9 +304,7 @@ def test_one_actual_fresh_pool_update_preserves_other_pools_and_measures_serving
             build = store.recommendations.claim(plan)
             store.recommendations.stage(plan, build)
             assert _heads(conn) == before_heads, 'Hidden stage changed a serving head'
-            with conn:
-                conn.execute('BEGIN IMMEDIATE')
-                store.recommendations.publish(build, time.time())
+            store.recommendations.publish(build, time.time())
         finally:
             conn.set_authorizer(None)
             report.update(publication_seconds=time.monotonic() - started,
@@ -359,7 +357,7 @@ def test_one_actual_fresh_pool_update_preserves_other_pools_and_measures_serving
             read_bytes[phase[0] + '_calls'] += 1
             read_bytes[phase[0] + '_bytes'] += len(encoded)
             return encoded
-        original_page = RecommendationPublicationsRepo.candidate_page
+        original_page = RecommendationPublications.candidate_page
         def observed_page(repo, *args, **kwargs):
             value = original_page(repo, *args, **kwargs)
             pages[phase[0] + '_calls'] += 1
@@ -373,7 +371,7 @@ def test_one_actual_fresh_pool_update_preserves_other_pools_and_measures_serving
             return old_proposal(repo, surface)
         monkeypatch.setattr(recommendation_outputs, '_decode', observed_decode)
         monkeypatch.setattr(recommendation_outputs, '_read', observed_read)
-        monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_page', observed_page)
+        monkeypatch.setattr(RecommendationPublications, 'candidate_page', observed_page)
         monkeypatch.setattr(RecProposalsRepo, '_proposal_json', no_bundle)
         started = time.monotonic()
         fresh = store.recommendations.candidate_page(*selected_slot, limit=128)
@@ -566,7 +564,8 @@ def test_one_actual_group_input_update_publishes_and_preserves_retained_version(
             report['controlled_shadow_enable'] = True
         prep = group_preparation.Preparation(store)
         report['production_budget'] = vars(prep.budget)
-        original_stage = compact_group_publication.stage
+        from yt_playlist.controllers.group_publication import GroupPublication
+        original_stage = GroupPublication.stage
         active_turn = [None]
         def observed_stage(repo, prepared):
             try:
@@ -580,7 +579,7 @@ def test_one_actual_group_input_update_publishes_and_preserves_retained_version(
                                   for frame in traceback.extract_tb(exc.__traceback__)],
                 })
                 raise
-        monkeypatch.setattr(compact_group_publication, 'stage', observed_stage)
+        monkeypatch.setattr(GroupPublication, 'stage', observed_stage)
         started, first_at, published = time.monotonic(), now, False
         storage_due_at = first_at
         report['storage_interval_seconds'] = 300

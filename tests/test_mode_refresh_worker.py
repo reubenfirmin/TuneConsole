@@ -407,7 +407,7 @@ def test_bundle_retry_repairs_a_model_invalidated_during_preparation(store, libr
         attempts.append(store.settings.get_setting("rec_content_model"))
         if len(attempts) == 1:
             if failure == 'policy-capacity':
-                from yt_playlist.repos.policy_storage import PolicyCapacityFull
+                from yt_playlist.core.policy_config import PolicyCapacityFull
                 # The real-library ranking outlasts the start-to-start interval.
                 clock[0] += 90
                 raise PolicyCapacityFull(131000, 60000000, 1024, 500000)

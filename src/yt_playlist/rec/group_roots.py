@@ -210,7 +210,7 @@ def maintain_retention(store):
     if not enabled(store):
         return result
     from yt_playlist.core.activity import work_budget
-    from yt_playlist.repos import compact_group_publication, group_retention, recommendation_publication
+    from yt_playlist.repos import recommendation_publication
 
     def sql_turn(callback):
         try:
@@ -226,11 +226,11 @@ def maintain_retention(store):
     def group_cleanup():
         store.group_evidence.collect_unpublished_mixes()
         reap_pending(store)
-        while compact_group_publication.cleanup(store.taste_groups):
+        while store.taste_groups.cleanup_builds():
             result['group_steps'] += 1
 
     def group_walk():
-        while group_retention.step(store.taste_groups):
+        while store.taste_groups.retire_history():
             result['group_steps'] += 1
 
     def files(*, groups=False):

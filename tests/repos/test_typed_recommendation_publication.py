@@ -43,9 +43,7 @@ def plan(store, key='one', *, candidates=None, fingerprint='a' * 64, group=1):
 def publish(store, prepared):
     build = store.recommendations.claim(prepared)
     store.recommendations.stage(prepared, build)
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        store.recommendations.publish(build, 11)
+    store.recommendations.publish(build, 11)
     return build
 
 
@@ -71,11 +69,10 @@ def test_partial_rows_are_hidden_until_one_atomic_head_switch(recommendations):
     assert store.conn.execute('SELECT status FROM recommendation_generations').fetchone()[0] == 'ready'
     # Retry crosses the bounded selection page without duplicating sealed pools.
     store.recommendations.stage(prepared, build)
-    with pytest.raises(RuntimeError, match='transaction'):
-        store.recommendations.publish(build, 11)
-    with store.conn:
+    with pytest.raises(RuntimeError, match='idle connection'), store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
         store.recommendations.publish(build, 11)
+    store.recommendations.publish(build, 11)
     assert store.recommendations.head('home')['id'] == build.generation_id
     assert [row['key'] for row in store.recommendations.page('home', 'small-genre', 'wheelhouse')] == ['one', 'two']
     assert [row['key'] for row in store.recommendations.page('home', 'genre-17', 'wheelhouse')] == ['one', 'two']
@@ -135,9 +132,7 @@ def test_interrupted_members_resume_the_exact_committed_prefix(recommendations, 
     resumed = store.recommendations.claim(prepared, owner=build.owner)
     assert resumed == build
     store.recommendations.stage(prepared, resumed)
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        store.recommendations.publish(resumed, 12)
+    store.recommendations.publish(resumed, 12)
     after, identities = -1, []
     while page := store.recommendations.page('home', 'all', 'wheelhouse', after=after, limit=31):
         assert len(page) <= 31
@@ -179,9 +174,7 @@ def test_interrupted_slot_batch_resumes_all_remaining_shared_selections(recommen
     resumed = store.recommendations.claim(prepared, owner=build.owner)
     assert resumed == build
     store.recommendations.stage(prepared, resumed)
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        store.recommendations.publish(resumed, 12)
+    store.recommendations.publish(resumed, 12)
     assert {row['mode_key'] for row in store.recommendations.selections('home', 'wheelhouse')} == {
         slot.mode_key for slot in slots}
     assert store.conn.execute('SELECT count(*) FROM recommendation_pools').fetchone()[0] == 1
@@ -220,13 +213,10 @@ def test_live_owner_fences_takeover_and_expired_takeover_fences_stale_completion
     replacement = store.recommendations.claim(prepared)
     assert replacement.owner != original.owner
     store.recommendations.stage(prepared, replacement)
-    with pytest.raises(WorkBudgetExceeded), store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
+    with pytest.raises(WorkBudgetExceeded):
         store.recommendations.publish(original, 12)
     assert store.recommendations.head('home') is None
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        store.recommendations.publish(replacement, 12)
+    store.recommendations.publish(replacement, 12)
 
 
 def test_late_snapshot_conflict_and_late_sql_failure_leave_last_good_head(recommendations):
@@ -240,15 +230,20 @@ def test_late_snapshot_conflict_and_late_sql_failure_leave_last_good_head(recomm
         build = store.recommendations.claim(second)
         store.recommendations.stage(second, build)
         store.settings.set_setting('schema-publication-guard', 'after')
-        assert not snapshot.publish(lambda: store.recommendations.publish(build, 12))
+        assert not snapshot.publish_ordered(lambda: store.recommendations.publish(build, 12))
     assert store.recommendations.head('home')['id'] == previous.generation_id
-    with pytest.raises(RuntimeError, match='controlled rollback'), store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
+    with store.conn:
+        store.conn.execute("CREATE TEMP TRIGGER controlled_head_failure BEFORE INSERT ON recommendation_heads "
+                           "BEGIN SELECT RAISE(ABORT,'controlled head failure'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='controlled head failure'):
         store.recommendations.publish(build, 12)
-        raise RuntimeError('controlled rollback')
     assert store.recommendations.head('home')['id'] == previous.generation_id
     assert store.conn.execute('SELECT owner FROM recommendation_builds WHERE generation_id=?',
                               (build.generation_id,)).fetchone()[0] == build.owner
+    with store.conn:
+        store.conn.execute('DROP TRIGGER controlled_head_failure')
+    store.recommendations.publish(build, 12)
+    assert store.recommendations.head('home')['id'] == build.generation_id
 
 
 def test_changed_inputs_during_output_files_stop_staging_and_keep_last_good_head(recommendations, monkeypatch):
@@ -282,7 +277,7 @@ def test_changed_inputs_during_output_files_stop_staging_and_keep_last_good_head
         staged = store.conn.execute(
             'SELECT chunk_key FROM prepared_outputs WHERE generation_id=?', (build.generation_id,)).fetchall()
         assert 0 < len(staged) < len(documents), 'Obsolete work must stop before staging every output'
-        assert not snapshot.publish(lambda: store.recommendations.publish(build, 12))
+        assert not snapshot.publish_ordered(lambda: store.recommendations.publish(build, 12))
     assert store.recommendations.head('home')['id'] == previous.generation_id
     assert store.recommendations.output('home', 'framing') == {'title': 'one'}
     assert store.recommendations.output('home', 'part-0') is None
@@ -294,7 +289,7 @@ def test_changed_inputs_during_output_files_stop_staging_and_keep_last_good_head
         renewed = replace(prepared, external_key='current-output-build')
         ready = store.recommendations.claim(renewed)
         assert store.recommendations.stage(renewed, ready, still_current=current.is_current)
-        assert current.publish(lambda: store.recommendations.publish(ready, 13))
+        assert current.publish_ordered(lambda: store.recommendations.publish(ready, 13))
     assert store.recommendations.head('home')['id'] == ready.generation_id
     for i in range(len(documents)):
         assert store.recommendations.output('home', f'part-{i}') == {'part': i}
@@ -373,13 +368,25 @@ def test_recommendation_generation_protects_group_history_without_a_permanent_pa
     prepared = plan(store)
     publish(store, prepared)
     enable(store)
-    assert 1 in group_retention.closure(store.conn)[0]
+    from yt_playlist.core.group_reads import retention_closure
+    assert 1 in retention_closure(store.conn)[0]
     drain(store)
     assert store.taste_groups.definition('first-leaf', generation='first') is not None
     publish(store, replace(plan(store, 'two'), group_generation_id=2))
     collect(store)
     drain(store)
     assert store.taste_groups.definition('first-leaf') is None
+
+
+def test_prepared_context_can_retain_recommendations_without_group_roots(recommendations):
+    store = recommendations
+    publish(store, plan(store))
+    generation = store.recommendations.head('home')['id']
+    store.group_evidence.replace_prepared('home_prepared', {'context': {'recommendation_generations': [generation]}}, 10)
+    identity = 'proposal:home_prepared:context'
+    assert [row[0] for row in store.conn.execute('SELECT generation_id FROM recommendation_generation_refs '
+        "WHERE kind='prepared' AND external_key=?", (identity,))] == [generation]
+    assert not store.conn.execute('SELECT 1 FROM group_evidence_owners WHERE external_key=?', (identity,)).fetchone()
 
 
 def test_output_files_survive_old_reader_and_backup_relocates_exact_owners(recommendations, tmp_path):

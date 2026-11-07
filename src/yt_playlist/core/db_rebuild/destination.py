@@ -200,7 +200,9 @@ def for_source(path, *, split=False, legacy=False):
                             | {'metadata_native_delivery_heads'}) if not metadata_active else set()
         captured_at = path.stat().st_mtime
         from ...repos import policy_storage
-        policy_closure = policy_storage.retained_closure(reader,path.stat().st_mtime) or {}
+        from .. import policy_config
+        policy_closure = policy_storage.retained_closure(reader, captured_at - policy_config.GRACE_SECONDS,
+            protected=policy_config.protected_references(policy_storage.legacy_root_messages(reader))) or {}
         importer = released if version==source.RELEASE_VERSION else development
         sparse = split and not legacy
         version_signature = signature()

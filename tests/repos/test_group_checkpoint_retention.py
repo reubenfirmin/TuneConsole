@@ -7,7 +7,8 @@ import pytest
 from tests.group_support import publish, recordings
 from tests.repos.test_group_retention import drain, enable
 from yt_playlist.core import group_preparation_state, group_retention_progress
-from yt_playlist.repos import group_queries, group_retention
+from yt_playlist.core import group_reads as group_queries
+from yt_playlist.repos import group_retention
 
 
 @pytest.mark.parametrize('durable', [False, True])
@@ -43,7 +44,7 @@ def test_new_checkpoint_invalidates_completed_walk_and_protects_publication(file
     publish(store, [], now=2, previous=first)
     enable(store)
     for _ in range(100):
-        selected = group_retention.plan(store.conn)
+        selected = group_queries.retention_plan(store.conn)
         assert selected is not None
         if 'generation' in selected:
             break

@@ -2,6 +2,7 @@
 from copy import deepcopy
 
 from tests.conftest import seed_catalog_track
+from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import measurement, mode_surfaces
 
 
@@ -18,22 +19,25 @@ def seed_bundle_subjects(store, bundle, *, fresh=()):
                     tracks[item['key']] = (lane != 'fresh' or bool(previous and previous[0]), item)
     for item in fresh:
         tracks.setdefault(item['key'], (False, item))
-    owned = store.rec_query.tracks_by_keys(tracks)
-    discovered = store.discovery.discovered_tracks_by_keys(tracks)
-    for key, (library, item) in tracks.items():
-        if key in owned or key in discovered:
-            continue
-        video = item.get('video_id') or 'fixture-' + key
-        existing = store.conn.execute('SELECT r.identity_key FROM youtube_items y JOIN recordings r '
-                                      'ON r.id=y.recording_id WHERE y.video_id=?', (video,)).fetchone()
-        if existing and existing[0] != key:
-            video = 'fixture-' + key
-        if library:
-            seed_catalog_track(store, key, item['title'], item['artist'], video_id=video,
-                               album=item.get('album'), genre=item.get('genre'))
-        else:
-            store.discovery.upsert_discovered_track(key, video, item['title'], item['artist'],
-                item.get('album'), item.get('thumbnail'), item.get('genre'), item.get('year'), None, 1)
+    # The complete candidate input is one fixture batch. Individual catalog
+    # operations keep their real SQL and guards without committing each field.
+    with atomic_write(store):
+        owned = store.rec_query.tracks_by_keys(tracks)
+        discovered = store.discovery.discovered_tracks_by_keys(tracks)
+        for key, (library, item) in tracks.items():
+            if key in owned or key in discovered:
+                continue
+            video = item.get('video_id') or 'fixture-' + key
+            existing = store.conn.execute('SELECT r.identity_key FROM youtube_items y JOIN recordings r '
+                                          'ON r.id=y.recording_id WHERE y.video_id=?', (video,)).fetchone()
+            if existing and existing[0] != key:
+                video = 'fixture-' + key
+            if library:
+                seed_catalog_track(store, key, item['title'], item['artist'], video_id=video,
+                                   album=item.get('album'), genre=item.get('genre'))
+            else:
+                store.discovery.upsert_discovered_track(key, video, item['title'], item['artist'],
+                    item.get('album'), item.get('thumbnail'), item.get('genre'), item.get('year'), None, 1)
 
 
 def publish_bundles(store, bundle, now=1000, *, fresh=(), vibes=False, retain_vibe_readiness=True):

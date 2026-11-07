@@ -217,7 +217,7 @@ def test_measurement_and_restore_survive_later_checks_that_keep_the_selected_set
     assert ms.view(store, 4000)["last"]["status"] == "restored"
 
 
-def test_publication_failure_rolls_back_vectors_and_configuration(store):
+def test_vector_publication_failure_preserves_configuration_and_restore_point(store):
     import sqlite3
     incumbent = _owned_vector(store, 'old')
     challenger = _owned_vector(store, 'new', 64, 2)
@@ -233,4 +233,5 @@ def test_publication_failure_rolls_back_vectors_and_configuration(store):
     assert store.settings.get_setting("rec_dim") is None
     assert store.settings.get_setting("rec_selection_active_run") is None
     assert store.model_selection.selection_run(run_id)['status'] == 'running'
-    assert not store.conn.execute('SELECT 1 FROM rec_model_previous_vectors').fetchone()
+    assert [tuple(row) for row in store.conn.execute(
+        'SELECT identity_key,vec FROM rec_model_previous_vectors WHERE run_id=?', (run_id,))] == [incumbent]

@@ -3,52 +3,30 @@
 Reports load a coherent set of detached inputs on a private snapshot. Recommendation
 services own statistical interpretation; this repository owns persistence and retention.
 """
-import json
-
-from yt_playlist.core import album_playback_context, entity_names, playback_bindings, served_facts
+from yt_playlist.core import album_playback_context, playback_bindings, served_facts
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
 from yt_playlist.repos.scorecard_attribution import ScorecardFacts
 from yt_playlist.repos import policy_storage
 
 RETENTION_BATCH_SIZE = 256
-POLICY_RETENTION_CURSOR = 'rec_policy_retention_cursor'
 
 
 class RecLedgerRepo(Repo):
-    def maintain_policy_history(self, now):
-        """Convert and expire retained policies with bounded writer admission."""
-        from yt_playlist.core.preparation import policy_history
-        return policy_history.maintain(self._store, now)
+    @synchronized
+    def mix_choices_available(self):
+        from yt_playlist.core import mix_choices
+        return mix_choices.available(self.conn)
 
     @synchronized
-    def publish_mix_menu(self, record, context):
+    def publish_mix_menu(self, plan):
         from yt_playlist.core import mix_choices
-        if mix_choices.available(self.conn):
-            with self.conn:
-                return mix_choices.publish_menu(self.conn, record, context)
-        return record
-
-    @snapshot_read
-    def expand_mix_options(self, options):
-        from yt_playlist.core import mix_choices
-        return [mix_choices.expand(self.conn, option) for option in options]
-
-    @snapshot_read
-    def policy_retention_candidates(self, now):
-        return policy_storage.retention_candidates(self.conn, now)
-
-    @snapshot_read
-    def policy_retirement_pending(self, now):
-        return policy_storage.retirement_pending(self.conn, now)
-
-    def restart_policy_retirement(self):
-        from yt_playlist.core.db_writes import atomic_write
-        with atomic_write(self._store):
-            self.conn.execute('DELETE FROM settings WHERE key=?', (policy_storage.CURSOR,))
+        with self.conn.atomic():
+            mix_choices.insert_menu(self.conn, plan)
 
     @synchronized
-    def prune_policies(self, versions, cursor):
-        return policy_storage.prune(self.conn, versions, cursor)
+    def mix_projection_facts(self, opportunity_id, context_id, *, mixes):
+        from yt_playlist.core import mix_choices
+        return mix_choices.projection_facts(self.conn, opportunity_id, context_id, mixes=mixes)
 
     @snapshot_read
     def mix_descriptor(self, descriptor_id):
@@ -56,83 +34,51 @@ class RecLedgerRepo(Repo):
         return mix_choices.read_descriptor(self.conn, descriptor_id)
 
     @snapshot_read
-    def album_playback_context(self):
-        return album_playback_context.load(self.conn)
+    def album_context_available(self):
+        return album_playback_context.available(self.conn)
+
+    @snapshot_read
+    def album_context_values(self):
+        return album_playback_context.load_native(self.conn)
 
     @synchronized
-    def remember_album_playback_context(self, value):
-        with self.conn:
-            album_playback_context.put(self.conn, value)
+    def put_album_context(self, value, album_id):
+        with self.conn.atomic():
+            album_playback_context.put_native(self.conn, value, album_id)
 
     @synchronized
-    def bind_album_playback_context(self, pending, account_id):
-        with self.conn:
-            album_playback_context.bind(self.conn, pending, account_id)
+    def bind_album_context(self, pending, account_id):
+        with self.conn.atomic():
+            album_playback_context.bind_native(self.conn, pending, account_id)
 
     @lookup_read
     def has_served_request(self, request_id):
         return self.conn.execute('SELECT 1 FROM rec_served_impressions WHERE request_id=? LIMIT 1',
                                  (request_id,)).fetchone() is not None
 
-    @synchronized
-    def bind_choice_playback(self, account_id, playlist, video, opportunity, option, now, window_s):
-        """Small exact-context index for delayed player observations; raw evidence stays in JSON.
+    @lookup_read
+    def playback_bindings_available(self):
+        return playback_bindings.available(self.conn)
 
-        Retain recent track bindings across a restart and a direction change. Evicted or expired
-        observations remain unattributed. The bound is a storage/work limit, not a taste weight.
-        """
-        if playback_bindings.available(self.conn):
-            with self.conn:
-                playback_bindings.put(self.conn,account_id,playlist,video,opportunity,option,now,window_s)
-            return
-        with self.conn:
-            if not self.conn.in_transaction:
-                self.conn.execute('BEGIN IMMEDIATE')
-            rows = [entity_names.account_document(row) for row in
-                    json.loads(self._store.settings.get_setting('listening_playback_bindings') or '[]')]
-            key = (account_id, playlist, video)
-            rows = [row for row in rows if 0 <= now - row['at'] <= window_s
-                    and (row['account_id'], row['playlist'], row['video']) != key]
-            rows.append({'account_id': account_id, 'playlist': playlist, 'video': video,
-                         'opportunity_id': opportunity, 'option_id': str(option), 'at': now})
-            self._store.settings.set_setting('listening_playback_bindings',
-                json.dumps([entity_names.external_account_document(row) for row in rows[-64:]]))
+    @lookup_read
+    def video_exists(self, video):
+        return self.conn.execute('SELECT 1 FROM youtube_items WHERE video_id=?', (video,)).fetchone() is not None
 
     @synchronized
-    def choice_playback(self, account_id, playlist, video, now, window_s):
-        if playback_bindings.available(self.conn):
-            return playback_bindings.find(self.conn,account_id,playlist,video,now,window_s)
-        rows = [entity_names.account_document(row) for row in
-                json.loads(self._store.settings.get_setting('listening_playback_bindings') or '[]')]
-        return next((row for row in reversed(rows)
-                     if (row['account_id'], row['playlist']) == (account_id, playlist)
-                     and (video is None or row['video'] == video)
-                     and 0 <= now - row['at'] <= window_s), None)
+    def put_choice_binding(self, account_id, playlist, video, opportunity, option, now, *, before, limit):
+        with self.conn.atomic():
+            playback_bindings.insert(self.conn, account_id, playlist, video, opportunity, option, now,
+                                     before=before, limit=limit)
+
+    @lookup_read
+    def choice_binding(self, account_id, playlist, video, *, before, through):
+        return playback_bindings.lookup(self.conn, account_id, playlist, video, before=before, through=through)
 
     @synchronized
-    def evidence(self):
-        """Size replay evidence from current library membership, including after imports."""
-        from yt_playlist.core.evidence_ledger import EvidenceLedger, library_byte_budget, root_for_database
-        store = self._store
-        directory = root_for_database(store._db_path, store._evidence_key)
-        recordings = self.conn.execute(
+    def library_recording_count(self):
+        return self.conn.execute(
             'SELECT COUNT(DISTINCT e.recording_id) FROM library_memberships m '
             'JOIN catalog_entries e ON e.id=m.entry_id').fetchone()[0]
-        return EvidenceLedger(directory, library_byte_budget(recordings), opportunity_projection=self._mix_projection)
-
-    @synchronized
-    def _mix_projection(self, record):
-        from yt_playlist.core import mix_choices
-        return mix_choices.project(self.conn, record)
-
-    @synchronized
-    def publish_prepared_policies(self, rows, bases=()) -> None:
-        """Join the snapshot publisher's transaction without committing proposals early."""
-        policy_storage.publish(self.conn, rows, bases, enforce_budget=True)
-
-    @synchronized
-    def policy_configuration(self, version):
-        return policy_storage.configuration(self.conn, version)
 
     @synchronized
     def scorecard_impressions(self, start, end, *, impression_id, experiments_only):
@@ -156,7 +102,7 @@ class RecLedgerRepo(Repo):
                 'WHERE i.served_at>=? AND i.served_at<?', (start, end))}
             for row in impressions:
                 if row['id'] in facts:
-                    row['provenance'] = json.dumps(served_facts.reporting_trace(facts[row['id']]))
+                    row['facts'] = dict(facts[row['id']])
         return impressions
 
     def scorecard_facts(self):
@@ -170,24 +116,11 @@ class RecLedgerRepo(Repo):
         if row is None:
             return None
         result = dict(row)
-        result["provenance"] = json.loads(result["provenance"])
+        result['facts'] = None
         if served_facts.available(self.conn):
             fact = self.conn.execute('SELECT * FROM served_facts WHERE impression_id=?', (impression_id,)).fetchone()
             if fact is not None:
-                trace = served_facts.diagnostic(self.conn, {**result, **dict(fact)})
-                result['diagnostic_status'] = 'expired' if trace is None else 'available'
-                result['provenance'] = trace if trace is not None else {
-                    **served_facts.reporting_trace(fact), **result['provenance']}
-        result["configuration"] = policy_storage.configuration(self.conn, result['model_version'])
-        from yt_playlist.core import policy_history
-        if result['configuration'] is None and policy_history.available(self.conn):
-            status = self.conn.execute('SELECT state FROM recommendation_policy_history WHERE version=?',
-                                       (result['model_version'],)).fetchone()
-            result['configuration_status'] = status[0] if status else 'missing'
-        else:
-            result['configuration_status'] = 'available' if result['configuration'] is not None else 'missing'
-        pool = result["provenance"].get("pool_policy")
-        result["pool_configuration"] = policy_storage.configuration(self.conn, str(pool)) if pool else None
+                result['facts'] = dict(fact)
         return result
 
     @synchronized
@@ -202,18 +135,6 @@ class RecLedgerRepo(Repo):
             (start, end)).fetchall()
         return [dict(r) for r in shadows]
 
-    # --- #113 served recommendation -> observed outcome ledger -------------------------------
-    @synchronized
-    def record_serving_policy(self, version, configuration, now) -> None:
-        with self.conn:
-            policy_storage.publish(self.conn, [(version, json.dumps(configuration, sort_keys=True), now)])
-
-    @synchronized
-    def record_prepared_policies(self, rows, bases=()) -> None:
-        """Store policy JSON that was calculated and encoded off the serving connection."""
-        with self.conn:
-            policy_storage.publish(self.conn, rows, bases, enforce_budget=True)
-
     @synchronized
     def insert_recommendation_outcomes(self, rows):
         self.conn.executemany(
@@ -222,18 +143,53 @@ class RecLedgerRepo(Repo):
         self.conn.commit()
 
     @synchronized
-    def insert_served_impressions(self, rows, *, policies, bases, versions):
-        with self.conn:
-            policy_storage.publish(self.conn, policies, bases)
+    def insert_served_impressions(self, rows, *, versions):
+        with self.conn.atomic():
             if rows:
-                if served_facts.active(self.conn):
-                    served_facts.insert(self.conn, rows)
-                else:
-                    self.conn.executemany(
-                        "INSERT OR IGNORE INTO rec_served_impressions("
-                        "request_id,surface,lane,mode_id,identity_key,rank,score,model_version,provenance,served_at) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+                self.conn.executemany(
+                    "INSERT OR IGNORE INTO rec_served_impressions("
+                    "request_id,surface,lane,mode_id,identity_key,rank,score,model_version,provenance,served_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
                 policy_storage.refresh_references(self.conn, versions)
+
+    @lookup_read
+    def served_facts_active(self):
+        return served_facts.active(self.conn)
+
+    @lookup_read
+    def served_facts_available(self):
+        return served_facts.available(self.conn)
+
+    @synchronized
+    def reserve_impression_ids(self, rows):
+        with self.conn.atomic():
+            identity = self.conn.execute('SELECT next_id FROM served_fact_state WHERE id=1').fetchone()[0]
+            identity = max(identity, self.conn.execute('SELECT COALESCE(max(id),0)+1 FROM rec_served_impressions').fetchone()[0])
+            reserved, seen = [], set()
+            for index, row in enumerate(rows):
+                key = row[0], row[1], row[5]
+                if key in seen or self.conn.execute(
+                        'SELECT 1 FROM rec_served_impressions WHERE request_id=? AND surface=? AND rank=?', key).fetchone():
+                    continue
+                seen.add(key)
+                reserved.append((identity, index))
+                identity += 1
+            self.conn.execute('UPDATE served_fact_state SET next_id=? WHERE id=1', (identity,))
+            return reserved
+
+    @synchronized
+    def insert_reserved_impressions(self, rows, *, versions):
+        with self.conn.atomic():
+            for identity, row, facts in rows:
+                inserted = self.conn.execute(
+                    'INSERT INTO rec_served_impressions(id,request_id,surface,lane,mode_id,identity_key,rank,'
+                    'score,model_version,provenance,served_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) '
+                    'ON CONFLICT(request_id,surface,rank) DO NOTHING', (identity, *row))
+                if inserted.rowcount:
+                    self.conn.execute('INSERT INTO served_facts(impression_id,' + ','.join(served_facts.FIELDS) +
+                        ') VALUES (' + ','.join('?' for _ in range(1 + len(served_facts.FIELDS))) + ')', (identity, *facts))
+                    self.conn.execute('DELETE FROM served_diagnostic_retirements WHERE impression_id=?', (identity,))
+            policy_storage.refresh_references(self.conn, versions)
 
     @synchronized
     def _prune_impression_batch(self, before):
@@ -254,14 +210,6 @@ class RecLedgerRepo(Repo):
             (before, RETENTION_BATCH_SIZE))
         self.conn.commit()
 
-    def _prune_policy_batch(self, before):
-        with self._store.read_snapshot() as snapshot:
-            versions, cursor = policy_storage.retention_candidates(snapshot.store.conn,
-                before + policy_storage.GRACE_SECONDS, limit=RETENTION_BATCH_SIZE,
-                cursor_key=POLICY_RETENTION_CURSOR)
-            snapshot.publish(lambda: policy_storage.prune(self.conn, versions, cursor,
-                cursor_key=POLICY_RETENTION_CURSOR))
-
     @synchronized
     def lane_impression_counts(self, since=None) -> dict:
         """Actual exposure counts from the unified ledger, excluding replay rows."""
@@ -273,37 +221,31 @@ class RecLedgerRepo(Repo):
         return {r["lane"]: r["c"] for r in rows}
 
     @synchronized
-    def maintain_impressions(self, now, *, before):
-        """Bounded idle maintenance; readers defer file retirement without waiting."""
-        if not served_facts.available(self.conn):
-            self._prune_impression_batch(before)
-            self._prune_response_batch(before)
-            return
-        from yt_playlist.core import policy_documents
-        root = served_facts.directory(self.conn)
-        root.mkdir(parents=True, exist_ok=True)
-        with (root / '.readers.lock').open('a+b') as lock:
-            unlock = policy_documents._try_file_lock(lock, exclusive=True)
-            if unlock is None:
-                return
-            try:
-                with self.conn:
-                    self.conn.execute('BEGIN IMMEDIATE')
-                    served_facts.expire(self.conn, now)
-                expired = [r[0] for r in self.conn.execute('SELECT id FROM rec_served_impressions '
-                    'WHERE served_at<? ORDER BY served_at,id LIMIT ?', (before, RETENTION_BATCH_SIZE))]
-                self._prune_impression_batch(before)
-                for identity in expired:
-                    from yt_playlist.core import fao
-                    fao.delete(root / served_facts.relative(identity),missing_ok=True)
-                self._prune_response_batch(before)
-                with self.conn:
-                    served_facts.collect_retired(self.conn)
-                with self.conn:
-                    self.conn.execute('BEGIN IMMEDIATE')
-                    served_facts.collect_orphans(self.conn, now)
-            finally:
-                unlock()
+    def expire_diagnostics(self, before, *, limit):
+        with self.conn.atomic():
+            identities = [row[0] for row in self.conn.execute('SELECT f.impression_id FROM rec_served_impressions i '
+                'JOIN served_facts f ON f.impression_id=i.id WHERE i.served_at<? AND f.diagnostic_expired=0 '
+                'ORDER BY i.served_at,i.id LIMIT ?', (before, limit))]
+            self.conn.executemany('UPDATE served_facts SET diagnostic_expired=1 WHERE impression_id=?', [(i,) for i in identities])
+            self.conn.executemany('INSERT OR IGNORE INTO served_diagnostic_retirements VALUES (?)', [(i,) for i in identities])
+
+    @synchronized
+    def diagnostic_retirements(self, *, limit):
+        return [row[0] for row in self.conn.execute('SELECT r.impression_id FROM served_diagnostic_retirements r '
+            'LEFT JOIN served_facts f ON f.impression_id=r.impression_id '
+            'WHERE f.impression_id IS NULL OR f.diagnostic_expired=1 ORDER BY r.impression_id LIMIT ?', (limit,))]
+
+    @synchronized
+    def acknowledge_diagnostic_retirements(self, identities):
+        with self.conn.atomic():
+            self.conn.executemany('DELETE FROM served_diagnostic_retirements WHERE impression_id=?', [(i,) for i in identities])
+
+    @synchronized
+    def existing_impressions(self, identities):
+        if not identities:
+            return set()
+        return {row[0] for row in self.conn.execute('SELECT id FROM rec_served_impressions WHERE id IN (' +
+            ','.join('?' for _ in identities) + ')', identities)}
 
     @synchronized
     def story_views(self) -> dict:
@@ -333,17 +275,10 @@ class RecLedgerRepo(Repo):
         total. Drives per-card rotation: a card holds its content for erosion_view_cap views, then
         epoch = (views-1)//cap advances and it regenerates. Ticked once per genuine Home visit
         (never on steer/stance previews) so tuning your taste model doesn't churn the cards."""
-        row = self.conn.execute(
-            "SELECT views FROM rec_impressions WHERE surface='card' AND item_key=?", (card,)).fetchone()
-        n = (row["views"] + 1) if row else 1
-        if row:
-            self.conn.execute("UPDATE rec_impressions SET views=?, last_shown=? "
-                              "WHERE surface='card' AND item_key=?", (n, now, card))
-        else:
-            self.conn.execute("INSERT INTO rec_impressions(surface,item_key,views,last_shown) "
-                              "VALUES('card',?,1,?)", (card, now))
-        self.conn.commit()
-        return n
+        with self.conn.atomic():
+            return self.conn.execute("INSERT INTO rec_impressions(surface,item_key,views,last_shown) "
+                "VALUES('card',?,1,?) ON CONFLICT(surface,item_key) DO UPDATE SET "
+                "views=rec_impressions.views+1,last_shown=excluded.last_shown RETURNING views", (card, now)).fetchone()[0]
 
     @lookup_read
     def card_views(self, card) -> int:

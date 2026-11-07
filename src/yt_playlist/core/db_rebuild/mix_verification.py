@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .. import choice_evidence_files, choice_learning_state, evidence_ledger, fao
 from .. import home_outputs, mix_choices, recommendation_reports
-from ...repos import group_queries
+from .. import group_reads as group_queries
 from . import mix_history, source
 
 

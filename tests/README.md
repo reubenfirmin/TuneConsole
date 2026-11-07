@@ -51,6 +51,22 @@ desktop/TV behavior by measured cost, with no fixed test-count target.
   the fixture volume. Teardown removes the alias. The cleanup command also
   handles abandoned aliases after their processes stop.
 
+### Keeping checks focused
+
+- Avoid repeated schema construction, unrelated large fixtures, repeated model
+  fits and duplicate browser journeys. Each consumer still owns a private
+  database and file namespace.
+- Bootstrap, migration, admission and corruption tests exercise their real
+  subject operations; historical-format tests use genuine installed versions.
+- Share setup for cases using the same prepared input while preserving distinct
+  failure, recovery, concurrency, ownership and negative cases.
+- Keep production-scale checks in explicit benchmarks. Smaller ordinary
+  fixtures must retain the boundary that caused the bug.
+- Covered-line overlap identifies review candidates; it does not establish
+  equivalent assertions or workflows.
+
+Historical runtime evidence: `build/test-reports/534-full-analysis/`.
+
 ## Test owners
 
 Paths below are relative to `tests/`.
@@ -137,7 +153,6 @@ Historical comparisons and saved-library investigations live in
 ```
 
 Use the shared local library manager for actual-library evidence.
-The [runtime findings](runtime-review.md) summarize the historical cost review.
 
 ### Local actual-library workspaces
 

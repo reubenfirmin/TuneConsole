@@ -16,7 +16,7 @@ from yt_playlist.core.activity import (activity_for, cancellable_work, check_sto
 from yt_playlist.core.work_diagnostics import work_span
 from yt_playlist.core.numerics import limit_native_threads
 from yt_playlist.core.evidence_ledger import EvidenceBudgetExceeded
-from yt_playlist.repos.policy_storage import PolicyCapacityFull
+from yt_playlist.core.policy_config import PolicyCapacityFull
 from yt_playlist.rec.worker_queue import Job, PendingJobs
 from yt_playlist.rec.worker_tasks import ServingTasks
 

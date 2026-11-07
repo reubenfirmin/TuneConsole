@@ -1,7 +1,6 @@
 """Disposable musical profiles and durable, bounded source dependency work."""
 from contextlib import ExitStack
 import json
-import hashlib
 
 from yt_playlist.core import metadata_native, metadata_evidence, metadata_runtime, profile_files, vibe_versions
 from yt_playlist.core.preparation import metadata_destinations
@@ -70,7 +69,7 @@ class MusicalProfilesRepo(Repo):
         return dependencies, tuple(row[0] for row in references)
 
     @synchronized
-    def source_input(self, key, limit=32, max_bytes=256 * 1024, *, observation_ids=None):
+    def source_facts(self, key, limit=32, max_bytes=256 * 1024, *, observation_ids=None):
         with ExitStack() as guards:
             typed = metadata_native.available(self.conn)
             tables = ('rec_musical_pending', 'rec_musical_sources', 'rec_musical_links', 'rec_musical_source_profiles')
@@ -112,37 +111,40 @@ class MusicalProfilesRepo(Repo):
             source = self.conn.execute('SELECT '+('provider,scope,entity_id' if prepared else '*')+
                 ' FROM rec_musical_sources WHERE source_key=?', (key,)).fetchone()
             if typed:
-                observations = metadata_native.source_values(self.conn, key, max_bytes, store=self._store)
+                reference = metadata_native.source_reference(self.conn, key, max_bytes, store=self._store)
             elif prepared:
-                observations = metadata_destinations.source_values(self.conn,key,max_bytes,identity=identity,store=self._store)
+                reference = {'prepared': metadata_destinations.native_references(
+                    self.conn, identity=identity, source=key, max_bytes=max_bytes, store=self._store)}
             else:
-                observations = json.loads(source['payload'])
+                reference = {'raw': source['payload']}
             # Guard another publisher of the same source, including a missing cache row.
             self.conn.execute('SELECT digest FROM rec_musical_source_profiles WHERE source_key=?', (key,)).fetchone()
             ids = [r[0] for r in self.conn.execute('SELECT recording_id FROM rec_musical_links '
                 'WHERE source_key=? AND recording_id>? ORDER BY recording_id LIMIT ?', (key, pending['cursor'], limit))]
             return ({'provider': source['provider'], 'scope': source['scope'], 'entity_id': source['entity_id'],
-                     'observations': observations}, tuple(pending), ids)
+                     'reference': reference}, tuple(pending), ids)
 
     @synchronized
-    def publish_source(self, key, pending, ids, payload, version, digest, now, limit=32):
-        self._guard()
-        self.conn.execute('INSERT INTO rec_musical_source_profiles VALUES (?,?,?,?,?) '
-            'ON CONFLICT(source_key) DO UPDATE SET payload=excluded.payload,version=excluded.version,'
-            'digest=excluded.digest,prepared_at=excluded.prepared_at', (key, payload, version, digest, now))
-        if profile_files.available(self.conn):
-            profile_files.publish(self.conn, 'source', [(key, payload, version, digest)])
-        for rid in ids:
-            self.conn.execute('INSERT INTO rec_content_pending(identity_key) '
-                'SELECT identity_key FROM recordings WHERE id=? '
-                'ON CONFLICT(identity_key) DO UPDATE SET revision=revision+1', (rid,))
-        revision, cursor = pending
-        self.conn.execute('DELETE FROM rec_musical_pending WHERE source_key=? AND revision=? AND cursor=?',
-                          (key, revision, cursor))
-        if len(ids) == limit:
-            # Move a large artist to the back so a hot source cannot starve others.
-            self.conn.execute('INSERT INTO rec_musical_pending(source_key,revision,cursor) VALUES (?,?,?)',
-                              (key, revision, ids[-1]))
+    def publish_source(self, key, pending, ids, payload, version, digest, now, limit=32, *, references=()):
+        with self.conn.atomic():
+            current = self.conn.execute('SELECT revision,cursor FROM rec_musical_pending WHERE source_key=?',
+                                        (key,)).fetchone()
+            if current is None or tuple(current) != pending:
+                raise ValueError('Stale musical-source publication')
+            self.conn.execute('INSERT INTO rec_musical_source_profiles VALUES (?,?,?,?,?) '
+                'ON CONFLICT(source_key) DO UPDATE SET payload=excluded.payload,version=excluded.version,'
+                'digest=excluded.digest,prepared_at=excluded.prepared_at', (key, payload, version, digest, now))
+            profile_files.install_references(self.conn, 'source', references)
+            for rid in ids:
+                self.conn.execute('INSERT INTO rec_content_pending(identity_key) '
+                    'SELECT identity_key FROM recordings WHERE id=? '
+                    'ON CONFLICT(identity_key) DO UPDATE SET revision=revision+1', (rid,))
+            revision, cursor = pending
+            self.conn.execute('DELETE FROM rec_musical_pending WHERE source_key=? AND revision=? AND cursor=?',
+                              (key, revision, cursor))
+            if len(ids) == limit:
+                self.conn.execute('INSERT INTO rec_musical_pending(source_key,revision,cursor) VALUES (?,?,?)',
+                                  (key, revision, ids[-1]))
 
     @synchronized
     def rotate(self, key):
@@ -154,7 +156,7 @@ class MusicalProfilesRepo(Repo):
                                   (key, *row))
 
     @synchronized
-    def recording_inputs(self, keys, max_bytes=8 * 1024 * 1024, *, source_scopes=None):
+    def recording_facts(self, keys, *, source_scopes=None, max_sources=64, max_link_scan=MAX_MASKED_SOURCE_LINKS):
         """Bound sources; an evaluation mask precedes slots and file-byte charges.
 
         Masked admission inspects at most 4096 link identities per recording,
@@ -162,7 +164,6 @@ class MusicalProfilesRepo(Repo):
         Ordinary preparation keeps its existing first-64/all-source semantics.
         """
         result = {}
-        used_bytes, file_cache = 0, profile_files.Cache()
         with ExitStack() as guards:
             guards.enter_context(keyed_reads(self._store, 'recordings', keys))
             guards.enter_context(keyed_reads(self._store, 'rec_musical_profiles', keys))
@@ -176,9 +177,9 @@ class MusicalProfilesRepo(Repo):
                 with keyed_reads(self._store, 'rec_musical_links', [rid]):
                     links = [r[0] for r in self.conn.execute('SELECT source_key FROM rec_musical_links '
                         'WHERE recording_id=? ORDER BY source_key LIMIT ?',
-                        (rid, 65 if source_scopes is None else MAX_MASKED_SOURCE_LINKS + 1))]
+                        (rid, max_sources + 1 if source_scopes is None else max_link_scan + 1))]
                 if source_scopes is not None:
-                    if len(links) > MAX_MASKED_SOURCE_LINKS:
+                    if len(links) > max_link_scan:
                         raise WorkBudgetExceeded('Masked recording source links exceed bounded admission')
                     allowed = set()
                     for start in range(0, len(links), 64):
@@ -187,16 +188,10 @@ class MusicalProfilesRepo(Repo):
                             allowed.update(row[0] for row in self.conn.execute(
                                 'SELECT source_key,scope FROM rec_musical_sources WHERE source_key IN ('
                                 + ','.join('?' for _ in batch) + ')', batch) if row[1] in source_scopes)
-                    links = [link for link in links if link in allowed][:65]
-                profiles = []
-                with keyed_reads(self._store, 'rec_musical_source_profiles', links[:64]):
-                    for link in links[:64]:
-                        used_bytes += profile_files.size(self.conn, 'source', link)
-                        if used_bytes > max_bytes:
-                            raise WorkBudgetExceeded('Recording profile inputs exceed byte budget')
-                        raw = profile_files.read(self.conn, 'source', link, cache=file_cache, max_bytes=max_bytes)
-                        if raw is not None:
-                            profiles.append(json.loads(raw))
+                    links = [link for link in links if link in allowed][:max_sources + 1]
+                with keyed_reads(self._store, 'rec_musical_source_profiles', links[:max_sources]):
+                    by_key = {row[0]: row for row in profile_files.reference_rows(self.conn, 'source', links[:max_sources])}
+                    references = [by_key[link] for link in links[:max_sources] if link in by_key]
                 with keyed_reads(self._store, 'catalog_entries', [rid]):
                     entries = [r[0] for r in self.conn.execute('SELECT id FROM catalog_entries WHERE recording_id=?', (rid,))]
                 choices = {}
@@ -216,118 +211,76 @@ class MusicalProfilesRepo(Repo):
                             for field, value in self.conn.execute('SELECT field,value_json FROM entry_field_choices WHERE entry_id=?',
                                                                   (entry,)):
                                 choices.setdefault(field, set()).add(value)
-                # Conflicting explicit entry choices block inherited fallback.
-                overrides = {field: json.loads(next(iter(values))) if len(values) == 1 else None
-                             for field, values in choices.items()}
-                result[key] = (profiles, overrides, len(links) > 64)
+                result[key] = (references, choices, len(links) > max_sources)
         return result
 
     @synchronized
-    def publish_recordings(self, rows, now):
-        with self.conn.atomic(join=True):
-            changed, publications = False, []
+    def publish_recordings(self, rows, now, *, references=()):
+        with self.conn.atomic():
+            changed, published_keys = False, set()
             for key, payload, version, digest in rows:
                 if payload is None:
                     cursor = self.conn.execute('DELETE FROM rec_musical_profiles WHERE identity_key=?', (key,))
                 else:
-                    profile = json.loads(payload)
-                    if 'vibes' in profile:
-                        profile.pop('vibes')
-                        payload = json.dumps(profile, sort_keys=True, separators=(',', ':'), allow_nan=False)
-                        digest = hashlib.sha256(payload.encode()).hexdigest()
                     cursor = self.conn.execute('INSERT INTO rec_musical_profiles VALUES (?,?,?,?,?) '
                         'ON CONFLICT(identity_key) DO UPDATE SET payload=excluded.payload,version=excluded.version,'
                         'digest=excluded.digest,prepared_at=excluded.prepared_at '
                         'WHERE digest<>excluded.digest OR version<>excluded.version',
                         (key, payload, version, digest, now))
-                    if cursor.rowcount and profile_files.available(self.conn):
-                        publications.append((key, payload, version, digest))
+                    if cursor.rowcount:
+                        published_keys.add(key)
                 changed = changed or cursor.rowcount > 0
-            if publications:
-                profile_files.publish(self.conn, 'recording', publications)
-        if changed:
-            self._store.rec_refresh.publish_notification()
+            profile_files.install_references(self.conn, 'recording',
+                [row for row in references if row[0] in published_keys])
+        return changed
+
+    @synchronized
+    def assert_idle(self):
+        if self.conn.in_transaction:
+            raise RuntimeError('Musical-profile files must be prepared outside a transaction')
+
+    @synchronized
+    def publication_owners(self, kind, keys):
+        if not profile_files.available(self.conn):
+            return None
+        return {key: profile_files._identity(self.conn, kind, key) for key in keys}
 
     @snapshot_read
-    def readiness_fingerprint(self, keys):
-        return self.readiness_state(keys)[0]
-
-    @snapshot_read
-    def readiness_state(self, keys):
-        """Identify current ranking/support inputs without decoding profile files.
-
-        Profiles and relational fits can advance independently of a menu head.
-        Return the small current fit projection alongside its persisted identity
-        so an older menu can be revalidated without restoring every profile.
-        """
-        digest = hashlib.sha256()
-        profiles = {}
-        keys = sorted(set(keys))
-        version = vibe_versions.expression(self.conn, 'recording_vibes', 'v')
-        for offset in range(0, len(keys), 512):
-            page = keys[offset:offset + 512]
-            qs = ','.join('?' for _ in page)
-            with column_group_reads(self._store, 'recordings', 'identity'):
-                ids = [row[0] for row in self.conn.execute(
-                    f'SELECT id FROM recordings WHERE identity_key IN ({qs})', page).fetchall()]
-                with keyed_reads(self._store, 'rec_musical_profiles', page), \
-                        keyed_reads(self._store, 'recording_vibes', ids), \
-                        keyed_reads(self._store, 'vibe_versions', []):
-                    rows = self.conn.execute('SELECT r.identity_key,p.version,p.digest,'
-                        f'v.vibe,v.score,v.support,v.source,{version} FROM recordings r '
-                        'LEFT JOIN rec_musical_profiles p ON p.identity_key=r.identity_key '
-                        'LEFT JOIN recording_vibes v ON v.recording_id=r.id '
-                        f'WHERE r.identity_key IN ({qs}) ORDER BY r.identity_key,v.vibe', page).fetchall()
-                    # Bound the fetch to this identity page instead of entering
-                    # the connection's Python wrappers for every fit row. Keep
-                    # the exact page boundaries and saved JSON/hash format.
-                    digest.update(json.dumps([tuple(row) for row in rows],
-                                             separators=(',', ':')).encode())
-                    for key, policy, _digest, vibe, score, support, source, stamp in rows:
-                        profile = profiles.setdefault(key, {'version': policy, 'vibes': {
-                            'inputs_version': stamp, 'fits': {}}})
-                        if vibe is not None and policy is not None:
-                            profile['vibes']['fits'][vibe] = {
-                                'score': score, 'support': support, 'source': source,
-                                'inputs_version': stamp}
-        return digest.hexdigest(), profiles
-
-    @snapshot_read
-    def by_keys(self, keys):
+    def readiness_rows(self, keys):
+        """Read one bounded page of current relational ranking/support facts."""
         if len(keys) > 512:
             raise ValueError('Musical profile page exceeds 512 identities')
-        with keyed_reads(self._store, 'rec_musical_profiles', keys):
-            result = profile_files.read_page(self.conn, 'recording', keys)
-        return self._store.vibe_predictions.overlay(result)
+        if not keys:
+            return []
+        version = vibe_versions.expression(self.conn, 'recording_vibes', 'v')
+        qs = ','.join('?' for _ in keys)
+        with column_group_reads(self._store, 'recordings', 'identity'):
+            ids = [row[0] for row in self.conn.execute(
+                f'SELECT id FROM recordings WHERE identity_key IN ({qs})', keys).fetchall()]
+            with keyed_reads(self._store, 'rec_musical_profiles', keys), \
+                    keyed_reads(self._store, 'recording_vibes', ids), \
+                    keyed_reads(self._store, 'vibe_versions', []):
+                return [tuple(row) for row in self.conn.execute('SELECT r.identity_key,p.version,p.digest,'
+                    f'v.vibe,v.score,v.support,v.source,{version} FROM recordings r '
+                    'LEFT JOIN rec_musical_profiles p ON p.identity_key=r.identity_key '
+                    'LEFT JOIN recording_vibes v ON v.recording_id=r.id '
+                    f'WHERE r.identity_key IN ({qs}) ORDER BY r.identity_key,v.vibe', keys).fetchall()]
 
     @snapshot_read
-    def provenance_sources(self, key, digests, *, limit=16, max_bytes=256 * 1024):
-        """Read bounded cached evidence actually used by a recording's saved profile.
+    def profile_references(self, keys):
+        with keyed_reads(self._store, 'rec_musical_profiles', keys):
+            return profile_files.reference_rows(self.conn, 'recording', keys)
 
-        A newer source cache must not be presented as the cause of an older
-        recording result. No preparation or provider lookup runs on this path.
-        """
+    @snapshot_read
+    def provenance_references(self, key, digests, *, limit=16):
         if not digests:
-            return [], False
-        digests = list(dict.fromkeys(digests))[:64]
+            return []
         qs = ','.join('?' for _ in digests)
         rows = self.conn.execute(
             'SELECT p.source_key,p.digest '
             'FROM recordings r JOIN rec_musical_links l ON l.recording_id=r.id '
             'JOIN rec_musical_source_profiles p ON p.source_key=l.source_key '
             f'WHERE r.identity_key=? AND p.digest IN ({qs}) ORDER BY p.source_key LIMIT ?',
-            (key, *digests, limit + 1))
-        sources, found, used, cache = [], set(), 0, profile_files.Cache()
-        for source_key, digest in rows:
-            size = profile_files.size(self.conn, 'source', source_key)
-            if len(sources) == limit or used + size > max_bytes:
-                break
-            used += size
-            raw = profile_files.read(self.conn, 'source', source_key, cache=cache, max_bytes=max_bytes)
-            sources.append(json.loads(raw))
-            found.add(digest)
-        return sources, set(digests) != found
-
-    def _guard(self):
-        if not self.conn.in_transaction:
-            raise RuntimeError('Musical profiles require guarded publication')
+            (key, *digests, limit + 1)).fetchall()
+        references = {row[0]: row for row in profile_files.reference_rows(self.conn, 'source', [row[0] for row in rows])}
+        return [references[key] for key, _digest in rows]

@@ -516,7 +516,7 @@ def test_pausing_during_full_refit_prevents_publication(library, monkeypatch):
     assert not daily.due(store, now + 2 * daily.DAY)
 
 
-def test_failure_after_vector_writes_rolls_back_the_whole_publication(library, monkeypatch):
+def test_failure_after_selection_publication_keeps_selected_vectors_and_restore_point(library, monkeypatch):
     store, now = library['store'], library['now']
     daily.maintain(store, now)
     daily.maintain(store, now + 5)
@@ -530,11 +530,15 @@ def test_failure_after_vector_writes_rolls_back_the_whole_publication(library, m
             raise ValueError('controlled publication failure')
 
     monkeypatch.setattr(store.model_selection, 'publish_selection', fail_after_writes)
-    assert daily.maintain(store, now + 10)['status'] == 'failed'
+    assert daily.maintain(store, now + 10)['status'] == 'applied'
     assert published_rows == [len(library['keys'])]
-    assert dict(store.rec_model.get_rec_vectors()) == dict(library['original'])
-    assert store.settings.get_setting('rec_dim') == '2'
-    assert not store.settings.get_setting('rec_selection_active_run')
+    selected = store.rec_model.get_rec_vectors()
+    assert len(selected) == len(library['keys'])
+    assert selected != library['original']
+    assert store.settings.get_setting('rec_dim') == '3'
+    active = int(store.settings.get_setting('rec_selection_active_run'))
+    assert dict(store.conn.execute('SELECT identity_key,vec FROM rec_model_previous_vectors WHERE run_id=?',
+                                   (active,))) == dict(library['original'])
 
 
 def test_tied_best_alternatives_keep_the_incumbent(library, monkeypatch):

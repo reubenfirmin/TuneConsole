@@ -101,7 +101,7 @@ def test_vibe_estimates_explain_audio_inheritance_and_unknowns_without_inference
                            (json.dumps(profile), key))
     with store.read_snapshot() as snapshot:
         with closing(snapshot.store.vibe_predictions.prepare_publication(tracks, resolved, [], 1000)) as plan:
-            assert snapshot.publish(lambda: store.vibe_predictions.publish_prepared(plan))
+            assert snapshot.publish_ordered(lambda: store.vibe_predictions.publish_prepared(plan))
     monkeypatch.setattr(musical_profiles, 'resolve', lambda *a, **kw: pytest.fail('Serving must not infer'))
     before = store.conn.total_changes
     body = songs['http'].get('/track/owned-song').text

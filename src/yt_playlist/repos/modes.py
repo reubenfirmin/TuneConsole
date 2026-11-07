@@ -26,17 +26,16 @@ def _centroid_bytes(value, *, encoded=False):
 class ModesRepo(Repo):
     @synchronized
     def publish_generation(self, rows, retired):
-        """Apply prepared stable mode identities within the model publication transaction."""
-        if not self.conn.in_transaction:
-            raise RuntimeError('Mode publication requires an outer transaction')
+        """Commit prepared stable mode identities as one repository write."""
         rows = [(mid, label, families, _centroid_bytes(blob, encoded=True), *rest)
                 for mid, label, families, blob, *rest in rows]
-        self.conn.executemany(
-            'INSERT INTO taste_modes(mode_id,label,families,centroid,size,rep_keys,first_seen,last_seen,space,active) '
-            'VALUES (?,?,?,?,?,?,?,?,?,1) ON CONFLICT(mode_id) DO UPDATE SET '
-            'label=excluded.label,families=excluded.families,centroid=excluded.centroid,size=excluded.size,'
-            'rep_keys=excluded.rep_keys,last_seen=excluded.last_seen,space=excluded.space,active=1', rows)
-        self.conn.executemany('UPDATE taste_modes SET active=0 WHERE mode_id=?', [(mid,) for mid in retired])
+        with self.conn.atomic():
+            self.conn.executemany(
+                'INSERT INTO taste_modes(mode_id,label,families,centroid,size,rep_keys,first_seen,last_seen,space,active) '
+                'VALUES (?,?,?,?,?,?,?,?,?,1) ON CONFLICT(mode_id) DO UPDATE SET '
+                'label=excluded.label,families=excluded.families,centroid=excluded.centroid,size=excluded.size,'
+                'rep_keys=excluded.rep_keys,last_seen=excluded.last_seen,space=excluded.space,active=1', rows)
+            self.conn.executemany('UPDATE taste_modes SET active=0 WHERE mode_id=?', [(mid,) for mid in retired])
 
     @snapshot_read
     def list_modes(self, active_only=True) -> list[dict]:

@@ -79,6 +79,11 @@ def head(conn, name):
 
 
 def rows(conn, name, *, keys=None):
+    kind, _space, _table, _column = descriptor(name)
+    return embedding_files.load_many(conn, kind, row_facts(conn, name, keys=keys))
+
+
+def row_facts(conn, name, *, keys=None):
     kind, space, table, column = descriptor(name)
     table = embedding_files.relation(conn, kind)
     if kind == 'recording':
@@ -110,7 +115,7 @@ def rows(conn, name, *, keys=None):
             args.extend(subjects)
     # Source insertion order is part of the discovered cohort's tied rankings.
     sql += ' ORDER BY e.insertion_order' if space == 'content_discovery' else f' ORDER BY {key}'
-    return embedding_files.load_many(conn, kind, conn.execute(sql, args))
+    return [tuple(row) for row in conn.execute(sql, args)]
 
 
 def count(conn, name):

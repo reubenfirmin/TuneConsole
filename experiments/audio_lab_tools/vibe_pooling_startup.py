@@ -2,6 +2,7 @@
 
 The empty case establishes setup availability, not time to first music. The
 installed case checks already useful content without admitting a model build.
+The cold case rebuilds musical profiles and vibe scores from retained inputs.
 Run each qualification setting in a separate copy of the same baseline.
 """
 from contextlib import contextmanager
@@ -14,16 +15,18 @@ import time
 
 from fastapi.testclient import TestClient
 
+from yt_playlist.core import vibe_model_files
+from yt_playlist.core.activity import check_stopping
 from yt_playlist.core.store import Store
 from yt_playlist.rec import home_vibe, vibe_joint_model as model, vibe_joint_preparation as preparation
-from yt_playlist.repos import vibe_models
+from yt_playlist.rec.progressive import Preparation
 from yt_playlist.web.app import create_app
 
 
 @contextmanager
 def serving_only():
     """Cover HTTP handler threads as well as the caller during startup."""
-    original_fit, original_read = model.fit, vibe_models.read
+    original_fit, original_read = model.fit, vibe_model_files.VibeModelFiles.read
     calls = {'fits': 0, 'model_reads': 0}
 
     def fit(*args, **kwargs):
@@ -34,11 +37,11 @@ def serving_only():
         calls['model_reads'] += 1
         raise AssertionError('Startup or Home request attempted loading a model')
 
-    model.fit, vibe_models.read = fit, read
+    model.fit, vibe_model_files.VibeModelFiles.read = fit, read
     try:
         yield calls
     finally:
-        model.fit, vibe_models.read = original_fit, original_read
+        model.fit, vibe_model_files.VibeModelFiles.read = original_fit, original_read
 
 
 def probe(database, output, name):
@@ -122,5 +125,113 @@ def run(output, *, candidate):
         report['reopened'] = probe(database, output.parent, 'reopened')
     finally:
         preparation.QUALIFICATIONS = previous
+        output.write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
+    return report
+
+
+def run_cold(output, *, candidate, seconds=300):
+    """Retain real catalog/provider/sample inputs, removing this feature's caches.
+
+    This is a cold musical-profile/vibe rebuild on an installed catalog. Other
+    recommendation domains and earned navigation access remain installed state;
+    a first new score is not a claim about first-account progression or menus.
+    """
+    database = Path(os.environ.get('TUNECONSOLE_TEST_LIBRARY', ''))
+    if (os.environ.get('TUNECONSOLE_IMAGE_RUN') != '1' or database != Path('/library/state.db')
+            or output.parent.resolve() != Path('/reports')):
+        raise ValueError('Use scripts/test-library.py with a private writable snapshot and /reports output')
+    previous = preparation.QUALIFICATIONS
+    report = {'candidate': candidate, 'configuration': model.configuration(),
+              'operational_acceptance': False, 'seconds_limit': seconds,
+              'limits': ['Cold musical-profile/vibe caches on a real installed catalog, not a new account.',
+                         'Other recommendation caches and earned navigation access are retained.',
+                         'First usable score means a newly prepared score for a playable saved recording.',
+                         'HTTP requests and background preparation run sequentially in this startup check.',
+                         'Python imports and cache removal precede the startup timer.']}
+    preparation.QUALIFICATIONS = ({preparation.config_identity(): 'isolated-cold-startup-rehearsal'}
+                                 if candidate else {})
+    store = None
+    worker = None
+    original_fit = model.fit
+    try:
+        store = Store(database)
+        store.init_schema()
+        raw_tables = ('recordings', 'catalog_entries', 'library_memberships', 'sample_attributes',
+                      'rec_musical_sources', 'rec_musical_links')
+        report['retained_inputs'] = {table: store.conn.execute('SELECT count(*) FROM ' + table).fetchone()[0]
+                                     for table in raw_tables}
+        tables = ('recording_vibes', 'prediction_model_generations', 'predictions',
+                  'measurement_samples', 'prediction_measurement_roots', 'measurements',
+                  'rec_musical_profiles', 'rec_musical_source_profiles')
+        report['removed_cache_rows'] = {table: store.conn.execute('SELECT count(*) FROM ' + table).fetchone()[0]
+                                        for table in tables}
+        with store.conn.atomic():
+            for table in tables:
+                store.conn.execute('DELETE FROM ' + table)
+            for vibe in preparation.VIBES:
+                store.conn.execute('DELETE FROM settings WHERE key IN (?,?)',
+                    (vibe_model_files.STATE_PREFIX + vibe, vibe_model_files.HEAD_PREFIX + vibe))
+            store.conn.execute('DELETE FROM rec_content_pending')
+            store.conn.execute('INSERT INTO rec_content_pending(identity_key) SELECT identity_key FROM recordings')
+            store.conn.execute('INSERT OR IGNORE INTO rec_musical_pending(source_key,revision) '
+                               'SELECT source_key,revision FROM rec_musical_sources')
+        assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
+        store.conn.close()
+        store = None
+        started = time.monotonic()
+        report['initial_home'] = probe(database, output.parent, 'cold-initial')
+        assert report['initial_home']['ranked_results'] == report['initial_home']['cached_scores'] == 0
+        store = Store(database)
+        store.init_schema()
+        worker = Preparation(store)
+        calls = []
+
+        def fit(rows, vibe, *args, **kwargs):
+            observation = {'vibe': vibe, 'originals': len(rows), 'at_seconds': time.monotonic() - started}
+            calls.append(observation)
+            at = time.monotonic()
+            try:
+                return original_fit(rows, vibe, *args, **kwargs)
+            finally:
+                observation['seconds'] = time.monotonic() - at
+
+        model.fit = fit
+        report['fits_before_first_score'] = calls
+        with store.priority.background(check_stopping):
+            for turn in range(100000):
+                if time.monotonic() - started >= seconds:
+                    report['outcome'] = 'bounded-incomplete'
+                    break
+                worker.capture(time.time())
+                first = store.conn.execute('SELECT r.identity_key,v.vibe,v.source FROM recording_vibes v '
+                    'JOIN recordings r ON r.id=v.recording_id WHERE EXISTS ('
+                    'SELECT 1 FROM catalog_entries e JOIN library_memberships m ON m.entry_id=e.id '
+                    'JOIN youtube_items y ON y.video_id=e.video_id '
+                    'WHERE e.recording_id=r.id AND COALESCE(y.available,1)<>0) LIMIT 1').fetchone()
+                if first:
+                    report.update(outcome='first-score-ready', first_new_score_seconds=time.monotonic() - started,
+                                  first_score=dict(first), turns=turn + 1)
+                    break
+            else:
+                report['outcome'] = 'bounded-incomplete'
+        worker.close()
+        worker = None
+        model.fit = original_fit
+        report['queue_after'] = {table: store.conn.execute('SELECT count(*) FROM ' + table).fetchone()[0]
+                                 for table in ('rec_content_pending', 'rec_musical_pending', 'rec_vibe_pending')}
+        report['retained_inputs_unchanged'] = all(store.conn.execute('SELECT count(*) FROM ' + table).fetchone()[0]
+                                                 == count for table, count in report['retained_inputs'].items())
+        report['foreign_key_failures'] = [tuple(row) for row in store.conn.execute('PRAGMA foreign_key_check')]
+        store.conn.close()
+        store = None
+        report['reopened_home'] = probe(database, output.parent, 'cold-reopened')
+        report['seconds'] = time.monotonic() - started
+    finally:
+        model.fit = original_fit
+        preparation.QUALIFICATIONS = previous
+        if worker is not None:
+            worker.close()
+        if store is not None:
+            store.conn.close()
         output.write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
     return report

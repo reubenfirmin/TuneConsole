@@ -118,6 +118,11 @@ def _payload(row, body):
     return payload
 
 
+def decode_source(observations, bodies):
+    """Interpret detached observation references against their original responses."""
+    return {row['field']: _profile_value(_payload(row, bodies[row['delivery_id']])) for row in observations}
+
+
 def source_values(conn, source_key, max_bytes=256 * 1024, *, store=None):
     from . import metadata_runtime as runtime, metadata_runtime_files as files
     if runtime.active(conn):
@@ -126,6 +131,29 @@ def source_values(conn, source_key, max_bytes=256 * 1024, *, store=None):
             return {}
         return files.read(conn, 'native', (source_key,), row[0], max_bytes=max_bytes)['observations']
     return installed_source_values(conn, source_key, max_bytes, store=store)
+
+
+def source_reference(conn, source_key, max_bytes=256 * 1024, *, store=None):
+    """Capture exact immutable source references without opening delivery files."""
+    from . import metadata_runtime as runtime
+    if runtime.active(conn):
+        row = conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?', (source_key,)).fetchone()
+        return {'key': source_key, 'revision': row[0] if row else None}
+    with ExitStack() as guards:
+        if store is not None:
+            guards.enter_context(keyed_reads(store, 'musical_source_observations', [source_key]))
+            observations = [row[0] for row in conn.execute(
+                'SELECT observation_id FROM musical_source_observations WHERE source_key=?', (source_key,))]
+            guards.enter_context(keyed_reads(store, 'native_metadata_observations', observations))
+            delivery_ids = [row[0] for observation in observations for row in conn.execute(
+                'SELECT delivery_id FROM native_metadata_observations WHERE id=?', (observation,))]
+            guards.enter_context(keyed_reads(store, 'metadata_deliveries', delivery_ids))
+        rows = [dict(row) for row in conn.execute('SELECT o.*,d.raw_filename,d.raw_digest,d.raw_byte_size,d.raw_offset '
+            'FROM musical_source_observations s JOIN native_metadata_observations o ON o.id=s.observation_id '
+            'JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE s.source_key=? ORDER BY s.field', (source_key,))]
+        if sum(row['raw_byte_size'] for row in rows) > max_bytes:
+            raise WorkBudgetExceeded('Source profile input exceeds byte budget')
+        return {'observations': rows}
 
 
 def installed_source_values(conn, source_key, max_bytes=256 * 1024, *, store=None):

@@ -26,7 +26,7 @@ def source_step(store, now, *, batch=32, seconds=2):
             if len(payload.encode()) > 512 * 1024:
                 raise WorkBudgetExceeded('Source profile output exceeds byte budget')
             check_stopping()
-            if snapshot.publish(lambda: store.musical_profiles.publish_source(
+            if snapshot.publish_ordered(lambda: store.musical_profiles.publish_source(
                     key, pending, ids, payload, profiles.VERSION,
                     profiles.digest(profile), now, batch)):
                 return True

@@ -199,7 +199,7 @@ def test_discovery_retries_an_actual_sql_deadline_without_an_exception_trace(
 def test_discovery_ticker_distinguishes_shutdown_from_unexpected_failures(store, monkeypatch, caplog, failure):
     import time
     from yt_playlist.core.activity import WorkClosing
-    from yt_playlist.repos.policy_storage import PolicyCapacityFull
+    from yt_playlist.core.policy_config import PolicyCapacityFull
 
     _, ctx = _ctx(store, FakeClient())
     worker = RecWorker(ctx)

@@ -8,6 +8,13 @@ from yt_playlist.repos.base import Repo, synchronized
 
 class PreparedContentRepo(Repo):
     @synchronized
+    def requeue_recording(self, recording_id):
+        with self.conn.atomic(join=True):
+            self.conn.execute('INSERT INTO rec_content_pending(identity_key) '
+                'SELECT identity_key FROM recordings WHERE id=? '
+                'ON CONFLICT(identity_key) DO UPDATE SET revision=revision+1', (recording_id,))
+
+    @synchronized
     def pending(self, limit=32):
         return [(r['identity_key'], r['revision']) for r in self.conn.execute(
             'SELECT identity_key,revision FROM rec_content_pending ORDER BY position LIMIT ?', (limit,))]

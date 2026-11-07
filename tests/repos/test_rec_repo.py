@@ -14,11 +14,11 @@ from yt_playlist.repos.artist_similarity import ArtistSimilarityRepo
 
 def test_named_recommendation_repositories(store):
     import pytest
-    assert isinstance(store.rec_model, RecModelRepo)
+    assert isinstance(store.rec_model.repository, RecModelRepo)
     assert isinstance(store.rec_ledger.repository, RecLedgerRepo)
     assert isinstance(store.rec_proposals, RecProposalsRepo)
     assert isinstance(store.rec_signals.repository, RecSignalsRepo)
-    assert isinstance(store.playlist_recipes, PlaylistRecipesRepo)
+    assert isinstance(store.playlist_recipes.repository, PlaylistRecipesRepo)
     assert isinstance(store.artist_similarity.repository, ArtistSimilarityRepo)
     assert not hasattr(store, "rec_surface")
     assert isinstance(store.rec_query.repository, RecQueryRepo)
@@ -32,8 +32,8 @@ def test_named_recommendation_repositories(store):
 
 
 def test_unified_onto_repo_base(store):
-    for dao in (store.rec_model, store.rec_ledger.repository, store.rec_proposals, store.rec_signals.repository,
-                store.playlist_recipes, store.artist_similarity.repository, store.rec_query.repository,
+    for dao in (store.rec_model.repository, store.rec_ledger.repository, store.rec_proposals, store.rec_signals.repository,
+                store.playlist_recipes.repository, store.artist_similarity.repository, store.rec_query.repository,
                 store.rec_candidates.repository, store.rec_evidence.repository, store.rec_eligibility.repository):
         assert isinstance(dao, Repo)
         assert dao.conn is store.conn and dao._lock is store._lock

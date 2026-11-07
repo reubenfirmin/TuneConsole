@@ -248,7 +248,7 @@ def test_facets_pin_membership_before_loading_track_metadata(installed, monkeypa
         with store._lock:
             store.conn.execute('BEGIN IMMEDIATE')
             try:
-                store.playlists._set_playlist_tracks(playlist, [])
+                store.playlists.repository._set_playlist_tracks(playlist, [])
                 catalog.choose_field(store.conn, seed, 'genre', 'Jazz')
                 if commit:
                     store.conn.commit()

@@ -10,11 +10,11 @@ from tests.core.test_compact_groups_migration import predecessor
 from tests.repos.test_compact_group_publication import database
 from tests.repos.test_typed_recommendation_publication import recommendations as historical_recommendations, publish, collect
 from yt_playlist.core.activity import WorkClosing
-from yt_playlist.core import recommendation_revalidations as revalidations
+from yt_playlist.core import policy_config, recommendation_revalidations as revalidations
 from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
 from yt_playlist.rec import home_vibe, musical_character, vibe_pools
-from yt_playlist.repos import bundle_storage
-from yt_playlist.repos import policy_storage, recommendation_publication as publication
+from yt_playlist.rec import bundle_storage
+from yt_playlist.repos import recommendation_publication as publication
 from yt_playlist.repos.rec_proposals import RecProposalsRepo
 
 
@@ -57,7 +57,7 @@ def prepare(store, value, fresh=None, key='converted', *, policy=None, reuse_exi
 def test_pending_policy_preflight_is_bounded_without_sql_or_files(recommendations, monkeypatch, budget):
     store = recommendations
     raw = '{"algorithm":"privately-calculated"}'
-    monkeypatch.setattr(policy_storage, 'MAX_BATCH_BYTES' if budget == 'bytes' else 'MAX_BATCH_VARIANTS',
+    monkeypatch.setattr(policy_config, 'MAX_BATCH_BYTES' if budget == 'bytes' else 'MAX_BATCH_VARIANTS',
                         len(raw.encode()) - 1 if budget == 'bytes' else 1)
     pending = [('new-root', raw, 10), ('new-candidate', raw, 10)]
     before = store.conn.total_changes
@@ -230,9 +230,7 @@ def test_revalidated_publication_reuses_published_or_staged_pools_with_original_
     first = store.recommendations.claim(prepared)
     store.recommendations.stage(prepared, first)
     if published:
-        with store.conn:
-            store.conn.execute('BEGIN IMMEDIATE')
-            store.recommendations.publish(first, 11)
+        store.recommendations.publish(first, 11)
     generation = first.generation_id
     with store.conn:
         assert store.conn.execute("SELECT payload FROM rec_proposals WHERE surface='mode_bundles'").fetchone()[0] == 'legacy-source'
@@ -267,23 +265,22 @@ def test_revalidated_publication_reuses_published_or_staged_pools_with_original_
         second = publish(store, next_plan).generation_id
     else:
         build = store.recommendations.claim(next_plan)
-        original, calls = publication._pool, []
-        def interrupted(*args):
+        from yt_playlist.controllers.recommendation_publications import RecommendationPublications
+        original, calls = RecommendationPublications._stage_pool, []
+        def interrupted(*args, **kwargs):
             calls.append(1)
             if len(calls) == 2:
                 raise WorkClosing('controlled interruption after revalidation')
-            return original(*args)
+            return original(*args, **kwargs)
         with monkeypatch.context() as boundary:
-            boundary.setattr(publication, '_pool', interrupted)
+            boundary.setattr(RecommendationPublications, '_stage_pool', interrupted)
             with pytest.raises(WorkClosing, match='after revalidation'):
                 store.recommendations.stage(next_plan, build)
         assert store.recommendations.head('home') is None
         assert store.conn.execute('SELECT count(*) FROM recommendation_pool_revalidations').fetchone()[0] == 1
         resumed = store.recommendations.claim(next_plan, owner=build.owner)
         store.recommendations.stage(next_plan, resumed)
-        with store.conn:
-            store.conn.execute('BEGIN IMMEDIATE')
-            store.recommendations.publish(resumed, 12)
+        store.recommendations.publish(resumed, 12)
         second = resumed.generation_id
     assert second != generation
     assert store.recommendations.head('home')['id'] == second
@@ -310,8 +307,8 @@ def test_revalidated_publication_reuses_published_or_staged_pools_with_original_
     second = publish(store, newest).generation_id
     collect(store)
     with store.conn:
-        assert policy_storage.prune(store.conn, ['new-input-policy'], None)['policies_deleted'] == 1
-        assert policy_storage.prune(store.conn, [prepared.policy_version, 'newest-input-policy'], None)['policies_deleted'] == 0
+        assert store.rec_ledger.prune_policies(['new-input-policy'], None)['policies_deleted'] == 1
+        assert store.rec_ledger.prune_policies([prepared.policy_version, 'newest-input-policy'], None)['policies_deleted'] == 0
     assert store.recommendations.page('home', 'all', 'wheelhouse')[0]['pool_policy'] == 'newest-input-policy'
     assert before == [tuple(row) for row in store.conn.execute('SELECT * FROM recommendation_candidates ORDER BY pool_id,rank')]
     def assert_compaction_ownership(expected):

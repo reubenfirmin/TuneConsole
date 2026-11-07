@@ -12,11 +12,11 @@ import pytest
 from tests.core.test_compact_groups_migration import historical_groups, apply
 from tests.prepared_fixture_support import capture_template, roots
 from yt_playlist.core.activity import WorkClosing
-from yt_playlist.core import group_documents
+from yt_playlist.core import group_documents, group_reads as group_queries
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.migrations import v072_compact_groups as migration
 from yt_playlist.core.store import Store
-from yt_playlist.repos import compact_group_publication as compact, group_publication as publication, group_queries
+from yt_playlist.repos import compact_group_publication as compact, group_publication as publication
 from yt_playlist.repos.compact_taste_groups import CompactTasteGroupsRepo
 
 
@@ -95,7 +95,7 @@ def finish(store, prepared, owner):
 def test_unchanged_leased_preparation_reuses_content_and_preserves_each_generation(database):
     store, prepared = database
     original = [tuple(row) for row in store.conn.execute('SELECT * FROM group_members')]
-    owner = compact.stage(store.taste_groups, prepared)
+    owner = store.taste_groups.stage(prepared)
     assert group_queries.head_generation(store.conn) == 'second'
     assert group_queries.definitions(store.conn, 'third') == []
     assert store.conn.execute('SELECT count(*) FROM group_versions').fetchone()[0] == 2
@@ -132,14 +132,14 @@ def test_committed_prefix_resumes_without_duplicate_members_or_early_visibility(
     prepared = changed(prepared)
     original = interrupt_after_member_batch(monkeypatch)
     with pytest.raises(WorkClosing, match='controlled interruption'):
-        compact.stage(store.taste_groups, prepared)
+        store.taste_groups.stage(prepared)
     assert group_queries.head_generation(store.conn) == 'second'
     assert group_queries.definition(store.conn, 'third-leaf') is None
     assert store.conn.execute('SELECT count(*) FROM group_build_versions').fetchone()[0] == 1
     with pytest.raises(RuntimeError, match='incomplete or no longer owned'):
         finish(store, prepared, prepared['_stage_owner'])
     monkeypatch.setattr(publication, '_write', original)
-    owner = compact.stage(store.taste_groups, prepared)
+    owner = store.taste_groups.stage(prepared)
     finish(store, prepared, owner)
     assert store.conn.execute('SELECT count(*) FROM group_versions').fetchone()[0] == 3
     assert store.conn.execute('SELECT count(*) FROM group_members').fetchone()[0] == 4
@@ -151,15 +151,15 @@ def test_live_lease_blocks_takeover_and_expired_lease_fences_the_old_owner(datab
     prepared = changed(prepared)
     original = interrupt_after_member_batch(monkeypatch)
     with pytest.raises(WorkClosing):
-        compact.stage(store.taste_groups, prepared)
+        store.taste_groups.stage(prepared)
     monkeypatch.setattr(publication, '_write', original)
     other = deepcopy(prepared)
     old_owner = other.pop('_stage_owner')
     with pytest.raises(publication.BuildUnavailable, match='leased by another worker'):
-        compact.stage(store.taste_groups, other)
+        store.taste_groups.stage(other)
     with store.conn:
         store.conn.execute('UPDATE group_builds SET expires_at=0')
-    new_owner = compact.stage(store.taste_groups, other)
+    new_owner = store.taste_groups.stage(other)
     assert new_owner != old_owner
     with pytest.raises(RuntimeError, match='incomplete or no longer owned'):
         finish(store, prepared, old_owner)
@@ -172,14 +172,14 @@ def test_expired_cleanup_removes_only_the_abandoned_build_and_can_rebuild(databa
     prepared = changed(prepared)
     original = interrupt_after_member_batch(monkeypatch)
     with pytest.raises(WorkClosing):
-        compact.stage(store.taste_groups, prepared)
+        store.taste_groups.stage(prepared)
     monkeypatch.setattr(publication, '_write', original)
-    assert not compact.cleanup(store.taste_groups)
+    assert not store.taste_groups.cleanup_builds()
     with store.conn:
         store.conn.execute('UPDATE group_builds SET expires_at=0')
     monkeypatch.setattr(publication, 'BATCH_ROWS', 1)
     for _ in range(100):
-        if not compact.cleanup(store.taste_groups):
+        if not store.taste_groups.cleanup_builds():
             break
         assert group_queries.head_generation(store.conn) == 'second'
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
@@ -188,7 +188,7 @@ def test_expired_cleanup_removes_only_the_abandoned_build_and_can_rebuild(databa
     assert store.conn.execute('SELECT count(*) FROM group_versions').fetchone()[0] == 2
     assert store.conn.execute('SELECT count(*) FROM group_members').fetchone()[0] == 3
     assert not store.conn.execute("SELECT 1 FROM group_generations WHERE external_key='third'").fetchone()
-    owner = compact.stage(store.taste_groups, prepared)
+    owner = store.taste_groups.stage(prepared)
     finish(store, prepared, owner)
     assert group_queries.head_generation(store.conn) == 'third'
 
@@ -197,7 +197,7 @@ def test_expired_cleanup_removes_only_the_abandoned_build_and_can_rebuild(databa
 def test_new_plan_clears_expired_foreign_aliases_with_bounded_restartable_cleanup(database, monkeypatch,
                                                                                 interrupt_cleanup):
     store, prepared = database
-    abandoned_owner = compact.stage(store.taste_groups, prepared)
+    abandoned_owner = store.taste_groups.stage(prepared)
     historical = group_queries.head(store.conn, members=True)
     next_plan = deepcopy(prepared)
     next_plan.update(generation='fourth', at=4, serial=4)
@@ -220,9 +220,9 @@ def test_new_plan_clears_expired_foreign_aliases_with_bounded_restartable_cleanu
     monkeypatch.setattr(compact, 'cleanup', cleanup)
     if interrupt_cleanup:
         with pytest.raises(WorkClosing, match='interrupted foreign build cleanup'):
-            compact.stage(store.taste_groups, next_plan)
+            store.taste_groups.stage(next_plan)
         assert not store.conn.execute("SELECT 1 FROM group_generations WHERE external_key='fourth'").fetchone()
-    owner = compact.stage(store.taste_groups, next_plan)
+    owner = store.taste_groups.stage(next_plan)
     assert calls and all(call == {'generation': 'third'} for call in calls)
     assert not store.conn.execute("SELECT 1 FROM group_generations WHERE external_key='third'").fetchone()
     assert group_queries.head(store.conn, members=True) == historical
@@ -235,13 +235,13 @@ def test_new_plan_clears_expired_foreign_aliases_with_bounded_restartable_cleanu
 
 def test_new_plan_preserves_live_foreign_alias_owner(database):
     store, prepared = database
-    owner = compact.stage(store.taste_groups, prepared)
+    owner = store.taste_groups.stage(prepared)
     next_plan = deepcopy(prepared)
     next_plan.update(generation='fourth', at=4, serial=4)
     next_plan.pop('_stage_owner')
     before = list(store.conn.iterdump())
     with pytest.raises(publication.BuildUnavailable, match='leased by another unpublished build'):
-        compact.stage(store.taste_groups, next_plan)
+        store.taste_groups.stage(next_plan)
     assert list(store.conn.iterdump()) == before
     finish(store, prepared, owner)
     assert group_queries.head_generation(store.conn) == 'third'
@@ -253,7 +253,7 @@ def test_hidden_append_preserves_the_original_publication_guard(database, change
     with store.read_snapshot() as snapshot:
         assert group_queries.head(snapshot.store.conn, members=True)['generation'] == 'second'
         snapshot.release_reader()
-        owner = compact.stage(store.taste_groups, prepared)
+        owner = store.taste_groups.stage(prepared)
         if change == 'recording':
             # The outer preparation declares the exact input identities too.
             snapshot.store._snapshot_reads.include({('recordings', '')})
@@ -279,7 +279,7 @@ def test_resume_rejects_changed_plan_before_extending_the_prefix(database, monke
     prepared = changed(prepared)
     original = interrupt_after_member_batch(monkeypatch)
     with pytest.raises(WorkClosing):
-        compact.stage(store.taste_groups, prepared)
+        store.taste_groups.stage(prepared)
     monkeypatch.setattr(publication, '_write', original)
     altered = deepcopy(prepared)
     altered.pop('_stage_digest')
@@ -288,7 +288,7 @@ def test_resume_rejects_changed_plan_before_extending_the_prefix(database, monke
     altered['groups'][1]['payload'] = json.dumps(value)
     before = list(store.conn.iterdump())
     with pytest.raises(RuntimeError, match='retained output digest'):
-        compact.stage(store.taste_groups, altered)
+        store.taste_groups.stage(altered)
     assert list(store.conn.iterdump()) == before
 
 
@@ -310,7 +310,7 @@ def test_foreground_can_read_and_write_between_compact_member_batches(database, 
             assert release.wait(5)
     monkeypatch.setattr(publication, '_write', write)
     with ThreadPoolExecutor(2) as pool:
-        work = pool.submit(compact.stage, store.taste_groups, prepared)
+        work = pool.submit(store.taste_groups.stage, prepared)
         try:
             assert paused.wait(5)
 
@@ -395,12 +395,10 @@ def test_store_retains_group_files_until_the_last_old_snapshot_read(database, tm
         assert group_queries.head(store.conn, members=True) == expected
 
 
-def test_compact_repository_atomic_import_preserves_membership_and_representatives(database):
+def test_compact_publication_preserves_membership_and_representatives(database):
     store, prepared = database
-    repo = CompactTasteGroupsRepo(store)
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        repo.publish(prepared)
+    repo = group_queries.service(store)
+    repo.publish(prepared)
     assert repo.head_generation() == 'third'
     assert repo.head_checkpoint()['generation'] == 'third'
     assert repo.head(members=True)['groups'][1]['members'] == {'one': (.9, .8)}
@@ -409,11 +407,28 @@ def test_compact_repository_atomic_import_preserves_membership_and_representativ
     assert repo.resumable_build('input-fingerprint', 3, prepared['policy'], 'second') is None
 
 
+def test_group_publication_file_io_runs_outside_the_sql_transaction(database, monkeypatch):
+    store, prepared = database
+    files = store.taste_groups.files
+
+    def checked(original):
+        def outside(*args, **kwargs):
+            assert not store.conn.in_transaction, 'File I/O ran inside a SQL transaction'
+            return original(*args, **kwargs)
+        return outside
+
+    for method in ('write', 'write_policy', 'read', 'policy'):
+        monkeypatch.setattr(files, method, checked(getattr(files, method)))
+    store.taste_groups.publish(prepared)
+    assert store.taste_groups.head_generation() == 'third'
+    assert not store.conn.in_transaction
+
+
 def test_real_offer_learning_reuses_the_same_external_alias_in_two_generations(database):
     from tests.test_group_learning import menu, compiled
     from yt_playlist.rec import choice_evidence as choices
     store, prepared = database
-    store.taste_groups = CompactTasteGroupsRepo(store)
+    store.taste_groups = group_queries.service(store)
     first = store.taste_groups.head(members=True)
     for group in prepared['groups']:
         group['version'] = group['version'].replace('third-', 'second-')
@@ -438,3 +453,39 @@ def test_real_offer_learning_reuses_the_same_external_alias_in_two_generations(d
     assert rows['leaf']['positive'] == .5 and rows['leaf']['days'] == 2
     assert not any(state['excluded'].values())
     assert store.conn.execute('SELECT count(*) FROM group_versions').fetchone()[0] == 2
+
+
+def test_group_repository_detaches_file_references_without_io_or_a_reporting_transaction(database, monkeypatch):
+    from yt_playlist.core import policy_documents
+    store, _ = database
+    with store.read_view() as view:
+        repository = CompactTasteGroupsRepo(view)
+        statements = []
+        view.conn.set_trace_callback(statements.append)
+
+        def forbidden(*args, **kwargs):
+            pytest.fail('The SQL repository attempted to read a file')
+
+        with monkeypatch.context() as patch:
+            patch.setattr(group_documents, 'read', forbidden)
+            patch.setattr(policy_documents, 'read', forbidden)
+            head = repository.head(members=True)
+            assert head['groups'][1]['members'] == {'one': (.9, .8)}
+            assert head['metadata_filename']
+            assert repository.head_checkpoint()['policy']['variant']
+            assert repository.definitions('second')[0]['definition_filename']
+            assert repository.definition('second-leaf')['external_version'] == 'second-leaf'
+            assert repository.learning_head()['groups'][0]['definition_filename']
+            assert repository.lineage()[0]['evidence_filename']
+            assert repository.successors('first-leaf')[0]['evidence_filename']
+        assert not view.conn.in_transaction
+        assert not any(statement.strip().upper().startswith('BEGIN') for statement in statements)
+
+        read = group_documents.read
+
+        def outside_transaction(*args, **kwargs):
+            assert not view.conn.in_transaction
+            return read(*args, **kwargs)
+
+        monkeypatch.setattr(group_documents, 'read', outside_transaction)
+        assert group_queries.service(view).head(members=True)['groups'][1]['version'] == 'second-leaf'

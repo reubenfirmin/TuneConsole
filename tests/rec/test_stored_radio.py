@@ -18,7 +18,7 @@ from yt_playlist.rec.radio_genres import GenrePolicy
 from yt_playlist.rec.stored_radio import PreparedRadio
 from yt_playlist.repos import recommendation_publication as publication
 from yt_playlist.repos.rec_proposals import RecProposalsRepo
-from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
+from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 
 
 @pytest.mark.parametrize('blocked_by', ['sql_writer', 'cancelled_work'])
@@ -105,12 +105,12 @@ def forbid_bundle(monkeypatch):
 def test_small_initial_lookahead_uses_point_ppr_ranks_and_keeps_exact_publication(radio, monkeypatch):
     store, generation, _ = radio
     forbid_bundle(monkeypatch)
-    pages, original = [], RecommendationPublicationsRepo.candidate_pages
+    pages, original = [], RecommendationPublications.candidate_pages
     def page(self, *args, **kwargs):
         value = original(self, *args, **kwargs)
         pages.extend((kwargs['limit'], len(page['tracks'])) for page in value)
         return value
-    monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_pages', page)
+    monkeypatch.setattr(RecommendationPublications, 'candidate_pages', page)
     candidates = RadioCandidates(store, 10, comparison=None)
     try:
         assert candidates.prepared.generation == generation
@@ -170,7 +170,7 @@ def test_intensity_reads_selected_rare_region_and_rechecks_live_source_metadata(
 def test_planning_reuses_pages_but_rechecks_used_tracks_and_next_pass_catalog(radio, monkeypatch):
     store, _, _ = radio
     prepared = PreparedRadio(store, 10)
-    reads, original = [], RecommendationPublicationsRepo.candidate_page
+    reads, original = [], RecommendationPublications.candidate_page
     facts, hydrate = [], type(store.rec_query).group_candidates
 
     def catalog(self, keys, *args, **kwargs):
@@ -181,7 +181,7 @@ def test_planning_reuses_pages_but_rechecks_used_tracks_and_next_pass_catalog(ra
         reads.append((args, kwargs))
         return original(self, *args, **kwargs)
 
-    monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_page', page)
+    monkeypatch.setattr(RecommendationPublications, 'candidate_page', page)
     monkeypatch.setattr(type(store.rec_query), 'group_candidates', catalog)
 
     def pick(used=()):

@@ -11,13 +11,13 @@ from yt_playlist.core.store import Store
 from yt_playlist.core import group_documents, group_evidence, policy_documents
 from yt_playlist.rec import choice_evidence, group_roots
 from yt_playlist.rec.choice_capture import CaptureQueue
-from yt_playlist.repos.compact_taste_groups import CompactTasteGroupsRepo
+from yt_playlist.core.group_reads import service as compact_groups
 
 
 @pytest.fixture
 def groups(database):
     store, _ = database
-    store.taste_groups = CompactTasteGroupsRepo(store)
+    store.taste_groups = compact_groups(store)
     return store
 
 

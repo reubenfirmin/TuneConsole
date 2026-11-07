@@ -13,6 +13,7 @@ from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import musical_preparation, musical_profiles as profiles
 from yt_playlist.rec.progressive import Budget, Preparation
 from yt_playlist.repos.musical_profiles import MusicalProfilesRepo
+from yt_playlist.controllers.musical_profiles import MusicalProfiles
 
 
 def observe(store, tid, value, *, entity='shared', scope='artist', field='tags', run='one', title=None, now=10):
@@ -293,14 +294,14 @@ def test_recording_snapshot_rejects_override_race_and_explicit_null_blocks_fallb
     before = get(store)
     with store.conn:
         catalog.choose_field(store.conn, tid, 'energy', .2)
-    original = MusicalProfilesRepo.recording_inputs
+    original = MusicalProfiles.recording_inputs
     def change(repo, keys):
         result = original(repo, keys)
         with store.conn:
             catalog.choose_field(store.conn, tid, 'energy', None)
         return result
     with monkeypatch.context() as patch:
-        patch.setattr(MusicalProfilesRepo, 'recording_inputs', change)
+        patch.setattr(MusicalProfiles, 'recording_inputs', change)
         assert not Preparation(store).capture(1001)
     assert get(store) == before
     drain(store)
@@ -341,12 +342,12 @@ def test_interrupted_profile_publication_keeps_batch_queued_for_retry(store, mon
     tid = store.tracks.upsert_track('v', 'Song', 'Artist', '', 200)
     observe(store, tid, .9, field='mood_aggressive', scope='recording')
     assert musical_preparation.source_step(store, 1000)
-    original = MusicalProfilesRepo.publish_recordings
+    original = MusicalProfiles.publish_recordings
     def fail(repo, rows, now):
         original(repo, rows, now)
         raise RuntimeError('interrupted publication')
     with monkeypatch.context() as patch:
-        patch.setattr(MusicalProfilesRepo, 'publish_recordings', fail)
+        patch.setattr(MusicalProfiles, 'publish_recordings', fail)
         with pytest.raises(RuntimeError, match='interrupted'):
             Preparation(store).capture(1000)
     assert store.prepared_content.has_pending()

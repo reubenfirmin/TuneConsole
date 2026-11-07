@@ -44,29 +44,9 @@ def _load(conn, *, project):
                                      kind='radio-session',owner=row['id'])
     if not project:
         return state,(row['id'],row['revision'])
-    state.update(identity=row['account_id'],episode_id=row['id'],phase=row['status'])
-    original = [*state.get('tracks',[]),*state.get('initial_tracks',[])]
-    if state.get('pending'):
-        original.append(state['pending'])
-    current,initial,pending = [],[],None
-    for item in conn.execute('SELECT q.*,r.identity_key FROM radio_queue_items q '
-            'JOIN recordings r ON r.id=q.recording_id WHERE q.session_id=? ORDER BY q.position',(row['id'],)):
-        track = dict(original[item['position']])
-        track['video_id'] = item['video_id']
-        for field in ('key','identity_key'):
-            if field in track:
-                track[field] = item['identity_key']
-        if item['state']=='initial':
-            initial.append(track)
-        elif item['state']=='pending':
-            pending = track
-        else:
-            current.append(track)
-    state['tracks'] = current
-    if 'initial_tracks' in state:
-        state['initial_tracks'] = initial
-    if 'pending' in state:
-        state['pending'] = pending
+    from .radio_checkpoint_policy import project_queue
+    project_queue(state,row,list(conn.execute('SELECT q.*,r.identity_key FROM radio_queue_items q '
+        'JOIN recordings r ON r.id=q.recording_id WHERE q.session_id=? ORDER BY q.position',(row['id'],))))
     from . import append_work
     if append_work.available(conn):
         append_work.load_radio(conn,row['id'],state)

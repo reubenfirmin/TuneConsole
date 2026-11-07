@@ -19,7 +19,7 @@ from yt_playlist.core.policy_config import BASE_FIELD
 from yt_playlist.core.db_revisions import column_group_reads
 from yt_playlist.core.work_diagnostics import work_span
 from yt_playlist.repos.rec_proposals import encode_proposals
-from yt_playlist.repos.policy_storage import PolicyCapacityFull
+from yt_playlist.core.policy_config import PolicyCapacityFull
 from yt_playlist.rec import (embedding_vectors as vectors, experiments, home_themes, home_vibe, layers, mode_eval, rec_params, surfaces,
                              taste_modes, transient, measurement, negative, vibe_pools)
 from yt_playlist.util import genre_map
@@ -156,15 +156,15 @@ def prepare_bundles(store, now) -> dict | None:
             return payload if published is not None else None
         encoded = encode_proposals('mode_bundles', payload)
         fresh_encoded = encode_proposals('fresh_pool', fresh)
-        # Release the pinned WAL reader before staging. These immutable chunks
-        # are invisible until both heads, policies and settings commit together.
+        # Release the pinned WAL reader before staging. Publish policy owners
+        # before the proposal heads and acknowledge the calculation in settings last.
         snapshot.release_reader()
         prepared = store.rec_proposals.stage_prepared_bundles(encoded, fresh_encoded)
         def publish():
             store.rec_ledger.publish_prepared_policies(list(policies.rows.values()), list(policies.bases.values()))
             store.rec_proposals.publish_prepared_bundles(*prepared, now)
             store.settings.publish_values(settings)
-        if not snapshot.publish(publish, validate_inputs=False):
+        if not snapshot.publish_ordered(publish, validate_inputs=False):
             return None
         return payload
 
@@ -192,7 +192,7 @@ def _publish_typed_bundles(store, snapshot, payload, fresh, policies, settings, 
             base = json.loads(row[1]).get(BASE_FIELD)
             if base is not None:
                 bases[base] = policies.bases[base]
-        old_rows, old_bases = previous.recommendations.captured_policies(selected - policies.rows.keys())
+        old_rows, old_bases = previous.rec_ledger.captured_policies(selected - policies.rows.keys())
         rows.extend(old_rows)
         bases.update((row[0], row) for row in old_bases)
     snapshot.release_reader()
@@ -211,7 +211,8 @@ class _DeferredBundles:
 
     def publish(self, store):
         try:
-            build = store.recommendations.claim(self.prepared, policies=self.rows, bases=self.bases)
+            store.rec_ledger.record_prepared_policies(self.rows, self.bases)
+            build = store.recommendations.claim(self.prepared)
         except PolicyCapacityFull:
             # Keep only one unclaimed plan. SQL retirement progress is durable;
             # restarting simply recalculates once from the then-current inputs.
@@ -229,7 +230,7 @@ class _DeferredBundles:
             store.settings.publish_values(self.settings)
 
         return (build.generation_id
-                if self.snapshot.publish(publish, validate_inputs=False) else None)
+                if self.snapshot.publish_ordered(publish, validate_inputs=False) else None)
 
 
 def _calculate_bundles(store, now, policies):

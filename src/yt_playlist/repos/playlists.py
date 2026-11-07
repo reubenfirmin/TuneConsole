@@ -1,11 +1,10 @@
 """PlaylistRepo: playlists, their track membership/ordering, groups, and hidden flags."""
 from yt_playlist.core.playlist_scopes import ensure,resolve
 from yt_playlist.core import entity_names, playlist_scope_state as scope_state
-from yt_playlist.core.db_revisions import setting_reads
 from yt_playlist.core.action_errors import ActionInputError
 
-from yt_playlist.repos.base import Repo, synchronized, lookup_read, snapshot_read, GENERATED_GROUP
-from yt_playlist.repos.models import Playlist, PlaylistMemberships
+from yt_playlist.repos.base import Repo, synchronized, lookup_read, snapshot_read
+from yt_playlist.repos.models import Playlist
 
 
 _FIRST_TRACK_THUMBNAIL = (
@@ -16,13 +15,6 @@ _FIRST_TRACK_THUMBNAIL = (
 
 
 class PlaylistRepo(Repo):
-    @lookup_read
-    def radio_playlist_ids(self):
-        """Read retained Radio origins on an owned connection, including legacy settings."""
-        from yt_playlist.core import radio_provenance
-        with setting_reads(self._store, radio_provenance.KEYS):
-            return radio_provenance.ids(self.conn)
-
     @synchronized
     def playlist_reference(self, ytm, account_id=None):
         return resolve(self.conn,ytm,account_id)
@@ -51,23 +43,14 @@ class PlaylistRepo(Repo):
                               (ytm, origin, int(adopted), description))
 
     @synchronized
-    def mark_generated_playlist(self, ytm, description=None) -> None:
-        from yt_playlist.library.playlist_metadata import GENERATED_DESCRIPTION
-        self.set_playlist_provenance(ytm, origin='tuneconsole', adopted=False,
-                                     description=description or GENERATED_DESCRIPTION)
-
-    @synchronized
-    def adopt_generated_playlist(self, ytm) -> None:
-        from yt_playlist.library.playlist_metadata import PROMOTED_DESCRIPTION
-        with self.conn:
-            if not self.conn.in_transaction:
-                self.conn.execute('BEGIN IMMEDIATE')
+    def adopt_generated_playlist(self, ytm, description) -> None:
+        with self.conn.atomic():
             ytm = ensure(self.conn,ytm)
             if scope_state.available(self.conn):
-                scope_state.adopt(self.conn, ytm, PROMOTED_DESCRIPTION)
+                scope_state.adopt(self.conn, ytm, description)
                 return
             self.conn.execute("UPDATE playlist_provenance SET adopted=1,description=? WHERE ytm=? "
-                              "AND origin='tuneconsole'", (PROMOTED_DESCRIPTION, ytm))
+                              "AND origin='tuneconsole'", (description, ytm))
 
     @synchronized
     def is_quarantined_playlist(self, ytm, *, account_id=None) -> bool:
@@ -75,40 +58,10 @@ class PlaylistRepo(Repo):
         return self.conn.execute('SELECT 1 FROM quarantined_playlists WHERE playlist_scope_id=?', (ytm,)).fetchone() is not None
 
     @synchronized
-    def reconcile_playlist_provenance(self, ytm, description, *, account_id=None) -> None:
-        from yt_playlist.library.playlist_metadata import is_generated_description, PROMOTED_DESCRIPTION
-        ytm = resolve(self.conn,ytm,account_id)
-        current = self.playlist_provenance(ytm)
-        promoted = PROMOTED_DESCRIPTION.casefold() in (description or '').casefold()
-        generated = is_generated_description(description)
-        if generated or promoted or current['origin'] == 'tuneconsole':
-            # A stale marker cannot undo explicit local adoption. An absent description is
-            # not an adoption decision, including incomplete sync responses.
-            adopted = promoted or (current['origin'] == 'tuneconsole' and current['adopted'])
-            self.set_playlist_provenance(ytm, origin='tuneconsole', adopted=adopted,
-                                         description=description if description is not None else current['description'])
-
-    @synchronized
-    def playlist_kind(self, playlist_id) -> str:
-        """Classify a playlist by its tracks' YouTube videoType.
-
-        Returns 'audio' (all ATV), 'video' (all OMV/UGC/…), 'mixed' (both), 'mix' (has tracks but
-        YouTube tagged none, i.e. an auto-generated radio/mix playlist), or '' (no tracks).
-        """
-        rows = self.conn.execute(
+    def playlist_video_types(self, playlist_id):
+        return [row[0] for row in self.conn.execute(
             "SELECT t.video_type FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id "
-            "WHERE pt.playlist_id=?", (playlist_id,)).fetchall()
-        if not rows:
-            return ""
-        kinds = {"audio" if r["video_type"] == "MUSIC_VIDEO_TYPE_ATV" else "video"
-                 for r in rows if r["video_type"] is not None}
-        if not kinds:
-            return "mix"        # non-empty but entirely untyped -> auto-mix / radio
-        if kinds == {"audio"}:
-            return "audio"
-        if kinds == {"video"}:
-            return "video"
-        return "mixed"
+            "WHERE pt.playlist_id=?", (playlist_id,))]
 
     @synchronized
     def upsert_playlist(self, account_id, provider_playlist_id, title, track_count, content_hash, now,
@@ -193,26 +146,18 @@ class PlaylistRepo(Repo):
 
     @synchronized
     def publish_playlist_snapshot(self, account_id, provider_playlist_id, title, track_ids, now, *,
-                                  expected_revision, thumbnail=None, created_at=None):
+                                  expected_revision, digest, thumbnail=None, created_at=None):
         """Publish complete remote metadata/membership iff its pre-fetch owner survives.
 
         Catalog observations may be retained before this call, but acquire library
         membership only on acceptance. Network I/O must remain outside this transaction.
         A rejected read returns None and cannot advance freshness or placement work.
         """
-        from yt_playlist.core.catalog import resolve_entry
-        from yt_playlist.library.playlist_metadata import content_hash
-
-        if self.conn.in_transaction:
-            raise RuntimeError('Cannot publish a playlist inside another transaction')
-        with self.conn:
-            self.conn.execute('BEGIN IMMEDIATE')
+        with self.conn.atomic():
             if self.playlist_revision(account_id, provider_playlist_id) != expected_revision:
                 return None
-            ids = list(dict.fromkeys(resolve_entry(self.conn, t) for t in track_ids))
-            keys = [self.conn.execute('SELECT identity_key FROM catalog_tracks WHERE id=?',
-                                     (tid,)).fetchone()[0] for tid in ids]
-            pid = self._upsert_playlist(account_id, provider_playlist_id, title, len(ids), content_hash(keys),
+            ids = list(track_ids)
+            pid = self._upsert_playlist(account_id, provider_playlist_id, title, len(ids), digest,
                                         now, thumbnail, created_at=created_at)
             self._set_playlist_tracks(pid, ids)
             self.conn.executemany("INSERT OR IGNORE INTO library_memberships VALUES (?,'observed',?)",
@@ -220,25 +165,11 @@ class PlaylistRepo(Repo):
             return pid
 
     @synchronized
-    def publish_confirmed_tracks(self, playlist_id, title, tracks, now, *, expected_prefix=None, destination=None):
-        """Atomically mirror a confirmed remote sequence and its catalog metadata.
-
-        A caller may supply an unchanged confirmed prefix. Use incremental writes
-        only when the saved sequence still matches it; otherwise reconcile fully.
-        No nested repository calls may commit part of this publication.
-        """
-        from yt_playlist.core import catalog
-        from yt_playlist.library.playlist_metadata import content_hash
-
-        tracks = list(tracks)
-        videos = [t["video_id"] for t in tracks]
+    def publish_confirmed(self, playlist_id, title, videos, digest, entry_ids, now, *,
+                          expected_prefix=None, destination=None, empty_digest):
+        """Conditionally replace playlist rows using already admitted catalog entries."""
         prefix = list(expected_prefix) if expected_prefix is not None else None
-        if any(not video for video in videos) or len(set(videos)) != len(videos):
-            raise ValueError("Confirmed playlist must contain distinct playable uploads")
-        if self.conn.in_transaction:
-            raise RuntimeError("Cannot publish a playlist inside another transaction")
-        with self.conn:
-            self.conn.execute("BEGIN IMMEDIATE")
+        with self.conn.atomic():
             if playlist_id is None:
                 if destination is None:
                     raise ValueError("A destination account and playlist are required")
@@ -247,7 +178,7 @@ class PlaylistRepo(Repo):
                     'SELECT id FROM playlists WHERE account_id=? AND provider_playlist_id=?',
                     (account_id, remote_id)).fetchone()
                 playlist_id = row[0] if row else self._upsert_playlist(
-                    account_id, remote_id, title, 0, content_hash([]), now)
+                    account_id, remote_id, title, 0, empty_digest, now)
             if not self.conn.execute("SELECT 1 FROM playlists WHERE id=?", (playlist_id,)).fetchone():
                 raise ValueError("Unknown playlist")
             saved = self.conn.execute(
@@ -263,44 +194,34 @@ class PlaylistRepo(Repo):
             if not incremental:
                 self.conn.execute("DELETE FROM playlist_items WHERE playlist_id=?", (playlist_id,))
                 self.conn.execute("DELETE FROM unresolved_playlist_items WHERE playlist_id=?", (playlist_id,))
-            for offset in range(start, len(tracks), 128):
-                members = []
-                for position, track in enumerate(tracks[offset:offset + 128], offset):
-                    catalog.upsert(
-                        self.conn, track["video_id"], track.get("title") or "", track.get("artist") or "",
-                        track.get("album") or "", track.get("duration"), thumbnail=track.get("thumbnail"),
-                        library=True)
-                    members.append((playlist_id, track["video_id"], position))
+            for offset in range(start, len(videos), 128):
+                members = [(playlist_id, video, position) for position, video in
+                           enumerate(videos[offset:offset + 128], offset)]
                 self.conn.executemany("INSERT INTO playlist_items VALUES (?,?,?)", members)
-            # A new upload can disambiguate an older recording's text key.
-            # Hash the final catalog identities after every upsert has settled.
-            keys = self.conn.execute(
-                "SELECT r.identity_key FROM playlist_items p "
-                "JOIN youtube_items y ON y.video_id=p.video_id JOIN recordings r ON r.id=y.recording_id "
-                "WHERE p.playlist_id=?", (playlist_id,)).fetchall()
-            digest = content_hash({row[0] for row in keys})
+            self.conn.executemany("INSERT OR IGNORE INTO library_memberships VALUES (?,'observed',?)",
+                                  [(entry, now) for entry in entry_ids])
             self.conn.execute(
                 "UPDATE main.playlists SET title=?,track_count=?,content_hash=?,last_seen=?,"
                 "last_changed=CASE WHEN content_hash<>? THEN ? ELSE last_changed END WHERE id=?",
-                (title, len(tracks), digest, now, digest, now, playlist_id))
+                (title, len(videos), digest, now, digest, now, playlist_id))
             self.conn.execute(
                 f"UPDATE main.playlists AS p SET thumbnail={_FIRST_TRACK_THUMBNAIL} "
                 "WHERE p.id=? AND NULLIF(p.thumbnail, '') IS NULL", (playlist_id,))
         return playlist_id
 
     @synchronized
-    def set_song_liked(self, account_id, video_id, on) -> None:
-        """Reflect a like/unlike locally by toggling the song's membership in this identity's
-        Liked Music (LM) playlist, so the derived `liked` flag flips immediately (a later sync
-        reconciles with YouTube). No-op if the identity has no synced LM playlist yet."""
+    def liked_membership_target(self, account_id, provider_playlist_id, video_id):
         lm = self.conn.execute(
-            "SELECT id FROM playlists WHERE account_id=? AND provider_playlist_id='LM'", (account_id,)).fetchone()
+            "SELECT id FROM playlists WHERE account_id=? AND provider_playlist_id=?", (account_id,provider_playlist_id)).fetchone()
         row = self.conn.execute(
             "SELECT id, identity_key FROM tracks WHERE video_id=? ORDER BY id DESC LIMIT 1", (video_id,)).fetchone()
         if lm is None or row is None:
-            return
-        lm_id = lm["id"]
-        with self.conn:
+            return None
+        return lm['id']
+
+    @synchronized
+    def set_liked_membership(self, lm_id, video_id, on):
+        with self.conn.atomic():
             if on:
                 self.conn.execute(
                     "INSERT INTO playlist_items(playlist_id, video_id, position) "
@@ -430,7 +351,7 @@ class PlaylistRepo(Repo):
         return {r["identity_key"] for r in rows}
 
     @snapshot_read
-    def cleanup_memberships(self) -> PlaylistMemberships:
+    def cleanup_membership_facts(self, excluded_group):
         """Bulk membership read for Cleanup, independent of pair-analysis policy.
 
         Count unique recordings as get_playlist_track_keys does. Kinds still use
@@ -444,16 +365,37 @@ class PlaylistRepo(Repo):
                 'JOIN tracks t ON t.id=pt.track_id').fetchall():
             keys[row['playlist_id']].add(row['identity_key'])
             if row['video_type'] is not None:
-                types[row['playlist_id']].add(
-                    'audio' if row['video_type'] == 'MUSIC_VIDEO_TYPE_ATV' else 'video')
-        kinds = {p.playlist_scope_id: ('mixed' if len(types[p.id]) > 1 else
-                              next(iter(types[p.id])) if types[p.id] else
-                              'mix' if keys[p.id] else '') for p in playlists}
+                types[row['playlist_id']].add(row['video_type'])
         excluded = {r[0] for r in self.conn.execute(
             'SELECT p.id FROM playlists p JOIN quarantined_playlists q ON q.playlist_scope_id=p.playlist_scope_id '
-            'WHERE q.name=?', (GENERATED_GROUP,))}
-        return PlaylistMemberships(playlists, {pid: frozenset(k) for pid, k in keys.items()},
-                                   kinds, excluded)
+            'WHERE q.name=?', (excluded_group,))}
+        return {'playlists': playlists, 'keys': keys, 'types': types, 'excluded': excluded}
+
+    @snapshot_read
+    def snapshot_track_facts(self, track_ids):
+        from yt_playlist.core.catalog import resolve_entry
+        result = []
+        for identity in track_ids:
+            entry = resolve_entry(self.conn, identity)
+            row = self.conn.execute('SELECT id,identity_key FROM catalog_tracks WHERE id=?', (entry,)).fetchone()
+            if row is None:
+                raise ValueError('Unknown track reference')
+            result.append(dict(row))
+        return result
+
+    @snapshot_read
+    def confirmed_facts(self, playlist_id, destination=None):
+        if playlist_id is None and destination is not None:
+            row = self.conn.execute('SELECT id FROM playlists WHERE account_id=? AND provider_playlist_id=?', destination).fetchone()
+            playlist_id = row[0] if row else None
+            if playlist_id is None:
+                return {'id': None, 'videos': [], 'unresolved': False}
+        if not self.conn.execute('SELECT 1 FROM playlists WHERE id=?', (playlist_id,)).fetchone():
+            return None
+        return {'id': playlist_id, 'videos': [row[0] for row in self.conn.execute(
+            'SELECT video_id FROM playlist_items WHERE playlist_id=? ORDER BY position', (playlist_id,))],
+            'unresolved': self.conn.execute('SELECT 1 FROM unresolved_playlist_items WHERE playlist_id=? LIMIT 1',
+                                            (playlist_id,)).fetchone() is not None}
 
     @synchronized
     def get_playlist_tracks_with_meta(self, playlist_id) -> list[tuple]:
@@ -466,7 +408,6 @@ class PlaylistRepo(Repo):
 
     @synchronized
     def set_playlist_group(self, ytm, name, *, account_id=None) -> None:
-        name = (name or "").strip()
         with self.conn:
             if not self.conn.in_transaction:
                 self.conn.execute('BEGIN IMMEDIATE')

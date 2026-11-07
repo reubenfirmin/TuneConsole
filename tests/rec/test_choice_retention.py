@@ -213,7 +213,7 @@ def test_retained_paired_storage_preserves_context_and_read_limits(monkeypatch):
             'context': {'artifact': 'frozen'}, 'tuning': 'current'}
     payload = legacy_projection(42, data)
     assert payload['context'] == data['context']
-    from yt_playlist.repos.policy_storage import references
+    from yt_playlist.core.policy_config import references
     assert 'policy-id' in set(references(payload))
     assert comparison_storage.decode(payload) == data
     assert comparison_storage.decode({'run_id': 42, 'data': data}) == data

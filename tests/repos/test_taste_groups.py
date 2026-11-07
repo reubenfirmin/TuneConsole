@@ -70,16 +70,14 @@ def test_failed_publication_rolls_back_every_artifact_and_preserves_head(store):
         input_fingerprint='second', policy=group_discovery.Policy())
     prepared['edges'].append(('broken', 'edge', None, 1))
     with pytest.raises(ValueError, match='scores must be finite'):
-        store.conn.execute('BEGIN')
-        with store.conn:
-            store.taste_groups.publish(prepared)
+        store.taste_groups.publish(prepared)
     assert store.taste_groups.head()['generation'] == first['generation']
     assert not store.conn.execute('SELECT 1 FROM group_generations WHERE external_key=?',
                                    (prepared['generation'],)).fetchone()
 
 
-def test_requires_outer_transaction(store):
-    with pytest.raises(RuntimeError):
+def test_publication_rejects_an_enclosing_transaction(store):
+    with store.conn.atomic(), pytest.raises(RuntimeError, match='idle serving connection'):
         store.taste_groups.publish({})
 
 

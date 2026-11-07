@@ -8,7 +8,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.test_audio_vibes import sample
-from yt_playlist.core import audio_annotation_files, sample_files
 from yt_playlist.rec import audio_vibe_prediction
 from yt_playlist.web.app import create_app
 
@@ -59,7 +58,8 @@ def test_audio_upload_waits_and_response_preparation_keep_serving(
         assert entered.wait(1)
     else:
         owner, name = ((audio_vibe_prediction, 'predict') if phase == 'response' else
-                       (audio_annotation_files if endpoint == 'feedback' else sample_files, 'publish'))
+                       (store.audio_vibes.annotation_files if endpoint == 'feedback'
+                        else store.audio_vibes.sample_files, 'write'))
         original = getattr(owner, name)
 
         def delayed(*args, **kwargs):
@@ -111,15 +111,15 @@ def test_cancelled_audio_upload_remains_tracked_and_retry_is_idempotent(file_bac
     value = _upload(store, endpoint)
     app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
     entered, release = threading.Event(), threading.Event()
-    owner = audio_annotation_files if endpoint == 'feedback' else sample_files
-    publish = owner.publish
+    owner = store.audio_vibes.annotation_files if endpoint == 'feedback' else store.audio_vibes.sample_files
+    publish = owner.write
 
     def delayed(*args, **kwargs):
         entered.set()
         assert release.wait(5)
         return publish(*args, **kwargs)
 
-    monkeypatch.setattr(owner, 'publish', delayed)
+    monkeypatch.setattr(owner, 'write', delayed)
 
     async def exercise():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),

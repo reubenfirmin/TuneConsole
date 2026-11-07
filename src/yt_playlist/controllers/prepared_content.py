@@ -24,6 +24,9 @@ class PreparedContent:
     def pending(self, limit=32):
         return self.repository.pending(limit)
 
+    def requeue_recording(self, recording_id):
+        return self.repository.requeue_recording(recording_id)
+
     def has_pending(self):
         return self.repository.has_pending()
 

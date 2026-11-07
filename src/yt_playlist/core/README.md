@@ -166,6 +166,7 @@ on each filesystem. Retained recovery copies still consume physical space.
 
 - [Schema owners and identity](../../../SCHEMA_OWNERSHIP.md)
 - [Field invariants](../../../SCHEMA_INVARIANTS.md)
+- [Retained storage contracts](storage-contracts.md)
 - [Managed file storage](../../../experiments/retained_copy/FAO-OWNERS.md)
-- [Retained-copy experiment](../../../experiments/retained_copy/README.md)
+- [Retained-copy experiment history](../../../experiments/retained_copy/README.md)
 - [Recommendation publication](../rec/README.md)

@@ -31,7 +31,7 @@ def test_ticker_admits_content_beside_pool_retries(scheduled, monkeypatch, retry
     def pools(*args):
         calls.append(('pools', clock[0]))
         if pool_outcome == 'policy-capacity':
-            from yt_playlist.repos.policy_storage import PolicyCapacityFull
+            from yt_playlist.core.policy_config import PolicyCapacityFull
             raise PolicyCapacityFull(131000, 60000000, 1024, 500000)
         if pool_outcome == 'failure':
             raise RuntimeError('pool unavailable')

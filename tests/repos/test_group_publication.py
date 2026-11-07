@@ -166,7 +166,7 @@ def test_failed_batch_and_expired_cleanup_preserve_published_history(database, m
         with database.conn:
             database.taste_groups.finish_staged(pending['generation'], owner)
     assert not database.taste_groups.expired_builds()
-    assert not group_publication.cleanup(database.taste_groups)  # An active lease stays intact.
+    assert not group_publication.cleanup(database.taste_groups.repository)  # An active lease stays intact.
     tables = ('rec_group_generations', 'rec_group_builds', 'rec_group_definitions',
               'rec_group_identities', 'rec_group_members', 'rec_group_lineage',
               'rec_group_unknown', 'rec_group_graph')
@@ -176,7 +176,7 @@ def test_failed_batch_and_expired_cleanup_preserve_published_history(database, m
 
     for _ in range(200):
         before = size()
-        if not group_publication.cleanup(database.taste_groups, before=float('inf')):
+        if not group_publication.cleanup(database.taste_groups.repository, before=float('inf')):
             break
         assert 0 < before - size() <= 2 * group_publication.BATCH_ROWS
         assert database.taste_groups.head(members=True) == first

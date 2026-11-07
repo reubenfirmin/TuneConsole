@@ -19,7 +19,7 @@ def admitted_installed(request, tmp_path, _admitted_installed_schema):
     validation; no mutable Store or file is shared between cases.
     """
     version = request.param
-    template, revisions = _admitted_installed_schema(version)
+    template = _admitted_installed_schema(version)
     store = Store(tmp_path / 'installed.db')
     try:
         template.restore(store)
@@ -28,7 +28,9 @@ def admitted_installed(request, tmp_path, _admitted_installed_schema):
         assert store._rebuild_source_version is None
         store._bind_repositories()
         assert store.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal'
-        store._snapshot_revisions = revisions.bind_revisions(store.conn)
+        # restore owns the source's complete TEMP revision guards as well as
+        # SQL/files. Rebinding an empty tracker would install them twice.
+        assert store._snapshot_revisions.conn is store.conn
         history = [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')]
         yield store, version
         assert [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')] == history
@@ -65,7 +67,7 @@ def installed(request, tmp_path, _pristine_installed_schema):
 def test_admitted_publication_inputs_keep_pinned_reads_and_real_write_guards(
         admitted_installed, _admitted_installed_schema):
     store, version = admitted_installed
-    template, _ = _admitted_installed_schema(version)
+    template = _admitted_installed_schema(version)
     assert store.settings.get_setting('private-publication-input') is None
     store.settings.set_setting('private-publication-input', 'original')
     with store.read_snapshot() as snapshot:

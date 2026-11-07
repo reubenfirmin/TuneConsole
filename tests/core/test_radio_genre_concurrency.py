@@ -21,7 +21,7 @@ def test_radio_selection_owns_genre_reads_while_sync_owns_writer(installed, monk
     store, _ = installed
     store.genres.rename_genre('synth pop', 'Renamed Synth')
     store.genres.set_genre_family('synth pop', 'jazz')
-    original = genre_identity.feature_axes
+    original = genre_identity.axis_matches
     reads = []
     locked, release = threading.Event(), threading.Event()
 
@@ -34,7 +34,8 @@ def test_radio_selection_owns_genre_reads_while_sync_owns_writer(installed, monk
         reads.append((conn, labels))
         return original(conn, labels)
 
-    monkeypatch.setattr(genre_identity, 'feature_axes', owned_read)
+    # Observe SQL after lookup_read has acquired a lock or a private reader.
+    monkeypatch.setattr(genre_identity, 'axis_matches', owned_read)
     track = {'key': 'one', 'video_id': 'v1', 'genre': 'Renamed Synth'}
     other = {'key': 'two', 'video_id': 'v2', 'genre': 'Synth Pop'}
 
@@ -50,7 +51,7 @@ def test_radio_selection_owns_genre_reads_while_sync_owns_writer(installed, monk
         try:
             # Prove the guard rejects an unsafe borrow without entering SQLite.
             with pytest.raises(AssertionError, match='borrowed the serving connection'):
-                genre_identity.feature_axes(store.conn, ['Renamed Synth'])
+                genre_identity.axis_matches(store.conn, ['Renamed Synth'])
             assert not reads
             if consumer == 'policy':
                 policy = GenrePolicy(1, [track], store=store)
@@ -113,7 +114,7 @@ def test_home_album_readiness_owns_genre_reads(installed, monkeypatch):
     from yt_playlist.rec import album_choices
 
     store, _ = installed
-    original = genre_identity.feature_axes
+    original = genre_identity.axis_matches
     reads = []
 
     def owned_read(conn, labels):
@@ -122,9 +123,9 @@ def test_home_album_readiness_owns_genre_reads(installed, monkeypatch):
         reads.append(labels)
         return original(conn, labels)
 
-    monkeypatch.setattr(genre_identity, 'feature_axes', owned_read)
+    monkeypatch.setattr(genre_identity, 'axis_matches', owned_read)
     with pytest.raises(AssertionError, match='Unowned album genre read'):
-        genre_identity.feature_axes(store.conn, ['Synth Pop'])
+        genre_identity.axis_matches(store.conn, ['Synth Pop'])
     assert not reads
     album = {'browse_id': 'owned-read', 'genre': 'Synth Pop'}
     assert album_choices.eligible(store, [album], now=1)[0]['browse_id'] == album['browse_id']

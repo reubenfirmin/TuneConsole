@@ -73,8 +73,10 @@ def test_restoring_identical_schema_fences_old_readers_and_preserves_write_guard
 
     def seed(source):
         source.settings.set_setting('fixture_input', 'template value')
+        source.rec_ledger.record_serving_policy('fixture-policy', {'ranker': 'fixture'}, 1000)
 
     with prepared_template(_pristine_current_schema, seed) as template:
+        assert template.coordinates, 'Exercise real immutable-file relocation'
         target.conn.set_trace_callback(statements.append)
         try:
             with target.read_snapshot() as old:
@@ -85,6 +87,7 @@ def test_restoring_identical_schema_fences_old_readers_and_preserves_write_guard
                                        validate_inputs=validate_inputs)
             with target.read_snapshot() as current:
                 assert value(current.store) == 'template value'
+                assert current.store.rec_ledger.policy_configuration('fixture-policy') == {'ranker': 'fixture'}
                 target.settings.set_setting('fixture_input', 'after restore')
                 assert not current.publish(lambda: pytest.fail('Missed a real post-restore write'))
             with target.read_snapshot() as current:
@@ -94,7 +97,8 @@ def test_restoring_identical_schema_fences_old_readers_and_preserves_write_guard
             target.conn.set_trace_callback(None)
         assert template.source.settings.get_setting('fixture_input') == 'template value'
     assert len(calculations) == 3
-    assert not any(sql.startswith(('CREATE TEMP TRIGGER', 'DROP TRIGGER')) for sql in statements)
+    assert not any(sql.startswith('CREATE TEMP TRIGGER') or (
+        sql.startswith('DROP TRIGGER') and 'snapshot_revision_' in sql) for sql in statements)
     assert not target.conn.in_transaction
 
 

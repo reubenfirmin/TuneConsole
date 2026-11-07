@@ -5,7 +5,7 @@ import pytest
 
 from tests.repos.test_compact_group_publication import database
 from yt_playlist.core import group_documents, policy_documents
-from yt_playlist.repos import group_queries
+from yt_playlist.core import group_reads as group_queries
 
 
 def test_repacking_and_collection_preserve_exact_owned_content(database):

@@ -14,7 +14,7 @@ from tests.rec.test_stored_fresh import fresh
 from tests.rec.test_stored_home import publish_bundle, candidates
 from yt_playlist.rec import group_home, group_serving, home_vibe, stored_groups
 from yt_playlist.repos.rec_proposals import RecProposalsRepo
-from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
+from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 
 
 def forbid_bundle(monkeypatch):
@@ -88,12 +88,12 @@ def test_rare_group_seeks_its_complete_tail_without_hydrating_unrelated_candidat
     values = candidates(store)
     generation = publish_bundle(store, {'all': {'explore': values}, '_meta': {'full_pools': True}})
     version = head['groups'][0]['version']
-    original, reads = RecommendationPublicationsRepo.candidate_page, []
+    original, reads = RecommendationPublications.candidate_page, []
     def page(self, *args, **kwargs):
         result = original(self, *args, **kwargs)
         reads.append((kwargs.get('group_version'), len(result['tracks']), kwargs['limit']))
         return result
-    monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_page', page)
+    monkeypatch.setattr(RecommendationPublications, 'candidate_page', page)
     forbid_bundle(monkeypatch)
     with stored_groups.selection(store, generation, 1100) as selected:
         tracks = selected.tracks(version, 'explore', 0, (), (), set(), 2, 2, {})

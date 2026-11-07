@@ -66,10 +66,10 @@ uv run pytest tests/test_radio_recovery.py
 | [Frontend](src/yt_playlist/web/static/README.md) | JavaScript ownership and fragment lifecycle |
 | [Extension](extension/README.md) | Pairing, capture, messages and diagnostics |
 | [Packaging](packaging/README.md) | Builds, releases and updates |
-| [Experiments](experiments/README.md) | Dataset logs and model provenance |
+| [Experiments](experiments/README.md) | Experiment results and model decisions |
 
 HTTP access logging defaults off; set `YT_PLAYLIST_ACCESS_LOG=1` to enable it.
 Set `YT_PLAYLIST_LISTENING_CHARTS=0` to disable the Charts journal and Listening
 analytics and their background work. Developer vibe ratings default off;
 `YT_PLAYLIST_AUDIO_VIBES=1` enables them without changing normal collection.
-Use the [audio lab reference](experiments/audio_lab/README.md) for model settings.
+Use the [audio model settings](src/yt_playlist/rec/README.md#audio-model-settings).

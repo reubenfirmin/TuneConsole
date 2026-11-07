@@ -1,11 +1,12 @@
-"""Immutable bounded model bytes. All SQL lives in repos.vibe_models."""
+"""Immutable bounded model bytes; SQL lives in core.vibe_model_queries."""
 import hashlib
 import json
 import math
 import re
+from contextlib import contextmanager
 from pathlib import Path
 
-from . import fao
+from . import fao, file_collection
 from .evidence_ledger import canonical
 
 MAX_BYTES = 16 * 1024 * 1024
@@ -13,6 +14,48 @@ HEAD_PREFIX = 'rec_vibe_joint_head_'
 STATE_PREFIX = 'rec_vibe_joint_state_'
 REVISION = 'rec_vibe_joint_revision'
 _DIGEST = re.compile(r'[0-9a-f]{64}\Z')
+
+
+class VibeModelFiles:
+    def __init__(self, root):
+        self.root = Path(root)
+
+    def read(self, generation):
+        return read(self.root, generation)
+
+    def stage(self, value):
+        return stage(self.root, value)
+
+    @contextmanager
+    def collection(self):
+        with file_collection.collector(self.root) as admitted:
+            if not admitted:
+                yield None
+                return
+            with file_collection.collection(self.root, self.root, name='.collection.json',
+                    valid_shard=lambda name: bool(re.fullmatch('[0-9a-f]{2}', name))) as work:
+                yield ModelCollection(self.root, work)
+
+
+class ModelCollection:
+    def __init__(self, root, cursor):
+        self.root, self.cursor = root, cursor
+
+    def generations(self, limit):
+        for _ in range(limit):
+            path = self.cursor.next()
+            if (path is not None and path.suffix == '.json' and _DIGEST.fullmatch(path.stem)
+                    and path.relative_to(self.root) == relative(path.stem)):
+                yield path.stem
+
+    def created_at(self, generation):
+        return fao.read(self.root / relative(generation)).info.ctime_ns / 1e9
+
+    def remove(self, generation):
+        fao.delete(self.root / relative(generation))
+
+    def save(self):
+        self.cursor.save()
 
 
 def relative(generation):

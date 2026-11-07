@@ -103,7 +103,7 @@ def replace_fresh(store, items):
         snapshot.release_reader()
         build = store.recommendations.claim(plan)
         store.recommendations.stage(plan, build)
-        assert snapshot.publish(lambda: store.recommendations.publish(build, 2))
+        assert snapshot.publish_ordered(lambda: store.recommendations.publish(build, 2))
 
 
 def cleanup(store):

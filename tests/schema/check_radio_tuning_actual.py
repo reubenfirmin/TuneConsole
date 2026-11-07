@@ -22,7 +22,7 @@ from yt_playlist.core.store import Store
 from yt_playlist.rec import musical_character
 from yt_playlist.rec.radio_candidates import RadioCandidates
 from yt_playlist.rec.stored_radio import PreparedRadio
-from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
+from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.web.routes import radio_session
 
@@ -37,7 +37,8 @@ def test_actual_library_tuning(request, tmp_path, monkeypatch):
     report = {'python': sys.version, 'source': source, 'source_access': 'read-only copy',
               'provider': 'forbidden; fresh playback presence controlled', 'sources': {}}
     for name in ('rec/radio_candidates.py', 'rec/stored_radio.py', 'rec/radio_directions.py',
-                 'repos/recommendation_publications.py', 'core/db_reads.py', 'core/store.py',
+                 'repos/recommendation_publications.py', 'controllers/recommendation_publications.py',
+                 'core/db_reads.py', 'core/store.py',
                  'core/preparation/listening_views.py', 'web/radio_listening.py',
                  'web/radio_session.py', 'web/static/radio.js'):
         report['sources'][name] = hashlib.sha256((Path('src/yt_playlist') / name).read_bytes()).hexdigest()
@@ -93,7 +94,6 @@ def _baseline(monkeypatch, revision, report):
     for module, owner, methods in (
         (radio_candidates, RadioCandidates, ('_stored_intensity_candidates', 'retain', '_energy')),
         (stored_radio, PreparedRadio, ('tracks', 'intensity_pool')),
-        (recommendation_publications, RecommendationPublicationsRepo, ('_hydrate_pages',)),
     ):
         path = Path(module.__file__).relative_to(Path.cwd()).as_posix()
         source = subprocess.run(['git', 'show', revision + ':' + path], check=True, capture_output=True, text=True).stdout
@@ -104,6 +104,18 @@ def _baseline(monkeypatch, revision, report):
             definition = next(child for child in node.body if isinstance(child, ast.FunctionDef) and child.name == method)
             exec(compile(ast.Module(body=[definition], type_ignores=[]), f'{revision}:{path}', 'exec'), namespace)
             monkeypatch.setattr(owner, method, namespace[method])
+
+    # The baseline hydration method now belongs to the controller. Its pure
+    # projection still accepts the same captured pages and catalog facts.
+    path = 'src/yt_playlist/repos/recommendation_publications.py'
+    source = subprocess.run(['git', 'show', revision + ':' + path], check=True, capture_output=True, text=True).stdout
+    report.setdefault('baseline_sources', {})[path] = hashlib.sha256(source.encode()).hexdigest()
+    owner = next(node for node in ast.parse(source).body if isinstance(node, ast.ClassDef)
+                 and node.name == 'RecommendationPublicationsRepo')
+    method = next(node for node in owner.body if isinstance(node, ast.FunctionDef) and node.name == '_hydrate_pages')
+    namespace = dict(vars(recommendation_publications))
+    exec(compile(ast.Module(body=[method], type_ignores=[]), f'{revision}:{path}', 'exec'), namespace)
+    monkeypatch.setattr(RecommendationPublications, '_hydrate_pages', namespace['_hydrate_pages'])
 
 
 def _measure(store, report, monkeypatch, report_path, captured_now, *, profiled):
@@ -145,8 +157,8 @@ def _measure(store, report, monkeypatch, report_path, captured_now, *, profiled)
         for owner, name in ((RadioCandidates, '__init__'), (RadioCandidates, '_stored_intensity_candidates'),
                             (RadioCandidates, '_score'), (RadioCandidates, '_energy'),
                             (RadioCandidates, 'refresh_exclusions'), (PreparedRadio, 'intensity_pool'),
-                            (RecommendationPublicationsRepo, 'candidate_pages'),
-                            (RecommendationPublicationsRepo, '_hydrate_pages'), (musical_character, 'load')):
+                            (RecommendationPublications, 'candidate_pages'),
+                            (RecommendationPublications, '_hydrate_pages'), (musical_character, 'load')):
             monkeypatch.setattr(owner, name, timed(owner.__name__ + '.' + name, getattr(owner, name)))
         initialize = RadioCandidates.__init__
 

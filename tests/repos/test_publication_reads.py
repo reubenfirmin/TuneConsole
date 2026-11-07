@@ -165,8 +165,7 @@ def test_radio_inputs_are_coherent_and_reader_closes_before_decode(tmp_path, mon
         assert view.conn is not store.conn
         result = space_id(view, **kwargs)
         # A real commit while the input reader is pinned must not mix generations.
-        with store._lock, store.conn:
-            store.conn.execute('BEGIN IMMEDIATE')
+        with store._lock:
             store.settings.publish_values({'rec_content_generation': 'new',
                                            'rec_content_model': new_model})
             store.recommendations.publish(build, 2)

@@ -20,7 +20,5 @@ def publish(store, tracks, now=1000, previous=None, *, policy=group_discovery.Po
         now=now, serial=store.taste_groups.serial(), input_fingerprint=group_versions.fingerprint([
             [track.key, track.genre, track.values] for track in tracks]), policy=policy,
         legacy_versions=store.taste_groups.legacy_versions())
-    store.conn.execute('BEGIN')
-    with store.conn:
-        store.taste_groups.publish(prepared)
+    store.taste_groups.publish(prepared)
     return store.taste_groups.head(members=True)

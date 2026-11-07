@@ -27,6 +27,9 @@ def run(output):
     repository = Path(__file__).resolve().parents[2]
     sources = ('experiments/audio_lab_tools/vibe_pooling_profile.py',
         'src/yt_playlist/core/vibe_model_files.py', 'src/yt_playlist/repos/vibe_models.py',
+        'src/yt_playlist/core/vibe_model_queries.py',
+        'src/yt_playlist/controllers/vibe_models.py', 'src/yt_playlist/core/vibe_manifest.py',
+        'src/yt_playlist/controllers/vibe_predictions.py', 'src/yt_playlist/core/vibe_publication.py',
         'src/yt_playlist/rec/vibe_joint_model.py', 'src/yt_playlist/rec/vibe_joint_preparation.py',
         'src/yt_playlist/rec/vibe_joint_common.py', 'src/yt_playlist/rec/vibe_joint_calibrated.py')
     report = {'quality_acceptance': False, 'fixed_variances': model.INITIAL, 'code': {}}

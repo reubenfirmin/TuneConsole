@@ -122,7 +122,9 @@ def test_recommendation_retention_checkpoints_each_bounded_repository_turn(
     store._db_path = tmp_path / 'never-opened.sqlite'
     store._lock = RLock()
     store.recommendations = Mock(spec=['checkpoint_retirement'])
-    store.taste_groups = object()
+    store.taste_groups = Mock(spec=['cleanup_builds', 'retire_history'])
+    store.taste_groups.cleanup_builds.return_value = False
+    store.taste_groups.retire_history.return_value = False
     store.group_evidence = Mock(spec=[
         'collect_unpublished_mixes', 'output_collector', 'collect_output_files'])
     store.group_evidence.collect_output_files.return_value = SimpleNamespace(
@@ -146,8 +148,6 @@ def test_recommendation_retention_checkpoints_each_bounded_repository_turn(
     monkeypatch.setattr(recommendation_roots, 'enabled', lambda value: True)
     monkeypatch.setattr(recommendation_publication, 'cleanup_generations', generation_turn)
     monkeypatch.setattr(recommendation_publication, 'cleanup_pools', pool_turn)
-    monkeypatch.setattr(compact_group_publication, 'cleanup', lambda repo: False)
-    monkeypatch.setattr(group_retention, 'step', lambda repo: False)
     # OS lifetime-file reaping is a separate integration obligation.
     monkeypatch.setattr(group_roots, 'reap_pending', lambda value: None)
 

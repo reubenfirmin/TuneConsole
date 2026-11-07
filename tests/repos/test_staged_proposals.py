@@ -52,9 +52,7 @@ def test_staging_releases_writer_between_bounded_commits_and_keeps_last_good_vis
     monkeypatch.setattr(proposal_cache, '_write', original)
     assert max(sizes) == publication.BATCH_ROWS
     assert sum(size > 0 for size in sizes) == 4
-    with database.conn:
-        database.conn.execute('BEGIN IMMEDIATE')
-        database.recommendations.publish(build, 11)
+    database.recommendations.publish(build, 11)
     assert database.recommendations.output('home', 'fixture') == {'title': 'café 🎵' * 1000}
 
 
@@ -91,20 +89,18 @@ def test_interrupted_prefix_resumes_after_store_reopen_without_reinserting_rows(
         assert starts == [256, 384]
         assert [tuple(row) for row in database.conn.execute(
             'SELECT * FROM recommendation_candidates WHERE rank<256 ORDER BY rank')] == prefix
-        with database.conn:
-            database.conn.execute('BEGIN IMMEDIATE')
-            database.recommendations.publish(reclaimed, 12)
+        database.recommendations.publish(reclaimed, 12)
         assert len(database.recommendations.page('home', 'all', 'wheelhouse', limit=512)) == 400
     finally:
         database.conn.close()
 
 
 @pytest.mark.parametrize('outcome', ['success', 'stale', 'failure'])
-def test_heads_policies_and_settings_publish_atomically(database, outcome):
+def test_policy_then_heads_commit_before_the_settings_acknowledgement(database, outcome):
     old = publish(database, plan(database, 'old'))
     build = stage(database, plan(database, 'new'))
     database.settings.set_setting('input', 'old')
-    row, base = policy_config.pack({'ranker': 'atomic-side-policy'}, 10)
+    row, base = policy_config.pack({'ranker': 'ordered-side-policy'}, 10)
     with database.read_snapshot() as snapshot:
         assert snapshot.store.settings.get_setting('input') == 'old'
         assert snapshot.store.recommendations.head('home')['id'] == old.generation_id
@@ -114,19 +110,20 @@ def test_heads_policies_and_settings_publish_atomically(database, outcome):
         def finish():
             database.rec_ledger.publish_prepared_policies([row], [base])
             database.recommendations.publish(build, 12)
-            database.settings.publish_values({'published': 'new'})
             if outcome == 'failure':
                 raise ValueError('injected cutover failure')
+            database.settings.publish_values({'published': 'new'})
         if outcome == 'failure':
             with pytest.raises(ValueError, match='injected cutover'):
-                snapshot.publish(finish)
+                snapshot.publish_ordered(finish)
         else:
-            assert snapshot.publish(finish) is (outcome == 'success')
+            assert snapshot.publish_ordered(finish) is (outcome == 'success')
     succeeded = outcome == 'success'
     for surface in ('home', 'fresh'):
-        assert database.recommendations.head(surface)['id'] == (build if succeeded else old).generation_id
+        assert database.recommendations.head(surface)['id'] == (old if outcome == 'stale' else build).generation_id
     assert database.settings.get_setting('published') == ('new' if succeeded else None)
-    assert database.rec_ledger.policy_configuration(row[0]) == ({'ranker': 'atomic-side-policy'} if succeeded else None)
+    assert database.rec_ledger.policy_configuration(row[0]) == (
+        None if outcome == 'stale' else {'ranker': 'ordered-side-policy'})
     assert not database.conn.in_transaction
 
 
@@ -143,9 +140,7 @@ def test_changed_head_rejects_old_snapshot_but_private_staging_does_not(database
     with database.read_snapshot() as snapshot:
         snapshot.store.conn.execute("SELECT generation_id FROM recommendation_heads WHERE surface='home'").fetchone()
         snapshot.release_reader()
-        with database.conn:
-            database.conn.execute('BEGIN IMMEDIATE')
-            database.recommendations.publish(build, 12)
+        database.recommendations.publish(build, 12)
         assert not snapshot.publish(lambda: database.settings.publish_values({'stale': 'forbidden'}))
     assert database.settings.get_setting('same') == 'accepted'
     assert database.settings.get_setting('stale') is None
@@ -199,8 +194,7 @@ def test_incomplete_build_cannot_publish_skip_a_rank_or_become_ready(database):
         identity = publication._create_pool(database.conn, prepared.slots[0].pool)
         database.conn.execute('INSERT INTO recommendation_build_pools VALUES (?,?)', (build.generation_id, identity))
         pools.append(database.conn, identity, prepared.slots[0].pool.candidates[:128], 0)
-    with pytest.raises(ValueError, match='unfinished'), database.conn:
-        database.conn.execute('BEGIN IMMEDIATE')
+    with pytest.raises(ValueError, match='unfinished'):
         database.recommendations.publish(build, 12)
     with database.conn:
         database.conn.execute('BEGIN IMMEDIATE')

@@ -17,7 +17,7 @@ from yt_playlist.core.activity import check_stopping, work_budget, WorkBudgetExc
 from yt_playlist.core import embeddings
 from yt_playlist.rec import content_model, group_preparation, musical_preparation, rec_params, taste_modes
 from yt_playlist.rec import vibe_preparation, vibe_joint_preparation
-from yt_playlist.repos.rec_model import VectorChanges
+from yt_playlist.core.rec_model_policy import VectorChanges
 from yt_playlist.util import genre_catalog
 
 PHASE = 'rec: progressive content basis'
@@ -465,7 +465,7 @@ class Preparation:
                     self.store.settings.publish_values(settings)
                     if modes is not None:
                         self.store.modes.publish_generation(*modes)
-                if snapshot.publish(publish):
+                if snapshot.publish_ordered(publish):
                     self._record('published', reason)
                     return True
                 self._defer(now, 'prepared-corpus-changed')

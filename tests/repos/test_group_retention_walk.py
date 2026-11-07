@@ -10,7 +10,7 @@ import pytest
 from tests.repos.test_compact_group_publication import database, finish
 from tests.core.test_compact_groups_migration import predecessor
 from tests.repos.test_group_retention import context, enable, drain
-from yt_playlist.core import group_documents, group_evidence, group_retention_progress, recommendation_outputs
+from yt_playlist.core import group_documents, group_evidence, group_reads, group_retention_policy, group_retention_progress, recommendation_outputs
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.store import Store
@@ -32,7 +32,7 @@ def ready(store):
         state = store.conn.execute('SELECT phase FROM group_retention_walk WHERE id=1').fetchone()
         if state and state[0] == 'ready':
             return
-        assert group_retention.step(store.taste_groups)
+        assert store.taste_groups.retire_history()
     pytest.fail('Durable closure never completed')
 
 
@@ -52,16 +52,16 @@ def test_closure_beyond_old_limit_resumes_after_reopen_with_exact_history(walkin
             group['version'] = group['version'].replace('third-', f'chain-{serial}-')
             if group['parent_version']:
                 group['parent_version'] = group['parent_version'].replace('third-', f'chain-{serial}-')
-        owner = compact.stage(store.taste_groups, next_prepared)
+        owner = store.taste_groups.stage(next_prepared)
         finish(store, next_prepared, owner)
         parent, source = next_prepared['generation'], target
-    expected = group_retention.closure(store.conn)
+    expected = group_reads.retention_closure(store.conn)
     assert len(expected[1]) == 15
     before = [tuple(row) for row in store.conn.execute('SELECT * FROM group_members ORDER BY 1,2')]
     monkeypatch.setattr(walk, 'BATCH', 2)
-    monkeypatch.setattr(group_retention, 'MAX_REFERENCES', 1)
+    monkeypatch.setattr(group_retention_policy, 'MAX_REFERENCES', 1)
     for _ in range(18):
-        assert group_retention.step(store.taste_groups)
+        assert store.taste_groups.retire_history()
     progress = tuple(store.conn.execute('SELECT * FROM group_retention_walk').fetchone())
     path = store.conn.execute('PRAGMA database_list').fetchone()[2]
     reopened = Store(path)
@@ -85,7 +85,7 @@ def test_new_evidence_invalidates_completed_closure_and_stale_deletion(walking, 
     monkeypatch.setattr(walk, 'BATCH', 1)
     ready(store)
     with store.read_snapshot() as snapshot:
-        selected = group_retention.plan(snapshot.store.conn)
+        selected = group_reads.retention_plan(snapshot.store.conn)
         assert selected and 'edges' in selected
         snapshot.release_reader()
         with store.conn:
@@ -94,7 +94,7 @@ def test_new_evidence_invalidates_completed_closure_and_stale_deletion(walking, 
         assert not snapshot.publish(lambda: group_retention.apply(store.conn, selected))
     old = store.conn.execute('SELECT revision FROM group_retention_walk').fetchone()[0]
     assert store.conn.execute('SELECT revision FROM group_retention_epoch').fetchone()[0] > old
-    assert group_retention.step(store.taste_groups)
+    assert store.taste_groups.retire_history()
     assert store.conn.execute('SELECT phase FROM group_retention_walk').fetchone()[0] == 'reset'
     ready(store)
     drain(store)
@@ -108,7 +108,7 @@ def test_new_evidence_invalidates_completed_closure_and_stale_deletion(walking, 
 
 def test_cancelled_prefix_rolls_back_all_work_and_retries(walking, monkeypatch):
     store, _ = walking
-    assert group_retention.step(store.taste_groups)
+    assert store.taste_groups.retire_history()
     before = '\n'.join(store.conn.iterdump())
     original = group_retention.check_cancellable_work
     calls = 0
@@ -123,7 +123,7 @@ def test_cancelled_prefix_rolls_back_all_work_and_retries(walking, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(group_retention, 'check_cancellable_work', interrupt)
         with pytest.raises(WorkClosing, match='prepared write'):
-            group_retention.step(store.taste_groups)
+            store.taste_groups.retire_history()
     assert '\n'.join(store.conn.iterdump()) == before
     ready(store)
 
@@ -186,10 +186,42 @@ def test_group_pack_collection_keeps_all_owners_and_pinned_readers(walking):
         assert isinstance(group_documents.read(filename, digest, size, offset, kind), dict)
 
 
+def test_runtime_group_collector_uses_sql_facts_without_a_transaction(walking, monkeypatch):
+    from yt_playlist.core import fao
+    store, _ = walking
+    root = group_documents.directory(store.conn)
+    orphan = next(group_documents.publish_many(root, [('generation', {'orphan': True})]))[0]
+    collector = store.group_evidence.output_collector(groups=True)
+    statements, deleted = [], []
+    remove = fao.delete
+
+    def outside_transaction(path, **kwargs):
+        assert not store.conn.in_transaction
+        deleted.append(str(path))
+        return remove(path, **kwargs)
+
+    monkeypatch.setattr(fao, 'delete', outside_transaction)
+    store.conn.set_trace_callback(statements.append)
+    try:
+        with store.read_view():
+            result = store.group_evidence.collect_output_files(collector)
+            assert result.blocked and not deleted
+        while True:
+            result = store.group_evidence.collect_output_files(collector)
+            if not result.pending:
+                break
+    finally:
+        collector.close()
+        store.conn.set_trace_callback(None)
+    assert deleted == [orphan]
+    assert not any(statement.strip().upper().startswith('BEGIN') for statement in statements)
+    assert group_reads.head(store.conn)['generation'] == 'second'
+
+
 def test_cleanup_budget_does_not_starve_durable_walk(walking, monkeypatch):
     store, _ = walking
 
-    def blocked(*args):
+    def blocked(*args, **kwargs):
         raise WorkBudgetExceeded('cleanup used its own turn')
 
     monkeypatch.setattr(compact, 'cleanup', blocked)
@@ -206,14 +238,14 @@ def test_retention_planning_leaves_foreground_writes_available(walking, monkeypa
     original = walk.advance
     errors = []
 
-    def held(conn):
+    def held(conn, sources):
         entered.set()
         assert release.wait(5)
-        return original(conn)
+        return original(conn, sources)
 
     def retire():
         try:
-            group_retention.step(store.taste_groups)
+            store.taste_groups.retire_history()
         except BaseException as exc:
             errors.append(exc)
 
@@ -247,9 +279,9 @@ def test_empty_lineage_scan_is_reused_until_an_edge_owner_changes(walking, monke
 
     monkeypatch.setattr(compact, '_delete', observe)
     with store.conn.atomic():
-        assert not compact._lineage_orphans(store.taste_groups)
+        assert not compact._lineage_orphans(store.taste_groups.repository)
     with store.conn.atomic():
-        assert not compact._lineage_orphans(store.taste_groups)
+        assert not compact._lineage_orphans(store.taste_groups.repository)
     assert len(scans) == 1
     source, target = store.conn.execute('SELECT source_alias,target_alias FROM group_lineage').fetchone()
     conn = sqlite3.connect(store._db_path) if external else store.conn
@@ -263,6 +295,6 @@ def test_empty_lineage_scan_is_reused_until_an_edge_owner_changes(walking, monke
         if external:
             conn.close()
     with store.conn.atomic():
-        assert compact._lineage_orphans(store.taste_groups)
+        assert compact._lineage_orphans(store.taste_groups.repository)
     assert len(scans) == 2
     assert not store.conn.execute('SELECT 1 FROM group_lineage').fetchone()

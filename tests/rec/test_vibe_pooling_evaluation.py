@@ -14,7 +14,7 @@ from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import home_vibe, musical_preparation, vibe_joint_preparation
-from yt_playlist.repos import vibe_evaluation
+from yt_playlist.rec import vibe_evaluation
 
 
 def bucket(value):

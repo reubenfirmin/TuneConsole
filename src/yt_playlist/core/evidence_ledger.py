@@ -124,6 +124,9 @@ class EvidenceLedger:
         except FileNotFoundError:
             return None
 
+    def contains(self, kind, identity):
+        return self._path(kind, identity).exists()
+
     def generation(self):
         """Constant-size event revision, read under the publication lock across processes."""
         with self._budget():

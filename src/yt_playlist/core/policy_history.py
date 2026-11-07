@@ -1,5 +1,5 @@
 """Compact impression attribution with bounded historical configuration replay."""
-from . import fao, file_collection, file_map, policy_documents
+from . import fao, file_collection, file_map, policy_documents, policy_config
 from .evidence_ledger import canonical
 from .policy_history_read import available, configuration, directory, document, head, unpack as _configuration
 
@@ -87,7 +87,7 @@ def candidates(conn, now, limit=128):
         'SELECT p.version FROM recommendation_policies p WHERE created_at<? AND '
         'p.version IN (SELECT policy_version FROM recommendation_impression_policies) AND '
         + policy_storage.operational_protection(conn) + ' ORDER BY created_at,version LIMIT ?',
-        (now-policy_storage.GRACE_SECONDS, limit))]
+        (now-policy_config.GRACE_SECONDS, limit))]
 
 
 def prepare_batch(conn, now, limit=128, *, versions=None):
@@ -97,7 +97,7 @@ def prepare_batch(conn, now, limit=128, *, versions=None):
         raise RuntimeError('Policy history requires a writer reservation')
     if type(limit) is not int or not 1<=limit<=128:
         raise ValueError('Policy history batch must be 1 to 128')
-    parameters = [now-policy_storage.GRACE_SECONDS]
+    parameters = [now-policy_config.GRACE_SECONDS]
     selected = ''
     if versions is not None:
         versions = list(versions)

@@ -2,6 +2,7 @@ import html
 import json
 import logging
 import re
+from contextlib import ExitStack
 
 import numpy as np
 import pytest
@@ -86,6 +87,15 @@ def genre_routes(monkeypatch, home_routes_only, template_bytecode):
     # Share compiled source only; each app keeps its own environment, globals
     # and request context. The real templates still render every response.
     monkeypatch.setattr(webapp, 'Jinja2Templates', cached_templates)
+    client_type = TestClient
+    with ExitStack() as clients:
+        def client(*args, **kwargs):
+            # Own one application/portal lifetime per client, rather than
+            # starting and stopping an event loop for every fragment request.
+            return clients.enter_context(client_type(*args, **kwargs))
+
+        monkeypatch.setattr(__name__ + '.TestClient', client)
+        yield
 
 
 def _publish_menu(store, now):

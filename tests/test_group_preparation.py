@@ -105,6 +105,33 @@ def test_cancellation_propagates_without_publishing_a_partial_generation(store, 
     assert store.taste_groups.head() is None
 
 
+def test_checkpoint_failure_retries_after_the_complete_generation_commits(store, monkeypatch):
+    seed(store, recordings([('Pop', 12, .2)]))
+    worker = group_preparation.Preparation(store)
+    repository = store.taste_groups.repository
+    original = type(repository).checkpoint_preparation
+
+    def fail_checkpoint(*_args):
+        assert not store.conn.in_transaction
+        raise RuntimeError('controlled checkpoint failure')
+
+    monkeypatch.setattr(type(repository), 'checkpoint_preparation', fail_checkpoint)
+    with pytest.raises(RuntimeError, match='controlled checkpoint failure'):
+        worker.step(1000)
+    generation = store.taste_groups.head_generation()
+    assert generation and worker._pending is not None
+    monkeypatch.setattr(type(repository), 'checkpoint_preparation', original)
+
+    def forbid_restage(*_args):
+        pytest.fail('A committed generation must not be staged again')
+
+    monkeypatch.setattr(store.taste_groups, 'stage', forbid_restage)
+    assert worker.step(1060)
+    assert store.taste_groups.head_generation() == generation
+    assert worker._pending is None
+    assert json.loads(store.settings.get_setting(group_preparation.CHECKPOINT))['generation'] == generation
+
+
 def test_new_supported_album_is_represented_on_the_next_update(store):
     metal = recordings([('Death Metal', 60, .9)])
     seed(store, metal)

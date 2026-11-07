@@ -28,8 +28,9 @@ from yt_playlist.core.store import Store
 from yt_playlist.rec import content_model, musical_preparation, progressive, taste_modes, vibe_preparation
 from yt_playlist.repos.musical_profiles import MusicalProfilesRepo
 from yt_playlist.repos.prepared_content import PreparedContentRepo
-from yt_playlist.repos.rec_model import RecModelRepo
+from yt_playlist.controllers.rec_model import RecommendationModel
 from yt_playlist.repos.vibe_predictions import VibePredictionsRepo
+from yt_playlist.controllers.vibe_predictions import VibePredictions
 
 
 class _CaptureIncomplete(AssertionError):
@@ -72,13 +73,13 @@ def _capture_costs(costs):
         (Revisions, 'capture', 'snapshot.revisions'),
         (progressive.Preparation, 'repair', 'capture.repair'),
         (PreparedContentRepo, 'capture', 'capture.content_sql'),
-        (MusicalProfilesRepo, 'recording_inputs', 'capture.musical_inputs_sql'),
+        (MusicalProfilesRepo, 'recording_facts', 'capture.musical_inputs_sql'),
         (musical_preparation, 'source_step', 'capture.source_step'),
         (musical_preparation, 'recordings', 'capture.musical_profiles'),
         (vibe_preparation, 'step', 'capture.vibe_fanout'),
         (vibe_preparation, 'recordings', 'capture.vibe_profiles'),
-        (VibePredictionsRepo, 'prepare_publication', 'capture.vibe_plan'),
-        (RecModelRepo, 'prepare_training_deltas', 'capture.embedding_plan'),
+        (VibePredictions, 'prepare_publication', 'capture.vibe_plan'),
+        (RecommendationModel, 'prepare_training_deltas', 'capture.embedding_plan'),
         (progressive, '_delta', 'capture.vector_delta'),
     )
     with ExitStack() as stack:

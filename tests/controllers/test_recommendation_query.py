@@ -3,10 +3,10 @@ from unittest.mock import create_autospec
 import pytest
 
 from tests.repository_mock_support import no_database
+from yt_playlist.controllers.genres import Genres
 from yt_playlist.controllers.recommendation_eligibility import RecommendationEligibility
 from yt_playlist.controllers.recommendation_query import RecommendationQuery
 from yt_playlist.repos.artists import ArtistRepo
-from yt_playlist.repos.genres import GenreRepo
 from yt_playlist.repos.rec_query import RecQueryRepo
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -16,7 +16,7 @@ pytestmark = pytest.mark.usefixtures('no_database')
 def query():
     return RecommendationQuery(
         create_autospec(RecQueryRepo, instance=True, spec_set=True),
-        create_autospec(GenreRepo, instance=True, spec_set=True),
+        create_autospec(Genres, instance=True, spec_set=True),
         create_autospec(RecommendationEligibility, instance=True, spec_set=True),
         create_autospec(ArtistRepo, instance=True, spec_set=True))
 

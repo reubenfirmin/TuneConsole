@@ -8,7 +8,8 @@ import pytest
 from tests.core.test_compact_groups_migration import predecessor
 from tests.repos.test_compact_group_publication import database, finish
 from yt_playlist.core import group_evidence, group_storage
-from yt_playlist.repos import compact_group_publication as compact, group_publication, group_queries, group_retention
+from yt_playlist.core import group_reads as group_queries
+from yt_playlist.repos import compact_group_publication as compact, group_publication, group_retention
 
 
 def context(generation='first', version='first-leaf'):
@@ -24,7 +25,7 @@ def enable(store):
 
 def drain(store):
     for _ in range(200):
-        if not compact.cleanup(store.taste_groups) and not group_retention.step(store.taste_groups):
+        if not store.taste_groups.cleanup_staged():
             break
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
     else:
@@ -34,8 +35,8 @@ def drain(store):
 def test_retention_is_disabled_until_all_actual_evidence_has_explicit_roots(database):
     store, _ = database
     before = '\n'.join(store.conn.iterdump())
-    assert group_retention.plan(store.conn) is None
-    assert not group_retention.step(store.taste_groups)
+    assert group_queries.retention_plan(store.conn) is None
+    assert not store.taste_groups.retire_history()
     assert '\n'.join(store.conn.iterdump()) == before
     with pytest.raises(RuntimeError, match='backfill is incomplete'), store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
@@ -80,7 +81,7 @@ def test_new_evidence_invalidates_a_retirement_plan_before_any_deletion(database
     store, _ = database
     enable(store)
     with store.read_snapshot() as snapshot:
-        selected = group_retention.plan(snapshot.store.conn)
+        selected = group_queries.retention_plan(snapshot.store.conn)
         assert selected and 'edges' in selected
         snapshot.release_reader()
         with store.conn:
@@ -95,9 +96,9 @@ def test_new_evidence_invalidates_a_retirement_plan_before_any_deletion(database
 def test_active_build_pins_its_parent_then_releases_that_reference_after_publication(database):
     store, prepared = database
     enable(store)
-    owner = compact.stage(store.taste_groups, prepared)
+    owner = store.taste_groups.stage(prepared)
     second = store.conn.execute("SELECT id FROM group_generations WHERE external_key='second'").fetchone()[0]
-    generations, _ = group_retention.closure(store.conn)
+    generations, _ = group_queries.retention_closure(store.conn)
     assert second in generations
     assert store.conn.execute('SELECT parent_generation_id FROM group_builds').fetchone()[0] == second
     finish(store, prepared, owner)
@@ -119,7 +120,7 @@ def test_unchanged_preparations_reuse_old_aliases_without_an_unbounded_generatio
             group['version'] = group['version'].replace('third-', 'second-')
             if group['parent_version']:
                 group['parent_version'] = group['parent_version'].replace('third-', 'second-')
-        owner = compact.stage(store.taste_groups, next_prepared)
+        owner = store.taste_groups.stage(next_prepared)
         finish(store, next_prepared, owner)
         drain(store)
         assert store.conn.execute('SELECT count(*) FROM group_generations').fetchone()[0] == 2
@@ -141,7 +142,7 @@ def test_reused_member_content_does_not_keep_an_unrelated_full_input_manifest(da
     metadata = json.loads(prepared['payload'])
     metadata['recording_inputs'] = {'one': '1' * 64, 'two': '2' * 64, 'unrelated': '4' * 64}
     prepared['payload'] = json.dumps(metadata)
-    owner = compact.stage(store.taste_groups, prepared)
+    owner = store.taste_groups.stage(prepared)
     finish(store, prepared, owner)
     drain(store)
     assert not store.conn.execute('SELECT 1 FROM group_input_manifests WHERE id=?', (original_manifest,)).fetchone()
@@ -165,19 +166,19 @@ def test_lineage_retirement_bounds_mapping_deletions_instead_of_only_edge_count(
             group['version'] = group['version'].replace('third-', 'second-')
             if group['parent_version']:
                 group['parent_version'] = group['parent_version'].replace('third-', 'second-')
-        owner = compact.stage(store.taste_groups, repeated)
+        owner = store.taste_groups.stage(repeated)
         finish(store, repeated, owner)
         parent = repeated['generation']
     before = store.conn.execute('SELECT count(*) FROM group_generation_lineage').fetchone()[0]
     assert before == 4
     enable(store)
     monkeypatch.setattr(group_publication, 'BATCH_ROWS', 1)
-    selected = group_retention.plan(store.conn)
+    selected = group_queries.retention_plan(store.conn)
     assert len(selected['edges']) == 1
     changes = []
     store.conn.set_trace_callback(changes.append)
     try:
-        assert group_retention.step(store.taste_groups)
+        assert store.taste_groups.retire_history()
     finally:
         store.conn.set_trace_callback(None)
     assert not store.conn.execute('SELECT 1 FROM group_lineage_retirements').fetchone()

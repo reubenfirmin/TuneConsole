@@ -2,192 +2,23 @@
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, astuple
-import hashlib
-import math
 import time
 import uuid
 
-from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools, policy_documents
+from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
 from yt_playlist.core.activity import WorkBudgetExceeded, check_cancellable_work
 from yt_playlist.core.db_checkpoint import deferred_autocheckpoint
 from yt_playlist.core.db_writes import reserved_write
-from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.core.recommendation_custody import retain, release
-from . import policy_storage, proposal_cache
+from yt_playlist.core.recommendation_plan import (
+    BATCH_ROWS, Build, Framing, MAX_PLAN_BYTES, MAX_SLOTS, OUTPUT_BATCH_ROWS, Output, Plan,
+    SLOT_BATCH_ROWS, Slot, finite as _finite, validate,
+)
+from . import proposal_cache
 
-BATCH_ROWS = 128
-SLOT_BATCH_ROWS = 16
-OUTPUT_BATCH_ROWS = 16
 CLEANUP_ROWS = 1024
 CLEANUP_POOLS = 32
 LEASE_SECONDS = 60
-MAX_PLAN_BYTES = 128 * 1024 * 1024
-MAX_SLOTS = 16384
-
-
-@dataclass(frozen=True)
-class Slot:
-    surface: str
-    mode_key: str
-    purpose: str
-    pool: pools.Pool
-    revalidated_policy: str | None = None
-
-    @property
-    def revalidated(self):
-        return self.revalidated_policy is not None
-
-
-@dataclass(frozen=True)
-class Output:
-    surface: str
-    chunk_key: str
-    encoded: bytes
-    expires_at: float | None = None
-    pool_digest: str | None = None
-    first_rank: int | None = None
-    last_rank: int | None = None
-
-
-@dataclass(frozen=True)
-class Framing:
-    presence: int = 0
-    comfort_pool: int | None = None
-    year_low: int | None = None
-    year_high: int | None = None
-    full_pools: bool | None = None
-    unmodeled: bool | None = None
-    musical_generation: str | None = None
-    radio_generation: str | None = None
-    radio_space: str | None = None
-    intensity_version: int | None = None
-    radio_profile_version: str | None = None
-    vibe_version: str | None = None
-    vibe_profile_version: str | None = None
-
-
-@dataclass(frozen=True)
-class Plan:
-    external_key: str
-    policy_version: str
-    group_generation_id: int | None
-    input_revision: int | None
-    created_at: float | None
-    slots: tuple[Slot, ...] = ()
-    outputs: tuple[Output, ...] = ()
-    framing: Framing | None = None
-
-
-@dataclass(frozen=True)
-class Build:
-    generation_id: int
-    owner: str
-    plan_digest: str
-
-
-def _identity(value, *, empty=False):
-    return isinstance(value, str) and (empty or bool(value)) and len(value.encode()) <= 1024
-
-
-def _finite(value):
-    return type(value) in (int, float) and math.isfinite(value)
-
-
-def validate(plan, *, allow_unobserved=False):
-    """Admit all logical output before creating rows or files."""
-    if (not isinstance(plan, Plan) or not _identity(plan.external_key) or not _identity(plan.policy_version)
-            or plan.group_generation_id is not None and
-            (type(plan.group_generation_id) is not int or plan.group_generation_id < 1)
-            or plan.input_revision is not None and (type(plan.input_revision) is not int or plan.input_revision < 0)
-            or not (_finite(plan.created_at) or allow_unobserved and plan.created_at is None)
-            or not isinstance(plan.slots, tuple) or not isinstance(plan.outputs, tuple)
-            or len(plan.slots) + len(plan.outputs) > MAX_SLOTS or not (plan.slots or plan.outputs)):
-        raise ValueError('Invalid recommendation publication plan')
-    if plan.framing is not None:
-        framing = plan.framing
-        if (not isinstance(framing, Framing) or type(framing.presence) is not int or not 0 <= framing.presence <= 2047
-                or any(value is not None and (type(value) is not int or value < 0)
-                       for value in (framing.comfort_pool, framing.intensity_version))
-                or any(value is not None and type(value) is not int for value in (framing.year_low, framing.year_high))
-                or (framing.year_low is None) != (framing.year_high is None)
-                or framing.year_low is not None and framing.year_low > framing.year_high
-                or any(value is not None and type(value) is not bool for value in (framing.full_pools, framing.unmodeled))
-                or any(value is not None and not _identity(value, empty=True) for value in (framing.musical_generation,
-                    framing.radio_generation, framing.radio_space, framing.radio_profile_version,
-                    framing.vibe_version, framing.vibe_profile_version))):
-            raise ValueError('Invalid recommendation bundle framing')
-    digest = hashlib.sha256(canonical([plan.external_key, plan.policy_version, plan.group_generation_id,
-                                      plan.input_revision, plan.created_at, astuple(plan.framing) if plan.framing else None]))
-    used, slots, files, distinct, surfaces, selections, ranges = 0, set(), set(), {}, set(), set(), {}
-    for slot in plan.slots:
-        if (not isinstance(slot, Slot) or not _identity(slot.surface) or not _identity(slot.mode_key, empty=True)
-                or not _identity(slot.purpose) or not isinstance(slot.pool, pools.Pool)
-                or slot.revalidated and not _identity(slot.revalidated_policy)):
-            raise ValueError('Invalid recommendation pool slot')
-        key = slot.surface, slot.mode_key, slot.purpose
-        if key in slots:
-            raise ValueError('Duplicate recommendation pool slot')
-        slots.add(key)
-        surfaces.add(slot.surface)
-        pool = slot.pool
-        selections.add((slot.surface, pool.content_digest))
-        if pool.content_digest not in distinct:
-            actual = pools.prepare(pool.pool_key, pool.policy_version, pool.group_version_id,
-                                   pool.input_fingerprint, pool.purpose, pool.candidates)
-            if actual != pool:
-                raise ValueError('Recommendation pool content identity changed')
-            used += sum(len(row) for row in pools.rows(pool))
-            distinct[pool.content_digest] = pool
-        elif distinct[pool.content_digest] != pool:
-            raise ValueError('Conflicting recommendation pool content identity')
-        digest.update(canonical([*key, pool.content_digest, *([slot.revalidated_policy] if slot.revalidated else [])]))
-        if used > MAX_PLAN_BYTES:
-            raise ValueError('Recommendation publication exceeds its admitted memory')
-    for output in plan.outputs:
-        if (not isinstance(output, Output) or not _identity(output.surface)
-                or not _identity(output.chunk_key, empty=True) or not isinstance(output.encoded, bytes)
-                or len(output.encoded) > outputs.MAX_BYTES
-                or output.expires_at is not None and not _finite(output.expires_at)):
-            raise ValueError('Invalid recommendation output chunk')
-        key = output.surface, output.chunk_key
-        if key in files:
-            raise ValueError('Duplicate recommendation output chunk')
-        files.add(key)
-        surfaces.add(output.surface)
-        document = outputs._decode(output.encoded, *key)
-        if output.pool_digest is None:
-            if output.first_rank is not None or output.last_rank is not None:
-                raise ValueError('Display ranks require a selected pool')
-        else:
-            if (not isinstance(output.pool_digest, str) or (output.surface, output.pool_digest) not in selections
-                    or type(output.first_rank) is not int or type(output.last_rank) is not int
-                    or not 0 <= output.first_rank <= output.last_rank < len(distinct[output.pool_digest].candidates)):
-                raise ValueError('Display ranks require a selected pool')
-            value = document['output']
-            if not isinstance(value, dict) or set(value) != {'rows'} or not isinstance(value['rows'], list) or not value['rows']:
-                raise ValueError('Invalid ranked display output')
-            previous = output.first_rank - 1
-            for row in value['rows']:
-                if (not isinstance(row, list) or len(row) != 3 or type(row[0]) is not int
-                        or not previous < row[0] <= output.last_rank or not isinstance(row[2], dict)
-                        or row[1] != pools.owner(distinct[output.pool_digest].candidates[row[0]])):
-                    raise ValueError('Display output differs from its ranked pool')
-                previous = row[0]
-            if value['rows'][0][0] != output.first_rank or previous != output.last_rank:
-                raise ValueError('Display output differs from its rank range')
-            ranges.setdefault((output.surface, output.pool_digest), []).append((output.first_rank, output.last_rank))
-        used += len(output.encoded)
-        if used > MAX_PLAN_BYTES:
-            raise ValueError('Recommendation publication exceeds its admitted memory')
-        digest.update(canonical([*key, hashlib.sha256(output.encoded).hexdigest(), output.expires_at,
-                                 output.pool_digest, output.first_rank, output.last_rank]))
-    for intervals in ranges.values():
-        intervals.sort()
-        if any(left[1] >= right[0] for left, right in zip(intervals, intervals[1:])):
-            raise ValueError('Overlapping ranked display output')
-    if len(surfaces) > BATCH_ROWS:
-        raise ValueError('Recommendation publication exceeds its surface-header budget')
-    return digest.hexdigest()
 
 
 def _touch(conn, build):
@@ -214,8 +45,7 @@ def _create(conn, plan, digest):
     return Build(generation, token, digest)
 
 
-def claim(repo, plan, *, owner=None, policies=(), bases=()):
-    digest = validate(plan)
+def claim(repo, plan, digest, *, owner=None):
     with proposal_cache._write(repo) as conn:
         previous = conn.execute('SELECT id,output_digest,status FROM recommendation_generations WHERE external_key=?',
                                 (plan.external_key,)).fetchone()
@@ -230,14 +60,10 @@ def claim(repo, plan, *, owner=None, policies=(), bases=()):
                 raise WorkBudgetExceeded('Recommendation generation is awaiting cleanup')
             if owner != lease[0] and lease[1] > time.time():
                 raise WorkBudgetExceeded('Recommendation generation is leased by another worker')
-            if policies or bases:
-                policy_storage.publish(conn, policies, bases, enforce_budget=True)
             token = owner if owner == lease[0] else uuid.uuid4().hex
             conn.execute('UPDATE recommendation_builds SET owner=?,expires_at=? WHERE generation_id=?',
                          (token, time.time() + LEASE_SECONDS, previous[0]))
             return Build(previous[0], token, digest)
-        if policies or bases:
-            policy_storage.publish(conn, policies, bases, enforce_budget=True)
         return _create(conn, plan, digest)
 
 
@@ -248,7 +74,7 @@ def _create_pool(conn, prepared):
          prepared.content_digest, prepared.purpose, len(prepared.candidates))).fetchone()[0]
 
 
-def _pool(repo, build, prepared, *, still_current=None):
+def begin_pool(repo, build, prepared):
     with proposal_cache._write(repo) as conn:
         _touch(conn, build)
         row = conn.execute('SELECT id,complete FROM recommendation_pools WHERE content_digest=?',
@@ -270,22 +96,7 @@ def _pool(repo, build, prepared, *, still_current=None):
             if sealed:
                 conn.execute('INSERT INTO recommendation_build_pools VALUES (?,?) ON CONFLICT DO NOTHING',
                              (build.generation_id, identity))
-    if not sealed:
-        if count is None:
-            with repo._store.read_view() as reader:
-                count = reader.conn.execute('SELECT (SELECT count(*) FROM recommendation_candidates WHERE pool_id=?)'
-                    '+(SELECT count(*) FROM unresolved_recommendation_candidates WHERE pool_id=?)', (identity, identity)).fetchone()[0]
-        if count > len(prepared.candidates):
-            raise ValueError('Recommendation candidate prefix exceeds its plan')
-        for start in range(count, len(prepared.candidates), BATCH_ROWS):
-            if still_current is not None and not still_current():
-                return None
-            with proposal_cache._write(repo) as conn:
-                _touch(conn, build)
-                pools.append(conn, identity, prepared.candidates[start:start + BATCH_ROWS], start)
-    with repo._store.read_view() as reader:
-        pools.verify(reader.conn, identity, prepared)
-    return identity
+    return identity, bool(sealed), count
 
 
 def _output(conn, plan, generation, output, file):
@@ -314,88 +125,8 @@ def _ready(conn, plan, generation):
         conn.execute("UPDATE recommendation_generations SET status='ready' WHERE id=?", (generation,))
 
 
-def stage(repo, plan, build, *, still_current=None):
-    if validate(plan) != build.plan_digest:
-        raise ValueError('Recommendation staged plan changed')
-    for start in range(0, len(plan.slots), SLOT_BATCH_ROWS):
-        if still_current is not None and not still_current():
-            return False
-        pending = []
-        with repo._store.read_view() as reader:
-            # Share only the bounded selection lookup. Each pool still gets its
-            # own complete off-lock verification and bounded write transactions.
-            for slot in plan.slots[start:start + SLOT_BATCH_ROWS]:
-                check_cancellable_work()
-                existing = reader.conn.execute('SELECT p.content_digest FROM recommendation_surface_pools m '
-                    'JOIN recommendation_pools p ON p.id=m.pool_id WHERE m.generation_id=? AND m.surface=? '
-                    'AND m.mode_key=? AND m.purpose=?',
-                    (build.generation_id, slot.surface, slot.mode_key, slot.purpose)).fetchone()
-                if existing:
-                    if existing[0] != slot.pool.content_digest:
-                        raise ValueError('Recommendation staged pool selection changed')
-                else:
-                    pending.append(slot)
-        for slot in pending:
-            check_cancellable_work()
-            identity = (_pool(repo, build, slot.pool, still_current=still_current)
-                        if still_current is not None else _pool(repo, build, slot.pool))
-            if identity is None:
-                return False
-            with proposal_cache._write(repo) as conn:
-                _touch(conn, build)
-                # Verification stays off-lock; sealing and attachment share a commit.
-                conn.execute('UPDATE recommendation_pools SET complete=1 WHERE id=? AND complete=0', (identity,))
-                if slot.revalidated:
-                    # _pool verified every canonical fact outside this lock.
-                    # This immutable owner explicitly records rechecking those
-                    # facts under the new generation's captured input policy.
-                    conn.execute('INSERT INTO recommendation_pool_revalidations VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING',
-                                 (build.generation_id, slot.surface, slot.mode_key, slot.purpose,
-                                  identity, slot.revalidated_policy))
-                conn.execute('INSERT INTO recommendation_surface_pools VALUES (?,?,?,?,?)',
-                             (build.generation_id, slot.surface, slot.mode_key, slot.purpose, identity))
-                conn.execute('DELETE FROM recommendation_build_pools WHERE generation_id=? AND pool_id=?',
-                             (build.generation_id, identity))
-    root = outputs.root_for_database(repo._store._db_path, repo._store._evidence_key)
-    for start in range(0, len(plan.outputs), OUTPUT_BATCH_ROWS):
-        if still_current is not None and not still_current():
-            return False
-        pending = []
-        with repo._store.read_view() as reader:
-            for output in plan.outputs[start:start + OUTPUT_BATCH_ROWS]:
-                check_cancellable_work()
-                existing = reader.conn.execute('SELECT content_digest FROM prepared_outputs WHERE generation_id=? '
-                    'AND surface=? AND chunk_key=?', (build.generation_id, output.surface, output.chunk_key)).fetchone()
-                if existing:
-                    if existing[0] != hashlib.sha256(output.encoded).hexdigest():
-                        raise ValueError('Recommendation staged output changed')
-                else:
-                    pending.append(output)
-        if not pending:
-            continue
-        # The shared lifetime lock fences file GC while bytes are durable but
-        # their owner rows are not committed. Only the bounded manifest batch
-        # takes the serving lock; every file is synced before its SQL owner.
-        with policy_documents.retained_reader(root):
-            files = []
-            for output in pending:
-                check_cancellable_work()
-                files.append((output, outputs.publish(root, output.encoded)))
-            with proposal_cache._write(repo) as conn:
-                _touch(conn, build)
-                for output, file in files:
-                    check_cancellable_work()
-                    _output(conn, plan, build.generation_id, output, file)
-    if still_current is not None and not still_current():
-        return False
-    with proposal_cache._write(repo) as conn:
-        _touch(conn, build)
-        _ready(conn, plan, build.generation_id)
-    return True
-
-
 def finish(conn, build, at):
-    """Join the snapshot publisher's transaction; policies/settings commit here too."""
+    """Switch the committed recommendation head in its repository's SQL write."""
     if not conn.in_transaction or not _finite(at):
         raise RuntimeError('Recommendation publication requires an outer transaction and finite time')
     _touch(conn, build)

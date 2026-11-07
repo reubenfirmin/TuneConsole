@@ -1,17 +1,20 @@
-# Coimbra MIREX-like
+# Coimbra MIREX-like mood dataset
 
-903 supplied clips were acquired from mirror revision
-`8bdd6492f520d76cc2fa74ff69885b2b2b9c5777`. Preserve this collection's identity
-separately from original MIREX and 4Q. Targets are five native mood clusters
-derived from AllMusic tags. Join numbered filenames to row-aligned annotations;
-the metadata needs UTF-16 decoding and one unquoted title-semicolon repair.
+Publisher: [University of Coimbra music information retrieval group](https://mir.dei.uc.pt/).
+Acquired audio and annotations: [MIREX-like release mirror](https://github.com/ethanray123/AudioEmotionPredictionModel/tree/8bdd6492f520d76cc2fa74ff69885b2b2b9c5777/Audio%20and%20Lyric%20Sentiment%20Neural%20Network%20Regression/MIREX-like_mood).
 
-Oct 28–29: extraction completed 903 clips; the later protected per-vibe source
-retained 900. Native learner/consensus searches did not establish a general
-six-vibe replacement. Source-selected Soundtracks transfer gave Energize NDCG
-.7305 and Release .4872, behind stronger native sources. Do not merge cluster
-scores into absolute arousal, valence or intensity scales.
+This collection contains 903 music clips assigned to five mood clusters derived
+from AllMusic tags: rousing, cheerful, brooding, quirky and aggressive. Each clip
+has one cluster assignment, recording metadata and a numbered audio filename.
+These are tag-derived categories, rather than newly collected listener ratings
+or continuous valence/arousal measurements.
 
-Evidence: `local/external-20261028/` and
-`local/per-vibe-20261029/all-sources-1/`.
-Source catalogue: [Coimbra](https://mir.dei.uc.pt/).
+TuneConsole uses the supplied 903 clips; protected per-vibe comparisons retain
+900. Numbered filenames join to row-aligned cluster annotations. The semicolon
+metadata requires UTF-16 decoding and one documented repair of an unquoted
+semicolon in the title for `782.mp3`. The original collection has 668 artist
+groups.
+
+This release is distinct from the original MIREX benchmark and the
+[4Q Emotion Dataset](4q.md). Cluster predictions do not share an absolute scale
+with valence, arousal or product intensity scores.

@@ -1,5 +1,5 @@
 """SQL inventory and admission facts for retained group evidence."""
-from yt_playlist.core import group_documents, group_evidence, mix_choices, recommendation_outputs, recommendation_references
+from yt_playlist.core import group_evidence, mix_choices, recommendation_custody, recommendation_references
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.group_admission import writer
 from yt_playlist.core.prepared_references import PREPARED
@@ -8,52 +8,82 @@ from yt_playlist.repos.base import Repo, lookup_read, snapshot_read, synchronize
 
 class GroupEvidenceRepo(Repo):
     @synchronized
-    def replace_prepared(self, surface, data, at, *, historical=False, resolved_contexts=None):
-        from yt_playlist.core.prepared_references import replace_prepared
-        return replace_prepared(self._store, surface, data, at,
-            historical=historical, resolved_contexts=resolved_contexts)
+    def replace_prepared(self, kind, surface, operations, generations, *, historical=False):
+        with self.conn.atomic(join=True):
+            if generations is not None:
+                identity = 'proposal:' + surface + ':recommendations'
+                recommendation_custody.release(self.conn, kind, identity)
+                recommendation_references.retain(self.conn, kind, identity, generations)
+            for identity, owner, unknown, references in operations:
+                existing = self.conn.execute('SELECT reference_digest FROM group_evidence_owners '
+                                              'WHERE kind=? AND external_key=?', (kind, identity)).fetchone()
+                if historical and existing is not None:
+                    continue
+                if generations is not None:
+                    recommendation_custody.release(self.conn, kind, identity)
+                if unknown is not None:
+                    group_evidence.retain_unknown_context(self.conn, kind, identity, *unknown)
+                elif owner is None:
+                    group_evidence.release(self.conn, kind, identity)
+                else:
+                    if existing is not None and existing[0] != owner.digest:
+                        group_evidence.release(self.conn, kind, identity)
+                    group_evidence.retain_owner(self.conn, owner,
+                                                strict=not historical and owner.generation is not None)
+                if unknown is None and generations is not None:
+                    recommendation_references.retain(self.conn, kind, identity, references)
 
-    def retain(self, kind, identity, value, at, *, strict, recommendations):
+    def retain(self, owner, *, strict, recommendations):
         with writer(self._store) as conn:
-            changed = group_evidence.retain(conn, kind, identity, value, at, strict=strict)
+            changed = group_evidence.retain_owner(conn, owner, strict=strict)
             if recommendations:
-                recommendation_references.retain(conn, kind, identity, recommendations)
+                recommendation_references.retain(conn, owner.kind, owner.identity, recommendations)
             return changed
 
     def release(self, kind, identity):
-        from yt_playlist.repos import recommendation_publication
         with writer(self._store) as conn:
             group_evidence.release(conn, kind, identity)
             if recommendation_references.enabled(self._store):
-                recommendation_publication.release(conn, kind, identity)
+                recommendation_custody.release(conn, kind, identity)
 
-    def retire(self, kind, identities):
-        from yt_playlist.repos import recommendation_publication
+    def retire(self, kind, identities, *, mixes):
         with writer(self._store) as conn:
-            if kind == 'offer':
+            if mixes:
                 mix_choices.retire(conn, identities)
             for identity in identities:
                 group_evidence.release(conn, kind, identity)
                 if recommendation_references.enabled(self._store):
-                    recommendation_publication.release(conn, kind, identity)
+                    recommendation_custody.release(conn, kind, identity)
 
     def collect_mix_dictionary(self):
         with writer(self._store) as conn:
             return mix_choices.collect_dictionary(conn)
 
-    def collect_unpublished_mixes(self):
-        return mix_choices.collect_unpublished(self._store)
+    @lookup_read
+    def mix_menu_ids(self, after, limit):
+        if not mix_choices.available(self.conn):
+            return []
+        return [row[0] for row in self.conn.execute('SELECT opportunity_id FROM mix_choice_menus '
+            'WHERE opportunity_id>? ORDER BY opportunity_id LIMIT ?', (after, limit))]
 
     @synchronized
-    def output_collector(self, *, groups=False):
-        directory = (group_documents if groups else recommendation_outputs).directory(self.conn)
-        owners = tuple((table, prefix + '_filename') for table, _keys, prefix, _kind
-                       in group_documents.OWNERS) if groups else None
-        return recommendation_outputs.OrphanCollector(directory, owners=owners)
+    def remove_unpublished_mixes(self, identities, limit):
+        with self.conn.atomic(join=True):
+            mix_choices.retire(self.conn, identities)
+            mix_choices.collect_dictionary(self.conn, limit)
 
-    @synchronized
-    def collect_output_files(self, collector):
-        return collector.step(self.conn)
+    @snapshot_read
+    def protected_output_files(self, names, owners):
+        if self.conn.in_transaction:
+            raise ValueError('Prepared output collection requires an idle connection')
+        owned = set()
+        if names:
+            marks = ','.join('?' for _ in names)
+            for owner, column in owners:
+                if self.conn.execute("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?", (owner,)).fetchone():
+                    owned.update(row[0] for row in self.conn.execute(
+                        f'SELECT DISTINCT {column} FROM {owner} WHERE {column} IN ({marks})', names))
+        return owned
 
     @lookup_read
     def has_owner(self, kind, identity):
@@ -90,10 +120,10 @@ class GroupEvidenceRepo(Repo):
 
     @synchronized
     def complete_roots(self):
-        if not self.conn.in_transaction:
-            raise RuntimeError('Root inventory completion requires its publication transaction')
-        self.conn.execute('UPDATE group_retention_state SET roots_complete=1 WHERE id=1')
+        with self.conn.atomic(join=True):
+            self.conn.execute('UPDATE group_retention_state SET roots_complete=1 WHERE id=1')
 
     @synchronized
     def retain_unknown(self, kind, identity, raw, reason, at):
-        group_evidence.retain_unknown_context(self.conn, kind, identity, raw, reason, at)
+        with self.conn.atomic(join=True):
+            group_evidence.retain_unknown_context(self.conn, kind, identity, raw, reason, at)

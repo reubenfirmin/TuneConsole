@@ -9,7 +9,7 @@ from tests.repos.test_compact_group_publication import database
 from tests.repos.test_typed_recommendation_publication import recommendations, publish, plan
 from tests.rec.test_stored_fresh import fresh, forbid_legacy
 from yt_playlist.rec import bundle_storage, mode_surfaces, rec_params
-from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
+from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 from yt_playlist.repos.rec_proposals import RecProposalsRepo
 
 
@@ -77,12 +77,12 @@ def test_unmodeled_genre_selection_reaches_complete_tail_with_bounded_pages(fres
         store.conn.execute("INSERT INTO library_memberships SELECT entry_id,'import',5 FROM discovery_memberships")
     tracks = candidates(store)
     generation = publish_bundle(store, {'all': {'explore': tracks}, '_meta': {'unmodeled': True}})
-    original, reads = RecommendationPublicationsRepo.candidate_page, []
+    original, reads = RecommendationPublications.candidate_page, []
     def page(self, *args, **kwargs):
         result = original(self, *args, **kwargs)
         reads.append((kwargs['limit'], len(result['tracks'])))
         return result
-    monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_page', page)
+    monkeypatch.setattr(RecommendationPublications, 'candidate_page', page)
     original_read = RecProposalsRepo._proposal_json
     def read(self, surface):
         assert surface not in ('mode_bundles', 'fresh_pool')
@@ -130,13 +130,13 @@ def test_real_typed_assembly_matches_complete_legacy_opportunities_and_experimen
     finally:
         store._recommendation_files = True
     selected = []
-    original = RecommendationPublicationsRepo.selected_candidates
+    original = RecommendationPublications.selected_candidates
 
     def hydrate(self, surface, selections, **kwargs):
         selected.append(selections)
         return original(self, surface, selections, **kwargs)
 
-    monkeypatch.setattr(RecommendationPublicationsRepo, 'selected_candidates', hydrate)
+    monkeypatch.setattr(RecommendationPublications, 'selected_candidates', hydrate)
     actual = mode_surfaces.assemble_cards(store, 10, 0, mode_order=[1, 2, 3, 4])
     assert len(actual) == 4 and keys(actual) == keys(expected)
     assert len(selected) == sum(1 + bool(card.get('counterfactual')) for card in actual)
@@ -178,12 +178,12 @@ def test_rare_tail_and_diversity_overflow_are_reachable_in_bounded_pages(fresh, 
     publish_bundle(store, {'1': {'wheelhouse': tracks}, 'all': {'wheelhouse': tracks},
                            '_meta': {'full_pools': True}})
     forbid_legacy(monkeypatch)
-    reads, original = [], RecommendationPublicationsRepo.candidate_page
+    reads, original = [], RecommendationPublications.candidate_page
     def page(self, *args, **kwargs):
         result = original(self, *args, **kwargs)
         reads.append((kwargs['limit'], len(result['tracks'])))
         return result
-    monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_page', page)
+    monkeypatch.setattr(RecommendationPublications, 'candidate_page', page)
     cards = mode_surfaces.assemble_cards(store, 10, 0, include_genres=('jazz',), mode_order=[1])
     assert keys(cards) == [('wheelhouse', 1, 'cosine', [f'fresh-{index}' for index in range(254, 260)])]
     assert len(reads) >= 3 and all(limit <= 128 and count <= limit for limit, count in reads)
@@ -231,7 +231,7 @@ def test_failed_hydration_releases_reader_retention_and_private_scratch_files(fr
     publish_bundle(store, {'1': {'wheelhouse': candidates(store)}, '_meta': {'full_pools': True}})
     def fail(self, *args, **kwargs):
         raise RuntimeError('controlled hydration failure')
-    monkeypatch.setattr(RecommendationPublicationsRepo, 'selected_candidates', fail)
+    monkeypatch.setattr(RecommendationPublications, 'selected_candidates', fail)
     rec_params.set_param(store, 'modes_album_cap', 12)
     with pytest.raises(RuntimeError, match='controlled hydration'):
         mode_surfaces.assemble_cards(store, 10, 0, mode_order=[1])

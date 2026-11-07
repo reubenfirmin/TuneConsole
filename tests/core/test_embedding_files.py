@@ -10,7 +10,7 @@ from yt_playlist.core import embeddings, embedding_files as owner, fao
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.preparation import embeddings as preparation
 from yt_playlist.core.store import Store
-from yt_playlist.repos.rec_model import VectorChanges
+from yt_playlist.core.rec_model_policy import VectorChanges
 
 
 def test_basis_validation_work_grows_linearly_and_rejects_both_storage_forms(store):
@@ -78,13 +78,11 @@ def test_empty_publications_clear_and_retract_each_space_during_partial_conversi
         assert len(embeddings.rows(store.conn, name)) == 3
     for name in names:
         before = {other: embeddings.rows(store.conn, other) for other in names if other != name}
-        with atomic_write(store):
-            store.rec_model.publish_training_generation({name: VectorChanges((), ())})
+        store.rec_model.publish_training_generation({name: VectorChanges((), ())})
         assert embeddings.rows(store.conn, name) == expected[name]
         # Remove a converted owner and an installed owner, then the final owner.
         for key, _ in expected[name]:
-            with atomic_write(store):
-                store.rec_model.publish_training_generation({name: VectorChanges((), (key,))})
+            store.rec_model.publish_training_generation({name: VectorChanges((), (key,))})
         assert embeddings.rows(store.conn, name) == []
         assert embeddings.head(store.conn, name) is None
         assert {other: embeddings.rows(store.conn, other) for other in before} == before

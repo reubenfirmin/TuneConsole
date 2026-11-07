@@ -2,11 +2,7 @@
 import hashlib
 
 from .evidence_ledger import canonical
-
-PRECISION = 'theme-raw-genres-v1'
-GROUP_FIELDS = frozenset(('groups', 'musical_groups', 'musical_definitions', 'group_generation',
-                          'group_allocation', 'group_choice_policy', 'group_choice_parameters',
-                          'recommendation_generations'))
+from .mix_choice_policy import PRECISION, GROUP_FIELDS, visible_option, context, menu_plan, project as project_record
 
 
 def definitions():
@@ -86,35 +82,16 @@ def validate(conn):
             raise MigrationError('Incompatible mix choice owner: ' + name)
 
 
-def visible_option(option):
-    """Freeze display values without consulting current metadata for old menus."""
-    if 'descriptor_id' in option:
-        return dict(option)
-    explicit = 'genres' in option
-    tracks = option.get('tracks') or []
-    genres = option.get('genres') if explicit else [t['genre'].strip().lower() for t in tracks if (t.get('genre') or '').strip()]
-    if (not isinstance(genres, list) or len(genres) > 256
-            or any(not isinstance(g, str) or not g or len(g.encode()) > 4096 for g in genres)):
-        raise ValueError('Invalid displayed raw genres')
-    result = {key: option[key] for key in ('id', 'position', 'label', 'note', 'intent', 'score', 'assignment') if key in option}
-    return {**result, 'genres': sorted(set(genres)),
-            'genres_complete': bool(option.get('genres_complete', explicit or bool(tracks) and all((t.get('genre') or '').strip() for t in tracks))),
-            'genre_origin': option.get('genre_origin', 'rendered' if explicit else 'legacy_tracks')}
-
-
-def context(value, *, mixes=False):
-    if mixes:
-        return {'schema': 2, 'precision': PRECISION, **{key: value[key] for key in ('at', 'comparison') if key in value}}
-    return {key: item for key, item in value.items() if key not in GROUP_FIELDS}
-
-
 def _intern(conn, table, fields, values):
     conn.execute('INSERT INTO '+table+'('+','.join(fields)+') VALUES ('+','.join('?' for _ in values)+') ON CONFLICT DO NOTHING', values)
     return conn.execute('SELECT id FROM '+table+' WHERE '+' AND '.join(f+'=?' for f in fields), values).fetchone()[0]
 
 
 def descriptor(conn, option):
-    option = visible_option(option)
+    return insert_descriptor(conn, visible_option(option))
+
+
+def insert_descriptor(conn, option):
     if 'descriptor_id' in option:
         read_descriptor(conn, option['descriptor_id'])
         return option['descriptor_id']
@@ -149,58 +126,51 @@ def read_descriptor(conn, identity):
 
 def publish_menu(conn, record, context_id, *, source=None):
     """Commit descriptors before acknowledging the menu; reuse verifies its source."""
+    insert_menu(conn, menu_plan(record, context_id, source=source))
+    return project(conn, record)
+
+
+def insert_menu(conn, plan):
     if not conn.in_transaction:
         conn.execute('BEGIN IMMEDIATE')
-    source = record if source is None else source
-    digest = hashlib.sha256(canonical(source)).digest()
-    prior = conn.execute('SELECT source_digest FROM mix_choice_menus WHERE opportunity_id=?', (record['id'],)).fetchone()
+    prior = conn.execute('SELECT source_digest FROM mix_choice_menus WHERE opportunity_id=?', (plan['id'],)).fetchone()
     if prior:
-        if prior[0] != digest:
+        if prior[0] != plan['source_digest']:
             raise ValueError('Mix menu source changed during preparation')
-        return project(conn, record)
+        return
     conn.execute('INSERT INTO mix_choice_menus VALUES (?,?,?,?,?)',
-                 (record['id'], context_id, source.get('context') or context_id, digest, record.get('context_at', record['at'])))
-    options = []
-    for position, original in enumerate(record['options'], 1):
-        option = visible_option(original)
-        identity = descriptor(conn, option)
+                 tuple(plan[key] for key in ('id', 'context', 'source_context', 'source_digest', 'context_at')))
+    for position, option in enumerate(plan['options'], 1):
+        identity = insert_descriptor(conn, option)
         complete = bool(option.get('genres_complete', True))
         origin = option.get('genre_origin', 'rendered')
         conn.execute('INSERT INTO mix_choice_options VALUES (?,?,?,?,?,?)',
-                     (record['id'], str(option['id']), position, identity, int(complete), origin))
-        options.append({key: option[key] for key in ('id', 'position', 'score', 'assignment') if key in option}
-                       | {'descriptor_id': identity, 'genres_complete': complete, 'genre_origin': origin})
-    return {**record, 'schema': 2, 'precision': PRECISION, 'context': context_id, 'options': options}
+                     (plan['id'], str(option['id']), position, identity, int(complete), origin))
 
 
 def project(conn, record):
     """Overlay a prepared legacy menu; immutable original JSON remains until #626."""
     if not record or 'context' not in record:
         return record
+    return project_record(record, projection_facts(conn, record.get('id'), record['context'],
+                                                 mixes=record.get('format') == 'mixes'))
+
+
+def projection_facts(conn, opportunity_id, context_id, *, mixes):
     installed = available(conn)
-    compact = record.get('format') == 'mixes' and record.get('precision') == PRECISION
+    facts = {'installed': installed, 'context': None, 'context_at': None, 'options': {}}
     if not installed:
-        return None if compact else record
-    if record.get('format') != 'mixes':
+        return facts
+    if not mixes:
         context = conn.execute("SELECT context FROM choice_context_projections WHERE source_context=? AND kind='independent'",
-                               (record['context'],)).fetchone()
-        return {**record, 'context': context[0]} if context else record
-    menu = conn.execute('SELECT context,context_at FROM mix_choice_menus WHERE opportunity_id=?', (record['id'],)).fetchone()
+                               (context_id,)).fetchone()
+        return {**facts, 'context': context[0] if context else None}
+    menu = conn.execute('SELECT context,context_at FROM mix_choice_menus WHERE opportunity_id=?', (opportunity_id,)).fetchone()
     if menu is None:
-        # An appendable file directory can be ahead of a SQL snapshot. Local
-        # descriptor IDs have meaning only after this menu's SQL publication.
-        return None if compact else record
-    options = {row['option_id']: row for row in conn.execute('SELECT * FROM mix_choice_options '
-                                                           'WHERE opportunity_id=?', (record['id'],))}
-    result = []
-    for option in record['options']:
-        row = options.get(str(option['id']))
-        if row is None:
-            raise ValueError('Prepared mix menu is incomplete')
-        result.append({key: option[key] for key in ('id', 'position', 'score', 'assignment') if key in option}
-                      | {'descriptor_id': row['descriptor_id'], 'genres_complete': bool(row['genres_complete']),
-                         'genre_origin': row['origin']})
-    return {**record, 'schema': 2, 'precision': PRECISION, 'context': menu[0], 'context_at': menu[1], 'options': result}
+        return facts
+    options = {row['option_id']: dict(row) for row in conn.execute('SELECT * FROM mix_choice_options '
+                                                                'WHERE opportunity_id=?', (opportunity_id,))}
+    return {**facts, 'context': menu[0], 'context_at': menu[1], 'options': options}
 
 
 def expand(conn, option):

@@ -176,6 +176,6 @@ def rebuild(store, now, *, keep_collaborative=False, memory_bytes=None, fit_cach
             if prepared['modes'] is not None:
                 store.modes.publish_generation(*prepared['modes'])
             store.rec_refresh.acknowledge(revision)
-        if not snapshot.publish(publish):
+        if not snapshot.publish_ordered(publish):
             return None
         return prepared

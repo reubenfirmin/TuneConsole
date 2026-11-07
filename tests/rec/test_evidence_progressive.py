@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.rec.test_evidence_responsiveness import library
+from tests.rec.test_evidence_responsiveness import evidence_template, library
 from yt_playlist.core import fao, playback_feedback
 from yt_playlist.core.activity import WorkBudgetExceeded, work_budget
 from yt_playlist.core.evidence_ledger import EvidenceLedger

@@ -50,6 +50,11 @@ def coordinates(conn, *, logical=()):
     return result
 
 
+def schema_definitions(conn):
+    return tuple(tuple(row) for row in conn.execute(
+        'SELECT type,name,tbl_name,sql FROM main.sqlite_schema ORDER BY type,name'))
+
+
 def cleanup_memory_files(store, owned):
     if store._db_path is None:
         for root in set(owned.values()):
@@ -180,6 +185,18 @@ class PreparedTemplate:
             # The owner restores the complete plan/index/unit graph and its
             # digests, preserving opaque originals and FAO logical ages.
             preparation_files.restore(target.conn, self.preparation_manifest)
+        if (self.revision_guards
+                and target._snapshot_revisions.schema_version != target.conn.execute(
+                    'PRAGMA main.schema_version').fetchone()[0]
+                and schema_definitions(target.conn) == schema_definitions(self.source.conn)
+                and revision_definitions(target.conn) == self.revision_guards):
+            # Coordinate relocation drops and restores immutable-owner guards.
+            # Their exact definitions and all TEMP revision guards still match
+            # the admitted source. Keep the real counters rather than rebuilding
+            # every table's triggers on the first consumer snapshot. Replacement
+            # already fenced older readers through _database_generation above.
+            target._snapshot_revisions.schema_version = target.conn.execute(
+                'PRAGMA main.schema_version').fetchone()[0]
         target._fixture_bundle_payload = deepcopy(self.bundles)
         return deepcopy(self.result)
 

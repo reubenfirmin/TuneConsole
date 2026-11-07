@@ -1,9 +1,8 @@
 """Revisioned human annotations. Callers own transactions and the Store lock."""
-import math
 from pathlib import Path
 
 from yt_playlist.core import audio_annotation_files as files
-from yt_playlist.core.audio_annotation_contract import FILE_FORMAT, KINDS, STATES
+from yt_playlist.core.audio_annotation_contract import FILE_FORMAT, evaluation_values, validate
 
 
 def latest(conn, run_id, *, kind, taxonomy_version):
@@ -58,59 +57,27 @@ def _save_evaluation(conn, annotation_id, prediction):
     version = prediction.get('taxonomy_version')
     vocabulary = {row[0] for row in conn.execute('SELECT vibe FROM audio_taxonomy_labels '
                                                  'WHERE taxonomy_version=?', (version,))}
-    if not vocabulary:
+    write_evaluation(conn, annotation_id, evaluation_values(prediction, vocabulary))
+
+
+def write_evaluation(conn, annotation_id, values):
+    if values is None:
         return
-    try:
-        ranking, predicted = prediction['ranking'], prediction['vibes']
-        scores = {row['vibe']: row['score'] for row in ranking}
-        if (len(ranking) != len(vocabulary) or set(scores) != vocabulary
-                or not all(isinstance(score, (float, int)) and not isinstance(score, bool)
-                           and math.isfinite(score) and 0 <= score <= 1 for score in scores.values())
-                or not isinstance(predicted, list) or not predicted or len(set(predicted)) != len(predicted)
-                or not set(predicted) <= vocabulary):
-            return
-        captured_model = prediction.get('model')
-        model = {} if captured_model is None else captured_model
-        if not isinstance(model, dict):
-            return
-        trained = model.get('trained_labels', [])
-        if (not isinstance(trained, list) or len(set(trained)) != len(trained)
-                or not set(trained) <= vocabulary):
-            return
-        training = model.get('training_songs')
-        if training is not None and (type(training) is not int or training < 0):
-            return
-        text = [prediction.get('version'), model.get('sha256'), model.get('feature_version')]
-        if any(value is not None and not isinstance(value, str) for value in text):
-            return
-    except (KeyError, TypeError):
-        return
+    version = values['header'][0]
     conn.execute('INSERT INTO audio_annotation_evaluations VALUES (?,?,?,?,?,?,?,?)',
-                 (annotation_id, version, text[0], int(prediction.get('model') is not None),
-                  int('trained_labels' in model), *text[1:], training))
+                 (annotation_id, *values['header']))
     conn.executemany('INSERT INTO audio_annotation_scores VALUES (?,?,?,?,?)',
-                     ((annotation_id, version, row['vibe'], position, row['score'])
-                      for position, row in enumerate(ranking)))
+                     ((annotation_id, version, *row) for row in values['scores']))
     conn.executemany('INSERT INTO audio_annotation_predictions VALUES (?,?,?)',
-                     ((annotation_id, label, position) for position, label in enumerate(predicted)))
+                     ((annotation_id, label, position) for position, label in enumerate(values['predicted'])))
     conn.executemany('INSERT INTO audio_annotation_model_labels VALUES (?,?,?,?)',
-                     ((annotation_id, version, label, position) for position, label in enumerate(trained)))
+                     ((annotation_id, version, label, position) for position, label in enumerate(values['trained'])))
 
 
 def save(conn, run_id, sample_ids, labels, taxonomy_version, prediction, now, *, kind='session',
          state=None, memory_key=None):
     """Publish a new immutable revision, including an explicitly empty judgment."""
-    if kind not in KINDS or not isinstance(run_id, str) or not run_id:
-        raise ValueError('Invalid annotation owner or kind')
-    samples, labels = list(sample_ids), list(labels)
-    state = state or ('labeled' if labels else 'empty')
-    if (state not in STATES or (state == 'labeled') != bool(labels)
-            or any(not isinstance(value, str) or not value for value in [*samples, *labels])
-            or len(set(samples)) != len(samples) or len(set(labels)) != len(labels)
-            or (kind == 'feedback' and len(labels) > 1)):
-        raise ValueError('Invalid annotation samples, labels or state')
-    if not isinstance(now, (int, float)) or not math.isfinite(now):
-        raise ValueError('Invalid annotation time')
+    samples, labels, state = validate(run_id, sample_ids, labels, now, kind=kind, state=state)
     if not conn.in_transaction:
         conn.execute('BEGIN IMMEDIATE')
     # An existing transaction may be a deferred reader. Reserve the writer

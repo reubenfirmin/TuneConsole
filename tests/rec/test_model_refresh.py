@@ -17,12 +17,13 @@ import pytest
 from yt_playlist.core.activity import Activity, WorkClosing
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
-from yt_playlist.rec import (account_growth, artist_model, choice_evidence, embedding_training as embed,
+from yt_playlist.rec import (account_growth, artist_model, embedding_training as embed,
                              model_refresh, mode_surfaces, rec_params, taste_modes)
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.web.app import create_app
 from tests import model_support
-from tests.home_fixture_support import home_routes_only, publish_menu, without_metadata_providers
+from tests.home_fixture_support import (home_routes_only, publish_menu, returning_listener,
+                                        without_metadata_providers)
 from tests.prepared_fixture_support import prepared_template
 
 
@@ -362,9 +363,7 @@ def test_coalesced_notifications_survive_restart_and_do_not_acknowledge_later_ch
     assert store.conn.execute('SELECT COUNT(*) FROM rec_change_queue').fetchone()[0] == 1
     revision = store.rec_refresh.revision()
     store.rec_refresh.enqueue()
-    with store.conn:
-        store.conn.execute('BEGIN')
-        store.rec_refresh.acknowledge(revision)
+    store.rec_refresh.acknowledge(revision)
     assert store.rec_refresh.has_pending_changes()
     store.conn.close()
     store = Store(path)
@@ -394,15 +393,10 @@ def test_background_fit_leaves_event_loop_and_last_good_home_available(
     # Change an actual collaborative input so the worker must enter its fitter.
     pid = store.playlists.upsert_playlist(iid, 'second', 'Second', 8, '', 1)
     store.playlists.set_playlist_tracks(pid, tids[:8])
-    # This is a returning Mix listener. Record a real choice followed by a
-    # confirmed start so journey access survives refreshing its fitted models.
-    opportunity = choice_evidence.issue(store, 'mixes', [
-        {'id': 'previous-mix', 'label': 'Previous mix', 'genres': ['Techno']}],
-        1990, context={'at': 1990}, opportunity_id='previous-listen')
-    assert opportunity is not None
-    choice_evidence.respond(store, opportunity, 'choice', 1991, option_id='previous-mix')
-    choice_evidence.respond(store, opportunity, 'start', 1992, option_id='previous-mix')
-    choice_evidence.compile_report(store, 1993)
+    # Completed listening evidence is an input to this concurrency contract.
+    # Choice compilation has its own owners in test_choice_evidence; keep the
+    # actual persisted report and access check without rerunning that producer.
+    returning_listener(store, 'mixes', now=1993)
     assert store.rec_proposals.choice_usage()['episodes']['mixes'] == 1
     assert any(len(menu['protos']) == 4 for menu in prepared['menus']), [
         [proto['lane'] for proto in menu['protos']] for menu in prepared['menus']]

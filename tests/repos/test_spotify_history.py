@@ -164,7 +164,7 @@ def test_artist_identity_reconciliation_preserves_removable_import_origin(store)
     assert not store.discovery.get_discovered_artists()
 
 
-def test_failed_removal_rolls_back_evidence_and_artist_changes(store):
+def test_failed_output_invalidation_preserves_evidence_and_artist_changes(store):
     iid = store.accounts.upsert_account('main','bridge',None,True)
     store.history.import_listening_events(iid,[('keep-on-failure',None,1700000000)],source='spotify_export')
     store.discovery.seed_spotify_artists(iid,{'Keep on failure':3},10)
@@ -177,6 +177,30 @@ def test_failed_removal_rolls_back_evidence_and_artist_changes(store):
     assert store.history.spotify_history_stats()['events'] == 1
     assert store.history.spotify_history_stats()['artists'] == 1
     assert store.rec_proposals.get_proposals('trend_rollups') == {'old':True}
+
+
+def test_late_removal_failure_keeps_committed_invalidations_and_retry_finishes(store):
+    iid = store.accounts.upsert_account('main', 'bridge', None, True)
+    store.history.import_spotify_listens(iid, [('spotify:track:x', 1700000000, 'Artist', 'song')])
+    store.discovery.seed_spotify_artists(iid, {'Imported': 3}, 10)
+    store.rec_proposals.put_proposals('trend_rollups', {'old': True}, 10)
+    run = store.model_selection.start_selection(10, {'status': 'applied'})
+    with store.conn:
+        store.conn.execute("CREATE TRIGGER fail_receipt_removal BEFORE DELETE ON spotify_history_listens "
+                           "BEGIN SELECT RAISE(ABORT,'injected receipt failure'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='injected receipt failure'):
+        store.history.remove_spotify_history()
+    assert not store.conn.in_transaction
+    assert store.history.spotify_history_stats()['events'] == 1
+    assert store.history.spotify_history_stats()['artists'] == 0
+    assert store.rec_proposals.get_proposals('trend_rollups') is None
+    assert store.model_selection.selection_run(run) is None
+    with store.conn:
+        store.conn.execute('DROP TRIGGER fail_receipt_removal')
+    store.history.remove_spotify_history()
+    assert store.history.spotify_history_stats()['events'] == 0
+    assert not store.conn.execute('SELECT 1 FROM spotify_history_listens').fetchone()
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
 def test_later_takeout_interest_keeps_an_artist_after_spotify_is_removed(store):

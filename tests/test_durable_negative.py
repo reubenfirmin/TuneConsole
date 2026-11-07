@@ -73,7 +73,7 @@ def test_prepared_card_order_applies_durable_dislike_delta(ranker):
 
 
 def test_live_steering_streams_distinct_dislikes_and_matches_complete_mean(store, monkeypatch):
-    from yt_playlist.repos.rec_model import RecModelRepo
+    from yt_playlist.controllers.rec_model import RecommendationModel
     keys = [f'bad-{index:03}' for index in range(259)] + ['candidate', 'zero']
     angles = np.linspace(-1.4, 1.4, len(keys))
     vectors = np.column_stack((np.cos(angles), np.sin(angles))).astype(np.float32)
@@ -86,14 +86,14 @@ def test_live_steering_streams_distinct_dislikes_and_matches_complete_mean(store
             [('one', key) for key in keys[:259]] + [('two', key) for key in keys[:129]] + [('one', 'zero'), ('one', 'missing')])
     expected = negative.penalties(store, vectors[-2:], {'candidate': 0, 'zero': 1},
                                   evidence_vecs=(vectors, dict(zip(keys, range(len(keys))))))
-    calls, original = [], RecModelRepo.vectors_by_keys
+    calls, original = [], RecommendationModel.vectors_by_keys
     def bounded(self, batch, **kwargs):
         batch = list(batch)
         calls.append(len(batch))
         assert len(batch) <= 128
         return original(self, batch, **kwargs)
-    monkeypatch.setattr(RecModelRepo, 'vectors_by_keys', bounded)
-    monkeypatch.setattr(RecModelRepo, 'disliked_identity_keys', lambda *args: pytest.fail('Loaded the complete dislike set'))
+    monkeypatch.setattr(RecommendationModel, 'vectors_by_keys', bounded)
+    monkeypatch.setattr(RecommendationModel, 'disliked_identity_keys', lambda *args: pytest.fail('Loaded the complete dislike set'))
     with store.read_view() as reader:
         steering = negative.Steering(reader)
         actual = steering.for_keys(['candidate', 'zero', 'absent'])

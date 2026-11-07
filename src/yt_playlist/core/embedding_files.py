@@ -2,13 +2,28 @@
 from yt_playlist.core import file_paths
 import hashlib
 import struct
+from pathlib import Path
 
-from . import fao
+from . import fao, file_collection
 
 MAX_ROWS = 128
 MAX_BYTES = 8 * 1024 * 1024
 HEADER = struct.Struct('>16sII')
 MAGIC = b'TC-embedding-1'.ljust(16, b'\0')
+
+
+class EmbeddingFiles:
+    def __init__(self, root):
+        self.root = Path(root)
+
+    def retained(self):
+        return file_collection.retained_reader(self.root)
+
+    def read_many(self, kind, rows):
+        return _load_many(self.root, kind, rows)
+
+    def write(self, kind, dimensions, rows):
+        return _prepare(self.root, kind, dimensions, rows)
 
 
 def definitions():
@@ -192,6 +207,10 @@ def relation(conn, kind):
 
 
 def load_many(conn, kind, rows):
+    return _load_many(directory(conn), kind, rows)
+
+
+def _load_many(root, kind, rows):
     """Read each selected chunk once, restoring the caller's original order."""
     result, chunks = [], {}
     for key, vector, dimensions, publication, position in rows:
@@ -199,7 +218,7 @@ def load_many(conn, kind, rows):
         if publication is not None:
             chunks.setdefault(publication, []).append((len(result)-1, dimensions, position))
     for publication, positions in chunks.items():
-        path = directory(conn) / relative(kind, publication)
+        path = root / relative(kind, publication)
         raw = fao.read(path, max_bytes=MAX_BYTES).bytes
         if hashlib.sha256(raw).digest() != publication or len(raw) < HEADER.size:
             raise fao.CorruptFile('Embedding chunk differs from its publication')
@@ -215,6 +234,10 @@ def load_many(conn, kind, rows):
 
 
 def prepare(conn, kind, dimensions, rows):
+    return _prepare(directory(conn), kind, dimensions, rows)
+
+
+def _prepare(root, kind, dimensions, rows):
     """Write immutable chunks while the caller holds its retained-reader fence.
 
     Return SQL metadata only. A rejected snapshot leaves collectible orphan
@@ -231,7 +254,7 @@ def prepare(conn, kind, dimensions, rows):
             raise ValueError('Embedding bytes differ from the declared dimensions')
         raw = HEADER.pack(MAGIC, len(batch), dimensions) + b''.join(row[1] for row in batch)
         publication = hashlib.sha256(raw).digest()
-        fao.write(directory(conn) / relative(kind, publication), raw)
+        fao.write(root / relative(kind, publication), raw)
         for position, (subject, vector, built, order) in enumerate(batch):
             result.append((subject, dimensions, publication, position, order, built))
     return tuple(result)

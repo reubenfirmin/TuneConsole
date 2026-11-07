@@ -1,147 +1,93 @@
-# Retained-data restore experiment for #658
+# Retained-copy experiment history
 
-This is an experiment, not the production compactor. The source is the current
-native database, opened read-only. First make a complete SQLite backup and copy
-its referenced files. Build a new database from that backup. Leave the native
-database and application configuration in place. The user will decide when to
-start the application against the experimental database.
+Current [storage contracts](../../src/yt_playlist/core/storage-contracts.md) and
+[maintenance commands](../../src/yt_playlist/core/README.md) live with the code.
+[Managed file ownership](FAO-OWNERS.md) remains the file-format reference.
+The studies below used isolated actual-library copies. Evidence paths are relative
+to the repository root, ignored by Git and unavailable in a fresh checkout.
+Measurements describe those runs; they do not establish current UI latency or
+authorize changes to the native library.
 
-## Restore contract, version 1
+## 31 October 2026: retained restore
 
-Use the source's actual installed schema, including indexes, views, triggers,
-applied migration history, IDs, implicit row IDs, sequence high-water marks and
-SQLite application/user versions. Do not pretend historical preparation has
-completed, run historical migrations, or change feature/model version settings.
+The first restore tested whether domain retention could shrink schema 93 without
+changing installed schema/history, IDs, model inputs or current selections. It
+retained referenced recommendation/group closures and personal metadata choices,
+omitting only unreferenced legacy metadata expansions in the experimental copy.
+SQL fell from 2,752,774,144 to 1,221,394,432 bytes (55.6%); 19,700 files added
+400,001,304 logical bytes and the evidence ledger 97,540,522 bytes. Equivalence
+checks passed, but the roughly 1.72 GB logical result missed the few-hundred-MB
+goal. This established a retained baseline for owner-specific studies; native-app
+startup, continued writes and installation were separate outstanding checks.
+Evidence: `backups/658-restore-experiment-20261031/RESULTS.md`; reproducer: [run.py](run.py).
 
-Keep every row in every table except the explicitly filtered owners below.
-The generated `restore-plan.json` lists **every source table**, its exact SQL
-predicate, source/retained counts and the retained key sets. It is written before
-creating or filling the candidate. Any foreign-key dependency adds its parent;
-it cannot silently become a missing reference.
+## 1 November 2026: runtime metadata
 
-The unchanged owners therefore include all of the following:
+This study separated current catalog/scheduling facts from provider alternatives,
+manual decision history and native input documents, then evaluated retirement of
+empty historical locators. The retained baseline's SQL fell from 1,221,394,432 to
+808,685,568 bytes; 40,228 runtime files used 48,535,229 logical and 181,100,544
+allocated bytes. Complete baseline comparisons found no differences. A separate
+continued-write exercise accepted 100 provider results without SQL page growth
+and preserved manual override/reset after reopening. The result favored compact
+current SQL with owned files, while retaining explicit activation and independent
+recovery verification; schema opening was measured separately from app startup.
+Evidence: `backups/681-682-runtime-experiment-20261101-final/`;
+reproducer: [runtime_metadata.py](runtime_metadata.py).
 
-- Accounts, canonical identities, catalog entries, recording/video identifiers,
-  artist credits, album relationships, library and playlist membership, playlist
-  observation/change times, saved recipes, manual settings and corrections.
-- Exact and coarse listening history, player events, generated-play provenance,
-  ratings, feedback, served impressions, responses, offer contexts, model
-  comparisons, checkpoints, policy definitions and group evidence roots.
-- Model training inputs and existing published output: recording/artist vectors,
-  content encoders and fingerprints, taste modes/axes, learned weights,
-  selection-run history, musical source/profile state, discovery candidates and
-  current prepared recommendations. Preserve pending work and its versions;
-  report existing backlog separately from work caused by this restore.
-- **Vibe storage follows [#481](https://github.com/reubenfirmin/TuneConsole/issues/481):**
-  sampled attribute payloads stay in external JSON files. `sample_attributes`
-  stores collection identity and a filename, with no attribute payload. SQL
-  retains scores/history in `measurements`, `predictions` and `recording_vibes`,
-  and relationships in `measurement_samples`, `prediction_artists` and
-  `prediction_inputs`. The latter contains only `(prediction_id, measurement_id)`
-  links, not copies of model input attributes. Preserve all these rows, plus
-  playback runs, human development annotations and their relations/files.
-  Preserve exact external input bytes, scores, support, contributor IDs,
-  model/policy versions and current selections; do not import JSON payloads
-  into SQL during restoration.
-- Provider state, attempts and attempt fields, capture/selection heads, metadata
-  conflicts/candidates, hints and native musical-source observations. Retaining
-  these avoids presenting already-completed provider work as missing.
-- Recovery archives, action/undo state, unresolved evidence, durable publication
-  and preparation state. A missing selection does not erase personal evidence.
+## 1 November 2026: served facts
 
-## Explicit row filters
+Moving diagnostic provenance into owned files left captured reporting facts in SQL.
+All 43,382 impressions produced identical scorecards before preparation, afterward
+and after diagnostic expiry. The files consumed 57,831,143 logical and 184,291,328
+allocated bytes; historical SQL provenance still awaited separate retirement, so
+this did not establish net whole-database savings. The result supported reports
+that remain independent of expiring diagnostics. Evidence:
+`backups/687-served-facts-report.json`; reproducer: [served_facts.py](served_facts.py).
 
-1. **Recommendation generations and pools.** Use the existing
-   `core.db_rebuild.build.plan` domain rules: preserve current heads, explicit references,
-   live builds and any additional FK owner. Copy the dependent outputs,
-   candidate rows, surfaces, bands and framing for those roots. Do not truncate
-   candidate pools or remove low-volume eligible genres.
-2. **Musical groups.** Start with the existing group-retention closure: current
-   head, evidence generations/versions, retained recommendations, live builds,
-   first alias publications and required historical lineage. Preserve complete
-   selected generation memberships, assignments, representatives, graph rows,
-   manifests and input records. Expand parent/child closure until stable; do not
-   drop a referenced alias or an ancestor merely to reach a size target.
-   Scratch retirement-walk tables are emptied; they are resumable cleanup work,
-   not learning evidence. Keep the roots-complete flag and epoch unchanged.
-3. **`metadata_observations`.** Keep all non-legacy observations, all
-   `legacy_choice` observations, every observation referenced by a retained
-   owner, and the complete `derived_from_observation_id` ancestry. Other
-   historical legacy logs/findings/attempt expansions remain in the complete
-   backup rather than the experimental database. This is a deliberate
-   experimental history omission; it is not approval for production deletion.
-4. **`metadata_legacy_records`.** Keep records referenced by retained
-   observations and records belonging to retained deliveries. Preserve the
-   original legacy owner/ID/disposition without inventing provenance.
-5. **`metadata_deliveries`.** Keep all non-legacy deliveries and every delivery
-   referenced by retained observations, native source evidence, provider state,
-   attempts, artist credits, captures, identifiers or retained legacy records.
-   Only unreferenced legacy expansions are left out of the experimental DB.
+## 1 November 2026: mix choices
 
-All FK parent closure is mandatory. If it keeps more history than expected, the
-report must expose that cost instead of silently weakening these rules.
+Frozen displayed descriptors replaced historical group pins as broad choice
+evidence. Target-owner SQL/index allocation fell from 292,913,152 to 9,322,496
+bytes, with two repacked group files totaling 440,970 bytes. All 437 current
+groups, 25,225 memberships, 117 menus and 1,539 response events remained equal;
+late and repeated writes worked. There were 183 descriptors sharing 163 genre
+sets and 13 legacy options with incomplete provenance, excluded from preference
+learning. This supported releasing obsolete group roots after projection without
+inventing track-level precision. Evidence: `backups/688-mix-choices-report.json`;
+reproducer: [mix_choices.py](mix_choices.py).
 
-## Files and backup custody
+## 1 November 2026: credit and mode history
 
-The full backup contains the unchanged SQL snapshot, exact bytes of every
-referenced file, an original-path mapping, SHA-256 hashes, file sizes and the
-source schema/sequence metadata. Include sample and annotation files, policies,
-group definitions/metadata/lineage packs, prepared recommendation documents,
-metadata response packs, descriptions, collection feedback, legacy archives,
-action backups, selected preparation files and nested preparation-plan pages.
-Also preserve the recommendation evidence ledger and deferred playback inbox
-when present. Do not copy credentials into reports.
+Permanent delivery replay receipts allowed obsolete artist captures to retire;
+explicit tombstones allowed inactive taste-mode payloads to shrink while IDs and
+labels survived. After simulated 31-day expiry and compaction, targeted SQL/index
+allocation fell by 72,364,032 bytes with no external files added. Fourteen active
+modes remained byte-identical, selected artist projections matched, and PPR ranks
+matched for 2,800 items. Replay after expiry preserved original outcomes; 2,172
+inactive mode payloads retired. This supported bounded explicit retention rather
+than another cold archive. Evidence: `backups/691-698-runtime-history-report.json`;
+reproducer: [runtime_history.py](runtime_history.py).
 
-The candidate gets private copies of its referenced files. Rewrite only the
-candidate's file paths, keeping every referenced byte range, digest and offset
-unchanged. Whole immutable packs may contain unselected ranges: report their
-physical size honestly. Keep the original backup and its files untouched.
+## Vibe version normalization
 
-## Measurements and checks before startup
+The companion [vibe_storage.py](vibe_storage.py) study isolates normalization of
+three repeated version strings into immutable IDs, retaining exact decoded
+versions, original measurements, samples and current outputs. Its protocol also
+separates 180-day superseded-summary retention from 30-day contributor details.
+The previous note recorded the contract without a dated measurement report;
+no additional savings or runtime acceptance is claimed here.
 
-- Record backup, planning, schema, copy, index, file-copy and verification times
-  separately, plus SQL/index/file logical and allocated sizes.
-- Check SQLite integrity, foreign keys, exact retained row values/types/IDs,
-  preserved sequences/schema/history, referenced file bytes and source custody.
-- Compare training baskets, listening counts, current model/version settings,
-  current vibe scores and selected recommendation/group heads with the backup.
-- Record pending queues and maintenance eligibility before startup so existing
-  unfinished work is distinguishable from restore-induced work.
-- Keep a pristine candidate as well as the future startup copy. App startup and
-  ongoing writes must not alter the backup or the pristine comparison baseline.
+## Reproducing a study
 
-Startup observations, any failing assumption and later contract revisions belong
-in the experiment report and #658. A small file alone does not establish success.
+For owner studies, run `uv run python -m experiments.retained_copy.MODULE
+SOURCE.db NEW_REPORT.json`; `runtime_metadata` instead takes a new output
+directory. Inspect the selected module's `--help` first. Use isolated sources
+with their owned files available and new report destinations.
 
-## Running this experiment
-
-The October 31 experiment lives in `backups/658-restore-experiment-20261031`.
-Its `RESULTS.md` records measurements, existing backlog and remaining checks.
-`original.db` and `backup-files` are the complete recovery point. `candidate`
-is the pristine retained baseline. `startup` is a separate app home with private
-file copies, a restored playback inbox, the full evidence ledger and the native
-configuration copied into it. Only `startup` should be opened by the application.
-
-From this checkout, the commands used to prepare it are:
-
-```sh
-.venv/bin/python -m experiments.retained_copy.run backup backups/658-restore-experiment-20261031 --source /home/rfirmin/.local/share/yt-playlist/state.db
-.venv/bin/python -m experiments.retained_copy.run plan backups/658-restore-experiment-20261031
-.venv/bin/python -m experiments.retained_copy.run build backups/658-restore-experiment-20261031
-.venv/bin/python -m experiments.retained_copy.run baseline backups/658-restore-experiment-20261031
-.venv/bin/python -m experiments.retained_copy.run stage backups/658-restore-experiment-20261031 --config /home/rfirmin/.config/yt-playlist/config.toml
-```
-
-These destinations already exist; do not repeat creation commands over them.
-The experiment deliberately rejects existing backup/candidate/startup destinations.
-
-When ready to observe startup, run:
-
-```sh
-YT_PLAYLIST_HOME="$PWD/backups/658-restore-experiment-20261031/startup" .venv/bin/python -m yt_playlist --host 127.0.0.1 --port 8765
-```
-
-Use an unused port if another instance is listening. This launches the checkout's
-application against the experimental home. Its log is
-`startup/logs/app.log`; it does not select the native database. Preserve
-`baseline-report.json` when interpreting any work shown by the application.
+The restore prototype uses `uv run python -m experiments.retained_copy.run` with
+`backup`, `plan`, `build`, `baseline` and `stage` in that order. `backup` takes
+`--source SOURCE.db`; `stage` takes `--config CONFIG.toml`. All actions take the
+same new experiment directory. Backup/candidate/startup creation rejects existing
+destinations. Keep the original and pristine candidate unchanged; any app startup
+uses only the separately staged home and its baseline report.

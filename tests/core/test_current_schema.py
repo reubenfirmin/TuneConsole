@@ -676,7 +676,7 @@ def test_initialized_state_matches_full_historical_chain(start_version):
 
 def test_existing_store_rebinds_owners_after_upgrade_and_both_memory_readers_use_them():
     from yt_playlist.core.store import Store
-    from yt_playlist.repos.compact_taste_groups import CompactTasteGroupsRepo
+    from yt_playlist.controllers.compact_taste_groups import CompactTasteGroups
     store = Store(':memory:')
     try:
         migrate(store.conn, registry=registry.MIGRATIONS[:69])
@@ -684,14 +684,14 @@ def test_existing_store_rebinds_owners_after_upgrade_and_both_memory_readers_use
         assert not store._compact_group_files
         migrate(store.conn, registry=registry.MIGRATIONS)
         store.init_schema()
-        assert isinstance(store.taste_groups, CompactTasteGroupsRepo)
+        assert isinstance(store.taste_groups, CompactTasteGroups)
         assert store._paid_descriptions and store._recommendation_files
         with store.read_view() as reader:
-            assert isinstance(reader.taste_groups, CompactTasteGroupsRepo)
+            assert isinstance(reader.taste_groups, CompactTasteGroups)
             assert reader._paid_descriptions and reader._recommendation_files
             assert reader.taste_groups.head() is None
         with store.read_snapshot() as snapshot:
-            assert isinstance(snapshot.store.taste_groups, CompactTasteGroupsRepo)
+            assert isinstance(snapshot.store.taste_groups, CompactTasteGroups)
             assert snapshot.store._paid_descriptions and snapshot.store._recommendation_files
             assert snapshot.store.taste_groups.head() is None
         repo = store.taste_groups

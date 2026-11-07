@@ -1,23 +1,25 @@
-"""Model publication, forecasts, and rollback snapshots.
-
-Selection changes span vectors and settings in one transaction. They live here so
-selection/report consumers do not depend on taste feedback or embedding storage.
-"""
+"""SQL records for model comparisons, forecast series and restore points."""
 import json
-from contextlib import nullcontext
 
-from yt_playlist.core import embeddings, recommendation_work
+from yt_playlist.core import recommendation_work
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
 
 
 class ModelSelectionRepo(Repo):
+    @synchronized
+    def delete_history(self):
+        with self.conn.atomic():
+            if self.conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='model_selection_heads'").fetchone():
+                self.conn.execute('DELETE FROM model_selection_heads')
+            for table in ('rec_model_previous_vectors', 'rec_model_forecasts', 'rec_model_selection_runs'):
+                self.conn.execute(f'DELETE FROM {table}')
+
     @snapshot_read
     def retained_pair_artifacts(self):
         protected = ({row[0] for row in self.conn.execute('SELECT artifact FROM model_pair_contexts')}
                      if self._store._model_projections else set())
-        surfaces = [row[0] for row in self.conn.execute(
+        return protected, [row[0] for row in self.conn.execute(
             "SELECT surface FROM rec_proposals WHERE surface LIKE 'model_pair:%'")]
-        return protected, surfaces
 
     @snapshot_read
     def comparison_constraints(self):
@@ -30,226 +32,132 @@ class ModelSelectionRepo(Repo):
         return values, standing
 
     @synchronized
-    def retire_product_trial(self, now, reason):
-        """Retire only the still-active legacy trial, preserving held evidence."""
-        with self.conn:
-            self.conn.execute('UPDATE rec_model_selection_runs SET result_json=result_json WHERE 0')
-            current = self._store.rec_proposals.get_proposals('model_live_comparison') or {}
-            if current.get('phase') not in ('preparing', 'observing'):
-                return
-            run = self.selection_run(current['run_id'])
-            if run:
-                run.update(status='retained', phase='complete', reason=reason, ended_at=now)
-                self.publish_selection(run['id'], json.dumps(run), None, run['previous'])
-            current.update(phase='retained', reason=reason, ended_at=now)
-            self._store.rec_proposals.publish_prepared_home(json.dumps(current), now, surface='model_live_comparison')
-            self._store.settings.publish_values({'rec_selection_live_run': ''})
-            monitor = self._store.rec_proposals.get_proposals('model_listening_monitor')
-            if monitor:
-                self._store.rec_proposals.publish_prepared_home(json.dumps({**monitor, 'complete': True}),
-                                                               now, surface='model_listening_monitor')
-
-    @synchronized
     def retire_model_display(self):
-        """Invalidate selected-model output in the caller's guarded transaction."""
-        if not self.conn.in_transaction:
-            raise RuntimeError('Model display retirement requires an outer transaction')
-        self.conn.execute("DELETE FROM rec_proposals WHERE surface IN ('home_choice','mode_bundles','fresh_pool')")
         from yt_playlist.core.recommendation_invalidation import clear_model_display
-        clear_model_display(self.conn)
+        with self.conn.atomic():
+            self.conn.execute("DELETE FROM rec_proposals WHERE surface IN ('home_choice','mode_bundles','fresh_pool')")
+            clear_model_display(self.conn)
 
     @lookup_read
-    def next_daily_at(self):
-        state = (recommendation_work.read(self.conn, 'daily_model_schedule')
-                 if recommendation_work.available(self.conn) else
-                 self._store.rec_proposals.get_proposals('daily_model_schedule'))
-        return (state or {}).get('next_at', 0)
+    def schedule_state(self):
+        available = recommendation_work.available(self.conn)
+        return available, recommendation_work.read(self.conn, 'daily_model_schedule') if available else None
 
     @synchronized
-    def schedule_daily(self, next_at, now):
-        """Participate in an enclosing guarded model publication when present."""
-        value = {'next_at': next_at}
-        unit = nullcontext() if self.conn.in_transaction else self.conn.atomic()
-        with unit:
-            if recommendation_work.available(self.conn):
-                recommendation_work.write(self.conn, 'daily_model_schedule', value, now)
-            else:
-                self._store.rec_proposals.publish_prepared_home(json.dumps(value), now,
-                                                                surface='daily_model_schedule')
+    def publish_schedule(self, next_at, now):
+        if not recommendation_work.available(self.conn):
+            return False
+        with self.conn.atomic():
+            recommendation_work.write(self.conn, 'daily_model_schedule', {'next_at': next_at}, now)
+        return True
 
-    @synchronized
+    @lookup_read
     def latest_daily_selection(self):
         row = self.conn.execute("SELECT id,result_json FROM rec_model_selection_runs "
             "WHERE json_extract(result_json,'$.kind')='daily' ORDER BY id DESC LIMIT 1").fetchone()
-        return {"id": row["id"], **json.loads(row["result_json"])} if row else None
+        return {'id': row['id'], **json.loads(row['result_json'])} if row else None
 
     @snapshot_read
     def comparison_activity(self, start, end):
-        """One first timestamp per independently played key in a half-open interval."""
         return {row[0]: row[1] for row in self.conn.execute(
             'SELECT identity_key,MIN(at) FROM listening_activity WHERE at>=? AND at<? '
             'GROUP BY identity_key', (start, end))}
 
-    @synchronized
-    def maintain_selection(self, now):
-        """Bound disposable pair/forecast storage, preserving live and held versions."""
-        keep = {str(row[0]) for row in self.conn.execute(
-            'SELECT id FROM rec_model_selection_runs ORDER BY id DESC LIMIT 12')}
-        for key in ('rec_selection_active_run', 'rec_selection_display_run', 'rec_selection_live_run'):
-            value = self._store.settings.get_setting(key)
-            if value:
-                keep.add(str(value))
-        try:
-            from yt_playlist.core import radio_storage
-            radio = radio_storage.load(self.conn)[0] or {}
-            if not radio.get('stopped') and (radio.get('comparison') or {}).get('run_id'):
-                keep.add(str(radio['comparison']['run_id']))
-        except (TypeError, ValueError):
-            pass
-        for surface in ('home_choice', 'model_album_assignment'):
-            held = self._store.rec_proposals.get_proposals(surface) or {}
-            assigned = held.get('comparison') or (held.get('choice_context') or {}).get('comparison') or {}
-            if assigned.get('run_id'):
-                keep.add(str(assigned['run_id']))
+    @snapshot_read
+    def retention_facts(self, limit, cutoff):
         from yt_playlist.core import recommendation_setting_outputs
-        if recommendation_setting_outputs.available(self.conn):
-            keep.update(str(row[0]) for row in self.conn.execute('SELECT run_ref FROM radio_seed_output WHERE run_ref IS NOT NULL'))
-        pairs = [row[0] for row in self.conn.execute("SELECT surface FROM rec_proposals WHERE surface LIKE 'model_pair:%'")]
-        with self.conn:
+        expired = [row[0] for row in self.conn.execute(
+            'SELECT DISTINCT run_id FROM rec_model_forecasts WHERE made_at<?', (cutoff,))]
+        return {'recent': [row[0] for row in self.conn.execute(
+                    'SELECT id FROM rec_model_selection_runs ORDER BY id DESC LIMIT ?', (limit,))],
+                'radio_seeds': [row[0] for row in self.conn.execute(
+                    'SELECT run_ref FROM radio_seed_output WHERE run_ref IS NOT NULL')]
+                    if recommendation_setting_outputs.available(self.conn) else [],
+                'pairs': [row[0] for row in self.conn.execute(
+                    "SELECT surface FROM rec_proposals WHERE surface LIKE 'model_pair:%'")],
+                'expired': [run for run_id in expired if (run := self.selection_run(run_id)) is not None],
+                'expired_ids': expired}
+
+    @synchronized
+    def prune(self, keep, surfaces, frozen, expired):
+        with self.conn.atomic():
             if self._store._model_projections:
                 from yt_playlist.core import model_projections
                 model_projections.clear(self.conn, keep)
-            for surface in pairs:
-                if surface.split(':')[1] not in keep:
-                    self.conn.execute('DELETE FROM rec_proposals WHERE surface=?', (surface,))
+            self.conn.executemany('DELETE FROM rec_proposals WHERE surface=?', [(surface,) for surface in surfaces])
             qs = ','.join('?' for _ in keep) or 'NULL'
             self.conn.execute(f'DELETE FROM rec_model_previous_vectors WHERE run_id NOT IN ({qs})', tuple(keep))
-            # Legacy diagnostic forecasts carry full candidate universes. An
-            # active restore point protects vectors, not an endless forecast log.
-            # Freeze the last published summary before retiring an entire source
-            # series; never recompute a misleading partial history from its tail.
-            expired = [row[0] for row in self.conn.execute(
-                'SELECT DISTINCT run_id FROM rec_model_forecasts WHERE made_at<?', (now - 180 * 86400,))]
-            for run_id in expired:
-                run = self.selection_run(run_id)
-                if run:
-                    followup = run.setdefault('followup', {})
-                    followup.update(frozen_at=now, reprocessing_available=False,
-                                    retention_days=180)
-                    self.conn.execute('UPDATE rec_model_selection_runs SET result_json=? WHERE id=?',
-                                      (json.dumps(run), run_id))
-                self.conn.execute('DELETE FROM rec_model_forecasts WHERE run_id=?', (run_id,))
+            self.conn.executemany('UPDATE rec_model_selection_runs SET result_json=? WHERE id=?', frozen)
+            self.conn.executemany('DELETE FROM rec_model_forecasts WHERE run_id=?', [(run,) for run in expired])
 
-    @synchronized
+    @lookup_read
     def selection_runs(self, limit=6):
-        return [{"id": r["id"], **json.loads(r["result_json"])} for r in self.conn.execute(
-            "SELECT id, result_json FROM rec_model_selection_runs ORDER BY id DESC LIMIT ?", (limit,))]
+        return [{'id': row['id'], **json.loads(row['result_json'])} for row in self.conn.execute(
+            'SELECT id,result_json FROM rec_model_selection_runs ORDER BY id DESC LIMIT ?', (limit,))]
 
-    @synchronized
+    @lookup_read
     def selection_run(self, run_id):
-        row = self.conn.execute("SELECT id,result_json FROM rec_model_selection_runs WHERE id=?", (run_id,)).fetchone()
-        return {"id": row["id"], **json.loads(row["result_json"])} if row else None
+        row = self.conn.execute('SELECT id,result_json FROM rec_model_selection_runs WHERE id=?', (run_id,)).fetchone()
+        return {'id': row['id'], **json.loads(row['result_json'])} if row else None
 
     @synchronized
     def start_selection(self, now, result):
-        cur = self.conn.execute(
-            "INSERT INTO rec_model_selection_runs(started_at,result_json,identity_version) VALUES (?,?,2)",
-            (now, json.dumps(result)))
-        self.conn.commit()
+        with self.conn.atomic():
+            cur = self.conn.execute(
+                'INSERT INTO rec_model_selection_runs(started_at,result_json,identity_version) VALUES (?,?,2)',
+                (now, json.dumps(result)))
         return cur.lastrowid
 
     @synchronized
-    def save_selection(self, run_id, result, *, rows=None):
-        """Publish vectors, their configuration, result, and exact rollback snapshot together."""
-        with self.conn:
-            self.conn.execute('UPDATE rec_model_selection_runs SET result_json=result_json WHERE id=?', (run_id,))
-            self.publish_selection(run_id, json.dumps(result), rows, result["selected"])
-
-    @synchronized
-    def publish_selection(self, run_id, encoded, rows, selected):
-        """Only prepared writes; the caller owns the transaction and stale-input guard."""
-        if not self.conn.in_transaction:
-            raise RuntimeError('Selection publication requires an outer transaction')
-        if rows is not None:
-            paused = self.conn.execute("SELECT value FROM settings WHERE key='rec_selection_paused'").fetchone()
-            if paused and paused["value"] == "1":
-                raise ValueError("Automatic selection was paused before publication")
+    def save_previous(self, run_id, rows):
+        with self.conn.atomic():
+            if self.conn.execute('SELECT 1 FROM rec_model_previous_vectors WHERE run_id=? LIMIT 1', (run_id,)).fetchone():
+                return
             self.conn.executemany('INSERT INTO rec_model_previous_vectors VALUES (?,?,?)',
-                ((run_id, key, vector) for key, vector in embeddings.rows(self.conn, 'rec_vectors')))
-            # A selection has its own objective/basis even when dimensions match.
-            embeddings.publish(self.conn, 'rec_vectors', rows, replace=True,
-                               model_version=f'selection:{run_id}')
-            self._store.settings.publish_values({"rec_embed_method": selected["method"],
-                "rec_dim": str(selected["dim"]), "rec_selection_active_run": str(run_id)})
-            self._store.settings.publish_values({'rec_fit_inputs':None})
-        self.conn.execute("UPDATE rec_model_selection_runs SET result_json=? WHERE id=?", (encoded, run_id))
+                                  [(run_id, key, vector) for key, vector in rows])
 
     @synchronized
-    def save_model_forecast(self, run_id, now, forecast):
-        run = self.selection_run(run_id)
-        if run and (run.get('followup') or {}).get('frozen_at') is not None:
-            return
-        self.conn.execute("INSERT OR IGNORE INTO rec_model_forecasts VALUES (?,?,?)",
-                          (run_id, now, json.dumps(forecast)))
+    def write_result(self, run_id, encoded):
+        self.conn.execute('UPDATE rec_model_selection_runs SET result_json=? WHERE id=?', (encoded, run_id))
         self.conn.commit()
 
     @synchronized
+    def insert_forecast(self, run_id, now, encoded):
+        self.conn.execute('INSERT OR IGNORE INTO rec_model_forecasts VALUES (?,?,?)', (run_id, now, encoded))
+        self.conn.commit()
+
+    @lookup_read
     def model_forecasts(self, run_id):
-        return [{"made_at": r["made_at"], **json.loads(r["forecast_json"])} for r in self.conn.execute(
-            "SELECT made_at,forecast_json FROM rec_model_forecasts WHERE run_id=? ORDER BY made_at", (run_id,))]
+        return [{'made_at': row['made_at'], **json.loads(row['forecast_json'])} for row in self.conn.execute(
+            'SELECT made_at,forecast_json FROM rec_model_forecasts WHERE run_id=? ORDER BY made_at', (run_id,))]
+
+    @snapshot_read
+    def restore_facts(self, run_id):
+        row = self.conn.execute('SELECT result_json,identity_version FROM rec_model_selection_runs WHERE id=?',
+                                (run_id,)).fetchone()
+        return {'identity_version': row['identity_version'], 'result': json.loads(row['result_json']),
+                'vectors': [tuple(row) for row in self.conn.execute(
+                    'SELECT identity_key,vec FROM rec_model_previous_vectors WHERE run_id=?', (run_id,))]} if row else None
 
     @synchronized
-    def restore_model_selection(self, run_id, now):
-        row = self.conn.execute("SELECT result_json,identity_version FROM rec_model_selection_runs WHERE id=?", (run_id,)).fetchone()
-        if not row:
-            return False
-        if row['identity_version'] != 2:
-            raise ValueError('This model predates a catalog identity change. Rebuild a model before restoring it.')
-        result = json.loads(row["result_json"])
-        if result.get("status") != "applied" or not self.conn.execute(
-                "SELECT 1 FROM rec_model_previous_vectors WHERE run_id=? LIMIT 1", (run_id,)).fetchone():
-            return False
-        with self.conn:
-            self.conn.execute('UPDATE rec_model_selection_runs SET result_json=result_json WHERE id=?', (run_id,))
-            rows = list(self.conn.execute('SELECT identity_key,vec FROM rec_model_previous_vectors WHERE run_id=?',
-                                          (run_id,)))
-            embeddings.publish(self.conn, 'rec_vectors', rows, replace=True,
-                               model_version=f'selection-restore:{run_id}')
+    def clear_restored_outputs(self):
+        from yt_playlist.core.recommendation_invalidation import clear_model_display
+        with self.conn.atomic():
             self.conn.execute("DELETE FROM rec_proposals WHERE surface IN "
-                "('home_choice','mode_bundles','fresh_pool',"
-                "'model_live_comparison','model_album_assignment','model_listening_monitor','model_live_report') OR surface LIKE 'model_pair:%'")
+                "('home_choice','mode_bundles','fresh_pool','model_live_comparison','model_album_assignment',"
+                "'model_listening_monitor','model_live_report') OR surface LIKE 'model_pair:%'")
             if self._store._model_comparison_state:
                 from yt_playlist.core import model_comparison_state
                 model_comparison_state.clear(self.conn)
             if self._store._model_projections:
                 from yt_playlist.core import model_projections
                 model_projections.clear(self.conn)
-            from yt_playlist.core.recommendation_invalidation import clear_model_display
             clear_model_display(self.conn)
             if self._store._recommendation_reports:
                 from yt_playlist.core import recommendation_reports
                 recommendation_reports.clear(self.conn, ('model_live_report',))
-            self._store.settings.publish_values({
-                "rec_embed_method":result["previous"]["method"],
-                "rec_dim":str(result["previous"]["dim"]),
-                "rec_selection_paused":"1", "rec_selection_restore":"", "rec_selection_active_run":"",
-                "rec_selection_display_run":str(run_id)})
-            result.update(status="restored", restored_at=now, reason="Previous model restored at your request.")
-            self.conn.execute("UPDATE rec_model_selection_runs SET result_json=? WHERE id=?",
-                              (json.dumps(result), run_id))
-            latest = self.conn.execute("SELECT id,result_json FROM rec_model_selection_runs ORDER BY id DESC LIMIT 1").fetchone()
-            if latest["id"] != run_id:
-                last = json.loads(latest["result_json"])
-                last["ended_at"] = now
-                if last.get('kind') == 'product' and last.get('status') == 'running':
-                    last.update(status='retained', phase='complete',
-                                reason='Comparison ended when the previous model was restored.')
-                self.conn.execute("UPDATE rec_model_selection_runs SET result_json=? WHERE id=?",
-                                  (json.dumps(last), latest["id"]))
-        return True
 
-    @synchronized
+    @lookup_read
     def selection_play_keys(self, start, end):
-        """Only exact play timestamps can establish outcomes after a saved forecast."""
-        return {r["identity_key"] for r in self.conn.execute(
-            "SELECT DISTINCT identity_key FROM play_event_subjects WHERE played_at>=? AND played_at<?", (start, end))}
+        return {row['identity_key'] for row in self.conn.execute(
+            'SELECT DISTINCT identity_key FROM play_event_subjects WHERE played_at>=? AND played_at<?', (start, end))}

@@ -12,7 +12,7 @@ from yt_playlist.core import choice_evidence_files, group_documents, group_stora
 from yt_playlist.core.migrations import v070_policy_documents as policies, v071_album_descriptions as descriptions
 from yt_playlist.core.migrations import v072_compact_groups as migration
 from yt_playlist.core.migrations.runner import Context, MigrationError
-from yt_playlist.repos import group_queries, policy_storage
+from yt_playlist.core import group_reads as group_queries
 
 
 @contextmanager
@@ -455,7 +455,7 @@ def test_recovery_bundle_preserves_group_and_policy_owners_together(predecessor,
     apply(conn)
     members = {version: list(group_storage.version_rows(conn, version))
                for version, in conn.execute('SELECT id FROM group_versions')}
-    configs = {version: policy_storage.configuration(conn, version)
+    configs = {version: policy_documents.configuration(conn, version)
                for version, in conn.execute('SELECT version FROM recommendation_policies')}
     assert members and all(members.values()) and configs
     links = {table: list(map(tuple, conn.execute('SELECT id,policy_version FROM '+table+' ORDER BY id')))
@@ -481,7 +481,7 @@ def test_recovery_bundle_preserves_group_and_policy_owners_together(predecessor,
         custody.restore_files(restored, manifests)
         migration.validate(restored)
         assert {version: list(group_storage.version_rows(restored, version)) for version in members} == members
-        assert {version: policy_storage.configuration(restored, version) for version in configs} == configs
+        assert {version: policy_documents.configuration(restored, version) for version in configs} == configs
         assert {table: list(map(tuple, restored.execute('SELECT id,policy_version FROM '+table+' ORDER BY id')))
                 for table in links} == links
         assert not restored.execute('PRAGMA foreign_key_check').fetchall()

@@ -3,12 +3,12 @@ import json
 import time
 
 from yt_playlist.core.activity import WorkBudgetExceeded
-from yt_playlist.core import prepared_inputs, profile_files
-from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.repos.base import synchronized
+from yt_playlist.repos.group_preparation import GroupPreparationRepo
 from yt_playlist.repos import group_publication
 
 
-class TasteGroupsRepo(Repo):
+class TasteGroupsRepo(GroupPreparationRepo):
     staged_tables = group_publication.STAGED_TABLES
 
     @synchronized
@@ -30,21 +30,6 @@ class TasteGroupsRepo(Repo):
         row = self.conn.execute('SELECT g.generation,g.serial,g.policy FROM rec_group_generations g '
             'JOIN rec_group_head h ON h.generation=g.generation WHERE h.id=1').fetchone()
         return dict(row) if row else None
-
-    @synchronized
-    def preparation_progress(self):
-        # These are separate units: a source job may affect many recordings.
-        prepared = self.conn.execute('SELECT COUNT(*) FROM prepared_recording_inputs '
-            'WHERE library_present=1').fetchone()[0]
-        pending_recordings = self.conn.execute('SELECT COUNT(*) FROM rec_content_pending').fetchone()[0]
-        sources = {row[0]: row[1] for row in self.conn.execute(
-            'SELECT s.scope,COUNT(*) FROM rec_musical_pending p '
-            'JOIN rec_musical_sources s USING(source_key) GROUP BY s.scope')}
-        return {'prepared': prepared, 'pending_recordings': pending_recordings, 'sources': sources}
-
-    @synchronized
-    def serial(self):
-        return self.conn.execute('SELECT serial FROM rec_group_clock WHERE id=1').fetchone()[0]
 
     @synchronized
     def head(self, *, members=False):
@@ -72,40 +57,6 @@ class TasteGroupsRepo(Repo):
                     self.conn.execute('SELECT * FROM rec_group_members WHERE version=?', (row['version'],))}
             result.append(group)
         return result
-
-    @synchronized
-    def corpus_size(self, max_rows):
-        size = self.conn.execute('SELECT COUNT(*) FROM prepared_recording_inputs '
-                                 'WHERE library_present=1').fetchone()[0]
-        if size > max_rows:
-            raise WorkBudgetExceeded('Musical group corpus exceeds admitted memory')
-        return size
-
-    @synchronized
-    def corpus_page(self, after='', *, limit=128, max_bytes=8 * 1024 * 1024):
-        # Bound raw bytes before fetching/decoding. Callers project each page and
-        # release provenance trees, retaining only compact per-recording features.
-        profile_size = (profile_files.recording_size_sql() if profile_files.available(self.conn) else 'length(CAST(m.payload AS BLOB))')
-        size = self.conn.execute('SELECT COALESCE(SUM(bytes),0) FROM (SELECT '
-            + prepared_inputs.byte_bound() + '+COALESCE((' + profile_size + ')*4,0) bytes '
-            'FROM prepared_recording_inputs p JOIN recordings r ON r.id=p.recording_id '
-            'LEFT JOIN rec_musical_profiles m ON m.identity_key=r.identity_key '
-            'WHERE p.library_present=1 AND r.identity_key>? '
-            'ORDER BY r.identity_key LIMIT ?)', (after, limit)).fetchone()[0]
-        if size > max_bytes:
-            raise WorkBudgetExceeded('Musical group page exceeds admitted memory')
-        rows = self.conn.execute('SELECT r.identity_key,p.*,m.payload profile FROM prepared_recording_inputs p '
-            'JOIN recordings r ON r.id=p.recording_id LEFT JOIN rec_musical_profiles m ON m.identity_key=r.identity_key '
-            'WHERE p.library_present=1 AND r.identity_key>? '
-            'ORDER BY r.identity_key LIMIT ?', (after, limit)).fetchall()
-        cache = profile_files.Cache()
-        return [(r['identity_key'], prepared_inputs.payload(r), self._profile(r, cache))
-                for r in rows]
-
-    def _profile(self, row, cache):
-        if row['profile'] is None:
-            return None
-        return json.loads(profile_files.read(self.conn, 'recording', row['identity_key'], cache=cache))
 
     @synchronized
     def lineage(self):
@@ -170,35 +121,27 @@ class TasteGroupsRepo(Repo):
 
     @synchronized
     def finish_staged(self, generation, owner):
-        """Only the guarded snapshot publisher may advance the last-good head."""
-        group_publication.finish(self.conn, generation, owner)
-
-    @synchronized
-    def finish_preparation(self, generation, owner, serial, now):
-        self.finish_staged(generation, owner)
-        from yt_playlist.core import group_preparation_state
-        if group_preparation_state.available(self.conn):
-            group_preparation_state.checkpoint(self.conn, generation, serial, now)
+        with self.conn.atomic(join=True):
+            group_publication.finish(self.conn, generation, owner)
 
     @synchronized
     def publish(self, prepared):
-        """Atomic import for bounded callers; background preparation uses stage/finish_staged."""
-        if not self.conn.in_transaction:
-            raise RuntimeError('Group publication requires an outer transaction')
-        generation = prepared['generation']
-        self.conn.execute('INSERT INTO rec_group_generations VALUES (?,?,?,?,?,?)',
-                          group_publication.generation_row(prepared))
-        for group in prepared['groups']:
-            self.conn.execute('INSERT OR IGNORE INTO rec_group_identities VALUES (?,?,?)',
-                              (group['group_id'], group.get('legacy_mode_id'), prepared['at']))
-            self.conn.execute('INSERT INTO rec_group_definitions VALUES (?,?,?,?,?)',
-                              (group['version'], generation, group['group_id'], group['parent_version'],
-                               group['payload']))
-            self.conn.executemany('INSERT INTO rec_group_members VALUES (?,?,?,?)',
-                                 [(group['version'], *member) for member in group['members']])
-        self.conn.executemany('INSERT INTO rec_group_lineage VALUES (?,?,?,?)', prepared['lineage'])
-        self.conn.executemany('INSERT INTO rec_group_unknown VALUES (?,?,?)',
-                             [(generation, *row) for row in prepared['unknown']])
-        self.conn.executemany('INSERT INTO rec_group_graph VALUES (?,?,?,?,?)',
-                             [(generation, *row) for row in prepared['edges']])
-        group_publication.finish(self.conn, generation)
+        """Import bounded SQL rows; background preparation uses stage/finish_staged."""
+        with self.conn.atomic(join=True):
+            generation = prepared['generation']
+            self.conn.execute('INSERT INTO rec_group_generations VALUES (?,?,?,?,?,?)',
+                              group_publication.generation_row(prepared))
+            for group in prepared['groups']:
+                self.conn.execute('INSERT OR IGNORE INTO rec_group_identities VALUES (?,?,?)',
+                                  (group['group_id'], group.get('legacy_mode_id'), prepared['at']))
+                self.conn.execute('INSERT INTO rec_group_definitions VALUES (?,?,?,?,?)',
+                                  (group['version'], generation, group['group_id'], group['parent_version'],
+                                   group['payload']))
+                self.conn.executemany('INSERT INTO rec_group_members VALUES (?,?,?,?)',
+                                     [(group['version'], *member) for member in group['members']])
+            self.conn.executemany('INSERT INTO rec_group_lineage VALUES (?,?,?,?)', prepared['lineage'])
+            self.conn.executemany('INSERT INTO rec_group_unknown VALUES (?,?,?)',
+                                 [(generation, *row) for row in prepared['unknown']])
+            self.conn.executemany('INSERT INTO rec_group_graph VALUES (?,?,?,?,?)',
+                                 [(generation, *row) for row in prepared['edges']])
+            group_publication.finish(self.conn, generation)

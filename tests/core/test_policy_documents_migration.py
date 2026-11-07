@@ -16,7 +16,6 @@ from yt_playlist.core.migrations.runner import Context, MigrationError
 from yt_playlist.core.migrations import v070_policy_documents as migration
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.store import Store
-from yt_playlist.repos import policy_storage
 
 
 @pytest.fixture
@@ -80,7 +79,7 @@ def impression(conn, request, version, provenance):
 
 def test_compact_shared_configuration_and_external_versions_are_preserved(predecessor):
     conn = predecessor
-    before = {version: policy_storage.configuration(conn, version) for version in ('one', 'two', 'shared')}
+    before = {version: files.configuration(conn, version) for version in ('one', 'two', 'shared')}
     apply(conn)
     assert {version: configuration(conn, version) for version in before} == before
     assert conn.execute('SELECT count(*) FROM recommendation_policy_bodies').fetchone()[0] == 1

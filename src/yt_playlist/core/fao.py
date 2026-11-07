@@ -253,8 +253,8 @@ class _PreparedFile:
             self.pending = None
             if self.durable:
                 _sync_directory(self.path.parent)
-        self.lease.__exit__(None,None,None)
-        self.lease = None
+        # The prepared inode remains leased after rename until this context
+        # closes. A caller can publish its SQL reference without a deletion gap.
 
     def close(self):
         if self.lease is not None:

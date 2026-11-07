@@ -10,8 +10,8 @@ from tests.repos.test_compact_group_publication import database
 from tests.repos.test_bundle_storage import recommendations, historical_recommendations, collect
 from tests.repos.test_typed_recommendation_publication import plan, publish as publish_plan
 from yt_playlist.rec import measurement, mode_surfaces
-from yt_playlist.repos import policy_storage, recommendation_publication as publication
-from yt_playlist.core import recommendation_pools as pools
+from yt_playlist.repos import recommendation_publication as publication
+from yt_playlist.core import policy_config, recommendation_pools as pools
 from yt_playlist.rec import recommendation_retirement
 
 
@@ -97,7 +97,7 @@ def test_priority_drain_resumes_orphan_children_and_preserves_live_shared_and_bu
         return result
 
     monkeypatch.setattr(publication, 'cleanup_pools', prefix)
-    monkeypatch.setattr(policy_storage, 'SCAN_LIMIT', 2)
+    monkeypatch.setattr(policy_config, 'SCAN_LIMIT', 2)
     if interrupted:
         with pytest.raises(OSError, match='committed prefix'):
             recommendation_retirement.drain(store, 10000)
@@ -157,18 +157,23 @@ def test_staged_worker_publishes_captured_policy_generation_and_settings_togethe
     monkeypatch.setattr(measurement, 'serving_policy', lambda reader, now: (
         'new-inputs', {'algorithm': 'new-captured-inputs', 'params': {'minimum': 3}, 'ranker': 'lane'}))
     claim, claims = store.recommendations.claim, []
-    def capture_claim(plan, **kwargs):
-        claims.append((plan, kwargs['policies'], kwargs['bases']))
+    record, batches = store.rec_ledger.record_prepared_policies, []
+    def capture_policies(rows, bases):
+        batches.append((rows, bases))
         if retired:
             with store.conn:
                 store.conn.execute('DELETE FROM recommendation_heads WHERE generation_id=?', (generation,))
             collect(store)
             assert not store.conn.execute('SELECT 1 FROM recommendation_pools').fetchone()
             with store.conn:
-                result = policy_storage.prune(store.conn, [head['policy_version'], first_pool], None)
+                result = store.rec_ledger.prune_policies([head['policy_version'], first_pool], None)
             assert result['policies_deleted'] == 2
             assert store.rec_ledger.policy_configuration(first_pool) is None
+        return record(rows, bases)
+    def capture_claim(plan, **kwargs):
+        claims.append((plan, *batches[-1]))
         return claim(plan, **kwargs)
+    monkeypatch.setattr(store.rec_ledger, 'record_prepared_policies', capture_policies)
     monkeypatch.setattr(store.recommendations, 'claim', capture_claim)
     assert publish(store, now=11) != generation
     plan, rows, bases = claims[0]
@@ -187,7 +192,7 @@ def test_staged_worker_publishes_captured_policy_generation_and_settings_togethe
     store._recommendation_revalidations = False
     assert store.recommendations.pool('home', 'all', 'wheelhouse')['source_policy_version'] == first_pool
     with store.conn:
-        assert policy_storage.prune(store.conn, [row[0] for row in rows], None)['policies_deleted'] == 0
+        assert store.rec_ledger.prune_policies([row[0] for row in rows], None)['policies_deleted'] == 0
     assert store.conn.execute('SELECT count(*) FROM recommendation_candidates').fetchone()[0] == before
     assert store.settings.get_setting('rec_candidate_preferences') == '11'
 
@@ -249,7 +254,7 @@ def test_ordinary_worker_uses_typed_publication_without_serializing_a_legacy_bun
     monkeypatch.setattr(mode_surfaces, '_calculate_bundles', calculate)
     monkeypatch.setattr(mode_surfaces, 'encode_proposals', lambda *args: pytest.fail('Encoded the obsolete bundle'))
     if capacity == 'invalid-batch':
-        monkeypatch.setattr(policy_storage, 'MAX_BATCH_BYTES', 4)
+        monkeypatch.setattr(policy_config, 'MAX_BATCH_BYTES', 4)
         with pytest.raises(ValueError, match='publication budget'):
             mode_surfaces.prepare_bundles(store, 11)
         assert not hasattr(store, '_deferred_bundles')
@@ -258,9 +263,9 @@ def test_ordinary_worker_uses_typed_publication_without_serializing_a_legacy_bun
     if capacity != 'available':
         count = store.conn.execute('SELECT count(*) FROM recommendation_policies WHERE served=0').fetchone()[0]
         additional = 1
-        monkeypatch.setattr(policy_storage, 'MAX_UNUSED_VARIANTS', count + additional)
+        monkeypatch.setattr(policy_config, 'MAX_UNUSED_VARIANTS', count + additional)
         for now in (11, 12, 13):
-            with pytest.raises(policy_storage.PolicyCapacityFull, match=f'batch adds {additional+1} variants'):
+            with pytest.raises(policy_config.PolicyCapacityFull, match=f'batch adds {additional+1} variants'):
                 mode_surfaces.prepare_bundles(store, now)
             assert store.recommendations.head('home')['id'] == first
             assert not store.conn.in_transaction
@@ -273,7 +278,7 @@ def test_ordinary_worker_uses_typed_publication_without_serializing_a_legacy_bun
         if capacity == 'changed-inputs':
             store.settings.set_setting('bundle-guard', 'changed')
         with store.conn:
-            pruned = policy_storage.prune(store.conn, ['expired'], None)
+            pruned = store.rec_ledger.prune_policies(['expired'], None)
         assert pruned['policies_deleted'] == 1
         result = mode_surfaces.prepare_bundles(store, 14)
         assert result['all']['wheelhouse'][0]['key'] == 'one'

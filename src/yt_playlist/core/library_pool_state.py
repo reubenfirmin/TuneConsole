@@ -34,6 +34,15 @@ def decode(surface, raw):
 
 def prepare(conn, surface, value, at, *, policy=None, input_revision=None, pending_policies=(), capture_only=False):
     from yt_playlist.rec import bundle_storage
+    inputs = publication_inputs(surface, value, at, policy=policy, input_revision=input_revision,
+                                pending_policies=pending_policies, capture_only=capture_only)
+    if inputs is None:
+        return None
+    bundle, options = inputs
+    return bundle_storage.prepare(conn, bundle, None, **options)
+
+
+def publication_inputs(surface, value, at, *, policy=None, input_revision=None, pending_policies=(), capture_only=False):
     validate(surface, value)
     policies = {track.get('pool_policy') for track in value['tracks']}
     if len(policies) > 1 or (policies and None in policies):
@@ -43,7 +52,7 @@ def prepare(conn, surface, value, at, *, policy=None, input_revision=None, pendi
         return None
     created = finite(at) if at is not None else None if capture_only else time.time()
     lane = value['parameters']['lane']
-    return bundle_storage.prepare(conn, {'all': {lane: value['tracks']}}, None,
+    return {'all': {lane: value['tracks']}}, dict(
         external_key='clicked-pool:' + uuid.uuid4().hex, policy_version=policy,
         input_revision=input_revision, created_at=created, pending_policies=pending_policies,
         home_surface=surface, allow_unobserved=capture_only)

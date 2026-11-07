@@ -3,7 +3,7 @@ import base64
 import zlib
 
 from yt_playlist.core.evidence_ledger import canonical
-from yt_playlist.repos.policy_storage import references
+from yt_playlist.core.policy_config import references
 
 
 def legacy_projection(run_id, value):

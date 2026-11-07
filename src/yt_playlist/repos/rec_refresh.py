@@ -22,8 +22,7 @@ class RecRefreshRepo(Repo):
 
     @synchronized
     def acknowledge(self, revision):
-        """Clear only the notification captured before this fit, in its publication transaction."""
-        if not self.conn.in_transaction:
-            raise RuntimeError("Refresh acknowledgement requires an outer transaction")
-        self.conn.execute("DELETE FROM rec_change_queue WHERE kind='refresh' AND item='' AND revision=?",
-                          (revision,))
+        """Commit acknowledgement of only the notification captured before this fit."""
+        with self.conn.atomic():
+            self.conn.execute("DELETE FROM rec_change_queue WHERE kind='refresh' AND item='' AND revision=?",
+                              (revision,))

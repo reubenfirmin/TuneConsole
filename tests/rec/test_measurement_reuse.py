@@ -10,7 +10,7 @@ from yt_playlist.core.activity import Activity
 from yt_playlist.core.store import Store
 from yt_playlist.rec import measurement, rec_params, scorecard
 from yt_playlist.rec.rec_worker import RecWorker
-from yt_playlist.repos.rec_model import RecModelRepo
+from yt_playlist.controllers.rec_model import RecommendationModel
 from tests.conftest import seed_catalog_track
 
 
@@ -36,11 +36,11 @@ def test_track_response_shares_policy_and_unchanged_models_skip_full_reads(store
     reads = []
     for method in ["get_rec_vectors", "get_rec_content_vectors", "get_rec_discovered_content_vectors",
                    "get_rec_artist_vectors", "get_rec_artist_content_vectors"]:
-        original = getattr(RecModelRepo, method)
+        original = getattr(RecommendationModel, method)
         def counted(repo, original=original, method=method):
             reads.append(method)
             return original(repo)
-        monkeypatch.setattr(RecModelRepo, method, counted)
+        monkeypatch.setattr(RecommendationModel, method, counted)
     policies, original = [], measurement.serving_policy
     def policy(*args, **kwargs):
         policies.append(True)

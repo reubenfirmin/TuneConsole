@@ -101,13 +101,13 @@ def test_interrupted_projection_import_retains_original_envelope_and_no_typed_pr
 
 def test_radio_seed_and_saved_queue_policies_have_sql_custody_without_json_scanning(store, monkeypatch):
     from yt_playlist.core import radio_storage
-    from yt_playlist.repos import policy_storage
+    from yt_playlist.core import policy_config
     store.rec_ledger.record_serving_policy('retained-policy', {'algorithm': 'saved-radio'}, -10000)
     store.settings.set_setting('radio_seed_offer', json.dumps({'tracks': [
         {'video_id': 'video', 'serving_context': {'pool_policy': 'retained-policy'}}]}))
     cutover(store)
-    monkeypatch.setattr(policy_storage, 'references', lambda value: pytest.fail('Current cleanup scanned JSON'))
-    candidates, _ = policy_storage.retention_candidates(store.conn, 100)
+    monkeypatch.setattr(policy_config, 'references', lambda value: pytest.fail('Current cleanup scanned JSON'))
+    candidates, _ = store.rec_ledger.policy_retention_candidates(100)
     assert 'retained-policy' not in candidates
     account = store.accounts.upsert_account('Main', 'main.json', None, True)
     state = {'episode_id': 'held-radio', 'identity': account, 'phase': 'playing', 'position': 0,
@@ -116,7 +116,7 @@ def test_radio_seed_and_saved_queue_policies_have_sql_custody_without_json_scann
     with store.conn.atomic():
         radio_storage.save(store.conn, state, expected=None, now=1)
     store.settings.delete_setting('radio_seed_offer')
-    candidates, _ = policy_storage.retention_candidates(store.conn, 100)
+    candidates, _ = store.rec_ledger.policy_retention_candidates(100)
     assert 'retained-policy' not in candidates
     with pytest.raises(sqlite3.IntegrityError), store.conn.atomic():
         store.conn.execute("DELETE FROM recommendation_policies WHERE version='retained-policy'")

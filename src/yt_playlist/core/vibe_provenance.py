@@ -9,13 +9,45 @@ from collections import OrderedDict
 from pathlib import Path
 import tempfile
 
-from . import fao, file_collection, vibe_model_files
+from . import fao, file_collection, vibe_model_files, vibe_models
 from .activity import check_stopping
-from yt_playlist.repos import vibe_models
 from .evidence_ledger import canonical
 
 CHUNK_ROWS = 128
 MAX_BYTES = 8 * 1024 * 1024
+
+
+class ProvenanceFiles:
+    def __init__(self, root):
+        self.root = Path(root)
+
+    def stage_many(self, values):
+        grouped, markers, originals = {}, [], set()
+        for pid, inputs, artists in values:
+            shared = vibe_model_files.is_receipt(inputs)
+            value = inputs if shared else {'inputs': sorted(set(inputs)), 'artists': sorted(set(artists))}
+            grouped.setdefault(pid // CHUNK_ROWS, {})[str(pid)] = value
+            markers.append((pid, hashlib.sha256(canonical(value)).digest() if shared else fingerprint(value['inputs']),
+                            len(canonical(value))))
+            if not shared:
+                originals.update(value['inputs'])
+        staged = []
+        try:
+            for pending in grouped.values():
+                pid = int(next(iter(pending)))
+                path = self.root / relative(pid)
+                source = fao.read(path, max_bytes=MAX_BYTES) if path.is_file() else None
+                records = _chunk_at(self.root, pid, content=source)
+                records.update(pending)
+                encoded = canonical({'format': 1, 'calculations': records})
+                staged.append(fao.prepare(path, source.replacing(encoded) if source is not None else encoded))
+            return staged, markers, sorted(originals)
+        except BaseException:
+            for publication in staged:
+                publication.close()
+            raise
+
+
 SQL = '''CREATE TABLE prediction_provenance (
     prediction_id INTEGER PRIMARY KEY REFERENCES predictions(id) ON DELETE CASCADE,
     input_fingerprint BLOB NOT NULL CHECK(length(input_fingerprint)=32),
@@ -147,7 +179,11 @@ def relative(pid):
 
 
 def _chunk(conn, pid, *, content=None):
-    path = directory(conn) / relative(pid)
+    return _chunk_at(directory(conn), pid, content=content)
+
+
+def _chunk_at(root, pid, *, content=None):
+    path = root / relative(pid)
     try:
         value = json.loads((content if content is not None else fao.read(path, max_bytes=MAX_BYTES)).bytes)
     except FileNotFoundError:
@@ -335,7 +371,7 @@ def publish_many(conn, values):
         # Rebuilds preserve compact shared identities rather than expanding each
         # manifest into an ordinary contributor graph. Borrowed FAO roots are
         # pinned for the rebuild's full lifetime by file_owners.readers.
-        vibe_models.publish_receipts(conn, shared, stage_receipts=stage_many, load_manifest=_model_manifest)
+        vibe_models.service(conn, ProvenanceFiles(directory(conn))).publish_receipts(shared)
 
 
 def prepare_batch(conn, limit=128):

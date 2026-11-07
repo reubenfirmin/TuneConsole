@@ -7,6 +7,13 @@ from yt_playlist.core import (album_tuning_state, content_preparation_state, exp
 
 
 class SettingsRepo(Repo):
+    @synchronized
+    def replace_keys(self, keys, values):
+        """Replace a captured set of ordinary taste parameter rows."""
+        with self.conn.atomic():
+            self.conn.executemany('DELETE FROM settings WHERE key=?', [(key,) for key in keys])
+            self.conn.executemany('INSERT INTO settings(key,value) VALUES (?,?)', values.items())
+
     def _publish_owned(self,values):
         workflows = {key:value for key,value in values.items() if workflow_settings.owns(key)} if workflow_settings.available(self.conn) else {}
         if workflows:

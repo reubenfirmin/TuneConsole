@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.conftest import seed_catalog_track
-from tests.musical_support import prepare_profiles, prepare_vibes
+from tests.musical_support import prepare_profiles
 from tests.prepared_fixture_support import prepared_template, roots
 from tests.recommendation_support import publish_bundles
 from yt_playlist.core import catalog
@@ -17,8 +17,8 @@ from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.util import genre_map
 from yt_playlist.rec import (fresh_pool, home_cards, home_prepared, home_vibe, library_pool,
                              mix_tuning, mode_surfaces, musical_character, musical_profiles,
-                             surfaces, vibe_pools, vibe_preparation)
-from yt_playlist.repos.musical_profiles import MusicalProfilesRepo
+                             musical_preparation, surfaces, vibe_pools, vibe_preparation)
+from yt_playlist.controllers.musical_profiles import MusicalProfiles
 
 # These are consumer contracts after unlock. Real startup/readiness is covered
 # separately by test_growth_readiness and test_growth_journey.
@@ -31,7 +31,7 @@ def controlled_profiles(monkeypatch):
     # Profile inference and its replacement publication remain real in the
     # independent profile-stamp test below and in test_vibe_prediction.
     profiles = {}
-    monkeypatch.setattr(MusicalProfilesRepo, 'by_keys',
+    monkeypatch.setattr(MusicalProfiles, 'by_keys',
                         lambda _repo, keys: {key: deepcopy(profiles[key]) for key in keys if key in profiles})
 
     def add(key, energy):
@@ -54,7 +54,7 @@ def character_consumer(monkeypatch, controlled_profiles):
         _recommendation_files=True, _read_only=True,
         settings=SimpleNamespace(get_setting=lambda key: None),
         recommendations=SimpleNamespace(framing=lambda *args, **kwargs: {}),
-        musical_profiles=MusicalProfilesRepo.__new__(MusicalProfilesRepo),
+        musical_profiles=MusicalProfiles.__new__(MusicalProfiles),
         rec_query=SimpleNamespace(track_genres=lambda keys: {}, track_decades=lambda keys: {},
             track_audio_features=lambda: {}, library_keys=lambda: set()),
         genres=SimpleNamespace(feature_axes=lambda genres:
@@ -120,6 +120,43 @@ def opportunities(store, opportunities_template):
     return opportunities_template.restore(store)
 
 
+@pytest.fixture(scope='module')
+def profile_stamp_template(_pristine_current_schema):
+    def build(store):
+        key = 'profile-stamp'
+        seed_catalog_track(store, key, 'Profile stamp', 'Artist', video_id=key,
+                           genre='Techno', energy=.05, mood_relaxed=.95)
+        publish_recording_profiles(store, 1000)
+        item = dict(key=key, video_id=key, title='Profile stamp', artist='Artist',
+                    album='', genre='Techno', score=1)
+        # Ranking is a completed lower-layer input to this publication/consumer
+        # contract. Keep real typed pools and profile files, without computing
+        # six presets over 48 subjects or preparing whole Home menus twice.
+        publish_bundles(store, {
+            'all': {'wheelhouse': [item]},
+            '_meta': {'full_pools': True, 'comfort_pool': 0},
+            '_vibes': {'version': home_vibe.VERSION,
+                       'pools': {'relax': {'wheelhouse': [item]}}}}, 1000)
+        with mix_tuning.adjusting_vibe(store, 1000):
+            store.settings.set_setting(home_vibe.SETTING, 'relax')
+        return {'library': [item], 'fresh': []}
+
+    with prepared_template(_pristine_current_schema, build) as template:
+        yield template
+
+
+def publish_recording_profiles(store, now):
+    # Keep actual catalog capture, inference, guarded publication and profile
+    # files. The progressive worker also runs independent Vibe prediction and
+    # content-vector producers, which this menu-stamp contract does not consume.
+    with store.read_snapshot() as snapshot:
+        pending = snapshot.store.prepared_content.pending()
+        rows = snapshot.store.prepared_content.capture(pending)
+        profiles = musical_preparation.recordings(snapshot.store, rows)
+        assert profiles
+        assert snapshot.publish_ordered(lambda: store.musical_profiles.publish_recordings(profiles, now))
+
+
 def test_fit_precedes_mode_heads_within_explicit_genres_in_every_cached_fallback(
         character_consumer, controlled_profiles, monkeypatch):
     store = character_consumer
@@ -171,8 +208,9 @@ def test_fit_precedes_mode_heads_within_explicit_genres_in_every_cached_fallback
 
 
 def test_prepared_profile_stamp_survives_a_new_profile_until_menu_publication(
-        store, opportunities, opportunities_template, file_backed_store):
-    template = opportunities_template
+        store, profile_stamp_template, file_backed_store):
+    template = profile_stamp_template
+    opportunities = template.restore(store)
     second = file_backed_store
     other_pools = template.restore(second)
     keys = [item['key'] for items in opportunities.values() for item in items]
@@ -203,19 +241,31 @@ def test_prepared_profile_stamp_survives_a_new_profile_until_menu_publication(
     # Candidate pools resolve current catalog/profile owners (#486). The
     # immutable output is the published Home menu (#487), not a new pick from
     # that pool. Exercise the actual publication and serving boundary.
-    payload = home_prepared.prepare(store, 1000)
+    def publish(now, previous=None):
+        tracks = vibe_pools.candidates(store, 'relax', 'wheelhouse')
+        tracks = home_cards._order_by_journey(store, tracks, 'warm_up', 1)
+        proto = home_cards._proto(store, 'wheelhouse', 'Your mix', tracks, now, vibe='relax')
+        proto['recipe'] = {'lane': 'wheelhouse', 'vibe': 'relax'}
+        result = home_cards.CardsResult([proto], [{'proto': proto, 'pool': None}],
+            None, None, [], [], home_cards._epoch(store, 'cards'), 'relax')
+        assert home_prepared.remember(store, previous, result, now)
+        with store.read_view() as reader:
+            return home_prepared.peek(reader, now)
+
+    payload = publish(1000)
     assert payload and payload['menus']
     service = home_cards.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__), genre_options=[])
     def served():
-        published = home_prepared.peek(store, 1000)
-        return next(p['tracks'] for p in home_prepared.cards(
-            store, published, 1000, service, record=False).protos if p['lane'] == 'wheelhouse')
+        with store.read_view() as reader:
+            published = home_prepared.peek(reader, 1000)
+            return next(p['tracks'] for p in home_prepared.cards(
+                reader, published, 1000, service, record=False).protos if p['lane'] == 'wheelhouse')
     before = served()
     track = before[0]
     tid = store.tracks.track_ids_for_videos([track['video_id']])[track['video_id']]
     with store.conn:
         catalog.choose_field(store.conn, tid, 'energy', .99)
-    prepare_profiles(store)
+    publish_recording_profiles(store, 1001)
     current = musical_character.load(store, [track['key']])[track['key']]
     assert current['digest'] != track['musical']['digest']
     after = served()
@@ -234,9 +284,8 @@ def test_prepared_profile_stamp_survives_a_new_profile_until_menu_publication(
         patch.setattr(journeys, 'journey_order', inspect)
         home_cards._order_by_journey(store, after, 'warm_up', 1)
     assert observed[track['key']] == musical_character.intensity(track)
-    prepare_vibes(store, 1001)
-    replacement = home_prepared.prepare(store, 1001)
-    assert replacement and replacement['generation'] != payload['generation']
+    replacement = publish(1001, payload)
+    assert replacement and replacement['built_at'] != payload['built_at']
     refreshed = served()
     assert refreshed != before
     profiles = musical_character.load(store, [t['key'] for t in refreshed])

@@ -170,7 +170,7 @@ def steps(store, *, seconds=10, input_seconds=2, memory_bytes=model.MEMORY_BYTES
                     store.vibe_predictions.publish_joint_model(vibe, generation, outcome,
                         files.measurement_ids(value) if value else [], staged, refresh)
 
-                return snapshot.publish(publish)
+                return snapshot.publish_ordered(publish)
         except (WorkBudgetExceeded, fao.FileBudgetExceeded, fao.FileChanged) as exc:
             attempts = previous.get('attempts', 0) + 1 if current(store, previous) else 1
             # No head is removed and no incomplete fit is recorded as ready.

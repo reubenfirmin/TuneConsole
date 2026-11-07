@@ -36,11 +36,8 @@ def stage(owner, conn):
 @pytest.mark.parametrize('append', [False, True])
 def test_preopened_runtime_readers_keep_exact_operation_state_and_revision(installed, append, monkeypatch):
     store, version = installed
-    # The account, playlist and original operation documents form one fixture
-    # prefix. Keep their ordinary writes, with one durable commit before the
-    # independent reader opens; preparation/publication keep their own commits.
-    with store.conn.atomic():
-        names, sources, recipe, state = seed(store, version, append=append)
+    # Each fixture owner commits before the independent reader opens.
+    names, sources, recipe, state = seed(store, version, append=append)
     other = Store(store._db_path)
     try:
         other.init_schema(defer_metadata=True)

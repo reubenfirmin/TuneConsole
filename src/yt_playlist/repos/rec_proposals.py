@@ -16,11 +16,22 @@ from yt_playlist.repos import proposal_cache, proposal_storage
 def encode_proposals(surface, value):
     if surface not in {'mode_bundles', 'fresh_pool'}:
         return json.dumps(value)
-    from yt_playlist.repos.policy_storage import references
+    from yt_playlist.core.policy_config import references
     return json_cache.encode(value, group_pools=surface == 'mode_bundles', references=references(value))
 
 
 class RecProposalsRepo(Repo):
+    @synchronized
+    def discard_learned_outputs(self):
+        from yt_playlist.core import recommendation_setting_outputs
+        from yt_playlist.core.recommendation_invalidation import clear_display, clear_findings
+        with self.conn.atomic():
+            self.conn.execute('DELETE FROM rec_proposals')
+            clear_display(self.conn)
+            clear_findings(self.conn)
+            if recommendation_setting_outputs.available(self.conn):
+                recommendation_setting_outputs.clear(self.conn)
+
     @snapshot_read
     def tv_artwork_observation(self, key):
         """Capture the request and result revisions before optional provider I/O."""

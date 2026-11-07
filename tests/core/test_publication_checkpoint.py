@@ -127,9 +127,10 @@ def test_projection_outputs_and_settings_are_committed_before_checkpoint(databas
                 external_key=expected, policy_version='projection-policy', input_revision=0,
                 created_at=2., pending_policies=policies)
             snapshot.release_reader()
-            build = database.recommendations.claim(prepared, policies=policies)
+            database.rec_ledger.record_prepared_policies(policies)
+            build = database.recommendations.claim(prepared)
             database.recommendations.stage(prepared, build)
-        # Staging also checkpoints; only the atomic head switch below is under
+        # Staging also checkpoints; only the ordered head/settings publication below is under
         # test, so discard observations from hidden preparation.
         observed.clear()
         def publish():
@@ -140,7 +141,7 @@ def test_projection_outputs_and_settings_are_committed_before_checkpoint(databas
             else:
                 database.recommendations.publish(build, 2.)
             database.settings.publish_values({'projection-version': '2'})
-        assert snapshot.publish(publish)
+        assert snapshot.publish_ordered(publish)
     assert observed == [(expected, '2')]
     assert database.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0] == 17
 

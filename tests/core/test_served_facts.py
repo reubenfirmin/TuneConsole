@@ -204,14 +204,16 @@ def test_idle_retention_defers_for_reader_and_keeps_monotonic_ids(store):
 
 
 @pytest.mark.parametrize('retry', (True, False))
-def test_failed_file_publication_rolls_back_and_recovers(store, monkeypatch, retry):
+def test_failed_file_publication_keeps_allocated_ids_and_recovers(store, monkeypatch, retry):
     activate(store)
-    original = facts.publish
-    def fail(*args, **kwargs):
-        original(*args, **kwargs)
+    files = store.rec_ledger.impressions.files
+    original = files.publish_many
+    def fail(rows):
+        assert not store.conn.in_transaction
+        original(rows)
         raise OSError('interrupted')
     with monkeypatch.context() as patch:
-        patch.setattr(facts, 'publish', fail)
+        patch.setattr(files, 'publish_many', fail)
         with pytest.raises(OSError, match='interrupted'):
             offer(store, 'one')
     assert not store.conn.execute('SELECT 1 FROM rec_served_impressions').fetchone()
@@ -220,23 +222,37 @@ def test_failed_file_publication_rolls_back_and_recovers(store, monkeypatch, ret
     assert path.exists()
     if retry:
         offer(store, 'one')
-        assert scorecard.served_recommendation(store, 1)['diagnostic_status'] == 'available'
+        assert scorecard.served_recommendation(store, 2)['diagnostic_status'] == 'available'
+        assert path.exists()  # Failed ID 1 remains an unowned file until expiry.
     else:
         now = time.time() + facts.RETAIN_SECONDS + 100
         with policy_documents.retained_reader(facts.directory(store.conn)):
             store.rec_ledger.maintain_impressions(now)
             assert path.exists()
         # Collection must rediscover an orphan without a SQL retirement receipt.
-        # Clear the in-memory traversal to exercise restart from its durable shard.
         store.rec_ledger.maintain_impressions(time.time())
-        current = getattr(store.conn, '_served_orphan_gc', None)
-        if current is not None and hasattr(current[1], 'close'):
-            current[1].close()
-            store.conn._close_callbacks.remove(current[1].close)
-        store.conn._served_orphan_gc = None
+        from yt_playlist.core.served_files import ServedFiles
+        # A fresh file accessor resumes its bounded cursor after restart.
+        store.rec_ledger.impressions.files = ServedFiles(files.root)
         for _ in range(3):
             store.rec_ledger.maintain_impressions(now)
         assert not path.exists()
+
+
+def test_failed_reporting_owner_write_keeps_id_and_file_for_bounded_orphan_collection(store):
+    import sqlite3
+    activate(store)
+    store.conn.execute("CREATE TEMP TRIGGER reject_served_fact BEFORE INSERT ON served_facts "
+                       "BEGIN SELECT RAISE(ABORT,'late SQL failure'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='late SQL failure'):
+        offer(store, 'one')
+    assert not store.conn.in_transaction
+    assert store.conn.execute('SELECT next_id FROM served_fact_state').fetchone()[0] == 2
+    assert not store.conn.execute('SELECT 1 FROM rec_served_impressions').fetchone()
+    assert (facts.directory(store.conn) / facts.relative(1)).exists()
+    store.conn.execute('DROP TRIGGER reject_served_fact')
+    offer(store, 'one')
+    assert scorecard.served_recommendation(store, 2)['diagnostic_status'] == 'available'
 
 
 @pytest.mark.parametrize('damage', ('checksum', 'meaning', 'incomplete'))

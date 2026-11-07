@@ -466,7 +466,7 @@ def operational_fields(conn, owner, key):
     return values
 
 
-def native_rows(conn, *, identity=None, source=None, recording=None, after=0, limit=100, max_bytes=8*1024*1024,
+def native_references(conn, *, identity=None, source=None, recording=None, after=0, limit=100, max_bytes=8*1024*1024,
                 store=None):
     identity = selected(conn,store=store) if identity is None else identity
     if identity is None:
@@ -490,7 +490,14 @@ def native_rows(conn, *, identity=None, source=None, recording=None, after=0, li
             (identity,recording,after,limit)).fetchall()
     if sum(row['byte_size'] for row in rows)>max_bytes:
         raise WorkBudgetExceeded('Native metadata page exceeds byte budget')
-    return [original(row) for row in rows]
+    return [dict(row) for row in rows]
+
+
+def native_rows(conn, *, identity=None, source=None, recording=None, after=0, limit=100, max_bytes=8*1024*1024,
+                store=None):
+    rows = native_references(conn, identity=identity, source=source, recording=recording, after=after, limit=limit,
+                             max_bytes=max_bytes, store=store)
+    return [original(row) for row in rows] if rows is not None else None
 
 
 def source_values(conn, key, max_bytes=256*1024, *, identity=None, store=None):

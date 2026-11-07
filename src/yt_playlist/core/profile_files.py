@@ -77,6 +77,65 @@ class Cache(dict):
         self.remaining = work_bytes
 
 
+class ProfileFiles:
+    def __init__(self, root):
+        self.root = Path(root)
+
+    def retained(self):
+        from .policy_documents import retained_reader
+        return retained_reader(self.root)
+
+    def write(self, kind, values):
+        """Publish bounded chunks for supplied exact owner IDs, without SQLite."""
+        values = list(values)
+        offset, references = 0, []
+        while offset < len(values):
+            batch, records, used = [], {}, 256
+            for key, identity, raw, version, digest in values[offset:offset + MAX_ROWS]:
+                if not isinstance(raw, str) or hashlib.sha256(raw.encode()).hexdigest() != digest:
+                    raise ValueError('Musical-profile body differs from its digest')
+                json.loads(raw)
+                record = {'body': raw, 'version': version, 'digest': digest}
+                size = len(canonical({str(identity): record})) + 1
+                if used + size > MAX_BYTES:
+                    if not batch:
+                        raise fao.FileBudgetExceeded('Musical profile exceeds the chunk byte budget')
+                    break
+                records[str(identity)] = record
+                batch.append((key, identity, len(raw.encode()), version, digest))
+                used += size
+            encoded = canonical({'format': 'musical-profile-1', 'kind': kind, 'profiles': records})
+            publication = hashlib.sha256(encoded).digest()
+            fao.write(self.root / relative(kind, publication), encoded)
+            references.extend((key, identity, publication, size, version, digest)
+                              for key, identity, size, version, digest in batch)
+            offset += len(batch)
+        return references
+
+    def read_page(self, kind, rows, *, max_bytes=MAX_BYTES):
+        """Decode detached exact heads, bounded by logical and chunk work bytes."""
+        rows = list(rows)
+        sizes = []
+        for key, raw, version, digest, identity, publication, byte_size in rows:
+            if not raw and publication is None:
+                raise fao.CorruptFile('Required musical-profile file head is missing')
+            sizes.append(len(raw.encode()) if raw else byte_size)
+        if sum(sizes) > max_bytes:
+            raise WorkBudgetExceeded('Musical profile page exceeds byte budget')
+        cache, result = Cache(), {}
+        for key, raw, version, digest, identity, publication, byte_size in rows:
+            if not raw:
+                value = _chunk_at(self.root, kind, publication, cache).get(str(identity))
+                if (not isinstance(value, dict) or set(value) != {'body', 'version', 'digest'}
+                        or not isinstance(value['body'], str) or (value['version'], value['digest']) != (version, digest)
+                        or len(value['body'].encode()) != byte_size
+                        or hashlib.sha256(value['body'].encode()).hexdigest() != digest):
+                    raise fao.CorruptFile('Musical profile differs from its exact head')
+                raw = value['body']
+            result[key] = json.loads(raw)
+        return result
+
+
 def definitions():
     yield ('recording_profile_files', 'CREATE TABLE recording_profile_files ('
         'recording_id INTEGER PRIMARY KEY REFERENCES recordings(id) ON DELETE CASCADE,'
@@ -136,10 +195,14 @@ def _physical_identity(path):
 
 
 def _chunk(conn, kind, publication, cache):
+    return _chunk_at(directory(conn), kind, publication, cache)
+
+
+def _chunk_at(root, kind, publication, cache):
     identity = kind, publication
     if cache is not None and identity in cache:
         return cache[identity]
-    path = directory(conn) / relative(kind, publication)
+    path = root / relative(kind, publication)
     physical = _physical_identity(path)
     identity_key = (str(path), publication, physical)
     encoded = None
@@ -223,11 +286,16 @@ def read_page(conn, kind, keys, *, max_bytes=MAX_BYTES):
     Grouping by publication also avoids evicting and reopening the same chunk
     when identity-key order interleaves several publications.
     """
+    return ProfileFiles(directory(conn)).read_page(kind, reference_rows(conn, kind, keys), max_bytes=max_bytes)
+
+
+def reference_rows(conn, kind, keys):
+    """SQL-only heads and inline predecessors, detached before file access."""
     keys = list(dict.fromkeys(keys))
     if len(keys) > 512:
         raise ValueError('Musical profile page exceeds 512 identities')
     if not keys:
-        return {}
+        return []
     table, column, marker, subject = KINDS[kind]
     marks = ','.join('?' for _ in keys)
     if available(conn):
@@ -240,25 +308,7 @@ def read_page(conn, kind, keys, *, max_bytes=MAX_BYTES):
     else:
         rows = conn.execute(f'SELECT {column},payload,version,digest,NULL,NULL,NULL '
             f'FROM {table} WHERE {column} IN ({marks})', keys).fetchall()
-    sizes = []
-    for key, raw, version, digest, identity, publication, byte_size in rows:
-        if not raw and publication is None:
-            raise fao.CorruptFile('Required musical-profile file head is missing')
-        sizes.append(len(raw.encode()) if raw else byte_size)
-    if sum(sizes) > max_bytes:
-        raise WorkBudgetExceeded('Musical profile page exceeds byte budget')
-    cache, result = Cache(), {}
-    for key, raw, version, digest, identity, publication, byte_size in rows:
-        if not raw:
-            value = _chunk(conn, kind, publication, cache).get(str(identity))
-            if (not isinstance(value, dict) or set(value) != {'body', 'version', 'digest'}
-                    or not isinstance(value['body'], str) or (value['version'], value['digest']) != (version, digest)
-                    or len(value['body'].encode()) != byte_size
-                    or hashlib.sha256(value['body'].encode()).hexdigest() != digest):
-                raise fao.CorruptFile('Musical profile differs from its exact head')
-            raw = value['body']
-        result[key] = json.loads(raw)
-    return result
+    return [tuple(row) for row in rows]
 
 
 def publish(conn, kind, values):
@@ -266,36 +316,23 @@ def publish(conn, kind, values):
     if not conn.in_transaction:
         raise RuntimeError('Profile publication requires the writer reservation')
     values = list(values)
+    references = ProfileFiles(directory(conn)).write(kind,
+        [(key, _identity(conn, kind, key), raw, version, digest) for key, raw, version, digest in values])
+    install_references(conn, kind, references)
+
+
+def install_references(conn, kind, references):
+    """Install already-published file heads only when their SQL content still agrees."""
     table, key_column, marker, subject = KINDS[kind]
-    offset = 0
-    while offset < len(values):
-        batch, records, used = [], {}, 256
-        for key, raw, version, digest in values[offset:offset+MAX_ROWS]:
-            identity = _identity(conn, kind, key)
-            if not isinstance(raw, str) or hashlib.sha256(raw.encode()).hexdigest() != digest:
-                raise ValueError('Musical-profile body differs from its digest')
-            json.loads(raw)
-            head = conn.execute(f'SELECT version,digest FROM {table} WHERE {key_column}=?', (key,)).fetchone()
-            if head is None or tuple(head) != (version, digest):
-                raise ValueError('Stale musical-profile publication')
-            record = {'body': raw, 'version': version, 'digest': digest}
-            size = len(canonical({str(identity):record}))+1
-            if used+size > MAX_BYTES:
-                if not batch:
-                    raise fao.FileBudgetExceeded('Musical profile exceeds the chunk byte budget')
-                break
-            records[str(identity)] = record
-            batch.append((key,raw,version,digest))
-            used += size
-        encoded = canonical({'format': 'musical-profile-1', 'kind': kind, 'profiles': records})
-        publication = hashlib.sha256(encoded).digest()
-        fao.write(directory(conn) / relative(kind, publication), encoded)
-        for key, raw, version, digest in batch:
-            conn.execute(f'INSERT INTO {marker} VALUES (?,?,?) ON CONFLICT({subject}) DO UPDATE '
-                'SET publication=excluded.publication,byte_size=excluded.byte_size',
-                (_identity(conn, kind, key), publication, len(raw.encode())))
-            conn.execute(f"UPDATE {table} SET payload='' WHERE {key_column}=?", (key,))
-        offset += len(batch)
+    for key, identity, publication, size, version, digest in references:
+        head = conn.execute(f'SELECT version,digest FROM {table} WHERE {key_column}=?', (key,)).fetchone()
+        if head is None or tuple(head) != (version, digest):
+            raise ValueError('Stale musical-profile publication')
+        if _identity(conn, kind, key) != identity:
+            raise ValueError('Musical-profile owner changed')
+        conn.execute(f'INSERT INTO {marker} VALUES (?,?,?) ON CONFLICT({subject}) DO UPDATE '
+            'SET publication=excluded.publication,byte_size=excluded.byte_size', (identity, publication, size))
+        conn.execute(f"UPDATE {table} SET payload='' WHERE {key_column}=?", (key,))
 
 
 def prepare_batch(conn, kind, limit=MAX_ROWS):

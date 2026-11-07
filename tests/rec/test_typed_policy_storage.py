@@ -20,7 +20,7 @@ def test_ledger_policy_round_trip_capture_reuse_and_impression_accounting(recomm
     store.rec_ledger.record_prepared_policies([variant], [base])
     assert policy_storage.typed(store.conn)
     assert store.rec_ledger.policy_configuration('typed-offer') == configuration
-    captured, bodies = policy_storage.captured(store.conn, ['typed-offer'])
+    captured, bodies = store.rec_ledger.captured_policies(['typed-offer'])
     assert [row[0] for row in captured] == ['typed-offer']
     assert len(bodies) == 1
     files = list(store._db_path.parent.glob(store._db_path.name + '.policies/*/*.json'))
@@ -33,14 +33,14 @@ def test_ledger_policy_round_trip_capture_reuse_and_impression_accounting(recomm
         "WHERE raw_version='typed-offer' ORDER BY kind")] == [('pool', 'typed-offer'), ('primary', 'typed-offer')]
     assert store.conn.execute("SELECT served FROM recommendation_policies WHERE version='typed-offer'").fetchone()[0] == 1
     with store.conn:
-        result = policy_storage.prune(store.conn, ['typed-offer'], None)
+        result = store.rec_ledger.prune_policies(['typed-offer'], None)
     assert result['policies_deleted'] == 0
 
 
 def test_new_generation_reference_is_rechecked_at_policy_retirement(recommendations):
     store = recommendations
     store.rec_ledger.record_serving_policy('generation-policy', {'algorithm': 'real-saved-policy'}, -10000)
-    candidates, cursor = policy_storage.retention_candidates(store.conn, 100)
+    candidates, cursor = store.rec_ledger.policy_retention_candidates(100)
     assert 'generation-policy' in candidates
     original = plan(store)
     ranked = pools.prepare('wheelhouse', 'generation-policy', None, 'd' * 64, 'card', [pools.Candidate(1, .9)])
@@ -48,7 +48,7 @@ def test_new_generation_reference_is_rechecked_at_policy_retirement(recommendati
                        slots=(publication.Slot('home', 'all', 'wheelhouse', ranked),))
     publish(store, prepared)
     with store.conn:
-        policy_storage.prune(store.conn, candidates, cursor)
+        store.rec_ledger.prune_policies(candidates, cursor)
     assert store.rec_ledger.policy_configuration('generation-policy') == {'algorithm': 'real-saved-policy'}
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
@@ -57,22 +57,22 @@ def test_prepared_legacy_references_remain_protected_during_reader_transition(re
     store = recommendations
     store.rec_ledger.record_serving_policy('old-prepared-policy', {'algorithm': 'old-prepared'}, -10000)
     store.rec_proposals.put_proposals('home_pool:wheelhouse', {'tracks': [{'pool_policy': 'old-prepared-policy'}]}, 10)
-    candidates, _ = policy_storage.retention_candidates(store.conn, 100)
+    candidates, _ = store.rec_ledger.policy_retention_candidates(100)
     assert 'old-prepared-policy' not in candidates
     with store.conn:
         store.conn.execute("DELETE FROM rec_proposals WHERE surface='home_pool:wheelhouse'")
-    candidates, cursor = policy_storage.retention_candidates(store.conn, 100)
+    candidates, cursor = store.rec_ledger.policy_retention_candidates(100)
     assert 'old-prepared-policy' in candidates
     with store.conn:
-        policy_storage.prune(store.conn, candidates, cursor)
+        store.rec_ledger.prune_policies(candidates, cursor)
     assert store.rec_ledger.policy_configuration('old-prepared-policy') is None
 
 
 def test_budget_failure_rolls_back_before_publishing_policy_files(recommendations, monkeypatch):
     store = recommendations
     files = list(store._db_path.parent.glob(store._db_path.name + '.policies/*/*.json'))
-    monkeypatch.setattr(policy_storage, 'MAX_BATCH_BYTES', 4)
-    with pytest.raises(policy_storage.PolicyStorageFull, match='batch'):
+    monkeypatch.setattr(policy_config, 'MAX_BATCH_BYTES', 4)
+    with pytest.raises(policy_config.PolicyStorageFull, match='batch'):
         store.rec_ledger.record_prepared_policies([('too-large', json.dumps({'algorithm': 'a-large-new-policy'}), 10)])
     assert not store.conn.in_transaction
     assert store.rec_ledger.policy_configuration('too-large') is None
@@ -95,9 +95,9 @@ def test_unused_budget_counts_canonical_record_wrappers_before_file_publication(
     bodies = store.conn.execute('SELECT COALESCE(sum(byte_size),0) FROM recommendation_policy_bodies WHERE served=0').fetchone()[0]
     encoded_size = len(canonical({'format': policy_documents.FORMAT, 'configuration': configuration}))
     assert encoded_size > len(raw.encode())
-    monkeypatch.setattr(policy_storage, 'MAX_UNUSED_BYTES', variants + bodies + encoded_size - 1)
+    monkeypatch.setattr(policy_config, 'MAX_UNUSED_BYTES', variants + bodies + encoded_size - 1)
     files = list(store._db_path.parent.glob(store._db_path.name + '.policies/*/*.json'))
-    with pytest.raises(policy_storage.PolicyStorageFull, match='Unused'):
+    with pytest.raises(policy_config.PolicyStorageFull, match='Unused'):
         store.rec_ledger.record_prepared_policies([('wrapper-budget', raw, 10)])
     assert store.rec_ledger.policy_configuration('wrapper-budget') is None
     assert list(store._db_path.parent.glob(store._db_path.name + '.policies/*/*.json')) == files
@@ -112,9 +112,9 @@ def test_recovery_cleanup_uses_actual_typed_owners_and_preserves_retained_semant
     before = [tuple(row) for row in store.conn.execute('SELECT * FROM recommendation_impression_policies')]
     deleted = 0
     while True:
-        candidates, cursor = policy_storage.retention_candidates(store.conn, 100)
+        candidates, cursor = store.rec_ledger.policy_retention_candidates(100)
         with store.conn:
-            deleted += policy_storage.prune(store.conn, candidates, cursor)['policies_deleted']
+            deleted += store.rec_ledger.prune_policies(candidates, cursor)['policies_deleted']
         if not cursor:
             break
     assert deleted >= 1

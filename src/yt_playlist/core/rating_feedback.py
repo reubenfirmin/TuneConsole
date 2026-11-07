@@ -121,6 +121,29 @@ def apply(conn, states, *, dislike_seconds=None, prior_feedback=None):
     return new_likes
 
 
+def feedback_changes(states, rows, *, dislike_seconds):
+    """Project ordinary, already-aggregated rating observations without SQL."""
+    existing = {(row['surface'], row['item_key'], row['kind']): row for row in rows if row['scope'] == ''}
+    deleted, actions, inserted, likes = [], [], [], {}
+    for key, rating in states.items():
+        if not key or rating.status not in PRIORITY:
+            continue
+        kind = rating.status.lower()
+        deleted.append((key, kind))
+        if rating.status == 'INDIFFERENT':
+            continue
+        surface = 'like' if kind == 'like' else 'sync'
+        if (surface, key, kind) in existing:
+            if kind == 'like' and rating.provenance == 'action':
+                actions.append((key,))
+            continue
+        until = rating.observed_at + dislike_seconds if kind == 'dislike' else None
+        inserted.append((surface, key, kind, rating.provenance if kind == 'like' else None, until, rating.observed_at))
+        if kind == 'like':
+            likes[key] = Rating('LIKE', rating.observed_at, rating.provenance)
+    return deleted, actions, inserted, likes
+
+
 def feedback_rows(conn, keys):
     keys = sorted(set(keys) - {None})
     result = []

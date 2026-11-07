@@ -28,7 +28,7 @@ def _alias(conn, identity):
     return commands
 
 
-def advance(conn):
+def advance(conn, sources):
     """Return prepared writes, or None once a current closure is complete.
 
     Every returned prefix fits in one transaction. Cancellation before commit
@@ -52,15 +52,6 @@ def advance(conn):
     if phase == 'ready':
         return None
     if phase == 'roots':
-        sources = [('group_head', 'generation_id', True),
-                   ('group_evidence_generations INDEXED BY ix_group_evidence_generation', 'generation_id', True),
-                   ('group_builds', 'generation_id', False),
-                   ('group_builds INDEXED BY ix_compact_group_build_parent', 'parent_generation_id', True)]
-        if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='recommendation_generations'").fetchone():
-            sources.append(('recommendation_generations', 'group_generation_id', True))
-        from yt_playlist.core import group_checkpoint_retention
-        if group_checkpoint_retention.available(conn):
-            sources.append(('group_preparation_state', 'generation_id', True))
         if source == len(sources):
             return [_state('evidence')]
         table, column, expand = sources[source]

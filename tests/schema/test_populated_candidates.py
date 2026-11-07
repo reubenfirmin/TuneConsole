@@ -17,7 +17,7 @@ from yt_playlist.rec import home_vibe, mode_surfaces
 from yt_playlist.rec.radio_candidates import RadioCandidates
 from yt_playlist.repos import proposal_cache
 from yt_playlist.repos.rec_proposals import RecProposalsRepo
-from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
+from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 
 
 def predecessor_registry():
@@ -131,12 +131,12 @@ def test_all_populated_ranks_and_representative_serving_survive_cutover(populate
             assert surface not in ('mode_bundles', 'fresh_pool'), 'Foreground decoded the retired bundle'
             return original(self, surface)
         monkeypatch.setattr(RecProposalsRepo, '_proposal_json', read)
-        original_page, pages = RecommendationPublicationsRepo.candidate_page, []
+        original_page, pages = RecommendationPublications.candidate_page, []
         def page(self, *args, **kwargs):
             result = original_page(self, *args, **kwargs)
             pages.append((kwargs['limit'], len(result['tracks'])))
             return result
-        monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_page', page)
+        monkeypatch.setattr(RecommendationPublications, 'candidate_page', page)
         started = time.monotonic()
         new_home = card_keys(mode_surfaces.assemble_cards(store, at, 0, mode_order=order))
         home_seconds = time.monotonic() - started

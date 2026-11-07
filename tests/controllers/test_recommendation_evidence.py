@@ -5,9 +5,9 @@ from unittest.mock import Mock, create_autospec
 import pytest
 
 from tests.repository_mock_support import no_database
+from yt_playlist.controllers.genres import Genres
 from yt_playlist.controllers.recommendation_evidence import RecommendationEvidence
 from yt_playlist.controllers.recommendation_eligibility import RecommendationEligibility
-from yt_playlist.repos.genres import GenreRepo
 from yt_playlist.repos.rec_evidence import RecEvidenceRepo
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -21,7 +21,8 @@ def evidence():
     eligibility.generated_only_keys.return_value = set()
     eligibility.excluded_playlist_ids.return_value = {4}
     eligibility.catchall_playlist_ids.return_value = {8}
-    genres = create_autospec(GenreRepo, instance=True, spec_set=True)
+    genres = create_autospec(Genres, instance=True, spec_set=True)
+    genres.feature_axes.return_value = {}
     for operation in ('playlist_memberships', 'album_memberships', 'artist_memberships',
                       'session_memberships', 'dated_session_memberships', 'content_facets'):
         getattr(repository, operation).return_value = []

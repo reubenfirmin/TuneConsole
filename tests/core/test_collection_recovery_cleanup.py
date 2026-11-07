@@ -29,11 +29,9 @@ def finish(store, limit=2000):
 
 
 def seed_recipe_owners(store, owners):
-    # The ordinary repository still publishes/fsyncs every real recipe file.
-    # Its supported outer unit commits these fixture-only SQL writes together.
-    with store._lock, store.conn.atomic():
-        for i in range(owners):
-            store.playlist_recipes.set_recipe(f'owned-{i}', {'model': 'fixture', 'value': i}, 1)
+    # Exercise ordinary file publication and each owner's committed SQL writes.
+    for i in range(owners):
+        store.playlist_recipes.set_recipe(f'owned-{i}', {'model': 'fixture', 'value': i}, 1)
     return owners
 
 
@@ -132,7 +130,7 @@ def test_inflight_publication_keeps_file_until_its_writer_finishes(
     writer._bind_repositories()
     entered, release = threading.Event(), threading.Event()
     paths = []
-    publish = recovery.publish
+    publish = recovery.publish_at
 
     def held_publish(*args, **kwargs):
         result = publish(*args, **kwargs)
@@ -143,7 +141,7 @@ def test_inflight_publication_keeps_file_until_its_writer_finishes(
             raise RuntimeError('Interrupted publication')
         return result
 
-    monkeypatch.setattr(recovery, 'publish', held_publish)
+    monkeypatch.setattr(recovery, 'publish_at', held_publish)
     try:
         with ThreadPoolExecutor(1) as executor:
             job = executor.submit(writer.playlist_recipes.set_recipe, 'P', {'model': 'inflight'}, 1)

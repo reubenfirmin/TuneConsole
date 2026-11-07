@@ -7,6 +7,7 @@ from itertools import islice
 from pathlib import Path
 import tempfile
 from collections import OrderedDict
+from contextlib import contextmanager
 from threading import Lock
 
 from . import policy_documents, fao
@@ -276,63 +277,86 @@ class OrphanCollector:
         self.paths = (path for path in self.root.glob('*/*.json'))
         self.batch = None
         self.removed = self.byte_size = 0
+        self._collecting = False
+        self._batch_limit = 128
 
     def close(self):
         self.paths.close()
         self.batch = None
 
-    def step(self, conn, *, limit=128):
-        if conn.in_transaction:
-            raise ValueError('Prepared output collection requires an idle connection')
+    @contextmanager
+    def candidates(self, *, limit=128):
         if not 1 <= limit <= 128:
             raise ValueError('Invalid prepared output collection batch')
+        self._batch_limit = limit
         if self.batch is None:
             self.batch = list(islice(self.paths, limit))
         if not self.batch:
+            yield []
+            return
+        with (self.root / '.readers.lock').open('a+b') as stream:
+            unlock = policy_documents._try_file_lock(stream, exclusive=True)
+            if unlock is None:
+                yield None
+                return
+            try:
+                self._collecting = True
+                yield [str(path) for path in self.batch]
+            finally:
+                self._collecting = False
+                unlock()
+
+    def remove_unowned(self, owned):
+        if not self.batch:
             self.close()
             return CollectionProgress()
+        if not self._collecting:
+            raise RuntimeError('Prepared output collection requires its file protection')
+        changed = set()
+        try:
+            for path in self.batch:
+                check_cancellable_work()
+                if str(path) not in owned:
+                    try:
+                        length = fao.read(path).info.compressed_bytes
+                        if not fao.delete(path, missing_ok=True):
+                            continue
+                    except FileNotFoundError:
+                        continue
+                    changed.add(path.parent)
+                    self.removed += 1
+                    self.byte_size += length
+        finally:
+            for parent in changed:
+                _sync_directory(parent)
+        checked = len(self.batch)
+        self.batch = None
+        pending = checked == self._batch_limit
+        if not pending:
+            self.close()
+        progress = CollectionProgress(checked, self.removed, self.byte_size, pending)
+        self.removed = self.byte_size = 0
+        return progress
+
+    def step(self, conn, *, limit=128):
+        """Installed-format compatibility; runtime controllers supply SQL facts separately."""
+        if conn.in_transaction:
+            raise ValueError('Prepared output collection requires an idle connection')
         try:
             conn.execute('BEGIN IMMEDIATE')
-            with (self.root / '.readers.lock').open('a+b') as stream:
-                unlock = policy_documents._try_file_lock(stream, exclusive=True)
-                if unlock is None:
+            with self.candidates(limit=limit) as names:
+                if names is None:
                     return CollectionProgress(pending=True, blocked=True)
-                try:
+                owned = set()
+                if names:
                     names = [str(path) for path in self.batch]
                     marks = ','.join('?' for _ in names)
-                    owned = set()
                     for owner, column in self.owners:
                         check_cancellable_work()
                         if conn.execute("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?", (owner,)).fetchone():
                             owned.update(row[0] for row in conn.execute(
                                 f'SELECT DISTINCT {column} FROM {owner} WHERE {column} IN ({marks})', names))
-                    changed = set()
-                    try:
-                        for path in self.batch:
-                            check_cancellable_work()
-                            if str(path) not in owned:
-                                try:
-                                    length = fao.read(path).info.compressed_bytes
-                                    if not fao.delete(path, missing_ok=True):
-                                        continue
-                                except FileNotFoundError:
-                                    continue
-                                changed.add(path.parent)
-                                self.removed += 1
-                                self.byte_size += length
-                    finally:
-                        for parent in changed:
-                            _sync_directory(parent)
-                    checked = len(self.batch)
-                    self.batch = None
-                    pending = checked == limit
-                    if not pending:
-                        self.close()
-                    progress = CollectionProgress(checked, self.removed, self.byte_size, pending)
-                    self.removed = self.byte_size = 0
-                    return progress
-                finally:
-                    unlock()
+                return self.remove_unowned(owned)
         finally:
             conn.rollback()
 

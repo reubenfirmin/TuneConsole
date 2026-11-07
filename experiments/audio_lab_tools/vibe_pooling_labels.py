@@ -15,7 +15,7 @@ import numpy as np
 from yt_playlist.core.activity import WorkBudgetExceeded, work_budget
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
 from yt_playlist.rec import home_vibe, vibe_joint_model as joint, vibe_prediction as baseline
-from yt_playlist.repos import vibe_evaluation
+from yt_playlist.rec import vibe_evaluation
 from . import vibe_pooling_evaluation as evaluation
 
 FORMAT = 'categorical-vibe-pooling-1'

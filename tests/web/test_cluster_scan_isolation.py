@@ -13,7 +13,7 @@ import pytest
 
 from yt_playlist.core.activity import Activity, WorkClosing
 from yt_playlist.core.bridge import Bridge
-from yt_playlist.repos.rec_model import RecModelRepo
+from yt_playlist.repos.embeddings import EmbeddingRepo
 from yt_playlist.web.routes import bridge, clusters
 
 
@@ -49,9 +49,11 @@ def application(store):
 def slow_vector_loading(store, monkeypatch):
     entered, release = threading.Event(), threading.Event()
     readers, threads = [], []
-    original = RecModelRepo.get_rec_vectors
+    original = EmbeddingRepo.rows
 
-    def load(repo):
+    def load(repo, name, keys=None):
+        if name != 'rec_vectors':
+            return original(repo, name, keys)
         assert repo.conn is not store.conn
         readers.append(repo.conn)
         threads.append(threading.get_ident())
@@ -62,9 +64,9 @@ def slow_vector_loading(store, monkeypatch):
         repo.conn.execute('WITH RECURSIVE slow(n) AS (VALUES(scan_started()) UNION ALL '
                           'SELECT n+1 FROM slow WHERE n<1000000000 AND scan_released()=0) '
                           'SELECT sum(n) FROM slow').fetchone()
-        return original(repo)
+        return original(repo, name, keys)
 
-    monkeypatch.setattr(RecModelRepo, 'get_rec_vectors', load)
+    monkeypatch.setattr(EmbeddingRepo, 'rows', load)
     return entered, release, readers, threads
 
 

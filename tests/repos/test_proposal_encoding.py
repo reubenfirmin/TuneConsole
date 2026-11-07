@@ -210,7 +210,7 @@ def test_compressed_proposals_protect_policy_references_during_retention(store):
 
 
 @pytest.mark.parametrize('outcome', ['success', 'failure', 'stale'])
-def test_encoded_bundles_policies_and_settings_publish_atomically(store, outcome):
+def test_encoded_bundles_commit_before_the_settings_acknowledgement(store, outcome):
     old = publish(store, plan(store, 'old', value={'unicode': 'café 🎵'}))
     build = stage(store, plan(store, 'new', value={'unicode': 'nueva canción'}))
     store.settings.set_setting('input', 'old')
@@ -222,18 +222,18 @@ def test_encoded_bundles_policies_and_settings_publish_atomically(store, outcome
         def finish():
             store.rec_ledger.publish_prepared_policies([row], [base])
             store.recommendations.publish(build, 10)
-            store.settings.publish_values({'published-input': 'new'})
             if outcome == 'failure':
                 raise RuntimeError('injected publication failure')
+            store.settings.publish_values({'published-input': 'new'})
         if outcome == 'failure':
             with pytest.raises(RuntimeError, match='injected publication'):
-                snapshot.publish(finish)
+                snapshot.publish_ordered(finish)
         else:
-            assert snapshot.publish(finish) is (outcome == 'success')
+            assert snapshot.publish_ordered(finish) is (outcome == 'success')
     assert not store.conn.in_transaction
-    if outcome == 'success':
+    if outcome != 'stale':
         assert store.recommendations.output('home', 'fixture') == {'unicode': 'nueva canción'}
-        assert store.settings.get_setting('published-input') == 'new'
+        assert store.settings.get_setting('published-input') == ('new' if outcome == 'success' else None)
         assert store.rec_ledger.policy_configuration(row[0]) == {'ranker': 'new'}
     else:
         assert store.recommendations.output('home', 'fixture') == {'unicode': 'café 🎵'}

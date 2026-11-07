@@ -446,10 +446,9 @@ def _admitted_installed_schema(tmp_path_factory, _pristine_installed_schema):
                 admitted = resources.enter_context(prepared_template(
                     _pristine_installed_schema(version), lambda source: None,
                     database=root / f'{version}.db'))
-                revisions = resources.enter_context(closing(sqlite3.connect(
-                    ':memory:', factory=PristineSchema)))
-                revisions.capture_revisions(admitted.source._snapshot_revisions)
-                templates[version] = admitted, revisions
+                # PreparedTemplate owns the admitted source's revision tracker
+                # and installs its TEMP guards when restoring each consumer.
+                templates[version] = admitted
             return templates[version]
 
         yield template

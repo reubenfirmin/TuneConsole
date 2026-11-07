@@ -117,8 +117,7 @@ def test_snapshot_retains_old_body_and_independent_restore(store, tmp_path):
     with store.read_view() as snapshot:
         before = owner.read(snapshot.conn, 'recording', keys[0])
         raw, digest = payload('successor')
-        with atomic_write(store):
-            store.musical_profiles.publish_recordings([(keys[0], raw, 'v2', digest)], 2)
+        store.musical_profiles.publish_recordings([(keys[0], raw, 'v2', digest)], 2)
         assert owner.read(snapshot.conn, 'recording', keys[0]) == before
         assert store.retention.collect_musical_profiles(10**10) == 0
     assert owner.read(store.conn, 'recording', keys[0]) == raw

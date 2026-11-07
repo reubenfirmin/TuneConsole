@@ -81,26 +81,34 @@ def inputs_for(conn, manifest_id):
 
 
 def version_rows(conn, version_id):
-    row = conn.execute('SELECT v.*,g.external_key,p.external_key parent_key FROM group_versions v '
-                       'JOIN taste_groups g ON g.id=v.group_id LEFT JOIN taste_groups p '
-                       'ON p.id=v.parent_group_id WHERE v.id=?', (version_id,)).fetchone()
-    if row is None:
-        raise ValueError('Missing canonical musical group version')
+    facts = version_facts(conn, version_id)
+    row = facts['version']
     definition = group_documents.read(row['definition_filename'], row['definition_digest'],
                                        row['definition_bytes'], row['definition_offset'], 'definition')
     policy = policy_documents.configuration(conn, row['policy_version'])
     if policy is None:
         raise ValueError('Missing canonical musical group policy')
     yield canonical([content.FORMAT, row['external_key'], row['parent_key'], definition, policy])
-    for recording_id, similarity, support, input_digest in conn.execute(
+    for recording_id, similarity, support, input_digest in facts['members']:
+        yield canonical([['recording', recording_id], content.score(similarity), content.score(support), input_digest])
+    for key, similarity, support, input_digest in facts['unresolved']:
+        yield canonical([['unresolved', key], content.score(similarity), content.score(support), input_digest])
+
+
+def version_facts(conn, version_id):
+    row = conn.execute('SELECT v.*,g.external_key,p.external_key parent_key FROM group_versions v '
+                       'JOIN taste_groups g ON g.id=v.group_id LEFT JOIN taste_groups p '
+                       'ON p.id=v.parent_group_id WHERE v.id=?', (version_id,)).fetchone()
+    if row is None:
+        raise ValueError('Missing canonical musical group version')
+    members = [tuple(value) for value in conn.execute(
             'SELECT m.recording_id,m.similarity,m.support,i.input_digest FROM group_members m '
             'LEFT JOIN group_recording_inputs i ON i.id=m.input_id '
-            'WHERE m.group_version_id=? ORDER BY m.recording_id', (version_id,)):
-        yield canonical([['recording', recording_id], content.score(similarity), content.score(support), input_digest])
-    for key, similarity, support, input_digest in conn.execute(
+            'WHERE m.group_version_id=? ORDER BY m.recording_id', (version_id,))]
+    unresolved = [tuple(value) for value in conn.execute(
             'SELECT raw_key,similarity,support,input_digest FROM unresolved_group_members '
-            'WHERE group_version_id=? ORDER BY raw_key', (version_id,)):
-        yield canonical([['unresolved', key], content.score(similarity), content.score(support), input_digest])
+            'WHERE group_version_id=? ORDER BY raw_key', (version_id,))]
+    return {'version': dict(row), 'members': members, 'unresolved': unresolved}
 
 
 def definition_fields(value, members=None):
@@ -234,6 +242,11 @@ def install_header(conn, prepared, policy, metadata, manifest_id):
     version = policy_version(prepared['policy'])
     policy_documents.install(conn, [(version, canonical(policy).decode(), prepared['at'])])
     file = next(group_documents.publish_many(group_documents.directory(conn), [('generation', metadata)]))
+    return install_header_reference(conn, prepared, version, file, manifest_id)
+
+
+def install_header_reference(conn, prepared, version, file, manifest_id):
+    _writer(conn)
     return conn.execute('INSERT INTO group_generations(external_key,policy_version,input_fingerprint,'
         'input_manifest_id,input_serial,created_at,metadata_filename,metadata_digest,metadata_bytes,metadata_offset) '
         'VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING id',

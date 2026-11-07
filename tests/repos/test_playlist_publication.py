@@ -41,7 +41,7 @@ def test_metadata_and_order_publish_in_one_transaction(tmp_path, monkeypatch, co
     try:
         iid, pid, ids = seed(store)
         revision = store.playlists.playlist_revision(iid, 'PL')
-        original = store.playlists._set_playlist_tracks
+        original = store.playlists.repository._set_playlist_tracks
         with sqlite3.connect(path) as reader:
             def observed(playlist_id, track_ids):
                 # Even after metadata has been written, another connection sees the
@@ -52,7 +52,7 @@ def test_metadata_and_order_publish_in_one_transaction(tmp_path, monkeypatch, co
                 assert reader.execute('SELECT video_id FROM playlist_items WHERE playlist_id=? ORDER BY position',
                                       (pid,)).fetchall() == [('a',), ('b',)]
                 original(playlist_id, track_ids)
-            monkeypatch.setattr(store.playlists, '_set_playlist_tracks', observed)
+            monkeypatch.setattr(store.playlists.repository, '_set_playlist_tracks', observed)
             assert store.playlists.publish_playlist_snapshot(
                 iid, 'PL', 'New title', [ids[2], ids[0]], 200, expected_revision=revision) == pid
             assert reader.execute('SELECT title,track_count,last_seen FROM playlists WHERE id=?',

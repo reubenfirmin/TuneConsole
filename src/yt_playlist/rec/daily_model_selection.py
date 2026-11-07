@@ -16,7 +16,7 @@ from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.core import embeddings
 from yt_playlist.rec import embedding_training as training, model_refresh, model_setup, progressive
 from yt_playlist.rec.vector_math import rank_by_context
-from yt_playlist.repos.rec_model import VectorChanges
+from yt_playlist.core.rec_model_policy import VectorChanges
 
 DAY = 86400
 HOLDOUT_DAYS = 30
@@ -196,7 +196,7 @@ def _publish_fit(store, snapshot, run, now):
         store.settings.publish_values({'rec_fit_inputs': fit_inputs})
         store.model_selection.retire_model_display()
         store.model_selection.schedule_daily(run['ran_at'] + DAY, now)
-    if not snapshot.publish(publish):
+    if not snapshot.publish_ordered(publish):
         raise ValueError('Model inputs changed before publication; the serving model was kept')
     return result
 
@@ -293,5 +293,10 @@ def maintain(store, now, *, checkpoint=None):
         _schedule(store, now, 60)
         return run
     except (ValueError, np.linalg.LinAlgError, model_refresh.MemoryBudgetExceeded) as exc:
+        durable = store.model_selection.selection_run(run['id'])
+        if durable and durable.get('phase') == 'complete':
+            store.model_selection.retire_model_display()
+            store.model_selection.schedule_daily(durable['ran_at'] + DAY, now)
+            return durable
         run['selected'] = run['previous']
         return _finish(store, run, now, status='failed', reason=f'Comparison deferred; current model kept: {exc}')

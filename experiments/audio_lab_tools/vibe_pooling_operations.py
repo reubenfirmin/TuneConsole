@@ -18,14 +18,13 @@ import zipfile
 
 import numpy as np
 
-from yt_playlist.core import file_paths
+from yt_playlist.core import file_paths, vibe_model_files
 from yt_playlist.core.activity import check_stopping
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
 from yt_playlist.rec import home_vibe, vibe_joint_model as model, vibe_joint_preparation as preparation
 from yt_playlist.rec import vibe_preparation
 from yt_playlist.rec.progressive import Preparation
-from yt_playlist.repos import vibe_models
 
 ROOT = Path(__file__).resolve().parents[2]
 OWNERS = ('recording_vibes', 'measurements', 'predictions', 'prediction_inputs',
@@ -80,7 +79,7 @@ def foreground(store, keys):
 
 @contextmanager
 def serving_guards(foreground_thread):
-    original_fit, original_read = model.fit, vibe_models.read
+    original_fit, original_read = model.fit, vibe_model_files.VibeModelFiles.read
     calls = {'foreground_fits': 0, 'foreground_model_reads': 0, 'fits': []}
     def fit(*args, **kwargs):
         if threading.get_ident() == foreground_thread:
@@ -101,11 +100,11 @@ def serving_guards(foreground_thread):
             calls['foreground_model_reads'] += 1
             raise AssertionError('Foreground score read attempted loading a model')
         return original_read(*args, **kwargs)
-    model.fit, vibe_models.read = fit, read
+    model.fit, vibe_model_files.VibeModelFiles.read = fit, read
     try:
         yield calls
     finally:
-        model.fit, vibe_models.read = original_fit, original_read
+        model.fit, vibe_model_files.VibeModelFiles.read = original_fit, original_read
 
 
 def phase(store, keys, candidate, *, seconds, turns, request_idle):
@@ -201,7 +200,12 @@ def run(output, *, seconds=180., turns=1000, request_idle=.1):
             'src/yt_playlist/rec/progressive.py',
             'src/yt_playlist/core/priority.py',
             'src/yt_playlist/rec/vibe_preparation.py', 'src/yt_playlist/repos/vibe_predictions.py',
-            'src/yt_playlist/repos/vibe_models.py', 'src/yt_playlist/core/vibe_model_files.py')}}
+            'src/yt_playlist/repos/vibe_models.py', 'src/yt_playlist/core/vibe_model_files.py',
+            'src/yt_playlist/core/vibe_model_queries.py',
+            'src/yt_playlist/controllers/vibe_models.py', 'src/yt_playlist/core/vibe_manifest.py',
+            'src/yt_playlist/controllers/vibe_predictions.py', 'src/yt_playlist/core/vibe_publication.py',
+            'src/yt_playlist/controllers/musical_profiles.py', 'src/yt_playlist/core/profile_files.py',
+            'src/yt_playlist/core/audio_metadata_files.py')}}
     with zipfile.ZipFile(output.parent / 'source.zip', 'x', zipfile.ZIP_DEFLATED) as archive:
         for name, digest in report['code'].items():
             raw = (ROOT / name).read_bytes()

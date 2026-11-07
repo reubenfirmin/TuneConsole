@@ -21,7 +21,7 @@ def test_startup_genres_read_committed_identity_while_writer_is_busy(installed, 
     store.genres.set_genre_family('synth pop', 'jazz')
     key = identity_key('Owned genre', 'Artist')
     track = {'key': key, 'video_id': 'genre-concurrency', 'genre': 'Renamed Synth'}
-    original = genre_identity.feature_axes
+    original = genre_identity.axis_matches
     reads, metadata_reads, statements = [], [], []
     locked, release = threading.Event(), threading.Event()
 
@@ -35,10 +35,10 @@ def test_startup_genres_read_committed_identity_while_writer_is_busy(installed, 
         finally:
             conn.set_trace_callback(None)
         expected_label = 'renamed synth' if consumer == 'home_options' else 'Renamed Synth'
-        assert result == {expected_label: ('jazz', 'synth pop')}
+        assert genre_identity.axes_from_matches(result) == {expected_label: ('jazz', 'synth pop')}
         return result
 
-    monkeypatch.setattr(genre_identity, 'feature_axes', owned_read)
+    monkeypatch.setattr(genre_identity, 'axis_matches', owned_read)
     if consumer == 'facets':
         for method in ('track_genres', 'track_decades', 'track_artists'):
             metadata = getattr(RecQueryRepo, method)
@@ -65,7 +65,7 @@ def test_startup_genres_read_committed_identity_while_writer_is_busy(installed, 
                 writer.result(1)
                 pytest.fail('Concurrent writer did not acquire the serving connection')
             with pytest.raises(AssertionError, match='Unowned serving connection'):
-                owned_read(store.conn, ['Renamed Synth'])
+                genre_identity.axis_matches(store.conn, ['Renamed Synth'])
             assert not reads
             if consumer == 'facets':
                 facets = transient.facets_for(store, [key])

@@ -8,6 +8,7 @@ from yt_playlist.core import fao, policy_history as owner, policy_documents
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.preparation import policy_history
 from yt_playlist.core.store import Store
+from yt_playlist.repos import policy_storage
 from tests.rec.test_policy_storage import _publish
 
 
@@ -16,21 +17,23 @@ def test_candidate_scan_is_off_writer_and_new_operational_owner_is_rechecked(fil
     store.rec_ledger.record_serving_policy('candidate', {'exact': True}, 1)
     store.rec_ledger.record_served_impressions('old', 'home', [
         {'key': 'song', 'rank': 1, 'model_version': 'candidate'}], 10000)
-    original = owner.candidates
+    original = policy_storage.history_candidates
     observed = []
 
-    def select(conn, now, limit):
+    def select(conn, before, limit, **options):
+        if options:
+            return original(conn, before, limit, **options)
         assert not store._lock.held_by_current_thread
         assert conn is not store.conn
-        result = original(conn, now, limit)
-        observed.extend(result)
+        result = original(conn, before, limit)
+        observed.extend(row['version'] for row in result)
         # A new prepared owner races selection. Archiving must inspect current
         # ownership again rather than deleting from the earlier snapshot alone.
         store.rec_proposals.put_proposals('home_choice',
-            {'tracks': [{'pool_policy': 'candidate'}]}, now)
+            {'tracks': [{'pool_policy': 'candidate'}]}, before + 3600)
         return result
 
-    monkeypatch.setattr(owner, 'candidates', select)
+    monkeypatch.setattr(policy_storage, 'history_candidates', select)
     assert store.rec_ledger.maintain_policy_history(10000) == 0
     assert observed == ['candidate']
     assert store.rec_ledger.policy_configuration('candidate') == {'exact': True}

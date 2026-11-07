@@ -119,7 +119,7 @@ def test_repeated_events_and_coarse_days_are_distinct_units(listening_store):
     assert s.history.listening_day_counts()=={'song':2}
     assert s.history.event_play_counts()=={'song':2}
     assert s.conn.execute('SELECT COUNT(*) FROM listening_activity').fetchone()[0]==3
-    assert s.recommendations._candidate_play_counts(['song', 'absent']) == {'song': 2}
+    assert s.recommendations.repository.candidate_play_counts(['song', 'absent']) == {'song': 2}
 
 
 def test_removing_one_source_preserves_overlaps_and_unknown_legacy(listening_store):
@@ -162,11 +162,11 @@ def test_generated_sync_shadow_is_account_scoped_and_independent_evidence_surviv
     s.history.record_history_plays(2,ts,[('song','Today')],source_timezone='America/Costa_Rica')
     assert s.history.listening_day_counts(1)=={}
     assert s.history.listening_day_counts(2)=={'song':1}
-    assert s.recommendations._candidate_play_counts(['song', 'absent']) == {'song': 1}
+    assert s.recommendations.repository.candidate_play_counts(['song', 'absent']) == {'song': 1}
     s.history.record_history_plays(1,ts,['song'],source_timezone='America/Costa_Rica')
     assert s.history.listening_day_counts(1)=={'song':1}
     assert s.history.event_play_counts(1)=={}
-    assert s.recommendations._candidate_play_counts(['song', 'absent']) == {'song': 2}
+    assert s.recommendations.repository.candidate_play_counts(['song', 'absent']) == {'song': 2}
 
 
 def test_failed_draft_upgrade_rolls_back_and_backup_is_installed_v25(tmp_path):
@@ -221,7 +221,7 @@ def test_playlist_counts_and_taste_weights_ignore_confirmed_alternate_upload(lis
     assert len(s.charts.get_playlist_track_recency()[first])==1
     assert s.history.listening_day_counts(1)[key]==2
     assert s.history.event_play_counts(1)[key]==2
-    assert s.recommendations._candidate_play_counts([key, other]) == {key: 2, other: 1}
+    assert s.recommendations.repository.candidate_play_counts([key, other]) == {key: 2, other: 1}
 
 
 def test_reassociation_preserves_coarse_sources_and_first_play_atomically(listening_store,monkeypatch):
@@ -279,11 +279,12 @@ def test_successful_draft_upgrade_reopens_without_rewriting_data(tmp_path):
     reopened.conn.close()
 
 
-def test_import_failure_rolls_back_event_source_and_calendar(listening_store,monkeypatch):
+def test_import_failure_keeps_calendar_setup_and_rolls_back_event_projection(listening_store,monkeypatch):
     from yt_playlist.core import listening
 
     s = listening_store
-    before = list(s.conn.iterdump())
+    tables = ('play_events', 'play_event_sources', 'play_event_calendar')
+    before = {table: [tuple(row) for row in s.conn.execute('SELECT * FROM ' + table)] for table in tables}
     original = listening.project_event
     def fail(*args,**kwargs):
         original(*args,**kwargs)
@@ -291,7 +292,11 @@ def test_import_failure_rolls_back_event_source_and_calendar(listening_store,mon
     monkeypatch.setattr(listening,'project_event',fail)
     with pytest.raises(RuntimeError,match='interrupt event projection'):
         s.history.import_listening_events(1,[('song',None,1000)],source_timezone='America/Costa_Rica')
-    assert list(s.conn.iterdump())==before
+    assert s.history.repository.calendar_facts(1) == {'timezone': 'America/Costa_Rica', 'confirmed': 1}
+    assert {table: [tuple(row) for row in s.conn.execute('SELECT * FROM ' + table)] for table in tables} == before
+    monkeypatch.setattr(listening, 'project_event', original)
+    assert s.history.import_listening_events(1, [('song', None, 1000)], source_timezone='America/Costa_Rica') == (1, 1)
+    assert s.conn.execute('SELECT count(*) FROM listening_calendars').fetchone()[0] == 1
 
 
 def test_partial_reassociation_keeps_unattributed_coarse_evidence_with_recording(listening_store):

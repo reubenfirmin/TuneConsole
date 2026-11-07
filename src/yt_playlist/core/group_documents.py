@@ -1,6 +1,7 @@
 """Bounded immutable files directly owned by group versions and generations."""
 import hashlib
 import json
+from contextlib import ExitStack, contextmanager
 from itertools import chain
 from pathlib import Path
 import tempfile
@@ -17,6 +18,42 @@ BACKUP_FORMAT = 'musical-group-backup-1'
 OWNERS = (('group_versions', ('id',), 'definition', 'definition'),
           ('group_generations', ('id',), 'metadata', 'generation'),
           ('group_lineage', ('source_alias', 'target_alias'), 'evidence', 'lineage'))
+
+
+class GroupFiles:
+    def __init__(self, root, policy_root):
+        self.root, self.policy_root = root, policy_root
+
+    @contextmanager
+    def retained(self):
+        with ExitStack() as readers:
+            readers.enter_context(policy_documents.retained_reader(self.root))
+            readers.enter_context(policy_documents.retained_reader(self.policy_root))
+            yield
+
+    def read(self, row, kind):
+        prefix = {'generation': 'metadata', 'definition': 'definition', 'lineage': 'evidence'}[kind]
+        return read(*(row[prefix + '_' + field] for field in ('filename', 'digest', 'bytes', 'offset')), kind)
+
+    def write(self, documents):
+        return list(publish_many(self.root, documents))
+
+    def write_policy(self, value):
+        return next(policy_documents.publish_many(self.policy_root, [value]))
+
+    def policy(self, reference):
+        if reference is None:
+            raise ValueError('Missing retained musical group policy')
+        filename, digest, base, offset, size = reference['variant']
+        result = policy_documents.read(filename, digest, offset=offset, size=size)
+        if result.pop(policy_documents.BASE_FIELD, None) != base:
+            raise ValueError('Policy configuration does not match its shared-body reference')
+        if base is not None:
+            if reference['body'] is None:
+                raise ValueError(f'Missing shared recommendation policy body: {base}')
+            filename, digest, offset, size = reference['body']
+            result = {**policy_documents.read(filename, digest, offset=offset, size=size), **result}
+        return result
 
 
 def root_for_database(path, memory_key):

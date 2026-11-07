@@ -1,19 +1,20 @@
 # VGMIDI
 
-The author repository supplies 99 rendered WAVs; 76 pass unique title/franchise,
-duration and complete-listener joins. This subset is distinct from the full
-200-piece / 204-phrase release. Use equal-listener whole-piece means from the
-original changing annotations as weak whole-piece targets, not phrase classes.
-Do not substitute new MIDI renders or commercial soundtrack recordings.
+Source, rendered audio and annotations: [author repository](https://github.com/lucasnfe/vgmidi).
 
-Oct 28–29: native VA, transfer, consensus and independent-target studies
-completed. Independent target selection reduced native MAE from .09331 joint
-ridge to .08778 (median .11649) in the later source round, but supplied no
-established general six-vibe replacement. Keep the instrumental auxiliary task
-separate until improvements transfer to recorded music.
+VGMIDI is a collection of video-game MIDI piano music with human time-varying
+valence/arousal annotations on a −1 to 1 scale. The full labeled collection
+describes 200 pieces and 204 phrase rows. The repository separately supplies
+99 rendered WAV files;
+these counts refer to different units.
 
-Group game franchises. Composer identities are absent; franchise grouping does
-not establish composer-independent validation.
-Evidence: `local/external-20261028/` and
-`local/per-vibe-20261029/all-sources-1/`.
-Source: [author repository](https://github.com/lucasnfe/vgmidi).
+TuneConsole uses 76 of those supplied renders that pass unique title/franchise,
+duration and complete-listener joins. Targets average the original changing
+annotations into equal-listener whole-piece means. Center-excerpt features with
+whole-piece labels are weak supervision, rather than phrase-level classes or
+temporally aligned annotations. New MIDI renders and commercial soundtrack
+recordings are not substitutions for these rated files.
+
+The acquired subset has five game-franchise groups. Composer identities are
+absent, so franchise grouping cannot establish composer-independent evaluation.
+Keep this rendered-piano source distinct from recorded-music collections.

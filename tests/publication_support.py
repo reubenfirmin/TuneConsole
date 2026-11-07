@@ -52,7 +52,5 @@ def stage(store, prepared):
 
 def publish(store, prepared):
     build = stage(store, prepared)
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        store.recommendations.publish(build, 11)
+    store.recommendations.publish(build, 11)
     return build

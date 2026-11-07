@@ -28,7 +28,7 @@ def test_scorecard_inputs_remain_usable_after_all_connections_close(tmp_path):
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_proposals_policies_and_settings_share_the_outer_publication(tmp_path, fail):
+def test_proposals_and_policies_commit_before_the_publication_marker(tmp_path, fail):
     store = Store(tmp_path / "publish.db")
     store.init_schema()
     try:
@@ -39,7 +39,7 @@ def test_proposals_policies_and_settings_share_the_outer_publication(tmp_path, f
             for owner in ("rec_ledger", "rec_proposals", "rec_signals",
                           "playlist_recipes", "artist_similarity"):
                 component = getattr(snapshot.store, owner)
-                repo = (component.repository if owner in ('rec_ledger', 'rec_signals', 'artist_similarity')
+                repo = (component.repository if owner in ('rec_ledger', 'rec_signals', 'artist_similarity', 'playlist_recipes')
                         else component)
                 assert repo.conn is snapshot.store.conn
                 assert repo._lock is snapshot.store._lock
@@ -47,20 +47,20 @@ def test_proposals_policies_and_settings_share_the_outer_publication(tmp_path, f
             def finish():
                 store.rec_ledger.publish_prepared_policies([("new-policy", "{}", 2)])
                 store.recommendations.publish(build, 2)
-                store.settings.publish_values({"publication-marker": "new"})
                 if fail:
                     raise sqlite3.IntegrityError("later owner failed")
+                store.settings.publish_values({"publication-marker": "new"})
 
             if fail:
                 with pytest.raises(sqlite3.IntegrityError, match="later owner failed"):
-                    snapshot.publish(finish)
+                    snapshot.publish_ordered(finish)
             else:
-                assert snapshot.publish(finish)
+                assert snapshot.publish_ordered(finish)
         assert not store.conn.in_transaction
-        assert store.recommendations.output('home', 'fixture') == {'generation': 1 if fail else 2}
+        assert store.recommendations.output('home', 'fixture') == {'generation': 2}
         for surface in ('home', 'fresh'):
-            assert store.recommendations.head(surface)['id'] == (old if fail else build).generation_id
+            assert store.recommendations.head(surface)['id'] == build.generation_id
         assert store.settings.get_setting("publication-marker") == ("old" if fail else "new")
-        assert store.rec_ledger.policy_configuration('new-policy') == (None if fail else {})
+        assert store.rec_ledger.policy_configuration('new-policy') == {}
     finally:
         store.conn.close()

@@ -59,32 +59,63 @@ def vocabulary(feature_names):
 
 
 def read(conn, video_id):
-    """Bounded exact-ID reads, shared by the read-only trainer and the repository."""
+    """Compatible offline reader; runtime coordinates these owners in its service."""
+    from . import metadata_delivery_files, metadata_runtime_files
+    from .audio_metadata_files import AudioMetadataFiles
+    files = AudioMetadataFiles(metadata_runtime_files.directory(conn), metadata_delivery_files.directory(conn))
+    with files.retained():
+        inputs = read_facts(conn, video_id)
+        return assemble(inputs, (files.source_values(reference) for reference in inputs['sources']))
+
+
+def read_facts(conn, video_id):
+    """Bounded catalog values and source references, with no file reads or inference."""
     row = conn.execute('SELECT id,identity_key,recording_id,' + ','.join(SELECTED)
                        + ' FROM catalog_tracks WHERE video_id=?', (video_id,)).fetchone()
     if row is None:
-        return {}
+        return {'metadata': {}, 'choices': {}, 'sources': []}
     result = dict(zip(('entry_id', 'identity_key', 'recording_id', *SELECTED), row, strict=True))
     # These native classifiers are retained in provider observations, but are
     # absent from the legacy selected columns. Never substitute genre priors.
-    fields = ('mood_aggressive', 'mood_party')
-    choices = {field: json.loads(value) for field, value in conn.execute(
+    choices = dict(conn.execute(
         "SELECT field,value_json FROM entry_field_choices WHERE entry_id=? "
-        "AND field IN ('mood_aggressive','mood_party')", (result['entry_id'],))}
-    observations = {field: set() for field in fields}
+        "AND field IN ('mood_aggressive','mood_party')", (result['entry_id'],)))
     if metadata_native.available(conn):
+        from . import metadata_runtime
+        runtime = metadata_runtime.active(conn)
         sources = conn.execute('SELECT s.source_key FROM rec_musical_links l '
             'JOIN rec_musical_sources s ON s.source_key=l.source_key '
             "WHERE l.recording_id=? AND s.scope='recording' ORDER BY s.source_key LIMIT 64",
             (result['recording_id'],)).fetchall()
-        payloads = (metadata_native.source_values(conn, source[0]) for source in sources)
+        references = []
+        for source, in sources:
+            if runtime:
+                revision = conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?', (source,)).fetchone()
+                references.append({'key': source, 'revision': revision[0] if revision else None})
+            else:
+                observations = [dict(row) for row in conn.execute(
+                    'SELECT o.*,d.raw_filename,d.raw_digest,d.raw_byte_size,d.raw_offset '
+                    'FROM musical_source_observations s JOIN native_metadata_observations o ON o.id=s.observation_id '
+                    'JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE s.source_key=? ORDER BY s.field', (source,))]
+                references.append({'observations': observations})
     else:
         rows = conn.execute(
             'SELECT s.payload FROM rec_musical_links l JOIN rec_musical_sources s ON s.source_key=l.source_key '
             "WHERE l.recording_id=? AND s.scope='recording' "
             'AND length(CAST(s.payload AS BLOB))<=262144 ORDER BY s.source_key LIMIT 64',
             (result['recording_id'],))
-        payloads = (json.loads(row[0]) for row in rows)
+        references = [{'raw': row[0]} for row in rows]
+    return {'metadata': result, 'choices': choices, 'sources': references}
+
+
+def assemble(inputs, payloads):
+    """Explicit choices override provider agreement, including an explicit null."""
+    result = dict(inputs['metadata'])
+    if not result:
+        return {}
+    fields = ('mood_aggressive', 'mood_party')
+    choices = {field: json.loads(value) for field, value in inputs['choices'].items()}
+    observations = {field: set() for field in fields}
     for payload in payloads:
         for field in fields:
             value = (payload.get(field) or {}).get('value')

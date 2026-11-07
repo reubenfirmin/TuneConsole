@@ -96,7 +96,7 @@ runtime/model assets; incomplete or mismatched assets prevent packaging/capture.
 
 The preview shows four mood classifiers, DEAM arousal/valence and optional general
 tags. Those diagnostic scores are uncalibrated. Production vibe recipes and adoption
-evidence belong in the [model logs](../experiments/audio_lab/README.md#model-provenance) and
+evidence belong in the [experiment history](../experiments/audio_lab/README.md) and
 [recommendation reference](../src/yt_playlist/rec/README.md).
 
 ### Developer feedback and storage
@@ -139,9 +139,32 @@ and developer labels are distinct from recommendation-learning evidence.
 
 The access-only probe lives in
 [`experiments/audio_lab/audio_probe.js`](../experiments/audio_lab/audio_probe.js).
-Use the [lab staging instructions](../experiments/audio_lab/README.md)
+Use the [lab staging instructions](#audio-runtime-and-reference-harness)
 for a disposable extension; it is excluded from production. Audio fixtures use
 Chromium's `--disable-audio-output` to process PCM without speaker hardware.
+
+### Audio runtime and reference harness
+
+The normal preview is **Tools > Audio analysis preview** (`/audio-preview`).
+Use the [audio build reference](../scripts/audio_model/README.md) to fetch
+verified models/licences and build the CSP-compatible runtime before staging.
+
+Stage the separate Chrome 116+ reference harness:
+
+```sh
+python3 scripts/audio_model/bundle.py --destination /tmp/tuneconsole-audio-lab
+cp experiments/audio_lab/*.js experiments/audio_lab/*.html experiments/audio_lab/*.css experiments/audio_lab/manifest.json /tmp/tuneconsole-audio-lab/
+```
+
+Load unpacked from `chrome://extensions`, open the reference tab, choose a
+permitted local audio file (up to 64 MiB), record permission and play it. Click
+the lab toolbar icon (or Ctrl+Shift+Y) to grant capture. It attempts three
+nonoverlapping beginning/midpoint/end windows; short audio may supply fewer.
+Missed windows are not substituted. Stop releases tracks/offscreen state while
+the player continues; export JSON for evidence. A file hash alone does not
+verify recording association. For the access-only probe, inject `audio_probe.js`
+through a disposable development extension's service-worker console; it tests
+access/nonzero capture rather than model quality.
 
 ## Radio inspection
 

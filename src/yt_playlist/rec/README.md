@@ -87,8 +87,8 @@ and never enter a mixed six-way maximum. Radio intensity retains the shared
 Energize/Release channels. Human popup labels are development targets, excluded
 from runtime preferences, inference and propagation.
 
-[Model provenance](../../../experiments/audio_lab/README.md#model-provenance)
-owns recipes, training inputs, model settings, adoption decisions and rejected
+[Audio experiment history](../../../experiments/audio_lab/README.md)
+owns recipes, training inputs, adoption decisions and rejected
 alternatives. Optional-model failure retains that vibe's shared score and other
 working specialists. Model identity changes queue rescoring without audio
 extraction or fitting.
@@ -102,6 +102,22 @@ extraction or fitting.
 
 Legacy incomplete lineage remains explicit. Exact-video reassociation changes
 current sample links without rewriting historical prediction ownership.
+
+### Audio model settings
+
+All six specialists default active on compatible captures. Optional-model failure
+retains that vibe's shared score and the other specialists. Set
+`YT_PLAYLIST_AUDIO_VIBE_<NAME>_MODE=off` to restore its shared score;
+`YT_PLAYLIST_AUDIO_VIBE_<NAME>_MODEL` overrides the artifact path (empty disables
+it). Use `FOCUS` for the `concentrate` vibe. `YT_PLAYLIST_AUDIO_VIBE_MODEL` selects
+the shared model; disabling it also disables specialists. Environment values
+override the checkout's ignored `.env.local`.
+
+Common bounded artifact reads, validation and prediction helpers belong to
+`audio_vibe_runtime`. Each specialist owns its target mapping, weights,
+aggregation and artifact contract. Production calls `apply()`; research routing
+lives in `experiments/audio_lab_tools/cruise_specialist.py`. Legacy correction
+formats `audio-vibe-corrections-1/2/3` remain supported.
 
 ## Road Trip and setup
 

@@ -1,24 +1,22 @@
-# DEAM
+# DEAM — Database for Emotional Analysis in Music
 
-1,802 supplied audio recordings join numeric IDs to original static and dynamic
-VA labels. Audio mirror revision: `3db39c68bf69609b57cdc31dd46fa9f8fd24970f`.
-Normalize native static 1–9 ratings explicitly. Most artist identities are absent;
-recording/component grouping does not establish unseen-artist evaluation.
+Source: [DEAM publisher page](https://cvml.unige.ch/databases/DEAM/).
+Annotation download: [DEAM release mirror on Zenodo](https://zenodo.org/records/11400122).
+Acquired audio: [recorded audio mirror revision](https://github.com/Akminar/Classifying-Emotionality-of-Music/tree/3db39c68bf69609b57cdc31dd46fa9f8fd24970f/data/MEMD_audio).
 
-Oct 29 extraction completed 1,801 recordings. ID 2048's 151.91-second source
-produces 440,999 stereo measurement frames under timestamp trimming rather than
-441,000; its 16-kHz model decode is complete. This is a one-sample boundary
-artifact. Preserve the frozen comparisons; any recovered feature needs a separate
-audit. Later protected specialist fits retain 1,800 rows.
+DEAM contains 1,802 music excerpts and full songs with crowdsourced static and
+time-varying valence/arousal annotations. The release preserves individual
+responses, song-level means and standard deviations, and changing emotion
+trajectories. Static ratings use a 1–9 scale; dynamic values use −1 to 1.
+Numeric song IDs join annotations to supplied audio.
 
-The feature bundle contains a DEAM-trained VA head: exclude its outputs from
-DEAM native-task features and direct pretrained controls. Static/aligned models
-provide useful VA transfer, but did not establish a general shared-model upgrade.
-The common-target Cruise experiment retains 1,798 source rows and selects a
-random-feature ridge head. Later consensus uses ridge native heads under its own
-protected folds; these are distinct fits.
+TuneConsole extracted complete features for 1,801 recordings. ID `2048` fails
+the exact ten-second measurement-frame requirement by one sample after timestamp
+trimming. Protected specialist fits use 1,800 rows; the separate common-target
+Cruise comparison uses 1,798 after its exclusions. These are subsets of DEAM,
+rather than different dataset totals.
 
-Evidence: `local/external-20261028/checkpoint-1/` and
-`local/mapped-vibes-20261029/common-target-1/`.
-Models: [Cruise](../models/cruise.md), [Uplift](../models/uplift.md),
-[Energize](../models/energize.md). Source: [DEAM publisher](https://cvml.unige.ch/databases/DEAM/).
+Artist metadata is mostly missing, so recording grouping cannot establish
+unseen-artist performance. The feature bundle includes a DEAM-trained emotion
+head; its outputs are excluded from DEAM native-task features and direct
+pretrained controls.

@@ -27,4 +27,4 @@ def test_metadata_page_rejects_unbounded_or_ambiguous_inputs(monkeypatch, option
     monkeypatch.setattr(sqlite3, 'connect', forbidden)
     repository = RecommendationPublicationsRepo(NoDatabase())
     with pytest.raises(ValueError, match='bounded recommendation metadata'):
-        repository.recording_metadata_page('home', **options)
+        repository.recording_metadata_rows('home', **options)

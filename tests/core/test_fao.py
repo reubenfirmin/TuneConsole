@@ -85,6 +85,15 @@ def test_stale_preparation_cannot_replace_new_publication(tmp_path):
     assert fao.read(path).bytes == b'newer publication'
 
 
+def test_prepared_publication_remains_readable_until_the_writer_context_closes(tmp_path):
+    path = tmp_path / 'document'
+    with fao.prepare(path, b'awaiting SQL reference') as stage:
+        stage.publish()
+        assert not fao.delete(path)
+        assert fao.read(path).bytes == b'awaiting SQL reference'
+    assert fao.delete(path)
+
+
 @pytest.mark.parametrize('failure', ['compress', 'replace'])
 def test_write_failure_preserves_last_publication_and_removes_pending(tmp_path, monkeypatch, failure):
     path = tmp_path / 'document'

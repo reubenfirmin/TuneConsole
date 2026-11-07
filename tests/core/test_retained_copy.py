@@ -9,7 +9,7 @@ from tests.core.test_predecessor_writes import installed
 from yt_playlist.core import recommendation_pools as pools
 from yt_playlist.core.db_rebuild import build as rebuild
 from yt_playlist.core.store import Store
-from yt_playlist.repos import policy_storage, recommendation_publication as publication
+from yt_playlist.repos import recommendation_publication as publication
 
 
 @pytest.mark.parametrize('installed', [79, 93, 107], indirect=True)
@@ -42,17 +42,15 @@ def test_exact_installed_format_personal_values_hidden_ids_and_sequences(install
 @pytest.fixture
 def ranked(tmp_path, consumer_store):
     store = consumer_store(tmp_path/'ranked.db')
+    store.rec_ledger.record_serving_policy('policy', {}, 1)
     with store.conn:
-        policy_storage.publish(store.conn, [('policy', '{}', 1)])
         store.conn.executemany('INSERT INTO recordings(id,identity_key) VALUES(?,?)', [(i,'recording-'+str(i)) for i in range(1,130)])
     def publish(key, count=129):
         pool = pools.prepare(key,'policy',None,'a'*64,'card',[pools.Candidate(i,1/i) for i in range(1,count+1)])
         plan = publication.Plan(key,'policy',None,1,10,(publication.Slot('home','all','wheelhouse',pool),),())
         build = store.recommendations.claim(plan)
         store.recommendations.stage(plan,build)
-        with store.conn:
-            store.conn.execute('BEGIN IMMEDIATE')
-            store.recommendations.publish(build,11)
+        store.recommendations.publish(build,11)
         return build, plan
     try:
         yield store,publish

@@ -4,8 +4,7 @@ This is a code inventory, not a persisted file or artifact registry.
 """
 from contextlib import contextmanager, ExitStack
 
-from . import file_paths, policy_documents, profile_files, vibe_provenance, embedding_files, legacy_journals, policy_history
-from yt_playlist.repos import vibe_models
+from . import file_paths, policy_documents, profile_files, vibe_provenance, embedding_files, legacy_journals, policy_history, vibe_models
 
 
 def owners():

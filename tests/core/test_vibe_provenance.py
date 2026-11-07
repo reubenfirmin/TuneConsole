@@ -8,7 +8,7 @@ from contextlib import closing
 import pytest
 
 from yt_playlist.core import fao, vibe_history, vibe_provenance as owner, vibe_versions
-from yt_playlist.repos import vibe_models as vibe_model_files
+from yt_playlist.core import vibe_models as vibe_model_files
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.preparation import vibe_provenance as preparation
 from yt_playlist.core.store import Store
@@ -245,7 +245,7 @@ def test_changed_target_conditioning_gets_distinct_receipt_when_numeric_result_i
         with store.read_snapshot() as snapshot:
             prepared = snapshot.store.vibe_predictions.prepare_publication({key: track}, resolved, [], 10)
             try:
-                assert snapshot.publish(lambda: store.vibe_predictions.publish_prepared(prepared))
+                assert snapshot.publish_ordered(lambda: store.vibe_predictions.publish_prepared(prepared))
             finally:
                 prepared.close()
         return store.conn.execute("SELECT prediction_id,score,support FROM recording_vibes "
@@ -314,17 +314,17 @@ def test_periodic_preparation_stages_off_lock_and_rejects_stale_allocation(store
                 version = vibe_versions.column(store.conn, 'predictions')
                 store.conn.execute(f'INSERT INTO predictions(recording_id,vibe,score,support,kind,{version},predicted_at) '
                     "VALUES (?,'relax',.5,1,'artist',?,4)",(rid,vibe_versions.stored(store.conn, 'competing')))
-            assert not snapshot.publish(lambda:store.vibe_predictions.publish_prepared(plan))
+            assert not snapshot.publish_ordered(lambda:store.vibe_predictions.publish_prepared(plan))
     assert calls
     assert not list(owner.directory(store.conn).rglob('.fao-pending-*'))
     with store.read_snapshot() as snapshot:
         with closing(snapshot.store.vibe_predictions.prepare_publication(tracks,resolved,set(),6)) as plan:
             monkeypatch.setattr(fao,'prepare',lambda *a,**k: pytest.fail('Compression under SQL publication'))
-            assert snapshot.publish(lambda:store.vibe_predictions.publish_prepared(plan))
+            assert snapshot.publish_ordered(lambda:store.vibe_predictions.publish_prepared(plan))
     current = store.conn.execute('SELECT prediction_id FROM recording_vibes WHERE recording_id=?',(rid,)).fetchone()[0]
     assert owner.read(store.conn,current)==expected
     with store.read_snapshot() as snapshot:
         with closing(snapshot.store.vibe_predictions.prepare_publication(tracks,resolved,set(),7)) as plan:
             assert not plan.staged and not plan.predictions
-            assert snapshot.publish(lambda:store.vibe_predictions.publish_prepared(plan))
+            assert snapshot.publish_ordered(lambda:store.vibe_predictions.publish_prepared(plan))
     assert store.conn.execute('SELECT prediction_id FROM recording_vibes WHERE recording_id=?',(rid,)).fetchone()[0]==current

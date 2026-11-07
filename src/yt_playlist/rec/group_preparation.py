@@ -59,7 +59,8 @@ class Preparation:
             with work_budget(self.budget.seconds):
                 if self._pending is not None:
                     snapshot, prepared = self._pending
-                    if snapshot.publish(lambda: None, allow_stale_tables=self.store.taste_groups.staged_tables):
+                    if (self.store.taste_groups.head_generation() == prepared['generation']
+                            or snapshot.is_current(allow_stale_tables=self.store.taste_groups.staged_tables)):
                         return self._publish_pending(now)
                     self._pending = None
                     self.store.taste_groups.abandon_staged(prepared)
@@ -137,12 +138,19 @@ class Preparation:
 
     def _publish_pending(self, now):
         snapshot, prepared = self._pending
-        owner = self.store.taste_groups.stage(prepared)
-        def publish():
-            self.store.taste_groups.finish_preparation(prepared['generation'], owner,
-                prepared['serial'], now)
-        if snapshot.publish(publish,
-                            allow_stale_tables=self.store.taste_groups.staged_tables):
+        if self.store.taste_groups.head_generation() == prepared['generation']:
+            # A prior attempt may have committed the head before its checkpoint
+            # failed. Finish that acknowledgement without staging it again.
+            self.store.taste_groups.checkpoint_preparation(prepared['generation'], prepared['serial'], now)
+            published = True
+        else:
+            owner = self.store.taste_groups.stage(prepared)
+            def publish():
+                self.store.taste_groups.finish_preparation(prepared['generation'], owner,
+                    prepared['serial'], now)
+            published = snapshot.publish_ordered(publish,
+                allow_stale_tables=self.store.taste_groups.staged_tables)
+        if published:
             self._pending = None
             report(self.store, 'ready', now)
             self.store.maintenance_diagnostics.record('published', phase='rec: adaptive grouping',

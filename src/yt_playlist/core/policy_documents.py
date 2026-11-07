@@ -273,6 +273,18 @@ def install(conn, rows, bases=(), *, memory_key=None):
 
 def configuration(conn, version, *, memory_key=None):
     """Reconstruct one policy from its exact compact variant and shared body."""
+    if not conn.execute("SELECT 1 FROM sqlite_schema WHERE name='recommendation_policies'").fetchone():
+        row = conn.execute('SELECT configuration FROM rec_serving_policies WHERE model_version=?', (version,)).fetchone()
+        if row is None:
+            return None
+        value = json.loads(row[0])
+        base = value.pop(BASE_FIELD, None)
+        if base is not None:
+            body = conn.execute('SELECT configuration FROM rec_policy_bases WHERE base_version=?', (base,)).fetchone()
+            if body is None:
+                raise ValueError(f'Missing shared recommendation policy body: {base}')
+            value = {**json.loads(body[0]), **value}
+        return value
     with _policy_read(conn, memory_key):
         row = conn.execute('SELECT configuration_filename,content_digest,base_version,configuration_offset,byte_size '
                            'FROM recommendation_policies WHERE version=?', (version,)).fetchone()

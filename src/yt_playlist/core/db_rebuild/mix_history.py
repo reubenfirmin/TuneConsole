@@ -1,7 +1,7 @@
 """Run the mix-choice owner's preparation inside the candidate's bookmarks."""
 from functools import partial
 
-from .. import choice_learning_state, group_documents, mix_choices
+from .. import choice_learning_state, group_documents, group_reads, mix_choices
 from ..preparation import mix_choices as preparation
 from ...rec import group_root_backfill
 from ...repos import compact_group_publication, group_retention
@@ -23,9 +23,9 @@ def _roots(reader, store, cursor, limit):
 
 
 def _groups(reader, store, cursor, limit, *, at):
-    progressed = compact_group_publication.cleanup_batch(store.taste_groups, before=at)
+    progressed = compact_group_publication.cleanup_batch(store.taste_groups.repository, before=at)
     if not progressed:
-        selected = group_retention.plan(store.conn)
+        selected = group_reads.retention_plan(store.conn)
         if selected is not None:
             group_retention.apply(store.conn, selected)
             progressed = True

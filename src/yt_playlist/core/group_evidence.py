@@ -6,6 +6,7 @@ Callers publish roots before acknowledging the corresponding external record.
 """
 import hashlib
 import math
+from dataclasses import dataclass
 
 from .evidence_ledger import canonical
 from . import group_storage
@@ -42,13 +43,33 @@ def references(context):
     return generation, sorted(versions.items())
 
 
-def retain(conn, kind, identity, context, created_at, *, strict=True):
-    group_storage._writer(conn)
+@dataclass(frozen=True)
+class Owner:
+    kind: str
+    identity: str
+    generation: str | None
+    versions: tuple
+    digest: str
+    created_at: float
+
+
+def prepare(kind, identity, context, created_at):
     if (kind not in KINDS or not isinstance(identity, str) or not identity
             or type(created_at) not in (int, float) or not math.isfinite(created_at)):
         raise ValueError('Invalid musical group evidence owner')
     generation, versions = references(context)
     digest = hashlib.sha256(canonical([generation, versions])).hexdigest()
+    return Owner(kind, identity, generation, tuple(versions), digest, created_at)
+
+
+def retain(conn, kind, identity, context, created_at, *, strict=True):
+    return retain_owner(conn, prepare(kind, identity, context, created_at), strict=strict)
+
+
+def retain_owner(conn, owner, *, strict=True):
+    group_storage._writer(conn)
+    kind, identity, generation, versions, digest, created_at = (
+        owner.kind, owner.identity, owner.generation, owner.versions, owner.digest, owner.created_at)
     existing = conn.execute('SELECT reference_digest FROM group_evidence_owners WHERE kind=? AND external_key=?',
                             (kind, identity)).fetchone()
     if existing is not None:

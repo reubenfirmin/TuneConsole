@@ -314,6 +314,17 @@ class CollectionRepo(Repo):
         return album_catalog.lookup(self.conn,browse_id)
 
     @synchronized
+    def ensure_album_identity(self, browse_id):
+        """Resolve or insert an empty release identity without observing metadata."""
+        with self.conn.atomic():
+            identity = album_catalog.lookup(self.conn, browse_id)
+            if identity is None:
+                identity = self.conn.execute('INSERT INTO albums(metadata_rank) VALUES (0)').lastrowid
+                self.conn.execute("INSERT INTO album_provider_ids(provider,provider_id,album_id) VALUES ('youtube',?,?)",
+                                  (browse_id, identity))
+            return identity
+
+    @synchronized
     def canonical_album_ids(self, browse_ids):
         return {bid: album_catalog.lookup(self.conn, bid) for bid in set(browse_ids) if bid}
 

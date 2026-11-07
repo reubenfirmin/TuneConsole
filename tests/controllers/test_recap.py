@@ -4,9 +4,9 @@ from unittest.mock import create_autospec
 import pytest
 
 from tests.repository_mock_support import no_database
+from yt_playlist.controllers.genres import Genres
 from yt_playlist.controllers.recap import Recap
 from yt_playlist.rec import recap_evidence
-from yt_playlist.repos.genres import GenreRepo
 from yt_playlist.repos.recap import RecapRepo
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -20,7 +20,7 @@ def recap():
     for name in ('play_sources', 'first_plays', 'first_observations', 'source_spans', 'artist_labels', 'calendars'):
         getattr(repository, name).return_value = {}
     repository.familiar_artists.return_value = set()
-    genres = create_autospec(GenreRepo, instance=True, spec_set=True)
+    genres = create_autospec(Genres, instance=True, spec_set=True)
     genres.feature_axes.return_value = {'Jazz': ('jazz', 'jazz')}
     return Recap(repository, genres)
 

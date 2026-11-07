@@ -1,24 +1,21 @@
 # SiTunes
 
-Pinned revision `aea53feca9ba092406b5b95a3976dba0b44c568f`; acquired files match
-Git blobs. Stages 2/3 supply 1,406 paired pre/post-mood observations from 30
-people and 305 item groups. Stage 1's 600 observations lack initial mood and
-remain audit-only. Retain missing metadata, native [-1,1] VA and repeated pairs.
+Source and data: [publisher repository at the acquired revision](https://github.com/JiayuLi-997/SiTunes_dataset/tree/aea53feca9ba092406b5b95a3976dba0b44c568f).
+Schema: [dataset README](https://github.com/JiayuLi-997/SiTunes_dataset/blob/aea53feca9ba092406b5b95a3976dba0b44c568f/SiTunes/README.md).
 
-Nov 1, #813: participant-held-out, track-held-out and later-stage fits compare
-initial mood, context, participant identity and supplied descriptors. Training-only
-imputation, scaling and nested selection protect each split. Initial VA regression
-improves new-participant MSE over unchanged mood by -.020111 valence and -.031779
-arousal, with negative paired intervals. Context adds no reliable gain; music
-descriptors give no reliable held-out gain and worsen later-stage valence by
-.010205 [.001641,.019657]. No deployable head or audio intervention model selected.
+SiTunes records situational music recommendation in a three-stage user study.
+It contains 2,006 interactions with aligned participant/item IDs, timestamps,
+listening durations, ratings and item metadata. Stages 2 and 3 add mood before
+and after listening, environmental context and wearable measurements; stage 3
+also records preference. Mood valence/arousal use −1 to 1, recommendation ratings
+use a five-point scale, and preference uses 0–100. These targets are distinct.
 
-The audio intersection is only 39 paired rows / 18 people / 11 tracks, with
-unverified recordings/windows and duration mismatches or short previews. No
-broad recovery is justified without verified audio and terms. Pre/post association
-has no untreated comparison and does not identify a causal listening effect.
+TuneConsole uses 1,406 paired pre/post-mood observations from 30 participants
+and 305 item groups. Stage 1's 600 observations lack initial mood. Missing
+duration, context and item metadata remain missing; repeated participant/item
+pairs retain their identities.
 
-Evidence: `local/situnes-813-20261101/round-2/`; round 1 stopped before fitting
-because missing metadata serialized as NaN. Protocol: [SiTunes](../SITUNES_PLAN.md).
-Verify with `./experiments/run.py situnes-study verify`.
-Source: [pinned publisher repository](https://github.com/JiayuLi-997/SiTunes_dataset/tree/aea53feca9ba092406b5b95a3976dba0b44c568f).
+The existing-audio intersection has only 39 paired observations across 18 people
+and eleven tracks, with unverified recording/window matches. No aligned audio
+intervention corpus is established. Before/after association without an untreated
+comparison does not identify a causal effect of listening.

@@ -19,10 +19,11 @@ def prepare(store, now, parameters):
                 {'parameters': parameters, 'tracks': tracks}, now, policy=policy,
                 input_revision=reader.prepared_content.serial(), pending_policies=rows)
             snapshot.release_reader()
-            build = store.recommendations.claim(plan, policies=rows, bases=bases)
+            store.rec_ledger.record_prepared_policies(rows, bases)
+            build = store.recommendations.claim(plan)
             store.recommendations.remember_clicked_pool_parameters(build.generation_id, parameters, now)
             store.recommendations.stage(plan, build)
-            return snapshot.publish(lambda: store.recommendations.publish(build, now), validate_inputs=False)
+            return snapshot.publish_ordered(lambda: store.recommendations.publish(build, now), validate_inputs=False)
     tracks = _calculate(store, now, parameters)
     tracks = measurement.stamp_pool(store, tracks, now, parameters['lane'])
     store.rec_proposals.put_proposals(f"home_pool:{parameters['lane']}", {"parameters": parameters, "tracks": tracks}, now)

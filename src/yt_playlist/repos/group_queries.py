@@ -1,23 +1,22 @@
-"""Compact group reads; the repository owns the pinned, file-retaining snapshot."""
-from yt_playlist.core import group_documents, group_storage, policy_documents
-from yt_playlist.core.activity import WorkBudgetExceeded
-from yt_playlist.core.evidence_ledger import canonical
+"""Detached SQL facts for compact group reads; no file reads or retention."""
+from yt_playlist.core import group_storage
 
 
 def _policy(conn, version):
-    value = policy_documents.configuration(conn, version)
-    if value is None:
-        raise ValueError('Missing retained musical group policy')
-    return canonical(value).decode()
+    row = conn.execute('SELECT configuration_filename,content_digest,base_version,configuration_offset,byte_size '
+                       'FROM recommendation_policies WHERE version=?', (version,)).fetchone()
+    if row is None:
+        return None
+    body = None
+    if row[2] is not None:
+        body = conn.execute('SELECT configuration_filename,content_digest,configuration_offset,byte_size '
+                            'FROM recommendation_policy_bodies WHERE version=?', (row[2],)).fetchone()
+    return {'variant': tuple(row), 'body': tuple(body) if body is not None else None}
 
 
 def _generation(conn, row):
-    value = group_documents.read(row['metadata_filename'], row['metadata_digest'],
-                                  row['metadata_bytes'], row['metadata_offset'], 'generation')
-    value['recording_inputs'] = group_storage.inputs_for(conn, row['input_manifest_id'])
-    return {'generation': row['external_key'], 'policy': _policy(conn, row['policy_version']),
-            'fingerprint': row['input_fingerprint'], 'created_at': row['created_at'],
-            'serial': row['input_serial'], 'payload': value}
+    return {**dict(row), 'policy': _policy(conn, row['policy_version']),
+            'recording_inputs': group_storage.inputs_for(conn, row['input_manifest_id'])}
 
 
 def head_generation(conn):
@@ -41,13 +40,10 @@ def head(conn, *, members=False):
 
 
 def _definition(conn, row):
-    value = group_documents.read(row['definition_filename'], row['definition_digest'],
-                                  row['definition_bytes'], row['definition_offset'], 'definition')
     parent = conn.execute('SELECT x.external_version FROM generation_groups x '
                          'WHERE x.generation_id=? AND x.group_id=?',
                          (row['generation_id'], row['parent_group_id'])).fetchone()
-    return {**value, 'group_id': row['external_key'], 'version': row['external_version'],
-            'parent_version': parent[0] if parent else None}
+    return {**dict(row), 'parent_version': parent[0] if parent else None}
 
 
 _SELECT = ('SELECT v.*,t.external_key,x.external_version,x.generation_id FROM generation_groups x '
@@ -111,13 +107,7 @@ def learning_head(conn):
         'JOIN taste_groups t ON t.id=x.group_id JOIN group_versions v ON v.id=x.group_version_id '
         'LEFT JOIN generation_groups parent ON parent.generation_id=x.generation_id '
         'AND parent.group_id=v.parent_group_id WHERE h.id=1 ORDER BY x.position')
-    groups = []
-    for row in rows:
-        value = group_documents.read(row['definition_filename'], row['definition_digest'],
-                                     row['definition_bytes'], row['definition_offset'], 'definition')
-        groups.append({key: row[key] for key in ('group_id', 'version', 'parent_version', 'legacy', 'leaf')}
-                      | {'genres': value.get('genres', [])})
-    return {'generation': generation, 'groups': groups}
+    return {'generation': generation, 'groups': [dict(row) for row in rows]}
 
 
 def leaf_members(conn, generation):
@@ -134,26 +124,16 @@ def leaf_members(conn, generation):
     return result
 
 
-def _lineage(row):
-    payload = group_documents.read(row['evidence_filename'], row['evidence_digest'],
-                                    row['evidence_bytes'], row['evidence_offset'], 'lineage')
-    return {'source': row['source_alias'], 'target': row['target_alias'], 'relation': row['relation'], 'payload': payload}
-
-
 def successors(conn, version, *, limit=512):
-    if type(limit) is not int or not 0 <= limit <= 8192:
-        raise ValueError('Invalid musical group lineage page size')
     rows = conn.execute('SELECT l.* FROM group_lineage l WHERE l.source_alias=? AND EXISTS('
         'SELECT 1 FROM group_generation_lineage x JOIN group_publications p ON p.generation_id=x.generation_id '
         'WHERE x.source_alias=l.source_alias AND x.target_alias=l.target_alias) '
         'ORDER BY l.target_alias LIMIT ?', (version, limit + 1)).fetchall()
-    if len(rows) > limit:
-        raise WorkBudgetExceeded('Musical lineage exceeds learning work ceiling')
-    return [_lineage(row) for row in rows]
+    return [dict(row) for row in rows]
 
 
 def lineage(conn):
-    return [_lineage(row) for row in conn.execute('SELECT l.* FROM group_lineage l WHERE EXISTS('
+    return [dict(row) for row in conn.execute('SELECT l.* FROM group_lineage l WHERE EXISTS('
         'SELECT 1 FROM group_generation_lineage x JOIN group_publications p ON p.generation_id=x.generation_id '
         'WHERE x.source_alias=l.source_alias AND x.target_alias=l.target_alias) ORDER BY l.source_alias,l.target_alias')]
 

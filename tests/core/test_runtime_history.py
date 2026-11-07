@@ -193,8 +193,7 @@ def test_mode_reactivation_requires_new_payload_and_allocation_never_reuses_dele
         assert [row['mode_id'] for row in store.modes.list_modes()] == [1]
     for invalid in (b'', b'\x00', np.array([np.nan], dtype=np.float32).tobytes()):
         with pytest.raises(ValueError, match='nonempty finite vector'):
-            with atomic_write(store):
-                store.modes.publish_generation([(900, 'Invalid', '[]', invalid, 2, '[]', 1, 4, 'basis')], [])
+            store.modes.publish_generation([(900, 'Invalid', '[]', invalid, 2, '[]', 1, 4, 'basis')], [])
     store.modes.replace_modes([mode(900, 'Updated')], [], 4)
     assert not store.conn.execute('SELECT 1 FROM taste_mode_retired_payloads WHERE mode_id=900').fetchone()
     assert {m['mode_id'] for m in store.modes.list_modes()} == {1, 900}

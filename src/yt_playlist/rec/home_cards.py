@@ -16,7 +16,7 @@ from yt_playlist.rec import (arc_energy, home_audit, home_themes, home_vibe, jou
                              mix_tuning, ordering, rec_params, recipes, surfaces)
 from yt_playlist.repos.discovery import DiscoveryRepo
 from yt_playlist.repos.modes import ModesRepo
-from yt_playlist.repos.rec_model import RecModelRepo
+from yt_playlist.controllers.rec_model import RecommendationModel
 from yt_playlist.controllers.recommendation_query import RecommendationQuery
 from yt_playlist.controllers.recommendation_ledger import RecommendationLedger
 from yt_playlist.repos.rec_proposals import RecProposalsRepo
@@ -31,7 +31,7 @@ _ROW_LANES = ("wheelhouse", "explore", "comfort", "fresh")
 class HomeRepositories(Protocol):
     discovery: DiscoveryRepo
     modes: ModesRepo
-    rec_model: RecModelRepo
+    rec_model: RecommendationModel
     rec_query: RecommendationQuery
     rec_ledger: RecommendationLedger
     rec_proposals: RecProposalsRepo

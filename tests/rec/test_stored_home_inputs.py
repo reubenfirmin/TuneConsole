@@ -12,7 +12,7 @@ from yt_playlist.core import recommendation_outputs, recommendation_pools as poo
 from yt_playlist.rec import album_choices, home_prepared, home_themes, rec_params
 from yt_playlist.repos import recommendation_publication as publication
 from yt_playlist.repos.rec_proposals import RecProposalsRepo
-from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
+from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 from yt_playlist.repos.genres import GenreRepo
 
 
@@ -72,12 +72,12 @@ def test_unavailable_whole_page_still_advances_to_later_metadata(home):
 def test_genre_options_keep_rare_tail_without_duplicate_mode_votes(home, monkeypatch):
     store, generation, _ = home
     forbid_bundle_and_files(monkeypatch)
-    reads, original = [], RecommendationPublicationsRepo.recording_metadata_page
+    reads, original = [], RecommendationPublications.recording_metadata_page
     def page(self, *args, **kwargs):
         value = original(self, *args, **kwargs)
         reads.append((value['generation'], len(value['tracks'])))
         return value
-    monkeypatch.setattr(RecommendationPublicationsRepo, 'recording_metadata_page', page)
+    monkeypatch.setattr(RecommendationPublications, 'recording_metadata_page', page)
     assert home_themes.genre_options(store, genre_plays={}) == [
         {'family': 'rock-classic', 'label': 'rock'}, {'family': 'jazz', 'label': 'jazz'}]
     assert len(reads) == 3 and all(gen == generation and size <= 128 for gen, size in reads)
@@ -113,9 +113,7 @@ def test_generation_hash_changes_only_when_private_output_becomes_a_head(home, m
     build = store.recommendations.claim(next_plan)
     store.recommendations.stage(next_plan, build)
     assert home_prepared._proposal_generation(store, None, 10, preview={}) == before
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        store.recommendations.publish(build, 12)
+    store.recommendations.publish(build, 12)
     assert home_prepared._proposal_generation(store, None, 10, preview={}) != before
 
 
@@ -152,11 +150,11 @@ def test_tv_seed_interleave_keeps_rare_mode_candidates_without_a_global_head_cut
         assert surface not in ('mode_bundles', 'fresh_pool')
         return original(self, surface)
     monkeypatch.setattr(RecProposalsRepo, '_proposal_json', read)
-    page, requests = RecommendationPublicationsRepo.candidate_page, []
+    page, requests = RecommendationPublications.candidate_page, []
     def bounded(self, *args, **kwargs):
         requests.append(kwargs['limit'])
         return page(self, *args, **kwargs)
-    monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_page', bounded)
+    monkeypatch.setattr(RecommendationPublications, 'candidate_page', bounded)
     seeds = tv._stored_seeds(store, [[values[0]]], 3)
     assert [track['key'] for track in seeds] == ['fresh-0', 'fresh-258', 'fresh-259']
     assert {track['serving_context']['recommendation_generation_id'] for track in seeds[1:]} == {generation}
@@ -175,12 +173,12 @@ def test_album_companions_find_best_tail_matches_with_artist_caps_and_bounded_pa
     keys = {f'fresh-{index}': index for index in range(260)}
     albums = [{'keys': ['fresh-259']}, {'keys': ['fresh-0', 'fresh-1']}]
     features = np.eye(2)
-    reads, original = [], RecommendationPublicationsRepo.recording_metadata_page
+    reads, original = [], RecommendationPublications.recording_metadata_page
     def page(self, *args, **kwargs):
         value = original(self, *args, **kwargs)
         reads.append((kwargs['limit'], value['generation'], kwargs.get('mode_key')))
         return value
-    monkeypatch.setattr(RecommendationPublicationsRepo, 'recording_metadata_page', page)
+    monkeypatch.setattr(RecommendationPublications, 'recording_metadata_page', page)
     actual = album_choices._companions(store, albums, features, vectors, keys)
     assert len(reads) == 3 and set(reads) == {(128, generation, 'all')}
     for position, tracks in enumerate(actual):

@@ -1,31 +1,22 @@
 # MTG-Jamendo human judgments
 
-Four official audio shards (00, 07, 23, 53) yielded 216 recordings with complete
-explicit human judgments. Official archive and selected-track SHA256 checks
-passed. Seven tasks retain positive-vote fractions: relaxed, happy, aggressive,
-party, sad, acoustic and electronic. Missing uploader tags are unknown.
-Original split-0 test annotations entered training; use new artist grouping.
+Source and audio download instructions: [MTG-Jamendo dataset](https://github.com/MTG/mtg-jamendo-dataset).
+Annotations used: [human classification judgments at the recorded revision](https://github.com/MTG/mtg-jamendo-dataset/tree/cafd8e20c265ed84f1e61f1c875327971f43a62f/derived/music-classification-annotations).
+Terms: [publisher's licence section](https://github.com/MTG/mtg-jamendo-dataset#license).
 
-Oct 30, #577/#614: the 187-row transfer-protected aggression head became the
-selected [Release model](../models/release.md). Adding Emotify power or balancing
-native aggression/power/anger tasks did not improve its fixed anger ranking;
-the browser power blend had a supported regression. Happy judgments also
-contribute to [Uplift](../models/uplift.md).
+MTG-Jamendo is a music auto-tagging dataset. Its mood/theme subset has 18,486
+tracks with uploader tags. A separate derived annotation collection contains
+explicit human yes/no judgments, including relaxed, happy, aggressive, party,
+sad, acoustic and electronic. TuneConsole uses the fraction of positive human
+votes for each task, preserving disagreement. An absent uploader tag is unknown.
 
-Nov 1, #709: froze 41 potential tracks across 34 additional artists in shards
-70/63, split into 21 training and 20 sequestered evaluation tracks. Both official
-endpoints returned HTTP503 for both shards: zero new audio/usable artists.
-The extension result is inconclusive, not evidence of failed generalization.
-Empty-extension and original-pool refits match exactly; comparison to the older
-187-row artifact reflects the 216-row pool difference, not an extension gain.
-No held-out aggression values were opened. Preserve the fixed cohort for a
-separately bounded retry; no backfill was performed.
+The acquired subset contains 216 recordings from 104 artists, with complete
+judgments for all seven tasks. Audio comes from official low-quality shards
+00, 07, 23 and 53; archives and selected tracks match the official SHA256 lists.
+The protected Release fit uses 187 recordings after transfer exclusions.
 
-Source revision `cafd8e20c265ed84f1e61f1c875327971f43a62f` retains noncommercial
-research/academic dataset terms and individual audio licences; product notices
-do not establish distribution clearance.
-Evidence: `local/individual-20261030/remaining-1/`,
-`local/release-614-20261030/round-2/`,
-`local/release-extension-709-20261101/round-3/`.
-Protocol: [artist extension](../RELEASE_EXTENSION_PLAN.md); retained
-[label audit](../RELEASE_LABEL_AUDIT.md) is also a hashed experiment input.
+The derived judgments reuse the original split-0 test pool. Training on them
+requires new artist grouping; split 0 is no longer an untouched evaluation set.
+Aggression describes the music, rather than anger relief from listening.
+The repository specifies noncommercial research/academic dataset terms and
+individual track licences.

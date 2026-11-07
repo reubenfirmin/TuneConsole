@@ -52,9 +52,9 @@ def test_idle_collection_reports_bounded_progress_and_matches_rebuild_closure(st
     for index in range(5):
         store.rec_ledger.record_serving_policy('unused-'+str(index), {'value':index}, 1)
     store.rec_ledger.record_serving_policy('live', {'value':'live'}, 9999)
-    closure = policy_storage.retained_closure(store.conn,10000)
+    closure = policy_storage.retained_closure(store.conn, 10000 - policy_config.GRACE_SECONDS)
     assert closure['recommendation_policies'] == {'live'}
-    monkeypatch.setattr(policy_storage,'SCAN_LIMIT',2)
+    monkeypatch.setattr(policy_config,'SCAN_LIMIT',2)
     progress = []
     for _ in range(4):
         result = measurement.maintain_storage(store,10000,progress=True)
@@ -100,7 +100,7 @@ def check_preparation_retention(store, monkeypatch, *, generations, variants, ev
     # Unchanged tracks reuse the first immutable pool. Its original generation
     # and pool policies remain meaningful roots beyond the three-tick grace
     # window; later unused revalidation policies must still be collected.
-    expired = {row['version'] for row in policies if row['created_at'] < now - policy_storage.GRACE_SECONDS}
+    expired = {row['version'] for row in policies if row['created_at'] < now - policy_config.GRACE_SECONDS}
     roots = {row[0] for row in store.conn.execute('SELECT policy_version FROM recommendation_generations '
         'UNION SELECT policy_version FROM recommendation_pools')}
     assert expired == original_versions
@@ -117,7 +117,7 @@ def check_preparation_retention(store, monkeypatch, *, generations, variants, ev
 
 
 def test_repeated_advancing_time_preparation_without_serving_has_bounded_bytes(store, monkeypatch):
-    monkeypatch.setattr(policy_storage, 'GRACE_SECONDS', 240)
+    monkeypatch.setattr(policy_config, 'GRACE_SECONDS', 240)
     check_preparation_retention(store, monkeypatch, generations=8, variants=4,
         evidence_bytes=256, maximum_generations=3, byte_bound=16000)
 
@@ -145,12 +145,12 @@ def test_unused_retention_protects_both_impression_paths_proposals_sessions_and_
 def test_prepared_reference_change_defers_cleanup(file_backed_store, monkeypatch):
     store = file_backed_store
     store.rec_ledger.record_serving_policy('old-policy', {'exact': True}, 1)
-    original = policy_storage.protected_references
+    original = policy_storage.legacy_root_messages
     def raced(conn):
         result = original(conn)
         store.rec_proposals.put_proposals('home_choice', {'context': {'pool_policy': 'old-policy'}}, 10000)
         return result
-    monkeypatch.setattr(policy_storage, 'protected_references', raced)
+    monkeypatch.setattr(policy_storage, 'legacy_root_messages', raced)
     try:
         assert measurement.maintain_storage(store, 10000) is False
         assert store.rec_ledger.policy_configuration('old-policy') == {'exact': True}
@@ -181,8 +181,8 @@ def test_queued_offer_restores_collected_pool_with_its_impression(file_backed_st
 def test_budget_rejection_preserves_last_good_projection_and_policies(store, monkeypatch, budget):
     rows, base = _publish(store)
     store.rec_proposals.put_proposals('home_choice', {'last-good': True}, 1)
-    monkeypatch.setattr(policy_storage, budget, 1)
-    with pytest.raises(policy_storage.PolicyStorageFull), store.conn:
+    monkeypatch.setattr(policy_config, budget, 1)
+    with pytest.raises(policy_config.PolicyStorageFull), store.conn:
         new_rows = [policy_config.variant_record(base[0], {'ranker': 'new'}, 2)]
         store.rec_ledger.publish_prepared_policies(new_rows, [base])
         store.rec_proposals.publish_prepared_home('{"last-good":false}', 2, surface='home_choice')
@@ -246,8 +246,8 @@ def test_republishing_existing_variants_at_exact_budget_is_idempotent(store, mon
     rows, base = _publish(store)
     size = store.conn.execute('SELECT sum(byte_size) FROM recommendation_policy_bodies').fetchone()[0]
     size += store.conn.execute('SELECT sum(byte_size) FROM recommendation_policies').fetchone()[0]
-    monkeypatch.setattr(policy_storage, 'MAX_UNUSED_BYTES', size)
-    monkeypatch.setattr(policy_storage, 'MAX_UNUSED_VARIANTS', len(rows))
+    monkeypatch.setattr(policy_config, 'MAX_UNUSED_BYTES', size)
+    monkeypatch.setattr(policy_config, 'MAX_UNUSED_VARIANTS', len(rows))
     store.rec_ledger.record_prepared_policies(rows, [base])
     assert store.conn.execute('SELECT count(*) FROM recommendation_policies').fetchone()[0] == len(rows)
     assert store.conn.execute('SELECT sum(byte_size) FROM recommendation_policy_bodies').fetchone()[0] + \
@@ -285,7 +285,7 @@ def test_quota_queries_use_partial_indexes_and_do_not_traverse_served_history(st
 
 def test_legacy_cleanup_limits_payload_work_and_resumes_from_cursor(legacy_policy_store, monkeypatch):
     store = legacy_policy_store
-    monkeypatch.setattr(policy_storage, 'SCAN_BYTES', 8 * 1024)
+    monkeypatch.setattr(policy_config, 'SCAN_BYTES', 8 * 1024)
     raw = json.dumps({'evidence': 'x' * 1024})
     with store.conn:
         store.conn.executemany('INSERT INTO rec_serving_policies VALUES (?,?,1)',
@@ -293,14 +293,14 @@ def test_legacy_cleanup_limits_payload_work_and_resumes_from_cursor(legacy_polic
     assert measurement.maintain_storage(store, 10000)
     remaining = store.conn.execute('SELECT count(*) FROM rec_serving_policies').fetchone()[0]
     assert 0 < remaining < 12
-    assert store.settings.get_setting(policy_storage.CURSOR) is not None
+    assert store.settings.get_setting(policy_config.CURSOR) is not None
     assert measurement.maintain_storage(store, 10000)
     assert store.conn.execute('SELECT count(*) FROM rec_serving_policies').fetchone()[0] == 0
 
 
 def test_orphan_body_collection_also_limits_payload_work(legacy_policy_store, monkeypatch):
     store = legacy_policy_store
-    monkeypatch.setattr(policy_storage, 'SCAN_BYTES', 8 * 1024)
+    monkeypatch.setattr(policy_config, 'SCAN_BYTES', 8 * 1024)
     for n in range(12):
         _publish(store, rankers=(), body={'evidence': 'x' * 1024, 'generation': n})
     assert measurement.maintain_storage(store, 10000)

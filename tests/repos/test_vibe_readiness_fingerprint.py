@@ -10,6 +10,7 @@ import pytest
 
 from yt_playlist.core.db_diagnostics import DiagnosticConnection
 from yt_playlist.repos.musical_profiles import MusicalProfilesRepo
+from yt_playlist.controllers.musical_profiles import MusicalProfiles
 
 
 @pytest.mark.parametrize('normalized', [False, True])
@@ -49,8 +50,9 @@ def test_readiness_hash_retains_exact_legacy_page_bytes(tmp_path, normalized, co
             rows = [row for key in ordered[start:start + 512] for row in expected_rows.get(key, ())]
             digest.update(json.dumps(rows, separators=(',', ':')).encode())
         repo = MusicalProfilesRepo(SimpleNamespace(conn=conn, _read_only=True, _lock=threading.RLock()))
-        assert repo.readiness_fingerprint(iter(keys)) == digest.hexdigest()
+        profiles = MusicalProfiles(repo, None, None, None, None)
+        assert profiles.readiness_fingerprint(iter(keys)) == digest.hexdigest()
         if count:
             with conn:
                 conn.execute("INSERT INTO rec_musical_profiles VALUES ('0000|café','new','changed')")
-            assert repo.readiness_fingerprint(keys) != digest.hexdigest()
+            assert profiles.readiness_fingerprint(keys) != digest.hexdigest()

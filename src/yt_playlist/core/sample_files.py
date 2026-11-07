@@ -18,11 +18,33 @@ REFERENCES = ('SELECT id,recording_id,video_id,run_id,point,captured_at,filename
 
 def directory(conn, memory_key=None):
     path = conn.execute('PRAGMA database_list').fetchone()[2]
+    return root_for_database(path, memory_key)
+
+
+def root_for_database(path, memory_key=None):
     if path:
         return Path(path).resolve().parent / 'sample-attributes'
     if memory_key is None:
         return Path(tempfile.mkdtemp(prefix='tuneconsole-samples-'))
     return Path(tempfile.gettempdir()) / 'tuneconsole-samples' / memory_key
+
+
+class SampleFiles:
+    def __init__(self, root):
+        self.root = root
+
+    def read(self, reference):
+        return read(reference['filename'], expected={name: reference[name]
+                    for name in ('id', 'run_id', 'point', 'video_id')})
+
+    def matches(self, filename, sample):
+        return Path(filename).stem == hashlib.sha256(canonical(sample)).hexdigest()
+
+    def write(self, sample):
+        return publish(self.root, sample)
+
+    def repair(self, filename, sample):
+        return publish(Path(filename).parent.parent, sample)
 
 
 def publish(root, sample):
@@ -159,20 +181,5 @@ def restore(conn, manifest, *, memory_key=None):
 
 
 def recording(conn, sample, now):
-    """An unknown exact video gets its own provisional identity, never a text match."""
-    row = conn.execute('SELECT recording_id FROM youtube_items WHERE video_id=?',
-                       (sample['video_id'],)).fetchone()
-    if row:
-        return row[0]
-    # Normal ingestion also registers title/artist aliases, which may rename
-    # existing ambiguous identities. Collection and migration must leave those
-    # identities (and their historical keyed state) alone.
-    rid = conn.execute('INSERT INTO recordings(identity_key,title,artist,created_at) VALUES (?,?,?,?)',
-        ('@sample-video:' + sample['video_id'], sample.get('title'), sample.get('artist'), now)).lastrowid
-    conn.execute('INSERT INTO youtube_items(video_id,recording_id,title,artist,orig_title,orig_artist) '
-        'VALUES (?,?,?,?,?,?)', (sample['video_id'], rid, sample.get('title'), sample.get('artist'),
-                               sample.get('title'), sample.get('artist')))
-    conn.execute('INSERT INTO catalog_entries(recording_id,video_id) VALUES (?,?)', (rid, sample['video_id']))
-    conn.execute('INSERT INTO item_recording_associations(video_id,recording_id,source,evidence,at) '
-        "VALUES (?,?,'sample','{}',?)", (sample['video_id'], rid, now))
-    return rid
+    from .sample_identity import recording as admit
+    return admit(conn, sample, now)

@@ -72,6 +72,10 @@ def publish_journey_prefix(store, now=1000, *, vibe_template=None):
 
 def finish_full_journey(store, now=1000):
     publish_destinations(store, now=now)
+    complete_journey(store, now=now)
+
+
+def complete_journey(store, now=1000):
     store.settings.set_setting('radio_seed_offer', json.dumps({
         'menu_id': 'current-radio', 'tracks': [
             {'key': f'prepared {i}|artist', 'video_id': f'prepared-{i}'} for i in range(4)]}))
@@ -113,14 +117,19 @@ def test_four_eligible_mixes_are_required_everywhere(store, count):
 
 
 def test_new_destinations_require_usable_outputs_and_recheck_current_eligibility(store, monkeypatch):
-    from tests.test_growth_journey import early_journey
-
     # Numerical Vibe evidence is a completed lower-layer result here. Its real
     # menu/evidence agreement is owned by test_growth_readiness and the Vibe
     # access test below. Keep actual prerequisite ordering, destination outputs
     # and their live feedback/eligibility reads under test.
     monkeypatch.setattr(type(store.readiness), 'vibe_evidence', lambda *args: (12, 0))
     monkeypatch.setattr(account_growth.growth_readiness, 'vibes', lambda *args: True)
+    # Foundation's 48-subject ranked reserve is owned by
+    # test_growth_readiness::test_foundation_needs_existing_taste_and_a_sizable_ranked_eligible_reserve.
+    # Here its completed result is a prerequisite to the real destination
+    # coordinator; late outputs must stay inaccessible until it becomes ready.
+    foundation_ready = False
+    monkeypatch.setattr(account_growth.growth_readiness, 'foundation',
+                        lambda *args: foundation_ready)
 
     def areas():
         return account_growth.view(store, 1000)['ready_areas']
@@ -130,9 +139,14 @@ def test_new_destinations_require_usable_outputs_and_recheck_current_eligibility
     ready = areas()
     assert not any(ready.values()), 'Later output must not skip the foundation'
     assert not ready['directions'] and not ready['radio']
-    early_journey(store)
+    seed_catalog_track(store, 'first|artist', 'First song', 'Artist', video_id='first')
+    foundation_ready = True
+    store.rec_proposals.put_proposals('album_prepared', {
+        'built_at': 1000, 'context': {}, 'items': [
+            {'browse_id': f'MPRE{i}', 'title': f'Record {i}', 'artist': f'Artist {i}',
+             'classification': 'discovery', 'score': .8} for i in range(2)]}, 1000)
     publish_personal_mix(store)
-    finish_full_journey(store)
+    complete_journey(store)
     assert all(areas().values())
     store.rec_model.record_feedback('for_you', 'new 0|new artist 0', 'dismiss', now=1000)
     seed_dislike(store, 'old 0|artist', until=None, now=1000)

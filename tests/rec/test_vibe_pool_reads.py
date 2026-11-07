@@ -135,8 +135,7 @@ def publish(store, value, *, costs=None):
     with measured(costs, 'subject_seed'), seed_costs(store, costs), store._lock, store.conn.atomic():
         seed_bundle_subjects(store, value, fresh=items)
     profiles = {item['key']: item['musical'] for item in items}
-    with measured(costs, 'profile_publication'), store._lock, store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
+    with measured(costs, 'profile_publication'):
         store.musical_profiles.publish_recordings([(key, musical_profiles.canonical(profile), profile['version'],
             musical_profiles.digest(profile)) for key, profile in profiles.items()], 1)
     with measured(costs, 'typed_publication'):

@@ -129,12 +129,12 @@ class TrackRepo(Repo):
 
     @synchronized
     def observe_track_entry(self, video_id, title, artist, *, now=None, album=None, album_browse_id=None, credits=None,
-                            duration_s=None, thumbnail=None):
+                            duration_s=None, thumbnail=None, preferred_key=None):
         """Retain an exact source entry without acquiring library membership."""
         with self.conn:
             return catalog.upsert(self.conn,video_id,title,artist,album=album,
                                       album_browse_id=album_browse_id,created_at=now,library=False,credits=credits,
-                                      duration_s=duration_s,thumbnail=thumbnail)
+                                      duration_s=duration_s,thumbnail=thumbnail,preferred_key=preferred_key)
 
     @synchronized
     def record_item_rating(self, account_id, video_id, status, *, source, now):

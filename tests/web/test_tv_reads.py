@@ -9,7 +9,7 @@ from tests.test_tv_stream import video
 from yt_playlist.core.store import Store
 from yt_playlist.library.playlist_generated import create_generated_playlist
 from yt_playlist.rec import tv_artwork
-from yt_playlist.repos.playlist_recipes import PlaylistRecipesRepo
+from yt_playlist.controllers.playlist_recipes import PlaylistRecipes
 from yt_playlist.util.matching import search_squash
 from yt_playlist.web.routes.home_tv import playlist_items
 
@@ -36,7 +36,7 @@ def test_playlist_response_stays_consistent_during_replacement_and_refreshes_nex
                 'retry_at': 86401} for item in videos}
 
         source.rec_proposals.put_proposals(tv_artwork.SURFACE, photos('before'), 1)
-        read_recipe = PlaylistRecipesRepo.get_recipe
+        read_recipe = PlaylistRecipes.get_recipe
         replaced = False
 
         def replace_after_recipe(repo, scope):
@@ -51,7 +51,7 @@ def test_playlist_response_stays_consistent_during_replacement_and_refreshes_nex
                 source.rec_proposals.put_proposals(tv_artwork.SURFACE, photos('after'), 2)
             return result
 
-        monkeypatch.setattr(PlaylistRecipesRepo, 'get_recipe', replace_after_recipe)
+        monkeypatch.setattr(PlaylistRecipes, 'get_recipe', replace_after_recipe)
         make_reader = source._make_reader
         readers = []
 

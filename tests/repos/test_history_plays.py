@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from yt_playlist.repos.history import _parse_played_date
+from yt_playlist.core.history_policy import parse_played_date as _parse_played_date
 
 DAY = 86400
 

@@ -73,9 +73,7 @@ def test_failed_slot_attachment_leaves_verified_prefix_unsealed_until_retry(file
     assert store.recommendations.head('home')['id'] == previous.generation_id
     store.conn.execute('DROP TRIGGER reject_slot')
     store.recommendations.stage(prepared, build)
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        store.recommendations.publish(build, 12)
+    store.recommendations.publish(build, 12)
     assert store.recommendations.head('home')['id'] == build.generation_id
     assert len(store.recommendations.page('home', 'all', 'wheelhouse', limit=256)) == 130
 
@@ -113,9 +111,7 @@ def test_cancelled_output_batch_keeps_only_committed_prefix_and_reuses_durable_f
     store.recommendations.stage(prepared, build)
     assert retried == [output.encoded for output in prepared.outputs[16:]]
     assert manifest(store, build.generation_id)[:16] == committed
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        store.recommendations.publish(build, 12)
+    store.recommendations.publish(build, 12)
     for index in range(35):
         assert store.recommendations.output('home', f'chunk-{index:02d}') == {'title': f'Output {index}'}
 
@@ -141,9 +137,7 @@ def test_failed_manifest_transaction_resumes_after_reopen_without_partial_batch(
         reopened.recommendations.stage(prepared, reclaimed)
         assert manifest(reopened, build.generation_id)[:16] == committed
         assert len(manifest(reopened, build.generation_id)) == 35
-        with reopened.conn:
-            reopened.conn.execute('BEGIN IMMEDIATE')
-            reopened.recommendations.publish(reclaimed, 12)
+        reopened.recommendations.publish(reclaimed, 12)
         assert reopened.recommendations.output('home', 'chunk-17') == {'title': 'Output 17'}
         assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchall()
     finally:
@@ -210,9 +204,7 @@ raise AssertionError('Expected abrupt process exit')
     store.recommendations.stage(prepared, reclaimed)
     assert manifest(store, build.generation_id)[:16] == committed
     assert len(manifest(store, build.generation_id)) == 35
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        store.recommendations.publish(reclaimed, 12)
+    store.recommendations.publish(reclaimed, 12)
     assert store.recommendations.output('home', 'chunk-18') == {'title': 'Output 18'}
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
@@ -304,9 +296,7 @@ def test_staging_checkpoint_failure_keeps_durable_success_and_original_policy(fi
     assert len(manifest(store, build.generation_id)) == 17
     assert store.conn.execute('SELECT status FROM recommendation_generations WHERE id=?',
                               (build.generation_id,)).fetchone()[0] == 'ready'
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        store.recommendations.publish(build, 12)
+    store.recommendations.publish(build, 12)
     assert store.recommendations.output('home', 'chunk-16') == {'title': 'Output 16'}
 
 
@@ -319,9 +309,7 @@ def test_staging_keeps_installed_layouts_writable_without_changing_migration_his
         assert pinned.store.recommendations.head('home')['id'] == first.generation_id
         store.recommendations.stage(prepared, build)
         assert store.recommendations.head('home')['id'] == first.generation_id
-        with store.conn:
-            store.conn.execute('BEGIN IMMEDIATE')
-            store.recommendations.publish(build, 12)
+        store.recommendations.publish(build, 12)
         assert pinned.store.recommendations.head('home')['id'] == first.generation_id
     assert store.recommendations.head('home')['id'] == build.generation_id
     assert store.recommendations.output('home', 'chunk-16') == {'title': 'Output 16'}

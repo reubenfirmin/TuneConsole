@@ -104,15 +104,13 @@ class PreparedRadio:
             return
         with (nullcontext(self.store) if getattr(self.store, '_read_only', False)
               else self.store.read_view(seconds=None)) as reader:
-            previous_facts = getattr(reader, '_radio_candidate_facts', None)
-            reader._radio_candidate_facts = OrderedDict()
-            token = _planning_read.set(dict(owner=self, reader=reader, pages=OrderedDict(),
-                                           headings=OrderedDict(), axes=OrderedDict(), facts={}))
-            try:
-                yield
-            finally:
-                _planning_read.reset(token)
-                reader._radio_candidate_facts = previous_facts
+            with reader.recommendations.planning_read():
+                token = _planning_read.set(dict(owner=self, reader=reader, pages=OrderedDict(),
+                                               headings=OrderedDict(), axes=OrderedDict(), facts={}))
+                try:
+                    yield
+                finally:
+                    _planning_read.reset(token)
 
     def _cached_read(self, name, key, load, limit):
         scope = _planning_read.get()
@@ -241,7 +239,7 @@ class PreparedRadio:
 
     @staticmethod
     def decode_inputs(captured):
-        from yt_playlist.repos.recommendation_publications import decode_display
+        from yt_playlist.core.recommendation_files import decode_display
         result, displays, pools = captured
         for surface, tracks, ranks, chunks in displays:
             explanations = decode_display(chunks, ranks, surface)

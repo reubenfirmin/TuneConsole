@@ -6,6 +6,7 @@ import math
 
 from . import bounded_json, group_evidence, json_cache, recommendation_outputs as files
 from .activity import check_cancellable_work
+from .policy_config import HOME_CONTEXTS as CONTEXTS, home_references as policy_references
 
 SURFACES = frozenset({'home_prepared', 'home_tuned', 'home_choice', 'album_prepared', 'adaptive_group_preview',
                       'home_discovery', 'home_revisit', 'into_recently', 'trend_rollups', 'cleanup'})
@@ -16,7 +17,6 @@ PART_CHARACTERS = 64 * 1024
 # Avoid publishing several separately synced files for one compressed menu.
 SELECTION_PART_CHARACTERS = 128 * 1024
 ASCII_SELECTION_PART_CHARACTERS = 256 * 1024
-CONTEXTS = ('context', 'choice_context', 'album_choice_context')
 
 
 @dataclass(frozen=True)
@@ -83,59 +83,6 @@ def _validate_numbers(value):
         visited += 1
         if visited % 128 == 0:
             check_cancellable_work()
-
-
-def policy_references(value):
-    """Only declared contexts, offers and their tracks carry policy identity."""
-    if not isinstance(value, dict):
-        return set()
-    result = set()
-    def capture(item):
-        if not isinstance(item, dict):
-            return
-        for field in ('model_version', 'pool_policy'):
-            version = item.get(field)
-            if version is not None:
-                if not isinstance(version, (str, int)) or isinstance(version, bool) or not str(version):
-                    raise ValueError('Invalid explicit Home policy reference')
-                result.add(str(version))
-    for field in CONTEXTS:
-        capture(value.get(field))
-    options = list(value.get('protos', []))
-    menus = value.get('menus', [])
-    if isinstance(menus, list):
-        if len(menus) > 128:
-            raise ValueError('Home menu reference budget exceeded')
-        for menu in menus:
-            if isinstance(menu, dict):
-                options.extend(menu.get('protos', []))
-    held = value.get('menu')
-    if isinstance(held, dict):
-        options.extend(held.get('protos', []))
-    if len(options) > 8192:
-        raise ValueError('Home offer reference budget exceeded')
-    tracks = []
-    for option in options:
-        capture(option)
-        if isinstance(option, dict):
-            capture(option.get('context'))
-            tracks.extend(option.get('tracks', []))
-    for field in ('tracks', 'discovery_tracks', 'rediscover_tracks'):
-        tracks.extend(value.get(field, []))
-    items = value.get('items', [])
-    if not isinstance(items, list) or len(items) > 512:
-        raise ValueError('Home album reference budget exceeded')
-    for item in items:
-        if isinstance(item, dict):
-            tracks.extend(item.get('companion', []))
-    if len(tracks) > 32768:
-        raise ValueError('Home track reference budget exceeded')
-    for track in tracks:
-        capture(track)
-        if isinstance(track, dict):
-            capture(track.get('serving_context'))
-            capture(track.get('provenance'))
-    return result
 
 
 def _root_key(identity, field):

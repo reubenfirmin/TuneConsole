@@ -382,7 +382,7 @@ def test_rebuild_resumes_final_compaction_without_repeating_converters(developme
 def test_rebuild_prepares_choices_before_retiring_group_history(development93, tmp_path):
     from yt_playlist.core import evidence_ledger, group_documents, group_evidence, group_storage, home_outputs, mix_choices
     from yt_playlist.core.db_rebuild import mix_verification, verification
-    from yt_playlist.repos import group_queries
+    from yt_playlist.core import group_reads as group_queries
     from yt_playlist.rec import choice_evidence
 
     with closing(sqlite3.connect(development93)) as conn:

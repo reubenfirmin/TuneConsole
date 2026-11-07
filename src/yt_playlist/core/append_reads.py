@@ -1,5 +1,5 @@
 """Project retained append custody without importing preparation workers."""
-from . import append_work, collection_recovery, radio_checkpoint
+from . import append_work, collection_recovery
 
 
 def _has(conn, table):
@@ -59,36 +59,8 @@ def apply_radio(conn, source, value):
         return value
     captured = collection_recovery.read(*(header[key] for key in ('recovery_filename', 'recovery_digest', 'recovery_bytes')),
         kind='radio-session', owner=header['source'])
-    append = header['kind'] == 'append'
-    operation = captured if append else captured['replacement']
-    fields = (('pending_sent', 'sent'), ('pending_started_at', 'started_at')) if append else (
-        ('waiting_at', 'started_at'), ('slot', 'slot'))
-    for field, column in fields:
-        if field in operation:
-            operation[field] = bool(header[column]) if field == 'pending_sent' else header[column]
-    receipt = operation.get('pending_result' if append else 'receipt')
-    if receipt is not None:
-        for field, column in (('status', 'receipt_status'), ('videoId', 'receipt_video_id_snapshot'), ('setVideoId', 'receipt_handle_snapshot')):
-            if field in receipt:
-                receipt[field] = header[column]
-    if append:
-        if operation.get('pending') is not None:
-            operation['pending']['video_id'] = header['adding_video_id_snapshot']
-        for field in ('pending', 'pending_sent', 'pending_started_at', 'pending_result'):
-            if field in operation:
-                value[field] = operation[field]
-        return value
-    if 'choice_id' in operation:
-        operation['choice_id'] = radio_checkpoint.project_choice(operation['choice_id'], header['choice_id'])
-    if 'allowed' in operation:
-        operation['allowed'] = [sequence(conn, name, header, 'allowed', index) for index in range(header['allowed_count'])]
-    for role in ('confirmed', 'waiting', 'play_prefix', 'excluded'):
-        if role in operation and operation[role] is not None:
-            operation[role] = sequence(conn, name, header, role)
-    if 'proposed' in operation:
-        operation['proposed'] = [{**item, 'video_id':video} for item, video in
-            zip(operation['proposed'], sequence(conn, name, header, 'proposed'), strict=True)]
-    if operation.get('adding') is not None:
-        operation['adding']['video_id'] = header['adding_video_id_snapshot']
-    value['replacement'] = operation
+    roles = {('allowed', index):sequence(conn,name,header,'allowed',index) for index in range(header['allowed_count'])}
+    roles.update(((role,0),sequence(conn,name,header,role)) for role in ('confirmed','waiting','play_prefix','excluded','proposed'))
+    from .radio_checkpoint_policy import project_prepared_operation
+    project_prepared_operation(value,captured,header,roles)
     return value

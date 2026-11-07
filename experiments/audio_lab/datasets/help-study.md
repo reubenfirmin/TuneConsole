@@ -1,21 +1,23 @@
 # Help Me study!
 
-Oct 30, #576/#638: acquired experience-sampling data, Spotify features and
-codebook; all three workbooks passed publisher MD5 checks. 280 episodes from
-ten participants contain 453 distinct nonempty artist/title pairs. Thirteen
-text matches yield 31 candidate episode/track fields in existing audio, without
-verified recording/window identity.
+Source and downloads: [publisher's Zenodo release](https://zenodo.org/records/10085104).
+Relevant files: [experience-sampling responses](https://zenodo.org/records/10085104/files/esm_raw_data.xlsx?download=1),
+[music features](https://zenodo.org/records/10085104/files/esm_music_features_analysis.xlsx?download=1)
+and [codebook](https://zenodo.org/records/10085104/files/index.xlsx?download=1).
+
+This observational study records music listening during study activities. The
+acquired workbooks contain 280 episodes from ten participants, with context,
+study tasks, track descriptions, Spotify features and self-reported concentration
+or distraction. Episodes name 453 distinct nonempty artist/title pairs; they
+can cover multiple songs. The release does not supply aligned audio.
 
 Only 18 episodes from seven participants have complete concentration/distraction
-outcomes; 262 are missing. Three complete episodes have no stated study task;
-none of their complete tasks is Computer programming. Positive concentration,
-negative concentration and distraction checkboxes are separate responses.
+outcomes; 262 are missing. Positive concentration, negative concentration and
+distraction are separate checkbox responses. Three complete episodes lack a
+stated study task; none of the complete tasks is Computer programming.
 
-The outcomes can cover multiple songs. Do not assign episode outcomes to each
-prompt track, turn missing fields into negatives, or substitute Spotify model
-features for human suitability. No task/person interaction was fit and no
-rankable independent Focus audio set was established. Audio recovery deferred.
-
-Evidence: `local/datasets/discovery/focus-576/` and
-`local/focus-controls-637-638-20261030/round-1/`.
-Source: [publisher release](https://zenodo.org/records/10085104).
+Thirteen text matches against existing audio remain unverified recording/window
+candidates. Episode outcomes cannot be assigned to each named song, missing
+answers cannot become negative labels, and Spotify features are not human
+suitability judgments. This dataset supplies no independent audio benchmark
+for Focus.

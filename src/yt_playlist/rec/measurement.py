@@ -12,7 +12,6 @@ from copy import deepcopy
 from yt_playlist.rec import choice_bandit, embedding_vectors as vectors, home_vibe, musical_character, rec_params, scoring, transient
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.core import policy_config
-from yt_playlist.repos import policy_storage
 from yt_playlist.repos.base import synchronized
 from yt_playlist.util.matching import normalize
 
@@ -218,7 +217,7 @@ class CapturedOffer:
             try:
                 version, config, rows = _prepare_impressions(
                     self.snapshot.store, items, self.now, configuration=configuration, **options)
-                pools, bases = self.snapshot.store.recommendations.captured_policies(
+                pools, bases = self.snapshot.store.rec_ledger.captured_policies(
                     (row['provenance'].get('pool_policy') for row in rows))
                 policy, base = policy_config.pack(config, self.now, version=version)
                 self.store.rec_ledger.record_served_impressions(request_id, self.surface, rows,
@@ -316,13 +315,13 @@ def maintain_storage(store, now, *, progress=False):
     with store.read_snapshot() as snapshot:
         versions, cursor = snapshot.store.rec_ledger.policy_retention_candidates(now)
         stats = {}
-        published = snapshot.publish(lambda: stats.update(store.rec_ledger.prune_policies(versions, cursor)))
+        published = snapshot.publish_ordered(lambda: stats.update(store.rec_ledger.prune_policies(versions, cursor)))
     if published and (stats['policies_deleted'] or stats['bodies_deleted']):
         log.info('Recommendation policy retention: policies_deleted=%d bodies_deleted=%d more=%s',
                  stats['policies_deleted'], stats['bodies_deleted'], cursor is not None)
     if progress:
         return {**stats, 'published': published,
-                'pending': bool(history) or not published or cursor is not None or stats.get('bodies_deleted', 0) == policy_storage.SCAN_LIMIT}
+                'pending': bool(history) or not published or cursor is not None or stats.get('bodies_deleted', 0) == policy_config.SCAN_LIMIT}
     return published
 
 

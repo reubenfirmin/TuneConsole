@@ -20,7 +20,7 @@ import numpy as np
 from yt_playlist.core.activity import WorkBudgetExceeded, work_budget
 from yt_playlist.core.audio_vibe_contract import INTENSITY_CHANNELS
 from yt_playlist.rec import home_vibe, musical_preparation, vibe_joint_model as joint, vibe_prediction as baseline
-from yt_playlist.repos import vibe_evaluation
+from yt_playlist.rec import vibe_evaluation
 
 ROOT = Path(__file__).resolve().parents[2]
 CODE = ('src/yt_playlist/rec/vibe_joint_model.py', 'src/yt_playlist/rec/vibe_prediction.py',
@@ -31,7 +31,15 @@ CODE = ('src/yt_playlist/rec/vibe_joint_model.py', 'src/yt_playlist/rec/vibe_pre
         'src/yt_playlist/repos/musical_profiles.py', 'src/yt_playlist/repos/prepared_content.py',
         'src/yt_playlist/repos/rec_query.py', 'src/yt_playlist/repos/discovery.py',
         'src/yt_playlist/repos/vibe_models.py', 'src/yt_playlist/core/vibe_model_files.py',
+        'src/yt_playlist/core/vibe_model_queries.py',
+        'src/yt_playlist/core/vibe_manifest.py', 'src/yt_playlist/controllers/vibe_models.py',
+        'src/yt_playlist/controllers/musical_profiles.py', 'src/yt_playlist/core/profile_files.py',
+        'src/yt_playlist/core/audio_metadata_files.py', 'src/yt_playlist/core/metadata_native.py',
+        'src/yt_playlist/core/preparation/metadata_destinations.py',
         'src/yt_playlist/repos/vibe_evaluation.py',
+        'src/yt_playlist/controllers/vibe_evaluation.py', 'src/yt_playlist/rec/vibe_evaluation.py',
+        'src/yt_playlist/controllers/prepared_content.py', 'src/yt_playlist/rec/prepared_content_inputs.py',
+        'src/yt_playlist/controllers/genres.py',
         'src/yt_playlist/core/audio_vibe_contract.py',
         'experiments/audio_lab_tools/vibe_pooling_evaluation.py')
 CRITERIA = {'macro_mae_gain': .05, 'stratum_mae_regression': .02, 'ndcg10_drop': .01,
@@ -83,7 +91,7 @@ def assignments(rows, folds=5):
 
 
 def freeze(database, destination, humans=None):
-    # Only this repository opens the source; model fitting runs later from JSON.
+    # Only the isolated capture opens the source; fitting runs later from JSON.
     snapshot = vibe_evaluation.evaluation_snapshot(database, (*home_vibe.PRESETS, *INTENSITY_CHANNELS))
     rows = [row for values in snapshot['rows'].values() for row in values]
     labels = json.loads(humans.read_text()) if humans else []

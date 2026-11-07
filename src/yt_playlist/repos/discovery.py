@@ -33,6 +33,12 @@ _GENERATED_PL = "(SELECT playlist_scope_id FROM quarantined_playlists)"
 class DiscoveryRepo(Repo):
 
     @synchronized
+    def remove_spotify_origins(self):
+        from yt_playlist.core.discovery_sources import remove_spotify_artists
+        with self.conn.atomic():
+            return remove_spotify_artists(self.conn)
+
+    @synchronized
     def merge_genre_origins(self, previous, target):
         with self.conn.atomic(join=True):
             if provenance.available(self.conn):

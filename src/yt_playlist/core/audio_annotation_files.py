@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from contextlib import contextmanager
 
 from yt_playlist.core.audio_annotation_contract import FILE_FORMAT
 from yt_playlist.core.evidence_ledger import canonical
@@ -14,6 +15,10 @@ MAX_BYTES = 4 * 1024 * 1024
 
 def directory(conn, memory_key=None):
     path = conn.execute('PRAGMA database_list').fetchone()[2]
+    return root_for_database(path, memory_key)
+
+
+def root_for_database(path, memory_key=None):
     if path:
         database = Path(path).resolve()
         return database.with_name(database.name + '.annotations')
@@ -22,15 +27,39 @@ def directory(conn, memory_key=None):
     return Path(tempfile.gettempdir()) / 'tuneconsole-annotations' / memory_key
 
 
-def publish(root, document, *, age=None):
-    """Publish before inserting its database reference, under the writer reservation."""
+class AnnotationFiles:
+    def __init__(self, root):
+        self.root = root
+
+    def read(self, annotation):
+        return read(annotation['model_output_filename'], expected={
+            'run_key': annotation['run_id'] or annotation['legacy_run_key'],
+            'kind': annotation['kind'], 'taxonomy_version': annotation['taxonomy_version'],
+            'revision': annotation['revision']})
+
+    @contextmanager
+    def write(self, document):
+        encoded, path = _publication(self.root, document)
+        with fao.prepare(path, fao.Content(encoded, max_bytes=MAX_BYTES)) as pending:
+            # Content addressing makes concurrent identical publications safe.
+            pending.expected = None
+            pending.publish()
+            yield str(path), path.stem
+
+
+def _publication(root, document):
     if not isinstance(document, dict) or document.get('format') != FILE_FORMAT:
         raise ValueError('Unsupported annotation document format')
     encoded = canonical(document)
     if len(encoded) > MAX_BYTES:
         raise ValueError('Annotation document exceeds the input byte budget')
     digest = hashlib.sha256(encoded).hexdigest()
-    path = Path(root) / digest[:2] / (digest + '.json')
+    return encoded, Path(root) / digest[:2] / (digest + '.json')
+
+
+def publish(root, document, *, age=None):
+    """Publish before inserting its database reference, under the writer reservation."""
+    encoded, path = _publication(root, document)
     fao.write(path, fao.Content(encoded, metadata=age, max_bytes=MAX_BYTES))
     return str(path)
 

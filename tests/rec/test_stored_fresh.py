@@ -9,7 +9,7 @@ from tests.repos.test_typed_recommendation_publication import recommendations, p
 from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
 from yt_playlist.rec import fresh_pool
 from yt_playlist.repos.rec_proposals import RecProposalsRepo
-from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
+from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 from yt_playlist.repos import recommendation_publication as publication
 
 
@@ -52,13 +52,13 @@ def forbid_legacy(monkeypatch):
 def test_rare_family_after_the_global_head_remains_reachable_in_bounded_reads(fresh, monkeypatch):
     store, generation = fresh
     forbid_legacy(monkeypatch)
-    pages, original = [], RecommendationPublicationsRepo.candidate_page
+    pages, original = [], RecommendationPublications.candidate_page
 
     def page(self, *args, **kwargs):
         result = original(self, *args, **kwargs)
         pages.append((kwargs['limit'], len(result['tracks'])))
         return result
-    monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_page', page)
+    monkeypatch.setattr(RecommendationPublications, 'candidate_page', page)
     tracks = fresh_pool.pick(store, 10, include_genres=('jazz',), size=2, minimum=2)
     assert [track['key'] for track in tracks] == ['fresh-258', 'fresh-259']
     assert len(pages) >= 3 and all(limit == 128 and count <= 128 for limit, count in pages)
@@ -77,12 +77,12 @@ def test_fresh_round_robin_preserves_requested_families(fresh, monkeypatch):
 def test_small_unfiltered_preview_stops_after_one_page(fresh, monkeypatch):
     store, _ = fresh
     forbid_legacy(monkeypatch)
-    reads, original = [], RecommendationPublicationsRepo.candidate_page
+    reads, original = [], RecommendationPublications.candidate_page
 
     def page(self, *args, **kwargs):
         reads.append(kwargs['after'])
         return original(self, *args, **kwargs)
-    monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_page', page)
+    monkeypatch.setattr(RecommendationPublications, 'candidate_page', page)
     tracks = fresh_pool.pick(store, 10, size=4)
     assert [track['key'] for track in tracks] == [f'fresh-{index}' for index in range(4)]
     assert reads == [-1]

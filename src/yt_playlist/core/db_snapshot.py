@@ -96,7 +96,7 @@ class ReadSnapshot:
         with self.source._lock:
             return self._inputs_current(PublicationTimings(), allow_stale_tables)
 
-    def publish_ordered(self, target):
+    def publish_ordered(self, target, *, allow_stale_tables=frozenset(), validate_inputs=True):
         """Check captured inputs once, then let each repository commit its own write.
 
         The serving lock preserves application ordering. A failed later step
@@ -112,7 +112,10 @@ class ReadSnapshot:
                 if self.source.conn.in_transaction:
                     raise RuntimeError('Ordered publication cannot join another transaction')
                 check_cancellable_work()
-                if not self._inputs_current(timings, frozenset()):
+                current = (self._inputs_current(timings, allow_stale_tables) if validate_inputs else
+                           getattr(self.source, '_database_generation', 0) == self._database_generation
+                           and self.source.conn.execute('PRAGMA schema_version').fetchone()[0] == self._schema)
+                if not current:
                     outcome = 'deferred'
                     return False
                 changes = self.source.conn.total_changes
