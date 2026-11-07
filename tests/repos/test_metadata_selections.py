@@ -137,7 +137,8 @@ def test_populated_upgrade_does_not_invent_user_intent_and_rolls_back(tmp_path):
     assert s.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
 
 
-def test_resolution_and_override_commit_atomically(store):
+def test_resolution_failure_preserves_choice_and_retry_completes(store):
+    """A failed receipt preserves the earlier choice; retry finishes the ordered workflow."""
     track = store.tracks.upsert_track('video','Song','Artist',None,200)
     store.enrichment.upsert_conflict(track,'genre',[{'provider':'a','value':'Rock'},
                                                   {'provider':'b','value':'Pop'}])
@@ -145,7 +146,14 @@ def test_resolution_and_override_commit_atomically(store):
                        "BEGIN SELECT RAISE(ABORT,'interrupted resolution'); END")
     with pytest.raises(sqlite3.IntegrityError,match='interrupted resolution'):
         store.enrichment.resolve_conflict(track,'genre','')
-    assert store.conn.execute('SELECT COUNT(*) FROM entry_field_choices').fetchone()[0] == 0
+    assert store.tracks.get_track_enrichment(track)[0] == ''
+    assert store.conn.execute('SELECT COUNT(*) FROM entry_field_choices').fetchone()[0] == 1
     assert store.conn.execute('SELECT COUNT(*) FROM metadata_runtime_choices').fetchone()[0] == 0
-    assert store.conn.execute('SELECT COUNT(*) FROM metadata_decisions').fetchone()[0] == 0
+    assert store.conn.execute('SELECT COUNT(*) FROM metadata_decisions').fetchone()[0] == 1
     assert store.conn.execute('SELECT resolved FROM enrichment_conflict').fetchone()[0] == 0
+    assert not store.conn.in_transaction
+    store.conn.execute('DROP TRIGGER reject_resolution')
+    store.enrichment.resolve_conflict(track, 'genre', '')
+    assert store.tracks.get_track_enrichment(track)[0] == ''
+    assert store.conn.execute('SELECT resolved,resolved_value FROM enrichment_conflict').fetchone()[:] == (1, '')
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()

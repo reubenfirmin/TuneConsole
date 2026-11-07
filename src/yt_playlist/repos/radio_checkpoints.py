@@ -1,5 +1,6 @@
 """SQL checkpoint owners, queue references and revision admission for Radio."""
 from yt_playlist.core import append_reads, append_work, entity_names, playlist_scopes, radio_provenance, radio_reads, radio_storage
+from yt_playlist.core.db_revisions import setting_reads
 from yt_playlist.repos.base import Repo, snapshot_read, synchronized
 
 
@@ -100,8 +101,9 @@ class RadioCheckpointRepo(Repo):
         revision = radio_reads.origin_selected(self.conn)
         if revision is not None:
             return {'native': False, 'ids': radio_reads.origin_ids(self.conn, revision), 'values': {}}
-        return {'native': False, 'ids': None, 'values': dict(self.conn.execute(
-            'SELECT key,value FROM settings WHERE key IN (?,?,?,?)', radio_provenance.KEYS))}
+        with setting_reads(self._store, radio_provenance.KEYS):
+            return {'native': False, 'ids': None, 'values': dict(self.conn.execute(
+                'SELECT key,value FROM settings WHERE key IN (?,?,?,?)', radio_provenance.KEYS))}
 
     @synchronized
     def remember_playlists(self, playlists, account=None):

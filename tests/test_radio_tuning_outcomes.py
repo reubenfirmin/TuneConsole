@@ -165,6 +165,10 @@ def test_completed_tuning_is_durable_before_confirmation_and_same_values_repair_
     tune, save = c.listening.tune, c.persistence.checkpoints.save
     token = []
 
+    def finish_request():
+        while token:
+            activity._DEADLINE.reset(token.pop())
+
     def published(*args, **kwargs):
         result = tune(*args, **kwargs)
         # Reproduce the reviewer's post-publication deadline boundary without
@@ -180,11 +184,13 @@ def test_completed_tuning_is_durable_before_confirmation_and_same_values_repair_
             monkeypatch.setattr(c.persistence.checkpoints, 'save', failed)
             with pytest.raises(RuntimeError, match='checkpoint write failed'):
                 c.tune(values)
+            finish_request()
             assert c.status()['tuning'] == values
             assert not c.status()['tuning_confirmed']
             assert c.persistence.load()['tuning'] != values
             monkeypatch.setattr(c.persistence.checkpoints, 'save', save)
         result = c.tune(values)
+        finish_request()
         assert result['ok'] and result['tuning_confirmed']
         assert c.persistence.load()['tuning'] == values
         c.suspend()
@@ -194,8 +200,7 @@ def test_completed_tuning_is_durable_before_confirmation_and_same_values_repair_
         finally:
             restored.suspend()
     finally:
-        for value in reversed(token):
-            activity._DEADLINE.reset(value)
+        finish_request()
 
 
 def test_new_session_during_tuning_admission_supersedes_that_apply(poc):

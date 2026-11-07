@@ -1,7 +1,8 @@
 """Canonical artist references, ordered credits, and name lookup for display boundaries."""
 from contextlib import contextmanager
+import json
 
-from yt_playlist.core import artists
+from yt_playlist.core import artists, artist_credits
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read
 
 
@@ -44,6 +45,28 @@ class ArtistRepo(Repo):
     @synchronized
     def add_alias(self, identity, name, source):
         self.conn.execute('INSERT OR IGNORE INTO artist_aliases VALUES (?,?,?)', (identity, name, source))
+
+    @snapshot_read
+    def credit_inputs(self, entry_id):
+        row = self.conn.execute('SELECT entry_id FROM legacy_track_refs WHERE legacy_id=?', (entry_id,)).fetchone()
+        entry_id = row[0] if row else entry_id
+        return {'entry_id': entry_id, 'typed': artist_credits.available(self.conn),
+                'artists': [row[0] for row in self.conn.execute(
+                    f'SELECT artist_id FROM {self.entry_artists_table} WHERE entry_id=? ORDER BY position', (entry_id,))]}
+
+    @synchronized
+    def store_credit(self, entry_id, credit, structured, source, now, *, typed):
+        with self.conn.atomic(join=True):
+            if typed:
+                version = artist_credits.intern(self.conn, credit)
+                observation, select = artist_credits.capture(self.conn, entry_id, version, source, now)
+                if select:
+                    artist_credits.select(self.conn, entry_id, observation)
+            else:
+                self.conn.execute('INSERT INTO artist_credit_observations(entry_id,credit,credits_json,source,observed_at) '
+                                  'VALUES (?,?,?,?,?)', (entry_id, credit.display_credit, json.dumps(structured), source, now))
+                artist_credits.update_projection(self.conn, entry_id,
+                    [(position, member.artist_id, member.credit_text, source) for position, member in enumerate(credit.members)])
 
     @synchronized
     def get_artist(self, value):

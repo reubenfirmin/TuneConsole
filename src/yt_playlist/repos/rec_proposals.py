@@ -11,16 +11,24 @@ from yt_playlist.core import (album_note_outputs, album_note_requests, choice_le
                               json_cache, recommendation_reports, tv_recommendation_state)
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
 from yt_playlist.repos import proposal_cache, proposal_storage
-
-
-def encode_proposals(surface, value):
-    if surface not in {'mode_bundles', 'fresh_pool'}:
-        return json.dumps(value)
-    from yt_playlist.core.policy_config import references
-    return json_cache.encode(value, group_pools=surface == 'mode_bundles', references=references(value))
+from yt_playlist.core.proposal_codec import encode_proposals
 
 
 class RecProposalsRepo(Repo):
+    @snapshot_read
+    def cache_rows(self):
+        return proposal_cache.logical_rows(self.conn, store=self._store)
+
+    def stage_pruned_cache(self, prepared):
+        return [(proposal_cache.stage(self, surface, encoded) if surface in proposal_cache.SURFACES else encoded,
+                 surface) for encoded, surface in prepared]
+
+    @synchronized
+    def publish_pruned_cache(self, prepared):
+        from yt_playlist.repos.discovery_cache import publish
+        with self.conn.atomic():
+            publish(self.conn, prepared)
+
     @synchronized
     def discard_learned_outputs(self):
         from yt_playlist.core import recommendation_setting_outputs

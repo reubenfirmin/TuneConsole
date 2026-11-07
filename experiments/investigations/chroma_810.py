@@ -4,16 +4,16 @@ import subprocess
 
 import numpy as np
 
-from experiments.audio_lab_tools.chroma_study import DEFAULT, PYTHON, ROOT
-from experiments.audio_lab_tools.focus_experiment import arrays, load
-from experiments.audio_lab_tools.quality_round import verify
+from experiments.audio_lab_tools.studies.chroma_study import DEFAULT, PYTHON, ROOT
+from experiments.audio_lab_tools.focus.focus_experiment import arrays, load
+from experiments.audio_lab_tools.support.quality_round import verify
 
 
 def test_chroma_preserves_known_pitch_and_silence():
     script = '''
 import numpy as np
 import librosa
-from experiments.audio_lab_tools.chroma_worker import summarize
+from experiments.audio_lab_tools.audio.chroma_worker import summarize
 t = np.arange(160000) / 16000
 kwargs = dict(sr=16000, hop_length=512, fmin=32.70319566257483,
     n_chroma=12, n_octaves=7, bins_per_octave=36, tuning=0.,

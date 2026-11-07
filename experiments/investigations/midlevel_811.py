@@ -1,9 +1,9 @@
 """Independent actual-cohort checks of every nested auxiliary exclusion."""
 import numpy as np
 
-from experiments.audio_lab_tools.midlevel_pilot import DEFAULT, ACQUISITION
-from experiments.audio_lab_tools.focus_experiment import arrays, load
-from experiments.audio_lab_tools.quality_round import verify
+from experiments.audio_lab_tools.studies.midlevel_pilot import DEFAULT, ACQUISITION
+from experiments.audio_lab_tools.focus.focus_experiment import arrays, load
+from experiments.audio_lab_tools.support.quality_round import verify
 
 
 def test_acquisition_and_actual_property_cohort():

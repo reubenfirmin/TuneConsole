@@ -1,5 +1,6 @@
 """Idle maintenance cannot touch a writer connection owned by another worker."""
 import threading
+from contextlib import contextmanager
 
 import pytest
 
@@ -16,8 +17,9 @@ from yt_playlist.core.preparation import (
 def test_idle_maintenance_serializes_every_statement(installed, preparation, monkeypatch):
     store, _ = installed
     attempted = threading.Event()
-    statements, errors, results = [], [], []
+    statements, shared_statements, errors, results = [], [], [], []
     acquire = store._lock.acquire
+    read_view = store.read_view
 
     def observed_acquire(*args, **kwargs):
         if threading.current_thread() is worker:
@@ -27,6 +29,17 @@ def test_idle_maintenance_serializes_every_statement(installed, preparation, mon
     def trace(sql):
         if threading.current_thread() is worker:
             statements.append((sql, store._lock.held_by_current_thread))
+            shared_statements.append(sql)
+
+    @contextmanager
+    def traced_reader(*args, **kwargs):
+        with read_view(*args, **kwargs) as reader:
+            reader.conn.set_trace_callback(lambda sql: statements.append(
+                (sql, reader._lock._is_owned())))
+            try:
+                yield reader
+            finally:
+                reader.conn.set_trace_callback(None)
 
     def run():
         try:
@@ -36,6 +49,7 @@ def test_idle_maintenance_serializes_every_statement(installed, preparation, mon
 
     worker = threading.Thread(target=run, daemon=True)
     monkeypatch.setattr(store._lock, 'acquire', observed_acquire)
+    monkeypatch.setattr(store, 'read_view', traced_reader)
     store.conn.set_trace_callback(trace)
     try:
         # Do not induce SQLite's uninterruptible mutex/GIL cycle in the test
@@ -43,7 +57,7 @@ def test_idle_maintenance_serializes_every_statement(installed, preparation, mon
         with store._lock:
             worker.start()
             assert attempted.wait(5), 'Maintenance did not wait for the connection'
-            assert not statements, 'Maintenance ran SQL on another worker\'s connection'
+            assert not shared_statements, 'Maintenance ran SQL on another worker\'s connection'
     finally:
         worker.join(5)
         assert not worker.is_alive(), 'Maintenance remained blocked after the writer finished'

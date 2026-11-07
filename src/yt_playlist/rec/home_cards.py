@@ -14,7 +14,7 @@ import json
 
 from yt_playlist.rec import (arc_energy, home_audit, home_themes, home_vibe, journeys, musical_character,
                              mix_tuning, ordering, rec_params, recipes, surfaces)
-from yt_playlist.repos.discovery import DiscoveryRepo
+from yt_playlist.controllers.discovery import Discovery
 from yt_playlist.repos.modes import ModesRepo
 from yt_playlist.controllers.rec_model import RecommendationModel
 from yt_playlist.controllers.recommendation_query import RecommendationQuery
@@ -29,7 +29,7 @@ _ROW_LANES = ("wheelhouse", "explore", "comfort", "fresh")
 
 
 class HomeRepositories(Protocol):
-    discovery: DiscoveryRepo
+    discovery: Discovery
     modes: ModesRepo
     rec_model: RecommendationModel
     rec_query: RecommendationQuery

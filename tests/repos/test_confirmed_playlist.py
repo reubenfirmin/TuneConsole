@@ -23,6 +23,11 @@ def _videos(store, pid):
         "SELECT video_id FROM playlist_items WHERE playlist_id=? ORDER BY position", (pid,))]
 
 
+def _library_videos(store):
+    return {row[0] for row in store.conn.execute(
+        'SELECT e.video_id FROM library_memberships m JOIN catalog_entries e ON e.id=m.entry_id')}
+
+
 def _existing_prefix(store, pid, tracks):
     """Build the large precondition directly; the small case tests initial publication.
 
@@ -79,6 +84,7 @@ def test_append_writes_only_new_catalog_and_membership(store, monkeypatch, size)
 
 @pytest.mark.parametrize("incremental", [False, True])
 def test_confirmed_publication_rolls_back_all_changes(store, monkeypatch, incremental):
+    """Reject the playlist as a whole; earlier observations stay outside the library."""
     pid = _playlist(store)
     store.playlists.publish_confirmed_tracks(pid, "Radio", [_track(0)], 2)
     before = store.playlists.get_playlist(pid)
@@ -93,7 +99,15 @@ def test_confirmed_publication_rolls_back_all_changes(store, monkeypatch, increm
                                                 expected_prefix=["v0"] if incremental else None)
     assert store.playlists.get_playlist(pid) == before
     assert _videos(store, pid) == ["v0"]
-    assert not store.conn.execute("SELECT 1 FROM youtube_items WHERE video_id='v1'").fetchone()
+    assert store.conn.execute("SELECT 1 FROM youtube_items WHERE video_id='v1'").fetchone()
+    assert not store.conn.execute("SELECT 1 FROM youtube_items WHERE video_id='v2'").fetchone()
+    store.settings.set_setting('unrelated', 'committed')
+    assert _library_videos(store) == {'v0'}
+    monkeypatch.setattr(catalog, 'upsert', original)
+    store.playlists.publish_confirmed_tracks(pid, 'Changed', [_track(i) for i in range(3)], 3,
+                                            expected_prefix=['v0'] if incremental else None)
+    assert _videos(store, pid) == ['v0', 'v1', 'v2']
+    assert _library_videos(store) == {'v0', 'v1', 'v2'}
 
 
 def test_other_connection_sees_only_complete_publication(file_backed_store, monkeypatch):
@@ -134,6 +148,7 @@ def test_stale_prefix_and_metadata_changes_reconcile_fully(store):
 
 
 def test_membership_failure_cannot_publish_metadata_or_catalog(store):
+    """An observed upload cannot become library content through a rejected playlist."""
     pid = _playlist(store)
     store.playlists.publish_confirmed_tracks(pid, "Radio", [_track(0)], 2)
     before = store.playlists.get_playlist(pid)
@@ -145,7 +160,15 @@ def test_membership_failure_cannot_publish_metadata_or_catalog(store):
                                                 expected_prefix=["v0"])
     assert store.playlists.get_playlist(pid) == before
     assert _videos(store, pid) == ["v0"]
-    assert not store.conn.execute("SELECT 1 FROM youtube_items WHERE video_id='v1'").fetchone()
+    assert store.conn.execute("SELECT 1 FROM youtube_items WHERE video_id='v1'").fetchone()
+    store.settings.set_setting('unrelated', 'committed')
+    assert _library_videos(store) == {'v0'}
+    with store.conn:
+        store.conn.execute('DROP TRIGGER reject_append')
+    store.playlists.publish_confirmed_tracks(pid, 'Changed', [_track(0), _track(1)], 3,
+                                            expected_prefix=['v0'])
+    assert _videos(store, pid) == ['v0', 'v1']
+    assert _library_videos(store) == {'v0', 'v1'}
 
 
 @pytest.mark.parametrize("incremental", [False, True])
@@ -165,13 +188,20 @@ def test_late_membership_batch_failure_rolls_back_prior_batches(store, increment
     assert not store.conn.in_transaction
     assert store.playlists.get_playlist(pid) == before
     assert _videos(store, pid) == ["v0"]
-    assert {table: list(map(tuple, store.conn.execute(f'SELECT * FROM {table} ORDER BY 1')))
-            for table in retained} == retained
+    for table, original_rows in retained.items():
+        assert list(map(tuple, store.conn.execute(f'SELECT * FROM {table} WHERE '
+                                                f'{"video_id" if table == "youtube_items" else "id"}=?',
+                                                ('v0' if table == 'youtube_items' else 1,)))) == original_rows
+        assert store.conn.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == len(tracks)
+    store.settings.set_setting('unrelated', 'committed')
+    assert _library_videos(store) == {'v0'}
     with store.conn:
         store.conn.execute("DROP TRIGGER reject_late_membership")
     store.playlists.publish_confirmed_tracks(
         pid, "Changed", tracks, 3, expected_prefix=["v0"] if incremental else None)
     assert _videos(store, pid) == [track['video_id'] for track in tracks]
+    assert _library_videos(store) == {track['video_id'] for track in tracks}
+    assert store.conn.execute('SELECT COUNT(*) FROM catalog_entries').fetchone()[0] == len(tracks)
     playlist = store.playlists.get_playlist(pid)
     assert (playlist.title, playlist.track_count) == ("Changed", len(tracks))
     assert playlist.content_hash == content_hash(store.playlists.get_playlist_track_keys(pid))

@@ -4,7 +4,6 @@ from contextlib import ExitStack
 from fastapi import APIRouter, Request
 
 from yt_playlist.core import updatecheck
-from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import account_growth, actions, artist_start, home_cache, home_preferences, home_prepared, mix_tuning, onboarding, rec_params, tv
 from yt_playlist.rec.home_cards import _epoch
 from yt_playlist.rec.trend_statistics import last_complete_month
@@ -43,16 +42,12 @@ def build(ctx) -> APIRouter:
             store.activity_paused or getattr(store, '_evidence_maintenance', 0)
             or ctx.storage_maintenance.phase == 'schema')
         if not paused:
-            # Count the visit once, before pinning the content it will display.
-            # Repository commits join this transaction instead of syncing each card.
-            with timing.measure('visit_accounting'), atomic_write(store):
-                for card in ROTATING_CARDS:
-                    if card == "cards":
-                        started = store.modes.epoch_started_at(_epoch(store, card))
-                        if started is not None and now - started >= MENU_MAX_AGE_S:
-                            store.rec_ledger.refresh_card(card, max(1, rec_params.get_param(store, "erosion_view_cap")), now)
-                            continue
-                    store.rec_ledger.bump_card_view(card, now)
+            # Count the visit before pinning the content it will display.
+            with timing.measure('visit_accounting'):
+                started = store.modes.epoch_started_at(_epoch(store, 'cards'))
+                refreshes = {'cards': rec_params.get_param(store, 'erosion_view_cap')} if (
+                    started is not None and now - started >= MENU_MAX_AGE_S) else {}
+                store.rec_ledger.record_home_visit(ROTATING_CARDS, now, refreshes=refreshes)
             with timing.measure('tuning_expiry'):
                 mix_tuning.expire(store, now)
         # Serve the committed menu while its evidence owner is busy. Keep the

@@ -352,6 +352,8 @@ def test_missing_backup_refuses_without_leaking_deletions_to_a_later_commit(stor
 def test_backup_failure_preserves_history_and_cleans_partial_file(store, monkeypatch, tmp_path, failure):
     _coverage(store)
     _hist(store, 1, 15, ['a', 'b'])
+    backup_dir = tmp_path / 'backups'
+    backup_dir.mkdir()
 
     def fail(*args, **kwargs):
         raise OSError('injected backup failure')
@@ -383,23 +385,25 @@ def test_backup_failure_preserves_history_and_cleans_partial_file(store, monkeyp
     else:
         monkeypatch.setattr(repair.os, 'fsync' if failure == 'fsync' else 'link', fail)
     with pytest.raises(OSError, match='injected backup failure'):
-        repair.purge_phantom_history(store.conn, tmp_path / 'backup.jsonl')
+        repair.purge_phantom_history(store.conn, backup_dir / 'backup.jsonl')
     store.settings.set_setting('unrelated', 'commit')
     assert _keys(store) == ['a', 'b'] and not store.conn.in_transaction
-    assert list(tmp_path.iterdir()) == []
+    assert list(backup_dir.iterdir()) == []
 
 
 def test_existing_backup_is_never_overwritten_and_no_deletion_is_committed(store, tmp_path):
     _coverage(store)
     _hist(store, 1, 15, ['observed'])
-    backup = tmp_path / 'backup.jsonl'
+    backup_dir = tmp_path / 'backups'
+    backup_dir.mkdir()
+    backup = backup_dir / 'backup.jsonl'
     backup.write_text('prior recovery evidence\n')
     with pytest.raises(FileExistsError):
         repair.purge_phantom_history(store.conn, backup)
     store.settings.set_setting('unrelated', 'commit')
     assert _keys(store) == ['observed']
     assert backup.read_text() == 'prior recovery evidence\n'
-    assert list(tmp_path.iterdir()) == [backup]
+    assert list(backup_dir.iterdir()) == [backup]
 
 
 def test_failed_delete_rolls_back_prior_deletions_and_leaves_complete_backup(store, tmp_path):

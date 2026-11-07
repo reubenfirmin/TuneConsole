@@ -210,13 +210,12 @@ def maintain_retention(store):
     if not enabled(store):
         return result
     from yt_playlist.core.activity import work_budget
-    from yt_playlist.repos import recommendation_publication
 
     def sql_turn(callback):
         try:
             # Each prefix commits durably and releases the serving lock. Copy
             # committed WAL pages once per bounded turn instead of per prefix.
-            while progress := callback(store.recommendations, checkpoint=False):
+            while progress := callback(checkpoint=False):
                 result['recommendation_rows'] += progress.rows
                 result['generations'] += progress.generations
                 result['pools'] += progress.pools
@@ -256,8 +255,8 @@ def maintain_retention(store):
     # for that fixed cost as well as one bounded durable traversal prefix.
     turns = [(group_cleanup, .25), (group_walk, .25), (lambda: files(groups=True), .1)]
     if recommendation_roots.enabled(store):
-        turns = [(lambda: sql_turn(recommendation_publication.cleanup_generations), .1),
-                 (lambda: sql_turn(recommendation_publication.cleanup_pools), .1), (files, .25), *turns]
+        turns = [(lambda: sql_turn(store.recommendations.cleanup_generations), .1),
+                 (lambda: sql_turn(store.recommendations.cleanup_pools), .1), (files, .25), *turns]
     with store._lock:
         if not hasattr(store, '_retention_lock'):
             store._retention_lock = threading.Lock()

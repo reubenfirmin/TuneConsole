@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from experiments.audio_lab_tools.evaluation import observations, packet, validate
+from experiments.audio_lab_tools.evaluation.evaluation import observations, packet, validate
 
 
 def _report(char='a', *, synthetic=False, artist='Artist', album='Album'):

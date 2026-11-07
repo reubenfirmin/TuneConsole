@@ -2,7 +2,7 @@
 import os
 import subprocess
 
-from experiments.audio_lab_tools.encoder_assets import ROOT, MODEL, PYTHON
+from experiments.audio_lab_tools.audio.encoder_assets import ROOT, MODEL, PYTHON
 
 
 def test_all_checkpoint_tensors_load_exactly_despite_weight_norm_warning():

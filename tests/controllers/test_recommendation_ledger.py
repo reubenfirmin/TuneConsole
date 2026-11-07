@@ -88,6 +88,13 @@ def test_refresh_advances_to_the_first_view_of_the_next_epoch(ledger, current, c
     ledger.repository.set_card_views.assert_called_once_with('wheelhouse', expected, 200)
 
 
+def test_home_visit_refreshes_only_expired_cards_and_publishes_one_ledger_batch(ledger):
+    ledger.repository.card_views.return_value = 4
+    ledger.record_home_visit(('cards', 'fresh'), 200, refreshes={'cards': 3})
+    ledger.repository.card_views.assert_called_once_with('cards')
+    ledger.repository.bump_card_views.assert_called_once_with(('cards', 'fresh'), 200, overrides={'cards': 7})
+
+
 def test_response_vocabulary_is_validated_before_persistence(ledger):
     with pytest.raises(ValueError, match='unsupported'):
         ledger.record_recommendation_outcomes('event', 'invented-response', ['song'], 200)

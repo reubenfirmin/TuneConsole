@@ -6,8 +6,8 @@ import math
 import numpy as np
 from threadpoolctl import threadpool_limits
 
-from experiments.audio_lab_tools.chroma_study import DEFAULT as CHROMA, LAB
-from experiments.audio_lab_tools import midlevel_pilot
+from experiments.audio_lab_tools.studies.chroma_study import DEFAULT as CHROMA, LAB
+from experiments.audio_lab_tools.studies import midlevel_pilot
 
 
 def read(path):

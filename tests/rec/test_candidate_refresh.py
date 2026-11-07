@@ -3,8 +3,10 @@ from contextlib import closing
 import sqlite3
 import time
 
+import numpy as np
 import pytest
 
+from tests.conftest import seed_catalog_track
 from tests.prepared_fixture_support import prepared_template, roots
 from tests.candidate_timing_support import candidate_costs, candidate_prefix_costs
 from tests.rec.test_model_refresh import refresh_costs, seed
@@ -71,6 +73,35 @@ def _assert_library_matches(store, original):
 
 def no_fit(*args, **kwargs):
     raise AssertionError('Preference or clock changes must reuse the completed model')
+
+
+@pytest.fixture
+def completed_ranking(store, monkeypatch):
+    """Clock admission consumes completed ranks; score changes are tested below."""
+    key = 'completed candidate|artist'
+    seed_catalog_track(store, key, 'Completed candidate', 'Artist',
+                       video_id='completed-candidate', genre='Techno')
+    store.rec_model.replace_rec_vectors([(key, np.array([1., 0.], np.float32).tobytes())])
+    vectors = store.rec_model.get_rec_vectors()
+    assert vectors
+    item = {'key': key, 'video_id': 'completed-candidate', 'title': 'Completed candidate',
+            'artist': 'Artist', 'genre': 'Techno', 'score': .8}
+
+    def calculate(reader, now, policies):
+        return {'all': {'wheelhouse': policies.stamp([dict(item)], 'wheelhouse')},
+                '_meta': {'full_pools': True, 'comfort_pool': 0}}, None
+
+    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', calculate)
+    monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
+
+    def publish(now=2000):
+        assert mode_surfaces.prepare_bundles(store, now) is not None
+
+    yield publish
+    # Check the final durable output once; the tests exercise every intermediate
+    # deadline, and no_fit rejects model work during any publication.
+    assert candidate(store, key)['key'] == key
+    assert store.rec_model.get_rec_vectors() == vectors
 
 
 @pytest.mark.parametrize('projection', ['vibe', 'profile'])
@@ -167,28 +198,27 @@ def test_genre_edits_reset_and_restore_update_scores_and_served_provenance(
     assert candidate(store, key)['score'] == saved_score
 
 
+@pytest.mark.parametrize('change', ['elapsed-time', 'half-life'])
 def test_decay_and_half_life_changes_refresh_without_authoritative_edits(
-        store, monkeypatch, candidate_library_template):
-    key = candidate_library_template.restore(store)
+        store, completed_ranking, change):
     store.rec_model.set_weight('genre:techno', 0.5, now=2000)
-    refresh(store)
-    before = home_prepared.tuning_key(store, 2000)
-    monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
     now = 2000 + 60 * 86400
-    assert candidate_refresh.due(store, now)
+    prepared_at = 2000 if change == 'elapsed-time' else now
+    completed_ranking(prepared_at)
+    assert not candidate_refresh.due(store, prepared_at)
+    before = home_prepared.tuning_key(store, prepared_at)
+    if change == 'half-life':
+        rec_params.set_param(store, 'weight_revert_halflife_d', 30)
     assert home_prepared.tuning_key(store, now) != before
-    refresh(store, now)
+    assert candidate_refresh.due(store, now)
+    completed_ranking(now)
     assert not candidate_refresh.due(store, now + 1)
     assert candidate_refresh.due(store, now + candidate_refresh.DECAY_TICK_S)
-    rec_params.set_param(store, 'weight_revert_halflife_d', 30)
-    assert candidate_refresh.due(store, now)
-    refresh(store, now)
-    assert not candidate_refresh.due(store, now + 1)
 
 
 def test_completed_ranking_retains_captured_preferences_and_leaves_later_edits_due(
-        store, monkeypatch, candidate_library_template):
-    candidate_library_template.restore(store)
+        store, monkeypatch, completed_ranking):
+    completed_ranking()
     store.rec_model.set_weight('genre:techno', 0.5, now=2000)
     original = mode_surfaces._calculate_bundles
     def superseded(reader, now, policies):
@@ -260,12 +290,10 @@ def test_taste_controls_rerank_saved_pools_after_edits_resets_and_checkpoint_res
     assert not candidate_refresh.due(store, 2000)
 
 
-def test_lane_decay_invalidates_prepared_rankings(store, monkeypatch, candidate_library_template):
-    candidate_library_template.restore(store)
+def test_lane_decay_invalidates_prepared_rankings(store, completed_ranking):
     store.rec_model.set_weight('lane:deep_cut', 3, now=2000)
-    refresh(store)
-    monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
+    completed_ranking()
     now = 2000 + candidate_refresh.DECAY_TICK_S
     assert candidate_refresh.due(store, now)
-    refresh(store, now)
+    completed_ranking(now)
     assert not candidate_refresh.due(store, now)

@@ -11,6 +11,9 @@ import sys
 
 EXPERIMENTS = Path(__file__).resolve().parent
 ROOT = EXPERIMENTS.parent
+sys.path.insert(0, str(ROOT))
+from experiments.audio_lab_tools import module_name, source_path
+
 LOCAL = EXPERIMENTS / 'audio_lab/local'
 CHECKPOINT = LOCAL / 'external-20261028/checkpoint-1'
 MODULES = {
@@ -286,7 +289,7 @@ def main(argv=None):
         checks.add_argument('--test', choices=TESTS, action='append', help='Run only the named research test file; repeat for several files')
         options = checks.parse_args(args.args)
         if options.syntax_only:
-            paths = [Path(__file__), *EXPERIMENTS.joinpath('audio_lab_tools').glob('*.py'),
+            paths = [Path(__file__), *EXPERIMENTS.joinpath('audio_lab_tools').rglob('*.py'),
                      *EXPERIMENTS.joinpath('retained_copy').glob('*.py'),
                      *EXPERIMENTS.joinpath('investigations').glob('*.py')]
             for path in paths:
@@ -301,8 +304,8 @@ def main(argv=None):
         command = [executable, 'run', 'pytest', '--confcutdir=' + str(EXPERIMENTS), '-p', 'tests.conftest',
                    '-o', 'cache_dir=experiments/audio_lab/local/pytest-cache',
                    '--basetemp=experiments/audio_lab/local/pytest-checkpoint',
-                   *(str(EXPERIMENTS / (name if name.startswith('retained_copy/') else
-                                       'audio_lab_tools/' + name)) for name in (options.test or TESTS))]
+                   *(str(EXPERIMENTS / name if name.startswith('retained_copy/') else
+                         source_path(name)) for name in (options.test or TESTS))]
     else:
         if args.command == 'reference':
             reference = argparse.ArgumentParser(prog='./experiments/run.py reference', description=(
@@ -312,10 +315,10 @@ def main(argv=None):
         executable = str(ROOT / '.venv/bin/python')
         if not Path(executable).exists():
             parser.error('The checkout .venv/bin/python is required; use the existing project environment')
-        command = [executable, '-B', '-m', 'experiments.audio_lab_tools.' + MODULES[args.command], *args.args]
+        command = [executable, '-B', '-m', module_name(MODULES[args.command]), *args.args]
         if args.runtime_snapshot:
-            command = [executable, '-B', str(EXPERIMENTS / 'audio_lab_tools/replay_runtime.py'),
-                       str(args.runtime_snapshot), 'experiments.audio_lab_tools.' + MODULES[args.command], *args.args]
+            command = [executable, '-B', str(source_path('replay_runtime.py')),
+                       str(args.runtime_snapshot), module_name(MODULES[args.command]), *args.args]
     print('Running: ' + ' '.join(command), flush=True)
     os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
     os.execv(executable, command)

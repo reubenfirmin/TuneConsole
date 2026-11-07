@@ -4,10 +4,10 @@ import hashlib
 import numpy as np
 from threadpoolctl import threadpool_limits
 
-from experiments.audio_lab_tools.focus_confirmation import DEFAULT, SOURCES, CHROMA, METHODS
-from experiments.audio_lab_tools.focus_experiment import arrays, load
-from experiments.audio_lab_tools.individual_protocol import group_guard
-from experiments.audio_lab_tools.quality_round import verify
+from experiments.audio_lab_tools.focus.focus_confirmation import DEFAULT, SOURCES, CHROMA, METHODS
+from experiments.audio_lab_tools.focus.focus_experiment import arrays, load
+from experiments.audio_lab_tools.studies.individual_protocol import group_guard
+from experiments.audio_lab_tools.support.quality_round import verify
 
 
 def test_source_eligibility_and_native_label_support():

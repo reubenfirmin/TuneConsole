@@ -1,0 +1,66 @@
+"""Publish explicit metadata decisions before installing their SQL head."""
+from dataclasses import replace
+
+from yt_playlist.core.metadata_contract import clock
+from yt_playlist.core import metadata_values
+
+
+class MetadataChoices:
+    def __init__(self, repository, files, deliveries):
+        self.repository, self.files, self.deliveries = repository, files, deliveries
+
+    def _prepare(self, field, value):
+        prepared = metadata_values.prepare_value(field, value,
+            unit=metadata_values.DEFAULT_UNIT.get(field) if value not in (None, '') else None)
+        if field == 'genre' and prepared.kind == 'value':
+            matches = self.repository.genre_matches(value)
+            prepared = replace(prepared, genre_key=next(iter(matches)) if len(matches) == 1 else None,
+                resolution_reason=None if len(matches) == 1 else 'ambiguous_genre' if matches else 'unknown_genre')
+        return prepared
+
+    def choose(self, entry, field, value=None, *, withdraw=False, source='user', now=None):
+        metadata_values.scope(field)
+        if type(withdraw) is not bool or not isinstance(source, str) or not source:
+            raise ValueError('Invalid metadata choice operation or source')
+        at = clock(now)
+        prepared = metadata_values.Value('withdrawn') if withdraw else self._prepare(field, value)
+        with self.repository.transaction():
+            inputs = self.repository.input(entry, field)
+            track = inputs['track']
+            identity = revision = None
+            if inputs['layout'] == 'runtime':
+                previous = inputs['choice']
+                identity = previous['id'] if previous else self.repository.reserve_identity()
+                revision = previous['revision'] + 1 if previous else 1
+                self.files.publish('choices', (identity,), revision, {
+                    'entry_id': track['id'], 'recording_id': track['recording_id'],
+                    'input_video_id': track['video_id'], 'field': field, 'value': value,
+                    'withdrawn': withdraw, 'source': source, 'at': at},
+                    current_revision=previous['revision'] if previous else None)
+            result = self.repository.store(inputs, field, value, prepared, withdraw=withdraw,
+                source=source, at=at, identity=identity, revision=revision)
+            self._resume_query(field, track)
+            return result
+
+    def select(self, entry, field, value, source, *, now=None, observation_id=None):
+        at = clock(now)
+        prepared = self._prepare(field, value)
+        inputs = self.repository.input(entry, field)
+        delivery = None
+        if inputs['layout'] == 'evidence' and observation_id is None:
+            delivery = self.deliveries.capture_state(inputs['track']['id'], source, 'selected-field:' + field,
+                {'format': 'catalog-field-capture-1', 'field': field, 'value': value}, now=at)
+        with self.repository.transaction():
+            self.repository.store_base(inputs, field, value, prepared, source, at,
+                                       delivery_id=delivery, observation_id=observation_id)
+            self._resume_query(field, inputs['track'])
+
+    def restore(self, entry, field, value, *, now=None):
+        self.select(entry, field, value, 'youtube', now=now)
+        return self.choose(entry, field, withdraw=True, now=now)
+
+    def _resume_query(self, field, track):
+        if field in ('title', 'artist'):
+            current = self.repository.query_identity(track['id'])
+            if current is not None and current != (track['recording_id'], track['title'], track['artist']):
+                self.repository.resume_provider_query(current[0], 'lastfm', status='retry')

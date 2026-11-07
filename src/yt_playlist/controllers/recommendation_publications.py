@@ -3,7 +3,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 import hashlib
 
-from yt_playlist.core import bundle_plan, library_pool_state, recommendation_plan
+from yt_playlist.core import bundle_plan, clicked_pool_policy, recommendation_plan
 from yt_playlist.core.activity import check_cancellable_work
 
 
@@ -48,7 +48,7 @@ class RecommendationPublications:
             self._facts_cache = previous
 
     def prepare_clicked_pool(self, surface, value, at, **options):
-        inputs = library_pool_state.publication_inputs(surface, value, at, **options)
+        inputs = clicked_pool_policy.publication_inputs(surface, value, at, **options)
         if inputs is None:
             return None
         bundle, options = inputs
@@ -134,6 +134,12 @@ class RecommendationPublications:
 
     def cleanup(self):
         return self.repository.cleanup()
+
+    def cleanup_generations(self, **options):
+        return self.repository.cleanup_generations(**options)
+
+    def cleanup_pools(self, **options):
+        return self.repository.cleanup_pools(**options)
 
     def retirement_pending(self):
         return self.repository.retirement_pending()

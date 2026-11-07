@@ -156,9 +156,9 @@ def test_cleanup_is_bounded_keeps_active_generation_and_preserves_pinned_reader(
         assert reader.recommendations.head('home')['id'] == old.generation_id
         new = publish(database, new_plan)
         for _ in range(20):
-            retired = publication.cleanup_generations(database.recommendations)
+            retired = publication.cleanup_generations(database.recommendations.repository)
             assert retired.rows <= publication.CLEANUP_ROWS
-            retired_pools = publication.cleanup_pools(database.recommendations)
+            retired_pools = publication.cleanup_pools(database.recommendations.repository)
             assert retired_pools.rows <= publication.CLEANUP_ROWS
             if not retired and not retired_pools:
                 break

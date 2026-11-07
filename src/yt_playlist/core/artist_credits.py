@@ -58,13 +58,13 @@ def available(conn):
     return conn.execute("SELECT 1 FROM sqlite_master WHERE name='artist_credits'").fetchone() is not None
 
 
-def prepare(conn, display_credit, structured, source, *, artist_ids=None):
+def normalize_credit(display_credit, structured, source):
+    """Validate provider credit text without consulting artist identities."""
     if (not isinstance(display_credit, str) or not isinstance(source, str) or not source
-            or not isinstance(structured, list) or not 1 <= len(structured) <= MAX_MEMBERS
-            or artist_ids is not None and len(artist_ids) != len(structured)):
+            or not isinstance(structured, list) or not 1 <= len(structured) <= MAX_MEMBERS):
         raise ValueError('Invalid ordered artist credit')
     members = []
-    for position, value in enumerate(structured):
+    for value in structured:
         if (not isinstance(value, dict) or value.keys() - {'name', 'id', 'browseId', 'role'}
                 or not isinstance(value.get('name'), str) or not value['name']
                 or any(value.get(key) is not None and not isinstance(value[key], str)
@@ -73,19 +73,33 @@ def prepare(conn, display_credit, structured, source, *, artist_ids=None):
         provider_id = value.get('id') or value.get('browseId')
         # v21 captured YouTube browse IDs under the literal-credit source label.
         provider = ('youtube' if source == 'legacy_literal' else source) if provider_id else None
-        if artist_ids is None:
-            row = conn.execute('SELECT artist_id FROM artist_provider_ids WHERE provider=? AND provider_id=?',
-                               (provider, provider_id)).fetchone() if provider_id else None
-            artist_id = row[0] if row else None
-        else:
-            artist_id = artist_ids[position]
-            if type(artist_id) is not int:
-                raise ValueError('A selected artist credit needs exact artist identities')
-        members.append(Member(artist_id, value['name'], provider, value.get('id'), value.get('browseId'),
+        members.append(Member(None, value['name'], provider, value.get('id'), value.get('browseId'),
                               value.get('role'), sum(1 << i for i, k in enumerate(('id', 'browseId', 'role')) if k in value)))
     result = Credit(display_credit, tuple(members))
     result.digest()
     return result
+
+
+def bind_credit(credit, artist_ids):
+    if len(artist_ids) != len(credit.members) or any(type(identity) is not int for identity in artist_ids):
+        raise ValueError('A selected artist credit needs exact artist identities')
+    result = replace(credit, members=tuple(replace(member, artist_id=identity)
+                                          for member, identity in zip(credit.members, artist_ids)))
+    result.digest()
+    return result
+
+
+def prepare(conn, display_credit, structured, source, *, artist_ids=None):
+    credit = normalize_credit(display_credit, structured, source)
+    if artist_ids is not None:
+        return bind_credit(credit, artist_ids)
+    members = []
+    for member in credit.members:
+        provider_id = member.raw_id or member.raw_browse_id
+        row = conn.execute('SELECT artist_id FROM artist_provider_ids WHERE provider=? AND provider_id=?',
+                           (member.provider, provider_id)).fetchone() if provider_id else None
+        members.append(replace(member, artist_id=row[0]) if row else member)
+    return replace(credit, members=tuple(members))
 
 
 def read(conn, credit_id):

@@ -223,15 +223,30 @@ def test_previously_used_mix_remains_home_and_fragment_destination_without_ready
 
 def test_radio_checkpoint_probe_serializes_with_concurrent_home_reads(store, monkeypatch):
     from yt_playlist.core import radio_storage
+    from yt_playlist.repos.base import snapshot_read
+    from yt_playlist.repos.radio_checkpoints import RadioCheckpointRepo
     from yt_playlist.web.radio_persistence import RadioPersistence
 
     persistence = RadioPersistence(store.radio_checkpoints)
     available = radio_storage.available
+    checkpoint_facts = RadioCheckpointRepo.checkpoint_facts.__wrapped__
+    owners = []
+
+    def owned_read(repository):
+        assert repository.conn is not store.conn
+        assert repository._lock._is_owned()
+        owners.append(repository)
+        return checkpoint_facts(repository)
+
     def checked_probe(connection):
-        assert store._lock.held_by_current_thread
+        assert owners and connection is owners[-1].conn
+        assert owners[-1]._lock._is_owned()
         return available(connection)
+
+    monkeypatch.setattr(RadioCheckpointRepo, 'checkpoint_facts', snapshot_read(owned_read))
     monkeypatch.setattr(radio_storage, 'available', checked_probe)
     assert persistence.load() is None
+    assert len(owners) == 1
 
 
 def test_radio_starter_exception_requires_the_current_offer_and_incomplete_setup(store, monkeypatch):

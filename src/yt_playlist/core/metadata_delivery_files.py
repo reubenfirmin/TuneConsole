@@ -118,6 +118,25 @@ def read(filename, digest, byte_size, offset):
     return json.loads(_read(filename, digest, byte_size, offset))['value']
 
 
+class MetadataDeliveryFiles:
+    """Managed response bytes for an injected metadata directory."""
+
+    def __init__(self, root):
+        self.root = Path(root)
+
+    def retained(self):
+        return policy_documents.retained_reader(self.root)
+
+    def encode(self, value):
+        return encode(value)
+
+    def read_encoded(self, reference):
+        return _read(*reference)
+
+    def publish(self, encoded):
+        return next(publish_encoded(self.root, [encoded]))
+
+
 def references(conn):
     from . import metadata_locator_contract as metadata_locators
     if metadata_locators.retired(conn):

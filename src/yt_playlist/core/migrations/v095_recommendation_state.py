@@ -107,8 +107,8 @@ def apply(conn, context):
                 value = library_pool_state.decode(surface, row[0])
                 plan = library_pool_state.prepare(conn, surface, value, row[1])
                 if plan is not None:
-                    from yt_playlist.repos import recommendation_publication
-                    recommendation_publication.preflight(conn, plan)
+                    from yt_playlist.controllers import recommendation_import
+                    recommendation_import.preflight(conn, plan)
                 library.append((surface, value, row[1], plan))
             except (ValueError, TypeError, OverflowError) as exc:
                 raise MigrationError(f'Invalid {surface}; original clicked pool retained: {exc}') from exc
@@ -126,8 +126,8 @@ def apply(conn, context):
             prepared = model_projections.prepare(conn, surface, model_comparison_state.recommendation_outputs.decode_json(raw),
                                                  at, historical=True)
             if prepared.plan is not None:
-                from yt_playlist.repos import recommendation_publication
-                recommendation_publication.preflight(conn, prepared.plan)
+                from yt_playlist.controllers import recommendation_import
+                recommendation_import.preflight(conn, prepared.plan)
             pairs.append(prepared)
         except (ValueError, TypeError, OverflowError, KeyError) as exc:
             raise MigrationError(f'Invalid {surface}; original comparison retained: {exc}') from exc
@@ -138,7 +138,7 @@ def apply(conn, context):
         conn.execute('DELETE FROM rec_proposals WHERE surface=?', (surface,))
     for surface, value, at, plan in library:
         if plan is not None:
-            recommendation_publication.import_plan(conn, plan, plan.created_at,
+            recommendation_import.import_plan(conn, plan, plan.created_at,
                 before_publish=lambda generation: library_pool_state.parameters(conn, generation, value['parameters'], at))
         conn.execute('DELETE FROM rec_proposals WHERE surface=?', (surface,))
     for surface, value, at in controls:

@@ -284,7 +284,7 @@ def test_replay_defers_late_serving_ownership_inside_actual_evidence_reads(pair,
             assert release.wait(5), 'Replay waited for a late evidence-read owner'
 
     with ThreadPoolExecutor(2) as workers, monkeypatch.context() as controlled:
-        name = '_mix_projection' if boundary == 'projection' else 'evidence'
+        name = 'mix_projection_facts' if boundary == 'projection' else 'evidence'
         owner = other.rec_ledger.repository if boundary == 'projection' else other.rec_ledger
         operation = getattr(owner, name)
 

@@ -132,13 +132,13 @@ def test_real_constructor_preserves_full_session_state_and_stored_pools(store, s
     head = store.recommendations.head('home')
     ranks = list(map(tuple, store.conn.execute('SELECT * FROM recommendation_candidates ORDER BY pool_id,rank')))
     tuning = {**radio_tuning.DEFAULTS, 'comfort': comfort}
-    batches, candidate_pages = [], RecommendationPublicationsRepo.candidate_pages
+    batches, candidate_rows = [], RecommendationPublicationsRepo.candidate_rows
 
     def observed_pages(self, surface, selections, **kwargs):
         batches.append(list(selections))
-        return candidate_pages(self, surface, selections, **kwargs)
+        return candidate_rows(self, surface, selections, **kwargs)
 
-    monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_pages', observed_pages)
+    monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_rows', observed_pages)
     projected = radio_candidates.RadioCandidates(store, 1000, tuning, comparison=False)
     assert batches and all(len(batch) <= 16 for batch in batches)
     assert len(batches) < sum(len(batch) for batch in batches), 'Initial lanes must share catalog hydration'

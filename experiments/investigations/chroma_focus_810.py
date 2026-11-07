@@ -6,11 +6,11 @@ import time
 import numpy as np
 from threadpoolctl import threadpool_limits
 
-from experiments.audio_lab_tools import encoder_models as models, individual_protocol as protocol
-from experiments.audio_lab_tools.chroma_study import DEFAULT, LAB
-from experiments.audio_lab_tools.external_experiment import digest, save
-from experiments.audio_lab_tools.focus_experiment import arrays, load
-from experiments.audio_lab_tools.quality_round import verify
+from experiments.audio_lab_tools.studies import encoder_models as models, individual_protocol as protocol
+from experiments.audio_lab_tools.studies.chroma_study import DEFAULT, LAB
+from experiments.audio_lab_tools.support.external_experiment import digest, save
+from experiments.audio_lab_tools.focus.focus_experiment import arrays, load
+from experiments.audio_lab_tools.support.quality_round import verify
 
 OUTPUT = LAB / 'local/chroma-810-20261101/focus-permutation'
 DOCUMENT = LAB / 'CHROMA_FOCUS_DIAGNOSTIC.md'

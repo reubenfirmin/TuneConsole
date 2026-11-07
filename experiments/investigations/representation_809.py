@@ -2,9 +2,9 @@
 from collections import defaultdict
 import numpy as np
 
-from experiments.audio_lab_tools.representation_study import DEFAULT, ORIGINAL
-from experiments.audio_lab_tools.focus_experiment import arrays, load
-from experiments.audio_lab_tools.quality_round import validate, verify
+from experiments.audio_lab_tools.studies.representation_study import DEFAULT, ORIGINAL
+from experiments.audio_lab_tools.focus.focus_experiment import arrays, load
+from experiments.audio_lab_tools.support.quality_round import validate, verify
 
 
 def test_frozen_cohort_and_native_intervals():

@@ -330,7 +330,7 @@ def _legacy_plan(conn, *, destination=None):
 
 
 def apply(conn, context):
-    from yt_playlist.repos import recommendation_publication
+    from yt_playlist.controllers import recommendation_import
 
     try:
         plan = _legacy_plan(conn)
@@ -339,7 +339,7 @@ def apply(conn, context):
     for sql in statements():
         conn.execute(sql)
     if plan is not None:
-        recommendation_publication.import_plan(conn, plan, plan.created_at)
+        recommendation_import.import_plan(conn, plan, plan.created_at)
     conn.execute('DROP TRIGGER proposal_cache_legacy_update')
     conn.execute("DELETE FROM rec_proposals WHERE surface IN ('mode_bundles','fresh_pool')")
     for table in ('rec_proposal_cache_heads', 'rec_proposal_cache_chunks', 'rec_proposal_cache_builds'):

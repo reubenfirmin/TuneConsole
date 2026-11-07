@@ -5,7 +5,7 @@ from dataclasses import dataclass, astuple
 import time
 import uuid
 
-from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
+from yt_playlist.core import recommendation_pools as pools
 from yt_playlist.core.activity import WorkBudgetExceeded, check_cancellable_work
 from yt_playlist.core.db_checkpoint import deferred_autocheckpoint
 from yt_playlist.core.db_writes import reserved_write
@@ -140,87 +140,6 @@ def finish(conn, build, at):
                  'FROM recommendation_generation_surfaces WHERE generation_id=? '
                  'ON CONFLICT(surface) DO UPDATE SET generation_id=excluded.generation_id', (build.generation_id,))
     conn.execute('DELETE FROM recommendation_builds WHERE generation_id=?', (build.generation_id,))
-
-
-def preflight(conn, plan):
-    """Resolve the complete import before writing an owner or publishing a file."""
-    digest = validate(plan)
-    if conn.execute('SELECT 1 FROM recommendation_generations WHERE external_key=?', (plan.external_key,)).fetchone():
-        raise ValueError('Recommendation import generation already exists')
-    row = conn.execute('SELECT COALESCE(base_version,version) FROM recommendation_policies WHERE version=?',
-                       (plan.policy_version,)).fetchone()
-    if row is None:
-        raise ValueError('Recommendation import requires its recorded policy')
-    family = row[0]
-    if plan.group_generation_id is not None and not conn.execute(
-            'SELECT 1 FROM group_publications WHERE generation_id=?', (plan.group_generation_id,)).fetchone():
-        raise ValueError('Recommendation import requires its published group generation')
-    distinct = {slot.pool.content_digest: slot.pool for slot in plan.slots}
-    for prepared in distinct.values():
-        check_cancellable_work()
-        row = conn.execute('SELECT COALESCE(base_version,version) FROM recommendation_policies WHERE version=?',
-                           (prepared.policy_version,)).fetchone()
-        if row is None or row[0] != family:
-            raise ValueError('Recommendation import pool has incompatible policy inputs')
-        if prepared.group_version_id is not None and not conn.execute(
-                'SELECT 1 FROM generation_groups WHERE generation_id=? AND group_version_id=?',
-                (plan.group_generation_id, prepared.group_version_id)).fetchone():
-            raise ValueError('Recommendation import pool has incompatible group inputs')
-        existing = conn.execute('SELECT id,complete FROM recommendation_pools WHERE content_digest=?',
-                                (prepared.content_digest,)).fetchone()
-        if existing:
-            if not existing[1] or conn.execute('SELECT 1 FROM recommendation_pool_retirements WHERE pool_id=?',
-                                              (existing[0],)).fetchone():
-                raise ValueError('Recommendation import cannot reuse an unfinished or retiring pool')
-            pools.verify(conn, existing[0], prepared)
-        for start in range(0, len(prepared.candidates), BATCH_ROWS):
-            identities = [candidate.recording_id for candidate in prepared.candidates[start:start + BATCH_ROWS]
-                          if isinstance(candidate, pools.Candidate)]
-            if identities:
-                marks = ','.join('?' for _ in identities)
-                found = {row[0] for row in conn.execute(f'SELECT id FROM recordings WHERE id IN ({marks})', identities)}
-                if found != set(identities):
-                    raise ValueError('Recommendation import has an unresolved canonical recording')
-    return digest
-
-
-def import_plan(conn, plan, published_at, *, before_publish=None):
-    """Install one fully preflighted legacy generation in the migration transaction.
-
-    The caller owns rollback and removal of its original source. This entry point
-    does not acquire serving locks, commit intermediate prefixes or delete source
-    evidence. Files left by a failed outer transaction are unowned and collectible.
-    """
-    if not conn.in_transaction or not _finite(published_at):
-        raise RuntimeError('Recommendation import requires an outer transaction and finite time')
-    digest = preflight(conn, plan)
-    build = _create(conn, plan, digest)
-    installed = {}
-    for slot in plan.slots:
-        check_cancellable_work()
-        prepared = slot.pool
-        if prepared.content_digest not in installed:
-            row = conn.execute('SELECT id FROM recommendation_pools WHERE content_digest=?',
-                               (prepared.content_digest,)).fetchone()
-            identity = row[0] if row else _create_pool(conn, prepared)
-            if row is None:
-                for start in range(0, len(prepared.candidates), BATCH_ROWS):
-                    check_cancellable_work()
-                    pools.append(conn, identity, prepared.candidates[start:start + BATCH_ROWS], start)
-                pools.verify(conn, identity, prepared)
-                conn.execute('UPDATE recommendation_pools SET complete=1 WHERE id=?', (identity,))
-            installed[prepared.content_digest] = identity
-        conn.execute('INSERT INTO recommendation_surface_pools VALUES (?,?,?,?,?)',
-                     (build.generation_id, slot.surface, slot.mode_key, slot.purpose, installed[prepared.content_digest]))
-    root = outputs.directory(conn)
-    for output in plan.outputs:
-        check_cancellable_work()
-        _output(conn, plan, build.generation_id, output, outputs.publish(root, output.encoded))
-    _ready(conn, plan, build.generation_id)
-    if before_publish is not None:
-        before_publish(build.generation_id)
-    finish(conn, build, published_at)
-    return build.generation_id
 
 
 @dataclass(frozen=True)

@@ -196,6 +196,14 @@ class RecommendationLedger:
     def bump_card_view(self, card, now):
         return self.repository.bump_card_view(card, now)
 
+    def record_home_visit(self, cards, now, *, refreshes=None):
+        overrides = {}
+        for card, cap in (refreshes or {}).items():
+            cap = max(1, cap)
+            current = self.repository.card_views(card)
+            overrides[card] = (max(0, current - 1) // cap + 1) * cap + 1
+        return self.repository.bump_card_views(cards, now, overrides=overrides)
+
     def card_views(self, card):
         return self.repository.card_views(card)
 

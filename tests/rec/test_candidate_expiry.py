@@ -10,7 +10,6 @@ from tests.conftest import seed_catalog_track
 from tests.rec.test_model_refresh import refresh_costs
 from tests.prepared_fixture_support import prepared_template
 from tests.rec.test_candidate_refresh import candidate, no_fit
-from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
 from yt_playlist.rec import candidate_refresh, embedding_training as embed, mode_surfaces
 from yt_playlist.rec.rec_worker import RecWorker
@@ -79,7 +78,7 @@ def candidate_library_template(_pristine_current_schema, expiry_rankers):
     test_model_refresh and test_ranking_playback_publication.
     """
     def build(store):
-        with atomic_write(store):
+        with store._lock:
             account = store.accounts.upsert_account('Listener', 'fixture', None, True)
             tids = [seed_catalog_track(store, f'expiry-{i}', f'Song {i}', f'Artist {i}',
                                       video_id=f'v{i}', genre=('Techno', 'Jazz', 'Rock')[i % 3])

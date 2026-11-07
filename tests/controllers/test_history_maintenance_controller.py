@@ -10,7 +10,7 @@ from yt_playlist.controllers.history_maintenance import HistoryMaintenance
 from yt_playlist.controllers.model_selection import ModelSelection
 from yt_playlist.core.history_files import HistoryRepairFiles
 from yt_playlist.core.repair import PHANTOM_PURGE_SEEN
-from yt_playlist.repos.discovery import DiscoveryRepo
+from yt_playlist.controllers.discovery import Discovery
 from yt_playlist.repos.history import HistoryRepo
 from yt_playlist.repos.rec_proposals import RecProposalsRepo
 from yt_playlist.repos.settings import SettingsRepo
@@ -22,7 +22,7 @@ pytestmark = pytest.mark.usefixtures('no_database')
 def maintenance():
     def mock(cls):
         return create_autospec(cls, instance=True, spec_set=True)
-    service = HistoryMaintenance(mock(HistoryRepo), mock(SettingsRepo), mock(DiscoveryRepo),
+    service = HistoryMaintenance(mock(HistoryRepo), mock(SettingsRepo), mock(Discovery),
         mock(Embeddings), mock(ModelSelection), mock(RecProposalsRepo), mock(HistoryRepairFiles), nullcontext)
     service.repository.verified_imports.return_value = [
         {'id': 1, 'account_id': 3, 'coverage_start': 10 * 86400 + 10, 'coverage_end': 20 * 86400 + 10},

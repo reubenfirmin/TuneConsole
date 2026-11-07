@@ -298,10 +298,9 @@ def test_large_import_publishes_each_confirmed_suffix_once(store, monkeypatch):
     iid = store.accounts.upsert_account('Main', 'bridge', None, True)
     client = SongClient()
     titles = [f'Song {i:03}' for i in range(250)]
-    upserts, statements, commits = [], [], []
+    upserts, commits = [], []
     upsert = catalog.upsert
-    publish = store.playlists.publish_confirmed_tracks
-    store.conn.set_trace_callback(statements.append)
+    publish = store.playlists.repository.publish_confirmed
     store.conn.execute('CREATE TEMP TABLE membership_writes(kind TEXT)')
     for op in ('INSERT', 'DELETE'):
         store.conn.execute(f"CREATE TEMP TRIGGER count_import_{op} AFTER {op} ON playlist_items "
@@ -312,17 +311,18 @@ def test_large_import_publishes_each_confirmed_suffix_once(store, monkeypatch):
         return upsert(conn, video, *args, **kwargs)
 
     def atomic(*args, **kwargs):
-        start = len(statements)
-        result = publish(*args, **kwargs)
-        commits.append(sum(sql == 'COMMIT' for sql in statements[start:]))
+        statements = []
+        store.conn.set_trace_callback(statements.append)
+        try:
+            result = publish(*args, **kwargs)
+        finally:
+            store.conn.set_trace_callback(None)
+        commits.append(statements.count('COMMIT'))
         return result
 
     monkeypatch.setattr(catalog, 'upsert', track)
-    monkeypatch.setattr(store.playlists, 'publish_confirmed_tracks', atomic)
-    try:
-        report = import_spotify_library(store, _playlists_zip(('Large', titles)), client, iid, 100)
-    finally:
-        store.conn.set_trace_callback(None)
+    monkeypatch.setattr(store.playlists.repository, 'publish_confirmed', atomic)
+    report = import_spotify_library(store, _playlists_zip(('Large', titles)), client, iid, 100)
     assert report['playlists_imported'] == 1 and report['tracks_imported'] == 250
     assert upserts == ['yt-' + title for title in titles]
     assert commits == [1] * 5  # empty destination, three confirmed batches, final order
@@ -353,7 +353,13 @@ def test_failed_second_batch_rolls_back_locally_and_resumes_same_remote_destinat
     playlist, = store.playlists.get_playlists()
     assert playlist.track_count == 100
     assert len(store.playlists.get_playlist_track_ids(playlist.id)) == 100
-    assert store.tracks.identity_key_for_video('yt-Song 100') is None
+    # Catalog observations survive independently; unconfirmed local membership
+    # must remain hidden until the failed batch is reconciled and published.
+    assert store.tracks.identity_key_for_video('yt-Song 100') is not None
+    assert not store.conn.execute('SELECT 1 FROM library_memberships m JOIN catalog_entries e ON e.id=m.entry_id '
+                                  'WHERE e.video_id=?', ('yt-Song 100',)).fetchone()
+    assert not store.conn.execute('SELECT 1 FROM playlist_items WHERE playlist_id=? AND video_id=?',
+                                  (playlist.id, 'yt-Song 100')).fetchone()
     monkeypatch.setattr(catalog, 'upsert', upsert)
     report = import_spotify_library(store, raw, client, iid, 200)
     assert report['playlists_imported'] == 1 and report['tracks_imported'] == 50

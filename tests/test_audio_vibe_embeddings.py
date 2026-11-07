@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 import numpy as np
 import pytest
 
-from experiments.audio_lab_tools import robust_vibes, train_vibes as trainer
+from experiments.audio_lab_tools.training import robust_vibes, train_vibes as trainer
 from tests.test_audio_vibe_model import examples, excerpts
 from tests.test_audio_vibes import sample
 from yt_playlist.core import audio_embedding, sample_files

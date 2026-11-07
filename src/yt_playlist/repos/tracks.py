@@ -1,29 +1,13 @@
 """TrackRepo: track rows and their genre/year enrichment."""
-from yt_playlist.util.matching import identity_key, normalize, recording_title
+from contextlib import contextmanager
 from yt_playlist.core import catalog, entity_names, metadata
 from yt_playlist.repos.base import Repo, synchronized, lookup_read, snapshot_read
 
 
 class TrackRepo(Repo):
     @synchronized
-    def remember_playback_alternate(self, account_id, requested, accepted, *, evidence, now):
-        """A provider replacement is reusable only with matching version, time and artist.
-
-        Keep its directed provenance without merging recordings, ratings or history.
-        The playlist occurrence proves the replacement; metadata independently
-        determines whether it is suitable as another upload of the same song.
-        """
-        import json
-        original, actual = requested['video_id'], accepted['video_id']
-        if original == actual:
-            return
-        first, second = requested.get('duration'), accepted.get('duration')
-        artists = [set(normalize(track.get('artist') or '').split()) for track in (requested, accepted)]
-        same = bool(requested.get('title') and accepted.get('title')
-                    and recording_title(requested['title']) == recording_title(accepted['title'])
-                    and all(artists) and (artists[0] <= artists[1] or artists[1] <= artists[0])
-                    and type(first) in (int, float) and type(second) in (int, float)
-                    and first > 0 and second > 0 and abs(first - second) <= 2)
+    def store_playback_alternate(self, account_id, original, actual, *, same_recording,
+                                 evidence_json, now):
         with self.conn:
             alternates = entity_names.owner(self.conn, 'youtube_playback_alternates')
             self.conn.execute(
@@ -31,7 +15,7 @@ class TrackRepo(Repo):
                 f'ON CONFLICT({alternates.column("account_id")},requested_video_id) DO UPDATE SET '
                 'video_id=excluded.video_id,same_recording=excluded.same_recording,'
                 'evidence_json=excluded.evidence_json,observed_at=excluded.observed_at',
-                (account_id, original, actual, int(same), json.dumps(evidence, sort_keys=True), now))
+                (account_id, original, actual, int(same_recording), evidence_json, now))
 
     @synchronized
     def playback_alternate(self, account_id, video_id):
@@ -106,16 +90,12 @@ class TrackRepo(Repo):
     def resolve_identity_key(self, key, video_id=None):
         return catalog.resolve_key(self.conn, key, video_id)
 
-    @synchronized
-    def match_recording(self, title, artist):
-        """Resolve text-only imports conservatively, retaining performance/version qualifiers."""
-        rows = self.conn.execute(
+    @snapshot_read
+    def recording_match_rows(self, alias):
+        return [dict(row) for row in self.conn.execute(
             'SELECT DISTINCT c.recording_id,c.identity_key,c.title,c.artist FROM catalog_tracks c '
             'JOIN recording_aliases a ON a.recording_id=c.recording_id WHERE a.alias=?',
-            (identity_key(title,artist),)).fetchall()
-        keys = {r['identity_key'] for r in rows if recording_title(r['title']) == recording_title(title)
-                and normalize(r['artist']) == normalize(artist)}
-        return next(iter(keys)) if len(keys)==1 else None
+            (alias,))]
 
     @synchronized
     def catalog_subject(self, track_id):
@@ -136,56 +116,42 @@ class TrackRepo(Repo):
                                       album_browse_id=album_browse_id,created_at=now,library=False,credits=credits,
                                       duration_s=duration_s,thumbnail=thumbnail,preferred_key=preferred_key)
 
-    @synchronized
-    def record_item_rating(self, account_id, video_id, status, *, source, now):
-        self.record_item_ratings(account_id, {video_id: status}, source=source, now=now)
+    @contextmanager
+    def rating_transaction(self):
+        """Keep the rating read and its prepared writes in this repository's unit of work."""
+        with self._lock:
+            with self.conn.atomic():
+                yield
+
+    @snapshot_read
+    def item_rating_inputs(self, account_id, video_ids):
+        previous, unbanned = {}, {}
+        video_ids = list(dict.fromkeys(video_ids))
+        for offset in range(0, len(video_ids), 500):
+            batch = video_ids[offset:offset + 500]
+            slots = ','.join('?' for _ in batch)
+            previous.update((row['video_id'], dict(row)) for row in self.conn.execute(
+                f'SELECT video_id,status,source,observed_at FROM item_ratings '
+                f'WHERE account_id=? AND video_id IN ({slots})', (account_id, *batch)))
+            for row in self.conn.execute(
+                    'SELECT y.video_id,f.created_at FROM rec_feedback f JOIN youtube_items y '
+                    'ON y.recording_id=f.recording_id '
+                    f"WHERE y.video_id IN ({slots}) AND f.surface='rating_override' AND f.kind='unban'", batch):
+                unbanned.setdefault(row['video_id'], row['created_at'])
+        return previous, unbanned
 
     @synchronized
-    def record_item_ratings(self, account_id, statuses, *, source, now):
-        """Newer observations win; confirmed actions win ties against sync evidence.
-
-        Equal-time sync conflicts retain the existing observation. Equal-time actions are
-        accepted in arrival order. A sync confirmation of an unchanged action retains its
-        original action time/provenance, including when the confirming snapshot is newer.
-        """
-        retain_action = ("excluded.source='sync' AND item_ratings.status=excluded.status "
-                         "AND item_ratings.source IN ('api','action')")
-        with self.conn:
+    def write_item_ratings(self, observations, action_rows):
+        with self.conn.atomic(join=True):
             ratings = entity_names.owner(self.conn, 'item_ratings')
             actions = entity_names.owner(self.conn, 'listening_rating_actions')
-            observations = []
-            for video_id, status in statuses.items():
-                observed_at = now
-                if source == 'api' and status == 'DISLIKE':
-                    from math import inf, nextafter
-                    unban = self.conn.execute(
-                        "SELECT f.created_at FROM rec_feedback f JOIN youtube_items y "
-                        "ON y.recording_id=f.recording_id WHERE y.video_id=? "
-                        "AND f.surface='rating_override' AND f.kind='unban'", (video_id,)).fetchone()
-                    if unban:
-                        # Preserve action order even with a coarse/frozen clock.
-                        observed_at = max(now, nextafter(unban[0], inf))
-                observations.append((account_id, video_id, status, source, observed_at))
-                # Native player readouts also use source='action', but hydration
-                # is not proof of a button press. Only confirmed commands qualify.
-                if source == 'api':
-                    previous = self.conn.execute(
-                        'SELECT status,observed_at FROM item_ratings WHERE account_id=? AND video_id=?',
-                        (account_id, video_id)).fetchone()
-                    if (previous is None or previous['observed_at'] <= observed_at) and (
-                            previous is None or previous['status'] != status):
-                        self.conn.execute(f'INSERT INTO {actions.table} '
-                            f'({actions.column("account_id")},video_id,previous_status,status,source,at) VALUES (?,?,?,?,?,?)',
-                            (account_id, video_id, previous['status'] if previous else None,
-                             status, source, observed_at))
+            self.conn.executemany(f'INSERT INTO {actions.table} '
+                f'({actions.column("account_id")},video_id,previous_status,status,source,at) VALUES (?,?,?,?,?,?)',
+                action_rows)
             self.conn.executemany(
                 f'INSERT INTO {ratings.table} VALUES (?,?,?,?,?) '
                 f'ON CONFLICT({ratings.column("account_id")},video_id) DO UPDATE SET '
-                f'source=CASE WHEN {retain_action} THEN item_ratings.source ELSE excluded.source END,'
-                f'observed_at=CASE WHEN {retain_action} THEN item_ratings.observed_at ELSE excluded.observed_at END,'
-                'status=excluded.status '
-                'WHERE excluded.observed_at>item_ratings.observed_at '
-                "OR (excluded.observed_at=item_ratings.observed_at AND excluded.source IN ('api','action'))",
+                'source=excluded.source,observed_at=excluded.observed_at,status=excluded.status',
                 observations)
 
     @synchronized
@@ -210,49 +176,37 @@ class TrackRepo(Repo):
             (account_id, video_id)).fetchone()
         return dict(row) if row else None
 
-    @synchronized
-    def recording_ratings(self, keys):
-        from yt_playlist.core import rating_feedback
+    @snapshot_read
+    def rating_rows(self, keys):
+        keys = sorted(set(keys) - {None})
+        result = []
+        for offset in range(0, len(keys), 500):
+            batch = keys[offset:offset + 500]
+            slots = ','.join('?' for _ in batch)
+            result.extend(dict(row) for row in self.conn.execute(
+                'SELECT r.identity_key,ir.status,ir.source,ir.observed_at,'
+                'EXISTS (SELECT 1 FROM rec_feedback f WHERE f.item_key=r.identity_key '
+                "AND f.surface='rating_override' AND f.kind='unban') unbanned,"
+                '(SELECT MAX(f.created_at) FROM rec_feedback f WHERE f.item_key=r.identity_key '
+                "AND f.surface='rating_override' AND f.kind='unban') unbanned_at "
+                'FROM item_ratings ir JOIN youtube_items y ON y.video_id=ir.video_id '
+                f'JOIN recordings r ON r.id=y.recording_id WHERE r.identity_key IN ({slots})', batch))
+        return result
 
-        return rating_feedback.aggregate(self.conn, keys)
-
-    @synchronized
-    def pending_action_ratings(self, account_id):
-        """Unresolved actions or combined feedback still awaiting projection.
-
-        An account's like suppressed by another contribution's dislike is reconciled,
-        not an endlessly pending like. The same holds for a neutral contribution while
-        another account/upload still supplies explicit feedback.
-        """
-        from yt_playlist.core import rating_feedback
-
-        rows = self.conn.execute(
+    @snapshot_read
+    def action_rating_rows(self, account_id):
+        return [dict(row) for row in self.conn.execute(
             "SELECT ir.video_id,ir.status,ir.observed_at,r.identity_key FROM item_ratings ir "
             "LEFT JOIN youtube_items y ON y.video_id=ir.video_id "
             "LEFT JOIN recordings r ON r.id=y.recording_id "
             "WHERE ir.account_id=? AND ir.source IN ('api','action') "
-            "ORDER BY ir.observed_at,ir.video_id", (account_id,)).fetchall()
-        keys = {row['identity_key'] for row in rows if row['identity_key']}
-        combined = rating_feedback.aggregate(self.conn, keys)
-        feedback = {}
-        for row in rating_feedback.feedback_rows(self.conn, keys):
-            if row['kind'] in ('like', 'dislike'):
-                feedback.setdefault(row['item_key'], {})[row['kind']] = row['reason']
-        pending = []
-        for row in rows:
-            key = row['identity_key']
-            if key is None:
-                needs_projection = row['status'] in ('LIKE', 'DISLIKE')
-            else:
-                expected = combined[key]
-                actual = feedback.get(key, {})
-                expected_kinds = set() if expected.status == 'INDIFFERENT' else {expected.status.lower()}
-                needs_projection = (set(actual) != expected_kinds or
-                                    (expected.status == 'LIKE' and expected.provenance == 'action'
-                                     and actual.get('like') != 'action'))
-            if needs_projection:
-                pending.append({name: row[name] for name in ('video_id', 'status', 'observed_at')})
-        return pending
+            "ORDER BY ir.observed_at,ir.video_id", (account_id,))]
+
+    @snapshot_read
+    def rating_feedback_rows(self, keys):
+        from yt_playlist.core.rating_feedback import feedback_rows
+
+        return feedback_rows(self.conn, keys)
 
     @synchronized
     def upsert_track(self, video_id, title, artist, album, duration_s, available=None,
@@ -308,16 +262,11 @@ class TrackRepo(Repo):
             "ORDER BY id DESC LIMIT 1", (video_id,)).fetchone()
         return row["duration_s"] if row else None
 
-    @synchronized
-    def known_duration(self, title, artist):
-        """A duration (seconds) we already hold for this song under ANY stored row, else None. Lets a
-        generated playlist reuse a time we know from one videoId for the same song under another."""
-        rows = self.conn.execute(
+    @snapshot_read
+    def duration_match_rows(self, alias):
+        return [dict(row) for row in self.conn.execute(
             "SELECT DISTINCT recording_id,duration_s,title,artist FROM catalog_tracks "
-            "WHERE identity_key=?", (catalog.resolve_key(self.conn,identity_key(title,artist)),)).fetchall()
-        exact = [r for r in rows if (r["title"] or "").strip().casefold() == (title or "").strip().casefold()
-                 and (r["artist"] or "").strip().casefold() == (artist or "").strip().casefold()]
-        return max((r["duration_s"] for r in exact if r["duration_s"] is not None), default=None)
+            "WHERE identity_key=?", (catalog.resolve_key(self.conn, alias),))]
 
     # A track still has work when anything is missing, INCLUDING its cover: YouTube serves a generic
     # grey disc rather than nothing when it has no art, so a track can be complete on genre/year/audio
@@ -360,11 +309,14 @@ class TrackRepo(Repo):
             f"WHERE a.browse_id=? AND ({self._NEEDS}) ORDER BY t.id", (album_browse_id,)).fetchall()
         return [dict(r) for r in rows]
 
-    @synchronized
-    def set_track_art(self, track_id, url, *, source='provider') -> None:
-        """Persist provider fallback using the same artwork precedence as ingestion."""
-        with self.conn:
-            catalog.update_artwork(self.conn, track_id, url, source=source)
+    @snapshot_read
+    def artwork_inputs(self, track_id):
+        track_id = catalog.resolve_entry(self.conn, track_id)
+        row = self.conn.execute(
+            "SELECT id,thumbnail,EXISTS (SELECT 1 FROM entry_field_choices c "
+            "WHERE c.entry_id=t.id AND c.field='thumbnail') chosen "
+            'FROM catalog_tracks t WHERE id=?', (track_id,)).fetchone()
+        return dict(row) if row is not None else None
 
     @synchronized
     def artwork_source(self, track_id):
@@ -376,13 +328,6 @@ class TrackRepo(Repo):
         return metadata.selected_source(self.conn, track_id, 'thumbnail')
 
     @synchronized
-    def set_track_genre(self, track_id, genre) -> None:
-        track_id = catalog.resolve_entry(self.conn, track_id)
-        # manual override: set exactly what the user chose (may be blank to clear)
-        catalog.choose_field(self.conn,track_id,'genre',genre or '')
-        self.conn.commit()
-
-    @synchronized
     def metadata_for_video(self, video_id) -> dict | None:
         row = self.conn.execute(
             "SELECT id track_id, title, artist, COALESCE(genre, '') genre, "
@@ -390,74 +335,11 @@ class TrackRepo(Repo):
             "FROM catalog_tracks WHERE video_id=?", (video_id,)).fetchone()
         return dict(row) if row else None
 
-    @synchronized
-    def update_metadata(self, video_id, values, *, observation) -> None:
-        """Save the dialog as one transaction without overriding unchanged provider values.
-
-        Songs discovered outside the library become catalog observations, never library members.
-        Restoring an original title or artist removes its manual override.
-        """
-        with self.conn:
-            current = self.metadata_for_video(video_id)
-            if current is None:
-                catalog.upsert(self.conn, video_id, **observation, library=False)
-                current = self.metadata_for_video(video_id)
-            entry_id = current['track_id']
-            for field in ('title', 'artist', 'genre', 'year'):
-                if field not in values:
-                    continue
-                value = values[field]
-                column = 'mb_year' if field == 'year' else field
-                if field in ('title', 'artist') and value == current['orig_' + field]:
-                    catalog.withdraw_choice(self.conn, entry_id, field)
-                    metadata.select(self.conn, entry_id, column, value, 'youtube')
-                elif value != current[field]:
-                    catalog.choose_field(self.conn, entry_id, column, value)
-
-    @synchronized
-    def set_track_year(self, track_id, year) -> None:
+    @lookup_read
+    def original_metadata(self, track_id):
         track_id = catalog.resolve_entry(self.conn, track_id)
-        # manual override: set exactly what the user typed (may be blank to clear)
-        catalog.choose_field(self.conn,track_id,'mb_year',str(year) if year is not None else '')
-        self.conn.commit()
-
-    @synchronized
-    def set_track_title(self, track_id, title) -> None:
-        track_id = catalog.resolve_entry(self.conn, track_id)
-        # manual fix: overwrite the live title in place so downstream consumers use it. Never blank.
-        title = (title or "").strip()
-        if not title:
-            return
-        catalog.choose_field(self.conn,track_id,'title',title)
-        self.conn.commit()
-
-    @synchronized
-    def set_track_artist(self, track_id, artist) -> None:
-        track_id = catalog.resolve_entry(self.conn, track_id)
-        # manual fix: overwrite the live artist in place. Never blank.
-        artist = (artist or "").strip()
-        if not artist:
-            return
-        catalog.choose_field(self.conn,track_id,'artist',artist)
-        self.conn.commit()
-
-    @synchronized
-    def reset_track_title(self, track_id) -> None:
-        track_id = catalog.resolve_entry(self.conn, track_id)
-        with self.conn:
-            catalog.withdraw_choice(self.conn, track_id, 'title')
-            row = self.conn.execute('SELECT orig_title FROM catalog_tracks WHERE id=?', (track_id,)).fetchone()
-            if row is not None and row[0] is not None:
-                metadata.select(self.conn, track_id, 'title', row[0], 'youtube')
-
-    @synchronized
-    def reset_track_artist(self, track_id) -> None:
-        track_id = catalog.resolve_entry(self.conn, track_id)
-        with self.conn:
-            catalog.withdraw_choice(self.conn, track_id, 'artist')
-            row = self.conn.execute('SELECT orig_artist FROM catalog_tracks WHERE id=?', (track_id,)).fetchone()
-            if row is not None and row[0] is not None:
-                metadata.select(self.conn, track_id, 'artist', row[0], 'youtube')
+        row = self.conn.execute('SELECT id,orig_title,orig_artist FROM catalog_tracks WHERE id=?', (track_id,)).fetchone()
+        return dict(row) if row is not None else None
 
     @synchronized
     def get_track_enrichment(self, track_id):

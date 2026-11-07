@@ -4,9 +4,9 @@ from collections import Counter
 import numpy as np
 from threadpoolctl import threadpool_limits
 
-from experiments.audio_lab_tools.situnes_study import DEFAULT, AXES, FAMILIES, cohort, matrix, schema
-from experiments.audio_lab_tools.focus_experiment import arrays, load
-from experiments.audio_lab_tools.quality_round import verify
+from experiments.audio_lab_tools.studies.situnes_study import DEFAULT, AXES, FAMILIES, cohort, matrix, schema
+from experiments.audio_lab_tools.focus.focus_experiment import arrays, load
+from experiments.audio_lab_tools.support.quality_round import verify
 
 
 def test_actual_cohort_and_all_group_boundaries():

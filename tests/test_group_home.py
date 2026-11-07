@@ -11,6 +11,7 @@ from tests.conftest import FakeClient, seed_catalog_track
 from tests.group_support import publish, recordings
 from tests.home_fixture_support import returning_listener
 from tests.playlist_fixture_support import library_catalog
+from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.recommendation_support import publish_bundles
 from yt_playlist.core import mix_choices
 from yt_playlist.rec import (choice_evidence, group_home, group_serving, group_viz,
@@ -334,15 +335,26 @@ def test_recent_listening_is_mapped_to_exact_graph_memberships_without_vectors(s
     assert reading['now']['segments'] and all(s['label'] == 'House' for s in reading['now']['segments'])
 
 
-def test_definitions_survive_regrouping_and_held_offers_keep_their_context(store, adaptive_library):
+def test_definitions_survive_regrouping_and_held_offers_keep_their_context(
+        store, adaptive_library, one_menu_per_attempt):
     tracks, head = adaptive_library
-    first = home_prepared.prepare(store, 1200)
-    original = home_prepared.cards(store, first, 1300, service(store))
+    # Consume one real assembled menu through the ordinary cache writer.
+    # Batch enumeration is independent of retaining an already displayed offer.
+    assembled = service(store).cards(home_cards.CardsRequest(1200, record=False))
+    assert assembled.protos and assembled.choice_context['group_generation'] == head['generation']
+    assert home_prepared.remember(store, None, assembled, 1200)
+    with store.read_view() as reader:
+        first = home_prepared.peek(reader, 1300)
+        original = home_prepared.cards(reader, first, 1300, service(reader), record=False)
     historical = deepcopy(original.choice_context)
-    publish(store, tracks[:-4], 1400, head)
+    regrouped = publish(store, tracks[:-4], 1400, head)
+    assert regrouped['generation'] != head['generation']
+    assert {p['group_version'] for p in original.protos} - {g['version'] for g in regrouped['groups']}
     assert group_serving.prepare(store, 1450)
-    replacement = home_prepared.prepare(store, 1500)
-    retained = home_prepared.cards(store, replacement, 1600, service(store))
+    replacement = home_prepared.prepare_mixes(store, 1500)
+    assert replacement
+    with store.read_view() as reader:
+        retained = home_prepared.cards(reader, replacement, 1600, service(reader), record=False)
     assert retained.choice_context == historical
     assert [p['group_version'] for p in retained.protos] == [p['group_version'] for p in original.protos]
     assert store.taste_groups.definition(original.protos[0]['group_version'])

@@ -18,6 +18,7 @@ def predecessor(tmp_path, request, _pristine_installed_schema):
     store.conn.execute('PRAGMA journal_mode=WAL')
     _pristine_installed_schema(90).backup(store.conn)
     store._bind_repositories()
+    store._snapshot_revisions = Revisions(store.conn)
     yield store
 
 

@@ -1,17 +1,10 @@
-"""Canonical enrichment metadata and conflict mutation.
-
-Provider precedence and explicit choices use core.metadata/catalog policy. This owner keeps
-the writable-field whitelist and conflict convergence/reopening policy. A user resolution
-validates its candidate, writes the chosen field and resolves the conflict under one Store
-lock and transaction; reporting never owns part of that write.
-"""
+"""Enrichment provider state and conflict persistence."""
 import json
 import time
 
 from yt_playlist.core import catalog, metadata, metadata_evidence, metadata_conflicts, metadata_attempts
 from yt_playlist.core import metadata_runtime
-from yt_playlist.core.enrichment_contract import FIELD_COLUMN
-from yt_playlist.repos.base import Repo, synchronized
+from yt_playlist.repos.base import Repo, synchronized, snapshot_read
 
 class EnrichmentRepo(Repo):
     @synchronized
@@ -133,26 +126,9 @@ class EnrichmentRepo(Repo):
         self.conn.commit()
 
     @synchronized
-    def _choose_track_field(self, track_id, field, value, *, now=None):
-        """Choose a whitelisted canonical field without committing the caller's transaction."""
+    def mark_resolved(self, track_id, field, value, observation, at):
         track_id = catalog.resolve_entry(self.conn, track_id)
-        spec = FIELD_COLUMN.get(field)
-        if spec is None:
-            raise ValueError(f"not a writable enrichment field: {field!r}")
-        col, cast = spec
-        try:
-            v = cast(value) if value not in (None, "") else ("" if cast is str else None)
-        except (TypeError, ValueError):
-            v = value
-        return catalog.choose_field(self.conn,track_id,col,v,'conflict_resolution',now=now)
-
-    @synchronized
-    def resolve_conflict(self, track_id, field, value, now=None) -> None:
-        """Write the user's choice and mark the conflict resolved in one transaction."""
-        track_id = catalog.resolve_entry(self.conn, track_id)
-        at = time.time() if now is None else now
-        with self.conn:
-            observation = self._choose_track_field(track_id,field,value,now=at)
+        with self.conn.atomic(join=True):
             if metadata_runtime.active(self.conn):
                 conflict = metadata_runtime.conflict(self.conn, track_id, field)
                 if conflict:
@@ -167,24 +143,18 @@ class EnrichmentRepo(Repo):
                 "WHERE track_id=? AND field=?",
                 (None if value is None else str(value), at, track_id, field))
 
-    @synchronized
-    def resolve_enrichment_candidate(self, track_id, field, value, now=None) -> bool:
-        """Accept a candidate or the saved value; validate and resolve under the same lock."""
+    @snapshot_read
+    def resolution_inputs(self, track_id, field, *, column):
         track_id = catalog.resolve_entry(self.conn, track_id)
-        spec = FIELD_COLUMN.get(field)
-        if spec is None:
-            return False
         row = self.conn.execute(
-            f"SELECT c.candidates, t.{spec[0]} current_value FROM enrichment_conflict c "
+            f"SELECT c.candidates, t.{column} current_value FROM enrichment_conflict c "
             "JOIN catalog_tracks t ON t.id=c.track_id WHERE c.track_id=? AND c.field=?",
             (track_id, field)).fetchone()
         if row is None:
-            return False
-        candidates = (metadata_runtime.conflict_details(self.conn, metadata_runtime.conflict(self.conn, track_id, field), now=now)['candidates']
-                      if metadata_runtime.active(self.conn) else json.loads(row['candidates']))
-        offered = {str(c["value"]) for c in candidates}
-        offered.add(str(row["current_value"]) if row["current_value"] is not None else "")
-        if value not in offered:
-            return False
-        self.resolve_conflict(track_id, field, value, now=now)
-        return True
+            return None
+        if metadata_runtime.active(self.conn):
+            conflict = metadata_runtime.conflict(self.conn, track_id, field)
+            evidence = {'reference': (conflict['id'], conflict['revision']), 'updated_at': conflict['updated_at']}
+        else:
+            evidence = {'candidates': json.loads(row['candidates'])}
+        return {'entry_id': track_id, 'current': row['current_value'], 'evidence': evidence}

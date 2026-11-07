@@ -336,7 +336,24 @@ def test_retry_reuses_completed_card_work_without_publishing_partial_set(
 def test_typed_adaptive_pools_survive_deferred_setup_and_follow_replacement(
         store, monkeypatch, adaptive_library_template, one_menu_per_attempt):
     from yt_playlist.repos.rec_proposals import RecProposalsRepo
+    from yt_playlist.rec import group_serving
     adaptive_library_template.restore(store)
+    # This retry owns captured typed framing and its invalidation. Selection
+    # from the real graph remains in test_group_home; consume completed cards
+    # here while keeping actual adaptive inputs, heads, retries and publication.
+    preview = store.rec_proposals.get_proposals(group_serving.SURFACE)
+    selected = store._fixture_bundle_payload['all']['wheelhouse'][:4]
+
+    def completed(home, request):
+        protos = [{'lane': lane, 'label': lane, 'name': f'Completed {lane}',
+                   'note': 'Completed graph selection', 'recipe': {}, 'tracks': [deepcopy(track)]}
+                  for lane, track in zip(('wheelhouse', 'explore', 'fresh', 'comfort'), selected)]
+        one_menu_per_attempt[0] += home_prepared.PREPARE_BUDGET_S * .6
+        return home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],
+            None, None, [], [], request.epoch, None,
+            choice_context={**preview['context'], 'group_generation': preview['generation']})
+
+    monkeypatch.setattr(home_cards.HomeCards, 'cards', completed)
     real_read = mode_surfaces.bundle_metadata
     framings = []
 
@@ -355,11 +372,11 @@ def test_typed_adaptive_pools_survive_deferred_setup_and_follow_replacement(
     monkeypatch.setattr(mode_surfaces, 'bundle_metadata', counted)
     with monkeypatch.context() as patch:
         patch.setattr(home_prepared, 'tuning_key', defer)
-        assert home_prepared.prepare(store, 1200) is None
-        assert home_prepared.prepare(store, 1201) is None
+        assert home_prepared.prepare_mixes(store, 1200) is None
+        assert home_prepared.prepare_mixes(store, 1201) is None
     assert len(framings) == 2 and framings[0] == framings[1]
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) is None
-    payload = home_prepared.prepare(store, 1202)
+    payload = home_prepared.prepare_mixes(store, 1202)
     assert payload and payload['menus'][0]['protos']
     assert len(framings) >= 3 and all(value == framings[0] for value in framings)
     before = len(framings)
@@ -368,10 +385,10 @@ def test_typed_adaptive_pools_survive_deferred_setup_and_follow_replacement(
     publish_bundles(store, bundles, now=1203)
     with monkeypatch.context() as patch:
         patch.setattr(home_prepared, 'tuning_key', defer)
-        assert home_prepared.prepare(store, 1204) is None
+        assert home_prepared.prepare_mixes(store, 1204) is None
     assert len(framings) == before + 1 and framings[-1] != framings[0]
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == payload
-    replacement = home_prepared.prepare(store, 1205)
+    replacement = home_prepared.prepare_mixes(store, 1205)
     assert replacement and replacement['menus'][0]['protos']
     assert replacement['generation'] != payload['generation']
 

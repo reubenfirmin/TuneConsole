@@ -124,12 +124,13 @@ def retire(conn, identity):
 
 
 def publish(conn, prepared, *, store=None, generation=None, historical=False):
+    from yt_playlist.controllers import recommendation_import
     from yt_playlist.repos import recommendation_publication
     if not conn.in_transaction or not isinstance(prepared, Prepared):
         raise ValueError('Comparison publication requires prepared output and its outer transaction')
     run, arm, format = address(prepared.surface)
     if prepared.plan is not None and generation is None:
-        generation = recommendation_publication.import_plan(conn, prepared.plan, prepared.plan.created_at)
+        generation = recommendation_import.import_plan(conn, prepared.plan, prepared.plan.created_at)
     known = conn.execute('SELECT id FROM rec_model_selection_runs WHERE id=?', (run,)).fetchone()
     identity = conn.execute('INSERT INTO model_pair_publications(run_id,run_ref,run_resolution,arm,format,'
         'generation_id,encoding_model,built_at,output_digest,part_count) VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING id',

@@ -143,14 +143,13 @@ def test_cold_start_keeps_library_and_discovery_bounded(store, monkeypatch, reje
     from tests.conftest import FakeClient, _track
     from tests.derived_rating_support import seed_dislike
     from yt_playlist.core.activity import WorkClosing, cancellable_work
-    from yt_playlist.core.db_writes import atomic_write
     from yt_playlist.web.app import create_app
 
     account = store.accounts.upsert_account('main', 'cred', None, True)
     playlist = store.playlists.upsert_playlist(account, 'LIBRARY', 'Library', 0, '', 1)
     entries, expected = [], set()
     rec_params.set_param(store, 'max_track_minutes', 5)
-    with atomic_write(store):
+    with store._lock:
         for index in range(3 * CLUSTER_POOL_LIMIT + 7):
             prefix = index < 2 * CLUSTER_POOL_LIMIT
             video, artist = f'cold-{index}', f'Artist {index}'

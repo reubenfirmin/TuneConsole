@@ -46,6 +46,11 @@ def record_provider(conn, delivery_id, fields, *, units=None, source_run_id=None
     if not isinstance(units, Mapping) or units.keys() - fields.keys():
         raise ValueError('Metadata units must belong to the supplied fields')
     prepared = {field: values.prepare(conn, field, value, unit=units.get(field)) for field, value in fields.items()}
+    return record_prepared(conn, delivery_id, prepared, source_run_id=source_run_id)
+
+
+def record_prepared(conn, delivery_id, prepared, *, source_run_id=None):
+    """Persist validated values with their delivery and idempotency constraints."""
     result = {}
     with _atomic(conn):
         delivery = conn.execute('SELECT input_entry_id,input_recording_id,input_video_id,observed_at '

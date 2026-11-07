@@ -151,16 +151,22 @@ def test_direct_sql_rejects_invalid_work_state_and_retired_writers(store, statem
 
 
 def test_domain_writers_join_outer_publication_and_rollback_together(store):
+    """A rejected enclosing write cannot absorb another repository's durable unit."""
     store.model_selection.schedule_daily(1000, 1)
     store.tv_preparation.record(False, 2)
     with pytest.raises(ValueError, match='Controlled rollback'), store.conn.atomic():
-        store.model_selection.schedule_daily(2000, 3)
-        store.tv_preparation.record(True, 4)
+        with pytest.raises(RuntimeError, match='requires an idle connection'):
+            store.model_selection.schedule_daily(2000, 3)
         store.conn.execute("INSERT INTO settings VALUES ('publication-marker','changed')")
         raise ValueError('Controlled rollback')
     assert store.model_selection.next_daily_at() == 1000
     assert store.tv_preparation.state() == {'failed': False, 'at': 2}
     assert store.settings.get_setting('publication-marker') is None
+    store.model_selection.schedule_daily(2000, 3)
+    assert store.model_selection.next_daily_at() == 2000
+    assert store.tv_preparation.state() == {'failed': False, 'at': 2}
+    store.tv_preparation.record(True, 4)
+    assert store.tv_preparation.state() == {'failed': True, 'at': 4}
 
 
 def test_legacy_call_boundary_routes_to_typed_owners_and_retains_unknown_tv_time(store):

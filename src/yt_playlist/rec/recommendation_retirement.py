@@ -6,7 +6,6 @@ import time
 from yt_playlist.core.activity import WorkBudgetExceeded, check_cancellable_work
 from yt_playlist.core.group_admission import source
 from yt_playlist.rec import group_roots, measurement, recommendation_roots
-from yt_playlist.repos import recommendation_publication
 
 log = logging.getLogger(__name__)
 BATCH_ROWS = 32768
@@ -48,10 +47,9 @@ def drain(store, now):
         checkpoint_at = started + 1
         while True:
             check_cancellable_work()
-            generation = recommendation_publication.cleanup_generations(
-                store.recommendations, checkpoint=False, row_limit=BATCH_ROWS)
-            pool = recommendation_publication.cleanup_pools(
-                store.recommendations, checkpoint=False, row_limit=BATCH_ROWS, pool_limit=BATCH_POOLS)
+            generation = store.recommendations.cleanup_generations(checkpoint=False, row_limit=BATCH_ROWS)
+            pool = store.recommendations.cleanup_pools(
+                checkpoint=False, row_limit=BATCH_ROWS, pool_limit=BATCH_POOLS)
             for result in (generation, pool):
                 progress['generations'] += result.generations
                 progress['pools'] += result.pools

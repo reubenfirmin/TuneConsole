@@ -6,6 +6,33 @@ The [audio history](audio_lab/README.md) records the sequence of studies;
 and decisions. Current [storage contracts](../src/yt_playlist/core/storage-contracts.md)
 live with the implementation. `investigations/` contains executable diagnostic checks.
 
+## Audio research code
+
+`audio_lab_tools/` is a Python package organized by responsibility:
+
+| Package | Contents |
+| --- | --- |
+| `datasets` | Dataset discovery, acquisition, annotations and aligned windows |
+| `audio` | Audio decoding, feature extraction, browser comparisons and encoder workers |
+| `training` | Shared fitting, calibration, learner comparisons and model exports |
+| `evaluation` | Metrics, cross-corpus transfer, identity exclusions and score contracts |
+| `focus`, `cruise`, `release`, `relax`, `uplift`, `energize` | Each vibe's model recipes, exports and production replay checks |
+| `pooling` | Library pooling, source assignment and recommendation evaluation |
+| `replay` | Isolated library runtimes and downstream consumer comparisons |
+| `studies` | Campaigns and candidate studies built on the shared tools |
+| `support` | Evidence receipts, provenance, caches and research coordination |
+
+Tests live with the corresponding tools. Package membership describes the code's
+role; adoption and rejection decisions remain in the audio history.
+
+Use `./experiments/run.py COMMAND` for the existing command names, and
+`./experiments/run.py check` for focused research tests. `check --test FILENAME`
+continues to accept test basenames. Direct module invocations include the package,
+for example `uv run python -m experiments.audio_lab_tools.training.train_vibes --help`.
+
+Historical source archives retain their original layout and hashes. Inspect those
+archives to reproduce frozen runs; changed source requires a new run directory.
+
 ## Research records
 
 - Keep [dataset references](audio_lab/datasets/README.md) separate from experiment

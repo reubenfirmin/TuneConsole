@@ -9,10 +9,13 @@ from yt_playlist.core.audio_vibe_contract import INTENSITY_CHANNELS
 from yt_playlist.rec import home_vibe, musical_preparation, musical_profiles, vibe_joint_model as model
 
 VIBES = (*home_vibe.PRESETS, *INTENSITY_CHANNELS)
-# Release qualification is deliberately empty until #819's frozen statistical,
-# lifecycle and resource gates have independent evidence. Map configuration
-# hashes to the accepted report hash; a successful fit alone cannot qualify it.
-QUALIFICATIONS = {}
+# Configuration hashes map to accepted review receipt SHA256s. Qualification
+# covers the frozen statistical, lifecycle, cold-start and resource gates:
+# https://github.com/reubenfirmin/TuneConsole/issues/819#issuecomment-6704311492
+QUALIFICATIONS = {
+    '30f91e6a2d29d6e8816e49dd1778093c4bfe06c960b8c2e8648beb0be908b8b3':
+        '31fcdd9e2995df7b8c23d56c03c505fd3ecd38b9a323e99e48314bd2923c7a5e',
+}
 # Under continuing upstream work, finish one bounded eight-channel cycle and
 # allow upstream capture to progress before admitting another cycle.
 BACKLOG_INTERVAL = 60

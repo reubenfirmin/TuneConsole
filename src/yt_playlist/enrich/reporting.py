@@ -1,11 +1,6 @@
 """Detached enrichment provenance, conflict choices and progress charts."""
 from yt_playlist.core.enrichment_contract import FIELD_COLUMN
-from yt_playlist.core.metadata_contract import ALTERNATIVE_SECONDS
-
-
-def current_candidates(document, updated_at, now):
-    return [candidate for candidate in document.get('candidates', [])
-            if candidate.get('at', updated_at) > now - ALTERNATIVE_SECONDS]
+from yt_playlist.core.enrichment_conflict_policy import current_candidates
 
 
 def genre_provenance(track, candidates, conflicts):

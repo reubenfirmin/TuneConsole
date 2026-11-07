@@ -21,6 +21,7 @@ from yt_playlist.core import fao, json_cache
 from yt_playlist.core.activity import Activity, WorkBudgetExceeded, WorkClosing
 from yt_playlist.rec import bundle_storage
 from yt_playlist.repos import discovery_cache, proposal_cache
+from yt_playlist.core import discovery_cache_policy
 from yt_playlist.repos.rec_proposals import encode_proposals
 from tests.conftest import seed_catalog_track
 from tests.prepared_fixture_support import prepared_template
@@ -170,7 +171,7 @@ def test_large_cleanup_prepares_after_reader_close_and_allows_foreground_writes(
             assert [row['reason'] for row in before_visible[slot]] == [
                 item['reason'] for item in bundles['all']['fresh']]
     entered, release = threading.Event(), threading.Event()
-    original_snapshot, original_prepare = database.read_snapshot, discovery_cache.prepare
+    original_snapshot, original_prepare = database.read_snapshot, discovery_cache_policy.prepare
     connections = []
 
     @contextmanager
@@ -192,7 +193,7 @@ def test_large_cleanup_prepares_after_reader_close_and_allows_foreground_writes(
         return original_prepare(rows, gone)
 
     monkeypatch.setattr(database, 'read_snapshot', tracked_snapshot)
-    monkeypatch.setattr(discovery_cache, 'prepare', prepare)
+    monkeypatch.setattr(discovery_cache_policy, 'prepare', prepare)
     with ThreadPoolExecutor(2) as pool:
         work = pool.submit(cleanup, database)
         try:
@@ -235,7 +236,7 @@ def test_stale_preparation_cannot_delete_membership_or_overwrite_newer_cache(
     if staged:
         stage_successor(database)
     before = published_state(database)
-    original = discovery_cache.prepare
+    original = discovery_cache_policy.prepare
     mutations = []
 
     def prepare(rows, gone):
@@ -251,7 +252,7 @@ def test_stale_preparation_cannot_delete_membership_or_overwrite_newer_cache(
                 key, 'gone-video', 'Gone', 'Artist', None, None, 'House', '2000', 'radio:new-source', 99 * DAY)
         return prepared
 
-    monkeypatch.setattr(discovery_cache, 'prepare', prepare)
+    monkeypatch.setattr(discovery_cache_policy, 'prepare', prepare)
     with pytest.raises(WorkBudgetExceeded, match='inputs changed'):
         cleanup(database)
     assert mutations == [change]
@@ -266,7 +267,7 @@ def test_stale_preparation_cannot_delete_membership_or_overwrite_newer_cache(
         assert published_state(database) == before
     assert not database.conn.in_transaction
 
-    monkeypatch.setattr(discovery_cache, 'prepare', original)
+    monkeypatch.setattr(discovery_cache_policy, 'prepare', original)
     result = cleanup(database)
     if change == 'rediscovered':
         assert result == {'albums': 0, 'artists': 0, 'tracks': 0}
@@ -282,7 +283,7 @@ def test_stale_preparation_cannot_delete_membership_or_overwrite_newer_cache(
 def test_concurrent_successor_staging_keeps_cleanup_inputs_valid(database, monkeypatch):
     key, _bundles = populate(database)
     before = published_state(database)
-    original = discovery_cache.prepare
+    original = discovery_cache_policy.prepare
     successors = []
 
     def prepare(rows, gone):
@@ -290,7 +291,7 @@ def test_concurrent_successor_staging_keeps_cleanup_inputs_valid(database, monke
         successors.append(stage_successor(database))
         return prepared
 
-    monkeypatch.setattr(discovery_cache, 'prepare', prepare)
+    monkeypatch.setattr(discovery_cache_policy, 'prepare', prepare)
     result = cleanup(database)
     assert result == {'albums': 0, 'artists': 0, 'tracks': 1}
     assert database.discovery.discovered_tracks_by_keys([key]) == {}
@@ -320,7 +321,7 @@ def test_cleanup_failure_preserves_sources_membership_and_rankings(database, mon
         def prepare(*args):
             raise WorkClosing('injected shutdown during pruning')
 
-        monkeypatch.setattr(discovery_cache, 'prepare', prepare)
+        monkeypatch.setattr(discovery_cache_policy, 'prepare', prepare)
         error = WorkClosing
     else:
         def read(*args, **kwargs):
@@ -336,6 +337,25 @@ def test_cleanup_failure_preserves_sources_membership_and_rankings(database, mon
     assert not database.conn.in_transaction
 
 
+def test_cleanup_retry_finishes_after_earlier_repository_commits(database, monkeypatch):
+    key, _bundles = populate(database, count=8)
+    database.settings.set_setting('enrich_attempts:' + key, 'old attempts')
+
+    def fail(*args):
+        assert not database.conn.in_transaction
+        raise ValueError('injected membership deletion failure')
+
+    with monkeypatch.context() as changes:
+        changes.setattr(database.discovery.repository, 'delete_pool_entries', fail)
+        with pytest.raises(ValueError, match='membership deletion failure'):
+            cleanup(database)
+    assert database.settings.get_setting('enrich_attempts:' + key) is None
+    assert set(database.discovery.discovered_tracks_by_keys([key])) == {key}
+    assert not database.conn.in_transaction
+    assert cleanup(database) == {'albums': 0, 'artists': 0, 'tracks': 1}
+    assert database.discovery.discovered_tracks_by_keys([key]) == {}
+
+
 @pytest.mark.parametrize('encoded', [False, True])
 def test_legacy_cache_pruning_preserves_all_other_fields_and_compression(encoded):
     """Retain the old complete-document assertions at the explicit codec boundary."""
@@ -349,7 +369,7 @@ def test_legacy_cache_pruning_preserves_all_other_fields_and_compression(encoded
     assert len(json.dumps(bundles).encode()) > 10 * 1024 * 1024
     rows = [{'surface': surface, 'payload': encode_proposals(surface, value) if encoded else json.dumps(value)}
             for surface, value in source.items()]
-    prepared = {surface: raw for raw, surface in discovery_cache.prepare(rows, {'gone'})}
+    prepared = {surface: raw for raw, surface in discovery_cache_policy.prepare(rows, {'gone'})}
     expected = items[1:]
     cleaned = {**bundles, 'all': {**bundles['all'], 'fresh': expected}, '1': {'fresh': expected}}
     assert json_cache.decode(prepared['mode_bundles']) == cleaned

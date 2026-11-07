@@ -10,7 +10,7 @@ import sys
 from fastapi.testclient import TestClient
 import pytest
 
-from experiments.audio_lab_tools import train_vibes as trainer
+from experiments.audio_lab_tools.training import train_vibes as trainer
 from tests.test_audio_vibes import sample
 from yt_playlist.core import catalog
 from yt_playlist.core import features
@@ -326,7 +326,7 @@ def test_cli_trains_while_pytest_holds_the_shared_machine_lock(store, tmp_path):
     output, report = tmp_path / 'model.json', tmp_path / 'report.json'
     # Pytest owns the shared machine lock for this entire test. The CLI must
     # finish independently, rather than waiting for its own parent to release it.
-    result = subprocess.run([sys.executable, '-m', 'experiments.audio_lab_tools.train_vibes',
+    result = subprocess.run([sys.executable, '-m', 'experiments.audio_lab_tools.training.train_vibes',
         '--db', str(database), '--output', str(output), '--report', str(report)],
         cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stderr

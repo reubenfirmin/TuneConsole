@@ -34,7 +34,7 @@ def operation(store, kind, stack):
         return lambda: snapshot.publish(lambda: store.settings.publish_values({'result': 'published'}))
     if kind == 'recommendation-retirement':
         from yt_playlist.repos.recommendation_publication import cleanup_pools
-        return lambda: cleanup_pools(store.recommendations)
+        return lambda: cleanup_pools(store.recommendations.repository)
     def write():
         with group_roots.writer(store) as conn:
             if kind == 'recommendation-write':

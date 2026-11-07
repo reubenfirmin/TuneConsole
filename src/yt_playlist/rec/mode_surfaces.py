@@ -18,7 +18,7 @@ from yt_playlist.core.activity import WorkClosing, check_stopping
 from yt_playlist.core.policy_config import BASE_FIELD
 from yt_playlist.core.db_revisions import column_group_reads
 from yt_playlist.core.work_diagnostics import work_span
-from yt_playlist.repos.rec_proposals import encode_proposals
+from yt_playlist.core.proposal_codec import encode_proposals
 from yt_playlist.core.policy_config import PolicyCapacityFull
 from yt_playlist.rec import (embedding_vectors as vectors, experiments, home_themes, home_vibe, layers, mode_eval, rec_params, surfaces,
                              taste_modes, transient, measurement, negative, vibe_pools)

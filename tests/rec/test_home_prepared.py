@@ -2,7 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from tests.derived_rating_support import seed_dislike, seed_like
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from copy import deepcopy
 from dataclasses import asdict
 import json
@@ -16,7 +16,7 @@ import pytest
 
 from tests.conftest import FakeClient
 from tests.group_support import publish as publish_groups, recordings as grouped_recordings
-from tests.home_fixture_support import returning_listener
+from tests.home_fixture_support import publish_menu, returning_listener
 from tests.home_prepared_support import publication_inputs as controlled_publication_inputs, seed
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
 from yt_playlist.core.activity import Activity
@@ -80,25 +80,34 @@ def one_menu_per_attempt(monkeypatch):
 
     monkeypatch.setattr(home_prepared, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
     monkeypatch.setattr(home_cards.HomeCards, 'cards', cards)
+    return clock
 
 
 def service(store):
     return home_cards.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__))
 
 
-def test_capacity_projection_preserves_worker_menu_after_feedback(store, publication_prepared):
-    prepared = publication_prepared
-    def selections(projected):
-        with store.read_view() as reader:
-            payload = home_prepared.peek(reader, 1000, readiness_only=projected)
-            result = home_prepared.cards(reader, payload, 1000, service(reader), record=False,
-                                         readiness_only=projected)
-            return [[track['key'] for track in proto['tracks']] for proto in result.protos]
-    original = selections(False)
-    assert len(original) == 4
-    assert selections(True) == original
+def test_capacity_projection_preserves_worker_menu_after_feedback(store):
+    prepared = publish_menu(store, tracks_per_card=1)
+    for proto in prepared['menus'][0]['protos']:
+        proto['tracks'][0]['musical'] = {'captured_features': [0.2, 0.7, 0.1]}
+    home_cache.put(store, home_prepared.SURFACE, prepared, 1000)
+
+    def selections(reader, projected):
+        payload = home_prepared.peek(reader, 1000, readiness_only=projected)
+        assert all(('musical' in proto['tracks'][0]) is not projected
+                   for proto in payload['menus'][0]['protos'])
+        result = home_prepared.cards(reader, payload, 1000, service(reader), record=False,
+                                     readiness_only=projected)
+        return [[track['key'] for track in proto['tracks']] for proto in result.protos]
+
+    with store.read_view() as reader:
+        original = selections(reader, False)
+        assert len(original) == 4
+        assert selections(reader, True) == original
     seed_dislike(store, original[0][0], until=None, now=999)
-    assert selections(True) == selections(False) == original
+    with store.read_view() as reader:
+        assert selections(reader, True) == selections(reader, False) == original
 
 
 def test_capacity_projection_does_not_hide_invalid_collection_data(store, prepared):
@@ -446,8 +455,13 @@ def test_changed_artist_links_do_not_rewrite_the_worker_publication(
     assert [p['tracks'] for p in current.protos] == [p['tracks'] for p in chosen['protos']]
 
 
+@pytest.mark.parametrize('method,path', [
+    ('get', '/'), ('get', '/home/cards'), ('get', '/home/feed'),
+    ('get', '/home/discovery'), ('get', '/home/genres'),
+    ('post', '/home/refresh-cards'), ('post', '/home/refresh-card/wheelhouse'),
+], ids=['page', 'cards', 'feed', 'discovery', 'genres', 'refresh', 'refresh-wheelhouse'])
 def test_ordinary_home_reads_use_prepared_results_without_selection_or_analytics(
-        store, publication_prepared, monkeypatch):
+        store, publication_prepared, monkeypatch, method, path):
     from yt_playlist.rec import account_growth, growth_readiness
 
     prepared = publication_prepared
@@ -499,14 +513,15 @@ def test_ordinary_home_reads_use_prepared_results_without_selection_or_analytics
         monkeypatch.setattr(target, name, forbidden)
     for name in ("play_counts", "track_audio_features", "genre_play_distribution", "era_play_distribution",
                  "artist_genre_years"):
-        monkeypatch.setattr(store.rec_query, name, forbidden)
+        monkeypatch.setattr(type(store.rec_query), name, forbidden)
     iid = store.accounts.upsert_account("main", "cred", None, True)
     store.settings.set_setting("last_sync_at", "1000")
     store.settings.set_setting("onboard_dismissed", "1")
-    client = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1001),
-                        base_url="http://127.0.0.1")
-    for path in ("/", "/home/cards", "/home/feed", "/home/discovery", "/home/genres"):
-        response = client.get(path)
+    # Each route independently consumes the same completed publication. A
+    # previous route's reads or choice writes must not be its precondition.
+    with closing(TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1001),
+                            base_url="http://127.0.0.1")) as client:
+        response = getattr(client, method)(path)
         assert response.status_code == 200
         if path in ("/", "/home/cards", "/home/feed"):
             rendered_path, _, context = rendered[-1]
@@ -515,8 +530,6 @@ def test_ordinary_home_reads_use_prepared_results_without_selection_or_analytics
             assert {proto['lane'] for proto in context['protos']} == {
                 'wheelhouse', 'explore', 'comfort', 'fresh'}
             assert all(proto['tracks'] for proto in context['protos'])
-    assert client.post("/home/refresh-cards").status_code == 200
-    assert client.post("/home/refresh-card/wheelhouse").status_code == 200
 
 
 def test_genre_preference_edits_schedule_and_publish_a_new_prepared_generation(store, publication_prepared):

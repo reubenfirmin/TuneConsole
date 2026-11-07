@@ -380,6 +380,14 @@ def test_populated_historical_chain_preserves_each_boundary(
         with closing(sqlite3.connect(predecessor_templates[1].resolve().as_uri()+'?mode=ro',uri=True)) as first:
             first.backup(conn)
         populate(conn, 1)
+        with conn:
+            conn.executemany('INSERT INTO settings(key,value) VALUES (?,?)', [
+                ('rec_param:onboard_coverage_min', '0.9'),
+                ('rec_param:onboard_library_min', '200'),
+                ('rec_param:onboard_feedback_min', '15'),
+                ('onboard_dismissed', '1'),
+                ('last_sync_at', '1000'),
+            ])
         steps = []
         for version in (*PREDECESSOR_VERSIONS, LATEST_VERSION):
             historical = list(conn.execute('SELECT * FROM schema_migrations ORDER BY version'))
@@ -409,6 +417,14 @@ def test_populated_historical_chain_preserves_each_boundary(
         migrate(conn, registry=registry.MIGRATIONS)
         assert list(conn.iterdump()) == before
         assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        settings = dict(conn.execute('SELECT key,value FROM settings'))
+        assert 'rec_param:onboard_coverage_min' not in settings
+        assert 'rec_param:onboard_library_min' not in settings
+        assert settings['rec_param:onboard_feedback_min'] == '15'
+        assert settings['onboard_dismissed'] == '1'
+        # Later collection migration moves this stamp into its native owner.
+        store._bind_repositories()
+        assert float(store.settings.get_setting('last_sync_at')) == 1000
         record_property('populated_historical_steps', json.dumps(steps))
     finally:
         store.conn.close()

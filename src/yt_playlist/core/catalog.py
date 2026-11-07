@@ -15,7 +15,7 @@ from yt_playlist.core.discovery_sources import prepare_reassociation, finish_rea
 from yt_playlist.core import metadata, metadata_deliveries, metadata_evidence, metadata_values, metadata_hints, metadata_runtime, artists, albums, mood
 from yt_playlist.core import rating_feedback, listening_summaries
 from yt_playlist.core import provider_queries
-from yt_playlist.util.thumbnails import is_placeholder_art
+from yt_playlist.core.track_policy import artwork_update
 
 
 def resolve_entry(conn, entry_id):
@@ -78,13 +78,9 @@ def update_artwork(conn, entry_id, url, *, source, observation_id=None):
     row = conn.execute('SELECT thumbnail FROM catalog_tracks WHERE id=?', (entry_id,)).fetchone()
     if row is None:
         return
-    current = row['thumbnail']
-    useful = current and current.strip() and not is_placeholder_art(current)
-    if is_placeholder_art(url) and (source != 'youtube' or current):
-        return
-    if source != 'youtube' and useful:
-        return
-    metadata.select(conn,entry_id,'thumbnail',url.strip(),source,observation_id=observation_id)
+    selected = artwork_update(row['thumbnail'], url, source=source)
+    if selected is not None:
+        metadata.select(conn,entry_id,'thumbnail',selected,source,observation_id=observation_id)
 
 
 def replace_hints(conn, entry_id, fields):

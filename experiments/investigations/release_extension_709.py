@@ -4,11 +4,11 @@ from pathlib import Path
 
 import numpy as np
 
-from experiments.audio_lab_tools import release_extension as m
-from experiments.audio_lab_tools.external_experiment import digest
-from experiments.audio_lab_tools.focus_experiment import arrays, load
-from experiments.audio_lab_tools.quality_round import verify
-from experiments.audio_lab_tools.relax_experiment import global_groups
+from experiments.audio_lab_tools.release import release_extension as m
+from experiments.audio_lab_tools.support.external_experiment import digest
+from experiments.audio_lab_tools.focus.focus_experiment import arrays, load
+from experiments.audio_lab_tools.support.quality_round import verify
+from experiments.audio_lab_tools.relax.relax_experiment import global_groups
 
 
 def test_artist_partition_and_global_components_are_disjoint():

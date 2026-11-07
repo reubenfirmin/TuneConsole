@@ -65,6 +65,35 @@ def test_unidentified_name_reuses_its_provisional_identity(artists):
     artists.repository.create.assert_not_called()
 
 
+def test_credit_correction_adds_an_alias_without_replacing_a_verified_identity(artists):
+    artists.repository.credit_inputs.return_value = {'entry_id': 7, 'artists': [12], 'typed': True}
+    artists.record_credit_choice(99, 'Correct spelling', now=10)
+    artists.repository.add_alias.assert_called_once_with(12, 'Correct spelling', 'user_correction')
+    artists.repository.create.assert_not_called()
+    artists.repository.store_credit.assert_not_called()
+
+
+def test_credit_correction_does_not_assign_one_alias_to_multiple_artists(artists):
+    artists.repository.credit_inputs.return_value = {'entry_id': 7, 'artists': [12, 13], 'typed': True}
+    artists.record_credit_choice(7, 'Display credit', now=10)
+    artists.repository.add_alias.assert_not_called()
+    artists.repository.store_credit.assert_not_called()
+
+
+@pytest.mark.parametrize('typed', [True, False])
+def test_uncredited_correction_prepares_exact_credit_before_persistence(artists, typed):
+    artists.repository.credit_inputs.return_value = {'entry_id': 7, 'artists': [], 'typed': typed}
+    artists.record_credit_choice(99, 'New credit', now=10)
+    args, kwargs = artists.repository.store_credit.call_args
+    assert args[0] == 7
+    credit = args[1]
+    assert credit.display_credit == 'New credit'
+    assert [(m.artist_id, m.credit_text, m.presence) for m in credit.members] == [(42, 'New credit', 1)]
+    assert args[2:] == ([{'name': 'New credit', 'id': None}], 'user_correction', 10)
+    assert kwargs == {'typed': typed}
+    artists.repository.add_alias.assert_called_once_with(42, 'New credit', 'user_correction')
+
+
 @pytest.mark.parametrize('provider,provider_id,source', [
     (None, None, 'unidentified_credit'), ('youtube', None, 'youtube'),
     (None, 'channel', 'unidentified_credit'), ('', 'channel', 'unidentified_credit'),

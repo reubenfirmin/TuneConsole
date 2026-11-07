@@ -58,11 +58,25 @@ def relative(kind, owner, revision):
 def _prepared(conn, kind, owner, revision, data):
     if not conn.in_transaction:
         raise RuntimeError('Runtime metadata publication requires a writer transaction')
+    current = None
+    if runtime_active(conn):
+        if kind in ('choices', 'conflicts'):
+            current = conn.execute('SELECT revision FROM metadata_runtime_'+kind+' WHERE id=?', owner).fetchone()
+        elif kind == 'native':
+            current = conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?', owner).fetchone()
+        elif kind == 'alternatives':
+            current = conn.execute('SELECT s.at FROM enrichment_provider_state s JOIN metadata_runtime_providers p '
+                'ON p.name=s.provider WHERE s.recording_id=? AND p.id=?', owner).fetchone()
+    return _prepared_at(directory(conn), kind, owner, revision, data,
+                        current_revision=current[0] if current is not None else None)
+
+
+def _prepared_at(root, kind, owner, revision, data, *, current_revision=None):
     body = {'format': 1, 'kind': kind, 'owner': list(owner), 'revision': revision, 'data': data}
     encoded = canonical({'body': body, 'sha256': hashlib.sha256(canonical(body)).hexdigest()})
     if len(encoded) > MAX_BYTES:
         raise ValueError('Runtime metadata document exceeds its byte budget')
-    path = directory(conn) / relative(kind, owner, revision)
+    path = Path(root) / relative(kind, owner, revision)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         old = fao.read(path, max_bytes=MAX_BYTES).bytes
@@ -74,16 +88,7 @@ def _prepared(conn, kind, owner, revision, data):
             return path, None
         # A failed transaction may leave its next revision on disk. Only a
         # committed/current revision is immutable; no snapshot owns an orphan.
-        current = None
-        if runtime_active(conn):
-            if kind in ('choices', 'conflicts'):
-                current = conn.execute('SELECT revision FROM metadata_runtime_'+kind+' WHERE id=?', owner).fetchone()
-            elif kind == 'native':
-                current = conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?', owner).fetchone()
-            else:
-                current = conn.execute('SELECT s.at FROM enrichment_provider_state s JOIN metadata_runtime_providers p '
-                    'ON p.name=s.provider WHERE s.recording_id=? AND p.id=?', owner).fetchone()
-        if current is not None and revision <= current[0]:
+        if current_revision is not None and revision <= current_revision:
             raise ValueError('Runtime metadata revision cannot change its content')
     return path, encoded
 
@@ -94,6 +99,23 @@ def publish(conn, kind, owner, revision, data):
     if encoded is not None:
         fao.write(path, encoded)
     return path
+
+
+class RuntimeMetadataFiles:
+    """Read and publish metadata selected by explicit SQL identities and revisions."""
+
+    def __init__(self, root):
+        self.root = Path(root)
+
+    def publish(self, kind, owner, revision, data, *, current_revision=None):
+        path, encoded = _prepared_at(self.root, kind, owner, revision, data,
+                                     current_revision=current_revision)
+        if encoded is not None:
+            fao.write(path, encoded)
+        return path
+
+    def read(self, kind, owner, revision, *, missing=False):
+        return read_at(self.root, kind, owner, revision, missing=missing)
 
 
 def publish_many(conn, documents):

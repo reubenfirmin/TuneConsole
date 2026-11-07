@@ -1,6 +1,6 @@
 """Background execution preserves the established models and last-good serving."""
 import asyncio
-from tests.enrichment_support import seed_audio
+from tests.enrichment_support import choose_field, seed_audio
 from copy import deepcopy
 from functools import wraps
 from html.parser import HTMLParser
@@ -36,18 +36,22 @@ def seed(store, *, distinct_albums=False, track_count=96, mode_count=3):
         for i in range(track_count):
             album = f'Album {i}' if distinct_albums else 'Album'
             tid = store.tracks.upsert_track(f'v{i}', f'Song {i:03}', f'Artist {i}', album, None)
-            store.tracks.set_track_genre(tid, ('Techno', 'Jazz', 'Rock')[i * 3 // track_count])
+            # This fixture owns the completed SQL input batch. Metadata's
+            # controller owns its own transaction when exercised by callers.
+            choose_field(store, tid, 'genre', ('Techno', 'Jazz', 'Rock')[i * 3 // track_count])
             seed_audio(store, tid, bpm=80 + i, energy=(i % 10) / 10)
             tids.append(tid)
         for i in range(8):
             size, offset = track_count // 4, i * (track_count // 8)
             pid = store.playlists.upsert_playlist(iid, f'p{i}', f'Playlist {i}', size, '', 1)
             store.playlists.set_playlist_tracks(pid, (tids + tids)[offset:offset + size])
-        store.history.import_play_events(iid, [(store.tracks.identity_key_for_video(f'v{i}'), f'v{i}', 1000 + i)
-                                             for i in range(8)])
         store.settings.set_setting('rec_dim', '16')
         rec_params.set_param(store, 'modes_k', mode_count)
         rec_params.set_param(store, 'modes_min_members', 8)
+    # History's controller coordinates its own repository transactions after
+    # the completed catalog batch has committed.
+    store.history.import_play_events(iid, [(store.tracks.identity_key_for_video(f'v{i}'), f'v{i}', 1000 + i)
+                                         for i in range(8)])
     return tids
 
 
@@ -380,19 +384,31 @@ def test_background_fit_leaves_event_loop_and_last_good_home_available(
         file_backed_store, monkeypatch, home_routes_only, without_metadata_providers):
     store = file_backed_store
     # This case owns worker/request concurrency and last-good serving. Ranked
-    # menu/model equivalence is checked above; use a small real publication
-    # instead of fitting and ranking 144 subjects before blocking the next fit.
-    prepared = publish_menu(store, 2000)
+    # menu/model equivalence is checked above. Four playable cards need one
+    # subject each here; ranking additional subjects adds no concurrency state.
+    prepared = publish_menu(store, 2000, tracks_per_card=1)
     tids = [row[0] for row in store.conn.execute('SELECT id FROM catalog_entries ORDER BY id')]
     iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
     pid = store.playlists.upsert_playlist(iid, 'first', 'First', len(tids), '', 1)
     store.playlists.set_playlist_tracks(pid, tids)
     store.settings.set_setting('rec_dim', '4')
+    # Numerical equivalence belongs to the two real fitting owners above. Keep
+    # capture, invalidation, worker dispatch and SQL/file model publication real.
+    def completed_fit(baskets, *, dim, method, weights):
+        keys = sorted({key for basket in baskets for key in basket})
+        matrix = np.zeros((len(keys), dim), dtype=np.float32)
+        matrix[:, 0] = 1.
+        return keys, matrix
+
+    monkeypatch.setattr(embed, 'build_vectors_from_baskets', completed_fit)
+    # This completed library has no out-of-corpus artist profiles. Discovery's
+    # independent producer and its model parity are not part of worker dispatch.
+    monkeypatch.setattr(artist_model, '_discovered_artist_profiles', lambda reader: {})
     assert model_refresh.rebuild(store, 2000) is not None
     assert store.rec_model.rec_vectors_count() > 0
     # Change an actual collaborative input so the worker must enter its fitter.
-    pid = store.playlists.upsert_playlist(iid, 'second', 'Second', 8, '', 1)
-    store.playlists.set_playlist_tracks(pid, tids[:8])
+    pid = store.playlists.upsert_playlist(iid, 'second', 'Second', 2, '', 1)
+    store.playlists.set_playlist_tracks(pid, tids[:2])
     # Completed listening evidence is an input to this concurrency contract.
     # Choice compilation has its own owners in test_choice_evidence; keep the
     # actual persisted report and access check without rerunning that producer.
@@ -400,6 +416,9 @@ def test_background_fit_leaves_event_loop_and_last_good_home_available(
     assert store.rec_proposals.choice_usage()['episodes']['mixes'] == 1
     assert any(len(menu['protos']) == 4 for menu in prepared['menus']), [
         [proto['lane'] for proto in menu['protos']] for menu in prepared['menus']]
+    expected_cards = {
+        f"gen-{proto['lane']}": [(track['key'], track['video_id']) for track in proto['tracks']]
+        for proto in prepared['menus'][0]['protos']}
     assert account_growth.has_access(account_growth.view(store, 2000), 'directions')
     app = create_app(store, lambda: {}, now_fn=lambda: 2000, background_work=False)
     ctx = SimpleNamespace(store=store, work=Activity(), now_fn=lambda: 2000,
@@ -448,14 +467,13 @@ def test_background_fit_leaves_event_loop_and_last_good_home_available(
                     assert rows and all(key and video for key, video in rows)
                 return document.cards
 
-            before = playable_cards(await asyncio.wait_for(client.get('/home/cards'), 1))
             generation = store.rec_model.content_generation()
             worker.trigger()
             assert await asyncio.to_thread(started.wait, 5)
             # One request made after the fitter is blocked proves this overlap.
             # Repeating the identical render adds no distinct state transition.
             response = await asyncio.wait_for(client.get('/home/cards'), 1)
-            assert playable_cards(response) == before
+            assert playable_cards(response) == expected_cards
             assert store.rec_model.content_generation() == generation
             assert await asyncio.wait_for(asyncio.to_thread(store.rec_model.rec_vectors_count), 1) > 0
         assert not release.is_set()

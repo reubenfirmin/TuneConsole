@@ -149,7 +149,8 @@ def test_interrupted_slot_batch_resumes_all_remaining_shared_selections(recommen
                   for i in range(publication.SLOT_BATCH_ROWS + 2))
     prepared = replace(first, slots=slots)
     build = store.recommendations.claim(prepared)
-    original = publication._pool
+    from yt_playlist.controllers.recommendation_publications import RecommendationPublications
+    original = RecommendationPublications._stage_pool
     calls, changed = 0, False
 
     def interrupted(repo, current, pool, **kwargs):
@@ -163,7 +164,7 @@ def test_interrupted_slot_batch_resumes_all_remaining_shared_selections(recommen
         return result
 
     with monkeypatch.context() as boundary:
-        boundary.setattr(publication, '_pool', interrupted)
+        boundary.setattr(RecommendationPublications, '_stage_pool', interrupted)
         if interruption == 'closing':
             with pytest.raises(WorkClosing):
                 store.recommendations.stage(prepared, build)

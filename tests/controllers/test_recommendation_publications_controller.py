@@ -246,3 +246,56 @@ def test_changed_plan_is_rejected_before_any_staging_write(publications):
     publications.repository.staged_outputs.assert_not_called()
     publications.repository.ready.assert_not_called()
     publications.files.publish.assert_not_called()
+
+
+def test_bundle_preparation_uses_explicit_identities_and_revalidates_reused_pool(publications):
+    repository = publications.repository
+    repository.is_private_reader.return_value = True
+    repository.supports_pool_revalidation.return_value = True
+    repository.recording_ids.return_value = {'one': 1}
+    repository.policy_families.return_value = {'new': 'shared'}
+    repository.recent_pools.return_value = {}
+    value = {'all': {'fresh': [{'key': 'one', 'score': .5, 'pool_policy': 'new', 'reason': 'Captured'}]}}
+    options = dict(external_key='prepared', policy_version='new', input_revision=2, created_at=100)
+    first = publications.prepare_bundles(value, None, previous=publications, **options)
+    original = first.slots[0].pool
+    old = recommendation_pools.prepare(original.pool_key, 'old', original.group_version_id,
+        original.input_fingerprint, original.purpose, original.candidates)
+    repository.recent_pools.return_value = {('home', 'all', 'fresh'): [
+        (9, old.pool_key, old.policy_version, old.group_version_id, old.input_fingerprint,
+         old.purpose, len(old.candidates), old.content_digest)]}
+    repository.pool_matches.return_value = True
+    prepared = publications.prepare_bundles(value, None, previous=publications, **options)
+    repository.recording_ids.assert_called_with(['one'])
+    assert prepared.slots[0].pool == old
+    assert prepared.slots[0].revalidated_policy == 'new'
+    assert prepared.outputs[0].pool_digest == old.content_digest
+    assert recommendation_outputs._decode(prepared.outputs[0].encoded)['output']['rows'][0][2] == {'reason': 'Captured'}
+    assert prepared.outputs[0].chunk_key != first.outputs[0].chunk_key
+    publications.files.publish.assert_not_called()
+
+
+def test_bundle_preparation_rejects_policy_family_before_publication(publications):
+    repository = publications.repository
+    repository.is_private_reader.return_value = True
+    repository.supports_pool_revalidation.return_value = False
+    repository.recording_ids.return_value = {'one': 1}
+    repository.policy_families.return_value = {'root': 'root', 'foreign': 'foreign'}
+    with pytest.raises(ValueError, match='different input generations'):
+        publications.prepare_bundles({'all': {'fresh': [{'key': 'one', 'pool_policy': 'foreign'}]}},
+            None, previous=publications, external_key='prepared', policy_version='root', input_revision=2, created_at=100)
+    repository.claim.assert_not_called()
+    publications.files.publish.assert_not_called()
+
+
+def test_bundle_preparation_requires_private_readers(publications):
+    publications.repository.is_private_reader.return_value = False
+    with pytest.raises(ValueError, match='private readers'):
+        publications.prepare_bundles({}, None, previous=publications)
+    publications.repository.recording_ids.assert_not_called()
+
+
+def test_empty_clicked_pool_without_policy_has_no_publication(publications):
+    value = {'parameters': {'lane': 'comfort', 'epoch': 0, 'include_genres': [], 'avoid_genres': []}, 'tracks': []}
+    assert publications.prepare_clicked_pool('home_pool:comfort', value, 100) is None
+    publications.repository.recording_ids.assert_not_called()

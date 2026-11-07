@@ -289,6 +289,20 @@ class RecLedgerRepo(Repo):
         return row["views"] if row else 0
 
     @synchronized
+    def bump_card_views(self, cards, now, *, overrides):
+        """Advance all counters belonging to one Home visit together."""
+        with self.conn.atomic():
+            counts = {}
+            for card in cards:
+                views = overrides.get(card)
+                counts[card] = self.conn.execute(
+                    "INSERT INTO rec_impressions(surface,item_key,views,last_shown) VALUES('card',?,?,?) "
+                    "ON CONFLICT(surface,item_key) DO UPDATE SET views=COALESCE(?,rec_impressions.views+1),"
+                    "last_shown=excluded.last_shown RETURNING views",
+                    (card, 1 if views is None else views, now, views)).fetchone()[0]
+            return counts
+
+    @synchronized
     def set_card_views(self, card, views, now) -> None:
         """Persist the view count calculated inside the caller's write unit."""
         self.conn.execute("INSERT INTO rec_impressions(surface,item_key,views,last_shown) "

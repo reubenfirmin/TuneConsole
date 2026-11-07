@@ -20,8 +20,11 @@ def library(store, monkeypatch, daily_library_template):
 
 
 @pytest.fixture(scope='module')
-def daily_library_template(_pristine_current_schema):
-    with prepared_template(_pristine_current_schema, _seed_library) as template:
+def daily_library_template(_pristine_current_schema, daily_catalog_template):
+    def seed(source):
+        return _seed_library(source, daily_catalog_template.restore(source))
+
+    with prepared_template(_pristine_current_schema, seed) as template:
         yield template
 
 
@@ -42,19 +45,18 @@ def _seed_catalog(store):
         for offset in (0, 80):
             playlist = store.playlists.upsert_playlist(account, f'PL{offset}', 'Old curation', 80, 'old', -100 * daily.DAY)
             store.playlists.set_playlist_tracks(playlist, entries[offset:offset + 80])
-        for key in keys[:20]:
-            store.history.record_play_event(account, key, videos[key], -100 * daily.DAY)
+    store.history.import_listening_events(account,
+        [(key, videos[key], -100 * daily.DAY) for key in keys[:20]], source='live')
     return dict(now=now, account=account, keys=keys, videos=videos)
 
 
-def _seed_library(store):
-    with atomic_write(store):
-        value = _seed_catalog(store)
-        now, account, keys, videos = (value[name] for name in ('now', 'account', 'keys', 'videos'))
-        for index, key in enumerate(keys[20:80]):
-            store.history.record_play_event(account, key, videos[key], now - 30 * daily.DAY + (index // 2) * daily.DAY + 100)
-        assert set(map(tuple, store.conn.execute('SELECT identity_key,video_id FROM play_event_subjects'))) == {
-            (key, videos[key]) for key in keys[:80]}
+def _seed_library(store, value):
+    now, account, keys, videos = (value[name] for name in ('now', 'account', 'keys', 'videos'))
+    store.history.import_listening_events(account, [
+        (key, videos[key], now - 30 * daily.DAY + (index // 2) * daily.DAY + 100)
+        for index, key in enumerate(keys[20:80])], source='live')
+    assert set(map(tuple, store.conn.execute('SELECT identity_key,video_id FROM play_event_subjects'))) == {
+        (key, videos[key]) for key in keys[:80]}
     original = [(key, np.array([1., 0.], dtype=np.float32).tobytes()) for key in keys]
     store.rec_model.replace_rec_vectors(original)
     store.settings.set_setting('rec_dim', '2')
@@ -91,8 +93,18 @@ def complete(library, *, start=None):
 
 
 def test_all_prior_history_single_holdout_shared_inputs_and_full_refit(
-        library, daily_library_template, file_backed_store, monkeypatch):
+        library, daily_library_template, daily_catalog_template, file_backed_store, monkeypatch):
     store, now = library['store'], library['now']
+    # The library adds held-out plays and vectors to a private copy of the
+    # common catalog. Admission cases still receive its original empty state.
+    catalog = daily_catalog_template.source
+    assert list(map(tuple, catalog.conn.execute(
+        'SELECT identity_key,video_id,played_at FROM play_event_subjects ORDER BY id'))) == [
+            (key, daily_catalog_template.result['videos'][key], -100 * daily.DAY)
+            for key in daily_catalog_template.result['keys'][:20]]
+    assert catalog.rec_model.get_rec_vectors() == []
+    assert catalog.settings.get_setting('rec_dim') is None
+    assert catalog.model_selection.latest_daily_selection() is None
     # Compare the real seed and both restore modes before any selection work.
     with monkeypatch.context() as patch:
         sibling = _library(file_backed_store, patch, daily_library_template)
@@ -194,62 +206,33 @@ def test_insufficient_activity_skips_all_fits(library):
 ])
 def test_initial_insufficient_attempt_does_not_require_another_30_plays(
         store, monkeypatch, initial_targets, new_targets, expected,
-        daily_catalog_template, file_backed_store, _pristine_current_schema):
+        daily_catalog_template):
     value = daily_catalog_template.restore(store)
     now, account, keys, videos = (value[name] for name in ('now', 'account', 'keys', 'videos'))
-    if (initial_targets, new_targets) == (26, 24):
-        sibling = daily_catalog_template.restore(file_backed_store)
-        with prepared_template(_pristine_current_schema, _seed_catalog) as fresh:
-            producer = fresh.source
-            assert fresh.result == value == sibling
-            for current in (daily_catalog_template.source, store, file_backed_store, producer):
-                assert list(map(tuple, current.conn.execute(
-                    'SELECT video_id,title,artist,created_at FROM tracks ORDER BY video_id'))) == list(map(tuple,
-                    producer.conn.execute('SELECT video_id,title,artist,created_at FROM tracks ORDER BY video_id')))
-                for offset in (0, 80):
-                    playlist = current.playlists.get_playlist_for_account(account, f'PL{offset}')
-                    assert len(current.playlists.get_playlist_track_ids(playlist.id)) == 80
-                    assert current.playlists.get_playlist_track_keys(playlist.id) == set(keys[offset:offset + 80])
-                assert list(map(tuple, current.conn.execute(
-                    'SELECT identity_key,video_id,played_at FROM play_event_subjects ORDER BY id'))) == [
-                        (key, videos[key], -100 * daily.DAY) for key in keys[:20]]
-                assert current.rec_model.get_rec_vectors() == []
-                assert current.model_selection.latest_daily_selection() is None
-                assert current.conn.execute('PRAGMA foreign_key_check').fetchall() == []
-        assert len({daily_catalog_template.source._evidence_key, store._evidence_key,
-                    file_backed_store._evidence_key}) == 3
-        for name, source in daily_catalog_template.files.items():
-            destinations = [roots(target.conn)[name] for target in (store, file_backed_store)]
-            assert len({source, *destinations}) == 3
-            for path in source.rglob('*'):
-                if path.is_file():
-                    paths = [path, *(directory / path.relative_to(source) for directory in destinations)]
-                    assert all(copied.read_bytes() == path.read_bytes() for copied in paths)
-                    assert len({(copied.stat().st_dev, copied.stat().st_ino) for copied in paths}) == 3
-        sibling['keys'].clear()
-        sibling['videos'].clear()
-        file_backed_store.settings.set_setting('private_catalog', 'sibling')
-        assert len(keys) == len(videos) == len(daily_catalog_template.result['keys']) == 160
-        assert len(daily_catalog_template.result['videos']) == 160
-        assert store.settings.get_setting('private_catalog') is None
-        assert daily_catalog_template.source.settings.get_setting('private_catalog') is None
+    # Catalog/history and template isolation belong to
+    # test_all_prior_history_single_holdout_shared_inputs_and_full_refit.
+    # This case exercises admission using the same unchanged 160-track catalog.
     active_days = 6 if initial_targets == 26 else 8
-    for index, key in enumerate(keys[20:20 + initial_targets]):
-        store.history.record_play_event(account, key, videos[key],
-            now - 15 * daily.DAY + (index % active_days) * daily.DAY + 100 + index)
+    store.history.import_listening_events(account, [
+        (key, videos[key], now - 15 * daily.DAY + (index % active_days) * daily.DAY + 100 + index)
+        for index, key in enumerate(keys[20:20 + initial_targets])], source='live')
     setup = model_setup.current_setup(store)
     vector = np.zeros(setup['dim'], dtype=np.float32)
     vector[0] = 1.
     original = {key: vector.tobytes() for key in keys}
     store.rec_model.replace_rec_vectors(list(original.items()))
-    real_fit, fits = daily.training.build_vectors_from_baskets, []
+    fits = []
 
-    def counted_fit(*args, **kwargs):
-        fits.append((kwargs['method'], kwargs['dim']))
-        return real_fit(*args, **kwargs)
+    def counted_fit(baskets, *, method, dim, weights):
+        fits.append((method, dim))
+        vocabulary = sorted({key for basket in baskets for key in basket})
+        vectors = np.zeros((len(vocabulary), dim), dtype=np.float32)
+        vectors[:, 0] = 1.
+        return vocabulary, vectors
 
-    # Keep the default grid, thresholds and numerical fitting. Only count fits;
-    # synthetic incumbent vectors establish the modeled-track prerequisite.
+    # Keep the default grid, thresholds, capture, ranking and publication.
+    # Numerical fitting is owned by test_sparse_models and test_item2vec;
+    # completed vectors keep this admission policy independent of fit cost.
     monkeypatch.setattr(daily.training, 'build_vectors_from_baskets', counted_fit)
     result = daily.maintain(store, now)
     if initial_targets == 26:
@@ -268,8 +251,9 @@ def test_initial_insufficient_attempt_does_not_require_another_30_plays(
     assert daily.readiness(store, now + daily.DAY - 1)['reason'] == 'The next daily comparison is scheduled.'
     next_at = now + daily.DAY + 3600
     added = keys[20 + initial_targets:20 + initial_targets + new_targets]
-    for index, key in enumerate(added):
-        store.history.record_play_event(account, key, videos[key], now + daily.DAY + 100 + index)
+    store.history.import_listening_events(account, [
+        (key, videos[key], now + daily.DAY + 100 + index)
+        for index, key in enumerate(added)], source='live')
     with store.read_view() as reader:
         captured, _ = daily._capture(reader, next_at)
     assert len(captured['held']) == initial_targets + new_targets

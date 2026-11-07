@@ -3,10 +3,10 @@ from collections import defaultdict
 
 import numpy as np
 
-from experiments.audio_lab_tools import uplift_consensus as m
-from experiments.audio_lab_tools.external_experiment import LAB
-from experiments.audio_lab_tools.focus_experiment import arrays, load
-from experiments.audio_lab_tools.relax_experiment import global_groups
+from experiments.audio_lab_tools.uplift import uplift_consensus as m
+from experiments.audio_lab_tools.support.external_experiment import LAB
+from experiments.audio_lab_tools.focus.focus_experiment import arrays, load
+from experiments.audio_lab_tools.relax.relax_experiment import global_groups
 
 OLD = LAB / 'local/uplift-618-20261030/round-1'
 
@@ -42,7 +42,7 @@ def test_stronger_inventory_repairs_prior_partition():
            'local_overlap': len(set(all_groups) & protected), 'merged_examples': list(merged.items())[:5]})
     assert len(merged) == 8
     assert not set(all_groups) & protected
-    from experiments.audio_lab_tools.uplift_gate_experiment import DEFAULT, datasets
+    from experiments.audio_lab_tools.uplift.uplift_gate_experiment import DEFAULT, datasets
     data = datasets(DEFAULT)
     fitted = np.concatenate([d['groups'] for d in data.values()])
     folds = np.concatenate([d['outer'] for d in data.values()])
@@ -52,7 +52,7 @@ def test_stronger_inventory_repairs_prior_partition():
 
 
 def test_actual_fit_excludes_complete_outer_and_omitted_components():
-    from experiments.audio_lab_tools.uplift_gate_experiment import DEFAULT, datasets, OMISSIONS
+    from experiments.audio_lab_tools.uplift.uplift_gate_experiment import DEFAULT, datasets, OMISSIONS
     data = datasets(DEFAULT)
     for path in DEFAULT.glob('*.trace.json'):
         stage = path.name.removesuffix('.trace.json')
@@ -72,7 +72,7 @@ def test_actual_fit_excludes_complete_outer_and_omitted_components():
 
 
 def test_frozen_references_and_native_targets_remain_original():
-    from experiments.audio_lab_tools.uplift_gate_experiment import DEFAULT, datasets
+    from experiments.audio_lab_tools.uplift.uplift_gate_experiment import DEFAULT, datasets
     data = datasets(DEFAULT)
     for source, d in data.items():
         prior = arrays(OLD / f'inputs/{source}.npz')
@@ -84,8 +84,8 @@ def test_frozen_references_and_native_targets_remain_original():
 
 
 def test_receipts_and_support_rules():
-    from experiments.audio_lab_tools.uplift_gate_experiment import DEFAULT
-    from experiments.audio_lab_tools.quality_round import verify
+    from experiments.audio_lab_tools.uplift.uplift_gate_experiment import DEFAULT
+    from experiments.audio_lab_tools.support.quality_round import verify
     verify(DEFAULT, required_stages={
         'full', 'evaluation', *(f'outer-{i}' for i in range(5)),
         'transfer-soundtracks', 'transfer-memo', 'transfer-manymusic',

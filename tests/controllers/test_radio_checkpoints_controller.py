@@ -10,7 +10,7 @@ from yt_playlist.controllers.radio_checkpoints import RadioCheckpoints
 from yt_playlist.core.radio_files import RadioFiles
 from yt_playlist.repos.radio_checkpoints import RadioCheckpointRepo
 from yt_playlist.repos.settings import SettingsRepo
-from yt_playlist.repos.tracks import TrackRepo
+from yt_playlist.controllers.tracks import Tracks
 
 pytestmark = pytest.mark.usefixtures('no_database')
 
@@ -19,7 +19,7 @@ pytestmark = pytest.mark.usefixtures('no_database')
 def checkpoints():
     repo = create_autospec(RadioCheckpointRepo, instance=True, spec_set=True)
     settings = create_autospec(SettingsRepo, instance=True, spec_set=True)
-    tracks = create_autospec(TrackRepo, instance=True, spec_set=True)
+    tracks = create_autospec(Tracks, instance=True, spec_set=True)
     files = create_autospec(RadioFiles, instance=True, spec_set=True)
     files.retained.side_effect = nullcontext
     repo.save_facts.return_value = {'native': True, 'head': None, 'existing': None,

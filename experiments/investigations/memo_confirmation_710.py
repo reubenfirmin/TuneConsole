@@ -2,15 +2,15 @@
 import urllib.error
 import urllib.request
 
-from experiments.audio_lab_tools.external_experiment import DATA
-from experiments.audio_lab_tools.focus_experiment import load
+from experiments.audio_lab_tools.support.external_experiment import DATA
+from experiments.audio_lab_tools.focus.focus_experiment import load
 
 
 def test_acoustic_worker_parity(tmp_path):
     import json
-    from experiments.audio_lab_tools.external_experiment import LAB, pcm
-    from experiments.audio_lab_tools.memo_confirmation_audio import measurements
-    from experiments.audio_lab_tools.quality_reference_audio import response
+    from experiments.audio_lab_tools.support.external_experiment import LAB, pcm
+    from experiments.audio_lab_tools.audio.memo_confirmation_audio import measurements
+    from experiments.audio_lab_tools.audio.quality_reference_audio import response
     row = load(LAB / 'local/external-20261028/deam.features.json')['rows'][0]
     old = load(row['feature_file'])
     print('Stored schema:', list(old))
@@ -43,8 +43,8 @@ def test_range_endpoint_diagnostic():
 
 
 def test_frozen_cohort_and_exclusions():
-    from experiments.audio_lab_tools.memo_confirmation import DEFAULT
-    from experiments.audio_lab_tools.quality_round import validate
+    from experiments.audio_lab_tools.studies.memo_confirmation import DEFAULT
+    from experiments.audio_lab_tools.support.quality_round import validate
     plan = validate(DEFAULT)
     selection = load(DEFAULT/'inputs/selection.json')['rows']
     reservation = load(DEFAULT/'inputs/reservation.json')
@@ -61,8 +61,8 @@ def test_old_pilot_both_preparations(tmp_path):
     import shutil
     from pathlib import Path
     import numpy as np
-    from experiments.audio_lab_tools.memo_confirmation import PREVIOUS
-    from experiments.audio_lab_tools.memo_confirmation_audio import extract
+    from experiments.audio_lab_tools.studies.memo_confirmation import PREVIOUS
+    from experiments.audio_lab_tools.audio.memo_confirmation_audio import extract
     row = load(PREVIOUS/'inputs/memo2496-pilot.json')['rows'][0]
     path = tmp_path/'audio'/Path(row['audio']).name
     path.parent.mkdir()
@@ -81,9 +81,9 @@ def test_old_pilot_both_preparations(tmp_path):
 
 def test_completed_confirmation_evidence():
     import numpy as np
-    from experiments.audio_lab_tools.memo_confirmation import DEFAULT
-    from experiments.audio_lab_tools.quality_round import verify
-    from experiments.audio_lab_tools.focus_experiment import arrays
+    from experiments.audio_lab_tools.studies.memo_confirmation import DEFAULT
+    from experiments.audio_lab_tools.support.quality_round import verify
+    from experiments.audio_lab_tools.focus.focus_experiment import arrays
     result = verify(DEFAULT)
     assert result['receipts']>=4
     acquisition = load(DEFAULT/'acquisition.json')
@@ -113,9 +113,9 @@ def test_completed_confirmation_evidence():
 
 
 def test_rejected_alignment_audit():
-    from experiments.audio_lab_tools.memo_confirmation import DEFAULT
-    from experiments.audio_lab_tools.external_experiment import probe, digest, save
-    from experiments.audio_lab_tools.quality_round import seal
+    from experiments.audio_lab_tools.studies.memo_confirmation import DEFAULT
+    from experiments.audio_lab_tools.support.external_experiment import probe, digest, save
+    from experiments.audio_lab_tools.support.quality_round import seal
     rejected = {r['id'] for r in load(DEFAULT/'features.json')['rejected']}
     rows = [r for r in load(DEFAULT/'acquisition.json')['rows'] if r['id'] in rejected]
     audit = []

@@ -2,7 +2,6 @@
 from tests.conftest import seed_catalog_track
 from tests.test_recommend import _seed_album
 from yt_playlist.core import artists
-from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.library import ratings
 from yt_playlist.rec import home_prepared, surfaces
 
@@ -68,26 +67,35 @@ def test_current_rating_availability_and_new_play_revalidate_prepared_song_pool(
     iid = store.accounts.upsert_account('Main', 'cred', None, True)
     # Artist ingestion is independent of the remembered-song eligibility SQL.
     # Keep actual catalog, rating and listening writes for every candidate.
-    with monkeypatch.context() as inputs, atomic_write(store):
+    with monkeypatch.context() as inputs:
         inputs.setattr(artists, 'observe', lambda *args, **kwargs: None)
-        keys = [song(store, iid, f'song{i}', plays=2, age=60) for i in range(20)]
+        keys = [song(store, iid, f'song{i}') for i in range(20)]
+    # The existing listening corpus is a completed input, imported in one real
+    # controller batch. The new live play below remains the mutation under test.
+    store.history.import_listening_events(iid,
+        [(key, 'v-' + key, NOW - 60 * DAY - index * 1000)
+         for key in keys for index in range(2)], source_timezone='UTC')
+    assert store.rec_query.play_counts() == dict.fromkeys(keys, 2)
     # Rediscovery has its own real checkpoint. Mix-menu model fitting and
     # discovery producers are independent of current listening eligibility.
     home_prepared.prepare_revisit(store, NOW)
     prepared = store.rec_proposals.get_proposals(home_prepared.REVISIT_SURFACE)
     assert {row['key'] for row in prepared['rediscover_tracks']} == set(keys)
-    first = home_prepared.collections(store, prepared, NOW)['rediscover_tracks']
-    assert len(first) == 15
-    assert home_prepared.collections(store, prepared, NOW)['rediscover_tracks'] == first
+    with store.read_view() as reader:
+        first = home_prepared.collections(reader, prepared, NOW)['rediscover_tracks']
+        assert len(first) == 15
+        assert home_prepared.collections(reader, prepared, NOW)['rediscover_tracks'] == first
     store.rec_ledger.bump_card_view('rediscover', NOW)
     store.rec_ledger.bump_card_view('rediscover', NOW+1)
-    following = home_prepared.collections(store, prepared, NOW+1)['rediscover_tracks']
+    with store.read_view() as reader:
+        following = home_prepared.collections(reader, prepared, NOW+1)['rediscover_tracks']
     assert following != first
     ratings.record_confirmed(store, iid, 'v-song0', 'DISLIKE', NOW)
     store.history.record_play_event(iid, 'song1', 'v-song1', NOW, source_timezone='UTC')
     with store.conn:
         store.conn.execute('UPDATE youtube_items SET available=0 WHERE video_id=?', ('v-song2',))
-    current = home_prepared.collections(store, prepared, NOW)['rediscover_tracks']
+    with store.read_view() as reader:
+        current = home_prepared.collections(reader, prepared, NOW)['rediscover_tracks']
     assert not {'song0', 'song1', 'song2'} & {r['key'] for r in current}
     assert {r['key'] for r in current} <= set(keys)
 

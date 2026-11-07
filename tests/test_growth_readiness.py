@@ -274,7 +274,7 @@ def test_missing_readiness_waits_for_worker_without_reading_profiles_or_ranked_p
         guards.setattr(vibe_pools, 'assemble', unexpected)
         guards.setattr(musical_character, 'load', unexpected)
         guards.setattr(profile_files, 'read', unexpected)
-        guards.setattr(RecommendationPublicationsRepo, 'candidate_page', unexpected)
+        guards.setattr(RecommendationPublicationsRepo, 'candidate_rows', unexpected)
         assert not growth_readiness.vibes(store, 1000)
     publish_bundles(store, bundle, vibes=True)
     assert growth_readiness.vibes(store, 1001)
@@ -334,7 +334,7 @@ def test_compact_gate_agrees_with_served_menus_for_genres_rotation_and_feedback(
         store, summary, vibe_menus, monkeypatch):
     from yt_playlist.core import json_cache
     from yt_playlist.rec import home_vibe, vibe_pools, vibe_readiness, vibe_readiness_index
-    from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
+    from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 
     lanes = vibe_menus
     bundle = deepcopy(store._fixture_bundle_payload)
@@ -351,17 +351,17 @@ def test_compact_gate_agrees_with_served_menus_for_genres_rotation_and_feedback(
     # This comparison owns compact selection versus full selection. Typed
     # publication and generation coherence have their real SQL/file owners in
     # test_vibe_pool_reads and the other readiness cases above. Supply the
-    # worker's real prepared output at the repository boundary rather than
+    # worker's real prepared output at the controller boundary rather than
     # staging the same candidate ranks again for every exclusion scenario.
     metadata = {}
-    output = RecommendationPublicationsRepo.output
+    output = RecommendationPublications.output
 
     def prepared_output(repo, surface, kind, **options):
         if (surface, kind) == ('home', 'ranking-evidence'):
             return metadata
         return output(repo, surface, kind, **options)
 
-    monkeypatch.setattr(RecommendationPublicationsRepo, 'output', prepared_output)
+    monkeypatch.setattr(RecommendationPublications, 'output', prepared_output)
 
     def check(expected, **filters):
         store.rec_proposals.put_proposals('home_genre_request', {'epoch': 0, **filters}, 1000)

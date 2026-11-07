@@ -63,7 +63,7 @@ def test_priority_drain_resumes_orphan_children_and_preserves_live_shared_and_bu
                            (expired.generation_id,))
     # Detach old ownership first. The real incident already had no generation
     # headers for most of its orphan pools, so that must not satisfy the gate.
-    while publication.cleanup_generations(store.recommendations):
+    while publication.cleanup_generations(store.recommendations.repository):
         pass
     assert store.conn.execute('SELECT 1 FROM recommendation_generations WHERE id=?',
                               (previous.generation_id,)).fetchone() is None

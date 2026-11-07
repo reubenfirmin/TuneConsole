@@ -117,17 +117,18 @@ def test_projection_outputs_and_settings_are_committed_before_checkpoint(databas
             observed.append(pool.submit(read).result(2))
 
     monkeypatch.setattr(db_snapshot, 'checkpoint_wal', checkpoint)
+    policies = [('projection-policy', '{}', 2.)] if projection == 'bundles' else []
+    if policies:
+        database.rec_ledger.record_prepared_policies(policies)
     with database.read_snapshot() as snapshot:
         if projection == 'trends':
             rows = snapshot.store.trends.prepare_first_play()
             build = None
         else:
-            policies = [('projection-policy', '{}', 2.)]
             prepared = bundle_storage.prepare(snapshot.store.conn, {'all': {}}, [],
                 external_key=expected, policy_version='projection-policy', input_revision=0,
                 created_at=2., pending_policies=policies)
             snapshot.release_reader()
-            database.rec_ledger.record_prepared_policies(policies)
             build = database.recommendations.claim(prepared)
             database.recommendations.stage(prepared, build)
         # Staging also checkpoints; only the ordered head/settings publication below is under

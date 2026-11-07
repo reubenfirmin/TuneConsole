@@ -53,6 +53,15 @@ def scope(field):
 
 
 def prepare(conn, field, value, *, unit=None):
+    prepared = prepare_value(field, value, unit=unit)
+    if field == 'genre' and prepared.kind == 'value':
+        from .genre_identity import resolve
+        genre, reason = resolve(conn, value)
+        return Value(prepared.kind, text=value, genre_key=genre, resolution_reason=reason)
+    return prepared
+
+
+def prepare_value(field, value, *, unit=None, genre=None, resolution_reason=None):
     """Validate new evidence without coercing strings, booleans or missing units."""
     scope(field)
     if value is None:
@@ -68,12 +77,8 @@ def prepare(conn, field, value, *, unit=None):
     if field in TEXT_FIELDS:
         if not isinstance(value, str) or len(value.encode()) > MAX_TEXT_BYTES or unit is not None:
             raise ValueError('Text metadata requires bounded text without a numeric unit')
-        genre = None
-        reason = None
-        if field == 'genre':
-            from .genre_identity import resolve
-            genre, reason = resolve(conn, value)
-        return Value('value', text=value, genre_key=genre, resolution_reason=reason)
+        return Value('value', text=value, genre_key=genre if field == 'genre' else None,
+                     resolution_reason=resolution_reason if field == 'genre' else None)
     if (type(value) not in (int, float)
             or not -1.7976931348623157e308 <= value <= 1.7976931348623157e308
             or unit not in UNITS[field]):

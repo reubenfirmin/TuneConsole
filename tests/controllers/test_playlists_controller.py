@@ -10,7 +10,7 @@ from yt_playlist.controllers.playlists import Playlists
 from yt_playlist.controllers.radio_checkpoints import RadioCheckpoints
 from yt_playlist.library.playlist_metadata import GENERATED_DESCRIPTION, PROMOTED_DESCRIPTION, content_hash
 from yt_playlist.repos.playlists import PlaylistRepo
-from yt_playlist.repos.tracks import TrackRepo
+from yt_playlist.controllers.tracks import Tracks
 
 pytestmark = pytest.mark.usefixtures('no_database')
 
@@ -18,7 +18,7 @@ pytestmark = pytest.mark.usefixtures('no_database')
 @pytest.fixture
 def playlists():
     repo = create_autospec(PlaylistRepo, instance=True, spec_set=True)
-    tracks = create_autospec(TrackRepo, instance=True, spec_set=True)
+    tracks = create_autospec(Tracks, instance=True, spec_set=True)
     radio = create_autospec(RadioCheckpoints, instance=True, spec_set=True)
     repo.confirmed_facts.return_value = {'id': 4, 'videos': [], 'unresolved': False}
     return Playlists(repo, tracks, radio, nullcontext)

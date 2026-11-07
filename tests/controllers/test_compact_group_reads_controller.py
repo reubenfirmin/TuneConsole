@@ -43,7 +43,7 @@ def groups():
 
 def test_head_uses_exact_sql_membership_and_parent_aliases(groups):
     definition = {'external_key': 'group', 'external_version': 'alias-2', 'parent_version': 'parent-2',
-                  'members': {'recording': (.8, .9)},
+                  'members': {'recording': (.8, .9)}, 'created_at': 1,
                   'document': {'leaf': True, 'group_id': 'obsolete', 'version': 'obsolete'}}
     groups.repository.head.return_value = {
         'external_key': 'generation-2', 'input_fingerprint': 'input', 'created_at': 5, 'input_serial': 9,

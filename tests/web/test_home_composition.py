@@ -67,20 +67,23 @@ def test_home_metadata_update_preserves_publication_and_refreshes_next_snapshot(
 
 
 def test_failed_home_visit_does_not_advance_only_some_cards(file_backed_store, monkeypatch):
+    import sqlite3
+
     store = file_backed_store
-    original = store.rec_ledger.bump_card_view
-
-    def fail_partway(card, now):
-        if card == 'fresh':
-            raise RuntimeError('Interrupted visit accounting')
-        return original(card, now)
-
-    monkeypatch.setattr(store.rec_ledger, 'bump_card_view', fail_partway)
+    store.conn.execute("CREATE TEMP TRIGGER interrupt_visit BEFORE INSERT ON rec_impressions "
+                       "WHEN NEW.surface='card' AND NEW.item_key='fresh' "
+                       "BEGIN SELECT RAISE(ABORT,'Interrupted visit accounting'); END")
     with client_for(store) as client:
-        with pytest.raises(RuntimeError, match='Interrupted visit accounting'):
+        with pytest.raises(sqlite3.IntegrityError, match='Interrupted visit accounting'):
             client.get('/')
     assert {card: store.rec_ledger.card_views(card) for card in ROTATING_CARDS} == {
         card: 0 for card in ROTATING_CARDS}
+    assert not store.conn.in_transaction
+    store.conn.execute('DROP TRIGGER interrupt_visit')
+    with client_for(store) as client:
+        assert client.get('/').status_code == 200
+    assert {card: store.rec_ledger.card_views(card) for card in ROTATING_CARDS} == {
+        card: 1 for card in ROTATING_CARDS}
 
 
 def test_prepared_albums_and_stories_arrive_in_the_home_document(

@@ -12,20 +12,28 @@ def test_home_renders_toast_from_query_param(store):
     assert "toast-ok" in html and "authenticated again" in html
     assert "toast-ok" not in c.get("/").text          # absent without the param
 
-def test_auth_expired_shows_reauth_banner(store):
+def test_auth_expired_shows_reauth_banner(store, monkeypatch):
+    from yt_playlist.library import sync
+    from yt_playlist.util.retry import with_retry
+
+    # Keep the real failed requests, retry policy, sync job and rendered banner;
+    # elapsed retry delays are covered by the retry owner's clock checks.
+    monkeypatch.setattr(sync, "with_retry", lambda fn, **kwargs:
+                        with_retry(fn, sleep=lambda _: None, **kwargs))
     class Expired:   # a client whose session has lapsed
         def get_library_playlists(self, limit=None):
             raise RuntimeError("Server returned HTTP 401: Unauthorized")
     iid = store.accounts.upsert_account("main", "cred", None, True)
-    app = create_app(store, lambda: {iid: Expired()}, now_fn=lambda: 1.0)
-    c = TestClient(app, base_url="http://127.0.0.1")
-    assert app.state.ctx.auth_expired == {}          # nothing wrong before a sync
-    assert "authBanner([])" in c.get("/").text       # banner seeded empty (hidden)
-    jid = c.post("/sync").json()["job_id"]
-    with c.stream("GET", f"/sync/events/{jid}") as s:
-        "".join(s.iter_text())                        # drain to completion
-    assert app.state.ctx.auth_expired == {iid: "main"}        # flagged for re-auth
-    assert 'authBanner(["main"])' in c.get("/").text          # banner seeded with the label
+    app = create_app(store, lambda: {iid: Expired()}, now_fn=lambda: 1.0,
+                     background_work=False)
+    with TestClient(app, base_url="http://127.0.0.1") as c:
+        assert app.state.ctx.auth_expired == {}          # nothing wrong before a sync
+        assert "authBanner([])" in c.get("/").text       # banner seeded empty (hidden)
+        jid = c.post("/sync").json()["job_id"]
+        with c.stream("GET", f"/sync/events/{jid}") as s:
+            "".join(s.iter_text())                        # drain to completion
+        assert app.state.ctx.auth_expired == {iid: "main"}        # flagged for re-auth
+        assert 'authBanner(["main"])' in c.get("/").text          # banner seeded with the label
 
 def test_actions_route_renders(store):
     store.accounts.upsert_account("main", "cred", None, True)

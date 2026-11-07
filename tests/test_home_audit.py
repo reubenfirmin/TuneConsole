@@ -1,5 +1,6 @@
 import json
 import logging
+from copy import deepcopy
 
 import pytest
 
@@ -7,6 +8,7 @@ from yt_playlist.core import logsetup
 from yt_playlist.rec import home_audit
 from yt_playlist.rec.surfaces import ForYouItem
 from yt_playlist.rec import home_cards as home
+from tests.home_fixture_support import home_routes_only, without_metadata_providers
 
 pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
 
@@ -52,11 +54,40 @@ def test_audit_snapshots_actual_genres_and_decades_with_unknown_coverage(store, 
     assert 'track_keys' not in card and 'recipe' not in card
 
 
-def test_routes_audit_mode_offers_previews_and_refreshes(store, audit_path, mode_cards_home_template):
-    from tests.home_fixture_support import prepared_client
+def test_routes_audit_mode_offers_previews_and_refreshes(
+        store, audit_path, monkeypatch, home_routes_only, without_metadata_providers):
+    from fastapi.testclient import TestClient
+    from tests.conftest import FakeClient, seed_catalog_track
+    from yt_playlist.rec import home_prepared
+    from yt_playlist.web.app import create_app
 
-    mode_cards_home_template.restore(store)
-    with prepared_client(store) as client:
+    # This consumer owns HTTP audit capture, not candidate preparation. Supply
+    # completed offers while retaining actual metadata, epochs and audit files.
+    offers = []
+    for index, lane in enumerate(('wheelhouse', 'explore', 'fresh')):
+        key = f'audit {index}|artist'
+        seed_catalog_track(store, key, f'Audit {index}', 'Artist', video_id=f'audit-{index}', genre='Jazz')
+        proto = home._proto(store, lane, f'A {lane} mix', [
+            {'key': key, 'title': f'Audit {index}', 'artist': 'Artist',
+             'video_id': f'audit-{index}', 'genre': 'Jazz'}], 1000)
+        proto.update(mode_id=index + 1 if lane != 'fresh' else None,
+                     recipe={'lane': lane})
+        offers.append(proto)
+
+    def completed(reader):
+        protos = deepcopy(offers)
+        return home.CardsResult(protos, [{'proto': p, 'pool': None} for p in protos],
+                                None, None, [], [], home._epoch(reader, 'cards'), None)
+
+    monkeypatch.setattr(home_prepared, 'load', lambda *args, **kwargs: {})
+    monkeypatch.setattr(home_prepared, 'peek', lambda *args, **kwargs: {})
+    monkeypatch.setattr(home_prepared, 'cards', lambda reader, *args, **kwargs: completed(reader))
+    monkeypatch.setattr(home.HomeCards, 'cards', lambda service, request: completed(service.store))
+    monkeypatch.setattr(home_prepared, 'remember', lambda *args, **kwargs: None)
+    identity = store.accounts.upsert_account('main', 'cred', None, True)
+    app = create_app(store, lambda: {identity: FakeClient()}, now_fn=lambda: 1000,
+                     background_work=False)
+    with TestClient(app, base_url='http://127.0.0.1') as client:
         assert client.get("/home/cards").status_code == 200
         assert client.get("/home/cards").status_code == 200
         assert client.post("/home/breadth", data={"breadth_bias": "0.5"}).status_code == 200

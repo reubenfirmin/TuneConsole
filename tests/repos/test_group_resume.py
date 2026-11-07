@@ -257,15 +257,23 @@ def test_cached_plan_revalidates_original_guard_between_turns(database, monkeypa
     original = interrupt(monkeypatch)
     assert not worker.step(2000)
     snapshot, plan = worker._pending
-    probe = snapshot.publish
+    probe = snapshot.publish_ordered
     results = []
+    current = snapshot.is_current
+    checks = []
+
+    def check_guard(*args, **kwargs):
+        result = current(*args, **kwargs)
+        checks.append(result)
+        return result
 
     def publish_guard(*args, **kwargs):
         result = probe(*args, **kwargs)
         results.append(result)
         return result
 
-    monkeypatch.setattr(snapshot, 'publish', publish_guard)
+    monkeypatch.setattr(snapshot, 'publish_ordered', publish_guard)
+    monkeypatch.setattr(snapshot, 'is_current', check_guard)
     monkeypatch.setattr(group_publication, '_write', original)
     if change == 'input':
         seed(database, [replace(tracks[0], values=(.95,) * len(tracks[0].values))])
@@ -275,7 +283,8 @@ def test_cached_plan_revalidates_original_guard_between_turns(database, monkeypa
         with closing(sqlite3.connect(database._db_path)) as other, other:
             other.execute("INSERT INTO settings VALUES ('external-setting','new')")
     assert worker.step(2060)
-    assert results == ([True, True] if change == 'unrelated-setting' else [False])
+    assert checks == [change == 'unrelated-setting']
+    assert results == ([True] if change == 'unrelated-setting' else [])
     if change == 'input':
         assert database.taste_groups.head_generation() != plan['generation']
     assert database.taste_groups.definitions(first['generation'], members=True) == first['groups']

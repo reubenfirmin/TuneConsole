@@ -15,6 +15,7 @@ from yt_playlist.core import recommendation_outputs as outputs, recommendation_p
 from yt_playlist.rec import home_vibe, musical_character, vibe_pools
 from yt_playlist.rec import bundle_storage
 from yt_playlist.repos import recommendation_publication as publication
+from yt_playlist.controllers import recommendation_import
 from yt_playlist.repos.rec_proposals import RecProposalsRepo
 
 
@@ -207,12 +208,12 @@ def test_atomic_import_preserves_source_until_caller_retires_it_and_reuses_compl
     prepared = prepare(store, bundle(store))
     with store.conn:
         store.conn.execute("INSERT INTO rec_proposals VALUES ('mode_bundles','legacy-source',9)")
-        generation = publication.import_plan(store.conn, prepared, 11)
+        generation = recommendation_import.import_plan(store.conn, prepared, 11)
         assert store.conn.execute("SELECT payload FROM rec_proposals WHERE surface='mode_bundles'").fetchone()[0] == 'legacy-source'
     before = [tuple(row) for row in store.conn.execute('SELECT * FROM recommendation_candidates ORDER BY pool_id,rank')]
     with store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
-        second = publication.import_plan(store.conn, replace(prepared, external_key='next-import'), 12)
+        second = recommendation_import.import_plan(store.conn, replace(prepared, external_key='next-import'), 12)
     assert second != generation
     assert store.recommendations.head('home')['id'] == second
     assert before == [tuple(row) for row in store.conn.execute('SELECT * FROM recommendation_candidates ORDER BY pool_id,rank')]
@@ -379,7 +380,7 @@ def test_import_preflight_checks_every_canonical_owner_before_publishing_files(r
     before = store.conn.total_changes
     with pytest.raises(ValueError, match='unresolved canonical'), store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
-        publication.import_plan(store.conn, prepared, 11)
+        recommendation_import.import_plan(store.conn, prepared, 11)
     assert store.conn.total_changes == before
     assert calls == []
     assert not store.conn.execute('SELECT 1 FROM recommendation_generations').fetchone()
@@ -403,7 +404,7 @@ def test_late_import_failure_rolls_back_owners_and_heads_without_deleting_legacy
     monkeypatch.setattr(publication, '_output', interrupted)
     with pytest.raises(RuntimeError, match='controlled late'), store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
-        publication.import_plan(store.conn, replace(prepared, external_key='interrupted-import'), 12)
+        recommendation_import.import_plan(store.conn, replace(prepared, external_key='interrupted-import'), 12)
     assert store.recommendations.head('home')['id'] == first.generation_id
     for table, count in counts.items():
         assert store.conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] == count

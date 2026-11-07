@@ -33,9 +33,10 @@ class CompactTasteGroups(TasteGroups):
     def _definition(self, row):
         result = {**self.files.read(row, 'definition'), 'group_id': row['external_key'],
                   'version': row['external_version'], 'parent_version': row['parent_version']}
-        for field in ('members', 'generation', 'created_at'):
-            if field in row:
-                result[field] = row[field]
+        if 'members' in row:
+            result['members'] = row['members']
+        if 'generation' in row:
+            result.update(generation=row['generation'], created_at=row['created_at'])
         return result
 
     def definitions(self, generation, *, members=False):

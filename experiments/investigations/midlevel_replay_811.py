@@ -1,8 +1,8 @@
 """Independent replay of frozen heads against all actual pilot predictions."""
 import numpy as np
 
-from experiments.audio_lab_tools.midlevel_pilot import DEFAULT, PROPERTIES, predict
-from experiments.audio_lab_tools.focus_experiment import arrays, load
+from experiments.audio_lab_tools.studies.midlevel_pilot import DEFAULT, PROPERTIES, predict
+from experiments.audio_lab_tools.focus.focus_experiment import arrays, load
 
 
 def test_serialized_heads_reproduce_every_outer_prediction():

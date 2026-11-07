@@ -129,6 +129,12 @@ class RecommendationPublicationsRepo(Repo):
     def cleanup(self):
         return publication.cleanup(self)
 
+    def cleanup_generations(self, **options):
+        return publication.cleanup_generations(self, **options)
+
+    def cleanup_pools(self, **options):
+        return publication.cleanup_pools(self, **options)
+
     @snapshot_read
     def retirement_pending(self):
         return publication.retirement_pending(self.conn)

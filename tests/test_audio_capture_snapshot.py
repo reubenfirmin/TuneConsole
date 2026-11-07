@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from experiments.audio_lab_tools.audio_evaluation import prepare_current
+from experiments.audio_lab_tools.audio.audio_evaluation import prepare_current
 
 
 @pytest.mark.parametrize('names', [

@@ -109,6 +109,7 @@ def settings(reader, target, cursor, limit):
 def proposal(reader, target, row):
     from .. import library_pool_state, model_comparison_state, model_projections, tv_recommendation_state
     from ...repos import recommendation_publication
+    from ...controllers import recommendation_import
     surface,raw,at = row['surface'],row['payload'],row['built_at']
     if surface in tv_recommendation_state.SURFACES:
         tv_recommendation_state.write(target,surface,tv_recommendation_state.decode(surface,raw),at,historical=True)
@@ -116,15 +117,15 @@ def proposal(reader, target, row):
         value = library_pool_state.decode(surface,raw)
         plan = library_pool_state.prepare(target,surface,value,at)
         if plan is not None:
-            recommendation_publication.preflight(target,plan)
-            recommendation_publication.import_plan(target,plan,plan.created_at,
+            recommendation_import.preflight(target,plan)
+            recommendation_import.import_plan(target,plan,plan.created_at,
                 before_publish=lambda generation:library_pool_state.parameters(target,generation,value['parameters'],at))
     elif surface in model_comparison_state.SURFACES:
         model_comparison_state.write(target,surface,model_comparison_state.decode(surface,raw),at)
     elif surface.startswith('model_pair:'):
         prepared = model_projections.prepare(target,surface,json.loads(raw),at,historical=True)
         if prepared.plan is not None:
-            recommendation_publication.preflight(target,prepared.plan)
+            recommendation_import.preflight(target,prepared.plan)
         model_projections.publish(target,prepared,historical=True)
         from .. import group_evidence
         for field in (*model_projections.CONTEXTS,'recommendations'):

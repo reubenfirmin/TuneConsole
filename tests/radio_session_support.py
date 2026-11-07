@@ -2,8 +2,6 @@
 import json
 import time
 from contextlib import contextmanager
-from io import BytesIO
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,37 +11,30 @@ from yt_playlist.web.radio_session import PlaylistRadio
 
 
 @pytest.fixture
-def memory_checkpoint_files(monkeypatch):
-    """Mock checkpoint file I/O beneath real encoding and SQLite publication.
+def controlled_radio_checkpoints(monkeypatch):
+    """Supply checkpoint storage beneath actual session encoding and journaling.
 
     File custody/recovery contracts stay in core/test_radio_publication.py and
-    core/test_radio_choice_persistence.py. Controllers need detached bytes,
-    including reload after replacement, without a durable file for each save.
+    core/test_radio_choice_persistence.py. Genre controllers consume committed
+    snapshots without exercising database/file publication on every tune.
     """
-    from yt_playlist.core import collection_recovery, fao
+    from yt_playlist.controllers.radio_checkpoints import RadioCheckpoints
 
-    files = {}
-    original_reader = fao._open_reader
+    saves = []
 
-    def publish(root, encoded, digest, *, age=None):
-        filename = str(Path(root) / digest[:2] / (digest + '.json'))
-        files[filename] = bytes(encoded)
-        return filename
+    def load(controller):
+        if not saves:
+            return None, None
+        state = json.loads(saves[-1])
+        return state, (state['episode_id'], len(saves))
 
-    @contextmanager
-    def reader(path, *args, **kwargs):
-        encoded = files.get(str(path))
-        if encoded is None:
-            with original_reader(path, *args, **kwargs) as stream:
-                yield stream
-        else:
-            with BytesIO(encoded) as stream:
-                stream.info = fao._FileStat(len(encoded), len(encoded), 0, 0, 0, False, None, ())
-                yield stream
+    def save(controller, encoded, *, expected, predecessor=None):
+        saves.append(encoded)
+        return json.loads(encoded)['episode_id'], len(saves)
 
-    monkeypatch.setattr(collection_recovery, '_publish_encoded', publish)
-    monkeypatch.setattr(fao, '_open_reader', reader)
-    return files
+    monkeypatch.setattr(RadioCheckpoints, 'load', load)
+    monkeypatch.setattr(RadioCheckpoints, 'save', save)
+    return saves
 
 
 def seed_pool(store):

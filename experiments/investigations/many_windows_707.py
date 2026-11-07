@@ -126,7 +126,7 @@ def test_fitted_components_and_recording_weights_match_frozen_partitions():
 
 
 def test_receipts_cover_exact_artifacts():
-    from experiments.audio_lab_tools.quality_round import verify
+    from experiments.audio_lab_tools.support.quality_round import verify
     verify(ROOT, required_stages={
         'extraction', 'evaluation',
         *(f'{kind}-outer-{fold}' for kind in ('natural', 'generated') for fold in range(5)),

@@ -7,6 +7,7 @@ import pytest
 from tests.core.test_predecessor_writes import installed
 from yt_playlist.core import radio_provenance
 from yt_playlist.rec import transient
+from yt_playlist.repos.radio_checkpoints import RadioCheckpointRepo
 from yt_playlist.web.radio_launch import RadioLaunch
 
 
@@ -17,17 +18,19 @@ def test_radio_origins_use_owned_connection_while_enrichment_holds_writer(instal
     with store._lock, store.conn:
         radio_provenance.remember(store.conn, 'known-radio')
     store.transient_radio_playlists.add('unsaved-radio')
-    original = radio_provenance.ids
+    original = RadioCheckpointRepo.origin_facts.__wrapped__
     connections = []
 
-    def owned_read(conn):
+    def owned_read(repository):
         # Fail before entering SQLite: recreating the native SQLite/GIL deadlock
         # inside pytest could freeze the entire test process, including timeouts.
-        assert conn is not store.conn, 'Radio fetched on the busy serving connection'
-        connections.append(conn)
-        return original(conn)
+        assert repository.conn is not store.conn, 'Radio fetched on the busy serving connection'
+        connections.append(repository.conn)
+        return original(repository)
 
-    monkeypatch.setattr(radio_provenance, 'ids', owned_read)
+    # Instrument inside the read decorator, where SQL actually uses the admitted reader.
+    from yt_playlist.repos.base import snapshot_read
+    monkeypatch.setattr(RadioCheckpointRepo, 'origin_facts', snapshot_read(owned_read))
     locked, release = threading.Event(), threading.Event()
 
     def enrichment():

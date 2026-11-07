@@ -71,6 +71,36 @@ def qualified_candidate(monkeypatch):
                         {vibe_joint_preparation.config_identity(): 'controlled-fixture'})
 
 
+def test_ordinary_preparation_uses_qualified_release_and_rejects_config_drift(file_backed_store, monkeypatch):
+    from yt_playlist.core import vibe_model_files
+
+    store = file_backed_store
+    assert vibe_joint_preparation.qualified()
+    track(store, 'release-original')
+    _entry, target = track(store, 'release-target')
+    capture(store, 'release-original')
+    worker = drain(store)
+    worker.close()
+    states = {vibe: vibe_joint_preparation.state(store, vibe) for vibe in vibe_joint_preparation.VIBES}
+    assert all(vibe_joint_preparation.current(store, value) and value['outcome'] == 'ready'
+               for value in states.values())
+    heads = [store.settings.get_setting(vibe_model_files.HEAD_PREFIX + vibe)
+             for vibe in vibe_joint_preparation.VIBES]
+    assert len(set(heads)) == len(vibe_joint_preparation.VIBES)
+    assert store.vibe_predictions.has_joint_scores(heads)
+    assert store.conn.execute('SELECT 1 FROM recording_vibes v '
+        'JOIN recordings r ON r.id=v.recording_id '
+        'JOIN prediction_model_generations g ON g.prediction_id=v.prediction_id '
+        'WHERE r.identity_key=?', (target,)).fetchone()
+    assert fits(store, target)['relax']['source'] == 'artist_genre'
+
+    configuration = joint.configuration()
+    monkeypatch.setattr(joint, 'configuration', lambda: {**configuration, 'version': 'unreviewed-change'})
+    assert not vibe_joint_preparation.qualified()
+    assert not vibe_joint_preparation.due(store)
+    assert vibe_joint_preparation.posterior(store, 'relax') is None
+
+
 def test_explicit_intensity_stays_authoritative_after_audio_and_a_later_correction(store, monkeypatch):
     from fastapi.testclient import TestClient
 
@@ -374,7 +404,15 @@ def test_broad_genres_cannot_seed_genre_predictions(store, genre):
     _tid, target = track(store, 'target', genre, 'Another artist')
     capture(store, 'measured')
     drain(store)
-    assert fits(store, target)['relax']['source'] == 'heuristic'
+    predicted = fits(store, target)['relax']
+    # The learned population baseline can transfer to an unseen artist, but
+    # broad genres must not become shared genre effects or conditioning keys.
+    assert predicted['source'] == 'artist'
+    prediction, = store.conn.execute('SELECT v.prediction_id FROM recording_vibes v JOIN recordings r '
+        "ON r.id=v.recording_id WHERE r.identity_key=? AND v.vibe='relax'", (target,)).fetchone()
+    assert vibe_provenance.read(store.conn, prediction)['conditioning']['genre'] is None
+    fitted = store.vibe_predictions.joint_model(store.settings.get_setting('rec_vibe_joint_head_relax'))
+    assert all(row['genre'] is None for row in fitted['inputs'])
     assert not store.conn.execute('SELECT 1 FROM recording_vibes WHERE subgenre_key IS NOT NULL').fetchone()
 
 
@@ -714,9 +752,16 @@ def test_provider_backlog_cannot_starve_vibe_bootstrap_or_dependency_fanout(file
     assert worker.capture(1000)  # provider source
     assert worker.capture(1000)  # recordings
     before = store.conn.execute("SELECT cursor FROM rec_vibe_pending WHERE group_key='*'").fetchone()[0]
-    assert worker.capture(1000)  # vibe job must get the next source admission
-    after = store.conn.execute("SELECT cursor FROM rec_vibe_pending WHERE group_key='*'").fetchone()[0]
-    assert after > before
+    # A qualified model cycle may precede fan-out, but cannot return to the
+    # continuing provider backlog without delivering the pending vibe work.
+    for _ in range(2 * len(vibe_joint_preparation.VIBES) + 4):
+        worker.capture(1000)
+        row = store.conn.execute("SELECT cursor FROM rec_vibe_pending WHERE group_key='*'").fetchone()
+        advanced = row is None or row[0] > before
+        if advanced:
+            break
+    worker.close()
+    assert advanced
     assert store.musical_profiles.pending()
     drain(store, batch=2)
 

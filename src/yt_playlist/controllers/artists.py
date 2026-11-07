@@ -1,4 +1,6 @@
 """Choose artist identity evidence while the repository stores its rows."""
+from yt_playlist.core import artist_credits
+from yt_playlist.core.metadata_contract import clock
 
 
 class Artists:
@@ -18,8 +20,24 @@ class Artists:
                 self.repository.add_alias(identity, name, provider or 'unidentified_credit')
             return identity
 
+    def record_credit_choice(self, entry_id, value, *, now=None):
+        current = self.repository.credit_inputs(entry_id)
+        if len(current['artists']) == 1:
+            with self.repository.transaction():
+                self.repository.add_alias(current['artists'][0], value, 'user_correction')
+        elif not current['artists']:
+            structured = [{'name': value, 'id': None}]
+            credit = artist_credits.normalize_credit(value, structured, 'user_correction')
+            identity = self.ensure_artist(value, provider='user_correction')
+            credit = artist_credits.bind_credit(credit, [identity])
+            self.repository.store_credit(current['entry_id'], credit, structured,
+                                         'user_correction', clock(now), typed=current['typed'])
+
     def resolve(self, value):
         return self.repository.resolve(value)
+
+    def resolve_exact(self, value):
+        return self.repository.resolve(value, exact=True)
 
     def state_id(self, value):
         identity = self.repository.resolve(value, exact=True)

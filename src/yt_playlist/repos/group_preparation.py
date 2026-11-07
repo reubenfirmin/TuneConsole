@@ -49,6 +49,6 @@ class GroupPreparationRepo(Repo):
 
     @synchronized
     def checkpoint_preparation(self, generation, serial, now):
-        if self.conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='group_preparation_state'").fetchone():
+        if group_preparation_state.available(self.conn):
             with self.conn.atomic(join=True):
                 group_preparation_state.checkpoint(self.conn, generation, serial, now)

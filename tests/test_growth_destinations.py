@@ -16,7 +16,7 @@ from yt_playlist.rec import account_growth, choice_evidence, home_prepared, into
 
 def publish_destinations(store, now=1000):
     """Controlled usable output for each new destination; no readiness overrides."""
-    with atomic_write(store):
+    with store._lock:
         _publish_destinations(store, now)
 
 

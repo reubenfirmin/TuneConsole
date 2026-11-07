@@ -15,7 +15,8 @@ from yt_playlist.core import recommendation_outputs as outputs, recommendation_p
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.rec import choice_evidence, group_roots, rec_worker
 from yt_playlist.rec.worker_queue import Job
-from yt_playlist.repos import group_retention, recommendation_publication as publication
+from yt_playlist.controllers.group_retention import GroupRetention
+from yt_playlist.repos import recommendation_publication as publication
 
 
 def orphan(store):
@@ -63,10 +64,10 @@ def test_interrupted_pool_batch_rolls_back_its_rows_and_fence(recommendations, m
 
     monkeypatch.setattr(publication, '_delete', interrupt)
     with pytest.raises(WorkClosing):
-        publication.cleanup_pools(store.recommendations)
+        publication.cleanup_pools(store.recommendations.repository)
     assert list(store.conn.iterdump()) == before
     monkeypatch.setattr(publication, '_delete', delete)
-    assert publication.cleanup_pools(store.recommendations).pools == 1
+    assert publication.cleanup_pools(store.recommendations.repository).pools == 1
     assert not store.conn.execute('SELECT 1 FROM recommendation_pools WHERE id=?', (identity,)).fetchone()
 
 
@@ -118,7 +119,7 @@ def test_group_budget_cannot_starve_recommendations_or_file_collection(recommend
     def blocked(*args):
         raise WorkBudgetExceeded('group closure is not finished')
 
-    monkeypatch.setattr(group_retention, 'step', blocked)
+    monkeypatch.setattr(GroupRetention, 'step', blocked)
     result = group_roots.maintain_retention(store)
     assert result['pending'] and result['generations'] == 1 and result['pools'] == 1
     assert result['output_files'] == 2 and result['output_bytes'] > 0
@@ -215,10 +216,10 @@ def test_sql_turns_checkpoint_committed_prefixes_after_releasing_the_serving_loc
     monkeypatch.setattr(proposal_cache, 'checkpoint_wal',
                         lambda *args: pytest.fail('Checkpointed an individual retirement prefix'))
     monkeypatch.setattr(db_checkpoint, 'checkpoint_wal', checkpoint)
-    monkeypatch.setattr(group_retention, 'step', lambda *args: False)
+    monkeypatch.setattr(GroupRetention, 'step', lambda *args: False)
     monkeypatch.setattr(group_roots, 'reap_pending', lambda *args: None)
     from yt_playlist.repos import compact_group_publication
-    monkeypatch.setattr(compact_group_publication, 'cleanup', lambda *args: False)
+    monkeypatch.setattr(compact_group_publication, 'cleanup', lambda *args, **kwargs: False)
     threshold = store.conn.execute('PRAGMA wal_autocheckpoint').fetchone()[0]
     progress = group_roots.maintain_retention(store)
     assert progress['generations'] == 1 and progress['pools'] == 1

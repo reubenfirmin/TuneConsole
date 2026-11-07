@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from experiments.audio_lab_tools import cruise_specialist as routing
-from experiments.audio_lab_tools.focus_export import captures
+from experiments.audio_lab_tools.cruise import cruise_specialist as routing
+from experiments.audio_lab_tools.focus.focus_export import captures
 from yt_playlist.core import features
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release
 from yt_playlist.rec import audio_vibe_relax as relax, audio_vibe_uplift as uplift

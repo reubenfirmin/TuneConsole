@@ -7,7 +7,7 @@ import pytest
 
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.prepared_content import PreparedContent
-from yt_playlist.repos.discovery import DiscoveryRepo
+from yt_playlist.controllers.discovery import Discovery
 from yt_playlist.repos.prepared_content import PreparedContentRepo
 from yt_playlist.repos.rec_refresh import RecRefreshRepo
 
@@ -23,7 +23,7 @@ def preparation():
         'content': {'library': ('Rock', '2001-05-03'), 'both': ('', 'unknown')},
         'audio': {'library': {'energy': 0, 'bpm': 120}}, 'previous': {},
     }
-    discovery = create_autospec(DiscoveryRepo, instance=True, spec_set=True)
+    discovery = create_autospec(Discovery, instance=True, spec_set=True)
     discovery.discovered_tracks_by_keys.return_value = {
         'both': {'genre': 'Jazz', 'year': '1999', 'audio': {'bpm': 90}},
         'discovery': {'genre': '', 'year': None},

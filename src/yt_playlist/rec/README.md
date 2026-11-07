@@ -116,7 +116,7 @@ override the checkout's ignored `.env.local`.
 Common bounded artifact reads, validation and prediction helpers belong to
 `audio_vibe_runtime`. Each specialist owns its target mapping, weights,
 aggregation and artifact contract. Production calls `apply()`; research routing
-lives in `experiments/audio_lab_tools/cruise_specialist.py`. Legacy correction
+lives in `experiments/audio_lab_tools/cruise/cruise_specialist.py`. Legacy correction
 formats `audio-vibe-corrections-1/2/3` remain supported.
 
 ## Road Trip and setup

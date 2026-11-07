@@ -16,6 +16,8 @@ def predecessor(tmp_path, _pristine_installed_schema):
     store.conn.execute('PRAGMA journal_mode=WAL')
     _pristine_installed_schema(92).backup(store.conn)
     store._bind_repositories()
+    from yt_playlist.core.db_revisions import Revisions
+    store._snapshot_revisions = Revisions(store.conn)
     yield store
     store.conn.close()
 

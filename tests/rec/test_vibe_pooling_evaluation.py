@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from experiments.audio_lab_tools import vibe_pooling_evaluation as evaluation
-from experiments.audio_lab_tools import vibe_pooling_labels as categorical
+from experiments.audio_lab_tools.pooling import vibe_pooling_evaluation as evaluation
+from experiments.audio_lab_tools.pooling import vibe_pooling_labels as categorical
 from tests.enrichment_support import seed_enrichment
 from tests.rec.test_musical_preparation import observe
 from tests.rec.test_vibe_prediction import capture, drain as drain_predictions, fits, track

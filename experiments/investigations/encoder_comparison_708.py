@@ -2,16 +2,16 @@
 from collections import defaultdict
 import numpy as np
 
-from experiments.audio_lab_tools.encoder_experiment import DEFAULT
-from experiments.audio_lab_tools import encoder_models as models
-from experiments.audio_lab_tools.focus_experiment import arrays, load
-from experiments.audio_lab_tools.quality_round import verify, validate
-from experiments.audio_lab_tools.external_experiment import save
+from experiments.audio_lab_tools.studies.encoder_experiment import DEFAULT
+from experiments.audio_lab_tools.studies import encoder_models as models
+from experiments.audio_lab_tools.focus.focus_experiment import arrays, load
+from experiments.audio_lab_tools.support.quality_round import verify, validate
+from experiments.audio_lab_tools.support.external_experiment import save
 
 
 def test_feature_reuse_provenance():
     from pathlib import Path
-    from experiments.audio_lab_tools.external_experiment import digest
+    from experiments.audio_lab_tools.support.external_experiment import digest
     plan=validate(DEFAULT)
     assert 'audio_lab_tools/memo_confirmation.py' in plan['code']
     assert 'audio_lab_tools/encoder_experiment.py' in plan['code']
@@ -36,7 +36,7 @@ def test_frozen_selection():
     assert len(selected)==288
     assert sum(len(r['chunk_starts']) for r in selected)==576
     assert len([p for p in plan['inputs'] if p.startswith('inputs/identities/')])==16
-    from experiments.audio_lab_tools.quality_round import reserve_memo
+    from experiments.audio_lab_tools.support.quality_round import reserve_memo
     reservation=reserve_memo()
     old=set(reservation['old_pilot_names'])
     from pathlib import Path
@@ -75,7 +75,7 @@ def test_musicnn_interval_parity():
         audit[source]={'recordings':len(errors),'maximum_error':max(errors)}
         assert max(errors)<.0005
     save(DEFAULT/'musicnn-parity.json',audit)
-    from experiments.audio_lab_tools.quality_round import seal
+    from experiments.audio_lab_tools.support.quality_round import seal
     seal(DEFAULT,'musicnn-parity',[DEFAULT/'musicnn-parity.json'])
     print('Exact interval old-reference parity:',audit)
 
@@ -84,8 +84,8 @@ def test_interval_pcm_and_mert_row_order():
     from pathlib import Path
     from tempfile import TemporaryDirectory
     import time
-    from experiments.audio_lab_tools.external_experiment import digest, pcm
-    from experiments.audio_lab_tools.quality_round import seal
+    from experiments.audio_lab_tools.support.external_experiment import digest, pcm
+    from experiments.audio_lab_tools.support.quality_round import seal
     rows=load(DEFAULT/'extraction.json')['rows']
     features=arrays(DEFAULT/'features.npz')
     cached={}

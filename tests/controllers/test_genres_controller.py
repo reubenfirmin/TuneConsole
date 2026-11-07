@@ -7,7 +7,7 @@ import pytest
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.genres import Genres
 from yt_playlist.repos.genres import GenreRepo
-from yt_playlist.repos.discovery import DiscoveryRepo
+from yt_playlist.controllers.discovery import Discovery
 from yt_playlist.util import genre_catalog
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -34,7 +34,7 @@ def genres(monkeypatch):
     repository.get_genre_whitelist.return_value = ['Jazz', 'Custom']
     repository.configuration_settings.return_value = {'genres_seeded': '1', 'genre_catalog_revision': 'old',
                                                      'genre_defaults': json.dumps(['Rock', 'Jazz'])}
-    return Genres(repository, create_autospec(DiscoveryRepo, instance=True, spec_set=True))
+    return Genres(repository, create_autospec(Discovery, instance=True, spec_set=True))
 
 
 @pytest.mark.parametrize('name', [None, '', '  ', 'é' * 513])
