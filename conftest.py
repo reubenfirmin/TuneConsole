@@ -1,35 +1,126 @@
-"""One test session per machine, with coordinated workers for complete local runs."""
+"""Lock complete suites; focused checks run independently without the machine lock."""
 
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import shlex
+import shutil
 import sys
+import tempfile
 import time
 import uuid
 
 import pytest
 
-pytest_plugins = ["ci_test_shards", "local_test_workers", "tests.browser_fixtures"]
+pytest_plugins = ["ci_test_shards", "local_test_workers", "pytest_progress", "pytest_time_limit", "tests.browser_fixtures"]
 
 
 # Deliberately independent of checkout, cwd, TMPDIR, and pytest's cache directory.
 # Never unlink this file: waiters must keep referring to the same inode.
 _LOCK_PATH = Path(f"/tmp/tuneconsole-tests-{os.getuid()}.lock")
+_FUNCTION_WORKSPACE = pytest.StashKey[Path]()
+
+
+@pytest.fixture(scope='session', autouse=True)
+def stdlib_test_storage(tmp_path_factory):
+    """Keep implicit temporary files on this session's selected fixture volume.
+
+    Explicit dir= arguments still win. The factory owns cleanup, including files
+    left behind by failed tests; shared machine locks keep their fixed /tmp path.
+    """
+    directory = tmp_path_factory.mktemp('stdlib')
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('TMPDIR', str(directory))
+        patch.setattr(tempfile, 'tempdir', str(directory))
+        yield directory
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_fixture_setup(fixturedef, request):
+    value = yield
+    factory = getattr(request.config, '_tmp_path_factory', None)
+    if (fixturedef.argname == 'tmp_path' and fixturedef.scope == 'function'
+            and isinstance(value, Path) and factory is not None
+            and value.parent == factory._basetemp):
+        request.node.stash[_FUNCTION_WORKSPACE] = value
+    return value
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_protocol(item, nextitem):
+    try:
+        result = yield
+    except BaseException:
+        # Pytest closes capture in pytest_keyboard_interrupt/internalerror,
+        # before its deferred sessionfinish fixture teardown. Drain admitted
+        # requests while the Store, native files and captured log streams are
+        # still owned. The normal runner has already unwound this protocol.
+        monitor = item.config.pluginmanager.getplugin('test-session-time-limit')
+        if monitor is not None:
+            monitor.stop()
+        item.session._setupstate.teardown_exact(None)
+        raise
+    # A completed protocol has run its fixture finalizers and report hooks.
+    # Interrupted protocols drain above and leave directory removal to session
+    # cleanup, including failures raised by a fixture finalizer.
+    # Remove only this function's fixture, never factory-created shared
+    # templates or another session's active, locked base directory.
+    directory = item.stash.get(_FUNCTION_WORKSPACE, None)
+    if directory is not None:
+        try:
+            shutil.rmtree(directory)
+        except FileNotFoundError:
+            pass  # An explicit pytest retention override may clean first.
+    return result
+
+
+def pytest_make_parametrize_id(val, argname):
+    # Oversized-input checks must not embed megabytes of fixture data in node
+    # IDs, which pytest stores persistently and repeats in failure reports.
+    if isinstance(val, (str, bytes)) and len(val) > 120:
+        data = val.encode("utf-8", errors="surrogatepass") if isinstance(val, str) else val
+        digest = hashlib.sha256(data).hexdigest()[:12]
+        unit = "chars" if isinstance(val, str) else "bytes"
+        return f"{argname}-{len(val)}{unit}-{digest}"
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_sessionfinish(session):
+    try:
+        import local_test_workers
+
+        # A monitor interrupt leaves worker fixtures alive. Closing execnet
+        # gateways first would interrupt those finalizers a second time.
+        local_test_workers.drain_workers(session.config)
+        return (yield)
+    finally:
+        # Keep pytest's active-directory protection during the session, then
+        # remove only this factory's workspace, including failures and explicit
+        # --basetemp. Wait until teardown and report writers finish; collection
+        # may never have used the factory or created the requested directory.
+        factory = getattr(session.config, "_tmp_path_factory", None)
+        if factory is not None:
+            if factory._basetemp is not None:
+                try:
+                    shutil.rmtree(factory._basetemp)
+                except FileNotFoundError:
+                    # Pytest may already have cleaned this completed session
+                    # when its retention policy was explicitly overridden.
+                    pass
 
 
 def pytest_addoption(parser):
+    from pytest_fixture_storage import addoption
+
+    addoption(parser)
     parser.addoption('--listening-acceptance-url', default=None, metavar='URL',
         help='Inspect Charts in an already running app without recording review impressions.')
     parser.addoption('--listening-acceptance-db', default=None, metavar='PATH',
         help='Run listening visual acceptance against a read-only copy of this saved database.')
-    parser.addoption('--policy-recovery-source', default=None, metavar='PATH',
-        help='Rehearse policy recovery against a read-only saved database under the shared test lock.')
-    parser.addoption('--policy-recovery-output', default=None, metavar='PATH',
-        help='Keep the verified backup, compact candidate and report in this new directory.')
     parser.addoption('--group-readonly-db', default=None, metavar='PATH',
         help='Benchmark musical groups using read-only prepared inputs from this database.')
     parser.addoption('--group-snapshot', default=None, metavar='PATH',
@@ -40,7 +131,7 @@ def pytest_addoption(parser):
         help='Rehearse vibe migration and startup on an isolated copy of this read-only database.')
     parser.addoption(
         "--test-lock-wait", type=float, default=0, metavar="SECONDS",
-        help="Wait up to SECONDS for the shared test lock (default: fail immediately).",
+        help="Wait up to SECONDS for the full-suite test lock (default: fail immediately).",
     )
     parser.addoption(
         "--run-flatpak-build", action="store_true",
@@ -60,6 +151,17 @@ def pytest_addoption(parser):
     )
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_cmdline_main(config):
+    # Configure before pytest constructs TempPathFactory. Each session owns one
+    # base; pytest only creates it when a fixture actually requests storage.
+    # Workers receive their coordinator's explicit child base from xdist.
+    if config.option.basetemp is None and not hasattr(config, 'workerinput'):
+        root = Path(config.getoption('fixture_root') or Path(__file__).parent / 'build' / 'pytest')
+        root.mkdir(parents=True, exist_ok=True)
+        config.option.basetemp = str(root / f'run-{os.getpid()}-{uuid.uuid4().hex}')
+
+
 def _owner(lock):
     lock.seek(0)
     return lock.read().strip() or "Owner details are being written."
@@ -76,6 +178,8 @@ def pytest_configure(config):
         local_test_workers.join_owner(config, _LOCK_PATH)
         return
     local_test_workers.validate(config)
+    if not local_test_workers.full_suite(config):
+        return
 
     lock = _LOCK_PATH.open("a+", encoding="utf-8")
     # Cleanup runs after session teardown, and also when configuration fails.

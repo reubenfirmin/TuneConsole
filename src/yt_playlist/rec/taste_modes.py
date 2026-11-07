@@ -1,5 +1,4 @@
-"""Taste modes (issue #60, Part A): discover the peaks of the user's multimodal taste in CONTENT
-space (genre / era / audio), persist them with stable identity, expose them read-only on /taste.
+"""Discover and reconcile taste modes in content space for guarded model publication.
 
 Content space, not the co-occurrence embedding: the co-listen graph blends genres (you playlist
 techno next to ambient, so they sit together there), while content vectors keep moods separable.
@@ -8,7 +7,6 @@ import numpy as np
 
 from yt_playlist.core.activity import check_stopping
 from yt_playlist.rec import embedding_vectors as vectors, rec_params
-from yt_playlist.util import genre_map
 
 _SEED = 1234567
 _MAX_ITERS = 40
@@ -117,6 +115,7 @@ def discover_modes(store, *, k=None, min_members=None, n_rep=6, seed=_SEED, snap
     k = min(int(k), len(keys))
     labels, _centroids = _kmeanspp(Vf, k, seed)
     genres = store.modes.genres_for(keys) if genres is None else genres
+    genre_axes = store.genres.feature_axes(genres.values())
     modes = []
     for j in range(k):
         member_rows = np.where(labels == j)[0]
@@ -134,7 +133,7 @@ def discover_modes(store, *, k=None, min_members=None, n_rep=6, seed=_SEED, snap
             g = genres.get(mk)
             if not g:
                 continue
-            fam = genre_map.family(g) or g
+            fam = genre_axes[g][0] or g
             fam_counts[fam] = fam_counts.get(fam, 0) + 1
         families = sorted(fam_counts.items(), key=lambda x: -x[1])[:4]
         # representative tracks: members nearest the centroid by cosine (rows are unit norm)
@@ -265,13 +264,3 @@ def prepare_modes(store, now, *, k=None, min_members=None, snapshot=None, genres
             u["mode_id"] = nid
             nid += 1
     return upserts, retired
-
-
-def recompute(store, now, *, k=None, min_members=None) -> int:
-    """Discover and persist modes, preserving stable IDs across content generations."""
-    prepared = prepare_modes(store, now, k=k, min_members=min_members)
-    if prepared is None:
-        return len(store.modes.list_modes(active_only=True))
-    upserts, retired = prepared
-    store.modes.replace_modes(upserts, retired, now)
-    return len(upserts)

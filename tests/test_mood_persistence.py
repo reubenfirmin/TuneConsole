@@ -11,7 +11,7 @@ def test_recent_mood_events_persist_newest_first(store):
 
 
 def test_record_mood_trims_to_cap(store, monkeypatch):
-    from yt_playlist.repos import rec_signals
+    from yt_playlist.controllers import rec_signals
     monkeypatch.setattr(rec_signals, "MOOD_EVENT_CAP", 3)
     for i in range(5):
         store.rec_signals.record_mood([f"k{i}|x"], 1, now=1000.0 + i)

@@ -1,9 +1,9 @@
-"""Taste-mode selection scoreboard (issue #60, Part C).
+"""Taste-mode choice evidence for the chart and Home sampler.
 
-Aggregates the non-circular signal: how often each mode was offered (impressions), how often it was
-picked (Save & play), and the playlist-attributed plays, skips and completions after each pick.
-The legacy chart retains these counts. Serving uses compiled, windowed context-response evidence
-when available, with legacy counts only before the first compilation. Reads only; writes nothing."""
+The chart shows offers and successful playlist creations with bounded selection uncertainty.
+Serving uses compiled, windowed context-response evidence when available, with legacy choice
+counts only before the first compilation. Reads only; writes nothing.
+"""
 
 import math
 
@@ -84,35 +84,3 @@ def mode_bandit_stats(store, *, before=None, now=None) -> dict:
     offered = store.modes.impression_counts(since, before=until)
     picked = store.modes.pick_counts(since, before=until)
     return {mid: (picked.get(mid, 0), n) for mid, n in offered.items()}
-
-
-def mode_scoreboard(store, since=None) -> list[dict]:
-    """Per active mode: offers, picks, attributed plays/exit depth and last play.
-
-    `since` selects offers and the cohort of picks made since that time, as in mode_bandit_stats.
-    """
-    modes = store.modes.list_modes(active_only=True)
-    offered = store.modes.impression_counts(since)
-    picks = store.modes.pick_rows(since)
-    stats = store.modes.playlist_engagement(since)
-    picked_count, totals, last_play = {}, {}, {}
-    for playlist_id, mode_id in picks:
-        picked_count[mode_id] = picked_count.get(mode_id, 0) + 1
-        engagement = stats.get(playlist_id, {})
-        total = totals.setdefault(mode_id, {"plays": 0, "skips": 0, "completions": 0})
-        for field in total:
-            total[field] += engagement.get(field, 0)
-        last = engagement.get("last_play")
-        if last is not None and (last_play.get(mode_id) is None or last > last_play[mode_id]):
-            last_play[mode_id] = last
-    board = []
-    for m in modes:
-        mid = m["mode_id"]
-        board.append({"mode_id": mid, "label": m["label"],
-                      "offered": offered.get(mid, 0), "picked": picked_count.get(mid, 0),
-                      "plays": totals.get(mid, {}).get("plays", 0),
-                      "skips": totals.get(mid, {}).get("skips", 0),
-                      "completions": totals.get(mid, {}).get("completions", 0),
-                      "last_play": last_play.get(mid)})
-    board.sort(key=lambda b: (-b["offered"], b["mode_id"]))
-    return board

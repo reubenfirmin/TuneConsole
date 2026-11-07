@@ -14,7 +14,7 @@ from yt_playlist.web.app import create_app
 
 
 def seed(store, created=1_000_000):
-    account = store.identities.upsert_identity('Main', 'cred', None, True)
+    account = store.accounts.upsert_account('Main', 'cred', None, True)
     track = store.tracks.upsert_track('song', 'Sombrero', 'Phase 09', None, 300)
     playlist = store.playlists.upsert_playlist(account, 'PLphase09', 'Phase 09 - Sombrero (2021 Remaster)',
                                               1, 'hash', created, created_at=created)
@@ -87,7 +87,7 @@ def test_native_context_observations_survive_same_song_play_report_deduplication
 
 def test_account_ownership_normalized_ids_and_known_creation_boundaries(store):
     _, playlist, _ = seed(store)
-    other = store.identities.upsert_identity('Other', 'cred', 'other-brand', False)
+    other = store.accounts.upsert_account('Other', 'cred', 'other-brand', False)
     other_playlist = store.playlists.upsert_playlist(other, 'PLphase09', 'Other account', 1, '', 0,
                                                     created_at=1_000_000)
     assert play(store, 999_999)
@@ -187,7 +187,8 @@ def test_playlist_page_exposes_creation_separately_from_actual_partial_listening
                     base_url='http://127.0.0.1') as web:
         def row():
             markup = web.get('/playlists').text
-            rows = json.loads(re.search(r'playlistsTab\((\[.*?\])\)', markup)[1])
+            from tests.template_support import playlist_rows
+            rows = playlist_rows(markup)
             return next(row for row in rows if row['id'] == playlist)
 
         initial = row()

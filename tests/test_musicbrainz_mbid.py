@@ -1,4 +1,8 @@
+import pytest
+
 from yt_playlist.providers import musicbrainz
+
+pytestmark = pytest.mark.usefixtures('canonical_genre_matcher')
 
 
 def test_recording_mbid_returns_top_match(monkeypatch):

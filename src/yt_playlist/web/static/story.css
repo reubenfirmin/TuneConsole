@@ -79,21 +79,14 @@
 .slide-new_this_month { --bg-grad: var(--slide-new); }
 .slide-different { --bg-grad: var(--slide-diversity); }
 .slide-same { --bg-grad: var(--slide-revival); }
-/* Optional beats use the reel's display type and open colour field. Long lists can scroll. */
-.slide-new_this_month > .slide-h1, .slide-different > .slide-h1, .slide-same > .slide-h1 { flex: 0 0 auto; }
-.recap-details { width: min(100%, 52rem); min-height: 0; overflow-y: auto;
-  overscroll-behavior: contain; pointer-events: auto; padding: .5rem; }
-.recap-group + .recap-group { margin-top: clamp(1rem, 3vh, 2rem); }
-.recap-label { margin: 0 0 .7rem; font-size: .8rem; font-weight: 600;
+/* One prepared finding fills a slide; the reel has no nested scrolling panel. */
+.recap-details { width: min(100%, 58rem); min-height: 0; padding: .5rem;
+  display: flex; flex-direction: column; align-items: center; gap: clamp(.8rem, 3vh, 2rem); }
+.recap-label { margin: 0; font-size: clamp(.85rem, 2vh, 1.1rem); font-weight: 600;
   text-transform: uppercase; letter-spacing: .08em; color: var(--reel-ink-72); }
-.recap-entries, .recap-findings { list-style: none; margin: 0; padding: 0; }
-.recap-entries li + li, .recap-findings li + li { margin-top: clamp(1rem, 3vh, 2rem); }
 .recap-details .slide-h1 { max-width: 28ch; margin: 0 auto;
-  font-size: clamp(1.5rem, min(5.5vw, 5.5vh), 3rem); }
-.recap-entries a { color: inherit; text-decoration: none; }
-.recap-entries a:hover { text-decoration: underline; text-decoration-color: var(--reel-ink);
-  text-underline-offset: .15em; }
-.recap-details .slide-sub { max-width: 38ch; margin: .6rem auto 0; }
+  font-size: clamp(1.5rem, min(6vw, 7vh), 4rem); }
+.recap-details .slide-sub { max-width: 48ch; margin: 0; }
 .recap-details .recap-subtitle { color: var(--reel-ink-72); }
 /* type stays legible over any bright corner */
 .slide-h1, .slide-big, .num-grid strong { text-shadow: 0 2px 30px var(--reel-type-shadow); }

@@ -37,6 +37,6 @@ def test_library_artist_batch_keeps_homonyms_distinct(store):
     store.tracks.upsert_track("second", "Two", "Echo", None, None,
                              credits=[{"name": "Echo", "id": "second-artist"}])
     store.tracks.upsert_track("third", "Three", "Unique", None, None)
-    ids = [r[0] for r in store.conn.execute("SELECT DISTINCT artist_id FROM track_artists")]
+    ids = [r[0] for r in store.conn.execute("SELECT DISTINCT artist_id FROM entry_artists")]
     assert store.rec_query.library_artists() == {
         artists.public_key(store.conn, aid) for aid in ids}

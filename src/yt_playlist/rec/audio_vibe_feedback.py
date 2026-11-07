@@ -5,13 +5,13 @@ preferences or override a track's vibe in recommendation ranking. See the
 usage boundary in core.audio_vibe_contract.
 """
 
-from yt_playlist.rec import audio_vibe_preview
+from yt_playlist.rec import audio_vibe_prediction
 
 
 def save(store, run_id, sample_ids, vibes, taxonomy_version, now):
-    if (taxonomy_version != audio_vibe_preview.TAXONOMY_VERSION
+    if (taxonomy_version != audio_vibe_prediction.TAXONOMY_VERSION
             or len(set(vibes)) != len(vibes)
-            or any(vibe not in audio_vibe_preview.LABELS for vibe in vibes)):
+            or any(vibe not in audio_vibe_prediction.LABELS for vibe in vibes)):
         raise ValueError('Feedback must use the current vibe targets')
     # The previous hypothesis and its replacement belong to one publication.
     with store._lock:
@@ -24,5 +24,5 @@ def save(store, run_id, sample_ids, vibes, taxonomy_version, now):
         metadata = store.audio_vibes.base_metadata(selected[0]['video_id']) if selected else None
         prediction = (previous['prediction'] if previous
                       and set(previous['sample_ids']) == set(sample_ids)
-                      else audio_vibe_preview.predict(selected, metadata=metadata))
+                      else audio_vibe_prediction.predict(selected, metadata=metadata))
         store.audio_vibes.save_feedback(run_id, sample_ids, vibes, taxonomy_version, prediction, now)

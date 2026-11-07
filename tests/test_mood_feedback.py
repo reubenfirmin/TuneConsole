@@ -29,7 +29,7 @@ def test_mood_tilt_points_away_when_negative(store):
 
 
 def test_mood_endpoint_records_and_confirms(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     t = store.tracks.upsert_track("v0", "S0", "Art", None, None, 1)
     pid = store.playlists.upsert_playlist(iid, "PLG", "From your catalog - June 21 2026", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(pid, [t])
@@ -44,7 +44,7 @@ def test_mood_endpoint_records_and_confirms(store):
 
 def test_recs_mood_accepts_key_subset_and_intensity(store):
     import json
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0),
                    base_url="http://127.0.0.1")
     # facet/track lever: tilt AWAY from a specific subset, "a lot" -> magnitude 2
@@ -57,7 +57,7 @@ def test_recs_mood_accepts_key_subset_and_intensity(store):
 
 
 def test_recs_mood_whole_playlist_still_works(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.tracks.upsert_track("v1", "A", "X", None, None)
     pid = store.playlists.upsert_playlist(iid, "PL", "Mix", 1, "h", 0.0)
     store.playlists.set_playlist_tracks(pid, [a])
@@ -70,7 +70,7 @@ def test_recs_mood_whole_playlist_still_works(store):
 
 
 def test_playlist_mood_state_reflects_active_whole_mix_mood(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.tracks.upsert_track("v1", "A", "X", None, None)
     pid = store.playlists.upsert_playlist(iid, "PL", "Mix", 1, "h", 0.0)
     store.playlists.set_playlist_tracks(pid, [a])

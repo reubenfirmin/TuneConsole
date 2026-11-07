@@ -3,7 +3,8 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core.migrations import Migration, MigrationError, current, migrate, registry
+from yt_playlist.core.migrations import Migration, MigrationError, migrate, registry
+from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.migrations import v035_progressive_source_members as source_migration
 
 
@@ -31,7 +32,7 @@ def test_applied_34_upgrades_without_losing_model_ledger_or_checkpoint(tmp_path)
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='ix_rec_playlist_scope_cursor'").fetchone() is None
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='rec_source_members'").fetchone() is None
         migrate(conn, registry=registry.MIGRATIONS[:35])
-        current.validate(conn, version=35)
+        validate_version(conn, 35)
         assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 35
         assert conn.execute("SELECT value FROM settings WHERE key='rec_content_model'").fetchone()[0] == 'saved-model'
         assert tuple(conn.execute('SELECT * FROM rec_vectors').fetchone()) == ('saved-key', bytes.fromhex('0000803F'))
@@ -52,7 +53,7 @@ def test_34_with_additions_already_present_keeps_projection_and_queue(tmp_path):
         conn.execute("INSERT INTO rec_source_members VALUES ('playlist:1','saved-key',1.5,123)")
         conn.commit()
         migrate(conn, registry=registry.MIGRATIONS[:35])
-        current.validate(conn, version=35)
+        validate_version(conn, 35)
         assert tuple(conn.execute('SELECT * FROM rec_source_members').fetchone()) == ('playlist:1', 'saved-key', 1.5, 123)
         assert conn.execute("SELECT revision FROM rec_change_queue WHERE kind='node' AND item='saved-key'").fetchone()[0] == 3
 
@@ -68,18 +69,19 @@ def test_interrupted_forward_repair_rolls_back_schema_and_data(tmp_path, monkeyp
 
         monkeypatch.setattr(registry, 'MIGRATIONS', (*original[:34], Migration(35, original[34].name, interrupted)))
         with pytest.raises(MigrationError, match='interrupted source projection'):
-            migrate(conn)
+            migrate(conn, registry=registry.MIGRATIONS)
         assert list(conn.iterdump()) == before
         monkeypatch.setattr(registry, 'MIGRATIONS', original)
-        migrate(conn)
-        current.validate(conn)
+        migrate(conn, registry=registry.MIGRATIONS[:35])
+        validate_version(conn, 35)
 
 
-def test_forward_repair_rejects_an_incompatible_existing_index(tmp_path):
+@pytest.mark.parametrize('target', [35, len(registry.MIGRATIONS)])
+def test_forward_repair_rejects_an_incompatible_existing_index(tmp_path, target):
     with predecessor(tmp_path / 'incompatible.db') as conn:
         conn.execute('CREATE INDEX ix_rec_playlist_scope_cursor ON playlists(id)')
         conn.commit()
         before = list(conn.iterdump())
         with pytest.raises(MigrationError, match='Incompatible current index: ix_rec_playlist_scope_cursor'):
-            migrate(conn)
+            migrate(conn, registry=registry.MIGRATIONS[:target])
         assert list(conn.iterdump()) == before

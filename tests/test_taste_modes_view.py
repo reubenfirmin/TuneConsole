@@ -1,20 +1,11 @@
 import numpy as np
-import pytest
 from fastapi.testclient import TestClient
-from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 
 
-@pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    return s
-
-
 def _client(store, now=10_000.0):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     fake = FakeClient()
     return TestClient(create_app(store, lambda: {iid: fake}, now_fn=lambda: now),
                       base_url="http://127.0.0.1")

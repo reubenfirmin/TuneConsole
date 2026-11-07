@@ -7,7 +7,7 @@
 (() => {
   const SENSOR_VERSION = 4;
   const MIN_SENSOR_REVISION = 8;
-  const RECEIVER_REVISION = 14;
+  const RECEIVER_REVISION = 15;
   const previous = window.__tcBridgeLoaded;
   if (Number.isSafeInteger(previous?.revision) && previous.revision >= RECEIVER_REVISION && !previous.stopped) return;
   // A legacy boolean guard owns anonymous listeners that cannot be removed safely. Let the
@@ -430,6 +430,10 @@
     if (msg.type === "next") {
       probePlayer(snapshot => {
         try {
+          if (msg.brandId !== undefined && (!snapshot?.brandKnown || snapshot.brandId !== msg.brandId)) {
+            sendResponse({ok: false, error: "Player account is unavailable or different"});
+            return;
+          }
           const result = clickNext(msg.videoId, snapshot);
           if (result.ok) confirmNext(msg.videoId, sendResponse);
           else sendResponse(result);

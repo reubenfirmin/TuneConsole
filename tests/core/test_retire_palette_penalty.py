@@ -1,6 +1,7 @@
 from yt_playlist.core.migrations import migrate
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.store import Store
+from tests.historical_support import upgrade_fixture
 
 
 def test_upgrade_removes_only_the_retired_override():
@@ -13,7 +14,7 @@ def test_upgrade_removes_only_the_retired_override():
             ('lastfm_api_key', 'keep'),
         ])
         store.conn.commit()
-        store.init_schema()
+        upgrade_fixture(store)
         assert store.settings.get_setting('rec_param:palette_absence_penalty') is None
         assert store.settings.get_setting('rec_param:breadth_bias') == '-0.5'
         assert store.settings.get_setting('lastfm_api_key') == 'keep'

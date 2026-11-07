@@ -13,6 +13,7 @@ from yt_playlist.util.action_kinds import (
     ADD_TRACKS, APPLY_MERGE, COPY_INTO, COPY_PLAYLIST, DELETE_EMPTY, DELETE_PLAYLIST, GC_GENERATED,
     MOVE_IDENTITY, PLAN, REMOVE_TRACK, REMOVE_LOCAL_PLAYLIST, RENAME_PLAYLIST, UNDO, is_undoable)
 from yt_playlist.library.executor import deserialize_plan
+from yt_playlist.library.undo_conflicts import UNDO_NOTICES
 
 
 def build(ctx) -> APIRouter:
@@ -26,6 +27,9 @@ def build(ctx) -> APIRouter:
             params = json.loads(action.params_json or "{}")
         except (ValueError, TypeError):
             pass
+        missing = params.get("missing_required")
+        contents_notice = (f"The kept playlist is missing {missing} required track(s). The source was kept."
+                           if type(missing) is int and missing > 0 else None)
         if action.kind == UNDO:
             return f"undo of action #{params.get('undid')}"
         if action.kind == APPLY_MERGE:
@@ -36,8 +40,10 @@ def build(ctx) -> APIRouter:
                 desc = f"partial merge into “{kept}”"
                 if deleted:
                     desc += ", deleted " + ", ".join(f"“{t}”" for t in deleted)
-                if params.get("error"):
-                    desc += f". {params['error']}"
+                if contents_notice:
+                    desc += ". " + contents_notice
+                elif params.get("error"):
+                    desc += ". Some changes are unconfirmed; review the saved progress."
                 return desc
             if deleted:
                 return f"merged into “{kept}”, deleted " + ", ".join(f"“{t}”" for t in deleted)
@@ -52,7 +58,9 @@ def build(ctx) -> APIRouter:
             if params.get("partial"):
                 return f"partial copy of “{params.get('title')}”; source kept"
             if params.get("delete_error"):
-                return f"copy of “{params.get('title')}”; source kept: {params['delete_error']}"
+                if contents_notice:
+                    return f"copy of “{params.get('title')}”; " + contents_notice
+                return f"copy of “{params.get('title')}”; source kept; deletion unconfirmed"
             if params.get("skipped") or params.get("unresolved"):
                 return f"partial copy of “{params.get('title')}”; source kept"
             verb = "moved" if params.get("deleted") else "copied"
@@ -86,10 +94,10 @@ def build(ctx) -> APIRouter:
             return action.kind
         src = store.playlists.get_playlist(pe.plan.source_playlist_id)
         tgt = store.playlists.get_playlist(pe.plan.target_playlist_id)
-        src_name = params.get("source_title") or (src.title if src else None) or pe.source_ytm_playlist_id
+        src_name = params.get("source_title") or (src.title if src else None) or pe.source_provider_playlist_id
         tgt_name = params.get("target_title") or (tgt.title if tgt else None) or "target"
         if pe.mode == "delete":
-            return f"delete “{src_name}” ({pe.source_ytm_playlist_id})"
+            return f"delete “{src_name}” ({pe.source_provider_playlist_id})"
         if pe.mode == "move":
             return f"move “{src_name}” into “{tgt_name}”, delete source"
         return f"merge “{src_name}” into “{tgt_name}”"
@@ -117,8 +125,19 @@ def build(ctx) -> APIRouter:
             additions = [undo["addition"]] if undo.get("addition") else [
                 e["addition"] for e in undo.get("restored", []) if e.get("addition")]
             steps = recovery.get("steps", [])
+            notice = None
+            if request.query_params.get('action') == str(a.id):
+                notice = {
+                    'undo': 'Undo was not confirmed. Review this change before trying again.',
+                    'recheck': 'Deletion is not confirmed. The backup is saved.',
+                }.get(request.query_params.get('notice'))
+            recovery_notice = None
+            if recovery.get('error'):
+                recovery_notice = UNDO_NOTICES.get(recovery.get('reason'),
+                    'Undo incomplete. Progress is saved; resume this Undo to continue.')
             rows.append({"a": a, "desc": _action_desc(a), "undoable": is_undoable(a.kind),
-                         "when": _when(a.created_at), "recovery_error": recovery.get("error"),
+                         "when": _when(a.created_at), "recovery_notice": recovery_notice,
+                         "notice": notice if not recovery_notice else None,
                          "deletions": undo.get("deletions", []),
                          "missing_snapshot": missing_snapshot, "copy_ytm": undo.get("new_ytm"),
                          "uncertain": sum(len(e.get("uncertain", [])) for e in additions),
@@ -126,8 +145,7 @@ def build(ctx) -> APIRouter:
                          "recovery_progress": f"{sum(s.get('phase') == 'complete' for s in steps)}/{len(steps)}",
                          "recovered": [s["created_id"] for s in steps if s.get("created_id")]})
         return templates.TemplateResponse(request, "actions.html", {
-            "rows": rows, "flash": request.query_params.get("flash"),
-            "flasherr": request.query_params.get("flasherr")})
+            "rows": rows, "flash": request.query_params.get("flash")})
 
     @router.get("/actions/{action_id}/deletions/{entry_index}/snapshot-report")
     def deletion_snapshot_report(action_id: int, entry_index: int):
@@ -138,10 +156,10 @@ def build(ctx) -> APIRouter:
             raise HTTPException(404, "Saved deletion not found")
         entry = entries[entry_index]
         try:
-            identity_id, client = client_for(store, ctx.client_provider(), identity_id=entry["identity"])
+            account_id, client = client_for(store, ctx.client_provider(), account_id=entry["identity"])
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from None
-        return JSONResponse({"identity_id": identity_id, "action_id": action_id,
+        return JSONResponse({"account_id": account_id, "action_id": action_id,
                              "entry_index": entry_index,
                              "reads": playlist_read_report(client, entry["ytm"])},
                             headers={"Cache-Control": "no-store"})
@@ -150,12 +168,9 @@ def build(ctx) -> APIRouter:
     def recheck_deletion(action_id: int):
         try:
             action = ctx.ops().recheck_deletion(action_id)
-        except ValueError as exc:
-            return RedirectResponse(f"/actions?flasherr={quote(str(exc))}", status_code=303)
         except Exception:
             logger.exception("deletion recheck %s failed", action_id)
-            return RedirectResponse("/actions?flasherr=Could%20not%20recheck%20deletion.%20"
-                                    "The%20backup%20is%20saved.", status_code=303)
+            return RedirectResponse(f"/actions?action={action_id}&notice=recheck", status_code=303)
         message = ("Deletion confirmed; the backup is ready for Undo." if action.status == "executed"
                    else "The playlist still exists. No deletion was retried; the backup is saved.")
         return RedirectResponse(f"/actions?flash={quote(message)}", status_code=303)
@@ -166,12 +181,9 @@ def build(ctx) -> APIRouter:
         desc = _action_desc(act) if act is not None else f"action #{action_id}"
         try:
             ctx.ops().undo(action_id)   # reverts + best-effort targeted refresh of the target
-        except ValueError as e:
-            return RedirectResponse(f"/actions?flasherr={quote(str(e))}", status_code=303)
         except Exception:  # noqa: BLE001
             logger.exception("undo %s failed", action_id)
-            return RedirectResponse(f"/actions?flasherr={quote('Could not undo. YouTube returned an '
-                'unexpected response.')}", status_code=303)
+            return RedirectResponse(f"/actions?action={action_id}&notice=undo", status_code=303)
         return RedirectResponse(f"/actions?flash={quote('Undid #' + str(action_id) + ': ' + desc)}",
                                 status_code=303)
 

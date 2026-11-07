@@ -1,5 +1,6 @@
 """Source evidence retains scope and disagreement without selecting catalog facts."""
 from dataclasses import replace
+from tests.metadata_provenance_support import metadata_provenance
 
 import pytest
 
@@ -27,7 +28,7 @@ def test_competing_evidence_is_idempotent_per_delivery_and_does_not_change_choic
         ('source-a', 0.8, 10), ('source-b', 0.2, 12), ('source-a', 0.8, 13)]
     assert [r['provenance']['delivery_id'] for r in rows] == ['run-1', 'run-1', 'run-2']
     assert store.tracks.get_track_audio(tid)[1] is None
-    assert store.enrichment_reports.metadata_provenance(tid)['fields']['energy'] == {
+    assert metadata_provenance(store, tid)['fields']['energy'] == {
         'value': None, 'override': True, 'source': 'user'}
     assert store.conn.execute('SELECT energy FROM recordings').fetchone()[0] is None
 
@@ -105,6 +106,10 @@ def test_in_flight_answer_cannot_follow_a_recording_correction(store):
         store.enrichment_state.record_metadata_observations(old, 'provider', [observation(value=0.3)],
             run_id='in-flight', now=30, expected_recording_id=old_recording)
     assert store.enrichment_state.metadata_observations('correct song|artist') == []
-    rows = store.conn.execute('SELECT recording_id,value_json FROM metadata_findings '
-                              'WHERE provenance_json IS NOT NULL').fetchall()
-    assert [tuple(row) for row in rows] == [(old_recording, '0.8')]
+    # The ordinary reader follows redirects. Inspect the immutable delivery's
+    # captured owner to prove the correction did not move its original evidence.
+    from yt_playlist.core import metadata_native
+    rows = store.conn.execute('SELECT o.id,d.input_recording_id FROM native_metadata_observations o '
+                              'JOIN metadata_deliveries d ON d.id=o.delivery_id').fetchall()
+    assert [(row['input_recording_id'], metadata_native.read(store.conn, row['id'])['value'])
+            for row in rows] == [(old_recording, 0.8)]

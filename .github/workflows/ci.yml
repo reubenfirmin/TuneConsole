@@ -67,7 +67,7 @@ jobs:
       - name: Run the unit / route suite
         env:
           SHARD_BASELINE: ${{ needs.plan.outputs.timing_artifact != '' && 'shard-baseline' || '.github/test-durations.json' }}
-        run: uv run pytest --ci-suite=unit --ci-shard=${{ matrix.shard }}/$SHARD_TOTAL --ci-shard-report=evidence/shard.json --ci-duration-baseline="$SHARD_BASELINE" --junitxml=evidence/junit.xml
+        run: uv run pytest --test-progress=evidence/progress.jsonl --ci-suite=unit --ci-shard=${{ matrix.shard }}/$SHARD_TOTAL --ci-shard-report=evidence/shard.json --ci-duration-baseline="$SHARD_BASELINE" --junitxml=evidence/junit.xml
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -111,7 +111,7 @@ jobs:
       - name: Run the live-browser suite
         env:
           SHARD_BASELINE: ${{ needs.plan.outputs.timing_artifact != '' && 'shard-baseline' || '.github/test-durations.json' }}
-        run: uv run pytest -m browser --ci-suite=browser --ci-shard=${{ matrix.shard }}/$SHARD_TOTAL --ci-shard-report=evidence/shard.json --ci-duration-baseline="$SHARD_BASELINE" --junitxml=evidence/junit.xml --tracing=retain-on-failure --output=evidence/browser-traces
+        run: uv run pytest -m browser --test-time-limit=1200 --test-progress=evidence/progress.jsonl --ci-suite=browser --ci-shard=${{ matrix.shard }}/$SHARD_TOTAL --ci-shard-report=evidence/shard.json --ci-duration-baseline="$SHARD_BASELINE" --junitxml=evidence/junit.xml --tracing=retain-on-failure --output=evidence/browser-traces
       - uses: actions/upload-artifact@v4
         if: always()
         with:

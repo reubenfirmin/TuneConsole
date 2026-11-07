@@ -9,7 +9,7 @@ from yt_playlist.web.app import create_app
 
 @pytest.fixture
 def library(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     first = store.playlists.upsert_playlist(iid, "PLA", "Alpha", 0, "", 0)
     second = store.playlists.upsert_playlist(iid, "PLB", "Beta", 0, "", 0)
     client = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1),
@@ -25,7 +25,7 @@ def test_failed_and_mixed_delete_batches_report_each_item(store, library, monkey
     def delete(self, pid):
         calls.append(pid)
         if pid in [ids[i] for i in failed_ids]:
-            raise ValueError("Delete rejected")
+            raise ValueError("provider DELETE timeout: internal-diagnostic-879")
         store.playlists.remove_playlist(pid)
     monkeypatch.setattr(PlaylistOps, "delete", delete)
     response = client.post("/playlists/delete", data={"ids": f"{first},{second},{first}"})
@@ -34,11 +34,16 @@ def test_failed_and_mixed_delete_batches_report_each_item(store, library, monkey
     assert result["status"] == ("failed" if len(failed_ids) == 2 else "partial")
     assert [item["status"] for item in result["items"]] == (["failed", "failed"] if len(failed_ids) == 2 else ["failed", "deleted"])
     assert calls == ids
+    assert "internal-diagnostic-879" not in response.text
+    assert [item["id"] for item in result["items"] if item["status"] == "failed"] == [ids[i] for i in failed_ids]
     assert "hx-refresh" not in response.headers
     for _ in range(2):
         page = client.get(response.headers["hx-redirect"])
         assert page.status_code == 200
-        assert "Alpha" in page.text and "Beta" in page.text and "Delete rejected" in page.text
+        assert "Alpha" in page.text and "Beta" in page.text
+        assert "internal-diagnostic-879" not in page.text
+        assert 'class="playlist-action-result" role="group"' in page.text
+        assert 'role="alert"' not in page.text
         assert "Check YouTube before retrying failed items" in page.text
     assert calls == ids  # refreshing the result never repeats a deletion
 
@@ -59,14 +64,23 @@ def test_copy_counts_destination_and_missing_songs_survive_refresh(library, monk
 
 def test_copy_exception_is_a_failure_with_uncertainty_and_recovery_guidance(library, monkeypatch):
     client, first, _ = library
+    calls = []
     def fail(*args):
-        raise RuntimeError("Connection lost")
+        calls.append(args)
+        raise RuntimeError("Connection lost: internal-diagnostic-879")
     monkeypatch.setattr(PlaylistOps, "copy", fail)
-    response = client.post("/playlists/copy", data={"ids": str(first)})
+    response = client.post("/playlists/copy", data={"ids": str(first), "name": "My retained copy name"})
     assert response.status_code == 422 and response.json()["status"] == "failed"
-    page = client.get(response.headers["hx-redirect"])
-    assert "Alpha" in page.text and "Connection lost" in page.text
-    assert "Check YouTube for a newly created playlist before retrying" in page.text
+    assert response.json()["source_ids"] == [first]
+    assert response.json()["copy_name"] == "My retained copy name"
+    assert "internal-diagnostic-879" not in response.text
+    for _ in range(2):
+        page = client.get(response.headers["hx-redirect"])
+        assert "Alpha" in page.text and "Copy not confirmed" in page.text
+        assert "Connection lost" not in page.text
+        assert 'role="alert"' not in page.text
+        assert "Check YouTube for a newly created playlist before retrying" in page.text
+    assert len(calls) == 1
 
 
 def test_cleanup_cache_failure_does_not_hide_successful_deletion(store, library, monkeypatch):

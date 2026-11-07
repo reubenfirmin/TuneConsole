@@ -107,8 +107,8 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('nod
         cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     event = json.loads(result.stdout)
-    main = store.identities.upsert_identity('Main', 'cred', None, True)
-    brand = store.identities.upsert_identity('Brand', 'cred', 'brand-A', False)
+    main = store.accounts.upsert_account('Main', 'cred', None, True)
+    brand = store.accounts.upsert_account('Brand', 'cred', 'brand-A', False)
     store.tracks.upsert_track('known-video', 'Song', 'Artist', '', None)
     from yt_playlist.library import player_events
     accepted = before in ('main', 'brand')
@@ -117,7 +117,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('nod
     assert len(rows) == int(accepted)
     expected = main if before == 'main' else brand if before == 'brand' else None
     if accepted:
-        assert rows[0]['identity_id'] == expected
+        assert rows[0]['account_id'] == expected
     for identity in (main, brand):
         rating = store.tracks.item_rating(identity, 'known-video')
         assert (rating is not None) is (identity == expected)

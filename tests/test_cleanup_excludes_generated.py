@@ -18,7 +18,7 @@ def _pl(store, iid, ytm, title, track_ids, *, generated=False):
 
 
 def _seed(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     t1 = store.tracks.upsert_track("v1", "S1", "X", None, 1)
     t2 = store.tracks.upsert_track("v2", "S2", "X", None, 1)
     t3 = store.tracks.upsert_track("v3", "S3", "X", None, 1)

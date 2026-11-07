@@ -70,7 +70,7 @@ def isolated_home(tmp_path, monkeypatch):
 
 
 def _deleted(store, client):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     pid = store.playlists.upsert_playlist(iid, "SOURCE", "Source", 2, "", 1)
     executor.delete_playlist(store, pid, client, 2)
     return iid, store.actions.get_actions()[0].id
@@ -81,7 +81,7 @@ def _journal(store, aid):
 
 
 def _copy(store, client):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     store.playlists.upsert_playlist(iid, "COPY", "Copy", 2, "", 1)
     aid = store.actions.record_action(COPY_PLAYLIST, "{}", "{}", "executed", json.dumps({
         "new_ytm": "COPY", "target_identity": iid,
@@ -116,7 +116,7 @@ def test_rejected_additions_resume_created_playlist_after_database_reopen(tmp_pa
 
 def test_failure_on_later_backup_does_not_recreate_completed_first_backup(store):
     client = RecoveryClient({"ONE": ["a"], "TWO": ["b"]})
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     backups = []
     for remote in ("ONE", "TWO"):
         pid = store.playlists.upsert_playlist(iid, remote, remote, 1, "", 1)
@@ -183,7 +183,7 @@ def test_copy_deletion_requires_verified_absence_and_resumes_safely(store, lost_
 
 def test_original_surviving_failed_forward_delete_is_reused_without_duplicate(store, monkeypatch):
     client = RecoveryClient({"SOURCE": ["a"], "KEEP": ["a"]})
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     src = store.playlists.upsert_playlist(iid, "SOURCE", "Source", 1, "", 1)
     keep = store.playlists.upsert_playlist(iid, "KEEP", "Keeper", 1, "", 1)
     delete = client.delete_playlist
@@ -221,8 +221,8 @@ def test_connection_failure_cannot_be_mistaken_for_missing_original(store, monke
 def test_move_with_lost_forward_delete_reply_retains_and_restores_its_backup(store):
     source = RecoveryClient({"SOURCE": ["a", "b"]})
     destination = RecoveryClient({})
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
-    other = store.identities.upsert_identity("Other", "bridge", None, False)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    other = store.accounts.upsert_account("Other", "bridge", None, False)
     pid = store.playlists.upsert_playlist(iid, "SOURCE", "Source", 2, "", 1)
     store.playlists.set_playlist_tracks(pid, [store.tracks.upsert_track(v, v, "Artist", None, 200) for v in ("a", "b")])
     source.lose_delete = True
@@ -346,6 +346,64 @@ def test_partial_recovery_remains_visible_and_retryable_after_action_log_reload(
     assert response.status_code == 200
     assert store.actions.get_action(aid).status == "undone"
     assert len(client.created) == 1
+
+
+def test_action_log_hides_native_recovery_diagnostic_and_resumes_saved_progress(store, monkeypatch, caplog):
+    from fastapi.testclient import TestClient
+    from yt_playlist.core import fao
+    from yt_playlist.web.app import create_app
+
+    diagnostic = 'sqlite3.OperationalError: recovery lease corrupt [review-879-undo]'
+    provider = RecoveryClient({'SOURCE': ['a', 'b']})
+    iid, aid = _deleted(store, provider)
+    backup = json.loads(store.actions.get_action(aid).undo_json)['backup']
+    before = fao.read(backup).bytes
+    refresh = playlist_undo._refresh
+
+    def failed_refresh(*_args, **_kwargs):
+        raise RuntimeError(diagnostic)
+
+    monkeypatch.setattr(playlist_undo, '_refresh', failed_refresh)
+    with TestClient(create_app(store, lambda: {iid: provider}), base_url='http://127.0.0.1') as web:
+        response = web.post(f'/undo/{aid}', follow_redirects=False)
+        assert response.status_code == 303
+        assert 'flasherr' not in response.headers['location']
+        assert diagnostic not in response.headers['location']
+        recovery = _journal(store, aid)
+        step, = recovery['steps']
+        assert recovery['error'] == diagnostic and step['phase'] == 'remote_complete'
+        assert step['created_id'] == 'PL_NEW_0'
+        assert fao.read(backup).bytes == before
+        for url in (response.headers['location'], '/actions', '/actions?flasherr=' + diagnostic):
+            html = web.get(url).text
+            assert diagnostic not in html and 'banner err' not in html
+            assert 'Undo incomplete' in html and 'Resume Undo' in html and 'recovery incomplete' in html
+            assert 'PL_NEW_0' in html
+        assert diagnostic in caplog.text
+        writes = (list(provider.created), list(provider.added), list(provider.deleted))
+        assert len(provider.created) == len(provider.added) == 1
+        assert _journal(store, aid) == recovery
+        monkeypatch.setattr(playlist_undo, '_refresh', refresh)
+        assert web.post(f'/undo/{aid}').status_code == 200
+        assert store.actions.get_action(aid).status == 'undone'
+        assert (provider.created, provider.added, provider.deleted) == writes
+        assert fao.read(backup).bytes == before
+
+
+def test_action_log_retains_human_conflict_without_displaying_diagnostics(store):
+    from fastapi.testclient import TestClient
+    from yt_playlist.web.app import create_app
+
+    provider = RecoveryClient({'COPY': ['a', 'b']})
+    iid, aid = _copy(store, provider)
+    provider._tracks['COPY'].append(_track('later', 'Later', 'Artist'))
+    with TestClient(create_app(store, lambda: {iid: provider}), base_url='http://127.0.0.1') as web:
+        response = web.post(f'/undo/{aid}')
+        assert response.status_code == 200
+        assert 'created playlist has changed' in response.text
+        assert 'It was preserved' in response.text and 'Resume Undo' in response.text
+        assert _journal(store, aid)['reason'] == 'copy_changed'
+        assert not provider.deleted
 
 
 def test_crash_after_creation_before_add_can_resume_from_verified_unchanged_baseline(store, monkeypatch):

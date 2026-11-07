@@ -28,14 +28,11 @@ from yt_playlist.core.db_diagnostics import database_operation
 #     Do not "fix" this tier by quarantining it: that deletes the only non-circular signal we have.
 GENERATED_GROUP = "Generated"
 
-# Prefer the main account's recorded rating, including confirmed writes before LM has synced.
-# Otherwise use cached Liked Music membership. The outer query must alias tracks as `t`.
-LIKED_EXISTS = ("COALESCE((SELECT r.status='LIKE' FROM item_ratings r "
-                "JOIN identities i ON i.id=r.identity_id WHERE i.active=1 AND i.is_master=1 "
-                "AND r.video_id=t.video_id), EXISTS(SELECT 1 FROM playlist_tracks lpt "
-                "JOIN playlists lpl ON lpl.id = lpt.playlist_id "
-                "JOIN tracks lt ON lt.id = lpt.track_id "
-                "WHERE lpl.ytm_playlist_id = 'LM' AND lt.video_id = t.video_id))")
+def _refresh_listening_reads(owner):
+    store = getattr(owner, '_store', owner)
+    if getattr(store, '_schema_compatibility', False) and not getattr(store, '_read_only', False):
+        from yt_playlist.core.entity_names import refresh_listening_reads
+        refresh_listening_reads(store.conn)
 
 
 def synchronized(method):
@@ -47,6 +44,7 @@ def synchronized(method):
     def wrapper(self, *args, **kwargs):
         with database_operation(method.__qualname__), self._lock:
             check_cancellable_work()
+            _refresh_listening_reads(self)
             return method(self, *args, **kwargs)
     return wrapper
 
@@ -64,6 +62,7 @@ def snapshot_read(method):
                     or getattr(self._lock, 'held_by_current_thread', False)):
                 with self._lock:
                     check_cancellable_work()
+                    _refresh_listening_reads(self)
                     return method(self, *args, **kwargs)
             with self._store.read_view() as view:
                 reader = type(self)(view)
@@ -84,10 +83,12 @@ def lookup_read(method):
                     or self._store._db_path is None):
                 with self._lock:
                     check_cancellable_work()
+                    _refresh_listening_reads(self)
                     return method(self, *args, **kwargs)
             if self._lock.acquire(blocking=False):
                 try:
                     check_cancellable_work()
+                    _refresh_listening_reads(self)
                     return method(self, *args, **kwargs)
                 finally:
                     self._lock.release()
@@ -102,5 +103,35 @@ class Repo:
     """Base for domain DAOs: bind the Store's connection + lock (constructor injection)."""
     def __init__(self, db):
         self._store = db
-        self.conn = db.conn
         self._lock = db._lock
+
+    @property
+    def conn(self):
+        # Long-lived application consumers retain repositories across database
+        # replacement. Follow this Store's current connection; snapshot Stores
+        # still own their separate pinned connection and generation checks.
+        return self._store.conn
+
+    @property
+    @lookup_read
+    def entry_artists_table(self):
+        from yt_playlist.core.artist_credits import projection_table
+        return projection_table(self.conn)
+
+    @property
+    @lookup_read
+    def album_tracks_table(self):
+        from yt_playlist.core.preparation.album_publication import relation
+        return relation(self.conn, 'album_tracks')
+
+    @property
+    @lookup_read
+    def album_fetch_state_table(self):
+        from yt_playlist.core.preparation.album_publication import relation
+        return relation(self.conn, 'album_fetch_state')
+
+    @property
+    @lookup_read
+    def album_track_links_table(self):
+        from yt_playlist.core.preparation.album_publication import relation
+        return relation(self.conn, 'album_track_links')

@@ -5,11 +5,13 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from yt_playlist.core.features import audio_vibes_enabled
+from yt_playlist.core.activity import activity_for
 from yt_playlist.core import audio_embedding
-from yt_playlist.rec import audio_vibe_feedback, audio_vibe_preview, home_vibe
+from yt_playlist.rec import audio_vibe_feedback, audio_vibe_prediction, home_vibe
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +178,33 @@ class Failure(Metadata):
     message: Annotated[str, Field(min_length=1, max_length=512)]
 
 
+class BrowserDiagnostic(Metadata):
+    page_id: Annotated[str, Field(min_length=1, max_length=64)]
+    asset_version: Annotated[str, Field(max_length=64)]
+    event: Literal['started', 'cards_ready', 'cards_failed', 'cards', 'card_blocked',
+                   'extension_connecting', 'extension_ready', 'extension_legacy',
+                   'extension_unavailable', 'playback', 'request_failed']
+    path: Annotated[str, Field(max_length=256)]
+    reason: Annotated[str, Field(max_length=64)] | None = None
+    detail: Annotated[str, Field(max_length=256)] | None = None
+    extension_id: Annotated[str, Field(max_length=128)] | None = None
+    extension_version: Annotated[str, Field(max_length=64)] | None = None
+    protocol: Annotated[str, Field(max_length=16)] | None = None
+    run_id: UUID | None = None
+    video_id: Annotated[str, Field(max_length=128)] | None = None
+    connected: bool | None = None
+    paused: bool | None = None
+    snapshot_age: Time | None = None
+    card_count: Annotated[int, Field(ge=0, le=100000)] | None = None
+    card_visible: bool | None = None
+    can_label: bool | None = None
+    samples: Annotated[int, Field(ge=0, le=3)] | None = None
+    runtime_available: bool | None = None
+    locks_available: bool | None = None
+    secure_context: bool | None = None
+    api_status: Annotated[int, Field(ge=0, le=599)] | None = None
+
+
 def require_enabled():
     if not audio_vibes_enabled():
         raise HTTPException(404)
@@ -203,22 +232,22 @@ def build(ctx):
     router = APIRouter()
     ctx.templates.env.globals['audio_vibes_enabled'] = audio_vibes_enabled
     choices = {
-        key: {'label': audio_vibe_preview.LABELS[key],
-              'attribute_label': audio_vibe_preview.ATTRIBUTE_LABELS[key],
+        key: {'label': audio_vibe_prediction.LABELS[key],
+              'attribute_label': audio_vibe_prediction.ATTRIBUTE_LABELS[key],
               'description': preset['description']}
         for key, preset in home_vibe.PRESETS.items()}
     ctx.templates.env.globals['audio_vibe_choices'] = choices
-    ctx.templates.env.globals['audio_vibe_taxonomy_version'] = audio_vibe_preview.TAXONOMY_VERSION
+    ctx.templates.env.globals['audio_vibe_taxonomy_version'] = audio_vibe_prediction.TAXONOMY_VERSION
 
     def state(run_id, video_id=None):
-        samples = ctx.store.audio_vibes.samples(run_id)
         playback = ctx.store.audio_vibes.playback(run_id)
         if not audio_vibes_enabled():
             # Collection needs acknowledgements, not the developer's annotation
             # history or full diagnostic payloads. Preparation predicts off-thread.
             return {'run_id': run_id, 'playback': playback,
-                    'samples': [{key: sample[key] for key in ('id', 'point')} for sample in samples],
-                    'taxonomy_version': audio_vibe_preview.TAXONOMY_VERSION}
+                    'samples': ctx.store.audio_vibes.sample_receipts(run_id),
+                    'taxonomy_version': audio_vibe_prediction.TAXONOMY_VERSION}
+        samples = ctx.store.audio_vibes.samples(run_id)
         metadata = ctx.store.audio_vibes.base_metadata(samples[0]['video_id']) if samples else None
         video_id = playback['video_id'] if playback else video_id
         feedback = ctx.store.audio_vibes.feedback(run_id)
@@ -226,19 +255,25 @@ def build(ctx):
                     if video_id and feedback is None else None)
         return {'run_id': run_id, 'playback': playback,
                 'samples': samples, 'choices': choices,
-                'taxonomy_version': audio_vibe_preview.TAXONOMY_VERSION,
-                'prediction': audio_vibe_preview.predict(samples, metadata=metadata),
+                'taxonomy_version': audio_vibe_prediction.TAXONOMY_VERSION,
+                'prediction': audio_vibe_prediction.predict(samples, metadata=metadata),
                 'feedback': feedback, 'previous_feedback': previous,
                 'legacy_feedback': ctx.store.audio_vibes.earlier_feedback(run_id)}
+
+    def persist_audio(run_id, save):
+        # Admission survives HTTP cancellation through Activity.to_thread. Keep
+        # publication, response reads/prediction and encoding in the same worker.
+        try:
+            save()
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from None
+        return JSONResponse(state(run_id))
 
     @router.post('/audio-vibes/runs')
     async def started(request: Request):
         value = await parse(request, Playback)
-        try:
-            ctx.store.audio_vibes.save_playback(**value, now=ctx.now())
-        except ValueError as error:
-            raise HTTPException(409, str(error)) from None
-        return state(value['run_id'])
+        return await activity_for(ctx).to_thread(persist_audio, value['run_id'],
+            lambda: ctx.store.audio_vibes.save_playback(**value, now=ctx.now()))
 
     @router.get('/audio-vibes/runs/{run_id}')
     def run(run_id: str, video_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None):
@@ -251,28 +286,28 @@ def build(ctx):
     @router.post('/audio-vibes/samples')
     async def sample(request: Request):
         value = await parse(request, Sample)
-        try:
-            ctx.store.audio_vibes.save_sample(value, ctx.now())
-        except ValueError as error:
-            raise HTTPException(409, str(error)) from None
-        return state(value['run_id'])
+        return await activity_for(ctx).to_thread(persist_audio, value['run_id'],
+            lambda: ctx.store.audio_vibes.save_sample(value, ctx.now()))
 
     @router.post('/audio-vibes/feedback')
     async def feedback(request: Request):
         require_enabled()
         value = await parse(request, Feedback)
-        try:
-            audio_vibe_feedback.save(ctx.store, value['run_id'], value['sample_ids'], value['vibes'],
-                                     value['taxonomy_version'], ctx.now())
-        except ValueError as error:
-            raise HTTPException(409, str(error)) from None
-        return state(value['run_id'])
+        return await activity_for(ctx).to_thread(persist_audio, value['run_id'],
+            lambda: audio_vibe_feedback.save(ctx.store, value['run_id'], value['sample_ids'], value['vibes'],
+                                           value['taxonomy_version'], ctx.now()))
 
     @router.post('/audio-vibes/failures')
     async def failure(request: Request):
         value = await parse(request, Failure)
         logger.warning('Audio vibe attempt failed: run=%s point=%s attempt=%s phase=%s message=%r',
                        value['run_id'], value['point'], value['attempt'], value['phase'], value['message'])
+        return {'recorded': True}
+
+    @router.post('/audio-vibes/diagnostics')
+    async def diagnostic(request: Request):
+        value = await parse(request, BrowserDiagnostic)
+        logger.info('Audio vibe browser: %s', {key: item for key, item in value.items() if item is not None})
         return {'recorded': True}
 
     return router

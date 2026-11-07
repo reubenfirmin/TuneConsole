@@ -1,5 +1,5 @@
 {% extends "base.html" %}{% from "_macros.html" import sort_indicator %}{% block title %}{{ pl.title }} · TuneConsole{% endblock %}{% block page_class %}page-playlist{% endblock %}{% block body %}
-<div x-data="enrichPanel({{ pl.id }}, {{ 'true' if lastfm_configured else 'false' }}, {{ active_job.id if active_job else 0 }}, '{{ active_job.source if active_job else '' }}', null, {{ conflict_count }})"
+<div x-data="enrichPanel({{ pl.id|tojson }}, {{ active_job.id if active_job else 0 }}, '{{ active_job.source if active_job else '' }}', null, {{ conflict_count }})"
      x-init="rejoinIfActive()" @conflicts-count.window="conflictCount = $event.detail.count">
 <div class="artist-head pl-head library-hero release-hero{{ ' has-art' if pl.thumbnail }}">
   <span class="pl-art pl-art-strip" aria-hidden="true">
@@ -19,7 +19,7 @@
         <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d="M7 3.5v17l14-8.5Z"/></svg>
       </a>
       {% else %}
-      <button type="button" class="playlist-play btn-primary" x-data='playlistPlayback({{ pl.ytm_playlist_id|tojson }})'
+      <button type="button" class="playlist-play btn-primary" x-data='playlistPlayback({{ pl.provider_playlist_id|tojson }})'
               @bridge-status.window="apply($event.detail)" @click="play()" :disabled="busy" :aria-busy="busy"
               :title="playing ? 'Pause on YouTube Music' : 'Play on YouTube Music'"
               :aria-label="playing ? 'Pause on YouTube Music' : 'Play on YouTube Music'"
@@ -31,6 +31,7 @@
       {% endif %}
       {% if show_playlist_radio %}
       <a class="playlist-radio" href="/?radio_playlist={{ pl.id }}#radio"
+         {% if pl.id is none %}inert{% endif %}
          title="Start radio from this playlist" aria-label="Start radio from this playlist">
         <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor"
              stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -44,7 +45,7 @@
       </p>
     </div>
   </div>
-  <div class="head-tools" aria-label="Playlist tools">
+  <div class="head-tools" aria-label="Playlist tools"{% if pl.id is none %} inert{% endif %}>
         <a class="head-icon" href="/playlist/{{ pl.id }}/share.txt" download="{{ pl.title }}.txt"
            title="Share: download one song URL per line as a .txt" aria-label="Share playlist">
           <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor"
@@ -78,17 +79,22 @@
   <span class="enrich-status" x-text="status"></span>
 </div>
 
-<div x-data="rowSort({{ pl.id }})" x-init="$nextTick(() => initSortable())">
+<div x-data="rowSort({{ pl.id|tojson }})"
+     @app-page-leaving.window="saveRecovery($event.detail?.state)"
+     @app-page-changed.window="restoreRecovery($event.detail?.state)"{% if pl.id is not none %} x-init="$nextTick(() => initSortable())"{% endif %}>
 {% if position_pending %}
 <div class="notice" role="status">
   Tracks added. Their placement after the original song on YouTube is still pending.
   TuneConsole will retry during the next library refresh.
   <button type="button" class="btn-ghost btn-sm" hx-post="/playlist/{{ pl.id }}/retry-placement"
-          hx-swap="none" hx-disabled-elt="this">Retry placement</button>
+          hx-swap="none" hx-disabled-elt="this"
+          @htmx:before-request.camel="placementStatus = ''"
+          @htmx:after-request.camel="if ($event.detail.xhr.status < 200 || $event.detail.xhr.status >= 300) placementStatus = 'Placement is still pending. Review the playlist before trying again.'">Retry placement</button>
+  <span x-show="placementStatus" x-text="placementStatus"></span>
 </div>
 {% endif %}
 <div class="card library-table-card">
-  <table class="track-table{{ ' is-lm' if pl.ytm_playlist_id == 'LM' }}">
+  <table class="track-table{{ ' is-lm' if pl.provider_playlist_id == 'LM' }}">
     <thead><tr>
       <th class="num col-thumb">#</th>
       <th class="col-thumb col-artwork"></th>
@@ -112,28 +118,6 @@
 </div>
 <datalist id="genrelist">{% for g in genres %}<option value="{{ g }}"></option>{% endfor %}</datalist>
 
-  <!-- Last.fm API key modal -->
-  <template x-teleport="body">
-    <div class="modal-backdrop" x-show="keyModal" x-cloak x-transition.opacity
-         @click="keyModal = false" @keydown.escape.window="keyModal = false">
-      <div class="modal" @click.stop x-transition.scale.origin.center>
-        <h3>Last.fm API key</h3>
-        <p>Last.fm has dense genre tags. Enrichment needs a free API key. Create one at
-           <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">last.fm/api</a>
-           and paste the <strong>API key</strong> here. It's stored locally.</p>
-        <input class="modal-input" type="text" x-model="keyValue" placeholder="API key"
-               autocomplete="off" spellcheck="false" @keydown.enter="saveKey()"
-               x-ref="lfkey" x-init="$watch('keyModal', v => v && $nextTick(() => $refs.lfkey.focus()))">
-        <p class="notice err" x-show="keyErr" x-text="keyErr"></p>
-        <div class="modal-actions">
-          <button type="button" class="btn-ghost" @click="keyModal = false" :disabled="keyBusy">Cancel</button>
-          <button type="button" @click="saveKey()" :disabled="keyBusy"
-                  x-text="keyBusy ? 'Saving…' : 'Save & run'"></button>
-        </div>
-      </div>
-    </div>
-  </template>
-
   <!-- remove-track confirm modal -->
   <template x-teleport="body">
     <div class="modal-backdrop" x-show="rmOpen" x-cloak x-transition.opacity
@@ -142,10 +126,11 @@
         <h3>Remove track?</h3>
         <p>Remove <strong x-text="rmTitle"></strong> from this playlist? This changes the playlist on
            YouTube. You can re-add it later from search.</p>
-        <p class="notice err" x-show="rmErr" x-text="rmErr"></p>
+        <p class="muted" role="status" x-show="rmErr" x-text="rmErr"></p>
         <div class="modal-actions">
           <button type="button" class="btn-ghost" @click="rmOpen = false" :disabled="rmBusy">Cancel</button>
-          <button type="button" class="btn-danger" @click="confirmRemove()" :disabled="rmBusy"
+          <button type="button" class="btn-danger" x-ref="removeSubmit" @click="confirmRemove()" :disabled="rmBusy"
+                  @htmx:after-request.camel="removeFinished($event)"
                   x-text="rmBusy ? 'Removing…' : 'Remove'"></button>
         </div>
       </div>
@@ -155,25 +140,32 @@
   <!-- alternate-versions modal -->
   <template x-teleport="body">
     <div class="modal-backdrop" x-show="altOpen" x-cloak x-transition.opacity
-         @click="altOpen = false" @keydown.escape.window="altOpen = false">
-      <div class="modal modal-wide" @click.stop x-transition.scale.origin.center>
+         @click="closeAlternates()" @keydown.escape.window="closeAlternates()">
+      <div class="modal modal-wide" role="dialog" aria-label="Alternate versions" aria-modal="true"
+           @click.stop x-transition.scale.origin.center>
         <h3>Alternate versions <span class="muted" x-show="altTitle" x-text="'· ' + altTitle"></span></h3>
         <p class="muted" x-show="altLoading">Searching YouTube…</p>
-        {# htmx swaps the server-rendered results (checkboxes carrying each track's JSON) here #}
+        <p class="muted" role="status" x-show="altStatus" x-text="altStatus"></p>
+        {# Successful reads replace these server-rendered results; failures retain selections. #}
         <div id="alt-results"></div>
         <div class="modal-actions">
-          <button type="button" class="btn-ghost" @click="altOpen = false">Cancel</button>
+          <button type="button" class="btn-ghost" @click="closeAlternates()">Cancel</button>
+          <button type="button" class="btn-ghost" @click="findAlternates(altVid, altTitle)"
+                  :disabled="altLoading || altAdding || !altVid">Search again</button>
           {# include the checked results and add them; the server reloads the page with the new tracks #}
           <button type="button" hx-post="/playlist/{{ pl.id }}/add-tracks" hx-include="#alt-results"
-                  :disabled="altLoading">Add to playlist</button>
+                  hx-swap="none" hx-disabled-elt="this"
+                  @htmx:before-request.camel="altAdding = true; altStatus = ''"
+                  @htmx:after-request.camel="alternateAdded($event)"
+                  :disabled="altLoading || altAdding || !altHasResults">Add to playlist</button>
         </div>
       </div>
     </div>
   </template>
 </div>
-<section class="pl-suggest space-before"
+{% if pl.id is not none %}<section class="pl-suggest space-before"
          hx-get="/playlist/{{ pl.id }}/suggestions" hx-trigger="load" hx-swap="innerHTML">
   <p class="section-note">Finding tracks that fit…</p>
-</section>
+</section>{% endif %}
 </div>
 {% endblock %}

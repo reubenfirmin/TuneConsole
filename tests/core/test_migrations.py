@@ -2,6 +2,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 import pytest
@@ -10,26 +11,30 @@ from yt_playlist.core.migrations import Migration, MigrationError, migrate
 from yt_playlist.core.store import Store
 
 
+@contextmanager
 def connect(path):
-    conn = sqlite3.connect(path, timeout=2)
-    conn.execute('PRAGMA foreign_keys=ON')
-    return conn
+    with closing(sqlite3.connect(path, timeout=2)) as conn:
+        conn.execute('PRAGMA foreign_keys=ON')
+        with conn:
+            yield conn
 
 
 def test_takeout_coverage_upgrade_preserves_legacy_rows_without_inventing_authority():
     from yt_playlist.core.migrations.registry import MIGRATIONS
     store = Store(':memory:')
-    migrate(store.conn, registry=MIGRATIONS[:10])
-    store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'main','bridge',1)")
-    store.conn.execute('INSERT INTO history_snapshots(id,identity_id,taken_at) VALUES (1,1,100)')
-    store.conn.execute("INSERT INTO history_items(snapshot_id,identity_key) VALUES (1,'legacy')")
-    store.conn.commit()
-    store.init_schema()
-    row = store.conn.execute('SELECT identity_key,source FROM listening_observations').fetchone()
-    assert tuple(row) == ('legacy', 'unknown')
-    assert store.conn.execute('SELECT COUNT(*) FROM takeout_imports').fetchone()[0] == 0
-    store.init_schema()
-    assert store.conn.execute('SELECT COUNT(*) FROM listening_observations').fetchone()[0] == 1
+    with closing(store.conn):
+        migrate(store.conn, registry=MIGRATIONS[:10])
+        store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'main','bridge',1)")
+        store.conn.execute('INSERT INTO history_snapshots(id,identity_id,taken_at) VALUES (1,1,100)')
+        store.conn.execute("INSERT INTO history_items(snapshot_id,identity_key) VALUES (1,'legacy')")
+        store.conn.commit()
+        migrate(store.conn, registry=MIGRATIONS)
+        store.init_schema()
+        row = store.conn.execute('SELECT identity_key,source FROM listening_observation_subjects').fetchone()
+        assert tuple(row) == ('legacy', 'unknown')
+        assert store.conn.execute('SELECT COUNT(*) FROM takeout_imports').fetchone()[0] == 0
+        store.init_schema()
+        assert store.conn.execute('SELECT COUNT(*) FROM listening_observations').fetchone()[0] == 1
 
 
 def test_early_fixture_preserves_ids_without_backups(tmp_path):
@@ -37,18 +42,21 @@ def test_early_fixture_preserves_ids_without_backups(tmp_path):
     with connect(path) as conn:
         conn.executescript((Path(__file__).parents[1] / 'fixtures/migrations/early_core.sql').read_text())
     store = Store(path)
-    assert not hasattr(store, 'tracks')
-    store.init_schema()
-    assert store.settings.get_setting('user-setting') == 'keep me'
-    assert tuple(store.conn.execute('SELECT id,orig_title,orig_artist FROM tracks').fetchone()) == (17, 'Original title', 'Artist')
-    assert tuple(store.conn.execute('SELECT * FROM playlist_tracks').fetchone()) == (8,17,0)
-    before = list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations')))
-    repo = store.tracks
-    store.init_schema()
-    assert store.tracks is repo
-    assert list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations'))) == before
-    assert not (tmp_path / 'backups').exists()
-    assert store.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+    with closing(store.conn):
+        assert not hasattr(store, 'tracks')
+        from yt_playlist.core.migrations.registry import MIGRATIONS
+        migrate(store.conn, registry=MIGRATIONS)
+        store.init_schema()
+        assert store.settings.get_setting('user-setting') == 'keep me'
+        assert tuple(store.conn.execute('SELECT id,orig_title,orig_artist FROM tracks').fetchone()) == (17, 'Original title', 'Artist')
+        assert tuple(store.conn.execute('SELECT * FROM playlist_tracks').fetchone()) == (8,17,0)
+        before = list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations')))
+        repo = store.tracks
+        store.init_schema()
+        assert store.tracks is repo
+        assert list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations'))) == before
+        assert not (tmp_path / 'backups').exists()
+        assert store.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
 
 
 def test_failure_rolls_back_ddl_data_and_version_then_resumes(tmp_path):
@@ -111,14 +119,14 @@ def test_upgrade_rolls_back_and_commits_without_a_backup_destination(tmp_path, j
 
 
 def test_rejects_caller_transaction_without_committing_or_rolling_it_back():
-    conn = connect(':memory:')
-    conn.execute('CREATE TABLE data (v INTEGER)')
-    conn.execute('INSERT INTO data VALUES (1)')
-    with pytest.raises(MigrationError, match='outstanding'):
-        migrate(conn)
-    assert conn.in_transaction
-    conn.rollback()
-    assert not conn.execute('SELECT * FROM data').fetchall()
+    with connect(':memory:') as conn:
+        conn.execute('CREATE TABLE data (v INTEGER)')
+        conn.execute('INSERT INTO data VALUES (1)')
+        with pytest.raises(MigrationError, match='outstanding'):
+            migrate(conn)
+        assert conn.in_transaction
+        conn.rollback()
+        assert not conn.execute('SELECT * FROM data').fetchall()
 
 
 def test_frozen_like_repair_preserves_published_entitlement_and_stamp(legacy_store):
@@ -145,6 +153,7 @@ def test_frozen_like_repair_preserves_published_entitlement_and_stamp(legacy_sto
     stamp = s.settings.get_setting('like_ratchet_repaired')
     assert '3 once-ever graduation stamp(s)' in stamp
     before = s.rec_model.weight_records()
+    migrate(s.conn, registry=MIGRATIONS)
     s.init_schema();s.init_schema()
     assert s.settings.get_setting('like_ratchet_repaired') == stamp
     assert s.rec_model.weight_records() == before
@@ -158,12 +167,12 @@ def test_frozen_like_repair_preserves_published_entitlement_and_stamp(legacy_sto
     "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT NOT NULL,applied_at REAL NOT NULL); INSERT INTO schema_migrations VALUES (2,'gap',1)",
 ])
 def test_invalid_database_unchanged(sql):
-    conn = connect(':memory:')
-    conn.executescript(sql)
-    before = list(conn.iterdump())
-    with pytest.raises(MigrationError):
-        migrate(conn)
-    assert list(conn.iterdump()) == before
+    with connect(':memory:') as conn:
+        conn.executescript(sql)
+        before = list(conn.iterdump())
+        with pytest.raises(MigrationError):
+            migrate(conn)
+        assert list(conn.iterdump()) == before
 
 
 def test_competing_startups_apply_once(tmp_path):
@@ -218,17 +227,19 @@ migrate(c,registry=[Migration(1,'first',lambda c,x: None),Migration(2,'second',i
 
 def test_fresh_and_current_create_no_backup(tmp_path):
     store = Store(tmp_path / 'fresh.db')
-    store.init_schema()
-    store.init_schema()
-    assert not (tmp_path / 'backups').exists()
+    with closing(store.conn):
+        store.init_schema()
+        store.init_schema()
+        assert not (tmp_path / 'backups').exists()
 
 
 def test_corrupted_versioned_schema_is_not_silently_repaired(tmp_path):
     store = Store(tmp_path / 'state.db')
-    store.init_schema()
-    store.conn.execute('DROP TABLE rec_mode_picks')
-    with pytest.raises(MigrationError, match='rec_mode_picks'):
+    with closing(store.conn):
         store.init_schema()
+        store.conn.execute('DROP TABLE rec_mode_picks')
+        with pytest.raises(MigrationError, match='rec_mode_picks'):
+            store.init_schema()
 
 
 @pytest.mark.parametrize('version', [8, 9])
@@ -248,15 +259,20 @@ def test_installed_catalog_upgrades_with_original_trigger_without_backups(tmp_pa
         conn.execute("INSERT INTO rec_vectors VALUES ('song|artist',x'01020304')")
         conn.commit()
         raw = conn.execute('SELECT id,raw_identity_key,video_id,played_at,source,is_generated FROM play_events ORDER BY id').fetchall()
+        # Historical conversion is an explicit offline operation. Normal
+        # startup retains supported installed owners instead of replaying it.
+        conn.row_factory = sqlite3.Row
+        migrate(conn, registry=MIGRATIONS)
     store = Store(path)
-    store.init_schema()
-    assert list(map(tuple, store.conn.execute('SELECT id,raw_identity_key,video_id,played_at,source,is_generated FROM play_events ORDER BY id'))) == raw
-    subjects = list(map(tuple, store.conn.execute('SELECT identity_key,recording_id FROM play_events ORDER BY id')))
-    assert subjects == [('song|artist',1)] * 4 + [('@unresolved-video:unknown',None)]
-    assert tuple(store.conn.execute('SELECT * FROM rec_weights').fetchone()) == ('genre:house',1.4,1)
-    assert not store.conn.execute('SELECT * FROM rec_vectors').fetchall()
-    store.init_schema()
-    assert list(map(tuple, store.conn.execute('SELECT identity_key,recording_id FROM play_events ORDER BY id'))) == subjects
-    assert not (tmp_path / 'backups').exists()
-    assert store.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-    store.conn.close()
+    with closing(store.conn):
+        store.init_schema()
+        assert list(map(tuple, store.conn.execute('SELECT p.id,p.raw_identity_key,p.video_id,p.played_at,s.source,p.is_generated FROM play_events p JOIN play_event_sources s ON s.event_id=p.id ORDER BY p.id'))) == raw
+        subjects = list(map(tuple, store.conn.execute('SELECT identity_key,recording_id FROM play_event_subjects ORDER BY id')))
+        assert subjects == [('song|artist',1)] * 4 + [('@unresolved-video:unknown',None)]
+        weights = store.rec_model.weight_records()
+        assert weights['genre:house']['weight']==1.4 and weights['genre:house']['updated_at']==1
+        assert not store.rec_model.get_rec_vectors()
+        store.init_schema()
+        assert list(map(tuple, store.conn.execute('SELECT identity_key,recording_id FROM play_event_subjects ORDER BY id'))) == subjects
+        assert not (tmp_path / 'backups').exists()
+        assert store.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'

@@ -5,6 +5,7 @@ import re
 import uuid
 from yt_playlist.core.activity import activity_for
 from yt_playlist.core.accounts import catalog_client,main_client
+from yt_playlist.core.action_errors import ActionInputError
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
@@ -12,8 +13,8 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from yt_playlist.library.album_fetch import fetch_album, is_upload_album, shareable_album_tracks
 from yt_playlist.library.album_catalog import remember_album
-from yt_playlist.providers import enrichment, lastfm, waterfall
-from yt_playlist.rec import album_choices, album_notes, choice_evidence
+from yt_playlist.providers import enrichment, waterfall
+from yt_playlist.rec import album_choices, album_notes, choice_evidence, home_cache
 from yt_playlist.util.duration import parse_duration
 from yt_playlist.util.thumbnails import best_thumb, is_placeholder_art
 
@@ -107,27 +108,20 @@ def build(ctx) -> APIRouter:
         # (privately owned release) is yours by definition, and can never appear in saved_albums
         # because saving means liking an audioPlaylistId, which an upload has none of.
         in_library = saved or upload
-        # The editable "folded-in library" table is only for library albums (whose full track list has
-        # been materialized for enrichment). For any other album, regular sync may still have stamped
-        # one incidental track with this album_browse_id (because it's in one of your playlists). That
-        # partial subset must NOT shadow the full live-fetched album. Count it for
-        # the library-status note, but only display it for saved or uploaded albums.
+        # Capture metadata for library editing independently of occurrence count:
+        # repeats and unavailable positions are not extra catalog members.
+        if not getattr(store, 'activity_paused', False) and in_library and album:
+            for t in album.get('tracks') or []:
+                if t.get('video_id') and t.get('title'):
+                    store.tracks.upsert_track(t['video_id'], t['title'],
+                        t.get('artist') or album.get('artist') or '', album.get('title') or '',
+                        parse_duration(t.get('duration')), album_browse_id=browse_id,
+                        thumbnail=album.get('thumbnail'))
+        # Complete publication owns the displayed sequence for every release.
+        # Before publication, incidental library evidence cannot shadow a live response.
         library_tracks = store.charts.album_tracks_detail(browse_id) if browse_id else []
         tracks = library_tracks if in_library else []
-        # Fold a library album's tracks in ON DEMAND (using the tracks we just fetched live), so
-        # enrichment is available the moment you open it, no waiting for a full sync. Fold whenever
-        # the live album has more than we hold: an upload typically arrives as a PARTIAL subset (sync
-        # stamps only the tracks that appear in a playlist), and a `not tracks` guard would skip the
-        # fold entirely for it, leaving 3 of 17 rows on screen.
-        if (not getattr(store, 'activity_paused', False)
-                and in_library and album and album.get("tracks") and len(tracks) < len(album["tracks"])):
-            for t in album["tracks"]:
-                if t.get("video_id") and t.get("title"):
-                    store.tracks.upsert_track(t["video_id"], t["title"], t.get("artist") or album.get("artist") or "",
-                                       album.get("title") or "", parse_duration(t.get("duration")),
-                                       album_browse_id=browse_id, thumbnail=album.get("thumbnail"))
-            tracks = store.charts.album_tracks_detail(browse_id)
-        complete = store.collection.is_album_tracklist_complete(browse_id)
+        complete = store.collection.has_published_album_tracklist(browse_id)
         fallback_tracks = library_tracks if complete else tracks if not inline else []
         if fallback_tracks and not (album and album.get("title")):
             meta = next((a for a in store.collection.get_saved_albums() if a["browse"] == browse_id), {})
@@ -136,13 +130,15 @@ def build(ctx) -> APIRouter:
                      "thumbnail": meta.get("thumbnail") or fallback_tracks[0]["thumbnail"], "tracks": fallback_tracks}
         # Unsaved releases use the same row component. Merge known metadata by exact
         # upload while retaining the full fetched sequence and keeping library ownership intact.
-        table_tracks = tracks if album else []
-        if album and (not in_library or getattr(store, 'activity_paused', False)):
+        table_tracks = (library_tracks if complete else tracks) if album else []
+        if album and not complete and (not in_library or getattr(store, 'activity_paused', False)):
             known = {t['video_id']: t for t in store.charts.video_tracks_detail(
                 [t['video_id'] for t in album.get('tracks') or [] if t.get('video_id')])}
             table_tracks = [{
                 **known.get(t.get('video_id'), {}),
-                'video_id': t.get('video_id') or '', 'title': t.get('title') or '',
+                'video_id': t.get('video_id') if t.get('title') else '',
+                'title': t.get('title') or 'Unavailable track',
+                'available': known.get(t.get('video_id'), {}).get('available') if t.get('title') else 0,
                 'artist': t.get('artist') or album.get('artist') or '',
                 'album': album['title'], 'album_browse': browse_id,
                 'thumbnail': t.get('thumbnail') or album.get('thumbnail'),
@@ -152,20 +148,20 @@ def build(ctx) -> APIRouter:
                 'liked': known.get(t.get('video_id'), {}).get('liked', False),
                 'plays': known.get(t.get('video_id'), {}).get('plays'),
             } for t in album.get('tracks') or []]
+        if album and complete:
+            album = {**album, 'tracks': table_tracks}
         cover, mosaic = cover_and_mosaic(album, tracks)
         editorial = {'browse_id': browse_id, 'title': (album or {}).get('title'),
                      'artist': (album or {}).get('artist')}
         if album and not inline and not getattr(store, 'activity_paused', False):
-            store.rec_proposals.request_album_notes([editorial], ctx.now_fn(), visible=True)
+            store.album_notes.request([editorial], ctx.now_fn(), visible=True)
             if ctx.rec_worker:
                 ctx.rec_worker.trigger_home_refresh()
-        prepared = store.rec_proposals.get_proposals("home_prepared") or {}
+        prepared = home_cache.read(store, 'home_prepared') or {}
         anchor = next((a for a in prepared.get("album_choices", []) if a["browse_id"] == browse_id), None)
         companion = []
         if not inline and anchor and anchor.get("companion"):
-            from yt_playlist.rec.home_prepared import _eligible_protos
-            proposals = _eligible_protos(store, [{"lane": "wheelhouse", "tracks": anchor["companion"]}], ctx.now_fn())
-            companion = proposals[0]["tracks"] if proposals else []
+            companion = anchor["companion"]
         companion_recipe = None
         if companion:
             oid = None
@@ -187,10 +183,10 @@ def build(ctx) -> APIRouter:
             "album_feedback": album_choices.feedback_state(store, [browse_id]).get(browse_id, {}).get("kind"),
             "companion": companion, "companion_recipe": companion_recipe,
             "is_upload": upload, "in_library": in_library,
-            "library_track_count": len({t["track_id"] for t in library_tracks}),
+            "library_track_count": len({t["track_id"] for t in library_tracks if t.get('track_id') is not None}),
             "cover": cover, "mosaic": mosaic,
             "genres": sorted(set(store.genres.get_genre_whitelist()) | set(store.genres.all_genres()), key=str.lower),
-            "lastfm_configured": lastfm.api_key(store) is not None,
+            "active_job": ctx.jobs.find_active_album(browse_id),
             "conflict_count": store.enrichment_reports.conflict_count_for_album(browse_id)}
 
     @router.post("/album/feedback")
@@ -199,8 +195,11 @@ def build(ctx) -> APIRouter:
         try:
             album_choices.set_feedback(store, (form.get("browse_id") or "").strip(),
                 form.get("kind"), ctx.now_fn(), form.get("opportunity_id"))
-        except ValueError as exc:
+        except ActionInputError as exc:
             return _toast(request, str(exc))
+        except Exception:
+            ctx.logger.exception("Album feedback failed")
+            return Response(status_code=503, headers={"HX-Reswap": "none"})
         if ctx.rec_worker:
             ctx.rec_worker.trigger_home_refresh()
         return Response(status_code=204)
@@ -235,19 +234,17 @@ def build(ctx) -> APIRouter:
                              "tracks": [{"video_id": track['videoId'],
                                          'key': store.tracks.identity_key_for_video(track['videoId'])}
                                         for track in tracks if track.get('videoId')]})
-                store.settings.set_setting("listening_album_pending", json.dumps({"opportunity_id": opportunity,
-                    "browse": browse, "playlist": playlist, "at": ctx.now_fn(), 'action_id': action_id,
-                    'videos': [track['videoId'] for track in tracks if track.get('videoId')]}))
+                store.rec_ledger.remember_album_playback_context({"opportunity_id":opportunity,
+                    "browse":browse,"playlist":playlist,"at":ctx.now_fn(),'action_id':action_id,
+                    'videos':[track['videoId'] for track in tracks if track.get('videoId')]})
             ctx.bridge.send_control({"type": "navigate", "url":
                 "https://music.youtube.com/watch?v=" + quote(video, safe="") + "&list=" + quote(playlist, safe="")},
                 intent=intent)
         try:
             await activity_for(ctx).to_thread(start)
-        except ValueError as exc:
-            return _toast(request, str(exc))
         except Exception:
             ctx.logger.exception("Album playback failed: %s", browse)
-            return _toast(request, "Couldn’t start the album. Check the extension connection and try again.")
+            return Response(status_code=503, headers={"HX-Reswap": "none"})
         return Response(status_code=204)
 
     @router.get("/album/{browse}/share.txt")
@@ -268,10 +265,10 @@ def build(ctx) -> APIRouter:
                 vids = [track["videoId"] for track in tracks]
                 if not getattr(store, 'activity_paused', False):
                     remember_album(store, browse, a)
-            except ValueError as exc:
+            except ActionInputError as exc:
                 problem = str(exc)
             except Exception:
-                ctx.logger.info("album share fetch failed for %r (non-fatal)", browse)
+                ctx.logger.info("album share fetch failed for %r (non-fatal)", browse, exc_info=True)
             if not vids:
                 raise HTTPException(status_code=503, detail=problem)
         lines = [f"https://music.youtube.com/watch?v={v}" for v in vids]
@@ -322,34 +319,41 @@ def build(ctx) -> APIRouter:
             return _toast(request, "No album to create from.")
         try:
             res = await activity_for(ctx).to_thread(ctx.ops().create_playlist_from_album, browse_id, name)
-        except ValueError as e:
+        except ActionInputError as e:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001
             ctx.logger.exception("create playlist from album %r failed", browse_id)
-            return _toast(request, "Couldn't create the playlist. See the log.")
+            return Response(status_code=503, headers={"HX-Reswap": "none"})
         return Response(status_code=200, headers={"HX-Redirect": f"/playlist/{res['db_pid']}"})
 
     @router.post("/album/{browse}/enrich")
     def album_enrich(browse: str):
         """Run the enrichment waterfall over a saved album's folded-in tracks, same harness and SSE
         stream as playlist enrichment, scoped by album_browse instead of a playlist."""
-        job = ctx.jobs.create()
-        job.album_browse = browse
-        job.source = "waterfall"
-        pending = store.tracks.album_tracks_for_waterfall(browse)
+        job, created = ctx.jobs.create_or_rejoin_album(browse)
+        if not created:
+            return JSONResponse({"job_id": job.id})
 
         def run():
             try:
+                from yt_playlist.web.jobs import record_enrichment_progress
+                pending = store.tracks.album_tracks_for_waterfall(browse)
                 waterfall.run_waterfall(store, pending, enrichment.load_config(store),
-                                        on_progress=job.events.append)
+                                        on_progress=lambda event: record_enrichment_progress(ctx, job, event))
             except Exception as e:  # noqa: BLE001
+                ctx.logger.exception("Album enrichment job %s failed", job.id)
                 detail = str(e) or type(e).__name__
                 job.error = detail
                 job.events.append({"type": "err", "text": f"enrichment failed: {detail}"})
             finally:
                 job.done = True
 
-        activity_for(ctx).start_thread(run)
+        try:
+            activity_for(ctx).start_thread(run)
+        except BaseException as exc:
+            job.error = str(exc) or type(exc).__name__
+            job.done = True
+            raise
         return JSONResponse({"job_id": job.id})
 
     @router.get("/album/{browse}/conflicts")

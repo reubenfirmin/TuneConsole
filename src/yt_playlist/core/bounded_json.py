@@ -5,6 +5,7 @@ from bounded subtrees in Python, allowing other threads and cancellation between
 them. Scalar strings remain atomic; their size does not multiply object creation.
 """
 import json
+import math
 import re
 
 from yt_playlist.core.activity import check_cancellable_work
@@ -13,11 +14,21 @@ CHUNK_CHARS = 64 * 1024
 _SPACE = re.compile(r'[ \t\r\n]*')
 
 
+def _nonfinite(value):
+    raise ValueError('Non-finite number in prepared output')
+
+
+def _finite_float(value):
+    parsed = float(value)
+    return parsed if math.isfinite(parsed) else _nonfinite(value)
+
+
 class _Reader:
-    def __init__(self, encoded):
+    def __init__(self, encoded, *, finite=False):
         self.text = encoded
         self.position = 0
-        self.decoder = json.JSONDecoder()
+        self.decoder = (json.JSONDecoder(parse_float=_finite_float, parse_constant=_nonfinite)
+                        if finite else json.JSONDecoder())
         self.chunk = ''
         self.chunk_start = 0
 
@@ -102,17 +113,18 @@ class _Reader:
             self.space()
 
 
-def loads(encoded, *, keys=None):
+def loads(encoded, *, keys=None, finite=False):
     """Read complete JSON, optionally retaining only requested top-level fields.
 
     Unselected values are still parsed and validated, without retaining their
     large graphs. Small documents use the ordinary fast path.
     """
     if not isinstance(encoded, str) or len(encoded) <= CHUNK_CHARS:
-        value = json.loads(encoded)
+        value = (json.loads(encoded, parse_float=_finite_float, parse_constant=_nonfinite)
+                 if finite else json.loads(encoded))
         return ({key: item for key, item in value.items() if key in keys}
                 if keys is not None and isinstance(value, dict) else value)
-    reader = _Reader(encoded)
+    reader = _Reader(encoded, finite=finite)
     result = reader.value(keys=keys)
     reader.space()
     if reader.position != len(encoded):

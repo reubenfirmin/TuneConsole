@@ -9,9 +9,10 @@ def test_upgrade_retains_catalog_and_accepts_account_scoped_playback_aliases(tmp
     try:
         migrate(store.conn, registry=MIGRATIONS[:47])
         store._bind_repositories()
-        identity = store.identities.upsert_identity('Main', 'ref', None, True)
+        identity = store.accounts.upsert_account('Main', 'ref', None, True)
         store.tracks.upsert_track('original', 'Song', 'Artist', '', 100)
         before = tuple(store.conn.execute('SELECT * FROM youtube_items').fetchone())
+        migrate(store.conn, registry=MIGRATIONS)
         store.init_schema()
         assert tuple(store.conn.execute('SELECT * FROM youtube_items').fetchone()) == before
         assert store.tracks.playback_alternate(identity, 'original') is None

@@ -44,7 +44,8 @@ def load(store, now, schedule=lambda: None):
     paired, comparison = product_comparison.prepared(store, 'albums', epoch, now, existing=previous)
     if paired:
         payload = {**paired, 'context': {**paired['context'], 'comparison': comparison}}
-        if comparison != previous:
+        if (comparison != previous and not getattr(store, '_read_only', False)
+                and not getattr(store, 'activity_paused', False)):
             store.rec_proposals.put_proposals('model_album_assignment', {'epoch': epoch, 'comparison': comparison}, now)
     return payload
 
@@ -64,14 +65,20 @@ def prepare_cached(store, now):
             def calculate():
                 leans = transient.facet_leans(reader, now)
                 discoveries = discover.pick_discovered_albums(reader, 60, now, facet_leans=leans)
-                return {'built_at': now, 'items': prepare(reader, now, discoveries),
-                        'context': choice_evidence.freeze_context(reader,
-                            choice_evidence.model_context(reader, now, facet_leans=leans))}
+                items = prepare(reader, now, discoveries)
+                payload = {'built_at': now, 'items': items,
+                           'context': choice_evidence.freeze_context(reader,
+                               choice_evidence.model_context(reader, now, facet_leans=leans))}
+                if getattr(reader, '_recommendation_files', False):
+                    from yt_playlist.rec import recommendation_roots
+                    payload['recommendation_generations'] = recommendation_roots.from_options(
+                        [{'tracks': item.get('companion', [])} for item in items])
+                return payload
 
             payload = reader.memoized_read(('album-choices', 6, int(now // MAX_AGE_S)), calculate)
             encoded = json.dumps(payload, separators=(',', ':'))
             if not snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(
-                    encoded, payload['built_at'], surface=SURFACE),
+                    encoded, payload['built_at'], surface=SURFACE, input_revision=snapshot._changes),
                     allow_stale_tables=mode_surfaces.RANKING_CHURN_TABLES):
                 return None
             return payload
@@ -169,6 +176,7 @@ def prepare(store, now, discoveries):
         if album["classification"] == "discovery":
             album["classification"] = album['unsaved_classification']
     feedback = feedback_state(store, candidates)
+    genre_axes = store.genres.feature_axes(album.get('genre') for album in candidates.values())
     ranked, features, collab_features = [], [], []
     for album in candidates.values():
         if feedback.get(album["browse_id"], {}).get("kind") == "reject":
@@ -177,7 +185,7 @@ def prepare(store, now, discoveries):
             album = {**album, "classification": "known"}
         rows = [index[key] for key in album.get("keys", []) if key in index]
         vector = (matrix[rows].mean(0) if rows else
-                  content_model.encode_content(model, album.get("genre"), album.get("year"), {}) if model else None)
+                  content_model.encode_content(model, album.get("genre"), album.get("year"), {},genre_axes=genre_axes) if model else None)
         collab_rows = [collab_index[key] for key in album.get('keys', []) if key in collab_index]
         collab_vector = collaborative[collab_rows].mean(0) if collab_rows else None
         def unit(value):
@@ -264,14 +272,28 @@ def prepare(store, now, discoveries):
             for i in order if i in frontier]
 
 
-def menu(items, controls, epoch=0, genres=(), *, exclude=()):
+def selection(store, items, now, controls, epoch=0, genres=(), *, exclude=(), current=None):
+    """Reconcile the prepared frontier and its genre filter in one owned view."""
+    if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
+        with store.read_view() as reader:
+            return selection(reader, items, now, controls, epoch, genres,
+                             exclude=exclude, current=current)
+    pool = [album for album in eligible(store, items, now) if album['browse_id'] != current]
+    axes = store.genres.feature_axes(item.get('genre') for item in pool) if genres else None
+    chosen, policy = menu(pool, controls, epoch, genres, exclude=exclude, genre_axes=axes)
+    return pool, chosen, policy
+
+
+def menu(items, controls, epoch=0, genres=(), *, exclude=(), genre_axes=None):
     """Allocate an explicit observational menu from already scored options.
 
     Discovery and fit are distinct dimensions. A missing discovery bucket stays a
     recorded coverage gap. Positions rotate; this is not randomized causal exposure.
     """
     from yt_playlist.util import genre_map
-    candidates = [item for item in items if not genres or genre_map.family(item.get('genre') or '') in genres]
+    candidates = [item for item in items if not genres or
+                  (genre_axes.get(item.get('genre'), ('', None))[0] if genre_axes is not None
+                   else genre_map.family(item.get('genre') or '')) in genres]
     excluded = set(exclude)
     novel = lambda item: item.get('classification') in {'discovery', 'familiar_artist'}
     novelty = controls['novelty']
@@ -331,6 +353,8 @@ def menu(items, controls, epoch=0, genres=(), *, exclude=()):
 def _companions(store, albums, features, matrix, index):
     """Bounded worker-only album anchors over existing prepared mix candidates."""
     from yt_playlist.rec import home_cards, rec_params
+    if getattr(store, '_recommendation_files', False):
+        return _stored_companions(store, albums, features, matrix, index)
     bundles = store.rec_proposals.get_proposals("mode_bundles") or {}
     pool = {track["key"]: track for tracks in bundles.get("all", {}).values()
             for track in tracks if track.get("key") in index and track.get("video_id")}
@@ -357,13 +381,64 @@ def _companions(store, albums, features, matrix, index):
     return results
 
 
+def _stored_companions(store, albums, features, matrix, index):
+    """Keep the best capped frontier while visiting complete prepared membership.
+
+    There is one diversity partition (artist), so a discarded row can never
+    become useful after a better row arrives. Each album retains at most twelve
+    candidates; each matrix multiplication uses at most one metadata page.
+    Equal similarities use canonical recording order, independent of pool reuse.
+    """
+    from yt_playlist.core.activity import WorkBudgetExceeded, check_cancellable_work
+    from yt_playlist.rec import home_cards
+    if len(albums) > 24:
+        raise WorkBudgetExceeded('Album companion selection exceeds its frontier budget')
+    if not getattr(store, '_read_only', False):
+        with store.read_view() as reader:
+            return _stored_companions(reader, albums, features, matrix, index)
+    head = store.recommendations.head('home')
+    if head is None or not albums:
+        return [[] for _ in albums]
+    cap = int(rec_params.get_param(store, 'modes_artist_cap'))
+    own = [set(album.get('keys') or []) for album in albums]
+    selected, after = [[] for _ in albums], 0
+    while True:
+        check_cancellable_work()
+        page = store.recommendations.recording_metadata_page(
+            'home', generation=head['id'], mode_key='all', after=after, limit=128)
+        tracks = [track for track in page['tracks'] if track['key'] in index]
+        if tracks:
+            vectors = matrix[[index[track['key']] for track in tracks]]
+            vectors = vectors / (np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-9)
+            scores = features @ vectors.T
+            for album_position, row in enumerate(scores):
+                for track, score in zip(tracks, row):
+                    if track['key'] in own[album_position]:
+                        continue
+                    ordered = sorted([*selected[album_position], (float(score), track)],
+                                     key=lambda pair: (-pair[0], pair[1]['recording_id']))
+                    artists, kept = Counter(), []
+                    for candidate in ordered:
+                        artist = (candidate[1].get('artist') or '').casefold()
+                        if artists[artist] < cap:
+                            artists[artist] += 1
+                            kept.append(candidate)
+                        if len(kept) == home_cards.PROTO_SIZE:
+                            break
+                    selected[album_position] = kept
+        after = page['after']
+        if page['exhausted']:
+            break
+    return [[track for _score, track in rows] for rows in selected]
+
+
 def eligible(store, items, now):
     """Recheck current explicit constraints without synchronous model work."""
-    from yt_playlist.util import genre_map
     muted = store.rec_model.muted_album_ids([album['browse_id'] for album in items], now)
     weights = store.rec_model.get_weights(now=now)
     feedback = feedback_state(store, [album['browse_id'] for album in items])
     saved = store.collection.saved_album_ids(browse_ids=[album['browse_id'] for album in items])
+    axes = store.genres.feature_axes([album.get('genre') for album in items])
     result = []
     for album in items:
         kind = feedback.get(album["browse_id"], {}).get("kind")
@@ -372,8 +447,9 @@ def eligible(store, items, now):
         if album['browse_id'] in muted:
             continue
         genre = album.get("genre")
-        if genre and (weights.get("genre:" + genre_map.family(genre), 1) == 0
-                      or weights.get("genre:" + (genre_map.subgenre(genre) or ""), 1) == 0):
+        family, subgenre = axes.get(genre, (None, None))
+        if genre and (weights.get("genre:" + (family or ""), 1) == 0
+                      or weights.get("genre:" + (subgenre or ""), 1) == 0):
             continue
         # Reconcile mutable collection/feedback state over the bounded prepared
         # frontier. Preserve the scored object and already-issued evidence unchanged.

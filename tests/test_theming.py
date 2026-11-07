@@ -288,9 +288,11 @@ def test_composed_launch_surfaces_have_one_shared_console_heading(template, stat
             if self.depth:
                 self.text.append(data)
 
-    source = (WEB / 'templates' / template).read_text()
-    assert '{% include "_partials/launch_loader.html" %}' in source
+    # The interstitial composes the shared loader through mix_launch_loader.
+    # Inspect the rendered composition so wrapper partials retain this check.
+    from yt_playlist.web.theme import mix_launch_tokens
     env = Environment(loader=FileSystemLoader(WEB / 'templates'), autoescape=True)
+    env.globals['mix_launch_tokens'] = mix_launch_tokens
     markup = LoaderMarkup()
     markup.feed(env.get_template(template).render(radio_bootstrap={}, tv_max_minutes=60))
     assert markup.loaders == 1

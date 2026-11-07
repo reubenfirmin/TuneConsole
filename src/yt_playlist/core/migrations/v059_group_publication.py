@@ -67,11 +67,13 @@ def apply(conn, context):
     conn.execute('DROP TABLE old_group_assignments')
 
 
-def validate(conn):
+def validate(conn, *, replaced=frozenset()):
     from .current import _tokens
     from .runner import MigrationError
     for sql in statements():
         name = sql.split()[2]
+        if name in replaced:
+            continue
         row = conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone()
         if row is None or _tokens(row[0]) != _tokens(sql):
             raise MigrationError(f'Incompatible group publication structure: {name}')

@@ -6,9 +6,9 @@ import sqlite3
 import numpy as np
 import pytest
 
-from experiments.audio_lab_tools import robust_vibes as robust, semisupervised_vibes as semi, train_vibes as trainer
+from experiments.audio_lab_tools.training import robust_vibes as robust, semisupervised_vibes as semi, train_vibes as trainer
 from tests.test_audio_vibe_model import examples, excerpts
-from yt_playlist.rec import audio_vibe_model as model, audio_vibe_preview as heuristic
+from yt_playlist.rec import audio_vibe_model as model, audio_vibe_prediction as heuristic
 
 
 def unlabeled_examples():
@@ -95,16 +95,18 @@ def test_outer_song_features_and_answers_cannot_change_graph_or_fitted_model(mon
         return predict(learned, held_out, training_songs)
 
     monkeypatch.setattr(robust, 'predict', observe)
-    before = robust.train(records, candidates=candidates, inner_folds=2, unlabeled_examples=pool)[1]
+    _, before, _ = robust.outer_fold(records, records[-1], candidates=candidates,
+                                     inner_folds=2, unlabeled_examples=pool)
     original = fitted[:]; fitted.clear()
     changed = deepcopy(records)
     changed[-1]['labels'] = ['release']
     changed[-1]['values'] = [1e9] * len(model.FEATURES)
     changed[-1]['subgenre'] = 'detroit techno'
-    after = robust.train(changed, candidates=candidates, inner_folds=2, unlabeled_examples=pool)[1]
+    _, after, _ = robust.outer_fold(changed, changed[-1], candidates=candidates,
+                                    inner_folds=2, unlabeled_examples=pool)
     assert fitted == original
-    assert before['outer_selections'][-1] == after['outer_selections'][-1]
-    assert before['inputs']['unlabeled_songs'] == 6
+    assert before == after
+    assert original[0]['training']['manifold']['unlabeled_songs'] == 6
 
 
 def test_collection_reads_legacy_partial_unlabeled_captures_without_database_writes(store, tmp_path):

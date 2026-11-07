@@ -6,5 +6,5 @@ does not make it independent taste evidence. Bind the quarantine group parameter
 
 QUARANTINED_PLAYLIST_IDS_SQL = (
     "SELECT p.id FROM playlists p "
-    "JOIN quarantined_playlists g ON g.ytm=p.scope_ref WHERE g.name=?"
+    "JOIN quarantined_playlists g ON g.playlist_scope_id=p.playlist_scope_id WHERE g.name=?"
 )

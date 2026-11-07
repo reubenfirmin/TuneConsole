@@ -12,7 +12,7 @@ def test_source_waits_for_song_clock_and_rejects_stale_or_changed_sources():
         pytest.skip('Node.js required for source-clock checks')
     script = r"""
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
-const source=fs.readFileSync('extension/audio_preview_capture.js','utf8');
+const source=fs.readFileSync('extension/audio_capture.js','utf8');
 const event=()=>({listeners:[],addListener(fn){this.listeners.push(fn)},removeListener(fn){
   this.listeners=this.listeners.filter(value=>value!==fn)}});
 function fixture() {
@@ -22,7 +22,7 @@ function fixture() {
     ended:false,readyState:4,isConnected:true,playbackRate:1,
     captureStream(){captures++;throw Error('Reached native capture')}};
   const elements=[media];
-  const window={__tcAudioPreviewCapture:{revision:1,stop(){oldStopped++}},
+  const window={__tcAudioPreviewCapture:{revision:3,stop(){oldStopped++}},
     addEventListener(type,fn){listeners.set(type,fn)},removeEventListener(type){listeners.delete(type)}};
   const chrome={runtime:{id:'extension',onConnect:event()}};
   const context=vm.createContext({window,chrome,location:{origin:'https://music.youtube.com'},
@@ -31,6 +31,9 @@ function fixture() {
     setInterval(fn){const id=next++;timers.set(id,fn);return id},clearInterval(id){timers.delete(id)}});
   vm.runInContext(source,context);
   assert.equal(oldStopped,1,'on-demand injection upgrades the old capture controller');
+  assert.equal(window.__tcAudioCapture.revision,4);
+  assert.equal(window.__tcAudioPreviewCapture,window.__tcAudioCapture,
+    'the old revision marker prevents an already-open tab from duplicating capture');
   vm.runInContext(source,context);
   assert.equal(chrome.runtime.onConnect.listeners.length,1,'same-revision reinjection is idempotent');
   const port={name:'tc-audio-preview-capture',sender:{id:'extension'},onMessage:event(),
@@ -42,8 +45,12 @@ function fixture() {
     start(){port.onMessage.listeners[0]({type:'capture',id:'check',video_id:'song',not_before:30},port)},
     tick(ms,delta=ms/1000){now+=ms;media.currentTime+=delta;
       for(const fn of [...timers.values()])fn()},
-    running(){return window.__tcAudioPreviewCapture.inspect().running},
-    close(){window.__tcAudioPreviewCapture.stop()}};
+    running(){return window.__tcAudioCapture.inspect().running},
+    close(){window.__tcAudioCapture.stop();
+      assert.equal(window.__tcAudioCapture,undefined);
+      assert.equal(window.__tcAudioPreviewCapture,undefined);
+      assert.equal(chrome.runtime.onConnect.listeners.length,0);
+      assert.equal(timers.size,0)}};
 }
 const offset=fixture();offset.media.currentTime+=29;offset.status(29);offset.start();
 assert.equal(offset.captures,0,'raw media at 1721 seconds must not satisfy a 30-second song target');

@@ -19,7 +19,7 @@ def video(index, duration=200):
 
 @pytest.fixture
 def stream(store):
-    iid = store.identities.upsert_identity('TV account', 'cred', None, True)
+    iid = store.accounts.upsert_account('TV account', 'cred', None, True)
     items = [video(i) for i in range(60)]
     client = FakeClient(catalog={t['video_id']: {'videoId': t['video_id'], 'title': t['title'],
                         'artists': [{'name': t['artist']}]} for t in items})
@@ -32,7 +32,7 @@ def stream(store):
 def test_multiple_batches_pass_seven_and_replays_never_duplicate_writes(store, stream):
     iid, client, playlist, recipe, items = stream
     for index in range(7, 27, 4):
-        recipe = store.playlist_recipes.get_recipe(playlist.scope_ref)
+        recipe = store.playlist_recipes.get_recipe(playlist.playlist_scope_id)
         result = tv_stream.refill(store, client, iid, playlist, recipe, 'live', str(index), items[index:index+4], index)
         assert result == (playlist.id, 'live', items[index:index+4])
         writes, draws = len(client.added), tv.draw_number(store)
@@ -44,6 +44,8 @@ def test_multiple_batches_pass_seven_and_replays_never_duplicate_writes(store, s
 
 
 def test_pending_append_is_confirmed_later_without_replaying_it(store, stream, monkeypatch):
+    from yt_playlist.library import tv_launch
+
     iid, client, playlist, recipe, items = stream
     read = client.get_playlist
     lagging = [False]
@@ -63,30 +65,89 @@ def test_pending_append_is_confirmed_later_without_replaying_it(store, stream, m
     assert len(store.charts.playlist_tracks_detail(playlist.id)) == 7
     writes = len(client.added)
     lagging[0] = False
-    recipe = store.playlist_recipes.get_recipe(playlist.scope_ref)
+    recipe = store.playlist_recipes.get_recipe(playlist.playlist_scope_id)
     result = tv_stream.refill(store, client, iid, playlist, recipe, 'live', 'pending', items[11:15], 3)
     assert result[2] == items[7:11]
     assert len(client.added) == writes
     assert len(store.charts.playlist_tracks_detail(playlist.id)) == 11
+
+    # Initial launches have their own durable intent before creation, including
+    # a lost create receipt and partial writes with never-attempted later videos.
+    monkeypatch.setattr(client, 'get_playlist', read)
+    original_create = client.create_playlist
+    for failure in ('partial', 'create'):
+        calls = []
+        selected = items[20:32]
+        lagging[0] = True
+
+        def partial(pid, videos, **kwargs):
+            calls.append(list(videos))
+            if len(videos) > 1 or videos == [selected[1]['video_id']]:
+                return {'status': 'STATUS_FAILED'}
+            result = add(pid, videos, **kwargs)
+            if videos == [selected[2]['video_id']]:
+                raise ConnectionError('second successful addition lost its receipt')
+            return result
+
+        def partial_read(pid, limit=None):
+            result = read(pid, limit)
+            return {**result, 'tracks': result['tracks'][:1]} if lagging[0] else result
+
+        def unknown_create(title, description):
+            original_create(title, description)
+            raise ConnectionError('committed create lost its receipt')
+
+        monkeypatch.setattr(client, 'add_playlist_items', partial if failure == 'partial' else add)
+        monkeypatch.setattr(client, 'get_playlist', partial_read)
+        monkeypatch.setattr(client, 'create_playlist', unknown_create if failure == 'create' else original_create)
+        with pytest.raises(tv_stream.PendingTV):
+            tv_launch.start(store, {iid: client}, failure, selected, 10)
+        retained = store.tv.launch(failure)
+        count = (len(client.created), len(client.added))
+        with pytest.raises(tv_stream.PendingTV):
+            tv_launch.start(store, {iid: client}, failure, items[40:52], 11)
+        assert store.tv.launch(failure) == retained
+        assert (len(client.created), len(client.added)) == count
+        lagging[0] = False
+        if failure == 'partial':
+            assert retained['outcome'] == {
+                'confirmed': [selected[0]['video_id']], 'rejected': [selected[1]['video_id']],
+                'uncertain': [selected[2]['video_id']], 'unattempted': [t['video_id'] for t in selected[3:]]}
+            pid, token = tv_launch.start(store, {iid: client}, failure, [], 12)
+            assert [t['video_id'] for t in store.charts.playlist_tracks_detail(pid)] == [
+                selected[0]['video_id'], selected[2]['video_id']]
+            assert tv_launch.start(store, {iid: client}, failure, [], 13) == (pid, token)
+        else:
+            assert retained['provider_playlist_id'] is None
+            with pytest.raises(tv_stream.PendingTV):
+                tv_launch.start(store, {iid: client}, failure, [], 12)
+        assert (len(client.created), len(client.added)) == count
+    # A separate explicit session keeps its own request, without rebinding the
+    # unknown-create intent or repeating its provider call.
+    monkeypatch.setattr(client, 'create_playlist', original_create)
+    pid, _ = tv_launch.start(store, {iid: client}, 'intentional-new-session', items[40:52], 14)
+    assert len(store.charts.playlist_tracks_detail(pid)) == 12
+    assert store.tv.launch('create')['provider_playlist_id'] is None
+    assert store.tv.launch('create')['state'] == 'pending'
 
 
 @pytest.mark.parametrize('rollover', ['saved', 'full'])
 def test_saved_sources_and_full_streams_roll_to_a_new_bounded_list(store, stream, rollover):
     iid, client, playlist, recipe, items = stream
     if rollover == 'saved':
-        store.playlists.adopt_generated_playlist(playlist.scope_ref)
+        store.playlists.adopt_generated_playlist(playlist.playlist_scope_id)
     else:
         items += [video(i) for i in range(60, 64)]
         client._catalog.update({t['video_id']: {'videoId': t['video_id'], 'title': t['title']}
                                 for t in items[60:]})
         tv_stream.refill(store, client, iid, playlist, recipe, 'live', 'fill', items[7:60], 2)
-        recipe = store.playlist_recipes.get_recipe(playlist.scope_ref)
-    before = list(client._tracks[playlist.ytm_playlist_id])
+        recipe = store.playlist_recipes.get_recipe(playlist.playlist_scope_id)
+    before = list(client._tracks[playlist.provider_playlist_id])
     next_items = items[-4:]
     result = tv_stream.refill(store, client, iid, playlist, recipe, 'live', 'roll', next_items, 3)
     assert result[0] != playlist.id
-    assert store.playlists.get_playlist(result[0]).identity_id == iid
-    assert client._tracks[playlist.ytm_playlist_id] == before
+    assert store.playlists.get_playlist(result[0]).account_id == iid
+    assert client._tracks[playlist.provider_playlist_id] == before
     created = len(client.created)
     assert tv_stream.refill(store, client, iid, playlist, recipe, 'live', 'roll', next_items, 4) == result
     assert len(client.created) == created
@@ -95,7 +156,7 @@ def test_saved_sources_and_full_streams_roll_to_a_new_bounded_list(store, stream
 
 def test_remote_edits_are_preserved_instead_of_appending_blindly(store, stream):
     iid, client, playlist, recipe, items = stream
-    client._tracks[playlist.ytm_playlist_id].reverse()
+    client._tracks[playlist.provider_playlist_id].reverse()
     writes = len(client.added)
     with pytest.raises(ValueError, match='changed elsewhere'):
         tv_stream.refill(store, client, iid, playlist, recipe, 'live', 'edited', items[7:11], 2)
@@ -104,7 +165,7 @@ def test_remote_edits_are_preserved_instead_of_appending_blindly(store, stream):
 
 def test_refill_route_uses_playlist_account_and_confirmed_videos(store, stream):
     iid, client, playlist, recipe, items = stream
-    other = store.identities.upsert_identity('another', 'cred2', None, False)
+    other = store.accounts.upsert_account('another', 'cred2', None, False)
     wrong = FakeClient()
     store.rec_proposals.put_proposals(tv.SURFACE, {
         'schema': tv.SCHEMA, 'key': 'pool', 'at': 1, 'attempted': [], 'items': items}, 1)
@@ -119,8 +180,51 @@ def test_refill_route_uses_playlist_account_and_confirmed_videos(store, stream):
         assert len(client.added) == 2
 
 
-def test_unlimited_persists_and_admits_a_video_longer_than_two_hours(store):
-    iid = store.identities.upsert_identity('main', 'cred', None, True)
+@pytest.mark.parametrize('include_stream', [True, False], ids=['empty-stream', 'absent-stream'])
+def test_saved_playlist_get_continues_once_with_the_browser_stream_token(store, stream, include_stream):
+    from copy import deepcopy
+    iid, client, playlist, recipe, items = stream
+    store.playlists.adopt_generated_playlist(playlist.playlist_scope_id)
+    original = (deepcopy(client._tracks[playlist.provider_playlist_id]),
+                store.charts.playlist_tracks_detail(playlist.id),
+                store.playlist_recipes.get_recipe(playlist.playlist_scope_id),
+                store.playlists.playlist_provenance(playlist.playlist_scope_id))
+    store.rec_proposals.put_proposals(tv.SURFACE, {
+        'schema': tv.SCHEMA, 'key': 'saved-pool', 'at': 1, 'attempted': [], 'items': items}, 1)
+    with TestClient(create_app(store, lambda: {iid: client}, now_fn=lambda: 2, background_work=False),
+                    base_url='http://127.0.0.1') as web:
+        saved = web.get(f'/home/tv/playlist/{playlist.id}')
+        assert saved.status_code == 200, saved.text
+        assert not saved.json().get('stream')
+        data = {'request_id': 'saved-next',
+                'exclude': json.dumps([t['video_id'] for t in saved.json()['items']])}
+        if include_stream:
+            data['stream'] = saved.json().get('stream') or ''
+        response = web.post(f'/home/tv/playlist/{playlist.id}/refill', data=data)
+        assert response.status_code == 200, response.text
+        value = response.json()
+        assert value['playlist_id'] != playlist.id and value['stream']
+        assert len(value['items']) == 4
+        videos = [t['video_id'] for t in value['items']]
+        target = store.playlists.get_playlist(value['playlist_id'])
+        assert target.account_id == iid
+        assert store.playlists.is_quarantined_playlist(target.playlist_scope_id)
+        assert [t['video_id'] for t in store.charts.playlist_tracks_detail(target.id)] == videos
+        assert [t['videoId'] for t in client._tracks[target.provider_playlist_id]] == videos
+        writes = (len(client.created), len(client.added), len(client.edited), len(client.removed))
+        assert writes[0] == 2
+        assert web.post(f'/home/tv/playlist/{playlist.id}/refill', data=data).json() == value
+        assert (len(client.created), len(client.added), len(client.edited), len(client.removed)) == writes
+    assert (client._tracks[playlist.provider_playlist_id],
+            store.charts.playlist_tracks_detail(playlist.id),
+            store.playlist_recipes.get_recipe(playlist.playlist_scope_id),
+            store.playlists.playlist_provenance(playlist.playlist_scope_id)) == original
+
+
+def test_unlimited_persists_and_admits_a_video_longer_than_two_hours(store, monkeypatch):
+    from yt_playlist.rec import account_growth
+
+    iid = store.accounts.upsert_account('main', 'cred', None, True)
     item = video(0, duration=3 * 3600)
     client = FakeClient(catalog={item['video_id']: {'videoId': item['video_id'], 'title': item['title']}})
     store.rec_proposals.put_proposals(tv.SURFACE, {
@@ -130,11 +234,17 @@ def test_unlimited_persists_and_admits_a_video_longer_than_two_hours(store):
         assert not web.post('/home/tv', data={'max_minutes': '120'}).json()['ready']
         assert web.post('/home/tv', data={'max_minutes': 'unlimited'}).json() == {'ready': True, 'max_minutes': None}
         assert store.settings.get_setting(tv.SETTING) == 'unlimited'
-        response = web.post('/home/tv/play')
+        # Downstream output alone cannot unlock TV. Isolate the subsequent
+        # duration check at the post-unlock boundary, keeping the real writer.
+        assert web.post('/home/tv/play').status_code == 409
+        assert not client.created and not client.added
+        with monkeypatch.context() as unlocked:
+            unlocked.setattr(account_growth, 'view', lambda *_args, **_kwargs: {'ready_areas': {'tv': True}})
+            response = web.post('/home/tv/play')
         assert response.status_code == 200, response.text
         assert response.json()['items'][0]['duration'] == 10800
         saved = store.playlists.get_playlist(response.json()['playlist_id'])
-        assert store.playlist_recipes.get_recipe(saved.scope_ref)['max_minutes'] is None
+        assert store.playlist_recipes.get_recipe(saved.playlist_scope_id)['max_minutes'] is None
         assert web.get('/home/tv').json()['max_minutes'] is None
         assert not web.post('/home/tv', data={'max_minutes': '1'}).json()['ready']
         with pytest.raises(ValueError, match='maximum track length'):

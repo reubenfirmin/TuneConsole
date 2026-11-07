@@ -1,4 +1,7 @@
 """Readable descriptions of saved musical evidence; no inference or provider I/O."""
+import math
+
+from yt_playlist.rec import home_vibe, musical_character
 from yt_playlist.rec.musical_profiles import DIMENSIONS
 
 _LABELS = {'intensity': 'Intensity', 'tempo': 'Tempo', 'groove': 'Groove',
@@ -12,6 +15,10 @@ _KINDS = {'explicit': 'Your correction', 'legacy_selected': 'Legacy metadata',
 _MATCHES = {'supplied_recording_mbid': 'Recording ID lookup',
             'title_artist_match': 'Title and artist lookup', 'musicbrainz_lookup': 'MusicBrainz lookup',
             'matched_release_or_tracklist': 'Release or tracklist lookup', 'name_query': 'Name lookup'}
+_VIBE_SOURCES = {'audio_measurement': 'Audio model estimate',
+                 'provider_measurement': 'Provider attribute estimate',
+                 'artist_genre': 'Artist and genre estimate', 'artist': 'Artist estimate',
+                 'genre': 'Genre estimate', 'heuristic': 'Attribute estimate'}
 
 
 def _basis(dimension):
@@ -64,5 +71,22 @@ def describe(profile, sources=(), *, truncated=False):
                 'match': _MATCHES.get((provenance.get('match_evidence') or {}).get('method'), 'Match method unknown')})
         retained.append({'provider': _PROVIDERS.get(source['provider'], source['provider']),
                          'scope': source['scope'], 'observations': observations})
+    vibes = (profile or {}).get('vibes') or {}
+    fits = vibes.get('fits') or {}
+    vibe_rows = []
+    for name, preset in home_vibe.PRESETS.items():
+        fit = fits.get(name) or {}
+        score, source = fit.get('score'), fit.get('source')
+        known = type(score) in (int, float) and math.isfinite(score) and 0 <= score <= 1
+        # A neutral fallback with zero support is still unknown evidence.
+        attributes_known = any(musical_character.dimension({'musical': profile}, dimension)[0] is not None
+                               for dimension in preset['weights'])
+        supported = known and source in _VIBE_SOURCES and (
+            fit.get('support', 0) > 0 or (source == 'heuristic' and attributes_known))
+        vibe_rows.append({'name': name, 'label': preset['label'],
+            'description': f'{score * 100:.0f}/100' if supported else 'Unknown',
+            'basis': _VIBE_SOURCES.get(source, 'Source unknown') if known else '',
+            'recordings': fit.get('recordings') if source in ('artist_genre', 'artist', 'genre') else None})
     return {'rows': rows, 'known': sum(row['known'] for row in rows), 'total': len(rows),
+            'vibes': vibe_rows, 'vibe_version': vibes.get('version'), 'vibe_inputs_version': vibes.get('inputs_version'),
             'sources': retained, 'truncated': truncated or bool((profile or {}).get('sources_truncated'))}

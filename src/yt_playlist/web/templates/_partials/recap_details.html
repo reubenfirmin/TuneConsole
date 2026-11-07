@@ -1,29 +1,6 @@
-<h1 class="slide-h1">{{ b.title }}</h1>
-<div class="recap-details" tabindex="0" aria-label="{{ b.title }} details"
-     @pointerdown="autoplay = false; _tick()" @focusin="autoplay = false; _tick()">
-  {% if b.kind == 'new_this_month' %}
-    {% for group in b.groups %}
-    <section class="recap-group" aria-label="{{ group.label }}">
-      <h2 class="recap-label">{{ group.label }} · {{ group.total }}</h2>
-      <ul class="recap-entries">
-        {% for entry in group.entries %}
-        <li>
-          <h3 class="slide-h1 slide-name"><a href="{{ entry.href }}">{{ entry.title }}</a></h3>
-          {% if entry.subtitle %}<p class="slide-sub recap-subtitle">{{ entry.subtitle }}</p>{% endif %}
-          <p class="slide-sub">{{ entry.detail }}</p>
-        </li>
-        {% endfor %}
-      </ul>
-      {% if group.total > group.entries|length %}
-      <p class="slide-sub">+{{ group.total - group.entries|length }} more</p>
-      {% endif %}
-    </section>
-    {% endfor %}
-  {% else %}
-    <ul class="recap-findings">
-      {% for finding in b.findings %}
-      <li><h2 class="slide-h1 slide-name">{{ finding.title }}</h2><p class="slide-sub">{{ finding.detail }}</p></li>
-      {% endfor %}
-    </ul>
-  {% endif %}
+<div class="recap-details">
+  <p class="recap-label">{{ b.title }}</p>
+  <h1 class="slide-h1 slide-name">{{ b.entry.title }}</h1>
+  {% if b.entry.subtitle %}<p class="slide-sub recap-subtitle">{{ b.entry.subtitle }}</p>{% endif %}
+  <p class="slide-sub">{{ b.entry.detail }}</p>
 </div>

@@ -34,7 +34,7 @@
         </template>
         <span class="hs-rate-group" role="group" aria-label="Playback and ratings">
           <span class="hs-progress" x-show="timing.position !== null && timing.duration !== null" x-cloak
-                :style="'--played: ' + Math.min(100, Math.max(0, (timing.position ?? 0) / (timing.duration || 1) * 100)) + '%'">
+                :style="{'--played': Math.min(100, Math.max(0, (timing.position ?? 0) / (timing.duration || 1) * 100)) + '%'}">
             <progress :value="timing.position ?? 0" :max="timing.duration || 1" aria-label="Track progress"
                       :title="timeLabel(timing.position) + ' of ' + timeLabel(timing.duration)"
                       :aria-valuetext="timeLabel(timing.position) + ' of ' + timeLabel(timing.duration)"></progress>

@@ -2,6 +2,7 @@
 import numpy as np
 import pytest
 
+from tests.conftest import seed_catalog_track
 from yt_playlist.rec import embedding_vectors, layers, rec_params, taste_viz
 
 
@@ -11,9 +12,9 @@ from yt_playlist.rec import embedding_vectors, layers, rec_params, taste_viz
 ])
 @pytest.mark.parametrize('quiet', [False, True])
 def test_recent_layers_read_and_decode_only_window_keys_once(store, monkeypatch, consumer, window_h, quiet):
-    iid = store.identities.upsert_identity('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', 'cred', None, True)
     now = 10_000_000
-    old = [(f'old{i}|artist', f'old{i}', now - 30 * 86400 - i) for i in range(200)]
+    old = [(f'old{i}|artist', f'old{i}', now - 30 * 86400 - i) for i in range(3)]
     recent = [] if quiet else [
         ('now1|artist', 'now1', now - 60),
         ('now2|artist', 'now2', now - 120),
@@ -21,13 +22,15 @@ def test_recent_layers_read_and_decode_only_window_keys_once(store, monkeypatch,
         ('now1|artist', 'now1', now - 3600),
     ]
     store.history.import_play_events(iid, old + recent)
+    for key, video in dict.fromkeys((key, video) for key, video, _ in old + recent):
+        seed_catalog_track(store, key, video, 'Artist', video_id=video)
     rec_params.set_param(store, 'now_window_h', 6)
     rec_params.set_param(store, 'now_min_events', 2)
     store.rec_model.replace_rec_content_vectors([
         (key, np.array([1., 0.], dtype=np.float32).tobytes())
         for key in dict.fromkeys(r[0] for r in old + recent)])
     store.modes.replace_modes([{'mode_id': 1, 'label': 'A', 'families': [['house', 1]],
-        'centroid': np.array([1., 0.], dtype=np.float32), 'size': 203, 'rep_keys': []}],
+        'centroid': np.array([1., 0.], dtype=np.float32), 'size': len(old) + len(recent), 'rep_keys': []}],
         retired_ids=[], now=now)
     history, generations, decoded = [], [], []
     read_plays = store.history.play_events_since

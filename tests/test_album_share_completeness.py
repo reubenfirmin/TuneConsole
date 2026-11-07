@@ -17,7 +17,7 @@ def _album():
 
 
 def _client(store, album=None):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.collection.replace_saved_albums([{"browse": "MPRE", "title": "Album", "artist": "Artist"}])
     client = FakeClient(albums={"MPRE": album}) if album is not None else None
     return TestClient(create_app(store, lambda: {iid: client} if client else {}, now_fn=lambda: 1),
@@ -70,11 +70,33 @@ def test_failed_or_incomplete_live_read_never_downloads_a_partial_file(store, pr
 
 
 def test_materialization_boundary_remains_required_even_with_an_ordered_snapshot(store):
+    from yt_playlist.core import album_tracklists
+
     _materialize(store)
     assert store.collection.cached_album_share("MPRE") is not None
-    store.conn.execute("DELETE FROM album_track_links WHERE video_id='v1'")
-    store.conn.commit()
+    # A captured source reference alone does not materialize a playable source.
+    # Publish all three positions, leaving the middle one without a catalog entry.
+    with store.conn:
+        tracklist = album_tracklists.begin(store.conn, store.collection.album_id('MPRE'),
+                                          'MPRE', expected_count=3)
+        entry = store.conn.execute("SELECT id FROM catalog_entries WHERE video_id='v2'").fetchone()[0]
+        album_tracklists.occurrence(store.conn, tracklist, entry_id=entry, position=0)
+        album_tracklists.occurrence(store.conn, tracklist, raw_source_ref='unmaterialized-video',
+                                   captured_title='First', captured_credit='Artist', position=1)
+        album_tracklists.occurrence(store.conn, tracklist, entry_id=entry, position=2)
+        album_tracklists.finish(store.conn, tracklist, complete=True)
+    assert store.collection.cached_album_share('MPRE') is None
     assert _client(store).get("/album/MPRE/share.txt").status_code == 503
+
+
+def test_complete_published_sources_remain_shareable_without_library_membership(store):
+    _materialize(store)
+    with store.conn:
+        store.conn.execute('DELETE FROM library_memberships')
+    assert not store.collection.is_album_tracklist_complete('MPRE')
+    response = _client(store).get('/album/MPRE/share.txt')
+    assert response.status_code == 200
+    assert [line.rsplit('=', 1)[1] for line in response.text.splitlines()] == ['v2', 'v1', 'v2']
 
 
 def test_a_new_full_but_unshareable_tracklist_invalidates_the_previous_export(store):
@@ -87,12 +109,13 @@ def test_a_new_full_but_unshareable_tracklist_invalidates_the_previous_export(st
 
 
 def test_upgrade_preserves_denominators_without_inventing_original_order():
+    from tests.historical_support import upgrade_fixture
     store = Store(":memory:")
     migrate(store.conn, registry=MIGRATIONS[:14])
     store.conn.execute("INSERT INTO album_tracklists VALUES ('MPRE','Album','Artist',NULL,'[\"first|artist\",\"second|artist\"]')")
     store.conn.commit()
-    store.init_schema()
-    assert store.conn.execute("SELECT track_keys FROM album_tracklists").fetchone()[0] == '["first|artist","second|artist"]'
+    upgrade_fixture(store)
+    assert store.conn.execute("SELECT track_keys FROM album_tracklist_keys").fetchone()[0] == '["first|artist","second|artist"]'
     assert store.conn.execute("SELECT COUNT(*) FROM album_share_snapshots").fetchone()[0] == 0
     store.init_schema()
     assert store.conn.execute("SELECT COUNT(*) FROM album_tracklists").fetchone()[0] == 1

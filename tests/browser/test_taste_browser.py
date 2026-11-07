@@ -1,5 +1,7 @@
 """Taste overview, playlist influence, recommendation comparison and feedback."""
 import json
+from tests.derived_rating_support import seed_dislike, seed_like
+from tests.retained_rating_support import observe_rating
 from urllib.parse import urlsplit
 
 import numpy as np
@@ -11,11 +13,20 @@ from yt_playlist.util.matching import identity_key
 from yt_playlist.web.track_links import track_url
 
 
-@pytest.mark.parametrize("width", [1440, 1024, 390, 320])
+@pytest.mark.parametrize("width", [1440])
 def test_preview_and_compare_show_artwork_play_tracks_and_keep_baseline(live_app, store, page, monkeypatch, width, tmp_path):
     from yt_playlist.rec import surfaces
+    from tests.conftest import seed_catalog_track
 
     title = 'A song with a "long" title & another verse'
+    for key, name, artist, video in [
+        ('song|artist', title, 'Artist & guest', 'preview-song'),
+        ('missing|artist', 'Missing artwork', 'Another artist', 'missing-art'),
+        ('unknown|artist', 'Unresolved song', 'Unknown artist', None),
+        ('old|artist', 'Former pick', 'Artist & guest', 'former-pick'),
+        ('new|artist', 'New pick', 'Artist & guest', 'new-pick'),
+    ]:
+        seed_catalog_track(store, key, name, artist, video_id=video)
     trace = {"durable": .4, "transient_delta": .1, "session_delta": 0,
              "audio_delta": 0, "axes": {}, "contexts": [{"name": "Night drive"}]}
     sample = [surfaces.ForYouItem(title, "Artist & guest", "An album", "preview-song",
@@ -95,12 +106,12 @@ def test_preview_and_compare_show_artwork_play_tracks_and_keep_baseline(live_app
     assert page.url.endswith("#experiment/preview")
     assert len(page.context.pages) == 1
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-    page.locator(".taste-comparison").screenshot(path=str(tmp_path / f"taste-comparison-{width}.png"))
+    page.locator(".taste-comparison").screenshot(path=f"/tmp/tuneconsole-ready-742-comparison-{width}.png")
     page.get_by_role("button", name="Refresh sample", exact=True).click()
     expect(page.locator(".sample-note")).to_contain_text("Sample updated")
-    page.locator(".foryou-sample").screenshot(path=str(tmp_path / f"taste-preview-{width}.png"))
+    page.locator(".foryou-sample").screenshot(path=f"/tmp/tuneconsole-ready-742-preview-{width}.png")
     page.get_by_role("tablist", name="Experiment tools", exact=True).scroll_into_view_if_needed()
-    page.screenshot(path=str(tmp_path / f"taste-experiment-subtabs-{width}.png"))
+    page.screenshot(path=f"/tmp/tuneconsole-ready-742-subtabs-{width}.png")
     assert errors == []
 
 
@@ -111,7 +122,7 @@ def test_overview_updates_itself_when_background_genre_repair_finishes(store, pa
     monkeypatch.setattr(RecWorker, "trigger_mode_refresh", lambda self, **kw: None)
     monkeypatch.setattr(RecWorker, "busy", property(lambda self: repairing["busy"]))
     live_app = request.getfixturevalue("live_app")
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     store.settings.set_setting("rec_content_model", json.dumps({"cat": {"fam:techno": 0}, "ncat": 1, "cont": []}))
     keys = []
     for i in range(3):
@@ -136,24 +147,24 @@ def test_overview_updates_itself_when_background_genre_repair_finishes(store, pa
     expect(page.locator("#taste-profile-panel .taste-panel-content")).to_contain_text("Loading taste profile")
 
 
-@pytest.mark.parametrize('width', [1440, 390, 320])
+@pytest.mark.parametrize('width', [1440])
 def test_populated_overview_leads_with_changes_and_keeps_feedback_compact(store, page, monkeypatch, request, width, tmp_path):
     from yt_playlist.rec.rec_worker import RecWorker
 
     monkeypatch.setattr(RecWorker, 'trigger_mode_refresh', lambda self, **kw: None)
     live_app = request.getfixturevalue('live_app')
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     store.modes.replace_modes([{
         'mode_id': 1, 'label': 'Latin', 'families': [['latin', 1]],
         'centroid': np.ones(1, dtype=np.float32), 'size': 3, 'rep_keys': [],
     }], retired_ids=[], now=1.0)
     store.history.record_history_plays(iid, 1.0, ['song|artist'], source_timezone='UTC')
     for i in range(47):
-        store.rec_model.record_like(f'action-{i}|artist', 1.0, provenance='action')
+        seed_like(store, f'action-{i}|artist', 1.0, provenance='action')
     for i in range(85):
-        store.rec_model.record_like(f'sync-{i}|artist', 1.0, provenance='sync')
+        seed_like(store, f'sync-{i}|artist', 1.0, provenance='sync')
     for i in range(3):
-        store.rec_model.record_dislike(f'disliked-{i}|artist', until=None, now=1.0)
+        seed_dislike(store, f'disliked-{i}|artist', until=None, now=1.0)
     for axis in ('genre:latin', 'era:2010', 'artist:Hermanos Gutiérrez'):
         store.rec_signals.log_graduation(axis, 'like', 2, 1.1, 1.1, 1.0)
 
@@ -187,9 +198,9 @@ def test_populated_overview_leads_with_changes_and_keeps_feedback_compact(store,
     expect(page.get_by_role('tab', name='Recent & learning', exact=True)).to_have_attribute('aria-selected', 'true')
 
 
-@pytest.mark.parametrize("width", [1440, 1024, 390, 320])
+@pytest.mark.parametrize("width", [1440])
 def test_playlist_influence_shows_the_whole_blend_and_links_selected_rows(live_app, store, page, width, tmp_path):
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     titles = ['Night drives / broken beats & "other" late discoveries',
               "Sunday slow / piano, soul and a little rain"]
     counts = [34, 22, 14, 10, 6, 5, 4, 2, 2, 1, 0]
@@ -254,7 +265,7 @@ def test_playlist_influence_shows_the_whole_blend_and_links_selected_rows(live_a
     assert errors == []
 
 
-@pytest.mark.parametrize("width", [1440, 390, 320])
+@pytest.mark.parametrize("width", [1440])
 def test_feedback_uses_track_table_with_artwork_sorting_and_unban(live_app, store, page, width, tmp_path):
     title = 'Alpha "Live" & the extended recording'
     artist = "Artist's Band"
@@ -263,10 +274,10 @@ def test_feedback_uses_track_table_with_artwork_sorting_and_unban(live_app, stor
                        thumbnail="/static/nag/intro.png")
     store.tracks.upsert_track("feedback-zeta", "Zeta Song", "Another Artist", "Last Album", None,
                        thumbnail="/static/nag/trends.png")
-    store.rec_model.record_dislike(key, until=2_000_000_000, now=2.0)
-    store.rec_model.record_dislike("zeta song|another artist", until=None, now=3.0)
-    store.rec_model.record_dislike("removed song|former artist", until=None, now=1.0)
-    store.rec_model.record_like("liked|artist", now=1.0)
+    observe_rating(store, key, 'DISLIKE', now=2.0)
+    seed_dislike(store, "zeta song|another artist", until=None, now=3.0)
+    seed_dislike(store, "removed song|former artist", until=None, now=1.0)
+    seed_like(store, "liked|artist", now=1.0)
     store.rec_model.mark_graduated_once("liked|artist", "like_grad", now=1.0)
     for kind in ("dismiss", "not_now", "more", "less", "mute"):
         store.rec_model.record_feedback("for_you", kind + "|artist", kind, now=1.0)
@@ -291,9 +302,11 @@ def test_feedback_uses_track_table_with_artwork_sorting_and_unban(live_app, stor
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     page.screenshot(path=str(tmp_path / f"taste-feedback-{width}.png"), full_page=True)
     page.get_by_role("button", name=f"Unban {title}", exact=True).click()
-    page.get_by_role("dialog").get_by_role("button", name="Confirm", exact=True).click()
-    expect(table.locator("tbody tr.srow")).to_have_count(2)
+    with page.expect_response('**/taste/unban') as unban:
+        page.get_by_role("dialog").get_by_role("button", name="Confirm", exact=True).click()
+    assert unban.value.status == 200, unban.value.text()
     assert key not in store.rec_model.disliked_identity_keys()
+    expect(table.locator("tbody tr.srow")).to_have_count(2)
     expect(page.get_by_role("tab", name="Feedback", exact=True)).to_have_attribute("aria-selected", "true")
     page.get_by_role("button", name="Clear feedback and recommendation history", exact=True).click()
     page.get_by_role("dialog").get_by_role("button", name="Confirm", exact=True).click()

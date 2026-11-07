@@ -77,6 +77,8 @@ class Session:
     preparation_seen_at: float = 0
     playback_confirmed: bool = False
     playback_intent: int | None = None
+    launch_sent: bool = False
+    launch_id: str | None = None
     metadata_checked_at: float = 0
     metadata_revision: int = 0
     metadata_rejected: set = field(default_factory=set)

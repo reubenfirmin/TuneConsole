@@ -6,15 +6,18 @@ guards. Every vector in a publication uses the exact same encoder, including
 its audio normalization. Last-good models remain available between steps.
 """
 from dataclasses import dataclass
+from contextlib import closing
 import json
 import math
 import sys
+import time
 import uuid
 
 from yt_playlist.core.activity import check_stopping, work_budget, WorkBudgetExceeded
-from yt_playlist.rec import content_model, group_assignment, group_preparation, musical_preparation, rec_params, taste_modes
-from yt_playlist.rec import vibe_preparation
-from yt_playlist.repos.rec_model import VectorChanges
+from yt_playlist.core import embeddings
+from yt_playlist.rec import content_model, group_preparation, musical_preparation, rec_params, taste_modes
+from yt_playlist.rec import vibe_preparation, vibe_joint_preparation
+from yt_playlist.core.rec_model_policy import VectorChanges
 from yt_playlist.util import genre_catalog
 
 PHASE = 'rec: progressive content basis'
@@ -27,8 +30,7 @@ MODE_PARAMS = ('modes_k', 'modes_min_members', 'modes_match_threshold')
 # Repair reads only these whole-table anti-joins. Capture their counters rather
 # than copying every per-record revision in the application for each small slice.
 REPAIR_INPUTS = frozenset((table, '') for table in (
-    'recordings', 'rec_content_vectors', 'rec_discovered_content_vectors',
-    'rec_prepared_content', 'rec_content_pending'))
+    'recordings', 'recording_redirects', 'prepared_recording_inputs', 'rec_content_pending'))
 
 
 @dataclass(frozen=True)
@@ -114,17 +116,22 @@ def _delta(reader, rows, raw_model):
     """Serialize bounded changes against one already published, fixed basis."""
     if not raw_model:
         return {}
+    if not reader.rec_model.content_generation(keys=[])['coherent']:
+        return {}
     model = json.loads(raw_model)
     keys = [r[0] for r in rows]
     pools = reader.rec_model.content_vector_pools(keys)
+    decoded = [(key,json.loads(raw)) for key,_revision,raw,_digest,_different in rows]
+    axes = reader.genres.feature_axes(features['genre'] for _key,payload in decoded
+                                      for features in payload.values() if isinstance(features,dict) and 'genre' in features)
     changes = {}
     for scope, table in (('library', 'rec_content_vectors'), ('discovered', 'rec_discovered_content_vectors')):
         previous = pools[scope]
         upserts, removed = [], []
-        for key, _revision, raw, _digest, _different in rows:
+        for key, payload in decoded:
             check_stopping()
-            features = json.loads(raw)[scope]
-            vector = (content_model.encode_content(model, features['genre'], features['year'], features['audio'])
+            features = payload[scope]
+            vector = (content_model.encode_content(model, features['genre'], features['year'], features['audio'],genre_axes=axes)
                       if features else None)
             blob = vector.tobytes() if vector is not None else None
             if blob is not None and previous.get(key) != blob:
@@ -132,8 +139,9 @@ def _delta(reader, rows, raw_model):
             elif blob is None and key in previous:
                 removed.append(key)
         if upserts or removed:
-            changes[table] = VectorChanges(tuple(upserts), tuple(removed))
-    return changes
+            changes[table] = VectorChanges(tuple(upserts), tuple(removed),
+                model_version=embeddings.version(table, {'rec_content_model': raw_model}))
+    return reader.rec_model.prepare_training_deltas(changes)
 
 
 class Preparation:
@@ -143,9 +151,33 @@ class Preparation:
         self.retry_fit_at = _state(store, FIT_STATE).get('next_attempt_at', 0)
         self.next_maintenance_at = 0
         self._repair_needed = False
+        self._repair_after = None
         self._source_turn = True
         self._vibe_turn = False
+        self._capturing = None
+        self._capturing_pending = None
+        self._capturing_expires_at = 0
+        self._capturing_kind = None
         self.groups = group_preparation.Preparation(store)
+
+    def close(self):
+        if self._capturing is not None:
+            try:
+                self._capturing.close()
+            finally:
+                self._capturing = None
+                self._capturing_pending = None
+                self._capturing_expires_at = 0
+                self._capturing_kind = None
+
+    def expire_capture(self, *, paused=False):
+        """Release idle snapshot leases even when no further work is admitted.
+
+        The worker serializes this with capture. The original pending queue
+        needs no repair: only complete guarded publication acknowledges it.
+        """
+        if self._capturing is not None and (paused or time.monotonic() >= self._capturing_expires_at):
+            self.close()
 
     def _record(self, outcome, reason, *, phase=PHASE):
         self.store.maintenance_diagnostics.record(outcome, reasons=(reason,), phase=phase)
@@ -182,11 +214,16 @@ class Preparation:
         try:
             with work_budget(self.budget.capture_seconds), self.store.read_snapshot(
                     dependencies=REPAIR_INPUTS) as snapshot:
-                keys = snapshot.store.prepared_content.missing_unqueued(self.budget.batch)
+                keys = snapshot.store.prepared_content.missing_unqueued(
+                    self.budget.batch, after=self._repair_after)
                 snapshot.release_reader()
                 if not snapshot.publish(lambda: self.store.prepared_content.enqueue_missing(keys)):
+                    self._repair_after = None
                     return False
             self._repair_needed = len(keys) == self.budget.batch
+            # A new audit starts at the beginning, including lost work behind
+            # this cursor. Advance only after a guarded, successful enqueue.
+            self._repair_after = keys[-1] if self._repair_needed else None
             self.next_maintenance_at = now + MAINTENANCE_INTERVAL
             if keys:
                 self._record('published', 'missing-inputs-requeued', phase=INPUT_PHASE)
@@ -200,6 +237,8 @@ class Preparation:
         changed = self.store.prepared_content.changed_since(previous.get('serial', 0))
         if not self.store.settings.get_setting('rec_content_model'):
             return 'initial-evidence' if self.store.prepared_content.changed_since(-1) else None
+        if not self.store.rec_model.content_generation(keys=[])['coherent']:
+            return 'encoder-repair'
         if self.store.settings.get_setting('rec_content_genre_revision') != genre_catalog.REVISION:
             return 'genre-revision'
         if previous and previous.get('modes') != [rec_params.get_param(self.store, key) for key in MODE_PARAMS]:
@@ -216,21 +255,39 @@ class Preparation:
 
     def due(self, now):
         """Retry a deferred basis even after the durable input queue has drained."""
-        return (self._maintenance_due(now) or self.store.prepared_content.has_pending()
+        return (self._capturing is not None or self._maintenance_due(now) or self.store.prepared_content.has_pending()
                 or musical_preparation.due(self.store)
                 or vibe_preparation.due(self.store)
                 or (now >= self.retry_fit_at and self._basis_reason(now) is not None))
 
     def capture(self, now):
+        if self._capturing is not None:
+            return self._advance_capture()
         # The audit is periodic even without new catalog writes. A lost queue
         # entry cannot permanently strand an otherwise healthy installation.
         self.repair(now)
+        # A bounded model cycle uses one accepted-original revision. Do not
+        # interleave our own source captures between its per-channel fits.
+        # External changes still invalidate each guarded snapshot normally.
+        if vibe_joint_preparation.active(self.store):
+            return vibe_preparation.step(self.store, self.batch,
+                seconds=self.budget.fit_seconds, memory_bytes=self.budget.memory_bytes, joint_step=self._joint_step)
+        if vibe_joint_preparation.scoring(self.store):
+            # The cycle's refresh fan-out must reach a recording batch before
+            # our next source write invalidates its newly published models.
+            # Existing generation references acknowledge delivery across a
+            # restart; one useful batch returns us to ordinary fair source turns.
+            self.store.vibe_predictions.fanout(self.batch)
+            pending = self.store.prepared_content.pending(self.batch)
+            if pending:
+                return self._start_capture(pending, now)
         # Alternate source fan-out and recording captures. Each admission gets
         # one time budget, and continual source updates cannot starve recordings.
         if self._source_turn:
             self._source_turn = False
             self._vibe_turn = not self._vibe_turn
-            if not self._vibe_turn and vibe_preparation.step(self.store, self.batch):
+            if not self._vibe_turn and vibe_preparation.step(self.store, self.batch,
+                    seconds=self.budget.fit_seconds, memory_bytes=self.budget.memory_bytes, joint_step=self._joint_step):
                 return True
             if musical_preparation.source_step(self.store, now, batch=self.batch,
                                                seconds=self.budget.capture_seconds):
@@ -240,44 +297,92 @@ class Preparation:
         self._source_turn = True
         pending = self.store.prepared_content.pending(self.batch)
         if not pending:
-            return vibe_preparation.step(self.store, self.batch)
+            return vibe_preparation.step(self.store, self.batch,
+                seconds=self.budget.fit_seconds, memory_bytes=self.budget.memory_bytes, joint_step=self._joint_step)
+        return self._start_capture(pending, now)
+
+    def _start_capture(self, pending, now):
+        self._capturing_pending = pending
+        self._capturing_kind = 'recordings'
+        self._capturing_expires_at = (time.monotonic() + self.budget.capture_seconds
+            + len(vibe_joint_preparation.VIBES) * self.budget.fit_seconds)
+        self._capturing = self._capture(pending, now)
+        return self._advance_capture()
+
+    def _joint_step(self):
+        self._capturing_kind = 'joint'
+        self._capturing_pending = None
+        # This bounds the lifetime of the pinned reader, not one worker turn.
+        self._capturing_expires_at = time.monotonic() + 180
+        self._capturing = vibe_joint_preparation.steps(self.store,
+            seconds=self.budget.fit_seconds, input_seconds=self.budget.capture_seconds,
+            memory_bytes=self.budget.memory_bytes)
+        published = self._advance_capture()
+        return published or self._capturing is not None
+
+    def _advance_capture(self):
+        # The first turn captures inputs; each subsequent turn reconstructs at
+        # most one posterior. Model work has the existing ten-second admission
+        # instead of forcing all eight channels into a two-second source slice.
+        seconds = (self.budget.fit_seconds if vibe_joint_preparation.qualified()
+                   else self.budget.capture_seconds)
         try:
-            with work_budget(self.budget.capture_seconds), self.store.read_snapshot() as snapshot:
-                reader = snapshot.store
-                rows = reader.prepared_content.capture(pending)
-                source_inputs = reader.musical_profiles.recording_inputs([row[0] for row in rows])
-                musical = musical_preparation.recordings(reader, rows, inputs=source_inputs)
-                musical, vibe_updates = vibe_preparation.recordings(reader, rows, musical, source_inputs=source_inputs)
-                assignments = group_assignment.prepare(reader, rows, musical, now)
-                raw_model = reader.settings.get_setting('rec_content_model')
-                revision = reader.settings.get_setting('rec_content_genre_revision')
-                changes = _delta(reader, rows, raw_model if revision == genre_catalog.REVISION else None)
-                # Guard a competing publisher even when this batch has no vector changes.
-                reader.settings.get_setting('rec_content_generation')
-                def publish():
-                    self.store.prepared_content.publish_capture(rows, now)
-                    self.store.musical_profiles.publish_recordings(musical, now)
-                    self.store.vibe_predictions.publish(*vibe_updates, now)
-                    self.store.taste_groups.publish_assignments(assignments)
-                    if changes:
-                        self.store.rec_model.publish_training_generation(changes)
-                        self.store.settings.publish_values({
-                            'rec_content_generation': uuid.uuid4().hex,
-                            'rec_content_inputs': '',  # not a claim of a current full-corpus fit
-                        })
-                if snapshot.publish(publish):
-                    self.batch = min(self.budget.batch, max(1, self.batch * 2))
-                    self._record('published', 'changed-entity-inputs', phase=INPUT_PHASE)
-                    return True
+            with work_budget(min(seconds, self._capturing_expires_at - time.monotonic())):
+                next(self._capturing)
+            return False  # A yielded channel has not published a recording yet.
+        except StopIteration as completed:
+            published = bool(completed.value)
         except WorkBudgetExceeded:
             self._record('deferred', 'capture-budget', phase=INPUT_PHASE)
+            published = False
+        except BaseException:
+            self.close()
+            raise
+        pending = self._capturing_pending
+        kind = self._capturing_kind
+        self.close()
+        if kind == 'joint':
+            return published
+        if published:
+            self.batch = min(self.budget.batch, max(1, self.batch * 2))
+            self._record('published', 'changed-entity-inputs', phase=INPUT_PHASE)
+            return True
         self.batch = max(1, self.batch // 2)
         self.store.prepared_content.rotate(pending)
         self._record('deferred', 'hot-input-batch', phase=INPUT_PHASE)
         return False
 
+    def _capture(self, pending, now):
+        with self.store.read_snapshot() as snapshot:
+            reader = snapshot.store
+            rows = reader.prepared_content.capture(pending)
+            source_inputs = reader.musical_profiles.recording_inputs([row[0] for row in rows])
+            musical = musical_preparation.recordings(reader, rows, inputs=source_inputs)
+            musical, vibe_updates = yield from vibe_preparation.recording_steps(
+                reader, rows, musical, source_inputs=source_inputs)
+            raw_model = reader.settings.get_setting('rec_content_model')
+            revision = reader.settings.get_setting('rec_content_genre_revision')
+            changes = _delta(reader, rows, raw_model if revision == genre_catalog.REVISION else None)
+            # Guard a competing publisher even when this batch has no vector changes.
+            reader.settings.get_setting('rec_content_generation')
+            vibe_plan = reader.vibe_predictions.prepare_publication(*vibe_updates, now)
+            def publish():
+                self.store.musical_profiles.publish_recordings(musical, now)
+                self.store.vibe_predictions.publish_prepared(vibe_plan)
+                if changes:
+                    self.store.rec_model.publish_training_generation(changes)
+                    self.store.settings.publish_values({
+                        'rec_content_generation': uuid.uuid4().hex,
+                        'rec_content_inputs': '',  # not a claim of a current full-corpus fit
+                    })
+                self.store.prepared_content.publish_capture(rows, now)
+            with closing(vibe_plan):
+                return snapshot.publish_ordered(publish)
+
     def fit(self, now):
         """Fit a coherent basis only after useful accumulated changes, within a budget."""
+        if self._capturing is not None:
+            return False
         if now < self.retry_fit_at:
             return False
         reason = self._basis_reason(now)
@@ -291,7 +396,7 @@ class Preparation:
                 if raw_model and reader.prepared_content.missing_previous_inputs():
                     self._defer(now, 'previous-generation-inputs', outcome='waiting')
                     return False
-                corpus = reader.prepared_content.corpus(self.budget.max_rows)
+                corpus = reader.prepared_content.corpus(self.budget.max_rows, max_bytes=self.budget.memory_bytes)
                 if corpus is None:
                     self._defer(now, 'corpus-memory-budget', max_rows=self.budget.max_rows)
                     return False
@@ -310,7 +415,9 @@ class Preparation:
                 if not content and not audio:
                     self._defer(now, 'empty-corpus', outcome='waiting')
                     return False
-                model = content_model.build_content_model(content, audio)
+                axes = reader.genres.feature_axes([*(value[0] for value in content.values()),
+                                                  *(row.get('genre') for row in discoveries)])
+                model = content_model.build_content_model(content, audio,genre_axes=axes)
                 dim = model['ncat'] + len(model['cont'])
                 inputs = content_model.ContentInputs(keys, content, audio)
                 genres = {key: value[0] for key, value in content.items()}
@@ -321,12 +428,12 @@ class Preparation:
                     self._defer(now, 'matrix-memory-budget', rows=rows, dimensions=dim,
                                 estimated_bytes=estimated, phase_bytes=phases)
                     return False
-                fingerprint = content_model.input_fingerprint(inputs)
-                encoded_keys, matrix, model = content_model.build_library_content(inputs)
+                fingerprint = content_model.input_fingerprint(inputs,genre_axes=axes)
+                encoded_keys, matrix, model = content_model.build_library_content(inputs,genre_axes=axes)
                 generation = {'model': json.dumps(model), 'generation': uuid.uuid4().hex,
                     'revision': genre_catalog.REVISION, 'inputs': fingerprint,
                     'library': [(key, matrix[i].tobytes()) for i, key in enumerate(encoded_keys)],
-                    'discovered': content_model.encode_discovered(discoveries, model)}
+                    'discovered': content_model.encode_discovered(discoveries, model,genre_axes=axes)}
                 # Clustering retains the encoded matrix and genre labels, not
                 # the decoded corpus or audio/input dictionaries.
                 del corpus, inputs, content, audio, keys, discoveries
@@ -336,7 +443,8 @@ class Preparation:
                 del matrix, genres
                 changes = reader.rec_model.prepare_training_changes({
                     'rec_content_vectors': generation['library'],
-                    'rec_discovered_content_vectors': generation['discovered']})
+                    'rec_discovered_content_vectors': generation['discovered']},
+                    {'rec_content_model': generation['model']})
                 serial = reader.prepared_content.serial()
                 state = {'serial': serial, 'rows': rows, 'at': now, 'reason': reason,
                          'modes': [rec_params.get_param(reader, key) for key in MODE_PARAMS],
@@ -357,7 +465,7 @@ class Preparation:
                     self.store.settings.publish_values(settings)
                     if modes is not None:
                         self.store.modes.publish_generation(*modes)
-                if snapshot.publish(publish):
+                if snapshot.publish_ordered(publish):
                     self._record('published', reason)
                     return True
                 self._defer(now, 'prepared-corpus-changed')

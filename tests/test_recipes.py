@@ -10,7 +10,7 @@ def test_recipe_round_trips(store):
 
 
 def test_versioned_title_increments_per_prefix(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     pfx = "Fresh songs - June 21 2026"
     assert playlist_metadata.versioned_title(store, pfx) == f"{pfx} #1"
     store.playlists.upsert_playlist(iid, "P1", f"{pfx} #1", 0, "h", 0.0)

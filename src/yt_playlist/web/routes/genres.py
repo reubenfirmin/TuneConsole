@@ -3,25 +3,23 @@ from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
 
 from yt_playlist.providers import genres as genre_lib
-from yt_playlist.util import genre_catalog, genre_map
+from yt_playlist.util import genre_catalog
 
 
 def genre_list_context(store, query=""):
     """Group recognized tags using the same family assignments as recommendations."""
     names = store.genres.get_genre_whitelist()
-    records, labels = genre_catalog.catalog()
-    aliases = {}
-    for key, (genre, label, source) in labels.items():
-        if source != "spelling" and key != genre:
-            aliases.setdefault(records[genre]["name"], []).append(label)
-    family_labels = genre_catalog.family_labels()
+    taxonomy = store.genres.taxonomy()
+    aliases = {row['name']:row['aliases'] for row in taxonomy['genres']}
+    family_labels = taxonomy['families']
+    families_by_name = {row['name']:row['family'] for row in taxonomy['genres']}
     query = query.strip()
     query_key = genre_catalog.normalize(query)
     grouped, unassigned = {}, []
     total_families = set()
     matching = 0
     for name in names:
-        family = genre_map.family(name)
+        family = families_by_name[name]
         if not family.startswith("other:"):
             total_families.add(family)
         if query_key and not any(query_key in genre_catalog.normalize(text) for text in
@@ -67,15 +65,15 @@ def build(ctx) -> APIRouter:
         name = (form.get("name") or "").strip()
         if not genre_catalog.normalize(name):
             return _toast(request, "enter a genre name")
-        store.genres.add_genre(genre_lib.canonical_name(name))
-        genre_lib.configure(store)                     # rebuild the active matcher
+        store.genres.add_genre(name)
+        genre_lib.configure(store, read_only=True)
         return _list(request, form.get("q") or "")
 
     @router.post("/genres/remove")
     async def genres_remove(request: Request):
         form = await request.form()
-        store.genres.remove_genre(genre_lib.canonical_name(form.get("name") or ""))
-        genre_lib.configure(store)
+        store.genres.remove_genre(form.get("name") or "")
+        genre_lib.configure(store, read_only=True)
         return _list(request, form.get("q") or "")
 
     @router.post("/genres/reset")

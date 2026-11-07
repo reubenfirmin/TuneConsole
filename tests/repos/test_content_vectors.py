@@ -5,6 +5,9 @@ from yt_playlist.core.store import Store
 def _store(tmp_path):
     s = Store(str(tmp_path / "t.db"))
     s.init_schema()
+    with s.conn:
+        s.conn.executemany('INSERT INTO recordings(identity_key) VALUES (?)',
+                          [(key,) for key in ('a|artist', 'b|artist', 'a|x', 'b|x')])
     return s
 
 

@@ -10,6 +10,7 @@ import pytest
     "audible", "heartbeat", "pending", "concurrent", "no_music", "leaving", "tab_muted", "media_muted",
     "sole_tab_muted", "sole_media_muted", "sole_zero_volume", "selected_muted", "native_upload",
     "rating_handoff",
+    "next_account", "next_account_legacy", "next_account_upgrade",
     "paused_resume", "paused_closed", "paused_legacy",
     "tv_pause", "tv_pause_failed", "tv_pause_legacy", "tv_pause_no_music",
     "confirmed_pause", "confirmed_lost_reply", "confirmed_missing_receiver", "confirmed_legacy",
@@ -43,6 +44,7 @@ if (['concurrent', 'no_music', 'tv_pause_no_music'].includes(scenario)) {
 }
 if (scenario === 'leaving') tabs = [app, {...old, pendingUrl: 'https://example.org/'}];
 const messages = [], frames = [], created = [], updated = [];
+let receiverUpgraded = false;
 const runtime = {onMessage: event(), onStartup: event(), onInstalled: event()};
 const sockets = [];
 class Socket {
@@ -77,6 +79,8 @@ const chrome = {
     },
     sendMessage: async (id, msg) => {
       messages.push({id, ...msg});
+      if (scenario.startsWith('next_account') && msg.type === 'sensor-ping')
+        return {ok:true,receiverRevision:scenario==='next_account' || receiverUpgraded?15:14};
       if (scenario.startsWith('confirmed_')) {
         if (msg.type==='sensor-ping') return {ok:true,receiverRevision:scenario==='confirmed_legacy'?13:14};
         if (msg.type==='player-control') {
@@ -95,7 +99,9 @@ const chrome = {
     },
     onUpdated: event(), onRemoved: event(),
   },
-  scripting: {executeScript: async () => {}},
+  scripting: {executeScript: async () => {
+    if (scenario==='next_account_upgrade') receiverUpgraded = true;
+  }},
   storage: {session: {get: async () => ({})}},
   windows: {onRemoved: event()},
   alarms: {create() {}, onAlarm: event()},
@@ -111,6 +117,17 @@ const report = async (id, msg) => {
 };
 const next = 'https://music.youtube.com/watch?list=PL_new';
 (async () => {
+  if (scenario.startsWith('next_account')) {
+    await sockets[0].onmessage({data:JSON.stringify({id:89,type:'next',videoId:'song',brandId:'main'})});
+    const result = JSON.parse(frames.at(-1).body);
+    assert.equal(frames.at(-1).id,89);
+    assert.equal(result.ok,scenario!=='next_account_legacy');
+    const skips = messages.filter(message=>message.type==='next');
+    assert.equal(skips.length,scenario==='next_account_legacy'?0:1);
+    if (skips.length) assert.deepEqual(skips[0],{id:3,type:'next',videoId:'song',brandId:'main'});
+    assert.equal(created.length,0); assert.equal(updated.length,0);
+    return;
+  }
   if (scenario.startsWith('confirmed_')) {
     await sockets[0].onmessage({data:JSON.stringify({id:88,type:'playpause',action:'pause',videoId:'song'})});
     const result = JSON.parse(frames.at(-1).body);

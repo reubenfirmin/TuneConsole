@@ -3,6 +3,8 @@ listen_distribution (plays per category in a time window) and corpus_distributio
 (library composition per category), across genre / year / album / playlist dimensions.
 """
 
+from tests.enrichment_support import seed_enrichment
+
 NOW = 11*86400.0+43200
 
 
@@ -12,13 +14,13 @@ def _seed(store):
     techno appears twice in the corpus (Alpha + Gamma); house once (Beta).
     Recent days: Alpha on both, Beta on one. Old day: Gamma.
     """
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     a = store.tracks.upsert_track("v1", "Alpha", "Artist A", "Album A", 200, album_browse_id="album-a")
     b = store.tracks.upsert_track("v2", "Beta", "Artist B", "Album B", 200, album_browse_id="album-b")
     g = store.tracks.upsert_track("v3", "Gamma", "Artist A", "Album A", 200, album_browse_id="album-a")
-    store.tracks.set_track_enrichment(a, "techno", "1995")   # 1990s
-    store.tracks.set_track_enrichment(b, "house", "2005")    # 2000s
-    store.tracks.set_track_enrichment(g, "techno", "2015")   # 2010s
+    seed_enrichment(store, a, "techno", "1995")   # 1990s
+    seed_enrichment(store, b, "house", "2005")    # 2000s
+    seed_enrichment(store, g, "techno", "2015")   # 2010s
     p1 = store.playlists.upsert_playlist(iid, "P1", "Mix", 0, "h", 0.0)
     p2 = store.playlists.upsert_playlist(iid, "P2", "Chill", 0, "h", 0.0)
     store.playlists.set_playlist_tracks(p1, [a, b])
@@ -39,16 +41,16 @@ def _seed(store):
 def test_listen_distribution_genre_windowed_excludes_old(store):
     _seed(store)
     since = NOW - 7 * 86400
-    assert store.charts.listen_distribution("genre", since=since) == {"techno": 2, "house": 1}
+    assert store.charts.listen_distribution("genre", since=since) == {"Techno": 2, "House": 1}
 
 
 def test_listen_distribution_genre_alltime_includes_old(store):
     _seed(store)
-    assert store.charts.listen_distribution("genre", since=None) == {"techno": 3, "house": 1}
+    assert store.charts.listen_distribution("genre", since=None) == {"Techno": 3, "House": 1}
 
 
 def test_album_browse_ids_maps_release_key_to_browse(store):
-    store.identities.upsert_identity("me", "c", None, True)
+    store.accounts.upsert_account("me", "c", None, True)
     store.tracks.upsert_track("v1", "Song", "Art", "Cool Album", 200, album_browse_id="MPREb_X")
     store.tracks.upsert_track("v2", "Single", "Art", "Loose Single", 200)   # no browse -> excluded
     ids = store.charts.album_browse_ids()
@@ -67,7 +69,7 @@ def test_history_bounds_spans_earliest_to_latest(store):
 
 
 def test_history_bounds_empty_when_no_history(store):
-    store.identities.upsert_identity("me", "c", None, True)
+    store.accounts.upsert_account("me", "c", None, True)
     assert store.charts.history_bounds() == (None, None)
 
 
@@ -75,7 +77,7 @@ def test_listen_distribution_respects_until_bound(store):
     _seed(store)
     # disjoint period (8d..365d ago): excludes the NOW snapshot, keeps the ~100d-old one (Gamma).
     out = store.charts.listen_distribution("genre", since=NOW - 365 * 86400, until=NOW - 7 * 86400)
-    assert out == {"techno": 1}
+    assert out == {"Techno": 1}
 
 
 def test_listen_distribution_year_buckets_by_decade(store):
@@ -111,7 +113,7 @@ def test_corpus_distribution_artist_counts_distinct_songs(store):
 
 def test_corpus_distribution_genre_counts_distinct_songs(store):
     _seed(store)
-    assert store.charts.corpus_distribution("genre") == {"techno": 2, "house": 1}
+    assert store.charts.corpus_distribution("genre") == {"Techno": 2, "House": 1}
 
 
 def test_corpus_distribution_year_decades(store):
@@ -134,7 +136,7 @@ def test_corpus_distribution_playlist_distinct_tracks(store):
 
 def test_distributions_skip_untagged(store):
     """A song with no genre/year is excluded from those dimensions (not bucketed as '')."""
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     t = store.tracks.upsert_track("v1", "Solo", "Artist", "Alb", 200)   # no enrichment
     k = store.conn.execute("SELECT identity_key k FROM tracks WHERE id=?", (t,)).fetchone()["k"]
     store.history.record_history_plays(iid, NOW, [k], source_timezone="UTC")

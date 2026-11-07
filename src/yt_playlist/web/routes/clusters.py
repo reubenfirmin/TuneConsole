@@ -10,7 +10,6 @@ import random
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
-from yt_playlist.util import genre_map
 from yt_playlist.rec import embed, measurement, recipes
 from yt_playlist.rec.cluster_explain import connection_reasons
 from yt_playlist.library import playlist_generated, playlist_navigation
@@ -112,6 +111,8 @@ def build(ctx) -> APIRouter:
         candidates = {key: score for key, score in nbrs
                       if (meta.get(key) or dmeta.get(key) or {}).get("video_id")}
         ring = []
+        genre_axes = store.genres.feature_axes(
+            [*genres.values(), *(m.get('genre') for m in dmeta.values())])
         while candidates and len(ring) < k:
             check_stopping()
             eligible = [key for key in candidates
@@ -134,7 +135,7 @@ def build(ctx) -> APIRouter:
             g = (m.get("genre") if new else genres.get(key, "")) or ""
             ring.append({"key": key, "video_id": m["video_id"], "title": m["title"],
                          "artist": m["artist"], "album": m["album"], "thumbnail": m["thumbnail"],
-                         "genre": g, "family": genre_map.family(g), "score": round(score, 4),
+                         "genre": g, "family": genre_axes.get(g, ('', None))[0], "score": round(score, 4),
                          "out_of_corpus": new})
         return {"ring": ring}, [track["key"] for track in ring if track["key"] in dmeta]
 
@@ -220,16 +221,16 @@ def build(ctx) -> APIRouter:
                   for k in order if k in meta and meta[k].get("video_id")]
         account_error = None
         try:
-            identity_id,client = client_for(store,ctx.client_provider())
+            account_id,client = client_for(store,ctx.client_provider())
         except ValueError as exc:
-            identity_id,client,account_error = None,None,str(exc)
+            account_id,client,account_error = None,None,str(exc)
         result = {"name": name}
         if client is None or not tracks:
             result["error"] = account_error or "Keep at least one track to create a playlist."
         else:
             try:
                 res = playlist_generated.create_generated_playlist(store, name, tracks, client, now_fn(),
-                                                         identity_id, recipe=recipe)
+                                                         account_id, recipe=recipe)
                 result.update(ytm=res["new_ytm"], pid=res["pid"], added=res["added"])
                 if res["added"]:
                     measurement.record_action(store, "save", now_fn(), playlist_id=res["pid"],

@@ -1,12 +1,23 @@
 """Release feedback follows verified aliases, while original observations stay intact."""
 from copy import deepcopy
-import json
 
 import numpy as np
 import pytest
 
 from tests.repos.test_album_aliases import OLD, ALIAS, release
-from yt_playlist.rec import album_choices, choice_evidence, scoring
+from yt_playlist.rec import album_choices, album_feedback, choice_evidence, scoring
+from yt_playlist.core import album_feedback_storage
+
+
+@pytest.fixture(autouse=True)
+def feedback_account(store):
+    store.accounts.upsert_account('Main','main.json',None,True)
+
+
+def feedback_history(store):
+    return {row['source_browse_id']:{'kind':row['response'],'at':row['created_at'],
+        'opportunity_id':row['opportunity_id'],'action_id':row['action_id']}
+        for row in store.conn.execute('SELECT * FROM album_feedback ORDER BY created_at,id')}
 
 
 @pytest.mark.parametrize('kind', ['reject', 'known', 'more'])
@@ -19,11 +30,16 @@ def test_feedback_follows_verified_release_and_clears_through_either_id(store, k
         store.collection.observe_album_representation(browse, release(), now=101)
     if not before:
         album_choices.set_feedback(store, source, kind, 102)
-    original = store.settings.get_setting('album_feedback')
+    original = feedback_history(store)
     states = album_choices.feedback_state(store, [OLD, ALIAS])
-    assert states[OLD] == states[ALIAS] == json.loads(original)[source]
-    assert list(album_choices.feedback_state(store)) == [OLD]
-    assert store.settings.get_setting('album_feedback') == original
+    assert states[OLD] == states[ALIAS] == original[source]
+    # Feedback now owns a canonical album even before its metadata arrives.
+    # Either provider representation can therefore be the retained primary;
+    # both must still resolve to that one release without changing evidence.
+    preferred = store.collection.preferred_album_ids([OLD,ALIAS])
+    assert preferred[OLD]==preferred[ALIAS]
+    assert list(album_choices.feedback_state(store)) == [preferred[OLD]]
+    assert feedback_history(store) == original
     prepared = [{'browse_id': browse, 'artist': 'All Them Witches', 'title': release()['title'],
                  'classification': 'discovery'} for browse in (OLD, ALIAS)]
     eligible = album_choices.eligible(store, prepared, 103)
@@ -46,17 +62,28 @@ def test_conflicts_resolve_by_time_then_source_and_replacement_withdraws_all_ori
         oid = choice_evidence.issue(store, 'albums', [{'id': browse}], 90,
                                      context={}, opportunity_id=browse)
         album_choices.set_feedback(store, browse, kind, at, oid)
-    original = json.loads(store.settings.get_setting('album_feedback'))
+    original = feedback_history(store)
     responses = deepcopy(store.rec_ledger.evidence().records('response'))
     opportunities = deepcopy(store.rec_ledger.evidence().records('opportunity'))
     for browse in (OLD, ALIAS):
         store.collection.observe_album_representation(browse, release(), now=102)
     expected = max(original, key=lambda browse: (original[browse]['at'], browse))
-    assert album_choices.feedback_state(store) == {OLD: original[expected]}
-    assert json.loads(store.settings.get_setting('album_feedback')) == original
+    preferred = store.collection.preferred_album_ids([OLD,ALIAS])
+    assert preferred[OLD]==preferred[ALIAS]
+    assert album_choices.feedback_state(store) == {preferred[OLD]: original[expected]}
+    assert feedback_history(store) == original
     # Replacing a judgment must not leave the losing pre-merge action able to reappear.
     album_choices.set_feedback(store, ALIAS, 'more', 103, ALIAS)
-    assert set(json.loads(store.settings.get_setting('album_feedback'))) == {ALIAS}
+    assert set(album_feedback_storage.original(store.conn)) == {ALIAS}
+    # Inline replay is bounded and may resume after an earlier outbox cursor.
+    # Every original response must already be withdrawn or have a durable intent.
+    published = store.rec_ledger.evidence().records('response')
+    pending = store.album_feedback.pending_responses(after=0, limit=128)
+    assert {row['id'] for row in responses} <= (
+        {row['details']['action_id'] for row in published if row['kind'] == 'withdraw'}
+        | {row['target_action_id'] for row in pending if row['kind'] == 'withdraw'})
+    album_feedback.drain(store)
+    assert not store.album_feedback.pending_responses(after=0, limit=128)
     ledger = store.rec_ledger.evidence()
     assert ledger.records('opportunity') == opportunities
     assert all(ledger.get('response', row['id']) == row for row in responses)
@@ -65,6 +92,7 @@ def test_conflicts_resolve_by_time_then_source_and_replacement_withdraws_all_ori
     latest = [row for row in ledger.records('response') if row['kind'] == 'feedback' and row['at'] == 103]
     assert len(latest) == 1 and latest[0]['option_id'] == ALIAS
     album_choices.set_feedback(store, OLD, 'clear', 104)
+    album_feedback.drain(store)
     assert album_choices.feedback_state(store) == {}
     assert {row['details']['action_id'] for row in ledger.records('response') if row['kind'] == 'withdraw'} == {
         row['id'] for row in responses + latest}

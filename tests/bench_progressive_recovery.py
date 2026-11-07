@@ -1,6 +1,6 @@
 """Opt-in #471 actual-library audit; native source is opened only for backup.
 
-uv run pytest --test-lock-wait=60 -s tests/bench_progressive_recovery.py
+uv run pytest -s tests/bench_progressive_recovery.py
 The cold scenario deletes only derived state on its disposable copy and applies
 controlled continuing metadata updates. All normal row/time/memory caps remain.
 """
@@ -18,15 +18,19 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.bench_svd_background import _backup_library, _saved_library_source
+from tests.bench_svd_background import _saved_library_source
+from tests.library_image.fixtures import benchmark_library
+from yt_playlist.core import embeddings, embedding_files
 from yt_playlist.core.db_diagnostics import PublicationTimings
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.numerics import limit_native_threads
 from yt_playlist.core.store import Store
-from yt_playlist.rec import content_model, group_assignment, musical_preparation, progressive, taste_modes, vibe_preparation
+from yt_playlist.rec import content_model, musical_preparation, progressive, taste_modes, vibe_preparation
 from yt_playlist.repos.musical_profiles import MusicalProfilesRepo
 from yt_playlist.repos.prepared_content import PreparedContentRepo
-from yt_playlist.repos.taste_groups import TasteGroupsRepo
+from yt_playlist.controllers.rec_model import RecommendationModel
+from yt_playlist.repos.vibe_predictions import VibePredictionsRepo
+from yt_playlist.controllers.vibe_predictions import VibePredictions
 
 
 class _CaptureIncomplete(AssertionError):
@@ -69,14 +73,13 @@ def _capture_costs(costs):
         (Revisions, 'capture', 'snapshot.revisions'),
         (progressive.Preparation, 'repair', 'capture.repair'),
         (PreparedContentRepo, 'capture', 'capture.content_sql'),
-        (MusicalProfilesRepo, 'recording_inputs', 'capture.musical_inputs_sql'),
+        (MusicalProfilesRepo, 'recording_facts', 'capture.musical_inputs_sql'),
         (musical_preparation, 'source_step', 'capture.source_step'),
         (musical_preparation, 'recordings', 'capture.musical_profiles'),
         (vibe_preparation, 'step', 'capture.vibe_fanout'),
         (vibe_preparation, 'recordings', 'capture.vibe_profiles'),
-        (group_assignment, 'prepare', 'capture.group_assignments'),
-        (TasteGroupsRepo, 'assignment_head', 'capture.group_regions'),
-        (TasteGroupsRepo, 'inputs_for', 'capture.group_anchors'),
+        (VibePredictions, 'prepare_publication', 'capture.vibe_plan'),
+        (RecommendationModel, 'prepare_training_deltas', 'capture.embedding_plan'),
         (progressive, '_delta', 'capture.vector_delta'),
     )
     with ExitStack() as stack:
@@ -139,9 +142,10 @@ def _capture(preparation, scenario, now, report, costs):
 
 
 @pytest.mark.parametrize('scenario', ['saved', 'cold-and-growing'])
-def test_actual_library_basis_recovery(tmp_path, scenario):
+def test_actual_library_basis_recovery(tmp_path, scenario, request):
     path = tmp_path / 'library.db'
-    backup = _backup_library(_saved_library_source(), path)
+    path, backup = benchmark_library(_saved_library_source(), path)
+    (tmp_path / 'backup.json').write_text(json.dumps({'scenario': scenario, **backup}, indent=2) + '\n')
     try:
         child = subprocess.run([sys.executable, '-m', 'tests.bench_progressive_recovery', str(path), scenario],
                                capture_output=True, text=True, timeout=300)
@@ -151,6 +155,12 @@ def test_actual_library_basis_recovery(tmp_path, scenario):
         pytest.fail(f'Recovery audit exceeded 300 seconds; diagnostics in {tmp_path}')
     (tmp_path / 'stdout.log').write_text(child.stdout)
     (tmp_path / 'stderr.log').write_text(child.stderr)
+    # Pytest removes successful fixture roots. Keep the measured report in
+    # JUnit too, so acceptance evidence does not depend on a polling copier.
+    report = tmp_path / 'recovery.json'
+    if report.exists():
+        request.node.user_properties.append(('actual_library_report', report.read_text()))
+    request.node.user_properties.append(('private_library_backup', json.dumps(backup)))
     print(json.dumps({'backup': backup, 'report': str(tmp_path / 'recovery.json')}), flush=True)
     assert child.returncode == 0, f'{child.stdout}\n{child.stderr}'
     print((tmp_path / 'recovery.json').read_text(), flush=True)
@@ -170,6 +180,9 @@ def _rss():
 def _verify_vectors(store):
     with store.read_view() as reader:
         corpus = reader.prepared_content.corpus(progressive.Budget().max_rows)
+        axes = reader.genres.feature_axes(
+            features['genre'] for _key, payload, _digest in corpus
+            for features in (payload['library'], payload['discovered']) if features is not None)
     content, audio = {}, {}
     for key, payload, _digest in corpus:
         features = payload['library']
@@ -178,13 +191,14 @@ def _verify_vectors(store):
                 content[key] = features['genre'], features['year']
             if features['audio']:
                 audio[key] = features['audio']
-    model = content_model.build_content_model(content, audio)
+    model = content_model.build_content_model(content, audio, genre_axes=axes)
     expected = {'library': [], 'discovered': []}
     for key, payload, _digest in corpus:
         for pool in expected:
             features = payload[pool]
             if features is not None:
-                vector = content_model.encode_content(model, features['genre'], features['year'], features['audio'])
+                vector = content_model.encode_content(model, features['genre'], features['year'], features['audio'],
+                                                      genre_axes=axes)
                 if vector is not None:
                     expected[pool].append((key, vector.tobytes()))
     generation = store.rec_model.content_generation()
@@ -208,9 +222,10 @@ def _measure(path, scenario):
     report = {'scenario': scenario, 'python': sys.version, 'caps': vars(progressive.Budget()),
               'controlled_changes': [], 'modules': {}}
     for module in (content_model, progressive, taste_modes, musical_preparation, vibe_preparation,
-                   group_assignment, sys.modules[PreparedContentRepo.__module__],
-                   sys.modules[TasteGroupsRepo.__module__],
+                   embeddings, embedding_files, sys.modules[RecModelRepo.__module__],
+                   sys.modules[PreparedContentRepo.__module__],
                    sys.modules[MusicalProfilesRepo.__module__], sys.modules[Revisions.__module__],
+                   sys.modules[VibePredictionsRepo.__module__],
                    sys.modules[Store.__module__]):
         source = Path(module.__file__)
         report['modules'][module.__name__] = {'path': str(source),
@@ -235,12 +250,18 @@ def _measure(path, scenario):
     try:
         if scenario == 'cold-and-growing':
             with store.conn:
-                for table in ('rec_content_vectors', 'rec_discovered_content_vectors',
-                              'rec_prepared_content', 'rec_content_pending'):
+                store.conn.execute("DELETE FROM recording_embeddings WHERE space IN ('content_library','content_discovery')")
+                store.conn.execute("DELETE FROM recording_embedding_files WHERE space IN ('content_library','content_discovery')")
+                for table in ('prepared_recording_inputs', 'unresolved_preparation_inputs', 'rec_content_pending'):
                     store.conn.execute(f'DELETE FROM {table}')
-                store.conn.executemany('DELETE FROM settings WHERE key=?', [(key,) for key in (
-                    'rec_content_model', 'rec_content_generation', 'rec_content_genre_revision',
-                    'rec_content_inputs', progressive.BASIS_STATE, progressive.FIT_STATE)])
+            # Encoders and preparation checkpoints have typed owners now.
+            # Deleting only legacy settings leaves the old model/retry delay
+            # active and does not establish the advertised cold scenario.
+            reset = ('rec_content_model', 'rec_content_generation', 'rec_content_genre_revision',
+                     'rec_content_inputs', progressive.BASIS_STATE, progressive.FIT_STATE)
+            for key in reset:
+                store.settings.delete_setting(key)
+            assert all(store.settings.get_setting(key) is None for key in reset)
             report['controlled_changes'] = ['Removed derived content inputs/vectors/model on copy',
                                              'Lost queue rebuilt by production maintenance audit',
                                              'Two recording BPM values change continually during fit']

@@ -4,18 +4,32 @@ from yt_playlist.core.store import Store
 from yt_playlist.rec import choice_evidence as choices
 
 
-@pytest.fixture
-def store():
-    result = Store(":memory:")
-    result.init_schema()
-    yield result
-    result.conn.close()
-
-
 def offer(store, identity="menu", episode="episode", now=100):
     return choices.issue(store, "albums", [{"id": "a", "score": .9}, {"id": "b", "score": .8}],
                          now, context={"layers": ["now", "session", "recent", "saved"]},
                          opportunity_id=identity, episode_id=episode)
+
+
+def test_mix_menu_availability_owns_the_serving_connection(store, monkeypatch):
+    from yt_playlist.core import mix_choices
+
+    assert mix_choices.available(store.conn)
+    observed = []
+    original = mix_choices.available
+
+    def available(connection):
+        if connection is store.conn:
+            observed.append(store._lock.held_by_current_thread)
+        return original(connection)
+
+    monkeypatch.setattr(mix_choices, 'available', available)
+    identity = choices.issue(store, 'mixes', [
+        {'id': 'comfort', 'label': 'Comfort listening', 'intent': 'comfort', 'genres': ['jazz']}],
+        100, context={}, opportunity_id='serving-guard')
+
+    assert identity == 'serving-guard'
+    assert observed and all(observed), observed
+    assert choices.opportunity(store, identity)['options'][0]['descriptor_id']
 
 
 def test_actual_visibility_controls_prediction_denominator_and_actions_are_distinct(store):
@@ -60,7 +74,7 @@ def test_unknown_menus_wrong_options_and_chronology_are_not_invented(store):
 
 
 def test_mix_playback_resolves_recipe_from_exact_external_queue(store):
-    iid = store.identities.upsert_identity("main", "test", None, True)
+    iid = store.accounts.upsert_account("main", "test", None, True)
     pid = store.playlists.upsert_playlist(iid, "PL-generated", "Generated mix", 1, "h", 1)
     oid = choices.issue(store, "mixes", [{"id": "comfort", "tracks": []}], 100,
                         context={}, opportunity_id="mix")
@@ -205,11 +219,10 @@ def test_home_storage_inventory_belongs_to_daily_maintenance(store, monkeypatch)
     assert choices.refresh_report in stages and choices.maintain_storage not in stages
 
 
-def test_new_and_withdrawn_evidence_from_another_store_refreshes_projection(tmp_path):
+def test_new_and_withdrawn_evidence_from_another_store_refreshes_projection(tmp_path, consumer_store):
     path = tmp_path / 'shared.db'
-    first, second = Store(path), Store(path)
+    first, second = consumer_store(path), Store(path)
     try:
-        first.init_schema()
         second.init_schema()
         oid = offer(first)
         choices.refresh_report(first, 110)
@@ -251,7 +264,7 @@ def test_bandit_expiry_preempts_periodic_refresh_and_mode_changes_refresh_immedi
     assert not choices.refresh_report(store, expiry)['bandit']['rows']
     choices.refresh_report(store, 104)
     modes(store, flipped=True)
-    assert not choices.refresh_report(store, 105)['bandit']['rows']
+    assert choices.refresh_report(store, 105)['bandit']['rows']
 
 
 def test_unrelated_visibility_does_not_republish_effectively_unchanged_interest(store):

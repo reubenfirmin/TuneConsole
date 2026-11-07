@@ -25,11 +25,15 @@ function tvHome(maximum = 15) {
   let visualRequest = null, visualTimer = null, visualSerial = 0, visualTarget = null;
   const visualChecked = new Set();
   let viewObserver = null, syncView = null, updateView = null, layoutView = null;
+  let launchId = null, launchAttempts = 0;
+  try { launchId = localStorage.getItem('tc-tv-launch'); } catch (_) {}
   const lengths = [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 45, 60, 90, 120, 180, 240, 360, 480, 720, null];
   return {
     items: [], selected: -1, maxMinutes: maximum, lengths, draft: lengths.indexOf(maximum), visible: false,
     ready: false, loading: false, starting: false, connecting: false, playing: false, playerMounted: false,
     playlistId: null, playlistTitle: '', error: '', playerError: '', finished: false,
+    savingParams: false, paramsError: '', resetting: false,
+    launchPending: !!launchId,
     stream: '', streamPlaylistId: null, refilling: false, waiting: false, refillError: '', refillAttempts: 0,
     failedVideos: [],
     destroyed: false, failed: [], revealedCount: 0, sessionStarted: false, savedPlaylistOpened: null,
@@ -171,14 +175,23 @@ function tvHome(maximum = 15) {
       controller?.abort(); controller = new AbortController(); clearTimeout(timer);
       this.loading = true;
       try {
-        const response = await fetch('/home/tv', {signal: controller.signal});
+        const response = await fetch('/home/tv', {signal: AbortSignal.any([controller.signal, AbortSignal.timeout(20000)])});
+        if (!response.ok) {
+          console.debug('[TV] readiness response unavailable', response.status, await response.text());
+          throw new Error('TV readiness failed');
+        }
         const data = await response.json();
         if (request !== serial || this.destroyed) return;
-        if (!response.ok) throw new Error(data.error || 'Couldn’t load TV. Try again.');
         this.ready = data.ready; this.maxMinutes = data.max_minutes;
-        this.error = data.message || '';
+        if (!launchId && data.pending_launch) {
+          launchId = data.pending_launch;
+          try { localStorage.setItem('tc-tv-launch', launchId); } catch (_) {}
+          this.launchPending = true;
+        }
+        this.error = this.launchPending ? 'This TV session is still unconfirmed.' : data.message || '';
         if (!this.ready && this.visible) timer = setTimeout(() => this.readiness(), 5000);
       } catch (error) {
+        console.debug('[TV] readiness unavailable', error);
         if (request === serial && !this.destroyed && error.name !== 'AbortError') {
           this.error = 'Couldn’t load TV. Try again.';
         }
@@ -186,48 +199,74 @@ function tvHome(maximum = 15) {
     },
     async start() {
       if (this.starting) return;
-      this.stopPlayer();
-      const intent = playbackSerial;
-      this.starting = true; this.sessionStarted = false; this.error = ''; this.playerError = '';
+      // Keep the last usable player until a replacement playlist is confirmed.
+      ++serial; clearTimeout(timer); controller?.abort(); controller = null;
+      const intent = ++playbackSerial;
+      launchId ||= window.crypto?.randomUUID?.() || String(Date.now()) + '-' + Math.random().toString(36).slice(2);
+      try { localStorage.setItem('tc-tv-launch', launchId); } catch (_) {}
+      launchAttempts = 0;
+      this.starting = true; this.error = ''; this.playerError = '';
       return this.generate(intent);
     },
     async generate(intent) {
       if (intent !== playbackSerial || this.destroyed) return;
       try {
-        const response = await fetch('/home/tv/play', {method: 'POST'});
+        const requestId = launchId;
+        const response = await fetch('/home/tv/play', {method: 'POST', signal: AbortSignal.timeout(20000),
+          body: new URLSearchParams({request_id: requestId})});
+        if (!response.ok) {
+          console.debug('[TV] start response unavailable', response.status, await response.text());
+          throw new Error('TV start failed');
+        }
         const data = await response.json();
         if (intent !== playbackSerial || this.destroyed) return;
         if (response.status === 202) {
+          if (data.pending || ++launchAttempts >= 12) {
+            this.starting = false; this.launchPending = true;
+            this.error = 'This TV session is still unconfirmed.';
+            return;
+          }
           if (data.message) { this.starting = false; this.error = data.message; return; }
           // An empty or rebuilding pool is normal preparation. Keep the same
           // launch intent and embedded loader until a prepared draw is ready.
           timer = setTimeout(() => this.generate(intent), 2000);
           return;
         }
-        if (!response.ok) throw new Error(data.error || 'Couldn’t start TV. Try again.');
         this.ready = true;
         this.usePlaylist(data);
+        this.forgetLaunch(requestId);
         await this.select(0);
       } catch (error) {
+        console.debug('[TV] start not confirmed', error);
         if (intent === playbackSerial && !this.destroyed) {
           this.starting = false;
-          this.error = error instanceof TypeError ? 'Couldn’t start TV. Try again.' : error.message;
+          this.launchPending = true;
+          this.error = 'This TV session is still unconfirmed.';
         }
       }
     },
+    forgetLaunch(id = launchId) {
+      try { if (localStorage.getItem('tc-tv-launch') === id) localStorage.removeItem('tc-tv-launch'); } catch (_) {}
+      if (launchId === id) { launchId = null; this.launchPending = false; }
+    },
     async openPlaylist(id) {
-      const intent = playbackSerial;
-      this.loading = true; this.connecting = true;
+      ++serial; clearTimeout(timer); controller?.abort(); controller = null;
+      const intent = ++playbackSerial;
+      this.starting = false; this.loading = true; this.connecting = true;
       try {
-        const response = await fetch('/home/tv/playlist/' + encodeURIComponent(id));
+        const response = await fetch('/home/tv/playlist/' + encodeURIComponent(id), {signal: AbortSignal.timeout(20000)});
+        if (!response.ok) {
+          console.debug('[TV] playlist response unavailable', response.status, await response.text());
+          throw new Error('TV playlist unavailable');
+        }
         const data = await response.json();
         if (intent !== playbackSerial || this.destroyed) return;
-        if (!response.ok) throw new Error(data.error);
         this.usePlaylist(data); await this.select(0);
       } catch (error) {
+        console.debug('[TV] playlist unavailable', error);
         if (intent !== playbackSerial || this.destroyed) return;
         this.connecting = false;
-        this.error = error.message || 'Couldn’t open this video playlist.';
+        this.error = 'Couldn’t open this video playlist. Choose another playlist or try again.';
       } finally { if (intent === playbackSerial) this.loading = false; }
     },
     usePlaylist(data) {
@@ -242,9 +281,16 @@ function tvHome(maximum = 15) {
       this.connecting = true;
     },
     async acquire() {
-      const response = await fetch('/home/tv/takeover', {method: 'POST'});
+      const response = await fetch('/home/tv/takeover', {method: 'POST', signal: AbortSignal.timeout(20000)});
+      if (!response.ok) {
+        console.debug('[TV] handoff response unavailable', response.status, await response.text());
+        throw new Error('TV handoff failed');
+      }
       const data = await response.json();
-      if (!response.ok || !data.ok) throw new Error(data.error || 'Couldn’t pause the audio player. Try again.');
+      if (!data.ok) {
+        console.debug('[TV] handoff not confirmed', data);
+        throw new Error('TV handoff not confirmed');
+      }
     },
     cancelVisualCheck() {
       ++visualSerial; clearTimeout(visualTimer); visualRequest?.abort();
@@ -319,14 +365,15 @@ function tvHome(maximum = 15) {
       try {
         await this.acquire();
         if (intent !== playbackSerial || attempt !== playerSerial || selection !== selectionSerial || this.destroyed) return;
-        ownsPlayback = true; releasePending = false; this.playerError = '';
+        ownsPlayback = true; releasePending = false; this.error = ''; this.playerError = '';
         if (player && loadedVideoId !== this.current?.video_id) {
           loadedVideoId = this.current.video_id; player.loadVideoById(loadedVideoId);
         } else player?.playVideo();
         this.publish();
       } catch (error) {
+        console.debug('[TV] playback handoff not confirmed', error);
         if (intent === playbackSerial && attempt === playerSerial && selection === selectionSerial && !this.destroyed) {
-          this.connecting = false; this.playerError = error.message;
+          this.connecting = false; this.playerError = 'Couldn’t start this video. Press play to try again.';
         }
       }
     },
@@ -344,7 +391,7 @@ function tvHome(maximum = 15) {
       playbackRetries = 0; retryPending = null;
       const intent = playbackSerial;
       if (index !== this.selected) reportedPlay = false;
-      this.selected = index; this.finished = false; this.playerError = '';
+      this.selected = index; this.finished = false; this.error = ''; this.playerError = '';
       this.playlistId = this.current.playlist_id || this.playlistId;
       this.playlistTitle = this.current.playlist_title || this.playlistTitle;
       this.waiting = false;
@@ -358,7 +405,9 @@ function tvHome(maximum = 15) {
           if (intent !== playbackSerial || attempt !== playerSerial || selection !== selectionSerial || this.destroyed) return;
           ownsPlayback = true; releasePending = false; loadedVideoId = this.current.video_id; player.loadVideoById(loadedVideoId);
         } catch (error) {
-          if (intent === playbackSerial && selection === selectionSerial && !this.destroyed) this.playerError = error.message;
+          console.debug('[TV] video selection not confirmed', error);
+          if (intent === playbackSerial && selection === selectionSerial && !this.destroyed)
+            this.playerError = 'Couldn’t start this video. Press play to try again.';
         }
         return;
       }
@@ -484,7 +533,12 @@ function tvHome(maximum = 15) {
         current: this.current.video_id, exclude: JSON.stringify(exclude),
         recent: JSON.stringify(this.items.slice(0, this.selected + 1).map(item => item.video_id).slice(-60))});
       try {
-        const response = await fetch('/home/tv/playlist/' + this.streamPlaylistId + '/refill', {method: 'POST', body});
+        const response = await fetch('/home/tv/playlist/' + this.streamPlaylistId + '/refill',
+          {method: 'POST', body, signal: AbortSignal.timeout(20000)});
+        if (!response.ok) {
+          console.debug('[TV] continuation response unavailable', response.status, await response.text());
+          throw new Error('TV continuation failed');
+        }
         const data = await response.json();
         if (intent !== playbackSerial || attempt !== refillSerial || this.destroyed || !ownsPlayback) return;
         if (response.status === 202 || response.ok && !data.items?.length) {
@@ -492,7 +546,6 @@ function tvHome(maximum = 15) {
           else refillTimer = setTimeout(() => this.refill(), 2000);
           return;
         }
-        if (!response.ok) throw new Error(data.error || 'The next videos could not load. Reset TV to continue.');
         this.stream = data.stream; this.streamPlaylistId = data.playlist_id;
         const upcoming = new Set(this.items.slice(this.selected + 1).map(item => item.video_id));
         const additions = data.items.filter(item => !upcoming.has(item.video_id) && !this.failedVideos.includes(item.video_id));
@@ -510,8 +563,9 @@ function tvHome(maximum = 15) {
         else if (!additions.length) refillTimer = setTimeout(() => this.refill(), 2000);
         this.inspectAhead();
       } catch (error) {
+        console.debug('[TV] next videos unavailable', error);
         if (intent === playbackSerial && attempt === refillSerial && !this.destroyed) {
-          if (++this.refillAttempts >= 3) this.continuationFailed(error.message || 'The next videos could not load. Reset TV to continue.');
+          if (++this.refillAttempts >= 3) this.continuationFailed('The next videos could not load. Reset TV to continue.');
           else refillTimer = setTimeout(() => this.refill(), 3000);
         }
       } finally {
@@ -519,19 +573,31 @@ function tvHome(maximum = 15) {
       }
     },
     openParams() {
+      if (this.savingParams) return;
+      this.paramsError = '';
       const exact = this.lengths.indexOf(this.maxMinutes);
       this.draft = exact >= 0 ? exact : this.lengths.findIndex(value => value === null || value >= this.maxMinutes);
       this.$refs.params.showModal();
     },
     async applyParams() {
+      if (this.savingParams) return;
+      this.savingParams = true; this.paramsError = '';
       try {
-        const response = await fetch('/home/tv', {method: 'POST', body: new URLSearchParams({max_minutes: this.lengths[this.draft] ?? 'unlimited'})});
+        const response = await fetch('/home/tv', {method: 'POST', signal: AbortSignal.timeout(20000),
+          body: new URLSearchParams({max_minutes: this.lengths[this.draft] ?? 'unlimited'})});
+        if (!response.ok) {
+          console.debug('[TV] parameters response unavailable', response.status, await response.text());
+          throw new Error('TV parameters failed');
+        }
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error);
+        if (this.destroyed) return;
         this.maxMinutes = data.max_minutes; this.ready = data.ready; this.$refs.params.close();
         this.error = data.message || '';
         if (!this.ready && !this.playerMounted && !this.starting) this.readiness();
-      } catch (error) { this.error = error.message || 'Couldn’t change TV parameters.'; }
+      } catch (error) {
+        console.debug('[TV] parameter changes not confirmed', error);
+        if (!this.destroyed) this.paramsError = 'Changes not confirmed. Your choice is kept here.';
+      } finally { this.savingParams = false; }
     },
     externalPlayback() {
       // Revoke pending work without changing the mounted player's lifetime:
@@ -548,10 +614,26 @@ function tvHome(maximum = 15) {
       player?.pauseVideo(); this.playing = false; this.publish();
     },
     async another() {
-      this.stopPlayer(); this.items = []; this.finished = false;
+      if (this.resetting) return;
+      this.resetting = true;
       const intent = playbackSerial;
-      try { await fetch('/home/tv/reset', {method: 'POST'}); } catch (_) { /* Start still handles connection errors. */ }
-      if (intent === playbackSerial && !this.destroyed) this.start();
+      try {
+        const response = await fetch('/home/tv/reset', {method: 'POST', signal: AbortSignal.timeout(20000)});
+        if (!response.ok) {
+          console.debug('[TV] reset response unavailable', response.status, await response.text());
+          throw new Error('TV reset failed');
+        }
+        const data = await response.json();
+        if (!data.ok) throw new Error('TV reset not confirmed');
+        if (intent !== playbackSerial || this.destroyed) return;
+        this.stopPlayer(); this.items = []; this.finished = false;
+        this.forgetLaunch();
+        await this.start();
+      } catch (error) {
+        console.debug('[TV] reset not confirmed', error);
+        if (intent === playbackSerial && !this.destroyed)
+          this.error = 'Reset not confirmed. Keep watching or try again.';
+      } finally { this.resetting = false; }
     },
     destroy() {
       this.destroyed = true; ++serial; clearTimeout(timer); controller?.abort(); this.stopPlayer();

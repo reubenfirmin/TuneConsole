@@ -1,5 +1,6 @@
 <!doctype html>
-<html lang="en">
+{% set maintenance = {'active': false, 'warning': false, 'banner_message': ''} if read_recovery else storage_maintenance_status() %}
+<html lang="en" data-storage-compacting="{{ 'true' if maintenance.active else 'false' }}">
 <head>
   {% set path = request.url.path if request else "/" %}
   <meta charset="utf-8">
@@ -104,14 +105,13 @@
   {% endif %}
   <!-- CSS token -> canvas bridge; must load before any script that paints. -->
   <script src="/static/theme.js?v={{ asset_v }}"></script>
+  <script src="/static/read-recovery.js?v={{ asset_v }}"></script>
   <script src="/static/playback-status.js?v={{ asset_v }}"></script>
-  {% if path != '/audio-preview' %}
   <script type="module" src="/static/audio-vibe-collection.js?v={{ asset_v }}"></script>
-  {% endif %}
-  {% if audio_vibes_enabled is defined and audio_vibes_enabled() and path != '/audio-preview' %}
+  {% if audio_vibes_enabled is defined and audio_vibes_enabled() %}
   <link rel="stylesheet" href="/static/audio-vibe-banner.css?v={{ asset_v }}">
   {% endif %}
-  {% set setup_pending = initial_setup_pending() %}
+  {% set setup_pending = false if read_recovery else initial_setup_pending() %}
   {% if setup_pending %}
   <link rel="stylesheet" href="/static/setup-status.css?v={{ asset_v }}">
   <script src="/static/setup-status.js?v={{ asset_v }}"></script>
@@ -131,6 +131,7 @@
   {% endif %}
   {# Shared song dialogs can be opened from any page, including HTMX results. #}
   <script src="/static/genre-dialog.js?v={{ asset_v }}"></script>
+  {% if path == '/enrich' %}<script src="/static/genre-editor.js?v={{ asset_v }}"></script>{% endif %}
   <script src="/static/visualization-tooltips.js?v={{ asset_v }}"></script>
   {% if path == '/' or path.startswith(('/playlist', '/album', '/artist', '/cleanup', '/taste')) %}
   <script src="/static/table-controls.js?v={{ asset_v }}"></script>
@@ -144,9 +145,9 @@
   {% if path == '/' or path.startswith(('/playlist/', '/album', '/artist', '/taste')) %}
   <script src="/static/track-tables.js?v={{ asset_v }}"></script>
   {% endif %}
-  {% if path == '/' or path.startswith('/road_trip') %}
+  <script>{% include "_partials/mix_launch_view.html" %}</script>
   <script src="/static/playlist-generation.js?v={{ asset_v }}"></script>
-  {% endif %}
+  <script src="/static/generated-playback.js?v={{ asset_v }}"></script>
   {% if path == '/' %}
   <script src="/static/home-board.js?v={{ asset_v }}"></script>
   <script src="/static/home-tuning.js?v={{ asset_v }}"></script>
@@ -170,9 +171,22 @@
   <script defer src="/static/vendor/alpine.min.js"></script>
 </head>
 <body>
-  {% set storage_status = storage_maintenance_status() %}
-  <div id="storage-maintenance" class="storage-maintenance" data-warning="{{ 'true' if storage_status.warning else 'false' }}" role="{{ 'alert' if storage_status.warning else 'status' }}" aria-live="{{ 'assertive' if storage_status.warning else 'polite' }}"{% if not storage_status.active and not storage_status.warning %} hidden{% endif %}>{% if storage_status.active or storage_status.warning %}{{ storage_status.message }}{% endif %}</div>
+  <template id="mix-launch-loader">
+    <link rel="stylesheet" href="/static/tokens.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/components.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/clusters.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/generating.css?v={{ asset_v }}">
+    <script defer src="/static/theme.js?v={{ asset_v }}"></script>
+    <script defer src="/static/generating.js?v={{ asset_v }}"></script>
+    {% include "_partials/mix_launch_loader.html" %}
+  </template>
   {% if setup_pending %}{% include "_partials/setup_status.html" %}{% endif %}
+  <div id="storage-maintenance" class="storage-maintenance"
+       data-warning="false"
+       role="status"
+       aria-live="polite"
+       aria-atomic="true"{% if not maintenance.banner_message %} hidden{% endif %}>{{ maintenance.banner_message }}</div>
   <header class="topbar">
     <a class="brand" href="/" aria-label="TuneConsole home">
       <img class="brand-mark" src="/static/favicon.svg?v={{ asset_v }}" width="28" height="28" alt="">
@@ -197,18 +211,20 @@
     {% endif %}
     {% set tools_active = path.startswith('/cleanup') or path.startswith('/move') or path.startswith('/actions') or path.startswith('/setup') or path.startswith('/network') or path.startswith('/enrich') or path.startswith('/discovery') or path.startswith('/audio-preview') %}
     <nav>
-      <div class="nav-group">
-        <span class="nav-group-label">Library</span>
-        <a href="/" class="{{ 'active' if path == '/' else '' }}">Home</a>
-        <a href="/playlists" class="{{ 'active' if path.startswith('/playlist') else '' }}">Playlists</a>
-        <a href="/artists" class="{{ 'active' if path.startswith('/artists') or path.startswith('/artist') else '' }}">Artists</a>
-        <a href="/albums" class="{{ 'active' if path.startswith('/albums') else '' }}">Albums</a>
-        <a href="/charts" class="{{ 'active' if path.startswith('/charts') else '' }}">Charts</a>
-      </div>
-      <div class="nav-group">
-        <span class="nav-group-label">Explore</span>
-        <a href="/clusters" class="{{ 'active' if path.startswith('/clusters') else '' }}">Clusters</a>
-        <a href="/road_trip" class="{{ 'active' if path.startswith('/road_trip') else '' }}">Road Trip</a>
+      <div class="nav-sections">
+        <div class="nav-group">
+          <span class="nav-group-label">Library</span>
+          <a href="/" class="{{ 'active' if path == '/' else '' }}">Home</a>
+          <a href="/playlists" class="{{ 'active' if path.startswith('/playlist') else '' }}">Playlists</a>
+          <a href="/artists" class="{{ 'active' if path.startswith('/artists') or path.startswith('/artist') else '' }}">Artists</a>
+          <a href="/albums" class="{{ 'active' if path.startswith('/albums') else '' }}">Albums</a>
+          <a href="/charts" class="{{ 'active' if path.startswith('/charts') else '' }}">Charts</a>
+        </div>
+        <div class="nav-group">
+          <span class="nav-group-label">Explore</span>
+          <a href="/clusters" class="{{ 'active' if path.startswith('/clusters') else '' }}">Clusters</a>
+          <a href="/road_trip" class="{{ 'active' if path.startswith('/road_trip') else '' }}">Road Trip</a>
+        </div>
       </div>
       <div class="tools-menu" x-data="{ open: false }" @click.outside="open = false" @keydown.escape.window="open = false">
         <button type="button" class="tools-btn {{ 'active' if tools_active else '' }}"
@@ -216,7 +232,7 @@
         <div class="tools-pop" x-show="open" x-cloak x-transition.opacity.scale.origin.top.right>
           <a href="/setup" class="{{ 'active' if path.startswith('/setup') else '' }}">Setup</a>
           <a href="/cleanup" class="{{ 'active' if path.startswith('/cleanup') else '' }}">Cleanup</a>
-          {% if has_multiple_identities() %}
+          {% if not read_recovery and has_multiple_identities() %}
           <a href="/move" class="{{ 'active' if path.startswith('/move') else '' }}">Move</a>
           {% endif %}
           <a href="/enrich" class="{{ 'active' if path.startswith('/enrich') else '' }}">Enrichment</a>
@@ -236,7 +252,7 @@
   <div class="global-now-playing-slot">
     {% include "_partials/now_playing.html" %}
   </div>
-  <div class="authbar" x-data='authBanner({{ ([] if storage_status.active else auth_expired.values()|list)|tojson }})'
+  <div class="authbar" x-data='authBanner({{ ([] if maintenance.active else auth_expired.values()|list)|tojson }})'
        x-show="labels.length && !dismissed" x-cloak @auth-expired.window="add($event.detail.label)"
        @auth-checked.window="labels = $event.detail.labels">
     <span class="authbar-body">⚠ Not signed in to YouTube Music for <strong x-text="labels.join(', ')"></strong>.
@@ -259,12 +275,10 @@
   <div id="genre-candidates-modal"></div>
   {% include "_partials/song_actions.html" %}
   <div id="toasts" class="toasts" aria-live="polite">{% block toasts %}{% endblock %}</div>
-  {% if path != '/audio-preview' %}
   <div hidden data-audio-vibe-collection
        data-extension-ids="{{ audio_vibe_extension_ids|join(',') }}"
        data-taxonomy-version="{{ audio_vibe_taxonomy_version }}"></div>
   {% if audio_vibes_enabled is defined and audio_vibes_enabled() %}{% include "_partials/audio_vibe_banner.html" %}{% endif %}
-  {% endif %}
   {% include "_partials/heartbeat.html" %}
 </body>
 </html>

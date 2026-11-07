@@ -2,11 +2,10 @@
 import time
 
 from fastapi import APIRouter, Request, Response
-from fastapi.responses import RedirectResponse
 
 from yt_playlist.core.accounts import main_client
 from yt_playlist.providers import lastfm
-from yt_playlist.rec import home_cards, home_preferences, onboarding
+from yt_playlist.rec import artist_start, home_cards, home_preferences, onboarding
 from yt_playlist.rec.home_cards import _proto
 
 LASTFM_NUDGE_SNOOZE_S = 30 * 86400
@@ -55,21 +54,6 @@ def sample_fragment(ctx, request, kind):
 def build(ctx):
     router = APIRouter()
     store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
-
-    @router.post('/home/onboard/welcome')
-    def welcome():
-        store.settings.set_setting('onboard_welcomed', '1')
-        return RedirectResponse('/', status_code=303)
-
-    @router.post('/home/onboard/format')
-    async def choose_listening_format(request: Request):
-        preference = (await request.form()).get('format')
-        if preference not in home_preferences.PANELS:
-            return Response('Choose albums, mixes or radio.', status_code=422)
-        store.settings.set_setting('onboard_listening_format', preference)
-        store.settings.set_setting('onboard_welcomed', '1')
-        store.settings.set_setting('onboard_format_pending', '0')
-        return RedirectResponse('/', status_code=303)
 
     @router.post("/onboard/lastfm/dismiss")
     def dismiss_lastfm_nudge():
@@ -129,6 +113,11 @@ def build(ctx):
 
     @router.get("/home/onboard/start")
     def home_onboard_start(request: Request):
+        if artist_start.required(store):
+            return templates.TemplateResponse(request, 'artist_start.html', {
+                'artist_choices': store.discovery.starter_artists(),
+                'minimum_artists': artist_start.MIN_ARTISTS,
+            })
         preference = home_preferences.default_format(store)
         if preference == 'albums':
             return templates.TemplateResponse(request, '_partials/onboarding_album.html', {

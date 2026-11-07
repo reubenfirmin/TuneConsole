@@ -18,8 +18,8 @@ from yt_playlist.web.spotify_import import JOB_KEY, save_job
 @pytest.mark.parametrize("operation", ["find-album-candidates", "resolve-album"])
 @pytest.mark.parametrize("overlap", ["delete", "replace"])
 def test_album_operation_rejects_overlapping_report_deletion_or_replacement(store, operation, overlap):
-    first = store.identities.upsert_identity("First", "first", None, True)
-    second = store.identities.upsert_identity("Second", "second", None, False)
+    first = store.accounts.upsert_account("First", "first", None, True)
+    second = store.accounts.upsert_account("Second", "second", None, False)
     entered, release = threading.Event(), threading.Event()
 
     class BlockingClient(AlbumClient):
@@ -42,7 +42,7 @@ def test_album_operation_rejects_overlapping_report_deletion_or_replacement(stor
         **old_client.results["One Artist"][0], "browseId": "MPRE-alternate"})
     report = import_spotify_library(store, album_zip("One"), old_client, first, 100)
     assert report["albums_unmatched"] == 1
-    save_job(store, {"status": "done", "identity_id": first, "identity_label": "First",
+    save_job(store, {"status": "done", "account_id": first, "identity_label": "First",
                      "report_schema": SPOTIFY_REPORT_SCHEMA, "report": report})
     app = create_app(store, lambda: {first: old_client, second: new_client},
                      now_fn=lambda: 1000, background_work=False)
@@ -73,40 +73,43 @@ def test_album_operation_rejects_overlapping_report_deletion_or_replacement(stor
         assert pending.result(timeout=3).status_code == 303
 
     completed = json.loads(store.settings.get_setting(JOB_KEY))
+    # Settings exposes the historical document; application code uses the typed owner.
     assert completed["identity_id"] == first
+    assert spotify_import.load_job(store)["account_id"] == first
     if operation == "resolve-album":
         assert completed["report"]["albums_imported"] == 1
         assert old_client.album_ratings == [("OLAK-One", "LIKE")]
-        assert len(store.collection.get_saved_albums(identity_id=first)) == 1
+        assert len(store.collection.get_saved_albums(account_id=first)) == 1
         retry_markers = store.settings.get_setting(f"spotify_library_imported_albums:{first}")
         assert retry_markers
     else:
         assert completed["report"]["details"]["albums"][0]["candidates"]
         assert old_client.album_ratings == []
     assert new_client.album_ratings == []
-    assert store.collection.get_saved_albums(identity_id=second) == []
+    assert store.collection.get_saved_albums(account_id=second) == []
 
     # Once accepted, deletion stays deleted and replacement keeps its own preview.
     if overlap == "replace":
         assert other.post("/import/spotify-library/prepare", data=replacement).status_code == 200
-        latest = _wait_for_library_job(store)
+        latest = _wait_for_library_job(other)
         assert latest["status"] == "preview" and latest["identity_id"] == second
+        assert spotify_import.load_job(store)["account_id"] == second
         assert latest["preview_token"]
     else:
         assert other.post("/import/spotify-library/delete-report", follow_redirects=False).status_code == 303
         assert store.settings.get_setting(JOB_KEY) is None
     if operation == "resolve-album":
         assert store.settings.get_setting(f"spotify_library_imported_albums:{first}") == retry_markers
-        assert len(store.collection.get_saved_albums(identity_id=first)) == 1
+        assert len(store.collection.get_saved_albums(account_id=first)) == 1
 
 
 @pytest.mark.parametrize("operation", ["find-album-candidates", "resolve-album"])
 def test_failed_album_operation_releases_report_owner(store, operation):
-    iid = store.identities.upsert_identity("First", "first", None, True)
+    iid = store.accounts.upsert_account("First", "first", None, True)
     client = AlbumClient()
     client.results["One Artist"].append({**client.results["One Artist"][0], "browseId": "MPRE-alternate"})
     report = import_spotify_library(store, album_zip("One"), client, iid, 100)
-    save_job(store, {"status": "done", "identity_id": iid,
+    save_job(store, {"status": "done", "account_id": iid,
                      "report_schema": SPOTIFY_REPORT_SCHEMA, "report": report})
     client.failed_searches.add("One Artist")
     client.failed_saves.add("OLAK-One")
@@ -123,8 +126,8 @@ def test_failed_album_operation_releases_report_owner(store, operation):
 
 @pytest.mark.parametrize("handoff", ["completed", "replacement", "deleted"])
 def test_status_poll_preserves_report_completed_or_replaced_during_its_read(store, monkeypatch, handoff):
-    first = store.identities.upsert_identity("First", "first", None, True)
-    second = store.identities.upsert_identity("Second", "second", None, False)
+    first = store.accounts.upsert_account("First", "first", None, True)
+    second = store.accounts.upsert_account("Second", "second", None, False)
     provider_entered, finish_provider = threading.Event(), threading.Event()
     poll_read, finish_poll = threading.Event(), threading.Event()
 
@@ -179,8 +182,9 @@ def test_status_poll_preserves_report_completed_or_replaced_during_its_read(stor
                     assert web.post("/import/spotify-library/prepare", data={
                         "selection_token": selection, "identity_id": second,
                         "include_albums": "on"}).status_code == 200
-                    latest = _wait_for_library_job(store)
+                    latest = _wait_for_library_job(web)
                     assert latest["status"] == "preview" and latest["identity_id"] == second
+                    assert original_load(store)["account_id"] == second
                 elif handoff == "deleted":
                     assert web.post("/import/spotify-library/delete-report",
                                     follow_redirects=False).status_code == 303
@@ -200,14 +204,14 @@ def test_status_poll_preserves_report_completed_or_replaced_during_its_read(stor
     assert original_load(store) == expected
     assert remote.album_ratings == [("OLAK-One", "LIKE")]
     assert next_remote.album_ratings == []
-    assert len(store.collection.get_saved_albums(identity_id=first)) == 1
+    assert len(store.collection.get_saved_albums(account_id=first)) == 1
     assert store.settings.get_setting(f"spotify_library_imported_albums:{first}") == retry_markers
 
 
 @pytest.mark.parametrize("status", ["queued", "running"])
 def test_status_poll_recovers_a_genuinely_interrupted_import(store, status):
-    identity = store.identities.upsert_identity("Destination", "credential", None, True)
-    previous = {"status": status, "identity_id": identity, "started_at": 900}
+    identity = store.accounts.upsert_account("Destination", "credential", None, True)
+    previous = {"status": status, "account_id": identity, "started_at": 900}
     save_job(store, previous)
     app = create_app(store, lambda: {identity: AlbumClient()}, now_fn=lambda: 1000,
                      background_work=False)
@@ -217,7 +221,7 @@ def test_status_poll_recovers_a_genuinely_interrupted_import(store, status):
     assert "TuneConsole stopped before the import finished" in response.text
     recovered = spotify_import.load_job(store)
     assert recovered["status"] == "error" and recovered["finished_at"] == 1000
-    assert recovered["identity_id"] == identity and recovered["started_at"] == 900
+    assert recovered["account_id"] == identity and recovered["started_at"] == 900
     assert not app.state.ctx.spotify_import_lock.locked()
     assert web.get("/import/spotify-library/status").status_code == 200
     assert spotify_import.load_job(store) == recovered

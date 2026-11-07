@@ -12,8 +12,8 @@ FIRST_DELAY = 3600
 MAX_DELAY = 86400
 
 
-def key(identity_id, ytm):
-    return PREFIX + json.dumps([identity_id, ytm], separators=(",", ":"))
+def key(account_id, ytm):
+    return PREFIX + json.dumps([account_id, ytm], separators=(",", ":"))
 
 
 def states(store):
@@ -22,7 +22,7 @@ def states(store):
 
 
 def read(store, playlist):
-    value = store.settings.get_setting(key(playlist.identity_id, playlist.ytm_playlist_id))
+    value = store.settings.get_setting(key(playlist.account_id, playlist.provider_playlist_id))
     return json.loads(value) if value else None
 
 
@@ -30,10 +30,10 @@ def begin(store, playlist, now, previous):
     """Commit the next deadline before network work, including interrupted attempts."""
     attempt = (previous or {}).get("attempts", 0) + 1
     delay = min(MAX_DELAY, FIRST_DELAY * 2 ** min(attempt - 1, 5))
-    state = {**(previous or {}), "identity": playlist.identity_id,
-             "ytm": playlist.ytm_playlist_id, "attempts": attempt,
+    state = {**(previous or {}), "identity": playlist.account_id,
+             "ytm": playlist.provider_playlist_id, "attempts": attempt,
              "last_attempt_at": now, "next_retry_at": now + delay}
-    store.settings.set_setting(key(playlist.identity_id, playlist.ytm_playlist_id), json.dumps(state))
+    store.settings.set_setting(key(playlist.account_id, playlist.provider_playlist_id), json.dumps(state))
     return state
 
 
@@ -46,16 +46,16 @@ def failed(store, playlist, state, exc, phase):
     failure_class = f"{phase}:{type(root).__module__}.{type(root).__name__}:{status or ''}:{reason}"
     changed = state.get("failure_class") != failure_class
     state.update(failure_class=failure_class, error=error_summary(root), phase=phase)
-    store.settings.set_setting(key(playlist.identity_id, playlist.ytm_playlist_id), json.dumps(state))
+    store.settings.set_setting(key(playlist.account_id, playlist.provider_playlist_id), json.dumps(state))
     deadline = datetime.fromtimestamp(state["next_retry_at"], timezone.utc).isoformat()
     logger.warning("GC: unresolved playlist %s (account %s); phase=%s; attempt=%d; "
                    "next retry=%s; %s. Playlist and backups retained.",
-                   playlist.ytm_playlist_id, playlist.identity_id, phase, state["attempts"],
+                   playlist.provider_playlist_id, playlist.account_id, phase, state["attempts"],
                    deadline, state["error"], exc_info=changed)
 
 
-def clear(store, identity_id, ytm):
-    store.settings.delete_setting(key(identity_id, ytm))
+def clear(store, account_id, ytm):
+    store.settings.delete_setting(key(account_id, ytm))
 
 
 def next_retry_at(store):

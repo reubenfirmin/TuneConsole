@@ -1,15 +1,13 @@
 """#61 end-to-end import: parse -> match (videoId exact, title/artist fallback) -> both stores."""
 import json
 
-from yt_playlist.core.store import Store
 from yt_playlist.library.takeout import import_takeout, seed_discovery_from_unmatched
 
 DAY = 86400.0
 
 
-def _store():
-    s = Store(":memory:"); s.init_schema()
-    s.identities.upsert_identity("main", "bridge", None, True)
+def _store(s):
+    s.accounts.upsert_account("main", "bridge", None, True)
     s.tracks.upsert_track("vidA", "Suave", "Danny Wabbit", "", 200)
     s.tracks.upsert_track("vidB", "Pulse", "Klockworks", "", 300)
     return s
@@ -25,8 +23,8 @@ def _e(title, artist, vid, iso):
             "subtitles": [{"name": f"{artist} - Topic"}], "time": iso}
 
 
-def test_video_id_match_and_missing_video_title_fallback_and_unmatched():
-    s = _store()
+def test_video_id_match_and_missing_video_title_fallback_and_unmatched(store):
+    s = _store(store)
     entries = [_e("Suave", "Danny Wabbit", "vidA", "2024-01-01T10:00:00Z"),      # videoId match
                _e("Pulse", "Klockworks", None, "2024-01-02T10:00:00Z"),          # no video, unique version-preserving match
                _e("Ghost Song", "Nobody", "NOVID9", "2024-01-03T10:00:00Z")]     # unmatched
@@ -37,25 +35,25 @@ def test_video_id_match_and_missing_video_title_fallback_and_unmatched():
     assert report["span_days"] >= 2
 
 
-def test_unknown_video_does_not_borrow_another_uploads_identity():
-    s = _store()
+def test_unknown_video_does_not_borrow_another_uploads_identity(store):
+    s = _store(store)
     report = import_takeout(s, _raw([
         _e("Pulse", "Klockworks", "OTHERVID", "2024-01-02T10:00:00Z")]))
     assert report["matched"] == 0 and report["unmatched"] == 1
     assert report["plays_added"] == 0 and report["events_added"] == 0
 
 
-def test_reimport_adds_nothing():
-    s = _store()
+def test_reimport_adds_nothing(store):
+    s = _store(store)
     entries = [_e("Suave", "Danny Wabbit", "vidA", "2024-01-01T10:00:00Z")]
     import_takeout(s, _raw(entries))
     report = import_takeout(s, _raw(entries))
     assert report["plays_added"] == 0 and report["events_added"] == 0
 
 
-def test_disjoint_uploads_record_separate_unverified_extents_and_preserve_gap():
+def test_disjoint_uploads_record_separate_unverified_extents_and_preserve_gap(store):
     from yt_playlist.core import repair
-    s = _store()
+    s = _store(store)
     february = 1706745600.0
     s.history.record_history_plays(1, february, [('phone-only', 'Today')], source_timezone='UTC')
     reports = [import_takeout(s, _raw([
@@ -68,11 +66,11 @@ def test_disjoint_uploads_record_separate_unverified_extents_and_preserve_gap():
     assert all(not r['account_verified'] and not r['complete'] and r['coverage_start'] is None
                for r in imports)
     assert repair.purge_phantom_history(s.conn) == 0
-    assert s.conn.execute("SELECT 1 FROM listening_observations WHERE identity_key='phone-only'").fetchone()
+    assert s.conn.execute("SELECT 1 FROM listening_observation_subjects WHERE identity_key='phone-only'").fetchone()
 
 
-def test_json_timestamp_loss_is_recorded_and_cannot_authorize_repair():
-    s = _store()
+def test_json_timestamp_loss_is_recorded_and_cannot_authorize_repair(store):
+    s = _store(store)
     report = import_takeout(s, _raw([
         _e('Suave', 'Danny Wabbit', 'vidA', '2024-01-01T10:00:00Z'),
         _e('Pulse', 'Klockworks', 'vidB', 'unreadable'),
@@ -82,8 +80,8 @@ def test_json_timestamp_loss_is_recorded_and_cannot_authorize_repair():
     assert row['unparsed_dates'] == 1 and not row['complete'] and not row['account_verified']
 
 
-def test_import_coexists_with_prior_live_day():
-    s = _store()
+def test_import_coexists_with_prior_live_day(store):
+    s = _store(store)
     # live capture already recorded a play of Suave on 2024-01-01 (different instant: 09:00 UTC,
     # vs. the takeout entry's 10:00 UTC below; 1704103200.0 would be the *same* instant as the
     # takeout entry and wrongly dedupe events_added to 0, defeating the point of this test)
@@ -94,14 +92,14 @@ def test_import_coexists_with_prior_live_day():
     assert report["events_added"] == 1           # distinct instant in the event stream
 
 
-def test_no_identity_configured_returns_error_shape():
-    s = Store(":memory:"); s.init_schema()
+def test_no_identity_configured_returns_error_shape(store):
+    s = store
     report = import_takeout(s, _raw([]))
     assert report == {"error": "no identity configured"}
 
 
-def test_seed_discovery_from_unmatched_respects_min_plays():
-    s = _store()
+def test_seed_discovery_from_unmatched_respects_min_plays(store):
+    s = _store(store)
     unmatched = {"Prolific Nobody": 3, "One-Off Nobody": 2}
     n = seed_discovery_from_unmatched(s, unmatched, now=1700000000.0)
     assert n == 1
@@ -109,24 +107,24 @@ def test_seed_discovery_from_unmatched_respects_min_plays():
     assert pool == {"Prolific Nobody"}
 
 
-def test_seed_discovery_from_unmatched_default_threshold_is_three():
-    s = _store()
+def test_seed_discovery_from_unmatched_default_threshold_is_three(store):
+    s = _store(store)
     n = seed_discovery_from_unmatched(s, {"Exactly Three": 3}, now=1700000000.0)
     assert n == 1
     assert {a["artist"] for a in s.discovery.get_discovered_artists()} == {"Exactly Three"}
 
 
-def test_seed_discovery_from_unmatched_honors_custom_min_plays():
-    s = _store()
+def test_seed_discovery_from_unmatched_honors_custom_min_plays(store):
+    s = _store(store)
     n = seed_discovery_from_unmatched(s, {"Two Plays": 2}, now=1700000000.0, min_plays=2)
     assert n == 1
     assert {a["artist"] for a in s.discovery.get_discovered_artists()} == {"Two Plays"}
 
 
-def test_seeding_never_clobbers_existing_pool_entries():
+def test_seeding_never_clobbers_existing_pool_entries(store):
     # A taste-bridge entry carries rich because/fits; re-seeding the same artist from Takeout would
     # overwrite them with empty fields (upsert clobbers on conflict), so existing names are skipped.
-    s = _store()
+    s = _store(store)
     s.discovery.upsert_discovered_artist("Bridge Artist", 9.5, ["anchor a"], ["Playlist A"], None, 1700000000.0)
     n = seed_discovery_from_unmatched(s, {"Bridge Artist": 50, "New Nobody": 5}, now=1700000001.0)
     assert n == 1

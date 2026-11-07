@@ -1,13 +1,8 @@
 """Task 6 (#53): per-pool view methods feeding the Tools screen (stats + GC date)."""
-from yt_playlist.core.store import Store
 
 
-def _s():
-    s = Store(":memory:"); s.init_schema(); return s
-
-
-def test_track_view_has_stats_and_gc_at():
-    s = _s()
+def test_track_view_has_stats_and_gc_at(store):
+    s = store
     s.discovery.upsert_discovered_track("a|x", "v1", "Song", "Artist", "Alb", None, "house", "2020", "r", 100.0)
     s.discovery.mark_offered("track", ["a|x"], 200.0)
     rows = {r["identity_key"]: r for r in s.discovery.discovery_track_view(1000.0, gc_days=30)}
@@ -17,15 +12,15 @@ def test_track_view_has_stats_and_gc_at():
     assert r["plays"] == 0 and r["playlists"] == 0 and r["title"] == "Song"
 
 
-def test_unshown_track_expires_from_found_date():
-    s = _s()
+def test_unshown_track_expires_from_found_date(store):
+    s = store
     s.discovery.upsert_discovered_track("a|x", "v1", "Song", "Artist", "Alb", None, None, None, "r", 100.0)
     r = s.discovery.discovery_track_view(1000.0, gc_days=30)[0]
     assert r["gc_at"] == 100.0 + 30 * 86400
 
 
-def test_album_and_artist_views():
-    s = _s()
+def test_album_and_artist_views(store):
+    s = store
     s.discovery.upsert_discovered_album("b1", "Artist", "Album", "2020", None, 100.0, genre="house")
     s.discovery.upsert_discovered_artist("Artist", 0.5, None, None, None, 100.0, genre="house")
     s.discovery.mark_offered("album", ["b1"], 200.0)

@@ -13,7 +13,7 @@ from tests.conftest import FakeClient
 
 
 def _client(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     fake = FakeClient()
     return fake, TestClient(create_app(store, lambda: {iid: fake}, now_fn=lambda: 1000.0),
                             base_url="http://127.0.0.1")
@@ -32,7 +32,7 @@ def test_discovery_page_lists_pooled_track(store):
 def test_discovery_add_likes_track(store, monkeypatch):
     store.discovery.upsert_discovered_track("a|x", "v1", "Cold Song", "Artist", "Alb", None, None, None, "r", 100.0)
     fake, c = _client(store)
-    owner = store.identities.get_master_identity().id
+    owner = store.accounts.get_master_account().id
     lm = store.playlists.upsert_playlist(owner, 'LM', 'Liked Music', 0, '', 1)
     refreshed, saves = [], []
     monkeypatch.setattr(c.app.state.ctx.rec_worker, 'trigger_rating_update', lambda: refreshed.append(True))
@@ -52,7 +52,7 @@ def test_discovery_add_failed_rating_keeps_row_and_collection_unchanged(store, m
     store.discovery.upsert_discovered_track('a|x', 'v1', 'Cold Song', 'Artist', 'Alb', None,
                                            None, None, 'r', 100)
     fake, client = _client(store)
-    owner = store.identities.get_master_identity().id
+    owner = store.accounts.get_master_account().id
     lm = store.playlists.upsert_playlist(owner, 'LM', 'Liked Music', 0, '', 1)
     saves, refreshed = [], []
     monkeypatch.setattr(measurement, 'record_action', lambda *args, **kwargs: saves.append(True))
@@ -80,7 +80,7 @@ def test_discovery_save_and_ordinary_rating_share_the_whole_ordered_turn(store, 
     store.discovery.upsert_discovered_track('a|x', 'v1', 'Cold Song', 'Artist', 'Alb', None,
                                            None, None, 'r', 100)
     fake, client = _client(store)
-    owner = store.identities.get_master_identity().id
+    owner = store.accounts.get_master_account().id
     lm = store.playlists.upsert_playlist(owner, 'LM', 'Liked Music', 0, '', 1)
     entered, release, queued, neutral_sent = (threading.Event() for _ in range(4))
     calls = []
@@ -139,7 +139,7 @@ def test_discovery_add_failed_acquisition_retains_confirmed_rating_and_can_retry
     store.discovery.upsert_discovered_track('a|x', 'v1', 'Cold Song', 'Artist', 'Alb', None,
                                            None, None, 'r', 100)
     _, client = _client(store)
-    owner = store.identities.get_master_identity().id
+    owner = store.accounts.get_master_account().id
     saves = []
     monkeypatch.setattr(measurement, 'record_action', lambda *args, **kwargs: saves.append(True))
 
@@ -149,15 +149,22 @@ def test_discovery_add_failed_acquisition_retains_confirmed_rating_and_can_retry
     with monkeypatch.context() as patch:
         patch.setattr(store.tracks, 'upsert_track', fail)
         response = client.post('/discovery/add', data={'kind': 'track', 'id': 'a|x'})
-    assert response.status_code == 502 and 'YouTube saved the like' in response.text
-    assert store.tracks.item_rating(owner, 'v1')['status'] == 'LIKE'
+    assert response.status_code == 200
+    from yt_playlist.core import playback_feedback
+    from yt_playlist.library import ratings
+    assert ratings.main_rating(store, 'v1')['status'] == 'LIKE'
+    assert playback_feedback.inbox(store).pending() == 1
     assert store.conn.execute("SELECT 1 FROM tracks WHERE video_id='v1'").fetchone() is None
     assert saves == []
-    assert client.post('/discovery/add', data={'kind': 'track', 'id': 'a|x'}).status_code == 200
+    assert playback_feedback.drain(store) == 1
+    assert store.tracks.item_rating(owner, 'v1')['status'] == 'LIKE'
     assert saves == [True]
 
 
 def test_fragment_loads_do_not_count_as_album_or_artist_views(store):
+    from tests.home_fixture_support import returning_listener
+
+    returning_listener(store, 'mixes')
     store.discovery.upsert_discovered_album("album", "Artist", "Unseen album", "2026", None, 100.0)
     store.discovery.upsert_discovered_artist("New artist", 1.0, [], [], None, 100.0)
     _, c = _client(store)

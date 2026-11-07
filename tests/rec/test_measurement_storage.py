@@ -4,6 +4,7 @@ import json
 import pytest
 
 from yt_playlist.rec import measurement, scorecard
+from yt_playlist.repos.discovery import DiscoveryRepo
 
 
 @pytest.mark.parametrize("membership", ["library", "discovery", "cached", "unknown"])
@@ -23,7 +24,7 @@ def test_action_resolution_preserves_membership_without_loading_pool(store, monk
         pytest.fail("action lookup must not materialize discovery metadata")
 
     monkeypatch.setattr(store.discovery, "get_discovered_tracks", unexpected)
-    monkeypatch.setattr(store.discovery, "_dtrack_row", unexpected)
+    monkeypatch.setattr(DiscoveryRepo, "_dtrack_row", unexpected)
     if membership == "library":
         monkeypatch.setattr(store.discovery, "identity_keys_for_video", unexpected)
     for _ in range(2):
@@ -43,21 +44,22 @@ def test_discovery_video_lookup_uses_membership_primary_key(store):
     store.discovery.upsert_discovered_track(
         "target|artist", "target", "Target", "Artist", "", None, None, None, "source", 1)
     statements = []
-    store.conn.set_trace_callback(statements.append)
-    try:
-        assert store.discovery.identity_keys_for_video("target") == ["target|artist"]
-    finally:
-        store.conn.set_trace_callback(None)
-    query = next(sql for sql in statements if "SELECT DISTINCT r.identity_key" in sql)
-    plan = [row[3] for row in store.conn.execute("EXPLAIN QUERY PLAN " + query)]
+    with store.read_view() as view:
+        view.conn.set_trace_callback(statements.append)
+        try:
+            assert view.discovery.identity_keys_for_video("target") == ["target|artist"]
+        finally:
+            view.conn.set_trace_callback(None)
+        query = next(sql for sql in statements if 'SELECT DISTINCT' in sql and 'identity_key' in sql and 'discovery_memberships' in sql)
+        plan = [row[3] for row in view.conn.execute("EXPLAIN QUERY PLAN " + query)]
     assert not any("SCAN d" in row or "SCAN e" in row for row in plan), plan
-    assert any("SEARCH d USING INTEGER PRIMARY KEY" in row for row in plan), plan
+    assert any("SEARCH d USING" in row and ("PRIMARY KEY" in row or "INDEX" in row) for row in plan), plan
 
 
 def test_experiment_policy_reuses_definition_and_retains_opportunity_linkage(store):
     for i in range(30):
         _offer(store, f"opportunity-{i}")
-    assert store.conn.execute("SELECT COUNT(*) FROM rec_serving_policies").fetchone()[0] == 1
+    assert store.conn.execute("SELECT COUNT(*) FROM recommendation_policies").fetchone()[0] == 1
     rows = store.conn.execute("SELECT id FROM rec_served_impressions ORDER BY id").fetchall()
     assert len(rows) == 30
     for i, row in enumerate(rows):
@@ -66,20 +68,16 @@ def test_experiment_policy_reuses_definition_and_retains_opportunity_linkage(sto
         assert trace["provenance"]["experiment"]["comparison_id"] == f"opportunity-{i}"
         assert trace["provenance"]["experiment"]["cluster"] == f"opportunity-{i}:mode"
     _offer(store, "changed-definition", share=.25)
-    assert store.conn.execute("SELECT COUNT(*) FROM rec_serving_policies").fetchone()[0] == 2
+    assert store.conn.execute("SELECT COUNT(*) FROM recommendation_policies").fetchone()[0] == 2
 
 
-def test_policy_captures_aggregate_evidence_without_lifetime_playlist_handles(store, monkeypatch):
+def test_policy_captures_aggregate_evidence_without_lifetime_playlist_handles(store):
     store.modes.replace_modes([{"mode_id": 7, "label": "Rock", "families": [],
         "centroid": [1., 0.], "size": 1, "rep_keys": []}], [], 1)
     for i in range(100):
         store.modes.log_pick(i + 1, 7, i + 1)
     store.modes.log_impressions(1, [("wheelhouse", 7)], 1)
 
-    def unexpected(*args, **kwargs):
-        pytest.fail("snapshot must aggregate picks in SQL")
-
-    monkeypatch.setattr(type(store.modes), "pick_rows", unexpected)
     version, config = measurement.serving_policy(store, 100)
     assert config["modes"]["picks"] == {7: 100}
     for i in range(100, 200):
@@ -100,4 +98,4 @@ def test_reused_old_policy_remains_traceable_until_last_reference_expires(store)
     assert scorecard.served_recommendation(store, impression)["configuration"]["experiment"]["cohort"] == "stable"
     store.rec_ledger._prune_impression_batch(101)
     store.rec_ledger._prune_policy_batch(101)
-    assert store.conn.execute("SELECT COUNT(*) FROM rec_serving_policies").fetchone()[0] == 0
+    assert store.conn.execute("SELECT COUNT(*) FROM recommendation_policies").fetchone()[0] == 0

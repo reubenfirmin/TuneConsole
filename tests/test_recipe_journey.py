@@ -1,18 +1,28 @@
+import pytest
+
+from tests.repository_mock_support import no_database, transient_repository_store
 from yt_playlist.rec import recipes, journeys
 
 
-def test_roll_recipe_includes_a_valid_journey(store):
+@pytest.fixture
+def recipe_store(no_database):
+    return transient_repository_store(
+        rec_query={'genre_play_distribution': {}, 'era_play_distribution': {}},
+    )
+
+
+def test_roll_recipe_includes_a_valid_journey(recipe_store):
+    store = recipe_store
     r = recipes.roll_recipe(store, "comfort", seed=1, now=1.0)
     assert r["journey"] in journeys.JOURNEYS
 
 
-def test_roll_recipe_journey_weight_biases_selection(store):
+def test_roll_recipe_journey_weight_biases_selection(recipe_store):
     # Boost energy_arc to the cap and floor the rest; a weighted-random sample must land on it far
     # more than the uniform 1/10 baseline, and it must be the modal pick.
-    for j in journeys.JOURNEYS:
-        if j != "energy_arc":
-            store.rec_model.set_weight(f"journey:{j}", 0.2)
-    store.rec_model.set_weight("journey:energy_arc", 3.0)
+    store = recipe_store
+    store.rec_model.get_weights.return_value = {
+        f'journey:{j}': 3.0 if j == 'energy_arc' else .2 for j in journeys.JOURNEYS}
     from collections import Counter
     picks = [recipes.roll_recipe(store, "comfort", seed=s, now=1.0)["journey"] for s in range(60)]
     c = Counter(picks)

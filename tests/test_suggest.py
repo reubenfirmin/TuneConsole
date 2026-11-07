@@ -1,4 +1,5 @@
 import json
+from tests.enrichment_support import complete_entries
 from html.parser import HTMLParser
 from fastapi.testclient import TestClient
 
@@ -18,7 +19,7 @@ class _TrackInputParser(HTMLParser):
 
 
 def _seed(store, genre="Techno"):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     a = store.tracks.upsert_track("v1", "Anchor", "Band", None, None)
     b = store.tracks.upsert_track("v2", "Bonus", "Band", None, None)
     if genre:
@@ -61,7 +62,7 @@ def test_suggestion_card_has_wired_add_button(store):
 
 
 def test_recs_rebuild_endpoint(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.post("/recs/rebuild")
@@ -92,7 +93,7 @@ def test_suggestion_add_appends_row_without_refresh(store):
 def test_genreless_suggestion_add_requeues_enrichment(store):
     target, c = _seed(store, genre=None)
     tid = store.tracks.track_ids_for_videos(["v2"])["v2"]
-    store.enrichment_queue.mark_enriched([tid], now=5.0)  # an earlier provider miss would otherwise wait 30 days
+    complete_entries(store, [tid], now=5.0)  # an earlier provider miss would otherwise wait 30 days
 
     class Worker:
         triggered = 0

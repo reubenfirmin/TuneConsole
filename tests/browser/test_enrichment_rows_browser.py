@@ -27,7 +27,7 @@ def test_replaced_rows_keep_metadata_menu(live_app, store, page, scope):
     page.on("request", lambda request: metadata_requests.append(request.url)
             if '/songs/metadata?' in request.url and request.method == "GET" else None)
     for iteration in range(3):
-        page.evaluate("""() => enrichPanel(1, false).applyRow({video_id: 'live-row',
+        page.evaluate("""() => enrichPanel(1).applyRow({video_id: 'live-row',
             row_html: window.liveRowHTML})""")
         page.wait_for_function("n => window.rowLifecycle.initialized === n", arg=iteration + 1)
         assert page.evaluate("window.rowLifecycle.destroyed") == iteration

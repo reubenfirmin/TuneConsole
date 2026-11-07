@@ -218,6 +218,21 @@
   --p-blue-400:    #56a6f5;
   --p-blue-500:    #3987e5;
   --p-blue-600:    #3d6fd0;
+
+  /* Illustrated Festival and standalone Mix launch recovery. */
+  --p-festival-paper: #fff5db; --p-festival-ink: #081722;
+  --p-festival-title: #071722; --p-festival-gold: #ffd087;
+  --p-festival-pending: #77d8ff; --p-festival-halo: #8dcfff;
+  --p-festival-ground: #121716; --p-festival-sign: #14181b;
+  --p-festival-underline: #e8d8b380; --p-festival-hover: #59eaff;
+  --p-festival-glow: #00c8ff; --p-festival-glow-soft: #00aaff80;
+  --p-festival-new: #ffdd89; --p-festival-legend: #0f0f16;
+  --p-festival-backdrop: #050912; --p-festival-shadow: #0009;
+  --p-launch-canvas: #0d0b20; --p-launch-text: #f3f0ff;
+  --p-launch-muted: #bcb5d5; --p-launch-art: #292241;
+  --p-launch-label: #b7e4d1; --p-launch-message: #d6d0e6;
+  --p-launch-border: #72658e; --p-launch-action: #24203a;
+  --p-launch-primary: #c2ead9; --p-launch-primary-text: #10251d;
 }
 
 /* ============================================================================
@@ -226,6 +241,34 @@
    redefines this block only.
    ============================================================================ */
 :root {
+  --festival-text: var(--p-festival-paper);
+  --festival-intro-scrim: radial-gradient(ellipse at top left,color-mix(in srgb,var(--p-festival-ink) 90%,transparent),color-mix(in srgb,var(--p-festival-ink) 50%,transparent) 60%,transparent 70%);
+  --festival-tools-scrim: linear-gradient(color-mix(in srgb,var(--p-festival-ink) 70.196%,transparent),transparent);
+  --festival-title-shadow: var(--p-festival-title);
+  --festival-route: var(--p-festival-gold);
+  --festival-pending: var(--p-festival-pending);
+  --festival-halo: var(--p-festival-halo);
+  --festival-ground: var(--p-festival-ground);
+  --festival-sign-border: var(--p-festival-sign);
+  --festival-link-decoration: var(--p-festival-underline);
+  --festival-link-hover: var(--p-festival-hover);
+  --festival-glow: var(--p-festival-glow);
+  --festival-glow-soft: var(--p-festival-glow-soft);
+  --festival-new: var(--p-festival-new);
+  --festival-legend: color-mix(in srgb,var(--p-festival-legend) 80%,transparent);
+  --festival-dialog-shadow: var(--p-festival-shadow);
+  --festival-backdrop: color-mix(in srgb,var(--p-festival-backdrop) 70%,transparent);
+  --mix-launch-canvas: var(--p-launch-canvas);
+  --mix-launch-text: var(--p-launch-text);
+  --mix-launch-muted: var(--p-launch-muted);
+  --mix-launch-art: var(--p-launch-art);
+  --mix-launch-label: var(--p-launch-label);
+  --mix-launch-message: var(--p-launch-message);
+  --mix-launch-border: var(--p-launch-border);
+  --mix-launch-action: var(--p-launch-action);
+  --mix-launch-primary: var(--p-launch-primary);
+  --mix-launch-primary-text: var(--p-launch-primary-text);
+
   /* ---- flat application surfaces ----
      Ordinary components use solid fills; hierarchy comes from contrast and
      borders, not gradients. Clusters and Recap keep protected roles below. */

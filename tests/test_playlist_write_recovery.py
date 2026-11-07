@@ -89,8 +89,8 @@ def test_uncertain_new_playlist_keeps_confirmed_membership_and_undo(store, monke
     from tests.conftest import FakeClient, _track
     from yt_playlist.library import executor
 
-    source_identity = store.identities.upsert_identity("Source", "cred", None, True)
-    target_identity = store.identities.upsert_identity("Target", "cred", None, False)
+    source_identity = store.accounts.upsert_account("Source", "cred", None, True)
+    target_identity = store.accounts.upsert_account("Target", "cred", None, False)
     tracks = [_track("v1", "One", "Artist"), _track("v2", "Two", "Artist")]
     tids = [store.tracks.upsert_track(t["videoId"], t["title"], "Artist", None, 200)
             for t in tracks]
@@ -119,7 +119,7 @@ def test_uncertain_new_playlist_keeps_confirmed_membership_and_undo(store, monke
     assert not source_client.deleted
     assert store.playlists.get_playlist(source) is not None
     created = next((p for p in store.playlists.get_playlists()
-                    if p.ytm_playlist_id == failure.value.playlist_id), None)
+                    if p.provider_playlist_id == failure.value.playlist_id), None)
     assert created is not None, "The partially populated remote playlist must stay visible locally"
     assert store.playlists.get_playlist_track_ids(created.id) == tids[:1]
     assert store.actions.get_actions(), "The new remote playlist must retain an Undo/recovery action"
@@ -145,7 +145,7 @@ def test_partial_merge_does_not_claim_a_concurrent_addition_for_undo(store, monk
     from tests.conftest import FakeClient, _track
     from yt_playlist.library import executor, playlist_undo
 
-    iid = store.identities.upsert_identity('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', 'cred', None, True)
     keeper = store.playlists.upsert_playlist(iid, 'KEEP', 'Keeper', 1, '', 1)
     source = store.playlists.upsert_playlist(iid, 'SOURCE', 'Source', 2, '', 1)
     tracks = {v: _track(v, v, 'Artist') for v in ('a', 'b', 'c', 'd')}
@@ -183,7 +183,7 @@ def test_other_mutation_boundaries_retain_partial_progress(store, monkeypatch, o
     from tests.conftest import FakeClient, _track
     from yt_playlist.library import executor
 
-    identity = store.identities.upsert_identity("Main", "cred", None, True)
+    identity = store.accounts.upsert_account("Main", "cred", None, True)
     tracks = [_track("v1", "One", "Artist"), _track("v2", "Two", "Artist")]
     tids = [store.tracks.upsert_track(t["videoId"], t["title"], "Artist", None, 200) for t in tracks]
     source = store.playlists.upsert_playlist(identity, "SOURCE", "Source", 2, "", 1)
@@ -205,7 +205,7 @@ def test_other_mutation_boundaries_retain_partial_progress(store, monkeypatch, o
         if operation == "generated":
             playlist_generated.create_generated_playlist(store, "Generated", [
                 {"video_id": t["videoId"], "title": t["title"], "artist": "Artist", "duration": 200}
-                for t in tracks], destination, 10, identity_id=identity)
+                for t in tracks], destination, 10, account_id=identity)
         elif operation == "album":
             playlist_creation.create_playlist_from_album(store, "ALBUM", "Album", destination, 10, identity)
         elif operation == "copy_into":
@@ -218,7 +218,7 @@ def test_other_mutation_boundaries_retain_partial_progress(store, monkeypatch, o
                 for t in tracks], destination, 10)
     assert calls == [["v1", "v2"]]
     retained = next(p for p in store.playlists.get_playlists()
-                    if p.ytm_playlist_id == failure.value.playlist_id)
+                    if p.provider_playlist_id == failure.value.playlist_id)
     assert store.playlists.get_playlist_track_ids(retained.id) == tids[:1]
     action = store.actions.get_actions()[0]
     assert json.loads(action.params_json)["added"] == 1
@@ -226,7 +226,7 @@ def test_other_mutation_boundaries_retain_partial_progress(store, monkeypatch, o
     addition = undo["restored"][0]["addition"] if operation == "merge" else undo["addition"]
     assert addition["uncertain"] == ["v2"]
     if operation == "generated":
-        assert store.playlists.is_quarantined_playlist(retained.scope_ref)
+        assert store.playlists.is_quarantined_playlist(retained.playlist_scope_id)
 
 
 @pytest.mark.parametrize("operation", ["copy", "generated"])
@@ -236,7 +236,7 @@ def test_http_result_exposes_partial_destination_and_recovery(store, monkeypatch
     from tests.conftest import FakeClient, _track
     from yt_playlist.web.app import create_app
 
-    identity = store.identities.upsert_identity("Main", "cred", None, True)
+    identity = store.accounts.upsert_account("Main", "cred", None, True)
     tracks = [_track("v1", "One", "Artist"), _track("v2", "Two", "Artist")]
     tids = [store.tracks.upsert_track(t["videoId"], t["title"], "Artist", None, 200) for t in tracks]
     source = store.playlists.upsert_playlist(identity, "SOURCE", "Source", 2, "", 1)
@@ -260,15 +260,53 @@ def test_http_result_exposes_partial_destination_and_recovery(store, monkeypatch
     assert response.status_code == 200
     if operation == "generated":
         assert "Partially saved" in response.text
-        assert "Review partial playlist" in response.text
-        assert "Action Log and recovery" in response.text
+        assert 'Your selected songs' in response.text
+        assert 'Some songs are still unconfirmed.' in response.text
+        assert 'null, true, true, false,' in response.text
         assert "window.location.assign" not in response.text
         assert "1 addition(s) remain unconfirmed" in client.get("/actions").text
+        ytm = destination.created[0][0]
+        recovery = {'account_id': identity, 'playlist': ytm, 'confirmed': ['v1'],
+                    'rejected': [], 'uncertain': ['v2'], 'unattempted': []}
+        form = {'recovery': json.dumps(recovery),
+                'tracks': json.dumps([{'video_id': t['videoId']} for t in tracks])}
+        # A lagging complete read, an incomplete read and a disconnected
+        # provider must all retain uncertainty without replaying additions.
+        read = destination.get_playlist
+        assert client.post('/home/generate/reconcile', data=form).json() == recovery
+        monkeypatch.setattr(destination, 'get_playlist', lambda *a, **kw: {'tracks': [], 'continuation': 'next'})
+        assert client.post('/home/generate/reconcile', data=form).json() is None
+        monkeypatch.setattr(destination, 'get_playlist', lambda *a, **kw: (_ for _ in ()).throw(TimeoutError()))
+        assert client.post('/home/generate/reconcile', data=form).json() is None
+        monkeypatch.setattr(destination, 'get_playlist', read)
+        destination._tracks[ytm] = tracks
+        # This check also works while writes are paused, without local changes.
+        store.activity_paused = True
+        store.conn.execute('PRAGMA query_only=ON')
+        changes = store.conn.total_changes
+        try:
+            checked = client.post('/home/generate/reconcile', data=form).json()
+            assert checked['confirmed'] == ['v1', 'v2'] and not checked['uncertain']
+            assert store.conn.total_changes == changes
+        finally:
+            store.conn.execute('PRAGMA query_only=OFF')
+            store.activity_paused = False
+        # Rejections stay separate from absence/unknown; a later positive read
+        # can establish delivery even for an earlier rejected occurrence.
+        recovery.update(confirmed=[], rejected=['v1'], uncertain=['v2'])
+        form['recovery'] = json.dumps(recovery)
+        destination._tracks[ytm] = tracks[1:]
+        checked = client.post('/home/generate/reconcile', data=form).json()
+        assert checked['rejected'] == ['v1'] and checked['confirmed'] == ['v2']
+        assert not checked['uncertain']
+        assert len(destination.created) == len(destination.added) == 1
         return
     result = response.json()
     assert result["status"] == "partial"
     assert result["copy"]["added"] == 1 and result["copy"]["uncertain"] == 1
     assert result["copy"]["new_ytm"] == json.loads(store.actions.get_actions()[0].undo_json)["new_ytm"]
-    assert "Action Log" in result["message"]
+    assert "1 addition(s) not confirmed" in result["message"]
+    assert "Action Log" in result["guidance"]
+    assert "Repeating Copy creates another playlist" in result["guidance"]
     assert "were kept" in result["guidance"]
     assert "1 addition(s) remain unconfirmed" in client.get("/actions").text

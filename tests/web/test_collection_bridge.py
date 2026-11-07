@@ -64,9 +64,9 @@ def _request_frame(ws, pending, timeout=5):
 @pytest.mark.parametrize('failure', [None, 'lookup', 'rating', 'dispatch'],
                          ids=['success', 'lookup-error', 'rating-error', 'early-http-error'])
 def test_album_operation_round_trips_through_live_bridge_without_blocking_loop(store, monkeypatch, saved, failure):
-    iid = store.identities.upsert_identity('main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('main', 'bridge', None, True)
     if not saved:
-        store.collection.add_saved_album({'browse': 'MPREb_x', 'title': 'The Album'},identity_id=iid)
+        store.collection.add_saved_album({'browse': 'MPREb_x', 'title': 'The Album'},account_id=iid)
     before = store.collection.get_saved_albums()
     bridge = Bridge()
     original_execute = bridge.execute
@@ -99,7 +99,7 @@ def test_album_operation_round_trips_through_live_bridge_without_blocking_loop(s
                 pending = pool.submit(http.post, '/collection/' + ('save-album' if saved else 'unsave-album'),
                                       data={'browse_id': 'MPREb_x'})
                 if failure == 'dispatch':
-                    with pytest.raises(pytest.fail.Exception, match='finished before its bridge request: 422'):
+                    with pytest.raises(pytest.fail.Exception, match='finished before its bridge request: 503'):
                         _request_frame(ws, pending)
                     return
                 lookup = _request_frame(ws, pending)
@@ -122,8 +122,8 @@ def test_album_operation_round_trips_through_live_bridge_without_blocking_loop(s
                                                      if failure == 'rating' else {})})
                 response = pending.result(timeout=5)
     if failure:
-        assert response.status_code == 422 and response.headers['hx-reswap'] == 'none'
-        assert 'YouTube refused' in response.text
+        assert response.status_code == 503 and response.headers['hx-reswap'] == 'none'
+        assert response.content == b''
         assert store.collection.get_saved_albums() == before
     else:
         assert response.status_code == 200 and response.headers['hx-refresh'] == 'true'

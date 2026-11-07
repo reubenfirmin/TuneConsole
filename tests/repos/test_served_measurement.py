@@ -1,9 +1,10 @@
 """#113 rendered recommendation opportunities and causal-ish outcome attribution."""
 
 import pytest
+from tests.enrichment_support import seed_discovered_enrichment
 
-from yt_playlist.rec.home_cards import _record_served_cards
 from yt_playlist.rec import measurement, scorecard
+from tests.conftest import seed_catalog_track
 
 
 def _shown(store, request, at, key="song|artist", rank=1, surface="home"):
@@ -14,7 +15,7 @@ def _shown(store, request, at, key="song|artist", rank=1, surface="home"):
 
 
 def _seed_track(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.tracks.upsert_track("vid", "song", "artist", None, None)
     return iid
 
@@ -144,11 +145,14 @@ def test_outcome_window_includes_its_exact_boundaries(store, offset, played):
     assert score["played"] == played
 
 
-def test_home_records_final_card_order_and_trace(store):
+def test_individual_offers_record_final_order_and_trace(store):
     protos = [{"lane": "explore", "mode_id": 7, "ranker": "ppr",
                "recipe": {"model": "mode"},
                "tracks": [{"key": "a|x"}, {"key": "b|y"}]}]
-    _record_served_cards(store, protos, 100)
+    for key, title, artist in [('a|x', 'A', 'X'), ('b|y', 'B', 'Y')]:
+        seed_catalog_track(store, key, title, artist, video_id=key)
+    measurement.record_offers(store, 'radio', [{'items': protos[0]['tracks'], 'lane': 'explore',
+        'mode_id': 7, 'ranker': 'ppr', 'provenance': {'ranker': 'ppr'}}], 100)
     rows = store.conn.execute(
         "SELECT lane,mode_id,identity_key,rank,model_version,provenance "
         "FROM rec_served_impressions ORDER BY rank").fetchall()
@@ -159,7 +163,7 @@ def test_home_records_final_card_order_and_trace(store):
 
 
 def test_coverage_conversion_and_variety_use_immutable_serving_metadata(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     tid = store.tracks.upsert_track("owned", "Owned", "Known artist", None, 200)
     store.tracks.set_track_genre(tid, "Techno")
     store.tracks.set_track_year(tid, "1999")
@@ -184,7 +188,7 @@ def test_coverage_conversion_and_variety_use_immutable_serving_metadata(store):
     assert score["by_ownership"]["cold"]["conversion"] == 1
     assert score["by_surface"]["home"]["unique_artists"] == 2
     # Enrichment and ownership change later, but not the historical cohort/slices.
-    store.discovery.set_discovered_enrichment("cold|new artist", "Folk", "2000")
+    seed_discovered_enrichment(store, "cold|new artist", "Folk", "2000")
     adopted = store.tracks.upsert_track("cold", "Cold", "New artist", None, 200)
     store.playlists.set_playlist_tracks(pid, [tid, adopted])
     assert scorecard.recommendation_scorecard(store, 90, 105) == score
@@ -203,7 +207,7 @@ def test_explicit_outcomes_follow_bounded_nearest_ownership(store, offset, credi
 
 
 def test_cold_exit_depth_and_staleness_have_samples_per_surface(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.discovery.upsert_discovered_track("cold|artist", "cold", "Cold", "Artist", "", None,
                                   "Techno", None, "source", 0)
     measurement.record_recommendations(store, "similar", [{"key": "cold|artist"}], 100)
@@ -219,7 +223,7 @@ def test_cold_exit_depth_and_staleness_have_samples_per_surface(store):
 
 @pytest.mark.parametrize("position,outcome", [(20, "skip"), (190, "completion")])
 def test_cold_exit_attribution_survives_discovery_removal_and_report_boundaries(store, position, outcome):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     key = "cold|artist"
     store.discovery.upsert_discovered_track(key, "cold", "Cold", "Artist", "", None,
                                   "Techno", None, "source", 0)
@@ -230,7 +234,8 @@ def test_cold_exit_attribution_survives_discovery_removal_and_report_boundaries(
     assert before[outcome] == 1 and before["by_surface"]["similar"][outcome] == 1
 
     with store.conn:
-        store.conn.execute("DELETE FROM discovered_tracks WHERE identity_key=?", (key,))
+        store.conn.execute("DELETE FROM discovery_memberships WHERE recording_id IN "
+                           "(SELECT id FROM recordings WHERE identity_key=?)", (key,))
     assert store.discovery.get_discovered_tracks() == []
     assert scorecard.recommendation_scorecard(store, 90, 160) == before
     assert scorecard.recommendation_scorecard(store, 90, 110)[outcome] == 0
@@ -238,12 +243,14 @@ def test_cold_exit_attribution_survives_discovery_removal_and_report_boundaries(
 
 
 def test_retention_prunes_responses_and_only_orphaned_old_policies(store):
+    seed_catalog_track(store, 'a|artist', 'A', 'Artist', video_id='a')
+    seed_catalog_track(store, 'b|artist', 'B', 'Artist', video_id='b')
     measurement.record_recommendations(store, "similar", [{"key": "a|artist"}], 10)
     store.rec_ledger.record_recommendation_outcomes("old", "open", ["a|artist"], 20)
     store.rec_ledger.record_serving_policy("orphan", {"old": True}, 1)
     measurement.record_recommendations(store, "similar", [{"key": "b|artist"}], 100)
     store.rec_ledger.record_served_impressions("prune", "home", [], 101, prune_before=50)
     assert store.conn.execute("SELECT COUNT(*) FROM rec_response_events").fetchone()[0] == 0
-    assert store.conn.execute("SELECT COUNT(*) FROM rec_serving_policies WHERE model_version='orphan'").fetchone()[0] == 0
+    assert store.rec_ledger.policy_configuration('orphan') is None
     row = store.conn.execute("SELECT id FROM rec_served_impressions").fetchone()
     assert scorecard.served_recommendation(store, row["id"])["configuration"] is not None

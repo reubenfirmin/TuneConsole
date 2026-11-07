@@ -1,6 +1,6 @@
-<div id="fb-facets-{{ pid }}" data-metadata-version="{{ feedback_version }}"
+<div id="fb-facets-{{ pid }}" data-metadata-version="{{ feedback_version }}"{% if pid is not none %}
      hx-get="/playlist/{{ pid }}/feedback-facets"
-     hx-trigger="playlist-metadata-changed from:body delay:300ms" hx-swap="outerHTML">
+     hx-trigger="playlist-metadata-changed from:body delay:300ms" hx-swap="outerHTML"{% endif %}>
   {% if facets and (facets.genres or facets.eras) %}
   <div class="fb-facets">
     {% if facets.genres %}

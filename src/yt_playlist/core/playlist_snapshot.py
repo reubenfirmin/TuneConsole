@@ -188,9 +188,22 @@ def _page_envelope(response):
 
     result = {'root': kind(response)}
     if not isinstance(response, dict):
+        result['classification'] = 'non_object'
         return result
-    for name in ('responseContext', 'contents', 'continuationContents', 'onResponseReceivedActions',
-                 'onResponseReceivedEndpoints'):
+    content_fields = ('contents', 'continuationContents', 'onResponseReceivedActions',
+                      'onResponseReceivedEndpoints')
+    metadata_fields = ('responseContext', 'trackingParams')
+    fields = (*metadata_fields, *content_fields, 'frameworkUpdates', 'responseCommands', 'error')
+    result['classification'] = (
+        'empty_object' if not response else
+        'provider_error' if 'error' in response else
+        'content_envelope' if any(name in response for name in content_fields) else
+        'metadata_only' if len(response) == sum(name in response for name in metadata_fields) else
+        'unrecognized_envelope')
+    # Count unknown fields without traversing or exposing their names. Even a
+    # context-only response cannot certify the advertised continuation's end.
+    result['other_fields'] = min(len(response) - sum(name in response for name in fields), 1000)
+    for name in fields:
         result[name] = kind(response[name]) if name in response else 'missing'
     for name in ('onResponseReceivedActions', 'onResponseReceivedEndpoints'):
         actions = response.get(name)

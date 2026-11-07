@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from tests.conftest import FakeClient, _track
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.bridge import BridgeError
+from yt_playlist.core import sync_state
 from yt_playlist.library import sync
 from yt_playlist.library.sync_outcomes import sync_due
 from yt_playlist.rec.actions import sync_status
@@ -58,27 +59,27 @@ def no_retry_backoff(monkeypatch):
 
 
 def test_disconnect_preserves_success_and_reconnect_is_due_immediately(store):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     client = Client()
     assert sync.sync_all(store, {iid: client}, 100)["status"] == "complete"
     client.problem = BridgeError("extension disconnected")
     result = sync.sync_all(store, {iid: client}, 200)
     assert result["status"] == "partial"  # history is independently available
-    assert store.settings.get_setting("last_sync_at") == "100"
-    assert store.settings.get_setting("last_sync_attempt_at") == "200"
+    assert float(store.settings.get_setting("last_sync_at")) == 100
+    assert float(store.settings.get_setting("last_sync_attempt_at")) == 200
     assert result["accounts"][str(iid)]["resources"]["playlists"]["last_success_at"] == 100
     assert not sync_due(store, 201, 86400)
     assert sync_due(store, 201, 86400, retry_now=True)
     client.problem = None
     assert sync.sync_all(store, {iid: client}, 201)["status"] == "complete"
-    assert store.settings.get_setting("last_sync_at") == "201"
+    assert float(store.settings.get_setting("last_sync_at")) == 201
     assert not sync_due(store, 202, 86400)
 
 
 @pytest.mark.parametrize("failure", ["disconnected", "auth", "missing", "unexpected"])
 def test_healthy_account_cannot_hide_an_unavailable_account(store, failure):
-    good = store.identities.upsert_identity("Good", "bridge", None, True)
-    bad = store.identities.upsert_identity("Bad", "bridge", "brand", False)
+    good = store.accounts.upsert_account("Good", "bridge", None, True)
+    bad = store.accounts.upsert_account("Bad", "bridge", "brand", False)
     clients = {good: Client(), bad: Client()}
     sync.sync_all(store, clients, 100)
     if failure == "missing":
@@ -93,7 +94,7 @@ def test_healthy_account_cannot_hide_an_unavailable_account(store, failure):
     assert result["accounts"][str(good)]["last_success_at"] == 200
     assert result["accounts"][str(bad)]["last_success_at"] == 100
     assert result["resources"]["saved_album_mirror"]["last_success_at"] == 100
-    assert store.settings.get_setting("last_sync_at") == "100"
+    assert float(store.settings.get_setting("last_sync_at")) == 100
     assert bool(expired) == (failure == "auth")
     assert not sync_due(store, 201, 86400)
     assert sync_due(store, 500, 86400)
@@ -104,7 +105,7 @@ def test_healthy_account_cannot_hide_an_unavailable_account(store, failure):
 
 @pytest.mark.parametrize("failed_resource", ["playlists", "ratings", "history", "saved_albums"])
 def test_resource_freshness_advances_independently(store, failed_resource):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     client = Client()
     sync.sync_all(store, {iid: client}, 100)
     client.failed_resource = failed_resource
@@ -115,8 +116,8 @@ def test_resource_freshness_advances_independently(store, failed_resource):
     assert resources[failed_resource]["last_attempt_at"] == 200
     healthy = "history" if failed_resource != "history" else "playlists"
     assert resources[healthy]["last_success_at"] == 200
-    assert store.settings.get_setting("last_sync_at") == "100"
-    assert json.loads(store.settings.get_setting("library_sync_state")) == result
+    assert float(store.settings.get_setting("last_sync_at")) == 100
+    assert sync_state.state(store) == result
 
 
 @pytest.mark.parametrize("pages", [
@@ -124,7 +125,7 @@ def test_resource_freshness_advances_independently(store, failed_resource):
     {"continuations": [{"nextContinuationData": {"continuation": "unread-page"}}]},
 ])
 def test_unread_playlist_pages_preserve_freshness_and_back_off(store, monkeypatch, pages):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     client = Client()
     assert sync.sync_all(store, {iid: client}, 100)["status"] == "complete"
     fetch = client.get_playlist
@@ -140,8 +141,8 @@ def test_unread_playlist_pages_preserve_freshness_and_back_off(store, monkeypatc
         assert account["resources"][name]["last_attempt_at"] == 200
     assert account["last_success_at"] == 100
     assert account["resources"]["history"]["last_success_at"] == 200
-    assert store.settings.get_setting("last_sync_at") == "100"
-    assert store.settings.get_setting("last_sync_attempt_at") == "200"
+    assert float(store.settings.get_setting("last_sync_at")) == 100
+    assert float(store.settings.get_setting("last_sync_attempt_at")) == 200
     assert not sync_due(store, 201, 86400)
     assert sync_due(store, 500, 86400)
     assert events[-1]["final"] and events[-1]["outcome"] == "partial"
@@ -149,12 +150,12 @@ def test_unread_playlist_pages_preserve_freshness_and_back_off(store, monkeypatc
 
     monkeypatch.setattr(client, "get_playlist", fetch)
     assert sync.sync_all(store, {iid: client}, 201)["status"] == "complete"
-    assert store.settings.get_setting("last_sync_at") == "201"
+    assert float(store.settings.get_setting("last_sync_at")) == 201
     assert not sync_due(store, 202, 86400)
 
 
 def test_no_clients_is_skipped_and_an_interrupted_attempt_is_due(store):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     assert sync.sync_all(store, {}, 100)["status"] == "skipped"
     assert store.settings.get_setting("last_sync_at") is None
     sync.sync_all(store, {iid: Client()}, 200)
@@ -167,7 +168,7 @@ def test_no_clients_is_skipped_and_an_interrupted_attempt_is_due(store):
                                                      "trackCount": 2},
                                   {"tracks": [{"title": "Song"}], "continuation": "next"}])
 def test_incomplete_album_tracks_cannot_refresh_the_library(store, album):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
 
     class Albums(Client):
         def get_library_albums(self, limit=None):
@@ -218,7 +219,7 @@ class Ticks:
 @pytest.mark.parametrize("failure", ["provider", "sync"])
 def test_manual_and_automatic_failures_publish_error_before_terminal_and_retry(
         store, monkeypatch, automatic, failure):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     calls = []
     provider_failed = False
 
@@ -265,11 +266,11 @@ def test_manual_and_automatic_failures_publish_error_before_terminal_and_retry(
     clock[0] = 500
     automatic_sync(ctx, None, SimpleNamespace(connected=True), stop=Ticks(1))
     assert ctx.jobs.get(jid + 1).outcome == "complete"
-    assert store.settings.get_setting("last_sync_at") == "500"
+    assert float(store.settings.get_setting("last_sync_at")) == 500
 
 
 def test_automatic_loop_waits_until_partial_resource_retry_is_due(store, monkeypatch):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     client = Client()
     client.failed_resource = "history"
     calls = []
@@ -316,7 +317,7 @@ def test_shutdown_stops_automatic_sync_after_inflight_disconnect(store, monkeypa
             assert release.wait(5)
             raise BridgeError("no extension connected")
 
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     client = Disconnected()
     client._playlists = [{"playlistId": f"PL-{n}", "title": str(n)} for n in range(100)]
     app = create_app(store, lambda: {iid: client}, now_fn=lambda: 200, background_work=False)

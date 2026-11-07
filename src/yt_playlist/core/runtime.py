@@ -4,7 +4,7 @@ import os
 import threading
 from pathlib import Path
 
-from yt_playlist.core.config import load_identities, validate_identities
+from yt_playlist.core.config import load_accounts, validate_accounts
 from yt_playlist.core.identities import build_client
 from yt_playlist.core.setup import (write_config, prepared_config,
                                     restore_config, BROWSER_CREDENTIAL_FILENAME)
@@ -38,10 +38,12 @@ class Runtime:
         with self._lock:
             return self._provider() if self._provider else {}
 
-    def _prepare_provider(self, configs, ids):
+    def _validate_clients(self, configs):
         # Client construction performs no network I/O, but can fail; do it before publication.
         for cfg in configs:
             build_client(cfg, self.bridge)
+
+    def _provider_for(self, configs, ids):
         # The bridge is wired after startup load; resolve its current value on each call.
         return lambda: {ids[c.label]: build_client(c, self.bridge) for c in configs}
 
@@ -56,10 +58,14 @@ class Runtime:
             if not self.config_path.exists():
                 return
             try:
-                cfgs = load_identities(self.config_path)
+                cfgs = load_accounts(self.config_path)
                 content = self.config_path.read_bytes()
-                with self.store.identities.reconciled(cfgs) as ids:
-                    provider = self._prepare_provider(cfgs, ids)
+                self._validate_clients(cfgs)
+                if self.store.activity_paused:
+                    ids = self.store.accounts.configured_ids(cfgs)
+                else:
+                    ids = self.store.accounts.replace_accounts(cfgs)
+                provider = self._provider_for(cfgs, ids)
             except Exception as e:
                 if self._last_config is not None:
                     restore_config(self._last_config, self.config_path)
@@ -81,33 +87,29 @@ class Runtime:
             logger.warning("could not provision default identity", exc_info=True)
 
     def apply_setup(self, identities) -> None:
-        """Prepare a complete usable candidate, then atomically publish it with reconciliation.
+        """Validate clients, commit account bindings, then publish config and runtime.
 
-        Raises ValueError on bad input. Identity definition (labels, brand_account_id, master) is
+        Raises ValueError on bad input. Account definition (labels, brand_account_id, master) is
         independent of the credential: the extension bridge is paired separately and live (see
         credentials_present / bridge_paired), so identities can be saved on their own even before
         pairing completes.
         """
-        validate_identities(identities)
+        validate_accounts(identities)
         self.creds_dir.mkdir(parents=True, exist_ok=True)
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
-            previous = self.config_path.read_bytes() if self.config_path.exists() else None
-            published = False
             try:
                 with prepared_config(identities, self.config_path) as (_, cfgs):
-                    with self.store.identities.reconciled(cfgs) as ids:
-                        rows = [{"id": ids[c.label], "label": c.label, "credential_ref": c.credential_ref,
-                                 "brand_account_id": c.brand_account_id, "is_master": c.is_master} for c in cfgs]
-                        with prepared_config(rows, self.config_path) as (staged, final_cfgs):
-                            provider = self._prepare_provider(final_cfgs, ids)
-                            content = staged.read_bytes()
-                            os.replace(staged, self.config_path)
-                            published = True
+                    self._validate_clients(cfgs)
+                    ids = self.store.accounts.replace_accounts(cfgs)
+                    rows = [{"id": ids[c.label], "label": c.label, "credential_ref": c.credential_ref,
+                             "brand_account_id": c.brand_account_id, "is_master": c.is_master} for c in cfgs]
+                    with prepared_config(rows, self.config_path) as (staged, final_cfgs):
+                        content = staged.read_bytes()
+                        os.replace(staged, self.config_path)
+                        provider = self._provider_for(final_cfgs, ids)
                 self._provider, self._configured, self._last_config = provider, True, content
             except BaseException as error:
-                if published:
-                    restore_config(previous, self.config_path)
                 if not isinstance(error, Exception):
                     raise
                 raise ValueError(f"Configuration was not saved: {error}") from error

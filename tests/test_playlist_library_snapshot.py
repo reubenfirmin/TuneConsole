@@ -258,7 +258,7 @@ def test_terminal_diagnostic_distinguishes_empty_tracking_and_hidden_fields():
 @pytest.mark.parametrize("verified_empty", [False, True, "terminal-continuation"])
 def test_only_verified_empty_library_can_remove_cached_playlists(store, monkeypatch, verified_empty):
     monkeypatch.setattr(sync, "with_retry", lambda fn, **kw: fn())
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     sync.sync_all(store, {iid: Client()}, 100)
     before = store.playlists.get_playlists()
     if verified_empty == "terminal-continuation":
@@ -288,7 +288,7 @@ def test_only_verified_empty_library_can_remove_cached_playlists(store, monkeypa
 def test_sync_with_a_display_variant_imports_known_playlists_but_preserves_cache_on_unknown_tiles(
         store, monkeypatch, identified, cached):
     monkeypatch.setattr(sync, 'with_retry', lambda fn, **kw: fn())
-    iid = store.identities.upsert_identity('Main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('Main', 'bridge', None, True)
     fake = Client()
     if cached:
         sync.sync_all(store, {iid: fake}, 100)
@@ -314,7 +314,7 @@ def test_sync_with_a_display_variant_imports_known_playlists_but_preserves_cache
     if identified:
         assert result['resources']['playlist_listing']['status'] == 'complete'
         assert reads == ['PL', 'NEW']
-        assert {p.ytm_playlist_id for p in store.playlists.get_playlists()} == {'PL', 'NEW'}
+        assert {p.provider_playlist_id for p in store.playlists.get_playlists()} == {'PL', 'NEW'}
     else:
         assert result['resources']['playlist_listing']['status'] == 'failed'
         assert store.playlists.get_playlists() == before

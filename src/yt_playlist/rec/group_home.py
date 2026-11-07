@@ -6,7 +6,6 @@ import random
 from yt_playlist.core.activity import check_stopping
 from yt_playlist.rec import group_learning, group_serving, home_themes, home_vibe, mode_surfaces, rec_params
 from yt_playlist.rec.eligibility import home_exclusions
-from yt_playlist.util import genre_map
 
 
 def inputs(store, now, preparation=None):
@@ -29,6 +28,17 @@ def _inputs(store, now, preparation):
                if group_serving.checkpoint(store) else None)
     result = None
     if preview:
+        if getattr(store, '_recommendation_files', False):
+            generations = preview.get('recommendation_generations', [])
+            if len(generations) != 1:
+                return None  # the worker must replace a preview of the retired JSON pools
+            allocation = group_learning.current_allocation(store, preview, now)
+            return {'preview': preview, 'typed_generation': generations[0], 'allocation': allocation,
+                    'context': {**preview['context'], 'at': now, 'group_allocation': allocation,
+                                'group_choice_policy': group_learning.POLICY,
+                                'group_choice_parameters': group_learning.choice_bandit.parameters(store)},
+                    'by_version': {group['version']: group for group in preview['groups']},
+                    'meta': mode_surfaces.bundle_metadata(store, generation=generations[0])}
         bundles = (preparation['bundles'] if preparation is not None else
                    json.loads(store.rec_proposals.group_pools_json() or '{}'))
         pools = bundles.get('all', {})
@@ -42,8 +52,8 @@ def _inputs(store, now, preparation):
         weights = store.rec_model.get_weights(now=now)
         maximum = 60 * rec_params.get_param(store, 'max_track_minutes')
         ranked_genres = {t['key']: t.get('genre') or '' for pool in pools.values() for t in pool}
-        genre_axes = {genre: (genre_map.family(genre), genre_map.subgenre(genre))
-                      for genre in set(genres.values()) | set(ranked_genres.values())}
+        genre_axes = {'': ('', None), None: ('', None),
+                      **store.genres.feature_axes(set(genres.values()) | set(ranked_genres.values()))}
         current = {}
         for key, track in owned.items():
             genre = genres.get(key) or ranked_genres.get(key) or ''
@@ -70,16 +80,24 @@ def _inputs(store, now, preparation):
 
 def assemble(store, now, epoch, data, *, include=(), avoid=()):
     """Spend each leaf's allocation once, combining mass at a usable parent as needed."""
+    if 'typed_generation' in data:
+        from yt_playlist.rec import stored_groups
+        with stored_groups.selection(store, data['typed_generation'], now) as selected:
+            return _assemble(store, now, epoch, data, include, avoid, selected)
+    return _assemble(store, now, epoch, data, include, avoid)
+
+
+def _assemble(store, now, epoch, data, include, avoid, selected=None):
     cap_artist = int(rec_params.get_param(store, 'modes_artist_cap'))
     cap_album = int(rec_params.get_param(store, 'modes_album_cap'))
     filter_key = (tuple(sorted(include)), tuple(sorted(avoid)))
-    if filter_key not in data['filtered']:
+    if selected is None and filter_key not in data['filtered']:
         pools = {lane: home_themes.matching_genres(store, pool, include=include, avoid=avoid)
                  for lane, pool in data['pools'].items()}
         data['filtered'][filter_key] = {lane: {t['key']: t for t in pool
             if t.get('video_id') and t['key'] not in data['blocked'] and t.get('artist') not in data['muted']}
             for lane, pool in pools.items()}
-    pools = data['filtered'][filter_key]
+    pools = data['filtered'][filter_key] if selected is None else {}
     by_version = data['by_version']
     meta = data['meta']
     comfort = meta.get('comfort_pool', 0) >= rec_params.get_param(store, 'comfort_min_pool')
@@ -97,6 +115,9 @@ def assemble(store, now, epoch, data, *, include=(), avoid=()):
         pool = pools.get(lane, {})
         candidates = {}
         def tracks(group):
+            if selected is not None:
+                return selected.tracks(group['version'], lane, epoch, include, avoid, seen,
+                                       cap_artist, cap_album, meta)
             cache_key = (filter_key, vibe.preset, lane, epoch % 3 if lane == 'temporal' else None, group['version'])
             if cache_key not in data['ranked']:
                 frame = group['frames'].get(lane, {})
@@ -130,7 +151,8 @@ def assemble(store, now, epoch, data, *, include=(), avoid=()):
         # The graph supplies area mass; the current sound preference can select
         # a different group as well as reordering tracks inside it.
         def priority(version):
-            fit = (sum(vibe.affinity(t) for t in candidates[version][:mode_surfaces.PROTO_SIZE])
+            fit = (sum(t['serving_context']['vibe_affinity'] if selected is not None else vibe.affinity(t)
+                       for t in candidates[version][:mode_surfaces.PROTO_SIZE])
                    / mode_surfaces.PROTO_SIZE)
             weight = weights[version] * (math.exp(6 * (fit - .5)) if vibe.preset else 1)
             return -math.log(max(rng.random(), 1e-12)) / max(weight, 1e-12)

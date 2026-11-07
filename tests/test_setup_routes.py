@@ -1,17 +1,31 @@
-"""Identity setup, validation and reauthentication messages."""
+"""Account setup, validation and reauthentication messages."""
 from urllib.parse import parse_qs, urlsplit
+from tests.enrichment_support import complete_entries, complete_discovered
 
 from fastapi.testclient import TestClient
 from yt_playlist.web.app import create_app
 from tests.setup_support import _FakeRuntime
 def test_home_format_setting_is_in_setup_and_persists(store):
-    c = TestClient(create_app(store, lambda: {}, now_fn=lambda: 1.0), base_url='http://127.0.0.1')
+    import json
+    from tests.onboarding_support import publish_personal_mix
+    from tests.test_growth_journey import early_journey
+
+    early_journey(store)
+    tracks = publish_personal_mix(store)
+    store.settings.set_setting('radio_seed_offer', json.dumps({
+        'menu_id': 'setup-radio', 'tracks': tracks[:4]}))
+    complete_entries(store, [row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1000)
+    complete_discovered(store, [row[0] for row in store.conn.execute(
+        'SELECT identity_key FROM discovered_tracks')], 1000)
+    c = TestClient(create_app(store, lambda: {}, now_fn=lambda: 1000.0), base_url='http://127.0.0.1')
+    assert all(c.get('/home/growth').json()['ready_formats'].values())
     html = c.get('/setup?tab=home').text
-    assert 'id="setup-home-format"' in html
+    assert 'class="setup-home-formats"' in html
+    assert 'Follow my listening' not in html
     assert 'hx-post="/home/format"' in html
     assert 'Start Home with' not in c.get('/taste/panels/recommendations').text
     assert c.post('/home/format', data={'format': 'radio'}).status_code == 204
-    assert '<option value="radio" selected>' in c.get('/setup?tab=home').text
+    assert 'name="format" value="radio" checked' in c.get('/setup?tab=home').text
     assert c.post('/home/format', data={'format': 'invalid'}).status_code == 400
     assert store.settings.get_setting('home_format') == 'radio'
 
@@ -110,7 +124,7 @@ def test_setup_page_alpine_attr_well_formed(store):
 
 def test_saving_identity_definitions_does_not_clear_expired_session(store):
     rt = _FakeRuntime(store, configured=True)
-    iid = store.identities.upsert_identity("main", "browser.json", None, True)
+    iid = store.accounts.upsert_account("main", "browser.json", None, True)
     store.settings.set_setting("last_sync_at", "1.0")
     app = create_app(store, rt.clients, now_fn=lambda: 1.0, setup=rt)
     app.state.ctx.flag_auth_expired(iid, "Main")

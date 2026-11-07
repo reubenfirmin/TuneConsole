@@ -13,7 +13,7 @@ def compile_usage(offers, responses, now, half_life_days):
     A failed launch, visibility, opening a record and continued tracks cannot establish
     a preference. The existing choice memory control also governs this navigation hint.
     """
-    choices, consumed, units = {}, set(), {}
+    choices, consumed, units, vibe_units = {}, set(), {}, set()
     for event in sorted(responses, key=lambda event: (event['at'], event['kind'] != 'choice', event['id'])):
         offer = offers.get(event['opportunity_id'])
         if not offer or offer['format'] not in PANELS or not offer['at'] <= event['at'] <= now:
@@ -28,6 +28,14 @@ def compile_usage(offers, responses, now, half_life_days):
             consumed.add(choice['id'])
             unit = (offer['format'], offer['episode_id'], int(choice['at'] // 86400))
             units[unit] = max(units.get(unit, choice['at']), choice['at'])
+            option = next((option for option in offer.get('options', [])
+                           if str(option['id']) == event.get('option_id')), {})
+            # Current compact menus keep the displayed preset in the decision
+            # envelope. Older unprojected menus may still have the recipe.
+            # Missing historical purpose cannot be inferred from today's tuning.
+            if option and offer['format'] == 'mixes' and (
+                    offer.get('vibe') or (option.get('recipe') or {}).get('vibe')):
+                vibe_units.add(unit)
     scores = {format: 0. for format in PANELS}
     counts = {format: 0 for format in PANELS}
     days = {format: set() for format in PANELS}
@@ -36,14 +44,9 @@ def compile_usage(offers, responses, now, half_life_days):
         counts[format] += 1
         days[format].add(day)
     return {'scores': scores, 'episodes': counts,
+            'vibe_episodes': len(vibe_units),
             'days': {format: len(value) for format, value in days.items()},
             'half_life_days': half_life_days}
-
-
-def choice_pending(store):
-    return (store.settings.get_setting('onboard_format_pending') == '1'
-            and not store.settings.get_setting('onboard_listening_format')
-            and store.settings.get_setting('home_format') not in {*PANELS, 'both', 'auto'})
 
 
 def default_format(store):
@@ -54,8 +57,7 @@ def default_format(store):
     last = store.settings.get_setting('home_last_panel')
     if override == 'both':
         return next((format for format, panel in PANELS.items() if panel == last), 'mixes')
-    report = store.rec_proposals.get_proposals('listening_choices') or {}
-    usage = report.get('home_format') or {}
+    usage = store.rec_proposals.choice_usage()
     scores, days = usage.get('scores') or {}, usage.get('days') or {}
     valid = {format: score for format, score in scores.items()
              if format in PANELS and type(score) in (int, float) and math.isfinite(score) and score > 0}

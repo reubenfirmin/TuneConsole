@@ -27,6 +27,7 @@ class EnrichmentResult:
     provider: str                       # "musicbrainz"
     fields: dict = field(default_factory=dict)   # only non-empty findings: {"genre": "Rock", ...}
     observations: tuple[MetadataObservation, ...] = ()
+    deferred_reason: str = ''           # Local prerequisites; no request outcome or timed retry.
 
 
 class Provider(Protocol):
@@ -41,13 +42,8 @@ class Provider(Protocol):
         ...
 
     def tripped(self) -> bool:
-        """Has this provider's circuit breaker tripped (host looks unreachable)?"""
+        """Is the integration boundary currently unavailable for another request?"""
         ...
-
-    def reset(self) -> None:
-        """Reset the circuit breaker at the start of a run."""
-        ...
-
 
 # --- field comparison ---------------------------------------------------------------------------
 

@@ -13,7 +13,7 @@ import pytest
     "unknown_account", "unverified_credits", "album_art", "like_again", "dislike_again",
     "unlike", "clear_dislike", "switch_to_like", "switch_to_dislike",
     "dislike_skip", "dislike_skip_already_set", "dislike_auto_advance", "dislike_no_next",
-    "dislike_wrong_account", "next", "next_stale", "next_disabled",
+    "dislike_wrong_account", "next", "next_stale", "next_disabled", "next_wrong_account", "next_unknown_account",
     "rating_target_only", "controller_data", "conflicting_controller", "missing_binding",
     "delayed_binding", "expired_before_probe", "expired_during_probe", "cancelled_probe", "superseded_probe",
     "unknown_expected_account",
@@ -37,7 +37,7 @@ const initialStatus={like_again:'LIKE',dislike_again:'DISLIKE',unlike:'LIKE',
  dislike_skip_already_set:'DISLIKE'}[scenario] || 'INDIFFERENT';
 let ratingStatus=initialStatus;
 const video={paused:false,muted:false,volume:1,addEventListener(){},removeEventListener(){}};
-const window={ytcfg:['unknown_account','unknown_expected_account'].includes(scenario)?null:{get:key=>key==='LOGGED_IN'?true:'brand'},addEventListener(t,fn){if(t==='message')handlers.push(fn);},
+const window={ytcfg:['unknown_account','unknown_expected_account','next_unknown_account'].includes(scenario)?null:{get:key=>key==='LOGGED_IN'?true:'brand'},addEventListener(t,fn){if(t==='message')handlers.push(fn);},
  removeEventListener(t,fn){if(t==='message')handlers.splice(handlers.indexOf(fn),1);},
  postMessage(msg){queue.push(msg);if(msg.__tcNow)snapshots.push(msg.__tcNow);}};
 const document={addEventListener(){},querySelector(s){
@@ -108,7 +108,8 @@ const desiredStatus={like_again:'LIKE',dislike_again:'DISLIKE',unlike:'INDIFFERE
 const skip=scenario.startsWith('dislike_') && scenario!=='dislike_again';
 assert.equal(runtime({type:scenario.startsWith('next')?'next':'rate',action,videoId:'A',
  likeStatus:desiredStatus,skip,ratingId:'one',expiresAt:2000,
- brandId:scenario==='dislike_wrong_account'?'other':scenario==='unknown_expected_account'?'brand':undefined},{},r=>reply=r),true);
+ brandId:['dislike_wrong_account','next_wrong_account'].includes(scenario)?'other':
+   ['unknown_expected_account','next_unknown_account','next'].includes(scenario)?'brand':undefined},{},r=>reply=r),true);
 if(scenario==='expired_during_probe')clock=3000;
 if(scenario==='cancelled_probe')runtime({type:'cancel-rating',ratingId:'one'},{},()=>{});
 if(scenario==='superseded_probe')runtime({type:'rate',ratingId:'two',action:'like',videoId:'A',
@@ -140,7 +141,7 @@ if(scenario==='delayed_binding'){
   assert.equal(clicks.length,1,'one exact desired-state click after the binding settles');
   process.exit(0);
 }
-const rejected=['advance','stale_bar','unknown','wrong_control','next_stale','next_disabled',
+const rejected=['advance','stale_bar','unknown','wrong_control','next_stale','next_disabled','next_wrong_account','next_unknown_account',
  'dislike_no_next','dislike_wrong_account','conflicting_controller','missing_binding',
  'expired_before_probe','expired_during_probe','cancelled_probe','superseded_probe','unknown_expected_account'].includes(scenario);
 const alreadySet=['like_again','dislike_again','dislike_skip_already_set'].includes(scenario);
@@ -160,7 +161,7 @@ else assert.equal(clicks.length,rejected || alreadySet?0:1);
 if(scenario.startsWith('next')){
  assert.equal(ratingStatus,'INDIFFERENT');
  const requests=events.filter(m=>m.type==='pevent'&&m.kind==='next');
- assert.equal(requests.length,scenario==='next_stale'?0:1);
+ assert.equal(requests.length,['next_stale','next_wrong_account','next_unknown_account'].includes(scenario)?0:1);
  if(requests.length){assert.equal(requests[0].videoId,'A');assert.equal(requests[0].brandKnown,true);}
  process.exit(0);
 }

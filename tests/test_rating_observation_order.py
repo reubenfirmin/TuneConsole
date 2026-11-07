@@ -28,7 +28,7 @@ def _client(status, *, partial=False, during_read=None):
 
 
 def _liked_videos(store, owner):
-    lm = next(p for p in store.playlists.get_playlists() if p.identity_id==owner and p.ytm_playlist_id=='LM')
+    lm = next(p for p in store.playlists.get_playlists() if p.account_id==owner and p.provider_playlist_id=='LM')
     return {r[1] for r in store.playlists.get_playlist_tracks_with_meta(lm.id)}
 
 
@@ -36,7 +36,7 @@ def _liked_videos(store, owner):
 @pytest.mark.parametrize('observed,confirmed', [
     ('INDIFFERENT','LIKE'),('DISLIKE','LIKE'),('LIKE','INDIFFERENT'),('LIKE','DISLIKE')])
 def test_stale_snapshot_cannot_replace_a_concurrent_confirmed_action(store, partial, observed, confirmed):
-    owner = store.identities.upsert_identity('Main','bridge',None,True)
+    owner = store.accounts.upsert_account('Main','bridge',None,True)
     tid = store.tracks.upsert_track('a','Song','Artist',None,200)
     lm = store.playlists.upsert_playlist(owner,'LM','Liked',0,'h',1)
     if observed=='LIKE':
@@ -67,7 +67,7 @@ def test_stale_snapshot_cannot_replace_a_concurrent_confirmed_action(store, part
 
 @pytest.mark.parametrize('source', ['api','action'])
 def test_sync_confirmation_keeps_action_time_and_ties_favor_confirmed_actions(store, source):
-    owner = store.identities.upsert_identity('Main','bridge',None,True)
+    owner = store.accounts.upsert_account('Main','bridge',None,True)
     store.tracks.record_item_rating(owner,'a','LIKE',source=source,now=110)
     # Older and equal-time conflicting snapshots cannot erase an action.
     for when in (100,110):
@@ -80,7 +80,7 @@ def test_sync_confirmation_keeps_action_time_and_ties_favor_confirmed_actions(st
 
 
 def test_equal_time_sync_conflicts_retain_existing_evidence_and_newer_remote_changes_win(store):
-    owner = store.identities.upsert_identity('Main','bridge',None,True)
+    owner = store.accounts.upsert_account('Main','bridge',None,True)
     store.tracks.record_item_rating(owner,'a','LIKE',source='sync',now=10)
     store.tracks.record_item_rating(owner,'a','DISLIKE',source='sync',now=10)
     assert store.tracks.item_rating(owner,'a')['status']=='LIKE'
@@ -89,7 +89,7 @@ def test_equal_time_sync_conflicts_retain_existing_evidence_and_newer_remote_cha
 
 
 def test_rejected_confirmed_input_projects_the_winning_rating_to_liked_music(store):
-    owner = store.identities.upsert_identity('Main','bridge',None,True)
+    owner = store.accounts.upsert_account('Main','bridge',None,True)
     store.tracks.upsert_track('a','Song','Artist',None,200)
     store.playlists.upsert_playlist(owner,'LM','Liked',0,'h',1)
     ratings.record_confirmed(store,owner,'a','LIKE',20)

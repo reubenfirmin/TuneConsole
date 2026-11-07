@@ -1,36 +1,33 @@
 # tests/test_slider_mechanic.py
 import time
 import pytest
-from yt_playlist.core.store import Store
 from yt_playlist.util import genre_map
 from yt_playlist.rec import graduation, rec_params
 
 DAY = 86400.0
 
 
-def _store():
-    s = Store(":memory:")
-    s.init_schema()
+def _store(s):
     tid = s.tracks.upsert_track("v", "s", "band", None, None)
     s.tracks.set_track_genre(tid, "Techno")
     return s, "genre:" + genre_map.family("Techno")
 
 
-def test_exposure_graduates_once_per_held_day():
-    s, axis = _store()
+def test_exposure_graduates_once_per_held_day(store):
+    s, axis = _store(store)
     s.rec_model.set_lean(axis, 2.0, 0.0)                       # full lean magnitude 1.0
     # day 0: +1.0*0.5 = 0.5 ledger, below 1.2 threshold -> no permanent nudge yet
     graduation.graduate_slider_exposure(s, 0.0)
     assert axis not in s.rec_model.get_weights()
-    assert abs(s.rec_signals.get_theme(axis) - rec_params.SOURCE_W_SLIDER * 1.0) < 1e-9
+    assert s.rec_signals.get_theme(axis) == pytest.approx(rec_params.get_param(s, "source_w_slider"))
     # same day again: no double-count
     graduation.graduate_slider_exposure(s, 100.0)
-    assert abs(s.rec_signals.get_theme(axis) - rec_params.SOURCE_W_SLIDER * 1.0) < 1e-9
+    assert s.rec_signals.get_theme(axis) == pytest.approx(rec_params.get_param(s, "source_w_slider"))
 
 
 @pytest.mark.parametrize("legacy_pause", [False, True])
-def test_exposure_migrates_conserving_effective_multiplier(legacy_pause):
-    s, axis = _store()
+def test_exposure_migrates_conserving_effective_multiplier(legacy_pause, store):
+    s, axis = _store(store)
     if legacy_pause:
         s.settings.set_setting("rec_param:graduation_enabled", "0")
     s.rec_model.set_lean(axis, 2.0, 0.0)
@@ -41,13 +38,13 @@ def test_exposure_migrates_conserving_effective_multiplier(legacy_pause):
     last_now = 2 * DAY
     after_eff = s.rec_model.get_weights(now=last_now).get(axis, 1.0) * s.rec_model.get_lean(axis)
     # #85 no more flat post-nudge shrink: reading at the same `now` as the last nudge gives exactly
-    # GRADUATE_UP (was strictly less than GRADUATE_UP under the old flat 5% shrink).
-    assert s.rec_model.get_weights(now=last_now)[axis] == pytest.approx(rec_params.GRADUATE_UP)
+    # graduate_up (was smaller under the old flat 5% shrink).
+    assert s.rec_model.get_weights(now=last_now)[axis] == pytest.approx(rec_params.get_param(s, "graduate_up"))
     assert abs(after_eff - before_eff) < 1e-9                        # displayed bar conserved
 
 
-def test_neutral_lean_stops_accrual():
-    s, axis = _store()
+def test_neutral_lean_stops_accrual(store):
+    s, axis = _store(store)
     s.rec_model.set_lean(axis, 1.0, 0.0)                       # neutral -> magnitude 0
     graduation.graduate_slider_exposure(s, 0.0)
     assert s.rec_signals.get_theme(axis) in (None, 0.0)

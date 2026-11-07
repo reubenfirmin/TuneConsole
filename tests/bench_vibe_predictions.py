@@ -16,7 +16,7 @@ import pytest
 from yt_playlist.core.store import Store
 from yt_playlist.core.migrations import migrate
 from yt_playlist.core.migrations.registry import MIGRATIONS
-from yt_playlist.rec import audio_vibe_model, audio_vibe_preview, musical_character, musical_preparation
+from yt_playlist.rec import audio_vibe_model, audio_vibe_prediction, musical_character, musical_preparation
 from yt_playlist.rec import vibe_preparation, musical_profiles
 from yt_playlist.rec.progressive import Preparation
 from yt_playlist.util.matching import normalize
@@ -39,8 +39,10 @@ def test_saved_library_vibe_startup(tmp_path, monkeypatch, record_property, requ
         migrate(store.conn, registry=MIGRATIONS[:60])
     else:
         store.init_schema()
+    from yt_playlist.core.artist_credits import projection_table
+    credit_table = projection_table(source)
     tables = ('artists', 'recordings', 'youtube_items', 'catalog_entries', 'unresolved_items',
-              'track_artists', 'entry_field_choices', 'library_memberships', 'discovery_memberships',
+              credit_table, 'entry_field_choices', 'library_memberships', 'discovery_memberships',
               'discovery_sources', 'rec_musical_sources', 'rec_musical_links',
               'audio_vibe_samples' if source_version < 61 else 'sample_attributes')
     counts = {}
@@ -51,7 +53,8 @@ def test_saved_library_vibe_startup(tmp_path, monkeypatch, record_property, requ
             for table in tables:
                 columns = [row[1] for row in source.execute(f'PRAGMA table_info({table})')]
                 query = source.execute(f'SELECT * FROM {table}')
-                sql = f'INSERT INTO {table} (' + ','.join(columns) + ') VALUES (' + ','.join('?' for _ in columns) + ')'
+                destination = projection_table(store.conn) if table == credit_table else table
+                sql = f'INSERT INTO {destination} (' + ','.join(columns) + ') VALUES (' + ','.join('?' for _ in columns) + ')'
                 counts[table] = 0
                 while rows := query.fetchmany(256):
                     store.conn.executemany(sql, rows)
@@ -127,7 +130,7 @@ def test_saved_library_vibe_startup(tmp_path, monkeypatch, record_property, requ
             layers.update(row['source'] for row in profile['vibes']['fits'].values())
             if profile['vibes']['fits']['relax']['source'] == 'audio_measurement':
                 inputs = store.vibe_predictions.inputs([key])[key]
-                expected = audio_vibe_preview.predict(inputs['samples'], metadata=inputs['metadata'])
+                expected = audio_vibe_prediction.predict(inputs['samples'], metadata=inputs['metadata'])
                 actual = profile['vibes']['fits']
                 assert {row['vibe']: row['score'] for row in expected['ranking']} == {
                     vibe: row['score'] for vibe, row in actual.items()}
@@ -139,7 +142,7 @@ def test_saved_library_vibe_startup(tmp_path, monkeypatch, record_property, requ
         assert measured > 0 and layers['provider_measurement'] > 0
         assert sum(layers[k] for k in ('artist_genre', 'artist', 'genre')) > 0
         assert eligible <= {row[0] for row in profiles}
-        assert not store.conn.execute('SELECT 1 FROM audio_session_labels').fetchone()
+        assert not store.conn.execute('SELECT 1 FROM audio_annotations').fetchone()
         report = {'source_schema': source_version, 'runtime': vibe_preparation.version(), 'copied_rows': counts,
                   'profiles': len(profiles), 'measured_recordings': measured, 'layers': dict(layers),
                   'steps': steps, 'cold_start': cold, 'upgrade_seconds': time.monotonic() - rollout_started,

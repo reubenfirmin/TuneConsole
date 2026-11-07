@@ -32,22 +32,17 @@ def test_unparseable_dismissal_timestamp_means_due(store, monkeypatch):
     assert lastfm_nudge_due(store, now=1000.0) is True
 
 
-def test_banner_links_to_enrichment_tab(store, monkeypatch):
-    # #69: the card's CTA must deep-link to the setup page's Enrichment tab (where the key lives),
-    # not dump the user on the default Pairing tab.
+def test_bonus_replaces_banner_and_legacy_dismiss_keeps_it_available(store, monkeypatch):
     monkeypatch.setattr(lastfm, "available", lambda s=None: False)
     store.settings.set_setting("last_sync_at", "1700000000")
     publish_personal_mix(store, now=1700000000)
     c = TestClient(create_app(store, lambda: FakeClient(), now_fn=lambda: 1700000000), base_url="http://127.0.0.1")
-    assert "/setup?tab=enrichment" in c.get("/").text
-
-
-def test_banner_renders_and_dismiss_persists(store, monkeypatch):
-    monkeypatch.setattr(lastfm, "available", lambda s=None: False)
-    store.settings.set_setting("last_sync_at", "1700000000")
-    publish_personal_mix(store, now=1700000000)
-    c = TestClient(create_app(store, lambda: FakeClient(), now_fn=lambda: 1700000000), base_url="http://127.0.0.1")
-    assert "lastfm-nudge" in c.get("/").text
+    html = c.get('/').text
+    assert '/setup?tab=enrichment' in html
+    assert 'lastfm-nudge' not in html
+    assert 'Find more music that fits' in html and 'See the setup steps' in html
     assert c.post("/onboard/lastfm/dismiss").status_code == 200
     assert store.settings.get_setting("lastfm_nudge_dismissed_at") is not None   # snooze timestamp recorded
-    assert "lastfm-nudge" not in c.get("/").text
+    after = c.get('/').text
+    assert 'lastfm-nudge' not in after
+    assert 'Find more music that fits' in after

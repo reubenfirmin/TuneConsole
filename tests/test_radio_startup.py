@@ -59,17 +59,36 @@ def test_radio_route_reserves_playback_before_its_worker_starts(owned_playback, 
     from yt_playlist.web.routes import radio_session
 
     controller, remote, frames, bridge = owned_playback
+    # Use the real, current starter offer; a locked empty request never reaches
+    # worker dispatch and therefore cannot test playback-intent ownership.
+    controller.ctx.store.settings.set_setting('onboard_listening_format', 'radio')
+    offer = controller.seeds()
+    chosen = offer['tracks'][0]['video_id']
     direct = {'type': 'navigate', 'url': 'https://music.youtube.com/watch?v=newer'}
+    dispatched = []
+    starts = []
+    start = controller.start
+
+    def captured_start(*args, intent, **kwargs):
+        starts.append(intent)
+        assert not bridge.playback_intent_current(intent)
+        return start(*args, intent=intent, **kwargs)
 
     async def delayed(target, *args, **kwargs):
+        dispatched.append(target)
         bridge.send_control(direct, intent=bridge.begin_playback_intent())
         return target(*args, **kwargs)
 
     monkeypatch.setattr(controller.work, 'to_thread', delayed)
+    monkeypatch.setattr(controller, 'start', captured_start)
     app = FastAPI()
     app.include_router(radio_session.build(controller.ctx))
     with TestClient(app) as client:
-        assert client.post('/radio/start', json={}).json()['ok']
+        response = client.post('/radio/start', json={'video_id': chosen, 'menu_id': offer['menu_id']})
+        assert response.status_code == 200, response.text
+        assert response.json()['ok'], response.text
+    assert len(dispatched) == len(starts) == 1
+    assert controller.ctx.store.playlists.get_playlist(controller.session.local_id)
     assert remote.ids and frames == [direct]
 
 

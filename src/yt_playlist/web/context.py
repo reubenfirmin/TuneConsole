@@ -8,7 +8,6 @@ six arguments through every module.
 """
 from __future__ import annotations
 
-import json
 import logging
 import threading
 from dataclasses import dataclass, field
@@ -41,6 +40,15 @@ def form_float(value):
         return None
 
 
+def refresh_playlist_view(ctx, provider_playlist_id):
+    """Refresh a connected extension's playlist after a confirmed mutation."""
+    try:
+        if provider_playlist_id:
+            ctx.bridge.send_control({"type": "refresh-view", "playlist": provider_playlist_id})
+    except Exception:  # noqa: BLE001 - notification failure must not change the mutation result
+        ctx.logger.debug("refresh-view control not sent for %s", provider_playlist_id, exc_info=True)
+
+
 @dataclass
 class Ctx:
     store: object
@@ -57,6 +65,7 @@ class Ctx:
     # flag_/clear_ helpers below so the persisted copy stays in sync.
     auth_expired: dict = field(default_factory=dict)
     rec_worker: object | None = None   # decoupled recommendation worker (set in create_app)
+    vibe_requests: object | None = None
     enrich_worker: object | None = None  # background enrichment worker (set in create_app)
     bridge: object | None = None       # shared Bridge instance the WS route and runtime read from
     radio: object | None = None        # saved-playlist Radio Session, set in create_app
@@ -70,38 +79,38 @@ class Ctx:
     spotify_import_lock: object = field(default_factory=threading.Lock)
 
     def __post_init__(self):
-        raw = self.store.settings.get_setting(AUTH_EXPIRED_KEY)
-        if raw:
-            try:                                    # keys are ints (identity ids) so on_auth_ok's pop matches
-                self.auth_expired.update({int(k): v for k, v in json.loads(raw).items()})
-            except (ValueError, TypeError):         # corrupt/legacy value: ignore, the next sync rebuilds it
-                self.logger.warning("ignoring unreadable %s setting", AUTH_EXPIRED_KEY)
+        try:
+            self.auth_expired.update(self.store.accounts.auth_expirations())
+        except (ValueError, TypeError):
+            self.logger.warning("ignoring unreadable %s setting", AUTH_EXPIRED_KEY)
 
-    def _persist_auth_expired(self):
-        if getattr(self.store, 'activity_paused', False):
+    def _persist_auth_expired(self, *, account_id=None, label=None, clear_all=False):
+        result = self.store.accounts.update_auth_expiration(
+            account_id=account_id, label=label, clear_all=clear_all)
+        if result is None:
             return
-        if self.auth_expired:
-            self.store.settings.set_setting(AUTH_EXPIRED_KEY,
-                                   json.dumps({str(k): v for k, v in self.auth_expired.items()}))
-        else:
-            self.store.settings.delete_setting(AUTH_EXPIRED_KEY)
+        current, invalid = result
+        if invalid:
+            self.logger.warning('ignoring unreadable %s setting', AUTH_EXPIRED_KEY)
+        self.auth_expired.clear()
+        self.auth_expired.update(current)
 
-    def flag_auth_expired(self, identity_id, label):
+    def flag_auth_expired(self, account_id, label):
         """Record (and persist) that an identity's session expired. Drives the re-auth banner."""
-        self.auth_expired[identity_id] = label or str(identity_id)
-        self._persist_auth_expired()
+        self.auth_expired[account_id] = label or str(account_id)
+        self._persist_auth_expired(account_id=account_id, label=self.auth_expired[account_id])
 
-    def clear_auth_expired(self, identity_id):
+    def clear_auth_expired(self, account_id):
         """Clear one identity's expired flag (a successful re-sync of that account)."""
-        if self.auth_expired.pop(identity_id, None) is not None:
-            self._persist_auth_expired()
+        self.auth_expired.pop(account_id, None)
+        self._persist_auth_expired(account_id=account_id)
 
     def clear_all_auth_expired(self):
         """Clear every expired flag (a re-auth / sign-out resolves the whole banner)."""
         self.auth_expired.clear()
         # A healthy bridge can clear RAM while repair discards writes. A fresh
         # confirmation after repair must also remove the stale persisted flag.
-        self._persist_auth_expired()
+        self._persist_auth_expired(clear_all=True)
 
     def now(self):
         return self.now_fn()

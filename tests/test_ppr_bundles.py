@@ -1,14 +1,11 @@
 import numpy as np
-import pytest
-from yt_playlist.core.store import Store
 from yt_playlist.rec import embedding_vectors as embed, surfaces, ppr, mode_surfaces as ms
+from tests.conftest import seed_catalog_track
 
 
-@pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    return s
+def seed_items(store, keys):
+    for key in keys:
+        seed_catalog_track(store, key, 'T' + key, 'A' + key, video_id='v' + key, genre='House')
 
 
 class _Item:
@@ -24,6 +21,7 @@ def test_prepare_stashes_ppr_order(monkeypatch, store):
          "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 50, "rep_keys": []},
     ], retired_ids=[], now=1.0)
     keys = ["k1", "k2"]
+    seed_items(store, keys)
     V = np.array([[1.0, 0.0], [1.0, 0.0]], dtype=np.float32)
     idx = {"k1": 0, "k2": 1}
     monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (keys, V, idx))
@@ -36,10 +34,11 @@ def test_prepare_stashes_ppr_order(monkeypatch, store):
 
     payload = ms.prepare_bundles(store, now=10.0)
     assert payload["_ppr"] == {"1": ["k2", "k1"]}
-    assert store.rec_proposals.get_proposals("mode_bundles")["_ppr"] == {"1": ["k2", "k1"]}
+    assert [row['key'] for row in store.recommendations.page('radio', '1', 'ppr')] == ['k2', 'k1']
 
 
 def test_prepare_ppr_failopen(monkeypatch, store):
+    seed_items(store, ['k1'])
     store.modes.replace_modes([
         {"mode_id": 1, "label": "a", "families": [["house", 1]],
          "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 50, "rep_keys": []},

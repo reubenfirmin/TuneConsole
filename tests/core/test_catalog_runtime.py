@@ -1,4 +1,5 @@
 import builtins
+from tests.enrichment_support import seed_audio
 import json
 from copy import deepcopy
 
@@ -23,7 +24,7 @@ def test_runtime_operations_do_not_import_historical_catalog_helpers(store, monk
     old = store.tracks.catalog_subject(first)['identity_key']
     store.playlist_recipes.set_cluster_canvas('saved',json.dumps({'nodes': [{'key': old}], 'label': old}))
     second = store.tracks.upsert_track('b', 'Song', 'Artist', 'Other', 200)
-    store.tracks.set_track_audio(first, bpm=120)
+    seed_audio(store, first, bpm=120)
     store.tracks.associate_youtube_item('b', store.tracks.catalog_subject(first)['recording_id'],
                                 source='verified', evidence={'review': 'same recording'}, now=2)
     assert store.tracks.get_track_audio(second)[0] == 120

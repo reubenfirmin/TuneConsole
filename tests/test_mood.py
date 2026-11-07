@@ -6,7 +6,7 @@ def test_mood_demotes_but_does_not_banish_cluster_in_for_you(store):
     """A strong negative mood DE-RANKS the disfavored cluster in for_you. It drops out of the lane's
     top but stays present, because the transient tilt de-ranks rather than banishes (banishing is the
     job of dislike / sustained graduation, not one mood gesture)."""
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     # two clusters by artist; both get vectors via artist baskets
     A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(8)]
     B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(8)]

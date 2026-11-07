@@ -76,7 +76,7 @@ def test_exhausted_searches_retry_deeper_candidates_without_waiting_for_cache_ex
     monkeypatch.setattr(tv, 'seed_tracks', seeds)
     monkeypatch.setattr(tv_artwork, 'prepare', lambda *args: False)
     client = Videos([row(3, title='Prepared 3 Live session')])
-    iid = worker.ctx.store.identities.upsert_identity('main', 'cred', None, True)
+    iid = worker.ctx.store.accounts.upsert_account('main', 'cred', None, True)
     worker.ctx.client_provider = lambda: {iid: client}
     worker._poll_tv()
     targets.pop()()

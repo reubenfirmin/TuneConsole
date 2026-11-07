@@ -1,5 +1,6 @@
 """Genre groups repair in the worker, without sync, provider access or request-time fitting."""
 import logging
+from tests.enrichment_support import seed_enrichment
 import threading
 import time
 from types import SimpleNamespace
@@ -10,15 +11,16 @@ from fastapi.testclient import TestClient
 from yt_playlist.rec import (content_model, embedding_training as training, embedding_vectors as embed,
                              model_refresh, mode_surfaces, rec_params, rec_worker, taste_modes, taste_viz)
 from yt_playlist.web.app import create_app
-from tests.model_support import build_content_model
+from tests.model_support import build_content_model, publish_modes
+from tests.prepared_fixture_support import prepared_template
+from tests.recommendation_support import publish_bundles
 
 
-@pytest.fixture
-def library(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+def _seed_library(store, *, per_genre=27):
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     tracks = []
     for genre in ("Techno", "Jazz", "Rock"):
-        for i in range(60):
+        for i in range(per_genre):
             title = f"{genre} {i}"
             video = f"{genre}-{i}"
             tid = store.tracks.upsert_track(video, title, "Artist", None, None)
@@ -27,10 +29,62 @@ def library(store):
     rec_params.set_param(store, "modes_k", 3)
     rec_params.set_param(store, "modes_min_members", 20)
     assert build_content_model(store)
-    assert taste_modes.recompute(store, 1000.0) == 3
+    assert publish_modes(store, 1000.0) == 3
     store.history.import_play_events(iid, [(f"techno {i}|artist", f"Techno-{i}", 2000.0)
                                    for i in range(4)])
     return tracks
+
+
+@pytest.fixture(scope="session")
+def mode_refresh_library_template(_pristine_current_schema):
+    with prepared_template(_pristine_current_schema, _seed_library) as template:
+        yield template
+
+
+@pytest.fixture
+def library(store, mode_refresh_library_template, request, record_property):
+    if getattr(request, 'param', 27) == 60:
+        # Independent full-sized producer, followed by the actual async worker.
+        tracks = _seed_library(store, per_genre=60)
+        record_property('library_tracks', len(tracks))
+        return tracks
+    record_property('library_tracks', len(mode_refresh_library_template.result))
+    return mode_refresh_library_template.restore(store)
+
+
+@pytest.fixture(autouse=True)
+def worker_phase_costs(monkeypatch, record_property):
+    from functools import wraps
+
+    costs, lock = {}, threading.Lock()
+    def timed(name, operation):
+        @wraps(operation)
+        def call(*args, **kwargs):
+            wall, cpu = time.monotonic(), time.thread_time()
+            try:
+                return operation(*args, **kwargs)
+            finally:
+                elapsed = time.monotonic() - wall, time.thread_time() - cpu
+                with lock:
+                    values = costs.setdefault(name, [0, 0.0, 0.0])
+                    values[0] += 1
+                    values[1] += elapsed[0]
+                    values[2] += elapsed[1]
+        return call
+
+    for owner, attribute, name in (
+            (rec_worker.RecWorker, '_do_mode_refresh', 'worker_repair'),
+            (model_refresh, 'rebuild', 'model_refresh'),
+            (mode_surfaces, 'prepare_bundles', 'bundle_preparation'),
+            (mode_surfaces, '_calculate_bundles', 'ranking'),
+            (mode_surfaces, '_publish_typed_bundles', 'typed_publication')):
+        monkeypatch.setattr(owner, attribute, timed(name, getattr(owner, attribute)))
+    yield
+    with lock:
+        for name, (calls, wall, cpu) in costs.items():
+            record_property(name + '_calls', calls)
+            record_property(name + '_wall_seconds', wall)
+            record_property(name + '_thread_cpu_seconds', cpu)
 
 
 def _worker(store):
@@ -40,6 +94,19 @@ def _worker(store):
 
 def _settle(store):
     assert model_refresh.rebuild(store, 2000) is not None
+
+
+def _pool_keys(store, lane):
+    head = store.recommendations.head('home')
+    assert head is not None
+    after, keys = -1, []
+    while True:
+        page = store.recommendations.candidate_page('home', 'all', lane,
+            generation=head['id'], after=after, limit=128)
+        keys.extend(track['key'] for track in page['tracks'])
+        if page['exhausted']:
+            return keys
+        after = page['after']
 
 
 def test_missing_pools_are_scheduled_even_while_models_need_refresh(store, monkeypatch):
@@ -61,16 +128,19 @@ def test_deferred_model_fit_still_prepares_candidates(store, monkeypatch):
     assert prepared == [True]
 
 
-@pytest.mark.parametrize("reason", ["stale", "missing"])
+@pytest.mark.parametrize('reason,library', [('stale', 27), ('missing', 27), ('missing', 60)],
+                         indirect=['library'], ids=['stale', 'missing', 'full-library-control'])
 def test_startup_repairs_groups_without_sync_or_extension(store, library, monkeypatch, reason):
-    old_ids = {m["mode_id"] for m in taste_modes.live_modes(store)}
+    old_modes = taste_modes.live_modes(store)
+    old_ids = {m["mode_id"] for m in old_modes}
     if reason == "missing":
         store.conn.execute("DELETE FROM taste_modes")
         store.conn.commit()
     else:
         # New release metadata adds a column while coverage stays in the same bucket.
-        for tid in library[60:120]:
-            store.tracks.set_track_enrichment(tid, "Jazz", "2001")
+        per_genre = len(library) // 3
+        for tid in library[per_genre:2 * per_genre]:
+            seed_enrichment(store, tid, "Jazz", "2001")
         build_content_model(store)
         assert not taste_viz.overview(store, 2000.0)["recent"]["styles_current"]
     store.settings.set_setting("enrich_worker_enabled", "0")
@@ -106,14 +176,24 @@ def test_startup_repairs_groups_without_sync_or_extension(store, library, monkey
                 assert "Updating your music groups automatically" in pending
         finally:
             release.set()
-        assert finished.wait(5)
+        # This is background model adoption and typed publication; the request
+        # availability assertions above retain their independent short bound.
+        assert finished.wait(60)
         deadline = time.monotonic() + 60
         while app.state.ctx.rec_worker.busy and time.monotonic() < deadline:
             time.sleep(0.02)
         assert not app.state.ctx.rec_worker.busy
         live = taste_modes.live_modes(store)
         assert len(live) == 3
-        assert {m["mode_id"] for m in live} == old_ids
+        if reason == 'stale':
+            assert {m["mode_id"] for m in live} == old_ids
+        else:
+            # Deleted identities cannot be reused after the retained high-water
+            # mark. Reconstructed groups must cover the same musical regions.
+            assert {m['mode_id'] for m in live}.isdisjoint(old_ids)
+            assert min(m['mode_id'] for m in live) > max(old_ids)
+            assert {tuple(tuple(pair) for pair in m['families']) for m in live} == {
+                tuple(tuple(pair) for pair in m['families']) for m in old_modes}
         assert all(m["last_seen"] == 2000.0 for m in live)
         recent = taste_viz.overview(store, 2000.0)["recent"]
         assert recent["styles_current"] and recent["n"] == 4
@@ -123,7 +203,8 @@ def test_startup_repairs_groups_without_sync_or_extension(store, library, monkey
             html = client.get("/taste/panels/overview").text
         assert "genre groups need to be updated" not in html
         assert 'hx-trigger="every 3s"' not in html
-        assert store.rec_proposals.get_proposals("mode_bundles") is not None
+        assert store.recommendations.head('home') is not None
+        assert _pool_keys(store, 'temporal')
 
 
 def test_content_update_refreshes_original_models_and_places_track(store, library, monkeypatch):
@@ -139,36 +220,35 @@ def test_content_update_refreshes_original_models_and_places_track(store, librar
     assert {m['mode_id'] for m in taste_modes.live_modes(store)} == {
         m['mode_id'] for m in store.modes.list_modes(active_only=True)}
     assert key in store.rec_model.content_vectors_by_keys([key])
-    bundles = store.rec_proposals.get_proposals("mode_bundles")
-    assert key in {row["key"] for row in bundles["all"]["temporal"]}
+    assert key in _pool_keys(store, 'temporal')
 
 
 @pytest.mark.parametrize("prepared", [False, True], ids=["missing-bundles", "saved-bundles"])
 def test_current_groups_are_not_recomputed_at_every_startup(store, library, monkeypatch, prepared):
+    # Adopt this pre-ledger fixture before guarding an unchanged restart.
+    _settle(store)
     saved = None
     if prepared:
         mode_surfaces.prepare_bundles(store, 1000.0)
-        saved = store.rec_proposals.get_proposals("mode_bundles")
+        saved = _pool_keys(store, 'temporal')
+    else:
+        assert store.recommendations.head('home') is None
 
     def forbidden(*args, **kwargs):
         raise AssertionError("Startup must reuse the saved model and current groups")
 
     monkeypatch.setattr(content_model, "build_library_content", forbidden)
-    monkeypatch.setattr(taste_modes, "recompute", forbidden)
-    # The one-time adoption of a pre-ledger model is itself incremental. Once
-    # adopted, a restart with no source changes must not learn the corpus twice.
-    _settle(store)
-    mode_surfaces.prepare_bundles(store, 2000)
-    saved = store.rec_proposals.get_proposals('mode_bundles')
+    monkeypatch.setattr(taste_modes, "prepare_modes", forbidden)
     generation = store.rec_model.content_generation()
+    groups = store.modes.list_modes()
     worker = _worker(store)
     monkeypatch.setattr(worker, '_start_loop', lambda: None)
     worker._do_mode_refresh()
     assert store.rec_model.content_generation() == generation
-    bundles = store.rec_proposals.get_proposals("mode_bundles")
-    assert bundles is not None
+    assert store.recommendations.head('home') is not None
+    assert [m['mode_id'] for m in store.modes.list_modes()] == [m['mode_id'] for m in groups]
     if prepared:
-        assert bundles == saved
+        assert _pool_keys(store, 'temporal') == saved
 
 
 @pytest.mark.parametrize("cached", [None, []], ids=["absent", "empty"])
@@ -178,17 +258,21 @@ def test_startup_repairs_absent_discovery_songs_while_reusing_saved_groups(store
     for i in range(12):
         store.discovery.upsert_discovered_track(f"new {i}|new artist {i}", f"v{i}", f"New {i}",
             f"New artist {i}", None, None, "Jazz", "2020", "radio:seed", 1001)
-    store.conn.execute("DELETE FROM rec_proposals WHERE surface='fresh_pool'")
-    store.conn.commit()
-    if cached is not None:
-        store.rec_proposals.put_proposals("fresh_pool", cached, 1000)
+    if cached is None:
+        with store.conn:
+            store.conn.execute("DELETE FROM recommendation_heads WHERE surface='fresh'")
+        assert store.recommendations.head('fresh') is None
+    else:
+        publish_bundles(store, {}, 1000, fresh=cached)
+        empty = store.recommendations.candidate_page('fresh', 'all', 'fresh', limit=1)
+        assert empty['tracks'] == [] and empty['exhausted']
 
     def forbidden(*args, **kwargs):
         raise AssertionError("Discovery repair must reuse the saved groups and model")
 
     # Adopt this fixture's saved spaces into the production fit ledger first.
     _settle(store)
-    monkeypatch.setattr(taste_modes, "recompute", forbidden)
+    monkeypatch.setattr(taste_modes, "prepare_modes", forbidden)
     monkeypatch.setattr(training, "build_vectors_from_baskets", forbidden)
     worker = _worker(store)
     monkeypatch.setattr(worker, '_start_loop', lambda: None)
@@ -298,6 +382,8 @@ def test_stale_projection_retry_does_not_refit_models_or_repeat_other_stages(sch
         worker._retry_bundles()
         assert not targets
         monkeypatch.setattr(rec_worker.time, 'monotonic', lambda: worker.jobs.retry['bundles'].retry_at + 1)
+        from yt_playlist.rec import candidate_refresh
+        worker.ctx.now_fn = lambda: 2000 + candidate_refresh.CHECK_INTERVAL_S
         worker._retry_bundles()
     targets.pop()()
     assert calls == ["full", projection, projection]
@@ -305,14 +391,28 @@ def test_stale_projection_retry_does_not_refit_models_or_repeat_other_stages(sch
     assert not worker.work.active
 
 
-def test_bundle_retry_repairs_a_model_invalidated_during_preparation(store, library, monkeypatch):
+@pytest.mark.parametrize('failure', ['model-invalidated', 'policy-capacity', 'unexpected'])
+def test_bundle_retry_repairs_a_model_invalidated_during_preparation(store, library, monkeypatch, caplog, failure):
+    from yt_playlist.rec import candidate_refresh
     worker = _worker(store)
     prepare = mode_surfaces.prepare_bundles
     attempts = []
+    clock = [100.0]
+    wall = [2000.0]
+    worker.ctx.now_fn = lambda: wall[0]
+    if failure == 'policy-capacity':
+        monkeypatch.setattr(rec_worker, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
 
     def invalidate_once(reader, now):
         attempts.append(store.settings.get_setting("rec_content_model"))
         if len(attempts) == 1:
+            if failure == 'policy-capacity':
+                from yt_playlist.core.policy_config import PolicyCapacityFull
+                # The real-library ranking outlasts the start-to-start interval.
+                clock[0] += 90
+                raise PolicyCapacityFull(131000, 60000000, 1024, 500000)
+            if failure == 'unexpected':
+                raise RuntimeError('Unexpected ranking failure')
             # A new, ambiguous upload rekeys catalog subjects and invalidates derived models.
             from yt_playlist.core.catalog import invalidate_derived
             with store.conn:
@@ -328,18 +428,35 @@ def test_bundle_retry_repairs_a_model_invalidated_during_preparation(store, libr
     _settle(store)
     with monkeypatch.context() as request_guard:
         request_guard.setattr(training, "build_vectors_from_baskets", forbidden)
-        worker._refresh_bundles()
+        with caplog.at_level(logging.INFO):
+            worker._refresh_bundles()
     assert worker.jobs.retry['bundles'].dirty
+    if failure == 'policy-capacity':
+        assert worker.jobs.retry['bundles'].failures == 0
+        assert worker.jobs.retry['bundles'].deferrals == 1
+        assert 'batch adds 1024 variants' in caplog.text
+        assert not any(record.exc_info for record in caplog.records)
+        assert worker.jobs.retry['bundles'].retry_at >= clock[0] + candidate_refresh.CHECK_INTERVAL_S
+    elif failure == 'unexpected':
+        failures = [record for record in caplog.records if 'rec bundle preparation failed' in record.message]
+        assert len(failures) == 1 and failures[0].exc_info[0] is RuntimeError
     # The worker settles invalidated model inputs before retrying candidate pools.
     # Pool preparation must only read the model lifecycle's published result.
     _settle(store)
+    if failure == 'policy-capacity':
+        clock[0] = worker.jobs.retry['bundles'].retry_at - .001
+        worker._refresh_bundles()
+        worker._retry_bundles()
+        assert len(attempts) == 1 and not worker.jobs.has('bundles')
     monkeypatch.setattr(rec_worker.time, 'monotonic', lambda: worker.jobs.retry['bundles'].retry_at + 1)
+    wall[0] += candidate_refresh.CHECK_INTERVAL_S
     with monkeypatch.context() as request_guard:
         request_guard.setattr(training, "build_vectors_from_baskets", forbidden)
         worker._refresh_bundles()
     assert len(attempts) == 2 and all(attempts)
     assert store.settings.get_setting("rec_content_model")
-    assert store.rec_proposals.get_proposals("mode_bundles")
+    assert store.recommendations.head('home') is not None
+    assert _pool_keys(store, 'temporal')
 
 
 def test_enrichment_requests_repair_when_saved_clusters_have_lost_their_model(store, library, monkeypatch):

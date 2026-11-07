@@ -1,10 +1,13 @@
 import json
+import hashlib
 from dataclasses import replace
 
 import pytest
 
 from tests.group_support import recordings
 from yt_playlist.core.activity import WorkClosing
+from yt_playlist.core import prepared_inputs
+from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import group_discovery, group_preparation, musical_profiles
 
 
@@ -13,13 +16,22 @@ def seed(store, tracks):
         for i, track in enumerate(tracks):
             library = {'genre': track.genre, 'year': str(track.year or ''), 'audio': {}}
             payload = json.dumps({'library': library, 'discovered': None})
-            store.conn.execute('INSERT OR REPLACE INTO rec_prepared_content VALUES (?,?,?,?,?)',
-                               (track.key, payload, str(i), 1, i + 1))
+            store.conn.execute('INSERT INTO recordings(identity_key) VALUES (?) '
+                               'ON CONFLICT(identity_key) DO NOTHING', (track.key,))
+            prepared_inputs.upsert(store.conn, track.key, json.loads(payload),
+                                   hashlib.sha256(payload.encode()).hexdigest(), 1, i + 1)
             profile = {'schema': 1, 'version': musical_profiles.VERSION, 'dimensions': {
                 name: {'value': value, 'support': support, 'evidence': [{'kind': 'explicit'}]}
                 for name, value, support in zip(musical_profiles.DIMENSIONS, track.values, track.support)}}
             store.conn.execute('INSERT OR REPLACE INTO rec_musical_profiles VALUES (?,?,?,?,?)',
                                (track.key, json.dumps(profile), musical_profiles.VERSION, str(i), 1))
+
+
+def observe_artist(store, track_id, artist, genre):
+    store.enrichment_state.record_metadata_observations(
+        track_id, 'fixture', [MetadataObservation(
+            'tags', [{'name': genre, 'count': 10}], 'artist', artist, 'reported')],
+        run_id='group-preparation', now=10)
 
 
 def test_background_shadow_is_coalesced_and_does_not_replace_live_modes(store):
@@ -39,6 +51,25 @@ def test_background_shadow_is_coalesced_and_does_not_replace_live_modes(store):
     assert not worker.step(1100)
     assert not worker.due(1160)
     assert store.taste_groups.head()['generation'] == head['generation']
+    worker.policy = replace(worker.policy, broad_edge=.61)
+    assert not worker.due(1159)
+    assert worker.due(1160) and worker.step(1160)
+    current = store.taste_groups.head()
+    assert current['generation'] != head['generation']
+    assert current['policy'] == musical_profiles.canonical(worker.policy.manifest())
+
+
+def test_group_preparation_never_loads_or_reimports_retired_mode_definitions(store, monkeypatch):
+    seed(store, recordings([('House', 12, .2)]))
+    def forbidden(*args, **kwargs):
+        pytest.fail('Grouping tried to import legacy mode history')
+    monkeypatch.setattr(type(store.modes), 'list_modes', forbidden)
+    monkeypatch.setattr(type(store.taste_groups), 'legacy_versions', forbidden)
+    worker = group_preparation.Preparation(store)
+    assert worker.step(1000)
+    assert all(not group.get('legacy') for group in store.taste_groups.head()['groups'])
+    seed(store, recordings([('House', 13, .2)]))
+    assert worker.due(1100) and worker.step(1100)
 
 
 def test_stale_and_budget_deferred_work_preserve_complete_last_good_generation(store, monkeypatch):
@@ -47,6 +78,7 @@ def test_stale_and_budget_deferred_work_preserve_complete_last_good_generation(s
     worker = group_preparation.Preparation(store)
     assert worker.step(1000)
     first = store.taste_groups.head()
+    seed(store, [replace(tracks[0], values=(.95,) * len(tracks[0].values))])
     original = group_discovery.discover
 
     def race(*args, **kwargs):
@@ -56,13 +88,11 @@ def test_stale_and_budget_deferred_work_preserve_complete_last_good_generation(s
         return result
 
     monkeypatch.setattr(group_discovery, 'discover', race)
-    worker.request_rebuild()
-    assert not worker.step(1100)
+    assert worker.due(1100) and not worker.step(1100)
     assert store.taste_groups.head()['generation'] == first['generation']
     monkeypatch.setattr(group_discovery, 'discover', original)
     deferred = group_preparation.Preparation(store, budget=group_preparation.Budget(seconds=0))
-    deferred.request_rebuild()
-    assert not deferred.step(1200)
+    assert deferred.due(1200) and not deferred.step(1200)
     assert store.taste_groups.head()['generation'] == first['generation']
 
 
@@ -73,6 +103,33 @@ def test_cancellation_propagates_without_publishing_a_partial_generation(store, 
     with pytest.raises(WorkClosing):
         worker.step(1000)
     assert store.taste_groups.head() is None
+
+
+def test_checkpoint_failure_retries_after_the_complete_generation_commits(store, monkeypatch):
+    seed(store, recordings([('Pop', 12, .2)]))
+    worker = group_preparation.Preparation(store)
+    repository = store.taste_groups.repository
+    original = type(repository).checkpoint_preparation
+
+    def fail_checkpoint(*_args):
+        assert not store.conn.in_transaction
+        raise RuntimeError('controlled checkpoint failure')
+
+    monkeypatch.setattr(type(repository), 'checkpoint_preparation', fail_checkpoint)
+    with pytest.raises(RuntimeError, match='controlled checkpoint failure'):
+        worker.step(1000)
+    generation = store.taste_groups.head_generation()
+    assert generation and worker._pending is not None
+    monkeypatch.setattr(type(repository), 'checkpoint_preparation', original)
+
+    def forbid_restage(*_args):
+        pytest.fail('A committed generation must not be staged again')
+
+    monkeypatch.setattr(store.taste_groups, 'stage', forbid_restage)
+    assert worker.step(1060)
+    assert store.taste_groups.head_generation() == generation
+    assert worker._pending is None
+    assert json.loads(store.settings.get_setting(group_preparation.CHECKPOINT))['generation'] == generation
 
 
 def test_new_supported_album_is_represented_on_the_next_update(store):
@@ -126,17 +183,21 @@ def test_member_that_loses_all_support_becomes_unknown_without_stale_assignment(
     assert worker.step(1900)
     current = store.taste_groups.head(members=True)
     assert all(changed.key not in g['members'] for g in current['groups'])
-    assert store.conn.execute('SELECT 1 FROM rec_group_unknown WHERE generation=? AND identity_key=?',
-                              (current['generation'], changed.key)).fetchone()
+    unknown = store.conn.execute(
+        'SELECT u.reason FROM group_unknown u '
+        'JOIN group_generations g ON g.id=u.generation_id '
+        'JOIN recordings r ON r.id=u.recording_id '
+        'WHERE g.external_key=? AND r.identity_key=?',
+        (current['generation'], changed.key)).fetchone()
+    assert unknown and unknown[0] == 'insufficient-shared-evidence'
     assert store.taste_groups.definitions(original['generation'], members=True) == original['groups']
 
 
 def test_initial_three_track_graph_splits_and_rejoins_while_backlog_continues(store):
     tracks = recordings([('House', 3, .1)])
     seed(store, tracks)
-    with store.conn:
-        store.conn.execute("INSERT INTO rec_content_pending(identity_key) VALUES ('not-captured-yet')")
-        store.conn.execute("INSERT INTO rec_musical_sources VALUES ('artist-source','test','artist','artist','{}',1)")
+    pending = store.tracks.upsert_track('pending-source', 'Pending', 'Other Artist', '', 200)
+    observe_artist(store, pending, 'other-artist', 'Jazz')
     worker = group_preparation.Preparation(store)
     assert worker.step(1000)
     first = store.taste_groups.head(members=True)
@@ -162,11 +223,11 @@ def test_fresh_library_publishes_from_real_capture_before_either_queue_drains(st
     from yt_playlist.rec import group_serving, progressive
 
     for i in range(12):
-        seed_catalog_track(store, f'fresh {i}|artist {i}', f'Fresh {i}', f'Artist {i}',
-                           video_id=f'fresh{i}', genre=('House', 'House', 'Jazz')[i % 3])
-    with store.conn:
-        store.conn.executemany('INSERT INTO rec_musical_sources VALUES (?,?,?,?,?,1)',
-            [(f'source{i}', 'test', 'artist', f'artist{i}', '{}') for i in range(12)])
+        genre = ('House', 'House', 'Jazz')[i % 3]
+        track_id = seed_catalog_track(
+            store, f'fresh {i}|artist {i}', f'Fresh {i}', f'Artist {i}',
+            video_id=f'fresh{i}', genre=genre)
+        observe_artist(store, track_id, f'artist{i}', genre)
     preparation = progressive.Preparation(store, budget=replace(progressive.Budget(), batch=3))
     assert preparation.capture(1000)  # First cached source batch.
     assert preparation.capture(1001)  # First three recordings, without a full-corpus fit.
@@ -180,8 +241,15 @@ def test_fresh_library_publishes_from_real_capture_before_either_queue_drains(st
     assert progress['prepared'] == 3 and progress['pending_recordings'] == 9
     assert progress['sources'] == {'artist': 11}
     # More inputs improve the initial graph while both queues remain nonempty.
-    assert preparation.capture(1060) and preparation.capture(1061)
-    assert preparation.groups.step(1062)
-    assert group_serving.prepare(store, 1063)
+    # Qualified models share the bounded worker with source/recording turns.
+    # Require useful progress before either queue drains, without fixing which
+    # kind of work the next two turns must perform.
+    for turn in range(32):
+        preparation.capture(1060 + turn)
+        if store.prepared_content.progress()['prepared'] == 6:
+            break
+    assert store.prepared_content.progress()['prepared'] == 6
+    assert preparation.groups.step(1100), group_preparation.status(store)
+    assert group_serving.prepare(store, 1101)
     assert group_serving.view(store)['counts']['known'] == 6
     assert store.prepared_content.has_pending() and store.musical_profiles.pending()

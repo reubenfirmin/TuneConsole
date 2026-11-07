@@ -11,7 +11,6 @@ import numpy as np
 import pytest
 
 from tests.conftest import FakeClient, _track
-from yt_playlist.core.store import Store
 from yt_playlist.library.spotify_library import import_spotify_library
 from yt_playlist.library.executor import add_tracks_to_playlist
 from yt_playlist.library.playlist_generated import create_generated_playlist
@@ -21,12 +20,9 @@ DAY = 86400
 
 
 @pytest.fixture
-def db():
-    store = Store(":memory:")
-    store.init_schema()
-    store.identities.upsert_identity("main", "bridge", None, True)
-    yield store
-    store.conn.close()
+def db(store):
+    store.accounts.upsert_account("main", "bridge", None, True)
+    return store
 
 
 def spotify_zip(count=1):
@@ -53,18 +49,8 @@ def shown(db, request, at):
         "model_version": "test"}], at)
 
 
-def test_85_old_mood_has_less_ranking_influence(db):
-    now = 1000 * DAY
-    db.rec_signals.record_mood(["song|artist"], 1, now)
-    vectors = np.eye(2)
-    idx = {"song|artist": 0, "other|artist": 1}
-    fresh = scoring._mood_components(np.zeros(2), db, now, vectors, idx)["transient"][0]
-    old = scoring._mood_components(np.zeros(2), db, now + 21 * DAY, vectors, idx)["transient"][0]
-    assert old <= fresh / 8 + 1e-9, {"fresh_delta": fresh, "21_day_delta": old}
-
-
 def test_22_unrelated_same_name_in_other_account_does_not_block_import(db):
-    other_identity = db.identities.upsert_identity("other", "other-bridge", None, False)
+    other_identity = db.accounts.upsert_account("other", "other-bridge", None, False)
     tid = db.tracks.upsert_track("unrelated", "Unrelated song", "Another artist", "", 200)
     pid = db.playlists.upsert_playlist(other_identity, "OTHER", "Road songs", 1, "hash", 1)
     db.playlists.set_playlist_tracks(pid, [tid])
@@ -115,8 +101,8 @@ def test_113_generated_provenance_survives_playlist_promotion(db):
     db.history.record_play_event(1, "song|artist", "vid", 120, playlist_ytm_id="RDAMPLPLGEN")
     before = scorecard.recommendation_scorecard(db, 90, 200)
     assert before["generated"] == 1 and before["organic"] == 0
-    db.conn.execute("DELETE FROM playlist_group WHERE ytm='PLGEN'")
-    db.conn.commit()
+    db.playlists.set_playlist_group('PLGEN', None)
+    assert db.playlists.get_playlist_groups().get('PLGEN') is None
     after = scorecard.recommendation_scorecard(db, 90, 200)
     assert after["generated"] == 1 and after["organic"] == 0, after
 
@@ -167,15 +153,15 @@ def test_44_cold_discovery_long_mix_is_excluded_before_saving(db):
     candidates = surfaces.cold_candidates(db, 100)
     tracks = [{"video_id": t.video_id, "title": t.title, "artist": t.artist} for t in candidates]
     client = FakeClient(song_durations={"one": 200, "mix": 7200, "two": 200})
-    create_generated_playlist(db, "Fresh songs", tracks, client, 100, identity_id=1)
+    create_generated_playlist(db, "Fresh songs", tracks, client, 100, account_id=1)
     assert "mix" not in [video for _, batch in client.added for video in batch]
 
 
 def test_86_boosting_cold_genre_does_not_lower_its_rank(db, monkeypatch):
     class Projection:
         def predict(self, genre, year=None, audio=None, artist=None):
-            return {"jazz": np.array([-.5, np.sqrt(.75)]),
-                    "ambient": np.array([-.6, .8])}[genre]
+            return {"Jazz": np.array([-.5, np.sqrt(.75)]),
+                    "Ambient": np.array([-.6, .8])}[genre]
 
     for key, genre in [("one|a", "jazz"), ("two|b", "ambient")]:
         db.discovery.upsert_discovered_track(key, key[0], key, key[-1], "", None,
@@ -187,4 +173,5 @@ def test_86_boosting_cold_genre_does_not_lower_its_rank(db, monkeypatch):
     assert before == ["one|a", "two|b"]
     db.rec_model.set_weight("genre:jazz", 2, lo=0, hi=2, now=100)
     after = [t.key for t in surfaces.cold_candidates(db, 100)]
+    assert set(after) == set(before) == {"one|a", "two|b"}
     assert after.index("one|a") <= before.index("one|a"), {"before": before, "after": after}

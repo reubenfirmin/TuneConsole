@@ -1,4 +1,5 @@
-<section id="recognized-genre-tags" class="genre-editor" aria-labelledby="genre-editor-heading">
+<section id="recognized-genre-tags" class="genre-editor" aria-labelledby="genre-editor-heading"
+         x-data="genreEditor()">
   <h2 id="genre-editor-heading">Recognized genre tags</h2>
   <p>Choose which MusicBrainz, Last.fm and Discogs tags can be used as genres.
      Defaults combine MusicBrainz genres with curated names and equivalent tags.
@@ -7,22 +8,15 @@
      change genres already saved on songs. Accepting non-genre tags can reduce recommendation quality.</p>
   <div class="genre-add">
     <input type="text" name="name" aria-label="Genre tag" placeholder="Add a genre tag…" autocomplete="off"
-           hx-post="/genres/add" hx-trigger="keyup[key=='Enter']"
-           hx-include="#genre-filter"
-           hx-target="#genre-list" hx-swap="innerHTML"
-           hx-on::after-request="this.value=''">
-    <button type="button"
-            hx-post="/genres/add" hx-include="previous input, #genre-filter"
-            hx-target="#genre-list" hx-swap="innerHTML"
-            hx-on::after-request="this.previousElementSibling.value=''">Add</button>
+           x-ref="name" @input="nameRevision++" @keyup.enter="add()">
+    <button type="button" @click="add()">Add</button>
     <button type="button" class="btn-ghost"
-            hx-post="/genres/reset" hx-include="#genre-filter" hx-target="#genre-list" hx-swap="innerHTML"
+            @click="change('reset')"
             title="Restore the built-in list of {{ builtin_count }} genre tags">Reset to defaults</button>
   </div>
   <label class="genre-filter" for="genre-filter">Find a genre, alias or family</label>
   <input id="genre-filter" type="search" name="q" placeholder="Search genres…" autocomplete="off"
-         hx-get="/genres/list" hx-trigger="input changed delay:200ms, search"
-         hx-target="#genre-list" hx-swap="innerHTML">
+         x-ref="filter" @input.debounce.200ms="filter()" @search="filter()">
   <div id="genre-list">
     {% include "_partials/genre_list.html" %}
   </div>

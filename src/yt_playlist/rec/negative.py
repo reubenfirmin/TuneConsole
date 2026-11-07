@@ -36,15 +36,53 @@ def penalties(store, vectors, index, *, evidence_vecs=None):
 
 def for_keys(store, keys):
     """Bounded live adjustments for prepared cards; reuse persisted collaborative vectors."""
-    keys = set(keys)
-    disliked = store.rec_model.disliked_identity_keys()
-    if not keys or not disliked:
-        return {}
-    _, vectors, index = vector_reads.load_vector_rows(list(store.rec_model.vectors_by_keys(keys | disliked).items()))
-    if vectors is None:
-        return {}
-    present = sorted(keys & index.keys())
-    candidates = vectors[[index[k] for k in present]]
-    deltas = penalties(store, candidates, {k: i for i, k in enumerate(present)},
-                       evidence_vecs=(vectors, index))
-    return dict(zip(present, map(float, deltas)))
+    keys = tuple(keys)
+    return Steering(store).for_keys(keys) if keys else {}
+
+
+class Steering:
+    """One mean direction per read snapshot, without retaining all disliked vectors."""
+
+    def __init__(self, store):
+        self.store = store
+        self.weight = rec_params.get_param(store, 'dislike_durable_w')
+        self.direction = None
+        if not self.weight:
+            return
+        after, count = None, 0
+        while True:
+            from yt_playlist.core.activity import check_cancellable_work
+            check_cancellable_work()
+            keys = store.rec_model.disliked_key_page(after=after, limit=128)
+            if not keys:
+                break
+            _, vectors, _ = vector_reads.load_vector_rows(list(store.rec_model.vectors_by_keys(keys).items()))
+            if vectors is not None:
+                vectors = np.asarray(vectors, dtype=np.float64)
+                norms = np.linalg.norm(vectors, axis=1)
+                valid = norms > 0
+                unit = np.asarray(vectors[valid], dtype=np.float64) / norms[valid, None]
+                if len(unit):
+                    total = unit.sum(axis=0)
+                    self.direction = total if self.direction is None else self.direction + total
+                    count += len(unit)
+            after = keys[-1]
+            if len(keys) < 128:
+                break
+        if count:
+            self.direction /= count
+
+    def for_keys(self, keys):
+        if self.direction is None:
+            return {}
+        result, keys = {}, sorted(set(keys))
+        for offset in range(0, len(keys), 128):
+            present, vectors, _ = vector_reads.load_vector_rows(list(
+                self.store.rec_model.vectors_by_keys(keys[offset:offset + 128]).items()))
+            if vectors is None:
+                continue
+            norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+            unit = np.divide(vectors, norms, out=np.zeros_like(vectors, dtype=np.float64), where=norms > 0)
+            deltas = -self.weight * np.clip(unit @ self.direction, 0.0, 1.0)
+            result.update(zip(present, map(float, deltas)))
+        return result

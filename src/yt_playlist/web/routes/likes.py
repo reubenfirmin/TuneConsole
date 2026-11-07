@@ -1,6 +1,7 @@
 """Toggle a song's membership in YouTube's Liked Music (the heart on a song row)."""
 from fastapi import APIRouter, Form, Request
-from yt_playlist.rec import measurement
+from fastapi.responses import Response
+from yt_playlist.core.action_errors import ActionInputError
 
 
 def build(ctx) -> APIRouter:
@@ -16,13 +17,13 @@ def build(ctx) -> APIRouter:
     def track_like(request: Request, video_id: str = Form(...), on: str = Form("")):
         try:
             res = ctx.ops().set_liked(video_id, bool(on))
-        except ValueError as e:
+        except ActionInputError as e:
             return _toast(request, str(e))
         except Exception:  # noqa: BLE001
             logger.exception("like toggle failed")
-            return _toast(request, "YouTube wouldn’t update your Liked Music.")
-        if res["liked"]:
-            measurement.record_action(ctx.store, "save", ctx.now_fn(), video_id=video_id)
+            return Response(status_code=503, headers={"HX-Reswap": "none"})
+        # The confirmed rating inbox records the save with its replay receipt.
+        # A second measurement here would duplicate it and wait for maintenance.
         return templates.TemplateResponse(
             request, "_partials/liked_cell.html", {"video_id": video_id, "liked": res["liked"]})
 

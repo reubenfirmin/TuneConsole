@@ -5,13 +5,64 @@ selection. Plugin fixtures remain visible to every such node.
 """
 import pathlib
 import logging
+import os
 import socket
-import threading
-import time
+import tempfile
+from contextlib import contextmanager
 
 import pytest
 
+from tests.live_server import LiveServer
+
 _BROWSER_DIR = pathlib.Path(__file__).parent / 'browser'
+
+
+@pytest.fixture(scope='session')
+def browser_type_launch_args(browser_type_launch_args, stdlib_test_storage):
+    """Keep Chromium's singleton socket below the Unix socket path limit.
+
+    The selected fixture volume can have an arbitrarily long path. Chromium
+    creates its persistent-profile socket under TMPDIR, even when its profile
+    lives elsewhere. Give the browser a short alias to the same owned storage;
+    Python temporaries and all browser data still use the selected volume.
+    """
+    # Chromium in the CI container hangs while evaluating injected scripts when
+    # TMPDIR uses /proc/<parent>/fd/<descriptor>. A filesystem symlink keeps the
+    # short socket path without that cross-process procfs dependency. Only this
+    # tiny alias lives on /tmp; browser data stays on the selected fixture volume.
+    with tempfile.TemporaryDirectory(dir='/tmp', prefix='tc-browser-') as alias:
+        temporary = pathlib.Path(alias) / 'tmp'
+        temporary.symlink_to(stdlib_test_storage, target_is_directory=True)
+        yield {**browser_type_launch_args, 'env': {
+            **os.environ, **browser_type_launch_args.get('env', {}), 'TMPDIR': str(temporary)}}
+
+
+@contextmanager
+def stalled_page_routes(page):
+    """Own deliberately unanswered routes until their cancellation checks finish."""
+    from playwright.sync_api import Error
+
+    held = []
+    try:
+        yield held
+    finally:
+        for route in held:
+            try:
+                route.abort()
+            except Error as error:
+                if str(error) != 'Route.abort: Route is already handled!':
+                    raise
+                # Playwright 1.60 can cancel the driver request while leaving
+                # Python's handler future unresolved. The driver has already
+                # handled this request; fallback releases that local future.
+                route.fallback()
+        page.unroute_all(behavior='wait')
+
+
+@pytest.fixture
+def stalled_routes(page):
+    with stalled_page_routes(page) as held:
+        yield held
 
 
 @pytest.fixture(autouse=True)
@@ -61,15 +112,10 @@ def live_app(store):
     from yt_playlist.web.app import create_app
     from tests.conftest import FakeClient
 
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.playlists.upsert_playlist(iid, "PLZ", "Old Mix", 3, "h", 0.0)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    while not server.started:        # wait until the socket is bound
-        time.sleep(0.02)
-    yield f"http://127.0.0.1:{port}"
-    server.should_exit = True
-    thread.join(timeout=5)
+    with LiveServer(server):
+        yield f"http://127.0.0.1:{port}"

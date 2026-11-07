@@ -7,18 +7,28 @@ tilt toward the centroid of the PRUNED ("negative model") set. Geometry is injec
 import math
 
 import numpy as np
+import pytest
 
 from yt_playlist.rec import embed
+from tests.repository_mock_support import no_database, repository_store
+
+
+@pytest.fixture
+def vector_store(no_database):
+    return repository_store(
+        settings={'get_setting': None},
+        rec_model={'get_rec_vectors': [], 'content_generation': {'library': []}},
+    )
 
 
 def _put(store, vecs):
-    """vecs = {identity_key: (x, y)}; stored L2-normalised as float32, like the real model."""
+    """Literal repository rows, L2-normalised as float32 like the real model."""
     rows = []
     for k, xy in vecs.items():
         v = np.asarray(xy, dtype=np.float32)
         v /= np.linalg.norm(v) + 1e-9
         rows.append((k, v.tobytes()))
-    store.rec_model.replace_rec_vectors(rows)
+    store.rec_model.get_rec_vectors.return_value = rows
 
 
 def _unit(deg):
@@ -26,7 +36,8 @@ def _unit(deg):
     return (math.cos(r), math.sin(r))
 
 
-def test_ranks_by_positive_centroid(store):
+def test_ranks_by_positive_centroid(vector_store):
+    store = vector_store
     # p points along 0°; a/b sit near it, z is opposite. Nearest-to-centroid order, seed excluded.
     _put(store, {"p": _unit(0), "a": _unit(15), "b": _unit(40), "z": _unit(180)})
     out = embed.cluster_expand(store, pos_keys=["p"], neg_keys=[], topn=3)
@@ -36,7 +47,8 @@ def test_ranks_by_positive_centroid(store):
     assert keys[-1] == "z"                     # the opposite pole ranks last
 
 
-def test_pushes_away_from_negative(store):
+def test_pushes_away_from_negative(vector_store):
+    store = vector_store
     # a and b are symmetric about p (equal positive score). A pruned seed n sits right on top of a,
     # so push-away must demote a below b: the whole point of "prune as negative signal".
     _put(store, {"p": _unit(0), "a": _unit(20), "b": _unit(-20), "n": _unit(18)})
@@ -49,7 +61,8 @@ def test_pushes_away_from_negative(store):
     assert pushed.index("b") < pushed.index("a")
 
 
-def test_excludes_seeds_pruned_and_extra(store):
+def test_excludes_seeds_pruned_and_extra(vector_store):
+    store = vector_store
     _put(store, {"p": _unit(0), "a": _unit(10), "n": _unit(30), "x": _unit(50), "y": _unit(70)})
     out = [k for k, _ in embed.cluster_expand(
         store, pos_keys=["p"], neg_keys=["n"], exclude=["x"], topn=10)]
@@ -58,5 +71,5 @@ def test_excludes_seeds_pruned_and_extra(store):
     assert "a" in out and "y" in out
 
 
-def test_empty_before_build(store):
-    assert embed.cluster_expand(store, pos_keys=["p"], neg_keys=[]) == []
+def test_empty_before_build(vector_store):
+    assert embed.cluster_expand(vector_store, pos_keys=["p"], neg_keys=[]) == []

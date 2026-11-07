@@ -1,20 +1,19 @@
 """Deliberate returns follow verified releases without multiplying shared dates."""
 from copy import deepcopy
+from tests.enrichment_support import seed_enrichment
+from contextlib import ExitStack
 
 import numpy as np
 import pytest
 
 from tests import model_support
 from tests.repos.test_album_aliases import OLD, ALIAS, release
+from tests.prepared_fixture_support import prepared_template
 from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.rec import choice_evidence, scoring
 
 
-@pytest.mark.parametrize('first', [OLD, ALIAS])
-@pytest.mark.parametrize('before', [True, False])
-@pytest.mark.parametrize('saved', [True, False])
-@pytest.mark.parametrize('scenario', ['preferred', 'alias', 'split-days', 'overlapping-days'])
-def test_confirmed_return_days_follow_verified_release_in_both_spaces(store, first, before, saved, scenario):
+def seed_return_catalog(store, first, before, saved):
     second = ALIAS if first == OLD else OLD
     payload = release()
     remember_album(store, first, payload)
@@ -29,16 +28,47 @@ def test_confirmed_return_days_follow_verified_release_in_both_spaces(store, fir
         remember_album(store, second, payload)
     keys = [f'track {index}|all them witches' for index in range(9)]
     for row in store.conn.execute('SELECT id FROM tracks').fetchall():
-        store.tracks.set_track_enrichment(row[0], 'Rock', '2015')
+        seed_enrichment(store, row[0], 'Rock', '2015')
     store.rec_model.replace_rec_vectors([
         (key, np.array([1., 0.], dtype=np.float32).tobytes()) for key in keys])
     assert model_support.build_content_model(store) >= len(keys)
+    return payload, keys
+
+
+@pytest.fixture(scope='module')
+def return_catalogs(_pristine_current_schema):
+    with ExitStack() as resources:
+        templates = {}
+
+        def restore(store, first, before, saved):
+            key = first, before, saved
+            if key not in templates:
+                templates[key] = resources.enter_context(prepared_template(
+                    _pristine_current_schema,
+                    lambda source: seed_return_catalog(source, first, before, saved)))
+            return templates[key].restore(store)
+
+        yield restore
+
+
+@pytest.fixture
+def return_catalog(store, return_catalogs, first, before, saved):
+    # Preserve alias/save/model construction order for every distinct baseline.
+    return return_catalogs(store, first, before, saved)
+
+
+@pytest.mark.parametrize('first', [OLD, ALIAS])
+@pytest.mark.parametrize('before', [True, False])
+@pytest.mark.parametrize('saved', [True, False])
+def test_confirmed_return_days_follow_verified_release_in_both_spaces(store, first, before, saved, return_catalog):
+    second = ALIAS if first == OLD else OLD
+    payload, keys = return_catalog
     tracks = [{'key': key, 'video_id': row['videoId']} for key, row in zip(keys, payload['tracks'])]
     start = 1_700_000_000
     for day in range(2):
-        requested = ([first] if scenario == 'preferred' else [second] if scenario == 'alias' else
-                     [(first, second)[day]] if scenario == 'split-days' else [first, second])
-        for index, browse in enumerate(requested):
+        # The durable owner keeps both original aliases on each day. Pure
+        # summary cases own preferred-only, alias-only and split-day arithmetic.
+        for index, browse in enumerate((first, second)):
             at = start + day * 86400
             oid = choice_evidence.issue(store, 'albums', [{'id': browse, 'tracks': tracks}], at,
                 context={}, opportunity_id=f'return-{day}-{index}')

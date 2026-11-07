@@ -6,22 +6,26 @@ import os
 import pytest
 
 
-def full_local_run(config):
-    if os.environ.get("CI") or config.getoption("ci_shard", default=None):
+def full_suite(config):
+    """Only selections spanning the complete suite need the machine lock."""
+    if config.getoption("ci_shard", default=None):
         return False
     if any(config.getoption(name, default=False) for name in (
-        "collectonly", "help", "version", "usepdb", "lf", "stepwise", "keyword", "deselect",
+        "collectonly", "help", "version", "lf", "stepwise", "keyword", "deselect",
         "run_flatpak_build", "run_live_radio",
     )):
         return False
     if config.getoption("markexpr", default="") not in ("", "not browser", "browser"):
         return False
-    if config.getoption("capture", default="fd") == "no":
-        return False
     if len(config.args) != 1:
         return False
     selected = (config.invocation_params.dir / config.args[0]).resolve()
     return selected in (config.rootpath.resolve(), (config.rootpath / "tests").resolve())
+
+
+def full_local_run(config):
+    return (not os.environ.get("CI") and not config.getoption("usepdb", default=False)
+            and config.getoption("capture", default="fd") != "no" and full_suite(config))
 
 
 def has_xdist(config):
@@ -42,7 +46,10 @@ def pytest_cmdline_main(config):
     if hasattr(config, "workerinput") or not has_xdist(config) or not full_local_run(config):
         return
     if config.option.numprocesses is None and not config.option.tx:
-        config.option.numprocesses = default_workers()
+        # pytest-cov chooses its serial/distributed controller before initial
+        # conftest loading. Late automatic workers would leave it with a serial
+        # controller. An explicit -n lets both plugins select workers together.
+        config.option.numprocesses = 0 if config.pluginmanager.hasplugin("_cov") else default_workers()
     if config.option.numprocesses and config.option.dist == "no":
         config.option.dist = "loadfile"
     if config.option.maxworkerrestart is None:
@@ -109,3 +116,29 @@ def join_owner(config, owner_path):
         raise pytest.UsageError("Test worker could not join its coordinator's machine lock.") from None
     if any(owner.get(key) != proof.get(key) for key in ("pid", "nonce", "path")):
         raise pytest.UsageError("Test worker's coordinator no longer owns the machine lock.")
+
+
+def drain_workers(config):
+    """Finish worker pytest lifetimes before xdist terminates their gateways.
+
+    Gateway termination sends another interrupt after five seconds, even when
+    a worker is already draining a live server in its fixture finalizers. Wait
+    for the pytest execution channels first, while the coordinator still owns
+    their parent factory, coverage and machine lock. Interrupted protocols
+    drain their fixture owners before pytest closes each worker's capture.
+    """
+    distributed = config.pluginmanager.getplugin('dsession')
+    manager = getattr(distributed, 'nodemanager', None)
+    if manager is None:
+        return  # Serial session, worker, or failure before workers started.
+    nodes = [gateway.node for gateway in manager.group
+             if hasattr(gateway, 'node') and hasattr(gateway.node, 'channel')]
+    for node in nodes:
+        node.shutdown()  # Stop admitting tests without terminating execution.
+    for node in nodes:
+        try:
+            node.channel.waitclose()
+        except (EOFError, node.channel.RemoteError):
+            # A dead worker has released its resources. Its channel callback
+            # already reports the failure through xdist; still drain siblings.
+            pass

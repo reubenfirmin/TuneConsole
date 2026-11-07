@@ -452,7 +452,8 @@ def test_lost_extension_connection_reports_playback_failure_without_repeating_it
 
     c.playback.navigate = disconnected
     c.advance(c.session)
-    assert 'Reconnect the extension' in c.status()['selection_error']
+    assert c.status()['selection_error'] == 'Playback not confirmed. Check the current song before choosing again.'
+    assert 'Disconnected' not in c.status()['selection_error']
     c.advance(c.session)
     assert len(attempts) == 1 and len(frames) == 1
 

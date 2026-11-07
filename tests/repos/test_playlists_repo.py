@@ -2,7 +2,7 @@
 
 
 def test_creation_date_is_independent_of_sync_and_edit_dates(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     known = store.playlists.upsert_playlist(iid, "NEW", "New", 0, "", 100, created_at=100)
     imported = store.playlists.upsert_playlist(iid, "OLD", "Imported", 0, "", 100)
     store.playlists.upsert_playlist(iid, "NEW", "Renamed", 2, "changed", 200)
@@ -13,21 +13,22 @@ def test_creation_date_is_independent_of_sync_and_edit_dates(store):
     # A real date can be supplied later without resetting it on subsequent syncs.
     store.playlists.upsert_playlist(iid, "OLD", "Imported", 0, "", 200, created_at=10)
     store.playlists.upsert_playlist(iid, "OLD", "Imported", 0, "", 300, created_at=300)
-    assert {p.ytm_playlist_id: p.created_at for p in store.playlists.get_playlists()} == {"NEW": 100, "OLD": 10}
+    assert {p.provider_playlist_id: p.created_at for p in store.playlists.get_playlists()} == {"NEW": 100, "OLD": 10}
 
 
 def test_upsert_tracks_change_detection(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     p = store.playlists.upsert_playlist(iid, "P", "Title", 3, "hash1", 1.0)
     same = store.playlists.upsert_playlist(iid, "P", "Title", 3, "hash1", 2.0)   # unchanged hash
     assert p == same
+    assert store.playlists.get_playlist(p).provider_playlist_id == "P"
     assert store.playlists.get_playlist(p).last_changed == 1.0                    # not bumped
     store.playlists.upsert_playlist(iid, "P", "Title", 4, "hash2", 3.0)           # changed hash
     assert store.playlists.get_playlist(p).last_changed == 3.0
 
 
 def test_set_tracks_dedupes_and_orders(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     p = store.playlists.upsert_playlist(iid, "P", "P", 0, "h", 0.0)
     a = store.tracks.upsert_track("v1", "A", "Ar", "Al", 100)
     b = store.tracks.upsert_track("v2", "B", "Ar", "Al", 100)
@@ -36,7 +37,7 @@ def test_set_tracks_dedupes_and_orders(store):
 
 
 def test_initial_thumbnail_is_persisted_without_changing_playlist_dates(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     pid = store.playlists.upsert_playlist(iid, "P", "Playlist", 0, "h", 100, thumbnail="", created_at=100)
     store.playlists.ensure_playlist_thumbnail(pid)
     assert store.playlists.get_playlist(pid).thumbnail is None
@@ -59,7 +60,7 @@ def test_initial_thumbnail_is_persisted_without_changing_playlist_dates(store):
 
 
 def test_set_song_liked_toggles_lm_membership(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     lm = store.playlists.upsert_playlist(iid, "LM", "Liked Music", 0, "h", 0.0)
     store.tracks.upsert_track("v1", "Song", "Artist", "Al", 100)
     store.playlists.set_song_liked(iid, "v1", True)
@@ -71,7 +72,7 @@ def test_set_song_liked_toggles_lm_membership(store):
 
 
 def test_remove_playlist_prunes_links_keeps_group(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     p = store.playlists.upsert_playlist(iid, "PX", "Gone", 0, "h", 0.0)
     store.playlists.set_playlist_group("PX", "Faves")
     store.playlists.remove_playlist(p)
@@ -80,7 +81,7 @@ def test_remove_playlist_prunes_links_keeps_group(store):
 
 
 def test_remove_playlist_retains_cleanup_dismissals(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     p = store.playlists.upsert_playlist(iid, "PX", "Gone", 0, "h", 0.0)
     store.overlaps.ignore_cleanup("PX", "empty", 1.0)
     store.overlaps.ignore_cleanup("PY", "tiny", 1.0)                    # other playlist, must survive
@@ -99,9 +100,3 @@ def test_hide_and_groups(store):
     store.playlists.set_playlist_group("P1", "Mood")
     store.playlists.set_playlist_group("P1", "")                                  # blank clears
     assert store.playlists.get_playlist_groups() == {}
-
-
-def test_store_binding(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
-    p = store.playlists.upsert_playlist(iid, "P", "P", 0, "h", 0.0)
-    assert store.playlists.get_playlist(p).ytm_playlist_id == "P"

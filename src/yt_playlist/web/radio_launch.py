@@ -12,6 +12,8 @@ from uuid import uuid4
 from yt_playlist.library import playlist_generated
 from yt_playlist.library.playlist_metadata import versioned_title
 from yt_playlist.rec.radio_directions import RadioDirections
+from yt_playlist.rec.radio_candidates import eligible_seeds
+from yt_playlist.rec.radio_restored import RestoredCandidates
 from yt_playlist.web.radio_persistence import PREPARATION_TIMEOUT, restore
 from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending, readback_durations
 from yt_playlist.web.radio_mutations import RadioMutations
@@ -44,20 +46,18 @@ class RadioLaunch:
                 return
             for playlist in pending:
                 self.store.playlists.mark_generated_playlist(playlist)
-            settings = self.store.settings
-            known = json.loads(settings.get_setting('radio_session_playlist_ids') or '[]')
-            settings.set_setting('radio_session_playlist_ids', json.dumps(sorted(set(known) | pending)))
+            self.store.radio_checkpoints.remember_playlists(pending)
             self.store.transient_radio_playlists.difference_update(pending)
 
-    def checkpoint_view(self, playing):
+    def checkpoint_view(self, playing, *, reader=None):
         """A saved checkpoint alone cannot establish current native playback."""
         try:
-            saved = self.persistence.load() or {}
+            saved = (self.persistence.load() if reader is None else self.persistence.view(reader)) or {}
         except (ValueError, KeyError, TypeError):
             saved = {}
         active = bool(saved.get('playlist') and playing.get('playlist_ytm_id') == saved['playlist']
                       and not saved.get('stopped'))
-        return {**saved_view(saved, active=active), 'resolving': active}
+        return saved_view(saved, active=active)
 
     def resolve(self, candidates, client, identity, day, *, seed_video_id=None,
                 playlist_id=None, menu_id=None):
@@ -78,21 +78,15 @@ class RadioLaunch:
                 else next(iter(candidates.seed_offer(1)), None))
         if seed is None and seed_video_id:
             # A previously offered upload may outlive the prepared pool that contained it.
-            with self.store._lock:
-                row = self.store.conn.execute(
-                    "SELECT identity_key AS key, video_id, title, artist, album, thumbnail, "
-                    "duration_s AS duration, genre, mb_year AS year, available "
-                    "FROM catalog_tracks WHERE video_id=? LIMIT 1", (seed_video_id,)).fetchone()
+            row = self.store.radio_catalog.details([seed_video_id]).get(seed_video_id)
             if row:
-                track = dict(row)
-                blocked = self.store.rec_model.disliked_identity_keys()
-                muted = {a.casefold() for a in self.store.rec_model.muted_artists()}
-                if (track["key"] not in blocked and track.get("available") != 0
-                        and (track.get("artist") or "").casefold() not in muted):
-                    seed = track
-                    candidates.retain([seed])
+                seed = dict(row)
+        if seed is not None and not seeds:
+            seed = next(iter(eligible_seeds(self.store, [seed], self.now_fn())), None)
+            if seed is not None:
+                candidates.retain([seed])
         if seed is None:
-            seed = next(iter(candidates.seed_offer(1)), None)
+            seed = next(iter(eligible_seeds(self.store, candidates.seed_offer(1), self.now_fn())), None)
         if seed is None:
             return None
         s = Session(client, candidates, identity,
@@ -145,10 +139,8 @@ class RadioLaunch:
         s.selected = list(seeds)
         choice = s.choices.pop(seed["video_id"])
         s.choices[seeds[0]["video_id"]] = choice
-        settings = self.store.settings
-        known = json.loads(settings.get_setting("radio_session_playlist_ids") or "[]")
         if not getattr(self.store, 'activity_paused', False) and s.local_id is not None:
-            settings.set_setting("radio_session_playlist_ids", json.dumps(list(dict.fromkeys(known + [s.playlist]))))
+            self.store.radio_checkpoints.remember_playlists([s.playlist], s.identity)
         with self.lock:
             s.initial_tracks = seeds
             s.preparation_deadline = time.monotonic() + PREPARATION_TIMEOUT
@@ -203,7 +195,7 @@ class RadioLaunch:
                 accepted.discard(track['video_id'])
             elif track['video_id'] != row['videoId']:
                 substitution = substitutions.substitute(track, row, s.candidates.by_video,
-                                                       identity_id=s.identity, playlist=s.playlist)
+                                                       account_id=s.identity, playlist=s.playlist)
                 actual = substitution.accepted
                 s.candidates.retain([actual])
                 choice = s.choices.pop(track['video_id'], None)
@@ -227,12 +219,11 @@ class RadioLaunch:
                 or state["playlist"] != playing.get("playlist_ytm_id")
                 or not (state.get("tracks") or state.get("initial_tracks"))):
             return None, False
-        candidates = candidates_factory(self.store, self.now_fn(), state.get("tuning"),
-                                        comparison=state.get('comparison'))
-        # A paired session owns its already visible plans across daily cache
-        # publication and restart. Replenish naturally as those plans advance.
-        changed = state.get("fingerprint") != candidates.fingerprint and not state.get('comparison')
-        return restore(state, clients[identity], identity, candidates), changed
+        # These songs and branches have already been published. Reattachment
+        # needs their checkpoint and live ownership, not another ranking pass.
+        # The monitor loads current candidates when future planning needs them.
+        candidates = RestoredCandidates(self.store, self.now_fn, state, candidates_factory)
+        return restore(state, clients[identity], identity, candidates), False
 
     def accept(self, s, prepared: PreparedStart):
         """Publish the confirmed initial queue before the coordinator navigates."""
@@ -261,19 +252,19 @@ class RadioLaunch:
     def adopt(self, playing, clients, candidates_factory):
         """Recognize an older already playing session without creating or navigating."""
         playlist = playing.get("playlist_ytm_id")
-        known = json.loads(self.store.settings.get_setting("radio_session_playlist_ids") or "[]")
+        known = self.store.playlists.radio_playlist_ids()
         if not playlist or playlist not in known:
             return None
-        local = next((p for p in self.store.playlists.get_playlists() if p.ytm_playlist_id == playlist), None)
-        if local is None or local.identity_id not in clients:
+        local = next((p for p in self.store.playlists.get_playlists() if p.provider_playlist_id == playlist), None)
+        if local is None or local.account_id not in clients:
             return None
         candidates = candidates_factory(self.store, self.now_fn(), comparison=None)
         candidates.retain([{**t, "key": t["identity_key"]}
                            for t in self.store.charts.playlist_tracks_detail(local.id)])
-        ids = [t["videoId"] for t in self.playlists.read(clients[local.identity_id], playlist)]
+        ids = [t["videoId"] for t in self.playlists.read(clients[local.account_id], playlist)]
         if not ids or any(video not in candidates.by_video for video in ids):
             return None
-        s = Session(clients[local.identity_id], candidates, local.identity_id, local.title)
+        s = Session(clients[local.account_id], candidates, local.account_id, local.title)
         s.playlist, s.local_id, s.tracks = playlist, local.id, [candidates.by_video[video] for video in ids]
         s.selected = list(s.tracks)
         s.position = next((i for i, t in enumerate(s.tracks) if t["video_id"] == playing.get("video_id")), -1)

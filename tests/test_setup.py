@@ -1,22 +1,22 @@
 import pytest
 from yt_playlist.core import setup as setup_mod
-from yt_playlist.core.config import load_identities, validate_identities
+from yt_playlist.core.config import load_accounts, validate_accounts
 
 
 def test_validate_identities_rules():
     ok = [{"label": "main", "is_master": True}, {"label": "brand", "is_master": False}]
-    validate_identities(ok)  # no raise
+    validate_accounts(ok)  # no raise
 
     with pytest.raises(ValueError, match="at least one"):
-        validate_identities([])
+        validate_accounts([])
     with pytest.raises(ValueError, match="needs a label"):
-        validate_identities([{"label": "  ", "is_master": True}])
+        validate_accounts([{"label": "  ", "is_master": True}])
     with pytest.raises(ValueError, match="unique"):
-        validate_identities([{"label": "a", "is_master": True}, {"label": "a", "is_master": False}])
+        validate_accounts([{"label": "a", "is_master": True}, {"label": "a", "is_master": False}])
     with pytest.raises(ValueError, match="exactly one"):
-        validate_identities([{"label": "a", "is_master": False}])
+        validate_accounts([{"label": "a", "is_master": False}])
     with pytest.raises(ValueError, match="exactly one"):
-        validate_identities([{"label": "a", "is_master": True}, {"label": "b", "is_master": True}])
+        validate_accounts([{"label": "a", "is_master": True}, {"label": "b", "is_master": True}])
 
 
 def test_write_config_roundtrips(tmp_path):
@@ -26,7 +26,7 @@ def test_write_config_roundtrips(tmp_path):
     ]
     path = tmp_path / "config.toml"
     setup_mod.write_config(identities, path)
-    cfgs = load_identities(path)
+    cfgs = load_accounts(path)
     assert [c.label for c in cfgs] == ["main", "brand"]
     assert sum(c.is_master for c in cfgs) == 1
     main = next(c for c in cfgs if c.label == "main")
@@ -40,7 +40,7 @@ def test_write_config_escapes_quotes(tmp_path):
                    "brand_account_id": None, "is_master": True}]
     path = tmp_path / "config.toml"
     setup_mod.write_config(identities, path)
-    cfgs = load_identities(path)
+    cfgs = load_accounts(path)
     assert cfgs[0].label == 'we"ird'
 
 
@@ -57,7 +57,7 @@ def test_accepted_text_roundtrips_all_toml_controls(tmp_path, value):
     path = tmp_path / "config.toml"
     setup_mod.write_config([{"label": value, "credential_ref": value,
                             "brand_account_id": value, "is_master": True}], path)
-    cfg = load_identities(path)[0]
+    cfg = load_accounts(path)[0]
     assert cfg.label == cfg.credential_ref == cfg.brand_account_id == value
 
 

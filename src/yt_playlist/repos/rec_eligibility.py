@@ -3,8 +3,7 @@
 All reads use this repository's connection, including when called on a pinned reader.
 Candidate ranking and historical basket construction consume these rules explicitly.
 """
-from yt_playlist.core.recommendation_settings import MAX_TRACK_MINUTES
-from yt_playlist.repos.base import GENERATED_GROUP, Repo, synchronized
+from yt_playlist.repos.base import GENERATED_GROUP, Repo, synchronized, lookup_read
 from yt_playlist.repos.playlist_eligibility import QUARANTINED_PLAYLIST_IDS_SQL
 
 
@@ -15,8 +14,26 @@ def exclude_ids(column, ids, *, connective="AND") -> str:
     return f" {connective} {column} NOT IN ({','.join(str(int(i)) for i in ids)})"
 
 
+def duration_clause(column, maximum_seconds):
+    """Render an internal column predicate for an explicit duration bound."""
+    return f'({column} IS NULL OR {column} <= {float(maximum_seconds)})'
+
+
 class RecEligibilityRepo(Repo):
-    @synchronized
+    @lookup_read
+    def offered_tracks(self, videos) -> dict:
+        """Current identity and playability of the exact uploads in a saved offer."""
+        videos = list(dict.fromkeys(video for video in videos if video))
+        result = {}
+        for offset in range(0, len(videos), 500):
+            batch = videos[offset:offset + 500]
+            qs = ','.join('?' * len(batch))
+            result.update({row['video_id']: dict(row) for row in self.conn.execute(
+                'SELECT identity_key AS key,video_id,title,artist,album,thumbnail,available,'
+                f'duration_s AS duration,genre,mb_year AS year FROM catalog_tracks WHERE video_id IN ({qs})', batch)})
+        return result
+
+    @lookup_read
     def offer_metadata(self, videos) -> dict:
         """Current genre and length for bounded offered uploads, without ranking."""
         videos = list(dict.fromkeys(videos))
@@ -28,30 +45,26 @@ class RecEligibilityRepo(Repo):
                 f'SELECT video_id,genre,duration_s AS duration FROM catalog_tracks WHERE video_id IN ({qs})', batch)})
         return result
 
-    @synchronized
-    def track_length_clause(self, col="duration_s") -> str:
-        """Keep tracks within the saved length limit, including unknown durations."""
-        minutes = MAX_TRACK_MINUTES.parse(
-            self._store.settings.get_setting('rec_param:' + MAX_TRACK_MINUTES.name))
-        return f"({col} IS NULL OR {col} <= {60 * minutes})"
-
-    @synchronized
-    def suppressed_candidate_keys(self, keys, now) -> set:
-        """Track/artist bans for loaded candidates; genre bans use their metadata."""
+    @lookup_read
+    def suppressed_candidate_keys(self, keys, now, *, surface, scope, track_kinds,
+                                  global_kind, artist_kind) -> set:
+        """Loaded candidate identities matching explicit feedback criteria."""
         keys = list(dict.fromkeys(keys))
         if not keys:
             return set()
         qs = ",".join("?" * len(keys))
+        kinds = ','.join('?' for _ in track_kinds)
         blocked = {r[0] for r in self.conn.execute(
             f"SELECT item_key FROM rec_feedback WHERE item_key IN ({qs}) "
-            "AND ((surface='for_you' AND scope='' AND kind IN ('dismiss','mute','not_now')) "
-            "OR kind='dislike') AND (until IS NULL OR until>?)", [*keys, now])}
+            f'AND ((surface=? AND scope=? AND kind IN ({kinds})) '
+            'OR kind=?) AND (until IS NULL OR until>?)',
+            [*keys, surface, scope, *track_kinds, global_kind, now])}
         blocked.update(r[0] for r in self.conn.execute(
             "SELECT DISTINCT r.identity_key FROM rec_feedback f "
-            "JOIN track_artists ta ON ta.artist_id=f.artist_id "
+            f"JOIN {self.entry_artists_table} ta ON ta.artist_id=f.artist_id "
             "JOIN catalog_entries e ON e.id=ta.entry_id JOIN recordings r ON r.id=e.recording_id "
-            f"WHERE r.identity_key IN ({qs}) AND f.kind='mute' AND (f.until IS NULL OR f.until>?)",
-            [*keys, now]))
+            f'WHERE r.identity_key IN ({qs}) AND f.kind=? AND (f.until IS NULL OR f.until>?)',
+            [*keys, artist_kind, now]))
         return blocked
 
     @synchronized
@@ -68,7 +81,7 @@ class RecEligibilityRepo(Repo):
         return {r["identity_key"] for r in self.conn.execute(
             "SELECT DISTINCT t.identity_key FROM playlist_tracks pt "
             "JOIN tracks t ON t.id=pt.track_id JOIN playlists p ON p.id=pt.playlist_id "
-            "JOIN quarantined_playlists g ON g.ytm=p.scope_ref WHERE g.name=?", (group,))}
+            "JOIN quarantined_playlists g ON g.playlist_scope_id=p.playlist_scope_id WHERE g.name=?", (group,))}
 
     @synchronized
     def generated_only_keys(self, group=GENERATED_GROUP) -> set:
@@ -85,8 +98,8 @@ class RecEligibilityRepo(Repo):
         return {r["k"] for r in rows}
 
     @synchronized
-    def catchall_playlist_ids(self, size_floor=120) -> set:
-        """Overlarge playlists carry weak, low-information co-occurrence signal."""
+    def catchall_playlist_ids(self, size_floor) -> set:
+        """Playlist IDs with row counts above the supplied bound."""
         return {r["pid"] for r in self.conn.execute(
             "SELECT playlist_id pid, COUNT(*) n FROM playlist_tracks GROUP BY playlist_id HAVING n > ?",
             (size_floor,))}

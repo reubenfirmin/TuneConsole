@@ -1,4 +1,5 @@
 import numpy as np
+from tests.enrichment_support import seed_audio
 import pytest
 
 from yt_playlist.rec import content_model, discover, embedding_vectors as embed, eval_recs
@@ -6,7 +7,7 @@ from tests import model_support
 
 
 def test_content_projection_lands_in_right_cluster(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(15)]
     B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(15)]
     for t in A:
@@ -32,7 +33,7 @@ def test_content_projection_lands_in_right_cluster(store):
 
 
 def test_projection_none_without_enough_tags(store):
-    store.identities.upsert_identity("main", "cred", None, True)
+    store.accounts.upsert_account("main", "cred", None, True)
     assert discover.ContentProjection.fit(store) is None
 
 
@@ -42,7 +43,7 @@ def test_evaluation_excludes_targets_and_feature_fitting_inputs(store, monkeypat
         tid = store.tracks.upsert_track(f"v{i}", f"Track {i}", "Artist", None, None)
         store.tracks.set_track_genre(tid, "Techno")
         store.tracks.set_track_year(tid, str(1990 + i))
-        store.tracks.set_track_audio(tid, bpm=100.0 + i)
+        seed_audio(store, tid, bpm=100.0 + i)
         keys.append(f"track {i}|artist")
     vectors = np.eye(30, dtype=np.float32)
     monkeypatch.setattr(embed, "load_vectors", lambda s: (keys, vectors, {k: i for i, k in enumerate(keys)}))
@@ -52,10 +53,10 @@ def test_evaluation_excludes_targets_and_feature_fitting_inputs(store, monkeypat
     active_training = set()
     tested = []
 
-    def model(content, audio):
+    def model(content, audio, *, genre_axes=None):
         assert set(content) == active_training
         assert set(audio) == active_training
-        return original_model(content, audio)
+        return original_model(content, audio, genre_axes=genre_axes)
 
     def solve(lhs, rhs):
         # Orthogonal reference targets make any held-out row entering Y observable here.
@@ -108,7 +109,7 @@ def test_projection_reports_insufficient_fold_evidence(store, monkeypatch):
 # --- §2: enriched feature basis (audio + subgenre) and graceful degradation ---
 
 def _two_playlists(store, A, B):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", len(A), "h", 0.0), A)
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PB", "PB", len(B), "h2", 0.0), B)
     model_support.build_track_model(store, dim=8)
@@ -141,10 +142,10 @@ def test_projection_uses_audio_to_separate_same_genre_year(store):
     B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(10)]
     for t in A:
         store.tracks.set_track_genre(t, "Techno"); store.tracks.set_track_year(t, "2015")
-        store.tracks.set_track_audio(t, bpm=172.0, energy=0.92, danceability=0.88)
+        seed_audio(store, t, bpm=172.0, energy=0.92, danceability=0.88)
     for t in B:
         store.tracks.set_track_genre(t, "Techno"); store.tracks.set_track_year(t, "2015")
-        store.tracks.set_track_audio(t, bpm=88.0, energy=0.18, danceability=0.20)
+        seed_audio(store, t, bpm=88.0, energy=0.18, danceability=0.20)
     _two_playlists(store, A, B)
 
     proj = discover.ContentProjection.fit(store)
@@ -179,10 +180,10 @@ def test_projection_grounds_genre_only_track(store):
     B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(10)]
     for t in A:
         store.tracks.set_track_genre(t, "Techno"); store.tracks.set_track_year(t, "2015")
-        store.tracks.set_track_audio(t, bpm=172.0, energy=0.92, danceability=0.88)
+        seed_audio(store, t, bpm=172.0, energy=0.92, danceability=0.88)
     for t in B:
         store.tracks.set_track_genre(t, "Folk"); store.tracks.set_track_year(t, "1995")
-        store.tracks.set_track_audio(t, bpm=92.0, energy=0.22, danceability=0.25)
+        seed_audio(store, t, bpm=92.0, energy=0.22, danceability=0.25)
     _two_playlists(store, A, B)
 
     proj = discover.ContentProjection.fit(store)

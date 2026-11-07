@@ -5,8 +5,16 @@ since scoring imports the `layers` module (not the bare function), and the term 
 ALONGSIDE the existing transient collaborative tilt and audio terms, not replace them.
 """
 import numpy as np
+import pytest
 
+from tests.repository_mock_support import no_database, repository_store
 from yt_playlist.rec import rec_params, scoring
+
+
+@pytest.fixture
+def store(no_database):
+    return repository_store(settings={'get_setting': None},
+                            rec_model={'disliked_identity_keys': set()})
 
 
 def _silence_other_terms(monkeypatch):

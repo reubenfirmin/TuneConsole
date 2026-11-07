@@ -1,13 +1,30 @@
 """Provider boundaries retain native tags/counts and their actual entity scope."""
-from yt_playlist.providers import discogs, lastfm, musicbrainz
+import pytest
+
+from yt_playlist.providers import discogs, genres, lastfm, musicbrainz
 
 
-def test_lastfm_preserves_multiple_track_tags_counts_and_verified_match(monkeypatch):
-    monkeypatch.setattr(lastfm, '_get', lambda params: {'track': {
-        'name': 'Song', 'mbid': 'recording-id', 'artist': {'name': 'Artist', 'mbid': 'artist-id'},
-        'toptags': {'tag': [{'name': 'Metal', 'count': '87'}, {'name': 'Ambient', 'count': '42'},
-                            {'name': 'seen live', 'count': '900'}]}}})
+@pytest.mark.parametrize('prior_genres', [None, []], ids=['catalog', 'prior-empty-app'])
+def test_lastfm_preserves_multiple_track_tags_counts_and_verified_match(monkeypatch, request, prior_genres):
+    if prior_genres is not None:
+        monkeypatch.setattr(genres, '_active', genres.build_canon(prior_genres))
+        monkeypatch.setattr(genres, '_active_keys', {})
+        assert genres.pick_genre(['Metal', 'Ambient']) is None
+    # Resolve isolation after reproducing the matcher left by an earlier app.
+    request.getfixturevalue('canonical_genre_matcher')
+    calls = []
+
+    def get(params):
+        calls.append(params['method'])
+        return {'track': {
+            'name': 'Song', 'mbid': 'recording-id', 'artist': {'name': 'Artist', 'mbid': 'artist-id'},
+            'toptags': {'tag': [{'name': 'Metal', 'count': '87'}, {'name': 'Ambient', 'count': '42'},
+                                {'name': 'seen live', 'count': '900'}]}}}
+
+    monkeypatch.setattr(lastfm, '_get', get)
     result = lastfm.probe({'title': 'Song', 'artist': 'Artist'}, key='fixture')
+    assert calls == ['track.getinfo']
+    assert result.fields == {'genre': 'Metal'}
     assert len(result.observations) == 1
     tags = result.observations[0].payload()
     assert (tags['scope'], tags['entity_id']) == ('recording', 'recording-id')
@@ -16,7 +33,7 @@ def test_lastfm_preserves_multiple_track_tags_counts_and_verified_match(monkeypa
     assert tags['match_evidence']['title_artist_match'] is True
 
 
-def test_lastfm_artist_fallback_retains_artist_scope_and_stable_id(monkeypatch):
+def test_lastfm_artist_fallback_retains_artist_scope_and_stable_id(monkeypatch, canonical_genre_matcher):
     def get(params):
         if params['method'] == 'track.getinfo':
             return {'track': {'name': 'Song', 'mbid': 'recording-id',
@@ -29,7 +46,7 @@ def test_lastfm_artist_fallback_retains_artist_scope_and_stable_id(monkeypatch):
     assert len(result.observations[1].value) == 2
 
 
-def test_musicbrainz_reuses_native_artist_cache_without_flattening_counts(monkeypatch):
+def test_musicbrainz_reuses_native_artist_cache_without_flattening_counts(monkeypatch, canonical_genre_matcher):
     import io
     import json
     from types import SimpleNamespace
@@ -59,7 +76,7 @@ def test_musicbrainz_reuses_native_artist_cache_without_flattening_counts(monkey
     assert calls.count('artist/artist-id') == 1
 
 
-def test_discogs_multiple_styles_stay_release_scoped_and_unrelated_hits_are_excluded(monkeypatch):
+def test_discogs_multiple_styles_stay_release_scoped_and_unrelated_hits_are_excluded(monkeypatch, canonical_genre_matcher):
     monkeypatch.setattr(discogs, '_search', lambda query, tok: [
         {'id': 1, 'title': 'Artist - Song', 'style': ['Doom Metal', 'Ambient'], 'genre': ['Rock']},
         {'id': 2, 'title': 'Someone else - Song', 'style': ['House']}])

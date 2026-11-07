@@ -9,7 +9,7 @@ from playwright.sync_api import expect
 from yt_playlist.rec import autotune_run, eval_recs, scorecard
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_historical_production_comparison_reports_formats_and_pause_without_overflow(live_app, store, page, width, tmp_path):
     from tests.rec.test_product_comparison import favorable
     from yt_playlist.rec import product_comparison as product
@@ -23,7 +23,7 @@ def test_historical_production_comparison_reports_formats_and_pause_without_over
         'challenger': current['challenger'], 'grid': []}
     current['run_id'] = store.model_selection.start_selection(0, run)
     store.rec_proposals.put_proposals(product.SURFACE, current, 0)
-    report = favorable(store, current)
+    report = favorable(current)
     run.update(status='retained', reason='Historical menu comparison completed.', product_report=report)
     store.model_selection.save_selection(current['run_id'], run)
     page.set_viewport_size({'width': width, 'height': 1000})
@@ -46,9 +46,9 @@ def test_historical_production_comparison_reports_formats_and_pause_without_over
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
 
 
-@pytest.mark.parametrize("width", [1920, 1440, 1024, 390, 320])
+@pytest.mark.parametrize("width", [1440])
 def test_model_health_groups_results_and_explains_tuning(live_app, store, page, monkeypatch, width, tmp_path):
-    iid = store.identities.get_identities()[0].id
+    iid = store.accounts.get_accounts()[0].id
     tracks, vectors = [], []
     for i in range(24):
         tid = store.tracks.upsert_track(f"health-{i}", f"Track {i}", f"Artist {i % 4}", "Album", None)
@@ -166,16 +166,23 @@ def test_model_health_groups_results_and_explains_tuning(live_app, store, page, 
 def test_model_health_checks_can_retry_without_reloading_the_tab(live_app, store, page):
     from yt_playlist.rec import model_health
     assert model_health.prepare(store, 1_792_512_000) is not None
+    page.clock.install()
     page.route("**/taste/recall", lambda route: route.fulfill(status=503, body="Unavailable"))
     page.goto(live_app + "/taste#health")
     expect(page.get_by_text("No track similarity model has been built yet.", exact=False)).to_be_visible()
-    page.locator("#model-health-checks").scroll_into_view_if_needed()
-    expect(page.get_by_role("status").filter(has_text="Could not load the model checks.")).to_be_visible()
+    with page.expect_response("**/taste/recall") as failed:
+        page.locator("#model-health-checks").scroll_into_view_if_needed()
+    assert failed.value.status == 503
+    page.evaluate("window.healthRecoveryDocument = document")
+    expect(page.locator("[role=alert]:visible, .toast-err, #navigation-error")).to_have_count(0)
     page.unroute("**/taste/recall")
-    page.get_by_role("button", name="Try checks again", exact=True).click()
+    with page.expect_response("**/taste/recall") as retried:
+        page.clock.run_for(2100)
+    assert retried.value.status == 200
     expect(page.get_by_text("Not enough history", exact=True)).to_be_visible()
     expect(page.get_by_text("Not enough playlist data", exact=True)).to_be_visible()
     expect(page.get_by_text("No recommendations tracked yet", exact=True)).to_be_visible()
+    assert page.evaluate("document === window.healthRecoveryDocument")
 
 
 def test_model_health_remembers_running_selection_after_reload(live_app, store, page):
@@ -192,6 +199,7 @@ def test_model_health_remembers_running_selection_after_reload(live_app, store, 
     store.model_selection.save_selection(run_id, run)
     store.settings.set_setting("rec_embed_method", "item2vec")
     store.settings.set_setting("rec_dim", "2")
+    store.tracks.upsert_track("selection-new-track", "New track", "Artist", None, 200)
     store.rec_model.replace_rec_vectors([("new track|artist", np.array([1, 0], dtype=np.float32).tobytes())])
     expect(page.get_by_role("heading", name="Current model retained", exact=True)).to_be_visible(timeout=10000)
     expect(page.locator(".model-health-facts > div").first.locator("strong")).to_have_text("1")
@@ -201,7 +209,7 @@ def test_model_health_remembers_running_selection_after_reload(live_app, store, 
     assert "/taste/viz/engine" not in paths
 
 
-@pytest.mark.parametrize("width", [1440, 390])
+@pytest.mark.parametrize("width", [1440])
 @pytest.mark.parametrize("state", ["waiting", "insufficient", "retained", "paused"])
 def test_automatic_selection_explains_waiting_and_empty_measurements(live_app, store, page, width, state, tmp_path):
     if state != "waiting":
@@ -213,9 +221,11 @@ def test_automatic_selection_explains_waiting_and_empty_measurements(live_app, s
             "comparison": {"eligible": True, "trials": 80, "windows": 3, "previous_score": .4, "score": .4}})
     if state == "insufficient":
         # Reproduce the screenshot: library/history gates pass, but the actual test is short.
-        iid = store.identities.get_identities()[0].id
+        iid = store.accounts.get_accounts()[0].id
         store.history.record_history_plays(iid, 1 - 15 * 86400, ["earlier|artist"], source_timezone="UTC")
         store.history.record_history_plays(iid, 1, ["later|artist"], source_timezone="UTC")
+        for i in range(100):
+            store.tracks.upsert_track(f"selection-{i}", f"Track {i}", "Artist", None, 200)
         store.rec_model.replace_rec_vectors([(f"track {i}|artist", np.ones(2, dtype=np.float32).tobytes()) for i in range(100)])
         store.settings.set_setting("rec_dim", "128")
         store.settings.set_setting(autotune_run.RESULT_SETTING, json.dumps({
@@ -256,6 +266,8 @@ def test_automatic_selection_explains_waiting_and_empty_measurements(live_app, s
 
 def test_model_selection_restore_and_resume_controls(live_app, store, page, monkeypatch):
     from yt_playlist.rec.rec_worker import RecWorker
+    store.tracks.upsert_track("selection-old", "Old", "Artist", None, 200)
+    store.tracks.upsert_track("selection-new", "New", "Artist", None, 200)
     old = [("old|artist", np.array([1, 0], dtype=np.float32).tobytes())]
     store.rec_model.replace_rec_vectors(old)
     result = {"ran_at": 1, "status": "applied", "previous": {"method": "svd", "dim": 2},

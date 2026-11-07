@@ -63,14 +63,15 @@ class DeepSeekIAO:
         return credentials.resolve(env_name='DEEPSEEK_API_KEY', setting_name='deepseek_api_key',
                                    store=store, config_path=config_path)
 
-    def settings(self, store, now):
+    def settings(self, store, now, *, paid=None):
+        paid = getattr(store, '_paid_descriptions', False) if paid is None else paid
         key = self.api_key(store)
         try:
             limit = int(store.settings.get_setting('deepseek_daily_limit', str(DEFAULT_DAILY_LIMIT)))
         except (ValueError, TypeError):
             limit = DEFAULT_DAILY_LIMIT
-        usage = store.rec_proposals.get_proposals('album_description_usage') or {}
-        wait = self.availability(store, key, now)
+        usage = {} if paid else store.rec_proposals.get_proposals('album_description_usage') or {}
+        wait = self.availability(store, key, now, paid=paid)
         saved = bool((store.settings.get_setting('deepseek_api_key') or '').strip())
         source = ('environment' if (os.environ.get('DEEPSEEK_API_KEY') or '').strip()
                   else 'settings' if saved else 'config' if key else None)
@@ -79,14 +80,19 @@ class DeepSeekIAO:
         return {'configured': bool(key), 'saved_key': saved, 'key_source': source,
                 'enabled': store.settings.get_setting('deepseek_album_descriptions_enabled', '1') == '1',
                 'daily_limit': max(0, min(MAX_DAILY_LIMIT, limit)),
-                'requests_today': usage.get('requests', 0) if usage.get('day') == int(now // 86400) else 0,
+                'requests_today': (store.album_descriptions.requests_today(now) if paid else
+                                   usage.get('requests', 0) if usage.get('day') == int(now // 86400) else 0),
                 'status': status, 'retry_at': wait.get('retry_at', 0)}
 
-    def availability(self, store, key, now):
+    def availability(self, store, key, now, *, paid=None):
+        paid = getattr(store, '_paid_descriptions', False) if paid is None else paid
         digest = credential_id(key)
         with self._lock:
             candidates = [self._host, self._credentials.get(digest, {})]
-        candidates.extend(store.rec_proposals.deepseek_availability(digest))
+        if paid:
+            candidates.append(store.album_descriptions.availability(digest, now))
+        else:
+            candidates.append(store.album_descriptions.legacy_availability(digest, now))
         blocked = [wait for wait in candidates if wait.get('status') == 'auth'
                    or wait.get('retry_at', 0) > now]
         return max(blocked, key=lambda wait: (wait.get('status') == 'auth', wait.get('retry_at', 0)),
@@ -134,7 +140,7 @@ class DeepSeekIAO:
         except OSError:
             raise DescriptionUnavailable('unavailable') from None
 
-    def complete(self, store, identity, project, now, *, now_fn=None):
+    def complete(self, store, identity, project, now, *, now_fn=None, policy=None):
         """Reserve and publish a single attempt, including failures and abstentions.
 
         Durable reservations serialize callers of the same database, including
@@ -145,16 +151,23 @@ class DeepSeekIAO:
         clock = now_fn or (lambda: now)
         admitted_at = clock()
         key = self.api_key(store)
-        config = self.settings(store, admitted_at)
+        # A typed request must identify its exact generation policy. Reject an
+        # old caller after cutover instead of recreating a legacy paid surface.
+        paid = policy is not None
+        if getattr(store, '_paid_descriptions', False) and not paid:
+            raise ValueError('Paid description admission requires its generation policy')
+        config = self.settings(store, admitted_at, paid=paid)
         if not key or not config['enabled'] or not config['daily_limit']:
             return {'status': 'not_configured' if not key else 'paused'}
-        wait = self.availability(store, key, admitted_at)
+        wait = self.availability(store, key, admitted_at, paid=paid)
         if wait:
             if config['requests_today'] >= config['daily_limit']:
                 return {'status': 'daily_limit', 'retry_at': (int(admitted_at // 86400) + 1) * 86400}
             return dict(wait)
         digest = credential_id(key)
-        claim = store.rec_proposals.claim_album_description(identity, digest, config['daily_limit'], admitted_at)
+        claim = (store.album_descriptions.claim(identity, policy, digest, config['daily_limit'], admitted_at)
+                 if paid else store.album_descriptions.legacy_claim(
+                     identity, digest, config['daily_limit'], admitted_at))
         if claim['status'] != 'reserved':
             return claim.get('record') or claim
         active, sent = True, False
@@ -169,15 +182,18 @@ class DeepSeekIAO:
             self.pacer.wait()
             check_cancellable_work()
             # Settings may have changed while awaiting the shared request slot.
-            current = self.settings(store, clock())
+            current = self.settings(store, clock(), paid=paid)
             if (not current['enabled'] or not current['daily_limit']
                     or current['requests_today'] > current['daily_limit'] or self.api_key(store) != key):
                 raise _AdmissionChanged()
-            wait = self.availability(store, key, clock())
+            wait = self.availability(store, key, clock(), paid=paid)
             if wait:
                 raise DescriptionUnavailable(wait['status'], wait['retry_at'])
-            if not store.rec_proposals.authorize_album_description_send(
-                    claim['token'], digest, current['daily_limit'], clock()):
+            authorized = (store.album_descriptions.authorize(
+                claim['request_id'], claim['token'], digest, current['daily_limit'], clock())
+                if paid else store.album_descriptions.legacy_authorize(
+                    claim['token'], digest, current['daily_limit'], clock()))
+            if not authorized:
                 raise _AdmissionChanged()
             return self._request(payload, key, now_fn=clock)
 
@@ -197,5 +213,9 @@ class DeepSeekIAO:
             net.record_probe_failure(DescriptionUnavailable(error.reason, record['retry_at']))
         finally:
             active = False
-        store.rec_proposals.finish_album_description(identity, claim['token'], record, clock())
+        if paid:
+            if not store.album_descriptions.finish(claim['request_id'], claim['token'], record, clock()):
+                return {'status': 'stale'}
+        else:
+            store.album_descriptions.legacy_finish(identity, claim['token'], record, clock())
         return record

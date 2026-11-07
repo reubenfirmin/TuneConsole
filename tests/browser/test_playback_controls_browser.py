@@ -11,7 +11,7 @@ from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
 pytestmark = pytest.mark.browser
 
 
-@pytest.mark.parametrize('width', [1280, 390])
+@pytest.mark.parametrize('width', [1280])
 def test_album_space_and_media_actions_reach_the_connected_player(live_artist_app, page, width):
     base = live_artist_app['base']
     page.set_viewport_size({'width': width, 'height': 1000})

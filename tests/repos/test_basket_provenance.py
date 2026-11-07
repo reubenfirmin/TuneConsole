@@ -31,7 +31,7 @@ def _session_baskets(store):
 
 
 def test_generated_only_key_dropped_from_session_basket(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     store.playlists.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
     _mark_generated(store, "PLGEN")
     ka = store.tracks.upsert_track("va", "A", "ArtA", None, None, 1)
@@ -52,7 +52,7 @@ def test_generated_only_key_dropped_from_session_basket(store):
 
 
 def test_two_track_day_fully_dropped_when_one_key_is_generated_only(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     store.playlists.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
     _mark_generated(store, "PLGEN")
     store.tracks.upsert_track("va", "A", "ArtA", None, None, 1)
@@ -71,7 +71,7 @@ def test_two_track_day_fully_dropped_when_one_key_is_generated_only(store):
 
 
 def test_mixed_evidence_day_keeps_the_full_session_basket(store):
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     store.playlists.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
     _mark_generated(store, "PLGEN")
     store.tracks.upsert_track("va", "A", "ArtA", None, None, 1)
@@ -92,7 +92,7 @@ def test_mixed_evidence_day_keeps_the_full_session_basket(store):
 def test_organic_day_untouched(store):
     """Sanity: with no generated-playlist provenance at all, session baskets behave exactly as
     before (#83 must be a no-op absent quarantined playlists)."""
-    iid = store.identities.upsert_identity("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", "c", None, True)
     store.tracks.upsert_track("va", "A", "ArtA", None, None, 1)
     store.tracks.upsert_track("vb", "B", "ArtB", None, None, 1)
     key_a, key_b = identity_key("A", "ArtA"), identity_key("B", "ArtB")

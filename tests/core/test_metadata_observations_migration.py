@@ -1,5 +1,6 @@
 """Add scoped observations without rewriting existing selections or source history."""
 import pytest
+from tests.metadata_provenance_support import metadata_provenance
 
 from yt_playlist.core.migrations import Migration, MigrationError, migrate
 from yt_playlist.core.migrations.registry import MIGRATIONS
@@ -17,7 +18,7 @@ def test_populated_upgrade_preserves_legacy_evidence_and_rolls_back_interruption
         store.enrichment_state.record_enrichment_attempt('song|artist', 'source', {'bpm': 125}, now=10)
         legacy = tuple(store.conn.execute('SELECT * FROM metadata_findings').fetchone())
         attempts = [tuple(r) for r in store.conn.execute('SELECT * FROM provider_attempts')]
-        selected = store.enrichment_reports.metadata_provenance(tid)
+        selected = metadata_provenance(store, tid)
 
         def interrupted(conn, context):
             MIGRATIONS[48].apply(conn, context)
@@ -27,11 +28,14 @@ def test_populated_upgrade_preserves_legacy_evidence_and_rolls_back_interruption
             migrate(store.conn, registry=(*MIGRATIONS[:48], Migration(49, MIGRATIONS[48].name, interrupted)))
         assert tuple(store.conn.execute('SELECT * FROM metadata_findings').fetchone()) == legacy
         assert store.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 48
+        # Version 79 is the supported installed boundary that retains these
+        # observations. Later explicit conversions replace their owner.
+        migrate(store.conn, registry=MIGRATIONS[:79])
         store.init_schema()
         upgraded = tuple(store.conn.execute('SELECT * FROM metadata_findings').fetchone())
         assert upgraded == (*legacy, None, None)
         assert [tuple(r) for r in store.conn.execute('SELECT * FROM provider_attempts')] == attempts
-        assert store.enrichment_reports.metadata_provenance(tid) == selected
+        assert metadata_provenance(store, tid) == selected
         assert store.enrichment_state.metadata_observations('song|artist') == []
         store.enrichment_state.record_metadata_observations(tid, 'new', [
             MetadataObservation('mood_party', 0.8, 'recording', 'mbid', 'prediction')], run_id='upgrade', now=20)

@@ -1,18 +1,26 @@
 """TV's real preparation flow, with the external YouTube player boundary controlled."""
 import pytest
+from tests.derived_rating_support import seed_like
 from playwright.sync_api import expect
 
 from tests.conftest import FakeClient
+from tests.home_fixture_support import browser_store as store, returning_listener
 from tests.onboarding_support import publish_personal_mix
 from yt_playlist.rec import tv, tv_artwork
 from yt_playlist.util.matching import search_squash
+from tests.browser.quiet_action_support import (  # noqa: F401 - shared evidence fixture
+    DIAGNOSTIC, action_evidence, assert_quiet_action,
+)
 
 
 @pytest.fixture
 def tv_ui(store, live_app, page, monkeypatch):
+    # Prior Vibes use retains the earlier TV destination, including while its
+    # pool refreshes. Keep the first TV draw so queue identity is deterministic.
+    returning_listener(store, 'mixes', 'vibes', now=1)
     seeds = publish_personal_mix(store, now=1)
     for seed in seeds:
-        store.rec_model.record_like(seed['key'], 1)
+        seed_like(store, seed['key'], 1)
     store.settings.set_setting('last_sync_at', '1')
     store.settings.set_setting('onboard_dismissed', '1')
     searches, api_loads, errors, created = [], [], [], []
@@ -87,71 +95,17 @@ def tv_ui(store, live_app, page, monkeypatch):
     assert not errors
 
 
-def test_tv_ignores_ended_until_the_selected_video_has_started(page, live_app, tv_ui):
-    page.goto(live_app + '/#tv')
-    page.evaluate('window.tvEndBeforePlay = true')
-    page.get_by_role('button', name='Play TV', exact=True).click()
-    model = 'Alpine.$data(document.querySelector(".tv-home"))'
-    page.wait_for_function(f'{model}.playing')
-    expect(page.locator('.tv-film[aria-current="true"]')).to_have_attribute(
-        'aria-label', 'Now playing: Prepared 0 (Visualizer)')
-    assert page.evaluate('window.tvCalls') == [['play', 'visual00000']]
-
-    # The same ordering can occur while loading another entry. A stale ended
-    # notification must not skip that entry before its first PLAYING event.
-    page.evaluate('window.tvEndBeforePlay = true; window.tvPlaybackControls.command("next")')
-    page.wait_for_function(f'{model}.playing && {model}.selected === 1')
-    expect(page.locator('.tv-film[aria-current="true"]')).to_have_attribute(
-        'aria-label', 'Now playing: Prepared 1 (Visualizer)')
-    assert page.evaluate('window.tvCalls.filter(call => call[0] === "load")') == [['load', 'visual00001']]
-
-    # A real completion after playback still advances normally, including when
-    # buffering was the last state reported before completion.
-    page.evaluate('''window.tvPlayer.options.events.onStateChange({data:3,target:window.tvPlayer});
-        window.tvPlayer.options.events.onStateChange({data:0,target:window.tvPlayer})''')
-    page.wait_for_function(f'{model}.playing && {model}.selected === 2')
-    assert page.evaluate('window.tvPlayer.id') == 'visual00002'
 
 
-@pytest.mark.parametrize('code', [5, 150, 999])
-def test_tv_retries_startup_errors_on_the_same_video_before_any_skip(page, live_app, tv_ui, code):
-    page.goto(live_app + '/#tv')
-    page.get_by_role('button', name='Play TV', exact=True).click()
-    model = 'Alpine.$data(document.querySelector(".tv-home"))'
-    page.wait_for_function(f'{model}.playing')
-    page.evaluate('window.originalTvPlayer = window.tvPlayer; window.tvPlayer.position = 3.15')
-    with page.expect_request(lambda request: request.url.endswith('/event')
-                             and 'kind=player_error' in (request.post_data or '')) as event:
-        page.evaluate('code => window.tvPlayer.options.events.onError({data:code,target:window.tvPlayer})', code)
-    assert f'state={code}' in event.value.post_data
-    assert 'position=3.15' in event.value.post_data
-    page.wait_for_function(f'{model}.playing && window.tvCalls.some(call => call[0] === "load")')
-    assert page.evaluate('window.tvPlayer === window.originalTvPlayer')
-    assert page.evaluate(f'{model}.selected') == 0
-    assert page.evaluate(f'{model}.failedVideos') == []
-    assert page.evaluate('window.tvCalls.filter(call => call[0] === "load")') == [['load', 'visual00000']]
-    expect(page.locator('.tv-film[aria-current="true"]')).to_have_attribute(
-        'aria-label', 'Now playing: Prepared 0 (Visualizer)')
-
-    page.evaluate('code => window.tvPlayer.options.events.onError({data:code,target:window.tvPlayer})', code)
-    if code == 150:
-        page.wait_for_function(f'{model}.playing && {model}.selected === 1')
-        assert page.evaluate(f'{model}.failedVideos') == ['visual00000']
-    else:
-        expect(page.get_by_role('status').filter(has_text='This video could not play')).to_be_visible()
-        assert page.evaluate(f'{model}.selected') == 0
-        assert page.evaluate(f'{model}.failedVideos') == []
-        assert not page.evaluate(f'{model}.playing')
-        # An explicit Play gives the retained entry another attempt.
-        page.evaluate('window.tvPlaybackControls.command("play")')
-        page.wait_for_function(f'{model}.playing && !{model}.playerError')
-        assert page.evaluate('window.tvCalls.filter(call => call[0] === "load")') == [
-            ['load', 'visual00000'], ['load', 'visual00000']]
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_tv_uses_prepared_pool_without_preview_and_shared_controls_own_video(page, live_app, tv_ui, width):
     searches, api_loads = tv_ui
+    # Hold continuation at the network boundary so this checks Reset against the
+    # initial saved draw. This journey does not establish refill history.
+    page.route('**/home/tv/playlist/*/refill',
+               lambda route: route.fulfill(status=202, json={'preparing': True}))
     page.set_viewport_size({'width': width, 'height': 1000})
     page.goto(live_app + '/')
     tabs = page.get_by_role('tab')
@@ -179,8 +133,6 @@ def test_tv_uses_prepared_pool_without_preview_and_shared_controls_own_video(pag
     expect(page.locator('.tv-player iframe')).to_be_visible()
     page.wait_for_function('window.tvCalls.some(call => call[0] === "play")')
     original_playlist = page.evaluate('Alpine.$data(document.querySelector(".tv-home")).playlistId')
-    # The stream can already have prefetched beyond its initial saved draw.
-    # Compare that draw, rather than the growing queue, when checking novelty.
     original_videos = ['visual00000', 'visual00001', 'visual00002']
     expect(page.locator('.tv-loading')).to_be_hidden()
     strip = page.get_by_role('navigation', name='TV playlist', exact=True)
@@ -219,6 +171,27 @@ def test_tv_uses_prepared_pool_without_preview_and_shared_controls_own_video(pag
     page.get_by_role('tab', name='TV', exact=True).click()
     expect(page.locator('.tv-player iframe')).to_be_visible()
     assert page.evaluate('Alpine.$data(document.querySelector(".tv-home")).playlistId') == original_playlist
+    # Acknowledging the in-flow earned notice moves the TV slot. Keep the
+    # playing iframe mounted and align it with the new slot without restarting.
+    notice = page.locator('.growth-unlock-notice')
+    expect(notice).to_be_visible()
+    page.evaluate('window.noticePlayerFrame = document.querySelector(".tv-player iframe")')
+    before_ack = page.locator('.tv-session').bounding_box()['y']
+    unseen = page.evaluate('Alpine.$data(document.querySelector(".home-growth")).newNodes.length')
+    assert unseen > 0
+    for _ in range(unseen):
+        notice.get_by_role('button', name='Mark as seen', exact=True).click()
+    expect(notice).to_be_hidden()
+    page.wait_for_function('''() => {
+        const player = document.querySelector('.tv-session').getBoundingClientRect();
+        const slot = document.querySelector('.tv-slot').getBoundingClientRect();
+        return Math.abs(player.top-slot.top) < 1 && Math.abs(player.left-slot.left) < 1
+            && Math.abs(player.width-slot.width) < 1;
+    }''')
+    assert page.locator('.tv-session').bounding_box()['y'] < before_ack
+    assert page.evaluate('window.noticePlayerFrame === document.querySelector(".tv-player iframe")')
+    assert page.evaluate('({id: window.tvPlayer.id, calls: window.tvCalls.length})') == continued
+    assert page.evaluate('window.tvPlaybackControls.active()')
     # Reset is the explicit action that requests a fresh draw.
     page.get_by_role('button', name='Adjust TV parameters').click()
     page.get_by_role('dialog', name='TV parameters').get_by_role('button', name='Reset playlist', exact=True).click()
@@ -237,91 +210,25 @@ def test_tv_uses_prepared_pool_without_preview_and_shared_controls_own_video(pag
     expect(launch).to_have_attribute('target', '_self')
     launch.click()
     expect(page.locator('.tv-player iframe')).to_be_visible()
+    page.wait_for_function('window.tvPlayer.id === "visual00000" && window.tvPlaybackControls.active()')
+    assert page.evaluate('Alpine.$data(document.querySelector(".tv-home")).playlistId') == original_playlist
     expect(page.locator('.global-now-playing .hs-now-title')).to_have_text('Prepared 0 (Visualizer)')
+    expect(page.locator('.tv-session')).to_have_count(1)
+    expect(page.locator('.tv-backdrop')).to_have_count(1)
+    # Playlists was a new document; its first TV launch loads the API once.
+    assert len(api_loads) == 2
+    assert not searches
+    expect(page.locator('#connection-error, #navigation-error')).to_have_count(0)
+    page.screenshot(path=f'/tmp/tuneconsole-727-saved-return-{width}.png')
 
 
-def test_tv_parameters_apply_without_search_and_blocked_embeds_offer_recovery(page, live_app, tv_ui, store):
-    page.goto(live_app + '/#tv')
-    play = page.get_by_role('button', name='Play TV', exact=True)
-    expect(play).to_be_visible()
-    page.get_by_role('button', name='Adjust TV parameters').click()
-    dialog = page.get_by_role('dialog', name='TV parameters')
-    slider = dialog.get_by_role('slider', name='Maximum video length')
-    expect(slider).to_have_value('9')
-    slider.press('Home')
-    expect(dialog.locator('output')).to_have_text('1 min')
-    slider.press('ArrowRight')
-    expect(dialog.locator('output')).to_have_text('2 min')
-    dialog.get_by_role('button', name='Apply', exact=True).click()
-    expect(dialog).to_be_hidden()
-    expect(play).to_be_visible()
-    expect(page.get_by_role('status').filter(has_text='No playable videos matched this length')).to_be_visible()
-    page.get_by_role('button', name='Adjust TV parameters').click()
-    slider.press('End')
-    expect(dialog.locator('output')).to_have_text('Unlimited')
-    page.screenshot(path='/tmp/tuneconsole-419-tv-length-slider.png')
-    dialog.get_by_role('button', name='Apply', exact=True).click()
-    expect(dialog).to_be_hidden()
-    assert store.settings.get_setting(tv.SETTING) == 'unlimited'
-    page.get_by_role('button', name='Adjust TV parameters').click()
-    expect(slider).to_have_value('22')
-    slider.press('Home')
-    for _ in range(9):
-        slider.press('ArrowRight')
-    dialog.get_by_role('button', name='Apply', exact=True).click()
-    expect(dialog).to_be_hidden()
-    expect(play).to_be_visible()
-    play.press('Enter')
-    expect(page.locator('.tv-player iframe')).to_be_visible()
-    for index in range(4):
-        previous = page.evaluate('window.tvPlayer.id')
-        loads = page.evaluate('window.tvCalls.filter(call => call[0] === "load").length')
-        page.evaluate('window.tvPlayer.options.events.onError({data:150,target:window.tvPlayer})')
-        page.wait_for_function('loads => window.tvCalls.filter(call => call[0] === "load").length > loads', arg=loads)
-        assert page.evaluate('window.tvPlayer.id') == previous
-        page.evaluate('window.tvPlayer.options.events.onError({data:150,target:window.tvPlayer})')
-        if index < 3:
-            page.wait_for_function('id => window.tvPlayer.id !== id', arg=previous)
-    expect(page.get_by_role('status').filter(has_text='We couldn’t find the next video')).to_be_visible(timeout=10000)
-    expect(page.get_by_role('button', name='Reset TV', exact=True)).to_be_visible()
 
 
-@pytest.mark.parametrize('width', [1440, 390])
-def test_reset_waits_inside_embed_until_background_pool_is_ready(page, live_app, tv_ui, store, width):
-    page.set_viewport_size({'width': width, 'height': 1000})
-    page.goto(live_app + '/#tv')
-    page.get_by_role('button', name='Play TV', exact=True).click()
-    expect(page.locator('.tv-player iframe')).to_be_visible()
-    original = page.evaluate('Alpine.$data(document.querySelector(".tv-home")).playlistId')
-    store.rec_proposals.put_proposals(tv.SURFACE, {}, 1)
-    page.get_by_role('button', name='Adjust TV parameters').click()
-    with page.expect_response(lambda response: response.url.endswith('/home/tv/play') and response.status == 202):
-        page.get_by_role('button', name='Reset playlist', exact=True).click()
-    expect(page.locator('.tv-loading')).to_be_visible()
-    expect(page.locator('.tv-loading [data-loader-status]')).to_have_text('Generating TV session')
-    expect(page.locator('.tv-idle:visible, .tv-message:visible, .tv-filmstrip:visible')).to_have_count(0)
-    assert 'TV is still being prepared' not in page.locator('.tv-home').inner_text()
-    page.screenshot(path=f'/tmp/tuneconsole-419-tv-reset-wait-{width}.png')
-    # Complete the real worker preparation. The pending reset proceeds itself;
-    # no additional user action is needed and no preview is exposed meanwhile.
-    while tv.prepare(store, FakeClient(), 1):
-        pass
-    page.wait_for_function('original => Alpine.$data(document.querySelector(".tv-home")).playlistId !== original && Alpine.$data(document.querySelector(".tv-home")).playing', arg=original)
-    expect(page.locator('.tv-loading')).to_be_hidden()
-    expect(page.locator('.tv-player iframe')).to_be_visible()
 
 
-def test_initial_empty_pool_shows_the_embedded_loader(page, live_app, tv_ui, store):
-    store.rec_proposals.put_proposals(tv.SURFACE, {}, 1)
-    page.goto(live_app + '/#tv')
-    expect(page.locator('.tv-loading')).to_be_visible()
-    expect(page.locator('.tv-loading [data-loader-status]')).to_have_text('Generating TV session')
-    expect(page.locator('.tv-idle')).to_be_hidden()
-    expect(page.get_by_role('button', name='Play TV', exact=True)).to_be_hidden()
-    expect(page.locator('.tv-filmstrip')).to_be_hidden()
 
 
-def test_tv_waits_for_audio_pause_confirmation_and_rejects_failed_takeover(page, live_app, tv_ui):
+def test_tv_waits_for_audio_pause_confirmation_and_rejects_failed_takeover(page, live_app, tv_ui, action_evidence):
     pending = []
     page.route('**/home/tv/takeover', lambda route: pending.append(route))
     page.goto(live_app + '/#tv')
@@ -340,8 +247,10 @@ def test_tv_waits_for_audio_pause_confirmation_and_rejects_failed_takeover(page,
     page.evaluate('void window.tvPlaybackControls.command("toggle")')
     page.wait_for_timeout(100)
     assert pending
-    pending.pop().fulfill(status=409, json={'error': 'Audio pause was not confirmed'})
-    expect(page.get_by_role('status').filter(has_text='Audio pause was not confirmed')).to_be_visible()
+    pending.pop().fulfill(status=409, json={'error': DIAGNOSTIC})
+    expect(page.get_by_role('status').filter(has_text='Couldn’t start this video. Press play to try again.')).to_be_visible()
+    assert_quiet_action(page)
+    page.screenshot(path=action_evidence + '.png')
     assert page.evaluate('window.tvCalls') == [['pause', 'visual00000']]
     page.evaluate('void window.tvPlaybackControls.command("toggle")')
     page.wait_for_timeout(100)

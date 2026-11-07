@@ -4,7 +4,7 @@ Videos retain their taste connection separately from their playable upload. The
 first resolver uses recordings; artist-connected long-form videos can share the
 same pool without pretending that a concert or set is a single recording.
 """
-from collections import Counter
+from collections import Counter, deque
 import hashlib
 import json
 import math
@@ -69,10 +69,13 @@ def seed_tracks(store, now, offset=0):
     liked = {t['key'] for t in library if t['liked']} | set(store.rec_model.recent_liked_keys())
     artists = {search_squash(t['artist']) for t in library}
     prepared = [p['tracks'] for m in payload['menus'] for p in m['protos']]
-    bundles = store.rec_proposals.get_proposals('mode_bundles') or {}
-    prepared.extend(bucket.get(lane, []) for mid, bucket in bundles.items()
-                    if not mid.startswith('_') for lane in ('wheelhouse', 'comfort', 'explore'))
-    ranked = _interleave(prepared, 1200)
+    if getattr(store, '_recommendation_files', False):
+        ranked = _stored_seeds(store, prepared, 1200)
+    else:
+        bundles = store.rec_proposals.get_proposals('mode_bundles') or {}
+        prepared.extend(bucket.get(lane, []) for mid, bucket in bundles.items()
+                        if not mid.startswith('_') for lane in ('wheelhouse', 'comfort', 'explore'))
+        ranked = _interleave(prepared, 1200)
     # Likes absent from a shallow prepared menu still deserve a chance, after
     # model-ranked likes. Never substitute all owned songs for explicit likes.
     ranked.extend(t for t in library if t['key'] in liked)
@@ -89,6 +92,43 @@ def seed_tracks(store, now, offset=0):
     return [t for t in tracks if t['key'] not in blocked and t['artist'] not in muted]
 
 
+def _stored_seeds(store, prepared, limit):
+    """Interleave complete mode ranks, retaining only the bounded search seeds."""
+    if not getattr(store, '_read_only', False):
+        with store.read_view() as reader:
+            return _stored_seeds(reader, prepared, limit)
+    head = store.recommendations.head('home')
+    slots = ([(row['mode_key'], lane) for lane in ('wheelhouse', 'comfort', 'explore')
+              for row in store.recommendations.selections('home', lane, generation=head['id'])]
+             if head else [])
+    # Across all streams, at most limit plus one row per slot waits in Python.
+    batch = max(1, min(128, limit // max(1, len(slots))))
+    def stream(mode, lane):
+        after = -1
+        while True:
+            check_cancellable_work()
+            page = store.recommendations.candidate_page('home', mode, lane,
+                generation=head['id'], after=after, limit=batch)
+            yield from page['tracks']
+            after = page['after']
+            if page['exhausted']:
+                return
+    streams = deque([iter(pool) for pool in prepared if pool] + [stream(*slot) for slot in slots])
+    selected, seen = [], set()
+    while streams and len(selected) < limit:
+        check_cancellable_work()
+        current = streams.popleft()
+        try:
+            track = next(current)
+        except StopIteration:
+            continue
+        streams.append(current)
+        if track['key'] not in seen:
+            selected.append(track)
+            seen.add(track['key'])
+    return selected
+
+
 def eligible(store, items, maximum, now):
     """Current suppression is a hard constraint, including while a job was searching."""
     if not isinstance(items, list) or len(items) > MAX_POOL:
@@ -97,7 +137,8 @@ def eligible(store, items, maximum, now):
              and all(isinstance(t.get(k), str) for k in
                      ('video_id', 'title', 'artist', 'kind', 'source_key', 'source_artist'))
              and _VIDEO.fullmatch(t['video_id']) and type(t.get('duration')) is int]
-    upload_keys = {t['video_id']: (store.tracks.identity_key_for_video(t['video_id'])
+    identities = store.tracks.identity_keys_for_videos(t['video_id'] for t in items)
+    upload_keys = {t['video_id']: (identities.get(t['video_id'])
                                   or identity_key(t['title'], t['artist'])) for t in items}
     blocked = home_exclusions(store, [t['source_key'] for t in items], now)
     # Video uploads are deliberately saved in Generated playlists. That origin
@@ -193,15 +234,18 @@ def prepare(store, client, now):
     except (WorkBudgetExceeded, WorkClosing):
         raise
     except Exception:
-        store.rec_proposals.put_proposals('tv_preparation', {'failed': True, 'at': now}, now)
+        store.tv_preparation.record(True, now)
         raise
-    store.rec_proposals.put_proposals('tv_preparation', {'failed': False, 'at': now}, now)
+    store.tv_preparation.record(False, now)
     return more
 
 
 def _prepare(store, snapshot, client, now):
     reader = snapshot.store
     previous = cached(reader) or {}
+    recovering = not previous.get('items')
+    if recovering:
+        previous = {**previous, 'items': _saved_videos(reader, now)}
     offset = previous.get('offset', 0)
     seeds = seed_tracks(reader, now, offset)
     if not seeds:
@@ -222,7 +266,9 @@ def _prepare(store, snapshot, client, now):
     # instead of restarting at seed one whenever the menu changes order or gains
     # a new candidate, and retain usable prepared videos through that refresh.
     attempted = set(previous.get('attempted', [])) & current_keys if reusable else set()
-    previous_items = eligible(reader, previous.get('items', []), None, now) if reusable else []
+    # Age restarts discovery, not playback. Keep last-good videos while the
+    # bounded search refills, including when it finds no replacements.
+    previous_items = eligible(reader, previous.get('items', []), None, now)
     source_keys = [t['source_key'] for t in previous_items]
     retained = (current_keys | set(reader.rec_query.tracks_by_keys(source_keys))
                 | set(reader.discovery.discovered_tracks_by_keys(source_keys, available_only=True)))
@@ -244,7 +290,20 @@ def _prepare(store, snapshot, client, now):
     key = hashlib.sha256(json.dumps(sorted([t['key'], t['group'], t['title'], t['artist']]
                                            for t in seeds)).encode()).hexdigest()[:24]
     batch = pending[:MAX_SEEDS]
-    found = resolve(client, batch, None)
+    try:
+        found = resolve(client, batch, None)
+    except (WorkBudgetExceeded, WorkClosing):
+        raise
+    except Exception:
+        if recovering and items:
+            # Saved output needs no successful search. Use the same input guard
+            # as a normal publication, without marking failed seeds attempted.
+            fallback = {'schema': SCHEMA, 'key': key, 'at': now,
+                'items': items[-MAX_POOL:], 'attempted': sorted(attempted),
+                'offset': offset, 'state': 'searching', 'retry_at': 0}
+            snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(
+                json.dumps(fallback, separators=(',', ':')), now, surface=SURFACE))
+        raise
     check_cancellable_work()
     seen = {t['video_id'] for t in items}
     items.extend(t for t in found if t['video_id'] not in seen)
@@ -257,6 +316,27 @@ def _prepare(store, snapshot, client, now):
     encoded = json.dumps(payload, separators=(',', ':'))
     published = snapshot.publish(lambda: store.rec_proposals.publish_prepared_home(encoded, now, surface=SURFACE))
     return not published or len(pending) > len(batch)
+
+
+def _saved_videos(store, now):
+    """Recover previously confirmed TV choices without searching or writing playlists."""
+    items = {}
+    for reference in store.playlist_recipes.recent_video_playlist_refs():
+        check_cancellable_work()
+        recipe = store.playlist_recipes.get_recipe(reference) or {}
+        if recipe.get('lane') != 'tv' or recipe.get('media') != 'video':
+            continue
+        candidates = eligible(store, (recipe.get('videos') or [])[-MAX_POOL:], None, now)
+        keys = [item['source_key'] for item in candidates]
+        available = (set(store.rec_query.tracks_by_keys(keys))
+                     | set(store.discovery.discovered_tracks_by_keys(keys, available_only=True)))
+        for item in candidates:
+            if item['source_key'] not in available:
+                continue
+            items.setdefault(item['video_id'], item)
+            if len(items) == MAX_POOL:
+                return list(items.values())
+    return list(items.values())
 
 
 def video_kind(row):

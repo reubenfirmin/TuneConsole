@@ -26,6 +26,9 @@ def test_populated_upgrade_replays_latest_fields_without_changing_evidence_and_i
         with pytest.raises(MigrationError, match='interrupted profiles'):
             migrate(store.conn, registry=(*MIGRATIONS[:49], Migration(50, MIGRATIONS[49].name, interrupted)))
         assert store.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 49
+        # Exercise the supported retained-evidence layout, before the separate
+        # conversion that replaces metadata_findings.
+        migrate(store.conn, registry=MIGRATIONS[:79])
         store.init_schema()
         assert [tuple(row) for row in store.conn.execute('SELECT * FROM metadata_findings')] == history
         source = store.conn.execute('SELECT payload FROM rec_musical_sources').fetchone()[0]

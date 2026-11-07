@@ -19,7 +19,7 @@ def _toml_str(s) -> str:
     return json.dumps(str(s), ensure_ascii=False).replace("\x7f", "\\u007f")
 
 def serialize_config(identities) -> str:
-    config.validate_identities(identities)
+    config.validate_accounts(identities)
     if any(not isinstance(row.get("credential_ref"), str) for row in identities):
         raise ValueError("every identity needs a credential reference")
     blocks = []
@@ -52,7 +52,7 @@ def prepared_config(identities, config_path):
             file.write(content)
             file.flush()
             os.fsync(file.fileno())
-        configs = config.load_identities(staged)
+        configs = config.load_accounts(staged)
         yield staged, configs
     finally:
         if staged is not None:

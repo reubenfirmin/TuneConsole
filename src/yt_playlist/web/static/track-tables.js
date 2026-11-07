@@ -28,14 +28,20 @@ document.addEventListener('htmx:afterSwap', (e) => {
   if (window.__trackPlaybackBound) return;
   window.__trackPlaybackBound = true;
   function norm(s) {
-    return (s || '').toLowerCase().replace(/\(.*?\)|\[.*?\]/g, '').replace(/\bfeat\.?.*$/, '')
-      .replace(/[^a-z0-9]+/g, ' ').trim();
+    return (s || '').normalize('NFKC').toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
   }
   function rowByVid(vid) {
     var sel = window.CSS && CSS.escape ? CSS.escape(vid) : vid;
     return document.querySelector('tr[data-vid="' + sel + '"]');
   }
-  var metaDone = false, metadataTable = null;
+  var metaDone = false, metadataTable = null, metadataRequest = null, playsRequest = null;
+  function cancelReads() {
+    metadataRequest?.abort(); metadataRequest = null;
+    playsRequest?.abort(); playsRequest = null;
+  }
+  window.addEventListener('app-page-leaving', cancelReads);
+  window.addEventListener('pagehide', cancelReads);
   document.addEventListener('playlist-track-added', function () {
     metaDone = false;
     refreshCells();
@@ -51,11 +57,14 @@ document.addEventListener('htmx:afterSwap', (e) => {
     rows.forEach(function (r) { r.classList.remove('now-playing'); });
     if (!np) return false;
     var matches = np.video_id ? Array.from(rows).filter(r => r.getAttribute('data-vid') === np.video_id) : [];
-    if (!np.video_id && np.title) {
+    // YouTube can play another upload of the requested song. Prefer its exact
+    // video ID, then require both title and artist rather than losing the row.
+    // Keep version qualifiers so a live recording cannot select a studio row.
+    if (!matches.length && np.title && np.artist) {
       var nt = norm(np.title);
       rows.forEach(function (r) {
-        if (norm(r.getAttribute('data-title')) === nt &&
-            (!np.artist || norm(r.getAttribute('data-artist')) === norm(np.artist))) matches.push(r);
+        if (nt && norm(r.getAttribute('data-title')) === nt &&
+            norm(r.getAttribute('data-artist')) === norm(np.artist)) matches.push(r);
       });
     }
     matches.forEach(r => r.classList.add('now-playing'));
@@ -65,9 +74,13 @@ document.addEventListener('htmx:afterSwap', (e) => {
   function refreshCells() {
     var plId = (location.pathname.match(/^\/playlist\/(\d+)/) || [])[1];
     var table = document.querySelector('tr[data-vid]')?.closest('table');
-    if (table !== metadataTable) { metadataTable = table; metaDone = false; }
-    if (!plId || !table || metaDone) return;
-    fetch('/playlist/' + plId + '/cells').then(function (r) { return r.json(); }).then(function (d) {
+    if (table !== metadataTable) {
+      metadataRequest?.abort(); metadataRequest = null;
+      metadataTable = table; metaDone = false;
+    }
+    if (!plId || !table || metaDone || metadataRequest) return;
+    var request = metadataRequest = new AbortController();
+    fetch('/playlist/' + plId + '/cells', {signal: request.signal}).then(function (r) { return r.json(); }).then(function (d) {
       if (!table.isConnected || (location.pathname.match(/^\/playlist\/(\d+)/) || [])[1] !== plId) return;
       (d.cells || []).forEach(function (c) {
         var row = rowByVid(c.video_id); if (!row) return;
@@ -98,23 +111,26 @@ document.addEventListener('htmx:afterSwap', (e) => {
         document.body.dispatchEvent(new CustomEvent('playlist-metadata-changed'));
       }
       if (d.pending === 0) metaDone = true;   // everything resolved: stop refreshing cells
-    }).catch(function () {});
+    }).catch(function () {}).finally(function () {
+      if (metadataRequest === request) metadataRequest = null;
+    });
   }
 
   function highlightCurrent() {
     var data = window.playbackStatus.snapshot;
     highlight(data?.connected ? data.now_playing : null);
   }
-  var playsPending = false;
   async function refreshPlays() {
-    if (playsPending || document.hidden) return;
+    if (playsRequest || document.hidden) return;
     var rows = [...document.querySelectorAll('tr[data-vid]:has(.track-plays)')];
     var videos = [...new Set(rows.map(row => row.dataset.vid).filter(Boolean))];
     if (!videos.length) return;
-    playsPending = true;
+    var request = playsRequest = new AbortController();
     try {
       for (var offset = 0; offset < videos.length; offset += 500) {
-        var response = await fetch('/album/track-plays?videos=' + encodeURIComponent(videos.slice(offset, offset + 500).join(',')));
+        request.signal.throwIfAborted();
+        var response = await fetch('/album/track-plays?videos=' + encodeURIComponent(videos.slice(offset, offset + 500).join(',')),
+          {signal: request.signal});
         if (!response.ok) continue;
         var counts = (await response.json()).plays || {};
         rows.forEach(function (row) {
@@ -125,7 +141,7 @@ document.addEventListener('htmx:afterSwap', (e) => {
         });
       }
     } catch (_) { /* Keep the last confirmed counts during a connection failure. */ }
-    finally { playsPending = false; }
+    finally { if (playsRequest === request) playsRequest = null; }
   }
   window.addEventListener('bridge-status', function (event) {
     highlight(event.detail?.connected ? event.detail.now_playing : null);

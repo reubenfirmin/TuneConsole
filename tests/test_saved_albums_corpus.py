@@ -24,7 +24,7 @@ class _AlbumClient(FakeClient):
 
 
 def test_saved_album_tracks_folded_in_once(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     fc = _AlbumClient()
 
     sync.sync_all(store, {iid: fc}, now=1.0)
@@ -39,7 +39,7 @@ def test_saved_album_tracks_folded_in_once(store):
 
 
 def test_incidental_album_track_does_not_prevent_full_materialization(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.tracks.upsert_track("v1", "So What", "Miles Davis", "Kind of Blue", 100,
                        album_browse_id="MPREb_X")
     client = _AlbumClient()
@@ -50,7 +50,7 @@ def test_incidental_album_track_does_not_prevent_full_materialization(store):
 
 
 def test_browsing_an_unsaved_album_does_not_prevent_later_library_materialization(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     client = _AlbumClient()
     remember_album(store, "MPREb_X", client.get_album("MPREb_X"),
                    {"title": "Kind of Blue", "artist": "Miles Davis"})
@@ -63,7 +63,7 @@ def test_browsing_an_unsaved_album_does_not_prevent_later_library_materializatio
 
 @pytest.mark.parametrize("incomplete", [(), ("album-3",), tuple(f"album-{i}" for i in range(8))])
 def test_materialization_enumerates_complete_albums_once_and_preserves_failures(store, monkeypatch, incomplete):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     saved = {f"album-{i}": {"title": f"Album {i}", "artist": "Artist", "thumbnail": None}
              for i in range(8)}
     albums = {bid: {"title": meta["title"], "artists": [{"name": "Artist"}],

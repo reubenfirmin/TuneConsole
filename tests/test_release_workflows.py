@@ -1,5 +1,6 @@
 """Enforce the publication boundary across the reusable workflow graph."""
 from pathlib import Path
+from functools import cache
 import json
 import os
 import subprocess
@@ -11,6 +12,7 @@ import yaml
 ROOT = Path(__file__).parents[1]
 
 
+@cache
 def workflow(name):
     return yaml.load((ROOT / f".github/workflows/{name}.yml").read_text(), Loader=yaml.BaseLoader)
 

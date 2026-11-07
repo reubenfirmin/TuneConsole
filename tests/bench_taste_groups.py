@@ -1,4 +1,4 @@
-"""Run under the normal pytest machine lock:
+"""Opt-in production preparation budget and lineage acceptance:
 
 uv run pytest -s tests/bench_taste_groups.py
 
@@ -6,62 +6,30 @@ Optional TUNECONSOLE_GROUP_READONLY_DB freezes only prepared library/profile inp
 from mode=ro/query_only SQLite. TUNECONSOLE_GROUP_SNAPSHOT replays that JSON file;
 TUNECONSOLE_GROUP_REPORT selects the local output JSON. No migrations or provider calls.
 """
+import hashlib
 import json
-import os
-from pathlib import Path
-import sqlite3
 import time
+import pytest
 
-from tests.group_support import recordings
-from yt_playlist.rec import group_discovery, group_eval, group_preparation, group_similarity
+from tests.group_benchmark_support import frozen_inputs, report_path
+from yt_playlist.core import prepared_inputs
+from yt_playlist.rec import group_discovery, group_preparation
 
 
-def test_compare_adaptive_engines_on_independently_prepared_libraries(tmp_path, store, request, monkeypatch):
-    cases = {
-        'small-album': recordings([('Pop', 8, .25)]),
-        'metal-plus-pop': recordings([('Death Metal', 180, .9), ('Thrash Metal', 60, .8), ('Pop', 12, .25)]),
-        'eclectic': recordings([('Death Metal', 45, .9), ('House', 45, .7), ('Ambient', 45, .1),
-                               ('Jazz', 45, .4), ('Pop', 12, .3)]),
-        'same-style-two-sounds': recordings([('House', 45, .1), ('House', 45, .95)]),
-    }
-    snapshot_path = request.config.getoption('group_snapshot') or os.getenv('TUNECONSOLE_GROUP_SNAPSHOT')
-    database = request.config.getoption('group_readonly_db') or os.getenv('TUNECONSOLE_GROUP_READONLY_DB')
-    if database:
-        with sqlite3.connect(Path(database).resolve().as_uri() + '?mode=ro', uri=True) as conn:
-            conn.execute('PRAGMA query_only=ON')
-            conn.execute('BEGIN')
-            rows = conn.execute('SELECT p.identity_key,p.payload,m.payload FROM rec_prepared_content p '
-                                'LEFT JOIN rec_musical_profiles m USING(identity_key) ORDER BY p.identity_key').fetchall()
-        frozen = {'rows': [[key, json.loads(raw), json.loads(profile) if profile else None] for key, raw, profile in rows]}
-        snapshot_path = snapshot_path or str(tmp_path / 'musical-group-inputs.json')
-        Path(snapshot_path).write_text(json.dumps(frozen))
-    if snapshot_path:
-        frozen = json.loads(Path(snapshot_path).read_text())
-        cases['frozen-library'] = [group_similarity.recording(key, payload['library'], profile)
-            for key, payload, profile in frozen['rows'] if payload['library'] is not None]
+def test_production_preparation_and_update_budgets_retain_lineage(tmp_path, store, request, monkeypatch):
+    frozen = frozen_inputs(request, tmp_path)
+    if frozen is None:
+        pytest.skip('Supply --group-snapshot or --group-readonly-db for production budget acceptance')
     reports = {}
-    for name, tracks in cases.items():
-        reports[name] = group_eval.compare(tracks, policy=group_discovery.Policy(max_groups=512))
-        print(json.dumps({'case': name, 'n': len(tracks), 'engines': {engine: {
-            **{key: row.get(key) for key in ('leaves', 'assigned', 'unknown', 'edges', 'named_leaves', 'seconds', 'growth_ari')},
-            'retained_small_styles': sum(row['minority_style_retention'].values()),
-            'small_styles': len(row['minority_style_retention']), 'largest': max(row['sizes'], default=0)}
-            for engine, row in reports[name]['engines'].items()}}), flush=True)
-        assert all(row['assigned'] + row['unknown'] == len(tracks) for row in reports[name]['engines'].values())
-    output = Path(request.config.getoption('group_report') or os.getenv('TUNECONSOLE_GROUP_REPORT')
-                  or tmp_path / 'group-comparison.json')
-    output.write_text(json.dumps(reports, indent=2))
-    print('Report:', output)
-    if snapshot_path:
-        reports['feature-comparison'] = group_eval.feature_comparison(cases['frozen-library'])
-        print(json.dumps({'feature-comparison': {name: {key: row.get(key) for key in ('leaves', 'assigned', 'unknown', 'seconds', 'deferred')}
-              for name, row in reports['feature-comparison'].items()}}), flush=True)
-        output.write_text(json.dumps(reports, indent=2))
+    output = report_path(request, tmp_path, 'group-production-budgets.json')
+    if frozen:
         # Exercise the actual paged worker and its default ten-second/512-node
         # limits on a disposable database, never the captured user's database.
         with store.conn:
-            store.conn.executemany('INSERT INTO rec_prepared_content VALUES (?,?,?,?,?)',
-                [(key, json.dumps(payload), 'frozen', 1, i + 1) for i, (key, payload, _profile) in enumerate(frozen['rows'])])
+            for i, (key, payload, _profile) in enumerate(frozen['rows']):
+                store.conn.execute('INSERT INTO recordings(identity_key) VALUES (?) '
+                    'ON CONFLICT(identity_key) DO NOTHING', (key,))
+                prepared_inputs.upsert(store.conn, key, payload, 'f' * 64, 1, i + 1)
             store.conn.executemany('INSERT INTO rec_musical_profiles VALUES (?,?,?,?,?)',
                 [(key, json.dumps(profile), profile['version'], 'frozen', 1)
                  for key, _payload, profile in frozen['rows'] if profile])
@@ -88,7 +56,12 @@ def test_compare_adaptive_engines_on_independently_prepared_libraries(tmp_path, 
         assert published, 'The default worker must publish this admitted frozen library within its budgets'
         # Dynamic updates also need to fit after the first large generation;
         # identity/lineage reconciliation must not turn subsequent passes into permanent deferrals.
-        worker.request_rebuild()
+        key, payload, _profile = next(row for row in frozen['rows'] if row[1].get('library') is not None)
+        library = payload['library']
+        payload = {**payload, 'library': {**library, 'year': '2001' if library.get('year') != '2001' else '2002'}}
+        digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        with store.conn:
+            prepared_inputs.upsert(store.conn, key, payload, digest, 2_000_000_059, len(frozen['rows']) + 1)
         started = time.monotonic()
         updated = worker.step(2_000_000_060)
         current = store.taste_groups.head()

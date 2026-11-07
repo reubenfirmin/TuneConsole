@@ -5,18 +5,29 @@ import json
 def _track(store, title="Hyperballad", artist="Bjork", genre=None, year=None):
     tid = store.tracks.upsert_track("v_" + title, title, artist, None, 200)
     if genre or year:
-        store.tracks.set_track_enrichment(tid, genre, year)
+        store.enrichment.apply_provider_fields(tid, 'musicbrainz', {'genre': genre, 'year': year})
     return tid
 
 
 def test_log_enrichment_rows(store):
     tid = _track(store)
+    ingestion = list(map(tuple, store.conn.execute('SELECT id,provider,field,value FROM enrichment_log '
+                                                   'WHERE track_id=? ORDER BY id', (tid,))))
+    assert {('youtube', 'title', 'Hyperballad'), ('youtube', 'artist', 'Bjork')} <= {
+        row[1:] for row in ingestion}
+    other = _track(store, title='Other')
     store.enrichment_state.log_enrichment(tid, "run1", "musicbrainz", "genre", "Electronic", now=1.0)
     store.enrichment_state.log_enrichment(tid, "run1", "discogs", "genre", "Art Pop", now=1.0)
-    rows = store.conn.execute("SELECT provider, field, value FROM enrichment_log WHERE track_id=? "
-                              "ORDER BY id", (tid,)).fetchall()
+    store.enrichment_state.log_enrichment(other, 'run1', 'lastfm', 'genre', 'Rock', now=1.0)
+    store.enrichment_state.log_enrichment(tid, 'another-run', 'lastfm', 'genre', 'Jazz', now=2.0)
+    rows = store.conn.execute("SELECT provider, field, value,created_at,input_video_id,field_scope FROM enrichment_log "
+                              "WHERE track_id=? AND run_id=? ORDER BY id", (tid, 'run1')).fetchall()
     assert [(r["provider"], r["field"], r["value"]) for r in rows] == [
         ("musicbrainz", "genre", "Electronic"), ("discogs", "genre", "Art Pop")]
+    assert all((r['created_at'], r['input_video_id'], r['field_scope']) ==
+               (1.0, 'v_Hyperballad', 'recording') for r in rows)
+    assert list(map(tuple, store.conn.execute('SELECT id,provider,field,value FROM enrichment_log '
+        'WHERE track_id=? AND provider=? ORDER BY id', (tid, 'youtube')))) == ingestion
 
 
 def test_genre_provenance_returns_latest_value_per_provider_and_current(store):
@@ -29,6 +40,7 @@ def test_genre_provenance_returns_latest_value_per_provider_and_current(store):
 
     assert result["current"] == "Art Pop"
     assert result["candidates"] == [
+        {"provider": "musicbrainz", "value": "Art Pop"},
         {"provider": "lastfm", "value": "Art Pop"},
         {"provider": "discogs", "value": ""},
     ]
@@ -82,7 +94,7 @@ def test_resolved_conflict_reopens_on_new_value(store):
 
 
 def test_conflict_count_and_list_scoped_to_playlist(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     tid = _track(store, title="A")
     other = _track(store, title="B")
     plid = store.playlists.upsert_playlist(iid, "PL", "Mix", 1, "h", 1000.0)
@@ -95,29 +107,29 @@ def test_conflict_count_and_list_scoped_to_playlist(store):
     assert [c["value"] for c in lst[0]["candidates"]] == ["x", "y"]
 
 
-def test_set_track_field_rejects_unknown_field(store):
+def test_resolve_conflict_rejects_unknown_field(store):
     tid = _track(store)
     import pytest
     with pytest.raises(ValueError):
-        store.enrichment.set_track_field(tid, "not_a_field", "x")
+        store.enrichment.resolve_conflict(tid, "not_a_field", "x")
 
 
 def test_conflict_current_value_keeps_historical_provider_evidence(store):
     tid = _track(store, genre="Electronic")
-    store.enrichment_state.log_enrichment(tid, "old-run", "musicbrainz", "genre", "Electronic")
+    store.enrichment_state.log_enrichment(tid, "old-run", "lastfm", "genre", "Electronic")
     store.enrichment.upsert_conflict(tid, "genre", [{"provider": "lastfm", "value": "Rock"},
                                          {"provider": "discogs", "value": "Pop"}])
     conflict = store.enrichment_reports.enrichment_conflict_detail(tid, "genre")
     current, *alternatives = conflict["options"]
     assert current["value"] == "Electronic" and current["current"]
-    assert current["providers"] == ["musicbrainz"]
+    assert current["providers"] == ["musicbrainz", "lastfm"]
     assert current["source_note"] == ""
     assert [o["value"] for o in alternatives] == ["Rock", "Pop"]
 
 
 def test_current_numeric_option_merges_matching_provider_values(store):
     tid = _track(store)
-    store.tracks.set_track_audio(tid, bpm=120.0)
+    store.enrichment.apply_provider_fields(tid, 'deezer', {'bpm': 120.0})
     store.enrichment.upsert_conflict(tid, "bpm", [{"provider": "deezer", "value": 120},
                                        {"provider": "acousticbrainz", "value": 124}])
     options = store.enrichment_reports.enrichment_conflict_detail(tid, "bpm")["options"]

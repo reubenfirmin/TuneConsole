@@ -8,7 +8,7 @@ def _trk(store, vid, title, artist):
 
 
 def test_catchall_is_size_based(store):
-    iid = store.identities.upsert_identity("m", "c", None, True)
+    iid = store.accounts.upsert_account("m", "c", None, True)
     big = store.playlists.upsert_playlist(iid, "ytm_big", "Big", 4, "h", 0.0)
     store.playlists.set_playlist_tracks(big, [_trk(store, f"b{i}", f"B{i}", "A") for i in range(4)])
     small = store.playlists.upsert_playlist(iid, "ytm_small", "Small", 2, "h", 0.0)

@@ -19,7 +19,6 @@ from yt_playlist.providers.base import EnrichmentResult
 logger = logging.getLogger(__name__)
 
 name = "deezer"
-manages_availability = True
 _iao = DeezerIAO()
 
 
@@ -33,10 +32,6 @@ def available(store=None) -> bool:
 
 def tripped() -> bool:
     return not _iao.availability().ready(_iao.now())
-
-
-def reset() -> None:
-    """A new batch must respect availability established by other callers."""
 
 
 def probe(track, store=None) -> EnrichmentResult:

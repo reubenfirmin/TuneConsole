@@ -28,7 +28,7 @@ class PlaylistTarget:
     title: str
     episode_id: str
     stop: threading.Event
-    identity_id: int | None = None
+    account_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -82,7 +82,7 @@ class RadioMutations:
             window[1] = self.now_fn() + 3
         return True
 
-    def substitute(self, requested, row, known, *, identity_id=None, playlist=None):
+    def substitute(self, requested, row, known, *, account_id=None, playlist=None):
         """Retain the actual upload without declaring two recordings equivalent."""
         video = row['videoId']
         previous = known.get(video) or {}
@@ -101,8 +101,8 @@ class RadioMutations:
                 accepted['album'], accepted['duration'], thumbnail=accepted.get('thumbnail'))
             accepted['key'] = self.catalog.catalog_subject(tid)['identity_key']
         log.info('Radio accepted upload substitution: requested=%s actual=%s', requested['video_id'], video)
-        if identity_id is not None and not self.paused():
-            self.catalog.remember_playback_alternate(identity_id, requested, accepted,
+        if account_id is not None and not self.paused():
+            self.catalog.remember_playback_alternate(account_id, requested, accepted,
                 evidence={'playlist': playlist, 'set_video_id': row.get('setVideoId'),
                           'source': 'youtube-music-playlist-occurrence'}, now=self.now_fn())
         return UploadSubstitution(requested, accepted)
@@ -146,7 +146,7 @@ class RadioMutations:
         accepted, substitutions = operation.track, ()
         if self.append_substitution(operation, view.tracks, remote):
             substitution = self.substitute(operation.track, remote[-1], view.known,
-                identity_id=target.identity_id,
+                account_id=target.account_id,
                 playlist=target.playlist)
             accepted, substitutions = substitution.accepted, (substitution,)
             desired = expected + [accepted['video_id']]
@@ -183,7 +183,7 @@ class RadioMutations:
         known = dict(view.known)
         if isinstance(accepted, Substitution):
             substitution = self.substitute(accepted.requested, accepted.row, known,
-                identity_id=target.identity_id,
+                account_id=target.account_id,
                 playlist=target.playlist)
             known[substitution.accepted['video_id']] = substitution.accepted
             substitutions = (substitution,)

@@ -1,16 +1,14 @@
 """#75 live play ingestion: a {type:'play'} bridge frame becomes a play_events row, feeds the
 (track, day) history model, stamps plays-freshness, and folds likeStatus into likes/dislikes."""
-from yt_playlist.core.store import Store
 from yt_playlist.library import live_plays
 from yt_playlist.util.matching import identity_key
 import pytest
 
 
-def _store(with_brand=False):
-    s = Store(":memory:"); s.init_schema()
-    s.identities.upsert_identity("main", "bridge", None, True)
+def _configure_accounts(s, *, with_brand=False):
+    s.accounts.upsert_account("main", "bridge", None, True)
     if with_brand:
-        s.identities.upsert_identity("band", "bridge", "10345", False)
+        s.accounts.upsert_account("band", "bridge", "10345", False)
     return s
 
 
@@ -25,8 +23,8 @@ def _msg(**over):
     return m
 
 
-def test_play_persists_event_day_model_and_freshness():
-    s = _store()
+def test_play_persists_event_day_model_and_freshness(store):
+    s = _configure_accounts(store)
     assert live_plays.handle_play_event(_ctx(s), _msg(), 1000.0) is True
     key = identity_key("Song", "Artist")
     evs = s.history.play_events_since(0)
@@ -37,8 +35,8 @@ def test_play_persists_event_day_model_and_freshness():
     assert s.settings.get_setting("last_plays_sync_at") == "1000.0"
 
 
-def test_unverified_metadata_does_not_write_track_history_or_rating():
-    s = _store()
+def test_unverified_metadata_does_not_write_track_history_or_rating(store):
+    s = _configure_accounts(store)
     assert live_plays.handle_play_event(_ctx(s), _msg(metadataVerified=False, likeStatus="LIKE"), 1000) is False
     assert s.history.play_events_since(0) == []
     assert s.conn.execute("SELECT COUNT(*) FROM listening_observations").fetchone()[0] == 0
@@ -47,8 +45,8 @@ def test_unverified_metadata_does_not_write_track_history_or_rating():
     assert live_plays.handle_play_event(_ctx(s), _msg(metadataVerified=True), 1001) is True
 
 
-def test_native_upload_proof_records_known_song_without_importing_unverified_credits_or_rating():
-    s = _store()
+def test_native_upload_proof_records_known_song_without_importing_unverified_credits_or_rating(store):
+    s = _configure_accounts(store)
     video = 'FDuJmIOtT7I'
     title = "Most Precious Love (DF's Future 3000 Extended Mix) (feat. Barbara Tucker)"
     s.tracks.upsert_track(video, title, 'Blaze', 'Most Precious Love', 480)
@@ -72,8 +70,8 @@ def test_native_upload_proof_records_known_song_without_importing_unverified_cre
     {'videoVerified': False}, {'videoId': 'unknown'}, {'brandKnown': False},
     {'brandId': 'unknown'}, {'muted': True}, {'tabMuted': True}, {'paused': True}, {'volume': 0},
 ])
-def test_unverified_native_play_requires_known_upload_account_and_audible_playback(overrides):
-    s = _store()
+def test_unverified_native_play_requires_known_upload_account_and_audible_playback(store, overrides):
+    s = _configure_accounts(store)
     s.tracks.upsert_track('v1', 'Canonical title', 'Canonical artist', '', 180)
     msg = _msg(**{'metadataVerified': False, 'videoVerified': True, **overrides})
     assert not live_plays.handle_play_event(_ctx(s), msg, 1000)
@@ -82,8 +80,8 @@ def test_unverified_native_play_requires_known_upload_account_and_audible_playba
 
 
 @pytest.mark.parametrize("silent", [{"muted": True}, {"tabMuted": True}, {"volume": 0}, {"paused": True}])
-def test_silent_play_does_not_write_but_unmute_records_once(silent):
-    s = _store()
+def test_silent_play_does_not_write_but_unmute_records_once(store, silent):
+    s = _configure_accounts(store)
     assert not live_plays.handle_play_event(_ctx(s), _msg(likeStatus="LIKE", **silent), 1000)
     assert s.history.play_events_since(0) == []
     assert s.tracks.identity_key_for_video("v1") is None
@@ -93,8 +91,8 @@ def test_silent_play_does_not_write_but_unmute_records_once(silent):
     assert len(s.history.play_events_since(0)) == 1
 
 
-def test_rereport_does_not_double_count_or_restamp():
-    s = _store()
+def test_rereport_does_not_double_count_or_restamp(store):
+    s = _configure_accounts(store)
     live_plays.handle_play_event(_ctx(s), _msg(), 1000.0)
     assert live_plays.handle_play_event(_ctx(s), _msg(likeStatus="LIKE"), 1030.0) is False
     key = identity_key("Song", "Artist")
@@ -104,54 +102,54 @@ def test_rereport_does_not_double_count_or_restamp():
     assert s.settings.get_setting("last_plays_sync_at") == "1000.0"
 
 
-def test_like_status_feeds_dislike_model():
-    s = _store()
+def test_like_status_feeds_dislike_model(store):
+    s = _configure_accounts(store)
     live_plays.handle_play_event(_ctx(s), _msg(likeStatus="DISLIKE"), 1000.0)
     assert identity_key("Song", "Artist") in s.rec_model.disliked_identity_keys()
 
 
-def test_like_status_feeds_like_channel():
-    s = _store()
+def test_like_status_feeds_like_channel(store):
+    s = _configure_accounts(store)
     live_plays.handle_play_event(_ctx(s), _msg(likeStatus="LIKE"), 1000.0)
     assert identity_key("Song", "Artist") in set(s.rec_model.recent_liked_keys())
 
 
-def test_brand_id_selects_matching_identity_and_unknown_reports_are_skipped():
-    s = _store(with_brand=True)
-    ids = {i.brand_account_id: i.id for i in s.identities.get_identities()}
+def test_brand_id_selects_matching_identity_and_unknown_reports_are_skipped(store):
+    s = _configure_accounts(store, with_brand=True)
+    ids = {i.brand_account_id: i.id for i in s.accounts.get_accounts()}
     live_plays.handle_play_event(_ctx(s), _msg(brandId="10345"), 1000.0)
     assert not live_plays.handle_play_event(_ctx(s), _msg(title="Other", brandId="nope"), 2000.0)
     evs = s.history.play_events_since(0)
-    assert evs[0]["identity_id"] == ids["10345"]
+    assert evs[0]["account_id"] == ids["10345"]
     assert len(evs)==1
 
 
-def test_untitled_or_unconfigured_is_skipped():
-    s = _store()
+def test_untitled_or_unconfigured_is_skipped(store):
+    # Exercise the empty account state before provisioning this private consumer.
+    assert live_plays.handle_play_event(_ctx(store), _msg(), 1000.0) is False
+    assert store.history.play_events_since(0) == []
+    s = _configure_accounts(store)
     assert live_plays.handle_play_event(_ctx(s), _msg(title=""), 1000.0) is False
-    empty = Store(":memory:"); empty.init_schema()      # no identities provisioned
-    assert live_plays.handle_play_event(_ctx(empty), _msg(), 1000.0) is False
-    assert empty.history.play_events_since(0) == []
 
 
-def test_playlist_provenance_recorded():
-    s = _store()
+def test_playlist_provenance_recorded(store):
+    s = _configure_accounts(store)
     live_plays.handle_play_event(_ctx(s), _msg(playlist="PLabc"), 1000.0)
     assert s.history.play_events_since(0)[0]["playlist_ytm_id"] == "PLabc"
 
 
-def test_main_remote_account_matches_without_a_configured_master():
-    s = Store(":memory:"); s.init_schema()
-    s.identities.upsert_identity("only", "bridge", None, False)     # configured, but nothing is master
-    ident = s.identities.get_identities()[0].id
+def test_main_remote_account_matches_without_a_configured_master(store):
+    s = store
+    s.accounts.upsert_account("only", "bridge", None, False)     # configured, but nothing is master
+    ident = s.accounts.get_accounts()[0].id
     assert live_plays.handle_play_event(_ctx(s), _msg(), 1000.0) is True
-    assert s.history.play_events_since(0)[0]["identity_id"] == ident
+    assert s.history.play_events_since(0)[0]["account_id"] == ident
 
 
-def test_live_play_and_history_backfill_share_browser_date():
+def test_live_play_and_history_backfill_share_browser_date(store):
     import datetime
 
-    s = _store()
+    s = _configure_accounts(store)
     now = datetime.datetime(2026, 10, 21, 0, 30, tzinfo=datetime.timezone.utc).timestamp()
     assert live_plays.handle_play_event(_ctx(s), _msg(timeZone="America/Costa_Rica"), now)
     assert s.history.record_history_plays(1, now + 3600, [("song|artist", "Today")],
@@ -161,31 +159,72 @@ def test_live_play_and_history_backfill_share_browser_date():
     assert s.history.play_events_since(0)[0]["played_at"] == now
 
 
-def test_selected_album_playback_is_context_evidence_not_organic_track_learning():
-    import json
+def test_selected_album_playback_is_context_evidence_not_organic_track_learning(store):
+    from yt_playlist.core import album_playback_context
     from yt_playlist.rec import choice_evidence, layers
 
-    s = _store(with_brand=True)
+    s = _configure_accounts(store, with_brand=True)
+    s.tracks.upsert_track('v1', 'Song', 'Artist', None, None)
+    s.tracks.upsert_track('v2', 'Next', 'Artist', None, None)
     oid = choice_evidence.issue(s, 'albums', [{'id': 'album', 'keys': ['song|artist']}],
                                 990, context={})
     choice_evidence.respond(s, oid, 'choice', 991, option_id='album', action_id='chosen')
-    s.settings.set_setting('listening_album_pending', json.dumps({'opportunity_id': oid,
-        'browse': 'album', 'playlist': 'OLAK-album', 'videos': ['v1', 'v2'],
-        'at': 991, 'action_id': 'chosen'}))
+    with s.conn:
+        album_playback_context.put(s.conn, {'opportunity_id': oid,
+            'browse': 'album', 'playlist': 'OLAK-album', 'videos': ['v1', 'v2'],
+            'at': 991, 'action_id': 'chosen'})
     assert live_plays.handle_play_event(_ctx(s), _msg(playlist='OLAK-album'), 1000)
     assert s.conn.execute('SELECT is_generated FROM play_events').fetchone()[0] == 1
     assert layers._plays(s, 0) == []
     assert choice_evidence.compile_report(s, 1001)['formats']['albums']['starts'] == 1
     # The first verified account owns the pending queue; another account is not attributed.
-    pending = json.loads(s.settings.get_setting('listening_album_pending'))
-    assert pending['identity_id'] == 1
+    pending = album_playback_context.load(s.conn)
+    assert pending['account_id'] == 1
     assert choice_evidence.album_playback_context(s, _msg(playlist='OLAK-album'), 1001,
-                                                 identity_id=2) is None
+                                                 account_id=2) is None
     assert choice_evidence.album_playback_context(s, _msg(playlist='OLAK-album', videoId='outside'),
-                                                 1001, identity_id=1) is None
+                                                 1001, account_id=1) is None
     # Album continuation stays quarantined even though it contains multiple tracks.
     assert live_plays.handle_play_event(_ctx(s), _msg(playlist='OLAK-album', title='Next', videoId='v2'), 1200)
     assert layers._plays(s, 0) == []
     # A later independent direct choice has its own organic evidence.
     assert live_plays.handle_play_event(_ctx(s), _msg(), 5000)
     assert [row['identity_key'] for row in layers._plays(s, 0)] == ['song|artist']
+
+
+def test_album_attribution_reads_committed_context_during_another_write(file_backed_store):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from yt_playlist.core import album_playback_context
+    from yt_playlist.rec import choice_evidence
+
+    store = file_backed_store
+    writing, release = Event(), Event()
+    try:
+        account = store.accounts.upsert_account('main', 'bridge', None, True)
+        pending = {'opportunity_id': 'chosen', 'browse': 'album', 'playlist': 'OLAK-album',
+                   'videos': ['v1'], 'at': 991, 'account_id': account}
+        with store._lock, store.conn:
+            album_playback_context.put(store.conn, pending)
+
+        def write_next_queue():
+            with store._lock, store.conn:
+                album_playback_context.put(store.conn, {**pending, 'playlist': 'OLAK-next'})
+                writing.set()
+                assert release.wait(10)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            writer = executor.submit(write_next_queue)
+            try:
+                assert writing.wait(5)
+                # A refill or playback writer may be mid-transaction. Attribution
+                # must see the committed queue without touching that transaction.
+                actual = choice_evidence.album_playback_context(
+                    store, _msg(playlist='OLAK-album'), 1000, account_id=account)
+                assert actual == pending
+            finally:
+                release.set()
+            writer.result(timeout=5)
+        assert album_playback_context.load(store.conn)['playlist'] == 'OLAK-next'
+    finally:
+        release.set()

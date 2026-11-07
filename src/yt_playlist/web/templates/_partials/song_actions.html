@@ -5,9 +5,11 @@
        @keydown="menuKey($event)">
     <button type="button" role="menuitem" @click="play()">Play on YouTube Music</button>
     <button type="button" role="menuitem" @click="similar()">Songs like this</button>
-    <button type="button" role="menuitem" @click="openDialog('create')">Create playlist from song</button>
-    <button type="button" role="menuitem" @click="openDialog('add')">Add song to playlist</button>
-    <button type="button" role="menuitem" @click="openDialog('metadata')">Edit Metadata</button>
+    <button type="button" role="menuitem" :disabled="readOnly" @click="openDialog('create')">Create playlist from song</button>
+    <button type="button" role="menuitem" :disabled="readOnly" @click="openDialog('add')">Add song to playlist</button>
+    <button type="button" role="menuitem" aria-label="Edit Metadata" :disabled="readOnly" @click="openDialog('metadata')">Edit Metadata
+      <small class="song-edit-note" x-show="metadataPending">Edit not confirmed</small>
+    </button>
     <a role="menuitem" :href="trackUrl(song)">Track details</a>
     <template x-if="context.playlist">
       <div role="group" aria-label="This playlist">
@@ -126,7 +128,7 @@
              x-text="query ? 'No matching playlists.' : 'No playlists available. Create one from the song menu.'"></p>
         </div>
       </div>
-      <p class="song-action-error" role="alert" x-show="error" x-text="error"></p>
+      <p class="song-action-error" role="status" x-show="error" x-text="error"></p>
       <p class="song-dialog-note" x-show="result?.guidance" x-text="result?.guidance"></p>
       <footer class="song-dialog-actions">
         <button type="button" class="btn-ghost" @click="closeDialog()" :disabled="busy" x-text="result ? 'Done' : 'Cancel'"></button>

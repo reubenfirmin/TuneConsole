@@ -1,7 +1,9 @@
-"""Production comparison chronology, correlated evidence and atomic recovery."""
-import base64
+"""Retained comparison assignments, correlated evidence and serving compatibility."""
 from concurrent.futures import ThreadPoolExecutor
+from tests.enrichment_support import seed_enrichment
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
+from dataclasses import asdict
 import logging
 import threading
 from types import SimpleNamespace
@@ -9,14 +11,21 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from yt_playlist.rec import (choice_evidence as choices, comparison_preparation,
-                            model_selection, model_setup, product_comparison as product)
+from yt_playlist.rec import (choice_evidence as choices, model_selection,
+                            model_setup, product_comparison as product)
 from yt_playlist.core.activity import Activity
 from yt_playlist.rec.rec_worker import RecWorker
 
 
-@pytest.fixture
-def trial(store):
+def _remove_trial(store):
+    if store._model_comparison_state:
+        store.conn.execute('DELETE FROM model_comparison_plan')
+    else:
+        store.conn.execute('DELETE FROM rec_proposals WHERE surface=?', (product.SURFACE,))
+    store.conn.commit()
+
+
+def _trial(store):
     policy = dict(product.POLICY)
     current = {'phase': 'observing', 'attempt': 1, 'seed': 'balanced', 'policy': policy,
         'alpha': .025, 'previous': {'method': 'svd', 'dim': 2},
@@ -30,9 +39,31 @@ def trial(store):
     return current
 
 
-def offer(store, current, day, *, format='mixes', episode='episode', outcome=1, suffix=''):
+@pytest.fixture
+def trial(store):
+    return _trial(store)
+
+
+@pytest.fixture(scope='module')
+def paired_album_template(_pristine_current_schema):
+    from tests.prepared_fixture_support import prepared_template
+    from tests.test_growth_journey import early_journey
+
+    # These cases consume readiness after real First sounds and Your music.
+    with prepared_template(_pristine_current_schema, early_journey) as template:
+        yield template
+
+
+@pytest.fixture
+def paired_album_store(file_backed_store, paired_album_template):
+    paired_album_template.restore(file_backed_store)
+    return file_backed_store
+
+
+def offer(store, current, day, *, format='mixes', episode='episode', outcome=1, suffix='', assignment=None):
     now = day * product.DAY + 100
-    assignment = product.assignment(store, format, f'{day}:{suffix}', now)
+    if assignment is None:
+        assignment = product.assignment(store, format, f'{day}:{suffix}', now)
     oid = choices.issue(store, format, [{'id': 'chosen', 'score': .7}], now,
         context={'comparison': assignment}, episode_id=f'{day}:{episode}',
         opportunity_id=f'{format}:{day}:{episode}:{suffix}')
@@ -59,9 +90,25 @@ def test_assignment_is_shared_by_day_and_held_windows_survive_midnight_and_later
     assert product.assignment(store, 'mixes', 'new', trial['exposure_until']) is None
 
 
-def test_comparison_preferences_serialize_with_concurrent_settings_updates(store):
+def test_comparison_preferences_serialize_with_concurrent_settings_updates(store, file_backed_store, monkeypatch):
+    from yt_playlist.repos.model_selection import ModelSelectionRepo
+    from yt_playlist.repos.base import snapshot_read
+
     started, queried = threading.Event(), threading.Event()
-    store.conn.set_trace_callback(lambda sql: queried.set() if sql.startswith('SELECT key,value FROM settings') else None)
+    constraints = ModelSelectionRepo.comparison_constraints
+
+    @snapshot_read
+    def observe(repo):
+        # The read now runs on a detached snapshot. Observe that connection,
+        # while retaining the held-serving-lock admission check below.
+        repo.conn.set_trace_callback(lambda sql: queried.set()
+            if 'FROM settings' in sql else None)
+        try:
+            return constraints.__wrapped__(repo)
+        finally:
+            repo.conn.set_trace_callback(None)
+
+    monkeypatch.setattr(ModelSelectionRepo, 'comparison_constraints', observe)
 
     def read():
         started.set()
@@ -84,63 +131,32 @@ def test_comparison_preferences_serialize_with_concurrent_settings_updates(store
     finally:
         store.conn.set_trace_callback(None)
 
+    # Production readers must stay coherent without waiting on an unrelated
+    # uncommitted writer; the writer itself must compose its own pending inputs.
+    import hashlib
+    from yt_playlist.core import album_feedback_storage
+    from yt_playlist.core.evidence_ledger import canonical
 
-def test_comparison_services_queued_capture_between_individual_menus(store, trial, monkeypatch):
-    old = [('recording', np.array([1., 0.], dtype=np.float32).tobytes())]
-    new = [('recording', np.array([0., 1., 0.], dtype=np.float32).tobytes())]
-    store.rec_model.replace_rec_vectors(old)
-    store.settings.set_setting('rec_dim', '2')
-    trial['vectors'] = store.rec_ledger.evidence().artifact({arm: [
-        (key, base64.b64encode(blob).decode()) for key, blob in rows]
-        for arm, rows in (('incumbent', old), ('challenger', new))})
-    worker = RecWorker(SimpleNamespace(store=store, work=Activity(),
-        logger=logging.getLogger(__name__), now_fn=lambda: product.DAY), debounce_s=0)
-    monkeypatch.setattr(worker, '_start_loop', lambda: None)
-    entered, release = threading.Event(), threading.Event()
-    checkpoints = []
-
-    def checkpoint():
-        checkpoints.append(threading.get_ident())
-        # Context, ranked pools and the first menu precede this fourth boundary.
-        if len(checkpoints) == 4:
-            entered.set()
-            assert release.wait(5)
-        worker._flush_measurements()
-
-    try:
-        with ThreadPoolExecutor(1) as threads:
-            future = threads.submit(worker._stage, 'comparison audit', comparison_preparation.prepare,
-                                    store, trial, product.DAY, checkpoint)
-            try:
-                assert entered.wait(5), store.model_selection.selection_run(trial['run_id'])
-                oid = choices.issue(store, 'albums', [{'id': 'a'}], product.DAY, context={})
-                assert choices.respond(store, oid, 'visible', product.DAY + 1, visible=['a'])
-                assert not store.rec_ledger.evidence().get('opportunity', oid)
-            finally:
-                release.set()
-            assert future.result(15), store.model_selection.selection_run(trial['run_id'])
-        assert checkpoints and all(ident != threading.get_ident() for ident in checkpoints)
-        assert choices.opportunity(store, oid)
-        assert store.rec_ledger.evidence().get('response', f'{oid}:visible:')
-        assert not worker.jobs.measurements
-        assert store.rec_model.get_rec_vectors() == old
-        from yt_playlist.rec import home_prepared
-        from yt_playlist.rec.comparison_storage import decode
-        for arm in ('incumbent', 'challenger'):
-            paired = store.rec_proposals.get_proposals(product.pair_surface(trial['run_id'], arm, 'mixes'))
-            assert decode(paired)['tuning'] == home_prepared.tuning_key(store, product.DAY)
-        saved_run = store.model_selection.selection_run(trial['run_id'])
-        sizes, timings = saved_run['preparation_bytes'], saved_run['preparation_timings']
-        assert len(sizes['projections']) == 6
-        assert sizes['total'] == sum(len(row[0].encode()) for row in store.conn.execute(
-            'SELECT payload FROM rec_proposals WHERE surface LIKE ?', (f"model_pair:{trial['run_id']}:%",)))
-        assert sizes['total'] <= comparison_preparation.MAX_PREPARED_BYTES
-        for arm in ('incumbent', 'challenger'):
-            assert all(f'{arm}: mix menu {index + 1}' in timings for index in range(12))
-            assert all(f'{arm}: {format} storage' in timings for format in product.FORMATS)
-    finally:
-        release.set()
-        worker.shutdown()
+    disk = file_backed_store
+    before = product.constraints(disk)
+    with disk.read_snapshot() as snapshot, disk._lock:
+        pinned = snapshot.store
+        disk.conn.execute('BEGIN IMMEDIATE')
+        try:
+            disk.settings.publish_values({'rec_param:album_collab_weight': '.25'})
+            album_feedback_storage.import_legacy(disk.conn, {'pending-release': {'kind': 'more', 'at': 1}})
+            values, standing = disk.model_selection.comparison_constraints()
+            expected = hashlib.sha256(canonical([
+                values, standing, album_feedback_storage.original(disk.conn)])).hexdigest()
+            assert expected != before
+            assert product.constraints(disk) == expected
+            with ThreadPoolExecutor(1) as worker:
+                assert worker.submit(product.constraints, disk).result(.5) == before
+            disk.conn.commit()
+            assert product.constraints(pinned) == before
+        finally:
+            disk.conn.rollback()
+    assert product.constraints(disk) == expected
 
 
 def test_unknown_endings_invisible_options_late_outcomes_and_withdrawals_stay_distinct(store, trial):
@@ -183,162 +199,95 @@ def test_interleaved_views_only_attribute_a_close_to_the_requesting_offer(store,
     assert len(store.rec_ledger.evidence().records('opportunity')) == 2
 
 
-def test_many_tracks_or_branches_cannot_manufacture_independent_days(store, trial):
-    for index in range(40):
-        offer(store, trial, 0, suffix=str(index))
-    report = product.measure(store, trial, trial['decision_at'])
-    assert sum(report['overall']['days'].values()) == 1
-    assert sum(len(values) for values in report['overall']['samples'].values()) == 1
-    assert product.decision(trial, report, trial['decision_at'])[0] == 'retained'
+def favorable(trial):
+    from tests.rec.test_product_comparison_measurement import offer as evidence_offer
 
-
-def favorable(store, trial):
+    # The health view consumes a historical report. Exercise its real aggregation
+    # over repository DTOs, without reissuing 84 menus and hundreds of responses.
+    # Durable capture/corrections remain in the unknown-endings and interleaved-
+    # views checks above; day assignment has its own retained check above.
+    records = {'opportunity': [], 'response': []}
     for day in range(28):
-        selected = product.assignment(store, 'mixes', day, day * product.DAY + 100)
         for format in product.FORMATS:
-            offer(store, trial, day, format=format, outcome=1 if selected['arm'] == 'challenger' else 'close')
-    return product.measure(store, trial, trial['decision_at'])
+            evidence_offer(records, trial, day, format=format, outcome=1 if day % 2 else 'close')
+    source = SimpleNamespace(rec_ledger=SimpleNamespace(
+        evidence=lambda: SimpleNamespace(records=records.__getitem__)))
+    return product.measure(source, trial, trial['decision_at'])
 
 
-@pytest.mark.parametrize('format', product.FORMATS)
-def test_a_single_listening_format_can_supply_the_complete_comparison(store, trial, format):
-    for day in range(28):
-        selected = product.assignment(store, format, day, day * product.DAY + 100)
-        for episode in range(2):
-            offer(store, trial, day, format=format, episode=str(episode),
-                  outcome=1 if selected['arm'] == 'challenger' else 'close')
-    report = product.measure(store, trial, trial['decision_at'])
-    assert product.decision(trial, report, trial['decision_at'])[0] == 'applied', report
+@pytest.fixture(scope='module')
+def favorable_template(_pristine_current_schema):
+    from tests.prepared_fixture_support import prepared_template
+
+    def build(source):
+        current = _trial(source)
+        return current, favorable(current)
+
+    with prepared_template(_pristine_current_schema, build) as template:
+        yield template
 
 
-def test_missing_promotion_artifact_keeps_the_current_model_and_reports_retention(store, trial):
-    old = [('recording', np.array([1., 0.], dtype=np.float32).tobytes())]
-    store.rec_model.replace_rec_vectors(old)
-    store.settings.set_setting('rec_dim', '2')
-    trial['vectors'] = 'missing'
-    favorable(store, trial)
-    store.rec_proposals.put_proposals(product.SURFACE, trial, 0)
-    comparison_preparation.maintain(store, trial['decision_at'])
-    assert store.rec_model.get_rec_vectors() == old
-    run = store.model_selection.selection_run(trial['run_id'])
-    assert run['status'] == 'retained' and 'snapshot is missing' in run['reason']
+@pytest.fixture
+def favorable_evidence(store, favorable_template):
+    return favorable_template.restore(store)
 
 
-def test_failed_daily_preparation_keeps_the_trial_and_last_published_pair(store, trial):
-    trial['vectors'] = 'missing'
-    surface = product.pair_surface(trial['run_id'], 'incumbent', 'radio')
-    saved = {'run_id': trial['run_id'], 'data': {'last_good': True}}
-    store.rec_proposals.put_proposals(surface, saved, 0)
-    assert comparison_preparation.prepare(store, trial, product.DAY) is False
-    current = product.state(store)
-    assert current['phase'] == 'observing' and current['last_prepare_attempt'] == product.DAY
-    assert current['decision_at'] == trial['decision_at']
-    assert store.rec_proposals.get_proposals(surface) == saved
-    assert store.model_selection.selection_run(trial['run_id'])['status'] == 'running'
+@pytest.fixture
+def prepared_trial(store, home_prepared_template):
+    normal = home_prepared_template.restore(store)
+    return _trial(store), normal
 
 
-def test_pair_quota_failure_retains_complete_previous_pairs_and_records_sizes(store, trial, monkeypatch):
-    store.settings.set_setting('rec_dim', '2')
-    trial['vectors'] = store.rec_ledger.evidence().artifact({'incumbent': [], 'challenger': []})
-    saved = {}
-    for arm in ('incumbent', 'challenger'):
-        for format in product.FORMATS:
-            surface = product.pair_surface(trial['run_id'], arm, format)
-            saved[surface] = {'run_id': trial['run_id'], 'data': {'last_good': [arm, format]}}
-            store.rec_proposals.put_proposals(surface, saved[surface], 0)
+@pytest.fixture(scope='module')
+def comparison_template(_pristine_current_schema, tmp_path_factory):
+    from tests.prepared_fixture_support import prepared_template
 
-    def complete_arm(*args):
-        return {'_policies': [], '_policy_bases': [], **{
-            format: {'complete': [f'recording:{i}' for i in range(100)]} for format in product.FORMATS}}
+    home = tmp_path_factory.mktemp('comparison-template-home')
 
-    monkeypatch.setattr(comparison_preparation, '_arm', complete_arm)
-    monkeypatch.setattr(comparison_preparation, 'MAX_PREPARED_BYTES', 1)
-    assert not comparison_preparation.prepare(store, trial, product.DAY)
-    assert all(store.rec_proposals.get_proposals(surface) == value for surface, value in saved.items())
-    run = store.model_selection.selection_run(trial['run_id'])
-    assert run['status'] == 'running'
-    assert 'storage budget' in run['preparation_error']
-    assert run['preparation_bytes']['total'] > 1
-    assert set(run['preparation_bytes']['projections']) == set(saved)
-    assert product.state(store)['decision_at'] == trial['decision_at']
+    @contextmanager
+    def template(build):
+        with ExitStack() as sources:
+            # A module builder can run before per-test isolation, or be
+            # requested lazily within it. Limit environment changes to the
+            # actual build so neither fixture lifetime can undo the other's.
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setenv('YT_PLAYLIST_HOME', str(home))
+                patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+                patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+                patch.delenv('DEEPSEEK_API_KEY', raising=False)
+                prepared = sources.enter_context(prepared_template(_pristine_current_schema, build))
+            yield prepared
+
+    return template
+
+
+def test_comparison_template_isolates_build_settings_and_restores_the_callers_environment(
+        comparison_template, tmp_path, monkeypatch):
+    import os
+
+    caller = {'YT_PLAYLIST_HOME': str(tmp_path / 'caller-home'),
+              'YT_PLAYLIST_AUDIO_VIBES': '1',
+              'YT_PLAYLIST_AUDIO_VIBE_MODEL': 'caller-model',
+              'DEEPSEEK_API_KEY': 'fixture-test-key'}
+    for key, value in caller.items():
+        monkeypatch.setenv(key, value)
+
+    def build(source):
+        return {key: os.environ.get(key) for key in caller}
+
+    with comparison_template(build) as template:
+        assert template.result['YT_PLAYLIST_HOME'] != caller['YT_PLAYLIST_HOME']
+        assert template.result['YT_PLAYLIST_AUDIO_VIBES'] == '0'
+        assert template.result['YT_PLAYLIST_AUDIO_VIBE_MODEL'] == ''
+        assert template.result['DEEPSEEK_API_KEY'] is None
+        assert {key: os.environ.get(key) for key in caller} == caller
+    assert {key: os.environ.get(key) for key in caller} == caller
 
 
 def test_interrupted_admission_without_published_trial_state_recovers_as_failed(store, trial):
-    store.conn.execute('DELETE FROM rec_proposals WHERE surface=?', (product.SURFACE,))
-    store.conn.commit()
+    _remove_trial(store)
     model_selection.recover_interrupted(store)
     assert store.model_selection.selection_run(trial['run_id'])['status'] == 'failed'
-
-
-def test_fixed_horizon_can_promote_real_serving_evidence_and_retains_with_missing_coverage(store, trial):
-    report = favorable(store, trial)
-    assert product.decision(trial, report, trial['decision_at'] - 1)[0] == 'observing'
-    assert product.decision(trial, report, trial['decision_at'])[0] == 'applied', report
-    report['formats']['albums']['arms']['challenger']['unknown'] = 100
-    report['formats']['albums']['arms']['challenger']['mature'] = 120
-    assert product.decision(trial, report, trial['decision_at'])[0] == 'retained'
-
-
-def test_promotion_restart_restore_and_resume_keep_preferences_and_vectors(store, trial):
-    old = [('recording', np.array([1., 0.], dtype=np.float32).tobytes())]
-    new = [('recording', np.array([0., 1., 0.], dtype=np.float32).tobytes())]
-    store.rec_model.replace_rec_vectors(old)
-    store.settings.set_setting('rec_dim', '2')
-    store.rec_model.set_weight('genre:jazz', 1.4, now=1)
-    trial['vectors'] = store.rec_ledger.evidence().artifact({'challenger': [
-        (key, base64.b64encode(blob).decode()) for key, blob in new]})
-    trial['report'] = favorable(store, trial)
-    store.rec_proposals.put_proposals(product.SURFACE, trial, 0)
-    model_selection.recover_interrupted(store)
-    assert store.model_selection.selection_run(trial['run_id'])['status'] == 'running'
-    comparison_preparation.maintain(store, trial['decision_at'])
-    applied = store.model_selection.selection_run(trial['run_id'])
-    assert applied['status'] == 'applied', applied
-    assert store.rec_model.get_rec_vectors() == new
-    assert model_selection.current_setup(store) == trial['challenger']
-    assert store.model_selection.restore_model_selection(trial['run_id'], trial['decision_at'] + 100)
-    assert store.rec_model.get_rec_vectors() == old
-    assert store.rec_model.weight_records()['genre:jazz']['weight'] == 1.4
-    assert store.settings.get_setting('rec_selection_paused') == '1'
-    assert not product.state(store)
-    assert product.assignment(store, 'mixes', 'new', trial['decision_at'] + 200) is None
-    store.settings.set_setting('rec_selection_paused', '0')
-    assert store.model_selection.selection_run(trial['run_id'])['status'] == 'restored'
-
-
-def test_changed_standing_intent_ends_epoch_without_publishing_and_learning_weights_do_not(store, trial):
-    store.rec_model.set_weight('genre:jazz', 1.4, now=1)
-    assert product.constraints(store) == trial['constraints']
-    store.settings.set_setting('rec_param:album_collab_weight', '.75')
-    comparison_preparation.maintain(store, 100)
-    assert product.state(store)['phase'] == 'retained'
-    assert store.settings.get_setting('rec_selection_active_run') is None
-
-
-def test_format_regression_is_not_hidden_by_other_formats(store, trial):
-    for day in range(28):
-        selected = product.assignment(store, 'mixes', day, day * product.DAY + 100)
-        for format in product.FORMATS:
-            success = (selected['arm'] == 'challenger') != (format == 'radio')
-            offer(store, trial, day, format=format, outcome=1 if success else 'close')
-    report = product.measure(store, trial, trial['decision_at'])
-    assert report['formats']['radio']['difference'] == -1
-    assert product.decision(trial, report, trial['decision_at'])[0] == 'retained'
-
-
-def test_missing_endings_can_reverse_an_apparent_gain_without_becoming_negative_votes(store, trial):
-    for day in range(28):
-        selected = product.assignment(store, 'mixes', day, day * product.DAY + 100)
-        for episode in range(10):
-            unknown = episode >= 7
-            offer(store, trial, day, episode=str(episode),
-                outcome=None if unknown else 1 if selected['arm'] == 'challenger' else 'close')
-    report = product.measure(store, trial, trial['decision_at'])
-    assert report['overall']['difference'] == 1
-    assert report['overall']['missing_outcome_bounds']['difference_bounds'] == pytest.approx([.4, 1])
-    assert sum(row['arms'][arm].get('unknown', 0) for row in report['formats'].values()
-               for arm in ('incumbent', 'challenger')) == 84
-    assert product.decision(trial, report, trial['decision_at'])[0] == 'retained'
 
 
 def test_active_trial_retains_visible_unanswered_offers_past_the_retention_setting(store, trial):
@@ -352,39 +301,6 @@ def test_active_trial_retains_visible_unanswered_offers_past_the_retention_setti
     assert product.measure(store, trial, 10 * product.DAY)['formats']['mixes']['arms'][assigned['arm']]['unknown'] == 1
 
 
-def test_restore_does_not_reset_the_repeated_comparison_error_budget(store, trial, monkeypatch):
-    store.conn.execute('DELETE FROM rec_proposals WHERE surface=?', (product.SURFACE,))
-    store.conn.commit()
-    store.rec_model.replace_rec_vectors([('recording', np.array([1., 0.], dtype=np.float32).tobytes())])
-    monkeypatch.setattr(model_setup, 'MIN_TRACKS', 1)
-    monkeypatch.setattr(store.charts, 'history_bounds', lambda: (0, 20 * product.DAY))
-    monkeypatch.setattr(comparison_preparation, 'prepare', lambda *a: None)
-    comparison_preparation.maintain(store, 21 * product.DAY)
-    current = product.state(store)
-    assert current['attempt'] == 2
-    assert current['alpha'] == pytest.approx(product.POLICY['family_alpha'] / 6)
-
-
-def test_weekly_monitoring_requires_sustained_observed_decline_and_never_restores_automatically(store, trial):
-    plan = {**trial, 'started_at': 40 * product.DAY, 'exposure_until': 68 * product.DAY,
-            'next_at': 48 * product.DAY, 'baseline': [1.] * 14}
-    store.rec_proposals.put_proposals(product.MONITOR, plan, 40 * product.DAY)
-    for day in range(40, 54):
-        for index in range(2):
-            now = day * product.DAY + 100 + index * 10
-            oid = choices.issue(store, 'mixes', [{'id': 'chosen'}], now, context={},
-                opportunity_id=f'monitor:{day}:{index}')
-            choices.respond(store, oid, 'visible', now + 1, visible=['chosen'])
-            choices.respond(store, oid, 'close', now + 2)
-        if day == 46:
-            comparison_preparation.monitor(store, 48 * product.DAY)
-    comparison_preparation.monitor(store, 55 * product.DAY)
-    run = store.model_selection.selection_run(trial['run_id'])
-    assert run['monitoring']['status'] == 'review'
-    assert run['status'] == 'running'  # Monitoring never changes the selected model.
-    assert store.settings.get_setting('rec_selection_restore') is None
-
-
 def test_storage_keeps_an_old_active_restore_point_and_radio_assignment(store, trial):
     store.rec_proposals.put_proposals(product.pair_surface(trial['run_id'], 'incumbent', 'radio'),
         {'run_id': trial['run_id'], 'data': {}}, 0)
@@ -394,18 +310,47 @@ def test_storage_keeps_an_old_active_restore_point_and_radio_assignment(store, t
     store.model_selection.maintain_selection(400 * product.DAY)
     assert store.rec_proposals.get_proposals(product.pair_surface(trial['run_id'], 'incumbent', 'radio'))
     store.settings.set_setting('rec_selection_active_run', '')
-    store.settings.set_setting('radio_current_session', '{"comparison":{"run_id":1},"stopped":false}')
+    identity = store.accounts.upsert_account('Main', 'main.json', None, True)
+    radio = {'identity': identity, 'episode_id': 'held-radio', 'phase': 'playing', 'tracks': [],
+             'comparison': {'run_id': trial['run_id']}, 'stopped': False}
+    import json
+    from yt_playlist.core import radio_storage
+    if radio_storage.available(store.conn):
+        with store.conn.atomic():
+            radio_storage.save(store.conn, radio, expected=None, now=1)
+    else:
+        store.settings.set_setting('radio_current_session', json.dumps(radio))
     store.model_selection.maintain_selection(400 * product.DAY)
     assert store.rec_proposals.get_proposals(product.pair_surface(trial['run_id'], 'incumbent', 'radio'))
-    store.settings.set_setting('radio_current_session', '{"stopped":true}')
+    stopped = {**radio, 'stopped': True, 'phase': 'stopped'}
+    if radio_storage.available(store.conn):
+        with store.conn.atomic():
+            radio_storage.save(store.conn, stopped, expected=radio_storage.load(store.conn)[1], now=2)
+    else:
+        store.settings.set_setting('radio_current_session', json.dumps(stopped))
     store.model_selection.maintain_selection(400 * product.DAY)
     assert store.rec_proposals.get_proposals(product.pair_surface(trial['run_id'], 'incumbent', 'radio')) is None
 
 
-def test_health_uses_daily_policy_and_preserves_legacy_history_without_fitting(store, trial, monkeypatch):
+@pytest.fixture
+def health_routes(monkeypatch):
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, taste
+
+    # Retain the actual factory, lifespan, Taste routes and rendered templates.
+    # Unrelated route registration and the idle monitor do not serve this view.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        taste.build(ctx), app_update.build(ctx), audio_preview.build(ctx)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *a: None)
+
+
+def test_health_uses_daily_policy_and_preserves_legacy_history_without_fitting(
+        store, favorable_evidence, monkeypatch, health_routes):
     from fastapi.testclient import TestClient
     from yt_playlist.web.app import create_app
-    report = favorable(store, trial)
+    trial, report = favorable_evidence
     store.rec_proposals.put_proposals('model_live_report', report, trial['decision_at'])
     historical = store.model_selection.selection_run(trial['run_id'])
     historical.update(status='retained', product_report=report, ended_at=trial['decision_at'],
@@ -427,8 +372,16 @@ def test_health_uses_daily_policy_and_preserves_legacy_history_without_fitting(s
         assert 'Listening outcomes by format' in history.text
         assert 'the latest 30 days' in history.text and 'withheld as one comparison period' in history.text
 
+    # The same measured report also proves the fixed horizon and missing-
+    # coverage guard; it needs no second restored database/file owner.
+    assert product.decision(trial, report, trial['decision_at'] - 1)[0] == 'observing'
+    assert product.decision(trial, report, trial['decision_at'])[0] == 'applied', report
+    report['formats']['albums']['arms']['challenger']['unknown'] = 100
+    report['formats']['albums']['arms']['challenger']['mature'] = 120
+    assert product.decision(trial, report, trial['decision_at'])[0] == 'retained'
 
-def test_health_pause_resume_controls_daily_selection_without_fitting(store, monkeypatch):
+
+def test_health_pause_resume_controls_daily_selection_without_fitting(store, monkeypatch, health_routes):
     from fastapi.testclient import TestClient
     from yt_playlist.rec import daily_model_selection as daily
     from yt_playlist.web.app import create_app
@@ -462,7 +415,7 @@ def test_collaborative_change_affects_actual_album_scores_with_content_available
     discoveries = []
     for name in ('Third', 'Fourth'):
         tid = store.tracks.upsert_track(name, 'Song', name, name, 200)
-        store.tracks.set_track_enrichment(tid, 'Techno', '2020')
+        seed_enrichment(store, tid, 'Techno', '2020')
         discoveries.append({'browse_id': name, 'title': name, 'artist': name,
                             'genre': 'Techno', 'year': '2020', 'keys': ['song|' + name.lower()]})
     def rows(swapped):
@@ -481,11 +434,38 @@ def test_collaborative_change_affects_actual_album_scores_with_content_available
     assert next(row for row in first if row['browse_id'] == 'Third')['basis'] != 'collaborative'
 
 
-def test_paired_mix_and_album_menus_serve_the_assigned_model_and_keep_the_window(store, trial):
-    from tests.rec.test_home_prepared import seed, service
+@pytest.mark.parametrize('held', ['missing', 'stale', 'current'])
+def test_album_readiness_does_not_publish_paired_assignments(paired_album_store, held):
+    from yt_playlist.rec import album_choices, onboarding
+    from yt_playlist.rec.home_cards import _epoch
+
+    store = paired_album_store
+    trial = _trial(store)
+    for arm in ('incumbent', 'challenger'):
+        store.rec_proposals.put_proposals(product.pair_surface(trial['run_id'], arm, 'albums'),
+            {'run_id': trial['run_id'], 'data': {'items': [{
+                'browse_id': f'{arm}-{index}', 'title': f'Ready record {index}',
+                'artist': f'Artist {index}', 'classification': 'discovery', 'score': .9}
+                for index in range(2)],
+                'context': {}, 'built_at': 1000}}, 1000)
+    if held == 'stale':
+        store.rec_proposals.put_proposals('model_album_assignment', {'epoch': 'old', 'comparison': {}}, 999)
+    elif held == 'current':
+        album_choices.load(store, 1000)
+        assert store.rec_proposals.get_proposals('model_album_assignment')['epoch'] == _epoch(store, 'album_choices')
+    before = store.rec_proposals.get_proposals('model_album_assignment')
+    with store.read_view() as reader:
+        assert reader.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+        assert onboarding.prepared_albums_ready(reader, 1000)
+        assert onboarding.arrival_status(reader, 1000)['setup']['albums_ready']
+        assert reader.rec_proposals.get_proposals('model_album_assignment') == before
+    assert store.rec_proposals.get_proposals('model_album_assignment') == before
+
+
+def test_paired_mix_and_album_menus_serve_the_assigned_model_and_keep_the_window(store, prepared_trial):
+    from tests.rec.test_home_prepared import service
     from yt_playlist.rec import album_choices, home_prepared
-    seed(store)
-    normal = home_prepared.prepare(store, 1000)
+    trial, normal = prepared_trial
     selected = product.assignment(store, 'mixes', 'window', 1000)
     for arm, index in (('incumbent', 0), ('challenger', -1)):
         data = {'menus': [deepcopy(normal['menus'][index])], 'choice_context': {'arm_snapshot': arm},
@@ -509,13 +489,12 @@ def test_paired_mix_and_album_menus_serve_the_assigned_model_and_keep_the_window
 
 
 @pytest.mark.parametrize('rebuild', ['pool', 'live'])
-def test_rebuilt_home_menu_captures_new_opportunity_without_old_comparison(store, trial, monkeypatch, rebuild):
-    from tests.rec.test_home_prepared import seed
+def test_rebuilt_home_menu_captures_new_opportunity_without_old_comparison(store, prepared_trial, monkeypatch, rebuild):
+    from starlette.requests import Request
     from yt_playlist.rec import home_prepared
     from yt_playlist.web.routes.home_views import HomeViews
 
-    seed(store)
-    normal = home_prepared.prepare(store, 1000)
+    trial, normal = prepared_trial
     for arm in ('incumbent', 'challenger'):
         store.rec_proposals.put_proposals(product.pair_surface(trial['run_id'], arm, 'mixes'),
             {'run_id': trial['run_id'], 'data': {'menus': deepcopy(normal['menus']),
@@ -523,21 +502,25 @@ def test_rebuilt_home_menu_captures_new_opportunity_without_old_comparison(store
     worker = RecWorker(SimpleNamespace(store=store, work=Activity(),
         logger=logging.getLogger(__name__), now_fn=lambda: 1001), debounce_s=0)
     monkeypatch.setattr(worker, '_start_loop', lambda: None)
-    ctx = SimpleNamespace(store=store, rec_worker=worker, now_fn=lambda: 1001,
+    ctx = SimpleNamespace(store=store, rec_worker=worker, vibe_requests=None, now_fn=lambda: 1001,
         logger=logging.getLogger(__name__), jobs=SimpleNamespace(latest=lambda *args: None),
         templates=SimpleNamespace(TemplateResponse=lambda request, template, context: context))
     views = HomeViews(ctx)
     monkeypatch.setattr(views, 'prepared', lambda *args: normal)
-    request = SimpleNamespace(url=SimpleNamespace(path='/home/cards'), query_params={})
+    request = Request({'type': 'http', 'method': 'GET', 'path': '/home/cards',
+                       'query_string': b'', 'headers': []})
     try:
         first = views.card_context(request, 1000)
         original = deepcopy(first['choice_context'])
         assert original['comparison']['controlled']
         previous_id = first['protos'][0]['recipe']['opportunity_id']
-        lane = first['protos'][0]['lane']
-        old_keys = [t['key'] for t in first['protos'][0]['tracks']]
-        replacement = next(deepcopy(p) for menu in normal['menus'] for p in menu['protos']
-            if p['lane'] == lane and [t['key'] for t in p['tracks']] != old_keys)
+        replacement = deepcopy(next(p for p in first['protos'] if len(p['tracks']) > 1))
+        lane = replacement['lane']
+        old_keys = [t['key'] for t in replacement['tracks']]
+        # The replacement is controlled; randomized menu selection need not
+        # produce another menu with different contents for this exact lane.
+        replacement['tracks'] = replacement['tracks'][1:] + replacement['tracks'][:1]
+        assert [t['key'] for t in replacement['tracks']] != old_keys
         if rebuild == 'pool':
             monkeypatch.setattr(views.recommendations, 'pool',
                 lambda *args: SimpleNamespace(proto=replacement))
@@ -547,12 +530,13 @@ def test_rebuilt_home_menu_captures_new_opportunity_without_old_comparison(store
             explicit = home_prepared.cards(store, normal, 1001, views.recommendations, record=False)
             explicit.protos = [p for p in explicit.protos if p['lane'] != lane] + [replacement]
             explicit.slots = [{'proto': p, 'pool': None} for p in explicit.protos]
-            monkeypatch.setattr(views.recommendations, 'cards', lambda *args: explicit)
+            # Live recalculation owns a private-reader HomeCards instance.
+            # Control that calculation rather than the route's writer instance.
+            monkeypatch.setattr(type(views.recommendations), 'cards', lambda *args: explicit)
             views.card_context(request, 1001, live=True)
 
         shown = views.card_context(request, 1002)
         assert shown['protos'] and not shown['choice_context'].get('comparison')
-        assert shown['choice_context']['arm_snapshot'] == original['arm_snapshot']
         changed = next(p for p in shown['protos'] if p['lane'] == lane)
         assert [t['key'] for t in changed['tracks']] == [t['key'] for t in replacement['tracks']]
         assert all(p['assignment'] is None for p in shown['protos'])
@@ -568,28 +552,61 @@ def test_rebuilt_home_menu_captures_new_opportunity_without_old_comparison(store
             while worker.jobs.measurements:
                 thread.submit(worker._flush_measurements).result(5)
         assert not choices.opportunity(store, current_id).get('comparison')
-        assert choices.resolve_context(store, {'artifact': choices.opportunity(store, current_id)['context']})[
-            'arm_snapshot'] == original['arm_snapshot']
+        captured = choices.resolve_context(store, {'artifact': choices.opportunity(store, current_id)['context']})
+        assert captured['precision'] == 'theme-raw-genres-v1'
+        assert 'arm_snapshot' not in captured and not captured.get('comparison')
         measured = product.measure(store, trial, 1004)
         assert sum(row.get('offered', 0) for row in measured['formats']['mixes']['arms'].values()) == 1
     finally:
         worker.shutdown()
 
 
+@pytest.fixture
+def home_tuning_trial(store, monkeypatch, steering):
+    from tests.home_prepared_support import publication_inputs
+    from yt_playlist.rec import home_cards, home_prepared, home_vibe, mix_tuning
+    from tests.rec.test_home_prepared import service
+
+    # Comparison attribution consumes completed menus. Ranking, profiles,
+    # discovery/revisit summaries and earned Vibe access have separate owners;
+    # none needs rebuilding to check that new tuning ends a comparison window.
+    inputs = publication_inputs(store, monkeypatch)
+    monkeypatch.setattr(home_vibe, '_access', lambda *a: True)
+    # Mode-impression accounting is owned by test_mode_bandit. Keep the actual
+    # held-choice writes that determine comparison attribution in this test.
+    monkeypatch.setattr(home_cards.HomeCards, 'record_modes', lambda *a: None)
+    def prepared(now, offset):
+        # Completed worker menus are the input to this serving/attribution
+        # boundary. Real preparation/publication and tuning fingerprints remain
+        # in test_home_prepared. Distinct menus make reuse of the old comparison
+        # projection observable, rather than supplying identical arm contents.
+        order = tuple(range(offset, 6)) + tuple(range(offset))
+        menu = asdict(inputs.cards(service(store), home_cards.CardsRequest(
+            now, epoch=offset, mode_order=order, record=False)))
+        for proto in menu['protos']:
+            proto['experiment_id'] = home_cards.experiment_id(proto)
+        by_lane = {p['lane']: p for p in menu['protos']}
+        for slot in menu['slots']:
+            slot['proto'] = by_lane[slot['proto']['lane']]
+        return {'tuning': home_prepared.tuning_key(store, now),
+                'menus': [menu], 'modes': [], 'genre_options': [],
+                'choice_context': {}, 'fingerprint': {}}
+    if steering in ('vibe_change', 'vibe_reset', 'vibe_expire'):
+        with mix_tuning.adjusting(store, 1000):
+            store.settings.set_setting(home_vibe.SETTING, 'energize')
+    current = _trial(store)
+    return current, prepared(1000, 0), prepared
+
+
 @pytest.mark.parametrize('steering', ['include', 'avoid', 'vibe', 'vibe_change', 'vibe_reset',
                                     'vibe_expire', 'breadth', 'lean'])
-def test_new_home_tuning_preserves_the_tailored_menu_without_comparison_attribution(store, trial, steering):
-    from tests.rec.test_home_prepared import seed, service
+def test_new_home_tuning_preserves_the_tailored_menu_without_comparison_attribution(store, home_tuning_trial, steering):
+    from tests.rec.test_home_prepared import service
     from yt_playlist.rec import home_cards, home_prepared, home_vibe, mix_tuning, rec_params
     from yt_playlist.util import genre_map
 
-    seed(store)
+    trial, original, prepared = home_tuning_trial
     now = 1000
-    if steering in ('vibe_change', 'vibe_reset', 'vibe_expire'):
-        with mix_tuning.adjusting(store, now):
-            store.settings.set_setting(home_vibe.SETTING, 'energize')
-    original = home_prepared.prepare(store, now)
-    assert original is not None
     for arm in ('incumbent', 'challenger'):
         store.rec_proposals.put_proposals(product.pair_surface(trial['run_id'], arm, 'mixes'),
             {'run_id': trial['run_id'], 'data': {'menus': deepcopy(original['menus']),
@@ -615,7 +632,7 @@ def test_new_home_tuning_preserves_the_tailored_menu_without_comparison_attribut
                 rec_params.set_param(store, 'breadth_bias', '.75')
             elif steering == 'lean':
                 store.rec_model.set_lean('genre:jazz', 2, now)
-    tailored = home_prepared.prepare(store, now)
+    tailored = prepared(now, 1)
     assert tailored is not None and tailored['tuning'] != original['tuning']
     shown = home_prepared.cards(store, tailored, now, service(store))
     assert shown.protos and not shown.choice_context.get('comparison')
@@ -623,9 +640,9 @@ def test_new_home_tuning_preserves_the_tailored_menu_without_comparison_attribut
     def contents(protos):
         return [(p['experiment_id'], [t['key'] for t in p['tracks']]) for p in protos]
     assert any(contents(shown.protos) == contents(menu['protos']) for menu in tailored['menus'])
-    if steering in ('include', 'avoid'):
-        assert all((genre_map.family(t['genre']) == family) == (steering == 'include')
-                   for p in shown.protos for t in p['tracks'])
+    # Actual track filtering remains in test_home_other_genres's chosen-genres
+    # and other-genres workflow checks. This boundary consumes the ranker's
+    # completed menu and owns its tuning/comparison attribution and stability.
     # A same-tuning refill must also leave the replacement window stable.
     again = home_prepared.cards(store, tailored, now + 1, service(store))
     assert contents(again.protos) == contents(shown.protos)

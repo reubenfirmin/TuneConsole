@@ -3,193 +3,193 @@
 Reports load a coherent set of detached inputs on a private snapshot. Recommendation
 services own statistical interpretation; this repository owns persistence and retention.
 """
-import json
-
-from yt_playlist.repos.base import Repo, synchronized, snapshot_read
-from yt_playlist.repos.scorecard_attribution import Attribution
+from yt_playlist.core import album_playback_context, playback_bindings, served_facts
+from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
+from yt_playlist.repos.scorecard_attribution import ScorecardFacts
 from yt_playlist.repos import policy_storage
 
-RESPONSE_RETAIN_DAYS = 90
 RETENTION_BATCH_SIZE = 256
-POLICY_RETENTION_CURSOR = 'rec_policy_retention_cursor'
 
 
 class RecLedgerRepo(Repo):
     @synchronized
-    def bind_choice_playback(self, identity_id, playlist, video, opportunity, option, now, window_s):
-        """Small exact-context index for delayed player observations; raw evidence stays in JSON.
-
-        Retain recent track bindings across a restart and a direction change. Evicted or expired
-        observations remain unattributed. The bound is a storage/work limit, not a taste weight.
-        """
-        rows = json.loads(self._store.settings.get_setting('listening_playback_bindings') or '[]')
-        key = (identity_id, playlist, video)
-        rows = [row for row in rows if 0 <= now - row['at'] <= window_s
-                and (row['identity_id'], row['playlist'], row['video']) != key]
-        rows.append({'identity_id': identity_id, 'playlist': playlist, 'video': video,
-                     'opportunity_id': opportunity, 'option_id': str(option), 'at': now})
-        self._store.settings.set_setting('listening_playback_bindings', json.dumps(rows[-64:]))
+    def mix_choices_available(self):
+        from yt_playlist.core import mix_choices
+        return mix_choices.available(self.conn)
 
     @synchronized
-    def choice_playback(self, identity_id, playlist, video, now, window_s):
-        rows = json.loads(self._store.settings.get_setting('listening_playback_bindings') or '[]')
-        return next((row for row in reversed(rows)
-                     if (row['identity_id'], row['playlist']) == (identity_id, playlist)
-                     and (video is None or row['video'] == video)
-                     and 0 <= now - row['at'] <= window_s), None)
+    def publish_mix_menu(self, plan):
+        from yt_playlist.core import mix_choices
+        with self.conn.atomic():
+            mix_choices.insert_menu(self.conn, plan)
 
     @synchronized
-    def evidence(self):
-        """Size replay evidence from current library membership, including after imports."""
-        from yt_playlist.core.evidence_ledger import EvidenceLedger, library_byte_budget
-        from yt_playlist.core import paths
-        store = self._store
-        directory = (store._db_path.parent / (store._db_path.name + ".evidence") if store._db_path
-                     else paths.data_dir() / "test-evidence" / store._evidence_key)
-        recordings = self.conn.execute(
+    def mix_projection_facts(self, opportunity_id, context_id, *, mixes):
+        from yt_playlist.core import mix_choices
+        return mix_choices.projection_facts(self.conn, opportunity_id, context_id, mixes=mixes)
+
+    @snapshot_read
+    def mix_descriptor(self, descriptor_id):
+        from yt_playlist.core import mix_choices
+        return mix_choices.read_descriptor(self.conn, descriptor_id)
+
+    @snapshot_read
+    def album_context_available(self):
+        return album_playback_context.available(self.conn)
+
+    @snapshot_read
+    def album_context_values(self):
+        return album_playback_context.load_native(self.conn)
+
+    @synchronized
+    def put_album_context(self, value, album_id):
+        with self.conn.atomic():
+            album_playback_context.put_native(self.conn, value, album_id)
+
+    @synchronized
+    def bind_album_context(self, pending, account_id):
+        with self.conn.atomic():
+            album_playback_context.bind_native(self.conn, pending, account_id)
+
+    @lookup_read
+    def has_served_request(self, request_id):
+        return self.conn.execute('SELECT 1 FROM rec_served_impressions WHERE request_id=? LIMIT 1',
+                                 (request_id,)).fetchone() is not None
+
+    @lookup_read
+    def playback_bindings_available(self):
+        return playback_bindings.available(self.conn)
+
+    @lookup_read
+    def video_exists(self, video):
+        return self.conn.execute('SELECT 1 FROM youtube_items WHERE video_id=?', (video,)).fetchone() is not None
+
+    @synchronized
+    def put_choice_binding(self, account_id, playlist, video, opportunity, option, now, *, before, limit):
+        with self.conn.atomic():
+            playback_bindings.insert(self.conn, account_id, playlist, video, opportunity, option, now,
+                                     before=before, limit=limit)
+
+    @lookup_read
+    def choice_binding(self, account_id, playlist, video, *, before, through):
+        return playback_bindings.lookup(self.conn, account_id, playlist, video, before=before, through=through)
+
+    @synchronized
+    def library_recording_count(self):
+        return self.conn.execute(
             'SELECT COUNT(DISTINCT e.recording_id) FROM library_memberships m '
             'JOIN catalog_entries e ON e.id=m.entry_id').fetchone()[0]
-        return EvidenceLedger(directory, library_byte_budget(recordings))
 
     @synchronized
-    def publish_prepared_policies(self, rows, bases=()) -> None:
-        """Join the snapshot publisher's transaction without committing proposals early."""
-        policy_storage.publish(self.conn, rows, bases, enforce_budget=True)
-
-    @snapshot_read
-    def policy_configuration(self, version):
-        return policy_storage.configuration(self.conn, version)
-
-    @snapshot_read
-    def scorecard_inputs(self, start, end, outcome_window_h=24,
-                         impression_id=None, experiments_only=False):
-        """Detach one coherent live impression range and its historical outcome ownership."""
+    def scorecard_impressions(self, start, end, *, impression_id, experiments_only):
+        """Detach impressions in the supplied report range."""
+        live = served_facts.expression(self.conn, 'policy_kind', "COALESCE(json_extract(provenance,'$.policy_kind'),'live')")
+        comparison = served_facts.expression(self.conn, 'comparison_id', "json_extract(provenance,'$.experiment.comparison_id')")
+        columns = '*'
+        if served_facts.available(self.conn):
+            columns = ('id,request_id,surface,lane,mode_id,identity_key,rank,score,model_version,served_at,'
+                       'recording_id,raw_identity_key,CASE WHEN EXISTS('
+                       'SELECT 1 FROM served_facts f WHERE f.impression_id=id) THEN \'{}\' '
+                       'ELSE provenance END provenance')
         impressions = [dict(r) for r in self.conn.execute(
-            "SELECT * FROM rec_served_impressions WHERE served_at>=? AND served_at<? "
-            "AND COALESCE(json_extract(provenance,'$.policy_kind'),'live')='live' "
-            "AND (?=0 OR json_extract(provenance,'$.experiment.comparison_id') IS NOT NULL) "
+            f"SELECT {columns} FROM rec_served_impressions WHERE served_at>=? AND served_at<? "
+            f"AND {live}='live' AND (?=0 OR {comparison} IS NOT NULL) "
             "AND (? IS NULL OR id=?) ORDER BY served_at,id",
             (start, end, experiments_only, impression_id, impression_id)).fetchall()]
-        horizon = max(0.0, float(outcome_window_h)) * 3600.0
-        attribution = Attribution(self.conn, {r['identity_key'] for r in impressions}, start, end, horizon)
-        return impressions, attribution
+        if served_facts.available(self.conn):
+            facts = {row['impression_id']: row for row in self.conn.execute(
+                'SELECT f.* FROM served_facts f JOIN rec_served_impressions i ON i.id=f.impression_id '
+                'WHERE i.served_at>=? AND i.served_at<?', (start, end))}
+            for row in impressions:
+                if row['id'] in facts:
+                    row['facts'] = dict(facts[row['id']])
+        return impressions
 
-    @snapshot_read
-    def served_recommendation_inputs(self, impression_id):
+    def scorecard_facts(self):
+        return ScorecardFacts(self._store)
+
+    @synchronized
+    def served_recommendation_facts(self, impression_id):
         row = self.conn.execute(
             "SELECT i.* FROM rec_served_impressions i WHERE i.id=?",
             (impression_id,)).fetchone()
         if row is None:
             return None
         result = dict(row)
-        result["provenance"] = json.loads(result["provenance"])
-        result["configuration"] = policy_storage.configuration(self.conn, result['model_version'])
-        pool = result["provenance"].get("pool_policy")
-        result["pool_configuration"] = policy_storage.configuration(self.conn, str(pool)) if pool else None
-        inputs = (None if result["provenance"].get("policy_kind") == "counterfactual" else
-                  self.scorecard_inputs(result["served_at"], result["served_at"] + 1,
-                                        impression_id=impression_id))
-        return result, inputs
+        result['facts'] = None
+        if served_facts.available(self.conn):
+            fact = self.conn.execute('SELECT * FROM served_facts WHERE impression_id=?', (impression_id,)).fetchone()
+            if fact is not None:
+                result['facts'] = dict(fact)
+        return result
 
-    @snapshot_read
-    def experiment_inputs(self, start, end, mature_end):
-        inputs = self.scorecard_inputs(start, mature_end, experiments_only=True)
+    @synchronized
+    def experiment_shadows(self, start, end):
+        ranker = served_facts.expression(self.conn, 'ranker', "json_extract(provenance,'$.ranker')")
+        comparison = served_facts.expression(self.conn, 'comparison_id', "json_extract(provenance,'$.experiment.comparison_id')")
+        kind = served_facts.expression(self.conn, 'policy_kind', "json_extract(provenance,'$.policy_kind')")
         shadows = self.conn.execute(
-            "SELECT json_extract(provenance,'$.ranker') ranker,COUNT(*) rows,"
-            "COUNT(DISTINCT json_extract(provenance,'$.experiment.comparison_id')) opportunities "
+            f"SELECT {ranker} ranker,COUNT(*) rows,COUNT(DISTINCT {comparison}) opportunities "
             "FROM rec_served_impressions WHERE served_at>=? AND served_at<? "
-            "AND json_extract(provenance,'$.policy_kind')='counterfactual' GROUP BY ranker",
+            f"AND {kind}='counterfactual' GROUP BY ranker",
             (start, end)).fetchall()
-        return inputs, [dict(r) for r in shadows]
+        return [dict(r) for r in shadows]
 
     @synchronized
-    def claim_home_offers(self, epoch, signatures, now):
-        """Deduplicate actual offers; home_shown is the ledger's reserved proposal key."""
-        if getattr(self._store, 'activity_paused', False):
-            return set(signatures)
-        row = self.conn.execute("SELECT payload FROM rec_proposals WHERE surface='home_shown'").fetchone()
-        try:
-            previous = json.loads(row[0]) if row else {}
-        except (ValueError, TypeError):
-            previous = {}
-        if not isinstance(previous, dict):
-            previous = {}
-        shown = set(previous.get("signatures", [])) if previous.get("epoch") == epoch else set()
-        unseen = set(signatures) - shown
-        if unseen:
-            # Only the current window is retained; a new window is a new actual opportunity.
-            self.conn.execute(
-                "INSERT INTO rec_proposals(surface,payload,built_at) VALUES ('home_shown',?,?) "
-                "ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload,built_at=excluded.built_at",
-                (json.dumps({"epoch": epoch, "signatures": sorted(shown | unseen)[-100:]}), now))
-            self.conn.commit()
-        return unseen
-
-    # --- #113 served recommendation -> observed outcome ledger -------------------------------
-    @synchronized
-    def record_serving_policy(self, version, configuration, now) -> None:
-        self.conn.execute(
-            "INSERT OR IGNORE INTO rec_serving_policies VALUES (?,?,?)",
-            (version, json.dumps(configuration, sort_keys=True), now))
-        self.conn.commit()
-
-    @synchronized
-    def record_prepared_policies(self, rows, bases=()) -> None:
-        """Store policy JSON that was calculated and encoded off the serving connection."""
-        with self.conn:
-            policy_storage.publish(self.conn, rows, bases, enforce_budget=True)
-
-    def record_recommendation_outcomes(self, event_id, kind, keys, now, generated=False) -> None:
-        if kind not in {"open", "start", "save", "promotion"}:
-            raise ValueError("unsupported recommendation response")
-        rows = [(event_id, kind, key, now, int(generated)) for key in set(keys) if key]
-        self._insert_recommendation_outcomes(rows)
-        self._prune_response_batch(now - RESPONSE_RETAIN_DAYS * 86400)
-
-    @synchronized
-    def _insert_recommendation_outcomes(self, rows):
+    def insert_recommendation_outcomes(self, rows):
         self.conn.executemany(
             "INSERT OR IGNORE INTO rec_response_events(event_id,kind,identity_key,at,is_generated) "
             "VALUES (?,?,?,?,?)", rows)
         self.conn.commit()
 
-    def record_served_impressions(self, request_id, surface, items, now, prune_before=None, *,
-                                  policies=(), bases=()) -> None:
-        """Persist final live order or an explicitly marked counterfactual replay.
-
-        ``items`` are dictionaries containing lane/key/rank plus optional mode_id, score and
-        provenance. The request/rank uniqueness key makes an HTMX retry idempotent. Instrumentation
-        is fail-open at route call sites. Retention catches up in bounded batches,
-        releasing the serving lock between insertion and each cleanup transaction.
-        """
-        rows = []
-        for item in items:
-            key = item.get("identity_key") or item.get("key")
-            if not key:
-                continue
-            rows.append((request_id, surface, item.get("lane") or "", item.get("mode_id"), key,
-                         int(item["rank"]), item.get("score"), item.get("model_version") or "unknown",
-                         json.dumps(item.get("provenance") or {}, sort_keys=True), now))
-        self._insert_served_impressions(rows, policies=policies, bases=bases)
-        if prune_before is not None:
-            self._prune_impression_batch(prune_before)
-            self._prune_response_batch(prune_before)
-            self._prune_policy_batch(prune_before)
-
     @synchronized
-    def _insert_served_impressions(self, rows, *, policies=(), bases=()):
-        with self.conn:
-            policy_storage.publish(self.conn, policies, bases)
+    def insert_served_impressions(self, rows, *, versions):
+        with self.conn.atomic():
             if rows:
                 self.conn.executemany(
                     "INSERT OR IGNORE INTO rec_served_impressions("
                     "request_id,surface,lane,mode_id,identity_key,rank,score,model_version,provenance,served_at) "
                     "VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
-                versions = []
-                for row in rows:
-                    pool = json.loads(row[8]).get('pool_policy')
-                    versions.extend((row[7], str(pool) if pool is not None else None))
                 policy_storage.refresh_references(self.conn, versions)
+
+    @lookup_read
+    def served_facts_active(self):
+        return served_facts.active(self.conn)
+
+    @lookup_read
+    def served_facts_available(self):
+        return served_facts.available(self.conn)
+
+    @synchronized
+    def reserve_impression_ids(self, rows):
+        with self.conn.atomic():
+            identity = self.conn.execute('SELECT next_id FROM served_fact_state WHERE id=1').fetchone()[0]
+            identity = max(identity, self.conn.execute('SELECT COALESCE(max(id),0)+1 FROM rec_served_impressions').fetchone()[0])
+            reserved, seen = [], set()
+            for index, row in enumerate(rows):
+                key = row[0], row[1], row[5]
+                if key in seen or self.conn.execute(
+                        'SELECT 1 FROM rec_served_impressions WHERE request_id=? AND surface=? AND rank=?', key).fetchone():
+                    continue
+                seen.add(key)
+                reserved.append((identity, index))
+                identity += 1
+            self.conn.execute('UPDATE served_fact_state SET next_id=? WHERE id=1', (identity,))
+            return reserved
+
+    @synchronized
+    def insert_reserved_impressions(self, rows, *, versions):
+        with self.conn.atomic():
+            for identity, row, facts in rows:
+                inserted = self.conn.execute(
+                    'INSERT INTO rec_served_impressions(id,request_id,surface,lane,mode_id,identity_key,rank,'
+                    'score,model_version,provenance,served_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) '
+                    'ON CONFLICT(request_id,surface,rank) DO NOTHING', (identity, *row))
+                if inserted.rowcount:
+                    self.conn.execute('INSERT INTO served_facts(impression_id,' + ','.join(served_facts.FIELDS) +
+                        ') VALUES (' + ','.join('?' for _ in range(1 + len(served_facts.FIELDS))) + ')', (identity, *facts))
+                    self.conn.execute('DELETE FROM served_diagnostic_retirements WHERE impression_id=?', (identity,))
+            policy_storage.refresh_references(self.conn, versions)
 
     @synchronized
     def _prune_impression_batch(self, before):
@@ -210,22 +210,42 @@ class RecLedgerRepo(Repo):
             (before, RETENTION_BATCH_SIZE))
         self.conn.commit()
 
-    def _prune_policy_batch(self, before):
-        with self._store.read_snapshot() as snapshot:
-            versions, cursor = policy_storage.retention_candidates(snapshot.store.conn,
-                before + policy_storage.GRACE_SECONDS, limit=RETENTION_BATCH_SIZE,
-                cursor_key=POLICY_RETENTION_CURSOR)
-            snapshot.publish(lambda: policy_storage.prune(self.conn, versions, cursor,
-                cursor_key=POLICY_RETENTION_CURSOR))
-
     @synchronized
     def lane_impression_counts(self, since=None) -> dict:
         """Actual exposure counts from the unified ledger, excluding replay rows."""
+        kind = served_facts.expression(self.conn, 'policy_kind', "COALESCE(json_extract(provenance,'$.policy_kind'),'live')")
         rows = self.conn.execute(
             "SELECT lane,COUNT(*) c FROM rec_served_impressions WHERE (? IS NULL OR served_at>=?) "
-            "AND COALESCE(json_extract(provenance,'$.policy_kind'),'live')='live' GROUP BY lane",
+            f"AND {kind}='live' GROUP BY lane",
             (since, since)).fetchall()
         return {r["lane"]: r["c"] for r in rows}
+
+    @synchronized
+    def expire_diagnostics(self, before, *, limit):
+        with self.conn.atomic():
+            identities = [row[0] for row in self.conn.execute('SELECT f.impression_id FROM rec_served_impressions i '
+                'JOIN served_facts f ON f.impression_id=i.id WHERE i.served_at<? AND f.diagnostic_expired=0 '
+                'ORDER BY i.served_at,i.id LIMIT ?', (before, limit))]
+            self.conn.executemany('UPDATE served_facts SET diagnostic_expired=1 WHERE impression_id=?', [(i,) for i in identities])
+            self.conn.executemany('INSERT OR IGNORE INTO served_diagnostic_retirements VALUES (?)', [(i,) for i in identities])
+
+    @synchronized
+    def diagnostic_retirements(self, *, limit):
+        return [row[0] for row in self.conn.execute('SELECT r.impression_id FROM served_diagnostic_retirements r '
+            'LEFT JOIN served_facts f ON f.impression_id=r.impression_id '
+            'WHERE f.impression_id IS NULL OR f.diagnostic_expired=1 ORDER BY r.impression_id LIMIT ?', (limit,))]
+
+    @synchronized
+    def acknowledge_diagnostic_retirements(self, identities):
+        with self.conn.atomic():
+            self.conn.executemany('DELETE FROM served_diagnostic_retirements WHERE impression_id=?', [(i,) for i in identities])
+
+    @synchronized
+    def existing_impressions(self, identities):
+        if not identities:
+            return set()
+        return {row[0] for row in self.conn.execute('SELECT id FROM rec_served_impressions WHERE id IN (' +
+            ','.join('?' for _ in identities) + ')', identities)}
 
     @synchronized
     def story_views(self) -> dict:
@@ -235,15 +255,15 @@ class RecLedgerRepo(Repo):
                     "SELECT item_key,views,last_shown FROM rec_impressions WHERE surface='into_recently'")}
 
     @synchronized
-    def record_story_views(self, subjects, now) -> bool:
-        """Collapse fragment replacements, retries and repeated visits within six hours."""
+    def record_story_views(self, subjects, now, *, surface, cooldown_s) -> bool:
+        """Increment views only after the caller's supplied cooldown."""
         changed = False
-        for subject in set(subjects):
+        for subject in subjects:
             cursor = self.conn.execute(
                 "INSERT INTO rec_impressions(surface,item_key,views,last_shown) "
-                "VALUES ('into_recently',?,1,?) ON CONFLICT(surface,item_key) DO UPDATE "
+                "VALUES (?,?,1,?) ON CONFLICT(surface,item_key) DO UPDATE "
                 "SET views=rec_impressions.views+1,last_shown=excluded.last_shown "
-                "WHERE rec_impressions.last_shown<=excluded.last_shown-21600", (subject, now))
+                "WHERE rec_impressions.last_shown<=excluded.last_shown-?", (surface, subject, now, cooldown_s))
             changed |= cursor.rowcount > 0
         self.conn.commit()
         return changed
@@ -255,19 +275,12 @@ class RecLedgerRepo(Repo):
         total. Drives per-card rotation: a card holds its content for erosion_view_cap views, then
         epoch = (views-1)//cap advances and it regenerates. Ticked once per genuine Home visit
         (never on steer/stance previews) so tuning your taste model doesn't churn the cards."""
-        row = self.conn.execute(
-            "SELECT views FROM rec_impressions WHERE surface='card' AND item_key=?", (card,)).fetchone()
-        n = (row["views"] + 1) if row else 1
-        if row:
-            self.conn.execute("UPDATE rec_impressions SET views=?, last_shown=? "
-                              "WHERE surface='card' AND item_key=?", (n, now, card))
-        else:
-            self.conn.execute("INSERT INTO rec_impressions(surface,item_key,views,last_shown) "
-                              "VALUES('card',?,1,?)", (card, now))
-        self.conn.commit()
-        return n
+        with self.conn.atomic():
+            return self.conn.execute("INSERT INTO rec_impressions(surface,item_key,views,last_shown) "
+                "VALUES('card',?,1,?) ON CONFLICT(surface,item_key) DO UPDATE SET "
+                "views=rec_impressions.views+1,last_shown=excluded.last_shown RETURNING views", (card, now)).fetchone()[0]
 
-    @synchronized
+    @lookup_read
     def card_views(self, card) -> int:
         """Current view total for a Home card (0 if never shown), read-only, so previews and
         re-renders can compute the card's rotation epoch without advancing it."""
@@ -276,20 +289,23 @@ class RecLedgerRepo(Repo):
         return row["views"] if row else 0
 
     @synchronized
-    def refresh_card(self, card, cap, now) -> None:
-        """Refresh button: jump a Home card to the START of its NEXT rotation epoch (a fresh, unseen
-        slice) and reset its view clock there, so it holds the new slice for the next `cap` views.
-        epoch = (views-1)//cap, so landing at (epoch+1)*cap+1 advances one epoch and resets the clock."""
-        cap = max(1, cap)
-        row = self.conn.execute(
-            "SELECT views FROM rec_impressions WHERE surface='card' AND item_key=?", (card,)).fetchone()
-        cur = row["views"] if row else 0
-        # current epoch is (cur-1)//cap; jump to the first view of the next epoch: (epoch+1)*cap + 1
-        new_views = (max(0, cur - 1) // cap + 1) * cap + 1
-        if row:
-            self.conn.execute("UPDATE rec_impressions SET views=?, last_shown=? "
-                              "WHERE surface='card' AND item_key=?", (new_views, now, card))
-        else:
-            self.conn.execute("INSERT INTO rec_impressions(surface,item_key,views,last_shown) "
-                              "VALUES('card',?,?,?)", (card, new_views, now))
+    def bump_card_views(self, cards, now, *, overrides):
+        """Advance all counters belonging to one Home visit together."""
+        with self.conn.atomic():
+            counts = {}
+            for card in cards:
+                views = overrides.get(card)
+                counts[card] = self.conn.execute(
+                    "INSERT INTO rec_impressions(surface,item_key,views,last_shown) VALUES('card',?,?,?) "
+                    "ON CONFLICT(surface,item_key) DO UPDATE SET views=COALESCE(?,rec_impressions.views+1),"
+                    "last_shown=excluded.last_shown RETURNING views",
+                    (card, 1 if views is None else views, now, views)).fetchone()[0]
+            return counts
+
+    @synchronized
+    def set_card_views(self, card, views, now) -> None:
+        """Persist the view count calculated inside the caller's write unit."""
+        self.conn.execute("INSERT INTO rec_impressions(surface,item_key,views,last_shown) "
+                          "VALUES('card',?,?,?) ON CONFLICT(surface,item_key) DO UPDATE "
+                          "SET views=excluded.views,last_shown=excluded.last_shown", (card, views, now))
         self.conn.commit()

@@ -14,11 +14,10 @@ def source_step(store, now, *, batch=32, seconds=2):
     key = store.musical_profiles.pending()
     if not key:
         return False
-    dependencies = {(table, 'key:' + key) for table in (
-        'rec_musical_pending', 'rec_musical_sources', 'rec_musical_links', 'rec_musical_source_profiles')}
+    dependencies, observation_ids = store.musical_profiles.source_dependencies(key)
     try:
         with work_budget(seconds), store.read_snapshot(dependencies=dependencies) as snapshot:
-            item = snapshot.store.musical_profiles.source_input(key, batch)
+            item = snapshot.store.musical_profiles.source_input(key, batch, observation_ids=observation_ids)
             if item is None:
                 return False
             source, pending, ids = item
@@ -27,7 +26,7 @@ def source_step(store, now, *, batch=32, seconds=2):
             if len(payload.encode()) > 512 * 1024:
                 raise WorkBudgetExceeded('Source profile output exceeds byte budget')
             check_stopping()
-            if snapshot.publish(lambda: store.musical_profiles.publish_source(
+            if snapshot.publish_ordered(lambda: store.musical_profiles.publish_source(
                     key, pending, ids, payload, profiles.VERSION,
                     profiles.digest(profile), now, batch)):
                 return True
@@ -58,3 +57,26 @@ def recordings(reader, rows, *, inputs=None):
         profile['sources_truncated'] = truncated
         result.append((key, profiles.canonical(profile), profiles.VERSION, profiles.digest(profile)))
     return result
+
+
+def masked_recordings(reader, rows, *, inputs=None):
+    """Prepare metadata conditioning with own observations removed before resolve.
+
+    Source scope admission must precede the repository's source/byte limits.
+    Prepared target profiles cannot be unmasked, so always start from inputs.
+    """
+    if inputs is None:
+        inputs = reader.musical_profiles.recording_inputs([row[0] for row in rows],
+                                                        source_scopes=('artist', 'release'))
+    masked, allowed = [], {}
+    for key, revision, raw, digest, different in rows:
+        content = json.loads(raw)
+        for features in content.values():
+            if features is not None:
+                features['audio'] = {}
+        sources, overrides, truncated = inputs[key]
+        if any(source['scope'] not in ('artist', 'release') for source in sources):
+            raise ValueError('Masked metadata requires source admission before source limits')
+        allowed[key] = (sources, {name: value for name, value in overrides.items() if name == 'genre'}, truncated)
+        masked.append((key, revision, json.dumps(content), digest, different))
+    return recordings(None, masked, inputs=allowed)

@@ -7,7 +7,7 @@ def _legacy(store, wanted):
             for r in store.conn.execute(
                 "SELECT t.identity_key k,t.title,t.artist,t.album,t.video_id vid,t.thumbnail thumb,t.genre "
                 "FROM playable_library_tracks t WHERE t.title<>'' AND EXISTS "
-                "(SELECT 1 FROM track_artists ta WHERE ta.entry_id=t.id AND ta.artist_id=?) "
+                "(SELECT 1 FROM entry_artists ta WHERE ta.entry_id=t.id AND ta.artist_id=?) "
                 "ORDER BY t.identity_key", (wanted,))]
 
 
@@ -59,15 +59,20 @@ def test_artist_expansion_work_is_bounded_by_requested_catalog(store):
     after, large, plan = _measured(store, artist)
     assert after == before
     assert large <= small * 2 + 500
-    assert any("ix_track_artist_subject" in step for step in plan)
+    assert any("ix_entry_artist_subject" in step for step in plan)
     assert any("ix_entries_recording" in step for step in plan)
-    indexes = [step for step in plan if "ix_track_artist_subject" in step or "ix_entries_recording" in step]
+    indexes = [step for step in plan if "ix_entry_artist_subject" in step or "ix_entries_recording" in step]
     print(f"Artist expansion: 8 matches, library 8 to 1508; VM steps {small} to {large}; indexes: {indexes}")
 
 
 def test_many_requested_artists_deduplicate_across_batches(store):
     credits = [{"name": f"Credit {i}"} for i in range(401)]
-    store.tracks.upsert_track("shared", "Collaboration", "Credit 0", "Album", 200, credits=credits)
+    # Put this recording's two credits in different 400-artist query batches.
+    # The remaining artists are real lookup subjects, not an oversized credit.
+    for credit in credits:
+        store.artists.ensure_artist(credit['name'])
+    store.tracks.upsert_track("shared", "Collaboration", "Credit 0", "Album", 200,
+                             credits=[credits[0], credits[-1]])
     rows = store.rec_query.tracks_by_artists([c["name"] for c in credits])
     assert len(rows) == 1
     assert rows[0]["video_id"] == "shared"

@@ -59,7 +59,8 @@ class RadioPolicy:
 
     @staticmethod
     def genre_mismatch(view: CandidateView, history: PlaybackHistory, track):
-        return not GenrePolicy(view.candidates.tuning["theme"], [], current=history.current).allows(track)
+        return not GenrePolicy(view.candidates.tuning["theme"], [], current=history.current,
+                               store=view.candidates.store).allows(track)
 
     def pick(self, view: CandidateView):
         view.candidates.refresh_exclusions(self.now_fn())
@@ -128,7 +129,7 @@ class RadioPolicy:
         for event in store.player_events.player_events_since(max(context.started_at, now - 45), kind="track_exit"):
             video, at = event["video_id"], event["at"]
             token = ("exit", video, at, event["position"], event["duration"])
-            if (event["playlist_ytm_id"] != context.playlist or event["identity_id"] != context.identity
+            if (event["playlist_ytm_id"] != context.playlist or event["account_id"] != context.identity
                     or video not in context.starts or at < context.starts[video] or video == context.observed_video
                     or token in seen):
                 continue

@@ -127,7 +127,7 @@ def _segue_order(items, journey, seed, feat):
     rows = []
     for item in items:
         features = feat(item)
-        rows.append((item, features["artist"], genre_map.family(features["genre"])))
+        rows.append((item, features["artist"], features.get('family',genre_map.family(features["genre"]))))
     rng.shuffle(rows)
     out = [rows.pop(0)]
     smooth = journey == "smooth_segue"

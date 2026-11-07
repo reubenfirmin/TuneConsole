@@ -1,6 +1,6 @@
+from tests.file_content_support import age_file
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
-import os
 
 import pytest
 
@@ -8,6 +8,7 @@ from yt_playlist.core.evidence_ledger import (
     EvidenceBudgetExceeded, EvidenceConflict, EvidenceLedger, canonical, library_byte_budget,
 )
 from yt_playlist.core.store import Store
+from yt_playlist.core import fao
 
 
 def test_retry_conflict_restart_and_safe_paths(tmp_path):
@@ -41,7 +42,7 @@ def test_failed_publication_keeps_previous_evidence(tmp_path, monkeypatch):
     def fail(*args):
         raise OSError("disk full")
 
-    monkeypatch.setattr("yt_playlist.core.evidence_ledger.os.link", fail)
+    monkeypatch.setattr("yt_playlist.core.fao.os.replace", fail)
     with pytest.raises(OSError, match="disk full"):
         ledger.put("response", "new", {"choice": "B"})
     assert ledger.get("response", "new") is None
@@ -51,18 +52,23 @@ def test_failed_publication_keeps_previous_evidence(tmp_path, monkeypatch):
 
 def test_repository_evidence_survives_restart_and_reader_uses_same_ledger(tmp_path):
     path = tmp_path / "state.db"
+    context = {'saved': {'track_count': 1}, 'model': {'revision': 'original'}}
     first = Store(path)
     first.init_schema()
     try:
-        first.rec_ledger.evidence().put("opportunity", "one", {"id": "one"})
+        identity = first.rec_ledger.evidence().artifact(context)
+        offer = {'id': 'one', 'context': identity, 'observed_at': 100}
+        first.rec_ledger.evidence().put('opportunity', 'one', offer)
         with first.read_snapshot() as snapshot:
-            assert snapshot.store.rec_ledger.evidence().get("opportunity", "one") == {"id": "one"}
+            assert snapshot.store.rec_ledger.evidence().get('opportunity', 'one') == offer
+            assert snapshot.store.rec_ledger.evidence().get('artifact', identity) == context
     finally:
         first.conn.close()
     second = Store(path)
     second.init_schema()
     try:
-        assert second.rec_ledger.evidence().get("opportunity", "one") == {"id": "one"}
+        assert second.rec_ledger.evidence().get('opportunity', 'one') == offer
+        assert second.rec_ledger.evidence().get('artifact', identity) == context
     finally:
         second.conn.close()
 
@@ -98,7 +104,7 @@ def test_capacity_error_reports_record_and_only_missing_artifact_bytes(tmp_path,
         assert ledger.artifact(manifest) == identity
     record = {'id': 'new', 'context': identity, 'observed_at': 100}
     required = len(canonical(record)) + (0 if existing_manifest else len(canonical(manifest)))
-    used = sum(path.stat().st_size for path in tmp_path.glob('*/*/*.json'))
+    used = sum(fao.read(path).info.logical_bytes for path in tmp_path.glob('*/*/*.json'))
     ledger.byte_budget = used + required - 1
     with pytest.raises(EvidenceBudgetExceeded) as failure:
         ledger.put('opportunity', 'new', record, artifact=manifest)
@@ -127,7 +133,8 @@ def test_reusing_an_immutable_prepared_manifest_renews_its_component_grace(tmp_p
     manifest = {'saved': {'$artifact': component}}
     identity = ledger.artifact(manifest)
     for path in tmp_path.glob('artifact/*/*.json'):
-        os.utime(path, (1, 1))
+        age_file(path, mtime_ns=10 ** 9)
+        assert fao.read(path).info.mtime_ns == 10**9
     assert ledger.artifact(manifest) == identity
     ledger.maintain(10**12, orphan_before=time.time() - 60)
     assert ledger.get('artifact', identity) == manifest
@@ -177,12 +184,39 @@ def test_generation_reader_waits_for_the_event_publication_boundary(tmp_path, mo
     assert second_ledger.get('response', 'event') == {'kind': 'choice'}
 
 
-def test_retiring_unanswered_events_advances_the_event_generation(tmp_path):
+@pytest.mark.parametrize('kind', ['expired', 'visible', 'open'])
+def test_retiring_unanswered_events_advances_the_event_generation(tmp_path, monkeypatch, kind):
+    from yt_playlist.core.activity import WorkBudgetExceeded
+    from yt_playlist.core.evidence_retirement import Retirements
     ledger = EvidenceLedger(tmp_path, byte_budget=1024 * 1024)
-    context = ledger.artifact({})
+    context = ledger.artifact({'padding': 'x' * 20000})
     ledger.put('opportunity', 'old', {'id': 'old', 'observed_at': 1, 'context': context})
     previous = ledger.generation()
-    assert ledger.maintain(2)['retired_unanswered'] == 1
+    if kind == 'expired':
+        result = ledger.maintain(2)
+    else:
+        ledger.put('response', 'passive', {'id': 'passive', 'opportunity_id': 'old',
+                                         'kind': kind, 'observed_at': 2})
+        age_file(ledger._path('artifact', context), mtime_ns=10 ** 9)
+        used = sum(fao.read(path).info.logical_bytes for path in tmp_path.glob('*/*/*.json'))
+        ledger.byte_budget = int(used / .95)
+        delete = fao.delete
+        def interrupted(path, **options):
+            removed = delete(path, **options)
+            if path == ledger._path('opportunity', 'old') and removed:
+                raise WorkBudgetExceeded('Deadline after offer unlink')
+            return removed
+        with monkeypatch.context() as patch:
+            patch.setattr(fao, 'delete', interrupted)
+            with pytest.raises(WorkBudgetExceeded):
+                ledger.maintain(0, orphan_before=9000, pressure_before=9000)
+        ledger = EvidenceLedger(tmp_path, ledger.byte_budget)
+        assert ledger.maintain(0, protected_opportunities={'old'})['deferred']
+        assert ledger.get('response', 'passive')
+        result = ledger.maintain(0, orphan_before=9000, pressure_before=9000)
+        assert ledger.get('response', 'passive') is None
+        assert not Retirements(tmp_path).offers and not result['deferred']
+    assert result['retired_unanswered'] == 1
     assert ledger.generation() != previous
 
 
@@ -198,14 +232,14 @@ def test_orphan_grace_is_independent_of_choice_retention_and_protects_components
     ledger.put('response', 'selected', {'id': 'selected', 'opportunity_id': 'choice',
                                        'kind': 'choice', 'observed_at': 101})
     for identity in (component, prepared, orphan, chosen, reused):
-        os.utime(ledger._path('artifact', identity), (100, 100))
-    os.utime(ledger._path('artifact', in_flight), (1000, 1000))
+        age_file(ledger._path('artifact', identity), mtime_ns=100 * 10 ** 9)
+    age_file(ledger._path('artifact', in_flight), mtime_ns=1000 * 10 ** 9)
     result = ledger.maintain(50, protected_artifacts=[prepared], orphan_before=900)
     assert ledger.get('artifact', orphan) is None
     for identity in (component, prepared, in_flight, chosen, reused):
         assert ledger.get('artifact', identity) is not None
     assert ledger.get('response', 'selected') is not None
-    assert result['used_bytes'] == sum(p.stat().st_size for p in tmp_path.glob('*/*/*.json'))
+    assert result['used_bytes'] == sum(fao.read(p).info.logical_bytes for p in tmp_path.glob('*/*/*.json'))
 
 
 def test_capacity_tracks_library_growth_without_counting_discovery_or_duplicate_entries(store):
@@ -246,8 +280,8 @@ def test_capacity_retires_oldest_unanswered_graphs_and_preserves_protected_roots
         ledger.put('response', name, {'id': name, 'opportunity_id': name,
                                      'kind': kind, 'observed_at': 50})
     for path in tmp_path.glob('artifact/*/*.json'):
-        os.utime(path, (100, 100))
-    used = sum(path.stat().st_size for path in tmp_path.glob('*/*/*.json'))
+        age_file(path, mtime_ns=100 * 10 ** 9)
+    used = sum(fao.read(path).info.logical_bytes for path in tmp_path.glob('*/*/*.json'))
     ledger.byte_budget = int(used / .95)
     result = ledger.maintain(0, orphan_before=9000, pressure_before=9000,
                             protected_opportunities={'active', 'pending'})
@@ -263,7 +297,7 @@ def test_capacity_retires_oldest_unanswered_graphs_and_preserves_protected_roots
     second_ledger = EvidenceLedger(tmp_path, ledger.byte_budget)
     assert second_ledger.put('response', 'later-choice', {'choice': 'kept'})
     assert int((tmp_path / '.budget').read_text()) == sum(
-        path.stat().st_size for path in tmp_path.glob('*/*/*.json'))
+        fao.read(path).info.logical_bytes for path in tmp_path.glob('*/*/*.json'))
 
 
 def test_capacity_never_discards_protected_evidence_when_it_cannot_recover(tmp_path):
@@ -302,8 +336,8 @@ def test_pending_write_reclaims_old_optional_graphs_but_preserves_learning_and_s
     ledger.put('opportunity', 'old-again', duplicate)
     records['old-again'] = duplicate
     for path in tmp_path.glob('artifact/*/*.json'):
-        os.utime(path, (1, 1))
-    used = sum(path.stat().st_size for path in tmp_path.glob('*/*/*.json'))
+        age_file(path, mtime_ns=10 ** 9)
+    used = sum(fao.read(path).info.logical_bytes for path in tmp_path.glob('*/*/*.json'))
     ledger.byte_budget = used + 100
     required_record = {'id': 'choice', 'opportunity_id': 'held', 'kind': 'choice',
                        'observed_at': 11, 'details': 'x' * 300}
@@ -335,7 +369,7 @@ def test_pending_write_reclaims_old_optional_graphs_but_preserves_learning_and_s
     restarted = EvidenceLedger(tmp_path, ledger.byte_budget)
     assert restarted.get('response', 'choice') == required_record
     assert int((tmp_path / '.budget').read_text()) == sum(
-        path.stat().st_size for path in tmp_path.glob('*/*/*.json'))
+        fao.read(path).info.logical_bytes for path in tmp_path.glob('*/*/*.json'))
 
 
 def test_pending_write_reports_shortfall_without_releasing_required_context(tmp_path):
@@ -343,7 +377,7 @@ def test_pending_write_reports_shortfall_without_releasing_required_context(tmp_
     context = ledger.artifact({'required': 'x' * 1000})
     record = {'id': 'held', 'context': context, 'observed_at': 1}
     ledger.put('opportunity', 'held', record)
-    used = sum(path.stat().st_size for path in tmp_path.glob('*/*/*.json'))
+    used = sum(fao.read(path).info.logical_bytes for path in tmp_path.glob('*/*/*.json'))
     ledger.byte_budget = used + 100
     result = ledger.maintain(0, protected_opportunities={'held'}, orphan_before=100,
                              compacted_contexts={context}, context_before=0,

@@ -49,6 +49,20 @@ def _neighborhoods(state: DraftState) -> ArtistNeighborhoods:
                                state.setdefault("artist_contexts", {}))
 
 
+def _refresh_genre_families(state, store, candidates=()) -> bool:
+    """Detach one current family interpretation for picking and persisted accounting."""
+    rows = [*(state.get('pool') or []), *(state.get('picked') or []), *candidates]
+    contexts = list((state.get('artist_contexts') or {}).values())
+    genres = [*state.get('inputs', {}).get('genres', []),
+              *(row.get('genre') for row in [*rows, *contexts])]
+    axes = store.genres.feature_axes(genres)
+    previous = state.get('genre_families') or {}
+    state['genre_families'] = {genre:axis[0] for genre,axis in axes.items()}
+    for row in [*rows, *contexts]:
+        row['family'] = axes.get(row.get('genre'), ('', ''))[0]
+    return any(previous.get(genre)!=family for genre,family in state['genre_families'].items())
+
+
 def _repair_artist_clusters(state):
     """Apply neighborhood repair to draft controls and queued work, without acquisition."""
     neighborhoods = _neighborhoods(state)
@@ -92,24 +106,25 @@ def _pool_targets(recipe):
             min(MAX_OTHER_POOL, max(12, int(slots * POOL_SLACK * 0.6))))
 
 
-def repick(state: DraftState, store, now=0.0) -> DraftState:
+def repick(state: DraftState, store, now=0.0, *, own_pool=None) -> DraftState:
     """Re-draw the whole playlist under the state's current mix, familiarity, genre/era quotas and
     crossed-out slots. Mutates and returns `state` (picked, stats, axes).
 
     Their side comes from the draft's cached pool - it cost network time to assemble. Your side is
-    read fresh from the library every time (own_candidates, ~30ms of local SQL): the collection is
-    the pool, so there is nothing to cache and nothing to run out of. No network either way, so this
-    stays instant."""
+    read fresh from the library for each transition. A draft start can pass its freshly detached
+    pool rather than reading it twice. The full collection remains eligible, without network I/O."""
+    own = own_candidates(store, now, state) if own_pool is None else own_pool
+    _refresh_genre_families(state, store, own)
     _repair_artist_clusters(state)
     for party in ("mine", "theirs"):
         state["axes"][party] = road_trip_axes.normalize(state["axes"][party], state["targets"][party])
-    pool = own_candidates(store, now, state) + [c for c in state["pool"] if c["source"] != "mine"]
+    pool = own + [c for c in state["pool"] if c["source"] != "mine"]
     result = road_trip_mix.construct(road_trip_mix.MixRequest(
         candidates=pool, own_pct=state["own_pct"], familiarity_pct=state["familiarity_pct"],
         target_minutes=state["target_minutes"], seed=state["seed"],
         artists=state.get("inputs", {}).get("artists", []), genres=state.get("inputs", {}).get("genres", []),
         targets=state.get("targets") or {}, banned=state["banned"], previous=state.get("prev") or [],
-        building=bool(state.get("building"))),
+        building=bool(state.get("building")),genre_families=state['genre_families']),
         random.Random(state["seed"]))
     groups, picked, short = result.groups, result.picked, result.short
     state["blend_available"] = result.blend_available
@@ -155,6 +170,12 @@ def reroll_slot(state: DraftState, store, index, now=0.0) -> DraftState:
     side = "mine" if gone.get("source") == "mine" else "theirs"
     pool = (own_candidates(store, now, state) if side == "mine"
             else [c for c in state["pool"] if c["source"] != "mine"])
+    if _refresh_genre_families(state, store, pool):
+        eligible = pool if side=='mine' else own_candidates(store,now,state)
+        if side != 'mine':
+            _refresh_genre_families(state, store, eligible)
+        state['blend_available'] = any(c['video_id'] not in banned and _mix_source(c,state)=='blend'
+                                       for c in eligible)
     # ...and, where a slider is pinned, from the same genre/decade, so one swap can't breach a quota.
     quotas = _quota_weights(state, side, [])
     cands = [c for c in pool
@@ -189,9 +210,9 @@ def start_draft(store, recipe, now, seed, previous=None) -> DraftState:
     _, other_size = _pool_targets(recipe)
     pending = ([{"kind": "artist", "name": a} for a in (recipe["artists"] or []) if a]
                + [{"kind": "genre", "name": g} for g in (recipe["genres"] or []) if g])
-    # Their side is the only thing the draft holds a pool for; yours is read from the library on
-    # every re-pick (own_candidates), so there is nothing to assemble here.
-    bare = sum(1 for c in own_candidates(store, now) if not (c["genre"] and c["year"]))
+    # Reuse this transition's detached library pool for readiness and its first pick.
+    own = own_candidates(store, now, recipe)
+    bare = sum(1 for c in own if not (c["genre"] and c["year"]))
     state: DraftState = {"recipe_id": recipe["id"], "name": recipe["name"], "seed": seed,
              "own_pct": recipe["own_pct"],
              "blacklist_genres": list(recipe.get("blacklist_genres") or []),
@@ -212,7 +233,7 @@ def start_draft(store, recipe, now, seed, previous=None) -> DraftState:
              "inputs": {"artists": list(recipe["artists"] or []),
                         "genres": list(recipe["genres"] or []),
                         }}
-    return repick(state, store, now)
+    return repick(state, store, now, own_pool=own)
 
 
 def add_other_input(state: DraftState, store, client, item) -> DraftState:
@@ -369,24 +390,21 @@ def finish_draft(state: DraftState, store, now=0.0) -> DraftState:
     return repick(state, store, now)
 
 
-def build_draft(store, client, recipe, now, seed, previous=None) -> DraftState:
-    """Assemble a whole draft in one blocking call. The incremental path (start_draft +
-    add_other_input + finish_draft) is what the web route uses; this is its synchronous equivalent,
-    for callers with nothing to show progress to."""
-    state = start_draft(store, recipe, now, seed, previous)
-    while state["pending"]:
-        add_other_input(state, store, client, state["pending"].pop(0))
-    fill_own_facts(state, store, now)
-    return finish_draft(state, store, now)
-
-
 def normalized(state: DraftState, store=None, now=0.0) -> DraftState:
     """Bring a stored draft up to the current shape. A draft is persisted JSON, so one written by an
     earlier build can outlive the code that wrote it (the page reopens the last draft); every field
     added since then has to arrive with a default rather than as a missing key the template blows up
-    on. Mutates and returns `state`. With a store, repair stale artist clusters and re-pick from
-    the corrected pool so reopening and saving an old draft use the same tracks."""
+    on. Mutates and returns `state`. With a store, refresh current families without redrawing;
+    stale artist clusters and older mix versions can require a re-pick from the corrected pool."""
     normalize_shape(state)
+    if store is not None and _refresh_genre_families(state, store):
+        # A family edit changes availability too. Refresh the local eligibility
+        # pool only when meanings change, while retaining every selected slot.
+        banned = set(state['banned'])
+        own = own_candidates(store,now,state)
+        _refresh_genre_families(state,store,own)
+        state['blend_available'] = any(c['video_id'] not in banned and _mix_source(c,state)=='blend'
+                                       for c in own)
     repaired = _repair_artist_clusters(state)
     # Existing unsaved drafts otherwise retain the old duration-based, underfilled Blend draw
     # indefinitely. Reopening repairs it locally; a playlist already saved to YouTube stays put.
@@ -442,7 +460,11 @@ def set_share(state: DraftState, party, axis, share, store, now=0.0) -> DraftSta
                 continue
             queued = set(state.get("done_widening", [])) | {p.get("widen_key") for p in state["pending"]}
             fresh = []
-            for term in road_trip_axes.widen_terms(state["pool"], state.get("inputs", {}).get("genres", []), key):
+            family_genres = {}
+            for row in store.genres.taxonomy()['genres']:
+                family_genres.setdefault(row['family'],[]).append(row['name'])
+            for term in road_trip_axes.widen_terms(state["pool"], state.get("inputs", {}).get("genres", []), key,
+                                                  family_genres=family_genres):
                 widen_key = f"{key}:{target}:{budget}:{term}"
                 if widen_key not in queued:
                     fresh.append({"kind": "genre", "name": term, "want": key,

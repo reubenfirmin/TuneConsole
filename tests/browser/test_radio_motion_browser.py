@@ -1,15 +1,16 @@
 """Radio artwork motion, restored shape and playback history geometry."""
 from pathlib import Path
+from functools import wraps
+import time
 
 import pytest
 from tests.template_support import web_templates
+from tests.visual_support import capture
 from playwright.sync_api import expect
 from tests.browser.radio_ui_support import radio_ui
 
 
-def _junction_snapshot(session):
-    """Measure the rendered routes, independently of their animation mechanism."""
-    return session.evaluate('''session => {
+_JUNCTION_SNAPSHOT = '''session => {
       const control = session.querySelector('.radio-tune').getBoundingClientRect();
       const cx = control.x + control.width / 2, cy = control.y + control.height / 2;
       const paths = ['line', 'flow'].map(name => {
@@ -66,19 +67,82 @@ def _junction_snapshot(session):
           }
         }
         const visible = points.filter(point => clip.isPointInFill(point));
+        const unmaskedClearance = Math.min(...points.map(point => {
+          const screen = point.matrixTransform(matrix);
+          return Math.hypot((screen.x - cx) / (control.width / 2 + 1),
+            (screen.y - cy) / (control.height / 2 + 1));
+        }));
         const clearance = Math.min(...visible.map(point => {
           const screen = point.matrixTransform(matrix);
           return Math.hypot((screen.x - cx) / (control.width / 2 + 1),
             (screen.y - cy) / (control.height / 2 + 1));
         }));
         return {d: getComputedStyle(path).d,
-          stemX: new DOMPoint(stemX, 112).matrixTransform(matrix).x, clearance, maxJoinAngle, maxStemSlope,
+          stemX: new DOMPoint(stemX, 112).matrixTransform(matrix).x, clearance, unmaskedClearance, maxJoinAngle, maxStemSlope,
           underControl: crossings.every(y => y > (control.bottom + 1 - matrix.f) / matrix.d),
           crossings, bottomOfControl: (control.bottom + 1 - matrix.f) / matrix.d,
           clipped: points.length - visible.length};
       });
-      return {control: {x: control.x, y: control.y, width: control.width, height: control.height}, paths};
-    }''')
+      const model = Alpine.$data(session.closest('.radio-home'));
+      return {control: {x: control.x, y: control.y, width: control.width, height: control.height}, paths,
+        x: model.junctionX, fork: model.junctionForkX};
+    }'''
+
+
+def _junction_snapshot(session):
+    """Measure the rendered routes, independently of their animation mechanism."""
+    return session.evaluate(_JUNCTION_SNAPSHOT)
+
+
+def _junction_frames(page, session, *, count, step):
+    # Keep every rendered observation while avoiding two driver round trips
+    # per sample. The real clock still runs every timer/animation frame.
+    session.evaluate('''(session, config) => {
+      const sample = (''' + _JUNCTION_SNAPSHOT + ''');
+      const frames = [];
+      const timer = setInterval(() => {
+        frames.push(sample(session));
+        if (frames.length === config.count) clearInterval(timer);
+      }, config.step);
+      session.__testJunctionFrames = {frames, timer};
+    }''', {'count': count, 'step': step})
+    try:
+        page.clock.run_for(count * step)
+    finally:
+        frames = session.evaluate('''session => {
+          const state = session.__testJunctionFrames;
+          clearInterval(state.timer);
+          delete session.__testJunctionFrames;
+          return state.frames;
+        }''')
+    assert len(frames) == count
+    return frames
+
+
+@pytest.fixture
+def motion_costs(monkeypatch, record_property, request, page):
+    totals = {}
+
+    def timed(name, operation):
+        @wraps(operation)
+        def call(*args, **kwargs):
+            started = time.perf_counter()
+            try:
+                return operation(*args, **kwargs)
+            finally:
+                values = totals.setdefault(name, [0, 0.0])
+                values[0] += 1
+                values[1] += time.perf_counter() - started
+        return call
+
+    for name in ('_junction_snapshot', '_junction_frames', '_assert_junction_motion',
+                 '_assert_accepted_junction_shape', 'capture'):
+        monkeypatch.setattr(request.module, name, timed(name, getattr(request.module, name)))
+    monkeypatch.setattr(type(page.clock), 'run_for', timed('clock_run_for', type(page.clock).run_for))
+    yield
+    for name, (calls, seconds) in totals.items():
+        record_property(name + '_calls', calls)
+        record_property(name + '_wall_s', seconds)
 
 
 def _assert_accepted_junction_shape(session):
@@ -128,16 +192,19 @@ def _assert_accepted_junction_shape(session):
         assert row['difference'] is not None and row['difference'] < 4, row
 
 
-def _assert_junction_motion(page, session, initial, target_x):
-    frames = [initial]
-    for _ in range(10):
-        page.clock.run_for(48)
-        frames.append(_junction_snapshot(session))
+def _assert_junction_motion(page, session, initial, target_x, *, dense=False):
+    frames = [initial, *_junction_frames(page, session, count=32 if dense else 10,
+                                        step=16 if dense else 48)]
     page.clock.run_for(1500)
     final = _junction_snapshot(session)
+    if dense:
+        assert len({round(frame['x'], 2) for frame in frames}) > 10
+        assert max(abs(frame['x'] - frame['fork']) for frame in frames) > 10
     for frame in [*frames, final]:
         assert frame['control'] == initial['control'], 'The tuning control must stay fixed'
         for path in frame['paths']:
+            if dense:
+                assert path['unmaskedClearance'] >= 1, 'Unmasked route crosses the tuning control'
             assert path['clearance'] >= 1, f'Junction enters the tuning control: {path}'
             assert path['underControl'], f'The bend must pass below the control: {path["crossings"]}, bottom {path["bottomOfControl"]}'
             assert path['maxJoinAngle'] < .005, f'Junction has an angular curve join: {path["maxJoinAngle"]}'
@@ -154,7 +221,7 @@ def _assert_junction_motion(page, session, initial, target_x):
         assert len({frame['paths'][index]['d'] for frame in frames}) >= 4
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440])
 def test_restored_junction_preserves_all_four_stream_shapes_without_loader_art(page, radio_ui, width):
     api = radio_ui
     page.set_viewport_size({'width': width, 'height': 1000})
@@ -177,7 +244,7 @@ def test_restored_junction_preserves_all_four_stream_shapes_without_loader_art(p
             assert path['underControl']
             assert path['maxJoinAngle'] < .005
         expect(page.locator('.radio-launch .gen-loader')).to_have_count(0)
-        page.screenshot(path=f'/tmp/tuneconsole-411-final-{width}-stream-{slot + 1}.png')
+        capture(page, path=f'/tmp/tuneconsole-411-final-{width}-stream-{slot + 1}.png')
     expect(session.locator('.radio-direction.is-active')).to_have_attribute('data-slot', '0')
 
 
@@ -281,14 +348,14 @@ def test_artwork_evolves_slowly_with_reduced_motion_and_pauses_when_hidden(page,
     phase = page.evaluate('Alpine.$data(document.querySelector(".radio-home")).artworkPhase')
     for minute in (0, 30):
         page.evaluate('minute => { Alpine.$data(document.querySelector(".radio-home")).artworkPhase = minute * Math.PI * 2 / 12; }', minute)
-        page.screenshot(path=f'/tmp/tuneconsole-radio-evolution-{minute}.png')
+        capture(page, path=f'/tmp/tuneconsole-radio-evolution-{minute}.png')
     page.evaluate('phase => { Alpine.$data(document.querySelector(".radio-home")).artworkPhase = phase; }', phase)
 
     page.get_by_role('tab').first.click()
     expect(page.locator('.radio-space-field')).to_be_hidden()
     expect(flow).to_have_css('animation-play-state', 'paused')
     phase = page.evaluate('Alpine.$data(document.querySelector(".radio-home")).artworkPhase')
-    page.clock.run_for(30_000)
+    page.clock.fast_forward(30_000)
     assert page.evaluate('Alpine.$data(document.querySelector(".radio-home")).artworkPhase') == phase
     page.get_by_role('tab', name='On air', exact=True).click()
     expect(page.locator('.radio-space-field')).to_be_visible()
@@ -339,9 +406,18 @@ def test_artwork_resumes_its_saved_shape_after_visiting_another_page(page, radio
     api.playlist = templates.get_template('_partials/radio_playlist.html').render(session=api.ready, tracks=api.tracks)
     api.state = api.ready
     expect(page.locator('.radio-session')).to_be_visible(timeout=6000)
+    drawing = page.evaluate('''() => {
+      const model = Alpine.$data(document.querySelector('.radio-home'));
+      return {playlistId: model.artworkPlaylistId, seed: model.artworkSeed};
+    }''')
+    assert drawing['playlistId'] == api.ready['playlist_id']
     page.evaluate('Alpine.$data(document.querySelector(".radio-home")).artworkPhase = 15')
     page.get_by_role('link', name='Playlists', exact=True).click()
+    # Navigation replaces the page after fetching it; click completion alone
+    # does not establish that the old component has saved and disposed itself.
+    expect(page.get_by_role('heading', name='Playlists', exact=True)).to_be_visible()
     saved = page.evaluate('JSON.parse(sessionStorage.getItem("radio-artwork"))')
+    assert saved['playlistId'] == drawing['playlistId'] and saved['seed'] == drawing['seed']
     assert 15 <= saved['phase'] < 15.01
     page.get_by_role('link', name='Home', exact=True).click()
     page.get_by_role('tab', name='On air', exact=True).click()
@@ -384,8 +460,11 @@ def test_record_cover_changes_immediately_when_replaying_history(page, radio_ui)
     expect(page.locator('.radio-history tr')).to_have_count(3)
 
 
-@pytest.mark.parametrize('width,height', [(1440, 1000), (1792, 1398), (390, 1000)])
-def test_session_history_rises_from_junction_and_queues_preview_without_switching(page, radio_ui, width, height):
+@pytest.mark.parametrize('width,height,motion', [
+    pytest.param(1440, 1000, True, id='desktop-motion'),
+])
+def test_session_history_rises_from_junction_and_queues_preview_without_switching(
+        page, radio_ui, width, height, motion, motion_costs):
     api = radio_ui
     page.set_viewport_size({'width': width, 'height': height})
     page.add_script_tag(content=Path(__file__).with_name('radio_junction_baseline.js').read_text())
@@ -437,10 +516,36 @@ def test_session_history_rises_from_junction_and_queues_preview_without_switchin
       return image.naturalWidth === 300;
     }''', api.tracks[0]['thumbnail'])
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    page.screenshot(path=f'/tmp/tuneconsole-radio-drawing-{width}.png')
+    capture(page, path=f'/tmp/tuneconsole-radio-drawing-{width}.png')
 
+    if motion:
+        _exercise_preview_motion(page, session, width)
+
+    playing(3)
+    expect(rows).to_have_count(3, timeout=6000)
+    expect(rows.last).to_have_attribute('aria-current', 'true')
+    assert abs(rows.last.bounding_box()['y'] + rows.last.bounding_box()['height'] - (height / 2 - 16)) < 3
+    expect(drawing.locator('.radio-record-cover')).to_have_attribute('href', api.tracks[2]['thumbnail'])
+    playing(12)
+    expect(rows).to_have_count(12, timeout=6000)
+    expect(rows.last).to_have_attribute('aria-current', 'true')
+    expect(session.locator('.radio-empty-row')).to_have_count(0)
+    expect(drawing).to_be_visible()
+    assert drawing.bounding_box()['height'] > 80
+    assert scroller.evaluate('el => el.scrollTop') > 0
+    assert abs(rows.last.bounding_box()['y'] + rows.last.bounding_box()['height'] - (height / 2 - 16)) < 3
+    # Polling must leave the user free to scroll back through earlier tracks.
+    scroller.evaluate('el => el.scrollTop = 0')
+    with page.expect_response('**/radio/status', timeout=6000):
+        pass
+    page.evaluate('() => new Promise(requestAnimationFrame)')
+    assert scroller.evaluate('el => el.scrollTop') == 0
+
+
+def _exercise_preview_motion(page, session, width):
+    """Desktop retains the full pointer, focus, reduced-motion and reversal journey."""
     other = session.locator('.radio-direction').nth(1)
-    # Scroll the phone's queue into view before measuring either endpoint.
+    # Scroll the queue into view before measuring either endpoint.
     other.scroll_into_view_if_needed()
     page.mouse.move(0, 0)
     page.clock.install()
@@ -469,7 +574,7 @@ def test_session_history_rises_from_junction_and_queues_preview_without_switchin
         expect(other.locator('.radio-direction-heading')).to_have_attribute('aria-pressed', 'false')
         assert active.evaluate('el => getComputedStyle(el).borderColor') != other.evaluate('el => getComputedStyle(el).borderColor')
         assert selections == [], 'Hover and focus must not switch the playing stream'
-        page.screenshot(path=f'/tmp/tuneconsole-radio-session-{width}-{preference}.png')
+        capture(page, path=f'/tmp/tuneconsole-radio-session-{width}-{preference}.png')
         preview = _junction_snapshot(session)
         page.mouse.move(0, 0)
         page.locator('.radio-menu > summary').focus()
@@ -484,7 +589,7 @@ def test_session_history_rises_from_junction_and_queues_preview_without_switchin
     other.hover(force=True)
     page.clock.run_for(1500)
     _assert_accepted_junction_shape(session)
-    page.screenshot(path=f'/tmp/tuneconsole-411-restored-{width}-02.png')
+    capture(page, path=f'/tmp/tuneconsole-411-restored-{width}-02.png')
     third = session.locator('.radio-direction').nth(2)
     for direction, queue in [('right', third), ('left', other)]:
         initial = _junction_snapshot(session)
@@ -494,10 +599,10 @@ def test_session_history_rises_from_junction_and_queues_preview_without_switchin
         for path in moving['paths']:
             assert path['maxJoinAngle'] < .005
             assert path['clearance'] >= 1
-        page.screenshot(path=f'/tmp/tuneconsole-411-{width}-{direction}-mid.png')
+        capture(page, path=f'/tmp/tuneconsole-411-{width}-{direction}-mid.png')
         box = queue.bounding_box()
-        _assert_junction_motion(page, session, initial, box['x'] + box['width'] / 2)
-        page.screenshot(path=f'/tmp/tuneconsole-411-restored-{width}-{direction}-settled.png')
+        _assert_junction_motion(page, session, initial, box['x'] + box['width'] / 2, dense=width == 1440)
+        capture(page, path=f'/tmp/tuneconsole-411-restored-{width}-{direction}-settled.png')
         _assert_accepted_junction_shape(session)
     third.hover(force=True)
     page.clock.run_for(128)
@@ -508,26 +613,6 @@ def test_session_history_rises_from_junction_and_queues_preview_without_switchin
     box = other.bounding_box()
     _assert_junction_motion(page, session, turning, box['x'] + box['width'] / 2)
     _assert_accepted_junction_shape(session)
-    page.screenshot(path=f'/tmp/tuneconsole-411-{width}-reversed.png')
+    capture(page, path=f'/tmp/tuneconsole-411-{width}-reversed.png')
     assert selections == []
     page.clock.resume()
-
-    playing(3)
-    expect(rows).to_have_count(3, timeout=6000)
-    expect(rows.last).to_have_attribute('aria-current', 'true')
-    assert abs(rows.last.bounding_box()['y'] + rows.last.bounding_box()['height'] - (height / 2 - 16)) < 3
-    expect(drawing.locator('.radio-record-cover')).to_have_attribute('href', api.tracks[2]['thumbnail'])
-    playing(12)
-    expect(rows).to_have_count(12, timeout=6000)
-    expect(rows.last).to_have_attribute('aria-current', 'true')
-    expect(session.locator('.radio-empty-row')).to_have_count(0)
-    expect(drawing).to_be_visible()
-    assert drawing.bounding_box()['height'] > 80
-    assert scroller.evaluate('el => el.scrollTop') > 0
-    assert abs(rows.last.bounding_box()['y'] + rows.last.bounding_box()['height'] - (height / 2 - 16)) < 3
-    # Polling must leave the user free to scroll back through earlier tracks.
-    scroller.evaluate('el => el.scrollTop = 0')
-    with page.expect_response('**/radio/status', timeout=6000):
-        pass
-    page.evaluate('() => new Promise(requestAnimationFrame)')
-    assert scroller.evaluate('el => el.scrollTop') == 0

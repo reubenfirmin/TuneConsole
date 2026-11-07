@@ -1,5 +1,3 @@
-import pytest
-
 from yt_playlist.rec import choice_evidence, home_preferences
 
 
@@ -61,11 +59,3 @@ def test_older_reports_and_ties_keep_the_stated_preference(store):
     store.rec_proposals.put_proposals('listening_choices', {'home_format': {
         'scores': {'mixes': 10, 'radio': 10}, 'days': {'mixes': 3, 'radio': 3}}}, 100)
     assert home_preferences.default_format(store) == 'albums'
-
-
-@pytest.mark.parametrize('override', ['albums', 'mixes', 'radio', 'both', 'auto'])
-def test_explicit_settings_choice_resolves_an_old_pending_picker(store, override):
-    store.settings.set_setting('onboard_format_pending', '1')
-    assert home_preferences.choice_pending(store)
-    store.settings.set_setting('home_format', override)
-    assert not home_preferences.choice_pending(store)

@@ -1,63 +1,16 @@
-"""Lossless bounded storage for repeated tracks in paired serving projections."""
+"""Bounded reads of retained historical paired serving projections."""
 import base64
 import json
 import zlib
 
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core.evidence_ledger import canonical
-from yt_playlist.repos.policy_storage import references
 
 LEGACY_CODEC = 'json-zlib-v1'
 CODEC = 'json-shared-zlib-v2'
 MAX_EXPANDED_BYTES = 64_000_000
 MAX_NODES = 500_000
 MAX_DEPTH = 128
-
-
-class _UsePlainJSON(ValueError):
-    pass
-
-
-def _pack(data):
-    """Intern exact JSON values, including musical profiles repeated in distant pools.
-
-    Containers store earlier node indexes; scalar nodes retain their JSON types.
-    Structural keys compare complete values, so neither hashes nor recording IDs
-    can accidentally merge different scores, policies or metadata.
-    """
-    nodes, indexes, visits = [], {}, 0
-
-    def visit(value, depth=0):
-        nonlocal visits
-        visits += 1
-        if visits % 1024 == 0:
-            check_cancellable_work()
-        if depth >= MAX_DEPTH:
-            raise _UsePlainJSON()
-        if isinstance(value, dict):
-            if any(not isinstance(key, str) for key in value):
-                raise _UsePlainJSON()
-            children = tuple((key, visit(child, depth + 1)) for key, child in sorted(value.items()))
-            key, node = (dict, children), dict(children)
-        elif isinstance(value, (list, tuple)):
-            children = tuple(visit(child, depth + 1) for child in value)
-            key, node = (list, children), list(children)
-        else:
-            # Python equates True, 1 and 1.0, and equates both signed zeros.
-            # Their distinct JSON encodings must remain distinct nodes.
-            key = (type(value), float(value).hex() if isinstance(value, float) else value)
-            node = value
-        if key in indexes:
-            return indexes[key]
-        if len(nodes) >= MAX_NODES:
-            raise _UsePlainJSON()
-        index = len(nodes)
-        indexes[key] = index
-        nodes.append(node)
-        return index
-
-    root = visit(data)
-    return canonical({'nodes': nodes, 'root': root})
 
 
 def _unpack(packed, expanded_bytes):
@@ -107,28 +60,6 @@ def _unpack(packed, expanded_bytes):
     # Sharing is only a storage detail. Mutating one decoded menu/track must
     # never mutate another occurrence of the same original value.
     return restore(root)
-
-
-def encode(run_id, data):
-    raw = canonical(data)
-    if len(raw) > MAX_EXPANDED_BYTES:
-        raise ValueError('Paired serving projection exceeds its expanded storage budget')
-    compressed, codec, packed_bytes = zlib.compress(raw, level=3), LEGACY_CODEC, len(raw)
-    try:
-        packed = _pack(data)
-        if len(packed) <= MAX_EXPANDED_BYTES:
-            shared = zlib.compress(packed, level=3)
-            if len(shared) < len(compressed):
-                compressed, codec, packed_bytes = shared, CODEC, len(packed)
-    except _UsePlainJSON:
-        pass  # Existing JSON supports uncommon key/depth shapes without interning.
-    # Context/policy references remain inspectable without decoding either codec.
-    return json.dumps({'run_id': run_id, 'codec': codec, 'expanded_bytes': len(raw),
-                       'packed_bytes': packed_bytes,
-                       'context': data.get('context') or data.get('choice_context') or {},
-                       'policies': [{'model_version': version} for version in sorted(set(references(data)))],
-                       'data': base64.b64encode(compressed).decode('ascii')},
-                      separators=(',', ':'))
 
 
 def decode(payload):

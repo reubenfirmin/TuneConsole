@@ -1,22 +1,39 @@
 """Saved discovery metadata queues background preparation with the established models."""
 import logging
+from tests.enrichment_support import (complete_entries, complete_discovered, seed_audio,
+                                      seed_discovered_enrichment)
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from tests.conftest import FakeClient
+from tests.playlist_fixture_support import remote_catalog
+from tests.recommendation_support import publish_bundles
 from yt_playlist.enrich.enrich_worker import EnrichWorker
 from yt_playlist.library import playlist_generated
-from yt_playlist.rec import content_model, embedding_training as training, embedding_vectors as embed, fresh_pool, mode_surfaces, model_refresh, recipes, surfaces
+from yt_playlist.rec import content_model, embedding_training as training, embedding_vectors as embed, fresh_pool, mode_selection, mode_surfaces, model_refresh, recipes, surfaces
 from yt_playlist.rec.scoring import PlaylistTaste
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
 
 
+def _pool(store, surface, mode, lane):
+    head = store.recommendations.head(surface)
+    assert head is not None
+    tracks, after = [], -1
+    while True:
+        page = store.recommendations.candidate_page(surface, mode, lane,
+            generation=head['id'], after=after, limit=128)
+        tracks.extend(page['tracks'])
+        if page['exhausted']:
+            return tracks
+        after = page['after']
+
+
 @pytest.mark.parametrize("with_modes", [False, True])
 def test_fresh_waits_for_metadata_then_generates_a_playlist_without_a_model(store, with_modes):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     if with_modes:
         store.modes.replace_modes([
             {"mode_id": 1, "label": "House", "families": [["house", 1]],
@@ -39,7 +56,7 @@ def test_fresh_waits_for_metadata_then_generates_a_playlist_without_a_model(stor
 
     # Metadata makes an unscored fallback eligible even before a taste/artist model exists.
     for key in keys:
-        store.discovery.set_discovered_enrichment(key, None, "2000")
+        seed_discovered_enrichment(store, key, None, "2000")
     fresh_pool.prepare(store, 250)
     picked = fresh_pool.pick(store, 250)
     assert {t["key"] for t in picked} == set(keys)
@@ -47,7 +64,7 @@ def test_fresh_waits_for_metadata_then_generates_a_playlist_without_a_model(stor
     # Unknown genres remain unknown; they must not pretend to satisfy an explicit genre request.
     assert fresh_pool.pick(store, 250, include_genres=["house"]) == []
 
-    client = FakeClient()
+    client = FakeClient(catalog=remote_catalog(picked))
     result = playlist_generated.create_generated_playlist(store, "Fresh songs", picked, client, 250, iid,
                                                 recipe={"model": "fresh"})
     assert result["added"] == 12
@@ -68,7 +85,7 @@ def test_enrichment_updates_fresh_modes_and_generated_playlist(store, monkeypatc
         a["audio"] = {"bpm": 172.0, "energy": .92, "danceability": .88}
         b["audio"] = {"bpm": 88.0, "energy": .18, "danceability": .20}
 
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     groups = []
     for group, fields in (("A", a), ("B", b)):
         tids = [store.tracks.upsert_track(f"{group}{i}", f"{group}{i}", group, None, 200) for i in range(10)]
@@ -76,10 +93,10 @@ def test_enrichment_updates_fresh_modes_and_generated_playlist(store, monkeypatc
             store.tracks.set_track_genre(tid, fields["genre"])
             store.tracks.set_track_year(tid, fields["year"])
             if fields["audio"]:
-                store.tracks.set_track_audio(tid, **fields["audio"])
+                seed_audio(store, tid, **fields["audio"])
         pid = store.playlists.upsert_playlist(iid, group, group, 10, group, 1)
         store.playlists.set_playlist_tracks(pid, tids)
-        store.enrichment_queue.mark_enriched(tids, 200)
+        complete_entries(store, tids, 200)
         groups.append(sorted(store.playlists.get_playlist_track_keys(pid)))
     store.settings.set_setting("rec_dim", "8")
     assert model_refresh.rebuild(store, 200) is not None
@@ -98,7 +115,7 @@ def test_enrichment_updates_fresh_modes_and_generated_playlist(store, monkeypatc
                       "space": embed.content_space_id(store), "size": 10000 if mid == 1 else 10,
                       "families": [[genre_map.family(fields["genre"]), 10]], "rep_keys": keys[:4]})
     store.modes.replace_modes(modes, retired_ids=[], now=200)
-    store.rec_proposals.put_proposals("mode_bundles", {
+    publish_bundles(store, {
         "1": {"wheelhouse": [], "explore": [], "comfort": [], "fresh": []},
         "2": {"wheelhouse": [], "explore": [], "comfort": [], "fresh": []},
         "all": {"wheelhouse": [], "explore": [], "comfort": [], "fresh": []},
@@ -113,11 +130,11 @@ def test_enrichment_updates_fresh_modes_and_generated_playlist(store, monkeypatc
                                           b["genre"], b["year"], "genre:techno", 100,
                                           audio=b["audio"])
             target.append(key)
-    store.discovery.mark_discovered_enriched(reference, 200)
+    complete_discovered(store, reference, 200)
     embed.build_discovered_content_vectors(store)
     fresh_pool.prepare(store, 200)
     assert [t["key"] for t in fresh_pool.pick(store, 200, size=4)] == reference
-    old_order = [t["key"] for t in store.rec_proposals.get_proposals("fresh_pool")]
+    old_order = [t["key"] for t in _pool(store, 'fresh', 'all', 'fresh')]
     model = store.settings.get_setting("rec_content_model")
 
     def forbidden(*args, **kwargs):
@@ -138,7 +155,7 @@ def test_enrichment_updates_fresh_modes_and_generated_playlist(store, monkeypatc
     worker = EnrichWorker(SimpleNamespace(store=store, now_fn=lambda: 500,
                                          logger=logging.getLogger(__name__)), waterfall_fn=waterfall)
     assert worker.drain_once(limit=4) == 4
-    assert [t["key"] for t in store.rec_proposals.get_proposals("fresh_pool")] == old_order
+    assert [t["key"] for t in _pool(store, 'fresh', 'all', 'fresh')] == old_order
     assert store.settings.get_setting("rec_content_model") == model
     assert [t["key"] for t in fresh_pool.pick(store, 500, size=4)] == reference
     assert store.rec_refresh.has_pending_changes()
@@ -147,21 +164,22 @@ def test_enrichment_updates_fresh_modes_and_generated_playlist(store, monkeypatc
     assert model_refresh.rebuild(store, 500) is not None
     assert mode_surfaces.prepare_bundles(store, 500) is not None
     assert store.settings.get_setting("rec_content_model") == model
-    bundles = store.rec_proposals.get_proposals("mode_bundles")
-    assert {t["key"] for t in bundles["1"]["fresh"]} == set(changed)
-    assert {t["key"] for t in bundles["2"]["fresh"]} == set(reference)
-    assert all(t["year"] == 2024 for t in bundles["1"]["fresh"])
+    preferred_fresh = _pool(store, 'home', '1', 'fresh')
+    reference_fresh = _pool(store, 'home', '2', 'fresh')
+    assert {t["key"] for t in preferred_fresh} == set(changed)
+    assert {t["key"] for t in reference_fresh} == set(reference)
+    assert all(t["year"] == 2024 for t in preferred_fresh)
     # Focus this preview on the preferred mode; mode rotation is tested separately.
-    monkeypatch.setattr(mode_surfaces, "select_modes", lambda *args, **kwargs: [1])
+    monkeypatch.setattr(mode_selection, "select_modes", lambda *args, **kwargs: [1])
     cards = mode_surfaces.assemble_cards(store, 500, epoch=0)
     fresh = next(c for c in cards if c["lane"] == "fresh")
     assert {t["key"] for t in fresh["tracks"][:4]} == set(changed)
     if signal == "year":
-        ordered = recipes.theme_filter(store, list(reversed(bundles["all"]["fresh"])), {"eras": ["2020"]})
+        ordered = recipes.theme_filter(store, list(reversed(_pool(store, 'home', 'all', 'fresh'))), {"eras": ["2020"]})
         assert {t["key"] for t in ordered[:4]} == set(changed)
 
-    client = FakeClient()
     picked = fresh["tracks"][:4]
+    client = FakeClient(catalog=remote_catalog(picked))
     result = playlist_generated.create_generated_playlist(store, "Fresh songs", picked, client, 500, iid,
                                                 recipe={"model": "fresh"})
     assert result["added"] == 4

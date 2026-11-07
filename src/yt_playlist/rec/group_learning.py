@@ -1,109 +1,50 @@
 """Conservative shared priors without copying historical parent wins into children."""
-from yt_playlist.core.activity import WorkBudgetExceeded, check_stopping
 from yt_playlist.rec import choice_bandit, group_versions
 
-POLICY = 'hierarchical-context-response-3'
+POLICY = 'theme-raw-genres-current-hierarchy-4'
 
 
 def compile(store, offers, responses, now, head):
     groups = {group['group_id']: group for group in head['groups'] if not group.get('legacy')}
     by_version = {group['version']: group for group in groups.values()}
-    links, resolved = {}, {}
-    edge_count = 0
-
-    def successors(version):
-        nonlocal edge_count
-        if version not in links:
-            check_stopping()
-            if edge_count >= 8192:
-                raise WorkBudgetExceeded('Musical response lineage exceeds learning work ceiling')
-            edges = store.taste_groups.successors(version, limit=min(512, 8192 - edge_count))
-            edge_count += len(edges)
-            compatible = [edge for edge in edges if edge['payload'].get('compatible')]
-            # A surviving parent owns its historical response even when a large
-            # new child also has high overlap with its former leaf definition.
-            continuations = [edge for edge in compatible if edge['relation'] == 'continuation']
-            links[version] = [edge['target'] for edge in continuations or compatible]
-        return links[version]
-
-    def destination(version):
-        # A historical parent can continue as today's umbrella. It is never
-        # distributed as child-specific wins. Ambiguous paths are excluded.
-        if version not in resolved:
-            pending, seen, matches = [version], set(), set()
-            try:
-                while pending and len(seen) < 512:
-                    candidate = pending.pop()
-                    if candidate in seen:
-                        continue
-                    seen.add(candidate)
-                    if candidate in by_version:
-                        matches.add(by_version[candidate]['group_id'])
-                    else:
-                        pending.extend(successors(candidate))
-                resolved[version] = next(iter(matches)) if len(matches) == 1 and not pending else None
-            except WorkBudgetExceeded:
-                resolved[version] = None
-        return resolved[version]
-
     def ancestors(gid):
-        while gid is not None:
+        seen = set()
+        while gid is not None and gid not in seen:
+            seen.add(gid)
             yield gid
             parent = by_version.get(groups[gid]['parent_version'])
             gid = parent['group_id'] if parent else None
+
+    def destination(option):
+        # Current descriptive raw genres identify a broad area. When several
+        # leaves are indistinguishable, only their common ancestor is supported.
+        # No historical versions, lineage, member tracks or vectors are read.
+        genres = {label.strip().casefold() for label in option['genres']}
+        matches = [group['group_id'] for group in groups.values() if group.get('leaf') and
+                   genres & {entry[0].strip().casefold() for entry in group.get('genres', [])}]
+        if not matches:
+            return None
+        paths = [list(ancestors(gid)) for gid in matches]
+        common = set(paths[0]).intersection(*(set(path) for path in paths[1:]))
+        return next((gid for gid in paths[0] if gid in common), None)
 
     excluded = {'unseen': 0, 'future_context': 0, 'missing_context': 0, 'unmapped_definition': 0,
                 'legacy_ambiguous': 0}
     menus = {}
     visible, picked = {}, {}
-    choices = {(event['opportunity_id'], event['option_id']) for event in responses
-               if event['kind'] == 'choice' and event['at'] <= now and event['observed_at'] <= now}
-    definitions = {}
     expiry = []
     for observation in choice_bandit.observations(store, offers, responses, now, excluded):
-        option, context = observation['option'], observation['context']
-        # Only a version actually frozen in the served menu's context is admissible.
-        version = option.get('group_version')
-        historical = {group.get('version'): group for group in context.get('musical_groups', [])}
-
-        def frozen_definition(version):
-            source = historical.get(version) if version else None
-            if version not in definitions:
-                definitions[version] = (next((definition for definition in context['musical_definitions']
-                                             if definition['version'] == version), None)
-                                        if 'musical_definitions' in context else
-                                        store.taste_groups.definition(version) if version else None)
-            definition = definitions[version]
-            if (not definition or not source or source.get('group_id') != definition['group_id']
-                    or context.get('group_generation') != definition['generation']
-                    or definition['created_at'] > context.get('at', observation['offer_at'])):
-                return None
-            return definition
-
-        definition = frozen_definition(version)
-        gid = destination(version) if definition else None
+        option = observation['option']
+        version = observation['context_id']  # Broad descriptor identity, not a group version.
+        gid = destination(option)
         supported = set(ancestors(gid)) if gid is not None else set()
-        # A vanished child can lose its specific mapping while its already
-        # supported broad parent continues unchanged. Resolve those frozen
-        # ancestors independently; never loosen child compatibility or copy a
-        # parent's historical response into today's children.
-        seen = {version}
-        parent = definition.get('parent_version') if definition else None
-        while parent and parent not in seen and len(seen) < 512:
-            seen.add(parent)
-            definition = frozen_definition(parent)
-            if definition is None:
-                break
-            if (mapped := destination(parent)) is not None:
-                supported.update(ancestors(mapped))
-            parent = definition.get('parent_version')
         if not supported:
             excluded['legacy_ambiguous' if option.get('mode_id') is not None else 'unmapped_definition'] += 1
             continue
         offer = (observation['opportunity'], option['id'])
         if gid is not None:
             visible.setdefault(gid, set()).add(offer)
-            if offer in choices:
+            if observation['selected']:
                 picked.setdefault(gid, set()).add(offer)
         expiry.append(observation['expires_at'])
         if observation['positive'] + observation['negative'] == 0:
@@ -157,7 +98,7 @@ def compile(store, offers, responses, now, head):
 def current_allocation(store, preview, now):
     """The effective serving input, excluding report timestamps and diagnostics."""
     stats = store.rec_proposals.get_proposals('group_choice_bandit') or {}
-    if (stats.get('generation') != preview['generation']
+    if (stats.get('policy') != POLICY or stats.get('generation') != preview['generation']
             or stats.get('parameters') != choice_bandit.parameters(store)
             or stats.get('at', now) > now
             or stats.get('expires_at') is not None and now >= stats['expires_at']):

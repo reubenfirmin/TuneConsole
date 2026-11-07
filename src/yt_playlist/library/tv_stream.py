@@ -11,25 +11,25 @@ class PendingTV(Exception):
     """A provider read has not confirmed the previous write yet."""
 
 
-def refill(store, client, identity_id, playlist, recipe, token, request_id, items, now):
+def refill(store, client, account_id, playlist, recipe, token, request_id, items, now):
     """Never replay an uncertain append, mutate an adopted/saved source, or grow beyond 60 videos."""
     receipt_key = f'{playlist.id}:{token}:{request_id}'
-    receipts = store.rec_proposals.get_proposals('tv_continuations') or {}
-    if receipt := receipts.get(receipt_key):
+    if receipt := store.tv.receipt(receipt_key):
+        if receipt.get('pending'):
+            raise ValueError('YouTube has not confirmed the new TV playlist. Reset TV to start a fresh session.')
         return receipt['playlist_id'], receipt['stream'], receipt['items']
-    result = _refill(store, client, identity_id, playlist, recipe, token, request_id, items, now)
+    result = _refill(store, client, account_id, playlist, recipe, token, request_id, items, now, receipt_key)
     # Retain the response at the original request address as well as the target
     # playlist. Retrying a lost rollover response must not create another list.
     pid, stream, confirmed = result
-    receipts[receipt_key] = {'playlist_id': pid, 'stream': stream, 'items': confirmed}
-    store.rec_proposals.put_proposals('tv_continuations', dict(list(receipts.items())[-60:]), now)
+    store.tv.complete_receipt(receipt_key, {'playlist_id': pid, 'stream': stream, 'items': confirmed}, now)
     tv.record_draw(store, confirmed)
     return result
 
 
-def _refill(store, client, identity_id, playlist, recipe, token, request_id, items, now):
+def _refill(store, client, account_id, playlist, recipe, token, request_id, items, now, receipt_key):
     live = (token and token == recipe.get('tv_stream')
-            and store.playlists.is_quarantined_playlist(playlist.scope_ref))
+            and store.playlists.is_quarantined_playlist(playlist.playlist_scope_id))
     if live:
         previous = recipe.get('tv_refill') or {}
         if previous.get('request_id') == request_id and previous.get('state') == 'complete':
@@ -46,11 +46,13 @@ def _refill(store, client, identity_id, playlist, recipe, token, request_id, ite
         # Opening a saved video playlist never grants permission to alter it.
         # A long stream rolls to another bounded Generated playlist as needed.
         token = uuid.uuid4().hex
+        if not store.tv.begin_rollover(receipt_key, token, now):
+            raise PendingTV()
         recipe = {'lane': 'tv', 'media': 'video', 'tv_stream': token,
                   'max_minutes': tv.max_minutes(store), 'videos': items,
                   'tv_refill': {'request_id': request_id, 'state': 'complete', 'items': items}}
         limit = tv.max_minutes(store)
-        result = create_generated_playlist(store, 'TV', items, client, now, identity_id, recipe=recipe,
+        result = create_generated_playlist(store, 'TV', items, client, now, account_id, recipe=recipe,
                                            max_duration_s=float('inf') if limit is None else limit * 60)
         confirmed = {t['video_id'] for t in store.charts.playlist_tracks_detail(result['pid'])}
         accepted = [t for t in items if t['video_id'] in confirmed]
@@ -58,16 +60,16 @@ def _refill(store, client, identity_id, playlist, recipe, token, request_id, ite
             'tv_refill': {'request_id': request_id, 'state': 'complete', 'items': accepted}}, now)
         return result['pid'], token, accepted
     before = [t['video_id'] for t in store.charts.playlist_tracks_detail(playlist.id)]
-    remote = validate_playlist(client.get_playlist(playlist.ytm_playlist_id, limit=None))['tracks']
+    remote = validate_playlist(client.get_playlist(playlist.provider_playlist_id, limit=None))['tracks']
     if [t['videoId'] for t in remote] != before:
         raise ValueError('This TV playlist changed elsewhere. Reset TV to continue without changing that playlist.')
     checkpoint = {'request_id': request_id, 'state': 'pending', 'items': items,
                   'additions': additions, 'before': before, 'at': now}
     recipe = {**recipe, 'videos': old, 'tv_refill': checkpoint}
-    store.playlist_recipes.set_recipe(playlist.scope_ref, recipe, now)
+    store.playlist_recipes.set_recipe(playlist.playlist_scope_id, recipe, now)
     if additions:
         # The same addition/reconciliation boundary as ordinary generated mixes.
-        outcome = account_additions(add_items, client, playlist.ytm_playlist_id,
+        outcome = account_additions(add_items, client, playlist.provider_playlist_id,
                                     [t['video_id'] for t in additions], prior_tracks=remote)
         try:
             outcome.finish()
@@ -78,7 +80,7 @@ def _refill(store, client, identity_id, playlist, recipe, token, request_id, ite
 
 def _confirm(store, client, playlist, recipe, checkpoint, now):
     try:
-        remote = validate_playlist(client.get_playlist(playlist.ytm_playlist_id, limit=None))['tracks']
+        remote = validate_playlist(client.get_playlist(playlist.provider_playlist_id, limit=None))['tracks']
     except ValueError:
         if now - checkpoint['at'] < 30:
             raise PendingTV() from None
@@ -95,5 +97,5 @@ def _confirm(store, client, playlist, recipe, checkpoint, now):
     store.playlists.publish_confirmed_tracks(playlist.id, playlist.title, confirmed, now, expected_prefix=before)
     recipe = {**recipe, 'videos': confirmed, 'tv_refill': {
         'request_id': checkpoint['request_id'], 'state': 'complete', 'items': checkpoint['items']}}
-    store.playlist_recipes.set_recipe(playlist.scope_ref, recipe, now)
+    store.playlist_recipes.set_recipe(playlist.playlist_scope_id, recipe, now)
     return playlist.id, recipe['tv_stream'], checkpoint['items']

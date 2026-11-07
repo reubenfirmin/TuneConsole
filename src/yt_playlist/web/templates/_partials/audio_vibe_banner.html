@@ -7,6 +7,7 @@
     <span data-vibe-count></span>
     <button type="button" data-vibe-next>Next song</button>
   </div>
+  <button type="button" class="audio-vibe-pending" data-vibe-pending hidden></button>
   <template data-vibe-card-template>
     <article class="audio-vibe-card" data-vibe-card>
       <div class="audio-vibe-heading">
@@ -18,6 +19,9 @@
       </div>
       <div class="audio-vibe-guess">
         <p class="audio-vibe-prediction" data-vibe-prediction></p>
+        <a class="audio-vibe-extension-update" data-vibe-extension-update hidden
+           href="https://chromewebstore.google.com/detail/opmmbolbdgdkphfocffpjpgmelkkjkcn"
+           target="_blank" rel="noopener">Update extension</a>
         <div class="audio-vibe-checks" data-vibe-checks role="group" aria-label="Completed audio checks"></div>
       </div>
       <p class="audio-vibe-prompt">Your take <span>Choose all that fit</span></p>
@@ -27,8 +31,10 @@
                 aria-pressed="false" title="{{ preset.description }}"><strong>{{ preset.attribute_label }}</strong></button>
         {% endfor %}
       </div>
+      <p class="audio-vibe-sync-detail" data-vibe-sync-detail hidden></p>
       <div class="audio-vibe-footer">
         <p data-vibe-feedback-status role="status" aria-live="polite">Click to label</p>
+        <button type="button" data-vibe-retry hidden>Retry saving</button>
         <button type="button" data-vibe-inspect>Audio details</button>
       </div>
     </article>

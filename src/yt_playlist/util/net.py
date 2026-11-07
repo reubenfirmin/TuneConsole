@@ -1,11 +1,8 @@
-"""Connectivity circuit breaker shared by the enrichment providers.
+"""Request failure reporting and retry classification shared by enrichment providers.
 
-Each provider (MusicBrainz, Discogs, Last.fm) talks to a single host. When that host goes
-unreachable (DNS failure, refused/reset connection, timeout) every track in a playlist fails the
-same way, so plowing through the whole list just burns one pace-interval per track for nothing. Each
-provider keeps a CircuitBreaker: its low-level fetch reports every HTTP attempt. Transport failures,
-throttling and server errors count toward an outage; successful reads and valid misses clear it.
-The waterfall also persists cooldowns and Retry-After deadlines across batches and restarts.
+Integration boundaries own provider access and availability. They report request failures through
+the probe-local error collector so the waterfall can distinguish outages from confirmed misses.
+The waterfall persists provider cooldowns and Retry-After deadlines across batches and restarts.
 """
 import urllib.error
 import math
@@ -57,7 +54,7 @@ def probe_errors():
     """Capture request failures within one provider probe, isolated from other threads/jobs.
 
     A missing recording (404) is a valid answer. Transport errors, throttling, server errors and
-    invalid responses need another attempt, even before the provider's circuit breaker trips.
+    invalid responses need another attempt rather than being recorded as confirmed misses.
     """
     errors = []
     token = _probe_errors.set(errors)
@@ -65,8 +62,6 @@ def probe_errors():
         yield errors
     finally:
         _probe_errors.reset(token)
-
-DEFAULT_THRESHOLD = 5                     # consecutive unreachable failures before we give up
 
 
 def is_unreachable(exc):
@@ -81,28 +76,3 @@ def is_unreachable(exc):
     if isinstance(exc, urllib.error.URLError):
         return True
     return isinstance(exc, OSError)
-
-
-class CircuitBreaker:
-    """Counts consecutive outage/throttling failures and trips at `threshold`."""
-
-    def __init__(self, threshold=DEFAULT_THRESHOLD):
-        self.threshold = threshold
-        self.consecutive = 0
-
-    def reset(self):
-        """Clear the streak, called at the start of each run so a past outage doesn't pre-trip it."""
-        self.consecutive = 0
-
-    def record(self, exc=None):
-        """Report one HTTP attempt: `exc` is the exception it raised, or None on success."""
-        if exc is not None:
-            if not isinstance(exc, urllib.error.HTTPError) or exc.code != 404:
-                record_probe_failure(exc)
-        if exc is not None and provider_outage(exc):
-            self.consecutive += 1
-        else:
-            self.consecutive = 0          # a usable response breaks the outage streak
-
-    def tripped(self):
-        return self.consecutive >= self.threshold

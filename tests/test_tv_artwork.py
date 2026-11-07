@@ -15,6 +15,22 @@ def test_existing_artist_photo_and_independent_alternatives_are_cached(store, mo
     assert images == ['https://img/artist.jpg', 'https://img/provider.jpg', 'https://img/wiki.jpg']
     assert cached and cached['retry_at'] == 86401
     assert not tv_artwork.prepare(store, client, ['Artist'], 2)
+    # A playlist's shared view keeps one consistent artwork generation. Its
+    # detached results must not leak mutations or hide updates from later views.
+    with store.read_view() as view:
+        photos, prepared = tv_artwork.images(view, 'Artist')
+        assert photos == images
+        assert tv_artwork.images(view, 'Other artist')[0] == []
+        photos.append('https://img/incorrect.jpg')
+        prepared['images'].append('https://img/incorrect.jpg')
+        store.rec_proposals.put_proposals(tv_artwork.SURFACE, {
+            search_squash('Artist'): {'images': ['https://img/new.jpg'], 'retry_at': 86402},
+            search_squash('Other artist'): {'images': ['https://img/other.jpg'], 'retry_at': 86402}}, 2)
+        assert tv_artwork.images(view, 'Artist')[0] == images
+        assert tv_artwork.images(view, 'Other artist')[0] == []
+    with store.read_view() as view:
+        assert tv_artwork.images(view, 'Artist')[0] == ['https://img/artist.jpg', 'https://img/new.jpg']
+        assert tv_artwork.images(view, 'Other artist')[0] == ['https://img/other.jpg']
 
 
 def test_failed_sources_have_a_bounded_retry_and_do_not_discard_good_photos(store, monkeypatch):

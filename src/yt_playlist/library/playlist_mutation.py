@@ -7,6 +7,10 @@ from yt_playlist.library.playlist_snapshot import validate_playlist
 from yt_playlist.util.retry import with_retry
 
 
+class PlaylistWriteUnconfirmed(ValueError):
+    """An attempted write was rejected or could not be confirmed by readback."""
+
+
 @dataclass(frozen=True)
 class PlaylistResult:
     status: Literal["complete", "partial", "failed"]
@@ -57,15 +61,15 @@ def confirm_playlist_write(write, read, matches, operation):
     if status == "STATUS_SUCCEEDED":
         return
     if status is not None:
-        raise ValueError(f"YouTube rejected a playlist {operation}. Re-sync before trying again.")
+        raise PlaylistWriteUnconfirmed(f"YouTube rejected a playlist {operation}. Re-sync before trying again.")
     try:
         confirmed = matches(read())
     except Exception as exc:
-        raise ValueError(f"YouTube did not confirm a playlist {operation}; its outcome is unconfirmed. "
+        raise PlaylistWriteUnconfirmed(f"YouTube did not confirm a playlist {operation}; its outcome is unconfirmed. "
                          "Re-sync before trying again; "
                          "the write was not retried.") from exc
     if not confirmed:
-        raise ValueError(f"YouTube did not confirm a playlist {operation}; its outcome is unconfirmed. "
+        raise PlaylistWriteUnconfirmed(f"YouTube did not confirm a playlist {operation}; its outcome is unconfirmed. "
                          "Re-sync before trying again; "
                          "the write was not retried.") from error
 

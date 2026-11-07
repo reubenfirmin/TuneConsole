@@ -1,7 +1,9 @@
 {# Server-rendered merge editor body. Every control posts to /merge/update (which mutates the
    in-memory draft) and swaps this whole partial back into #merge-body. #}
 {% set upd = '/merge/update?ids=' ~ ids_csv %}
-<div class="card section-block workflow-control merge-control">
+<div class="card section-block workflow-control merge-control" x-data="actionOutcome('merge-outcome')"
+     @htmx:before-request.camel="start()" @htmx:after-request.camel="settle($event)"
+     @app-page-leaving.window="saveRecovery($event)" @app-page-changed.window="restoreRecovery($event)">
   <div class="cfg">
     <div>
       <div class="cmp-h">Where should the result go?</div>
@@ -25,6 +27,8 @@
   </div>
   <p class="muted note-compact"><strong>Nothing changes until you click Apply.</strong>
      Tick the songs you want in the result. A backup of any deleted playlist is written first, and it's undoable from Actions.</p>
+  <span id="merge-outcome" x-ref="outcome" class="action-outcome muted small" role="status"></span>
+  <span class="action-outcome muted small" x-show="failedAction" x-cloak>Apply isn't confirmed. Review Actions before trying again.</span>
 </div>
 
 <div class="card workflow-sheet merge-sheet">

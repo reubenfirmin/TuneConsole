@@ -1,15 +1,17 @@
+from tests.file_content_support import age_file
 from copy import deepcopy
 from dataclasses import replace
-import os
 
 import pytest
 
 from tests.group_support import publish, recordings
+from yt_playlist.core import fao
 from yt_playlist.rec import choice_evidence as choices, group_learning
 
 
 def menu(store, head, ids, *, at=1100, oid='groups'):
-    options = [{'id': group['group_id'], 'group_version': group['version'], 'position': index + 1}
+    options = [{'id': group['group_id'], 'label': group.get('name', ''),
+                'genres': [entry[0] for entry in group['genres']], 'position': index + 1}
                for index, group in enumerate(head['groups']) if group['group_id'] in ids]
     context = {'schema': 1, 'at': at, 'group_generation': head['generation'],
                'musical_groups': [{key: group.get(key) for key in ('group_id', 'version', 'parent_version', 'name')}
@@ -50,11 +52,10 @@ def test_siblings_share_one_parent_opportunity_without_self_reinforcement(store)
     choices.respond(store, oid, 'visible', 1101, visible=ids)
     choices.respond(store, oid, 'choice', 1102, option_id=ids[0])
     _state, rows = compiled(store, head, 1103)
-    assert rows[ids[0]]['positive'] == .25
-    assert rows[ids[1]]['negative'] == .25
+    assert all(rows[gid]['positive'] == rows[gid]['negative'] == 0 for gid in ids)
     parent = rows[head['groups'][0]['group_id']]
     assert parent['positive'] == .25 and parent['negative'] == 0
-    assert all(rows[gid]['shared_strength'] == 0 for gid in ids)
+    assert all(rows[gid]['shared_strength'] == .25 for gid in ids)
 
 
 def test_missing_visibility_and_outcomes_are_not_rejections(store):
@@ -66,6 +67,26 @@ def test_missing_visibility_and_outcomes_are_not_rejections(store):
     choices.respond(store, oid, 'visible', 1102, visible=[gid])
     _state, rows = compiled(store, head, 1103)
     assert rows[gid]['positive'] == rows[gid]['negative'] == 0
+
+
+def test_reused_definition_is_resolved_for_each_served_generation(store):
+    tracks = recordings([('House', 8, .3)])
+    first = publish(store, tracks)
+    second = publish(store, tracks, 1200, first)
+    gid = first['groups'][0]['group_id']
+    for index, head in enumerate((first, second)):
+        at = 1100 + index * 86400
+        oid = menu(store, head, [gid], at=at, oid=f'shared-publication-{index}')
+        choices.respond(store, oid, 'visible', at + 1, visible=[gid])
+        choices.respond(store, oid, 'choice', at + 2, option_id=gid)
+    state, rows = compiled(store, second, 1103 + 86400)
+    assert rows[gid]['positive'] == .5 and rows[gid]['days'] == 2
+    assert not any(state['excluded'].values())
+    version = first['groups'][0]['version']
+    next_version = second['groups'][0]['version']
+    assert not store.conn.execute("SELECT 1 FROM group_evidence_generations WHERE kind='offer'").fetchone()
+    assert store.conn.execute('SELECT group_version_id FROM group_version_aliases WHERE external_version=?', (version,)).fetchone()[0] == (
+        store.conn.execute('SELECT group_version_id FROM group_version_aliases WHERE external_version=?', (next_version,)).fetchone()[0])
 
 
 def test_regrouped_parent_keeps_history_without_inventing_child_history(store):
@@ -105,15 +126,15 @@ def test_repeated_menus_on_one_day_cannot_multiply_group_feedback(store):
     assert rows[gid]['positive'] == .25 and rows[gid]['days'] == 1
 
 
-def test_a_definition_created_after_the_served_context_cannot_receive_its_response(store):
+def test_current_genre_area_can_interpret_an_earlier_broad_descriptor(store):
     head = publish(store, recordings([('House', 8, .3)]), now=1000)
     gid = head['groups'][0]['group_id']
     oid = menu(store, head, [gid], at=900)
     choices.respond(store, oid, 'visible', 901, visible=[gid])
     choices.respond(store, oid, 'choice', 902, option_id=gid)
     state, rows = compiled(store, head, 1100)
-    assert rows[gid]['positive'] == rows[gid]['negative'] == 0
-    assert state['excluded']['unmapped_definition'] > 0
+    assert rows[gid]['positive'] == .25 and rows[gid]['negative'] == 0
+    assert not any(state['excluded'].values())
 
 
 def test_parent_continuation_wins_over_overlap_with_a_large_new_child(store):
@@ -138,6 +159,9 @@ def test_frozen_broad_support_survives_child_rejoin(store, monkeypatch, transiti
     from tests.test_group_preparation import seed
     from yt_playlist.rec import choice_bandit, choice_context, choice_retention, group_preparation
 
+    # Keep this contract on the current compact layout. Revision binding is
+    # independently checked against genuine startup in test_store_fixture.
+    assert store._compact_group_files
     tracks = recordings([('House', 3, .1)])
     seed(store, tracks)
     worker = group_preparation.Preparation(store)
@@ -178,7 +202,12 @@ def test_frozen_broad_support_survives_child_rejoin(store, monkeypatch, transiti
             if storage.endswith('released'):
                 serializing.setattr(choice_retention, 'DIAGNOSTIC_FRACTION', 0)
                 for path in ledger.directory.glob('artifact/*/*.json'):
-                    os.utime(path, (1, 1))
+                    file_before, raw = fao.read(path).info, fao.read(path).bytes
+                    age_file(path, mtime_ns=10 ** 9)
+                    after = fao.read(path).info
+                    assert after.mtime_ns == 10**9 and after.ctime_ns == file_before.ctime_ns
+                    assert after.logical_bytes == file_before.logical_bytes == len(raw)
+                    assert fao.read(path).bytes == raw
             choices.maintain_storage(store, 1074)
         identity = ledger.get('opportunity', oid)['context']
         saved = choice_context.checkpoint(ledger, identity)
@@ -186,15 +215,15 @@ def test_frozen_broad_support_survives_child_rejoin(store, monkeypatch, transiti
         if storage.endswith('released'):
             assert ledger.get('artifact', identity) is None
         checkpoint_bytes = ledger._path('checkpoint', identity).read_bytes()
-        frozen = {group['version']: group for group in
-                  choice_context.learning_context(store, identity)['musical_definitions']}
-        assert frozen[selected['version']]['parent_version'] == selected['parent_version']
+        frozen = choice_context.learning_context(store, identity)
+        assert frozen['at'] == 1070 and frozen['precision'] == 'theme-raw-genres-v1'
+        assert 'musical_definitions' not in frozen
         assert compiled(store, split, 1074)[1] == before
 
     if transition == 'rejoin':
         seed(store, [tracks[-1]])
     else:
-        worker.request_rebuild()
+        seed(store, [replace(tracks[0], year=tracks[0].year + 1)])
     assert worker.step(1120)
     current = store.taste_groups.head(members=True)
     retained = next(g for g in current['groups'] if g['group_id'] == broad_id)
@@ -205,11 +234,8 @@ def test_frozen_broad_support_survives_child_rejoin(store, monkeypatch, transiti
     assert after[broad_id]['positive'] == expected
     assert after[broad_id]['negative'] == 0 and after[broad_id]['days'] == 1
     assert after[broad_id]['menus'] == [oid]
-    assert after[broad_id]['offered'] == after[broad_id]['picked'] == (1 if source == 'parent' else 0)
-    if transition == 'continuation':
-        assert after[selected['group_id']]['positive'] == expected
-    if source == 'parent':
-        assert all(row['positive'] == row['negative'] == 0 for gid, row in after.items() if gid != broad_id)
+    assert after[broad_id]['offered'] == after[broad_id]['picked'] == 1
+    assert all(row['positive'] == row['negative'] == 0 for gid, row in after.items() if gid != broad_id)
     assert store.taste_groups.definitions(split['generation'], members=True) == split['groups']
     assert store.taste_groups.definition(selected['version']) == definition
     assert all(ledger._path(kind, identity).read_bytes() == raw for (kind, identity), raw in original.items())

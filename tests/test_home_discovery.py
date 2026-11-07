@@ -1,12 +1,17 @@
 """Home Discover serves prepared pools immediately and never fits models on a request."""
 import re
+from functools import wraps
+import time
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
-from yt_playlist.rec import discover, fresh_pool, home_prepared, surfaces
+from tests.home_fixture_support import returning_listener
+from tests.prepared_fixture_support import prepared_template
+from yt_playlist.core.recommendation_invalidation import clear_model_display
+from yt_playlist.rec import discover, fresh_pool, home_prepared, home_vibe, surfaces
 from yt_playlist.web.app import create_app
 
 
@@ -17,20 +22,92 @@ def seed_songs(store, count=40):
     fresh_pool.prepare(store, 2)
 
 
-def client_for(store, busy="idle"):
+def prepare_client_state(store):
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     assert home_prepared.prepare(store, 3) is not None
+    returning_listener(store, 'mixes', now=3)
+    return iid
+
+
+def client_for(store, busy="idle", *, prepare=True):
+    iid = prepare_client_state(store) if prepare else store.accounts.get_master_account().id
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 3)
     app.state.ctx.rec_worker._model_active = busy == "rebuild"
     app.state.ctx.rec_worker._discovering = busy == "discovery"
     return TestClient(app, base_url="http://127.0.0.1")
 
 
+@pytest.fixture(scope='module')
+def songs_template(_pristine_current_schema):
+    def build(source):
+        started = time.perf_counter()
+        seed_songs(source)
+        return time.perf_counter() - started
+
+    with prepared_template(_pristine_current_schema, build) as template:
+        yield template
+
+
+@pytest.fixture(scope='module')
+def empty_home_template(_pristine_current_schema):
+    def build(source):
+        started = time.perf_counter()
+        assert prepare_client_state(source) == 1
+        return time.perf_counter() - started
+
+    with prepared_template(_pristine_current_schema, build) as template:
+        yield template
+
+
+def restore_prefix(store, template, record_property, name):
+    started = time.perf_counter()
+    build_seconds = template.restore(store)
+    record_property(name + '_clone_seconds', time.perf_counter() - started)
+    record_property(name + '_source_seconds', build_seconds)
+    record_property(name + '_source_identity', str(template.source.conn._policy_memory_key))
+
+
+@pytest.fixture
+def discovery_songs(store, songs_template, record_property):
+    restore_prefix(store, songs_template, record_property, 'songs')
+
+
+@pytest.fixture
+def empty_discovery_home(store, empty_home_template, record_property):
+    restore_prefix(store, empty_home_template, record_property, 'empty_home')
+
+
+@pytest.fixture(autouse=True)
+def discovery_costs(monkeypatch, record_property, request):
+    totals = {}
+
+    def timed(name, operation):
+        @wraps(operation)
+        def call(*args, **kwargs):
+            started = time.perf_counter()
+            try:
+                return operation(*args, **kwargs)
+            finally:
+                values = totals.setdefault(name, [0, 0.0])
+                values[0] += 1
+                values[1] += time.perf_counter() - started
+        return call
+
+    for owner, attribute in ((request.module, 'seed_songs'), (request.module, 'client_for'),
+            (fresh_pool, 'prepare'), (home_prepared, 'prepare'), (home_prepared, 'prepare_discovery'),
+            (TestClient, 'request')):
+        name = owner.__name__.rsplit('.', 1)[-1] + '_' + attribute
+        monkeypatch.setattr(owner, attribute, timed(name, getattr(owner, attribute)))
+    yield
+    for name, (calls, seconds) in totals.items():
+        record_property(name + '_calls', calls)
+        record_property(name + '_seconds', seconds)
+
+
 @pytest.mark.parametrize("busy", ["idle", "rebuild", "discovery"])
-def test_persisted_recommendations_are_in_initial_home_and_survive_refresh(store, monkeypatch, busy):
-    seed_songs(store)
+def test_persisted_recommendations_are_in_initial_home_and_survive_refresh(store, monkeypatch, busy, discovery_songs):
     store.discovery.upsert_discovered_album("album", "Artist", "Ready album", "2026", None, 1)
     store.discovery.upsert_discovered_artist("New artist", 1, [], [], None, 1)
     client = client_for(store, busy)
@@ -64,8 +141,7 @@ def test_persisted_recommendations_are_in_initial_home_and_survive_refresh(store
     assert store.discovery.get_discovered_artists()[0]["offered_count"] == 0
 
 
-def test_song_only_pool_fills_discover_and_honors_current_exclusions(store):
-    seed_songs(store)
+def test_song_only_pool_fills_discover_and_honors_current_exclusions(store, discovery_songs):
     store.rec_model.record_feedback("for_you", "song 0|artist 0", "dismiss", now=2)
     store.rec_model.record_feedback("for_you", "artist:Artist 1", "mute", now=2)
     store.tracks.upsert_track("v2", "Song 2", "Artist 2", None, None)
@@ -92,21 +168,27 @@ def test_discovery_can_show_one_song_without_claiming_a_mix_is_ready(store):
     assert "New recommendations will appear" not in response.text
 
 
-def test_discovery_survives_model_cache_invalidation_and_rechecks_eligibility(store, monkeypatch):
-    seed_songs(store)
+def test_discovery_survives_model_cache_invalidation_and_rechecks_eligibility(store, monkeypatch, discovery_songs):
     store.discovery.upsert_discovered_album('retained-album', 'Artist', 'Retained album', '2026', None, 1)
     client = client_for(store, 'discovery')
     assert 'Retained album' in client.get('/home/discovery').text
     with store.conn:
-        store.conn.execute("DELETE FROM rec_proposals WHERE surface IN "
-                           "('home_prepared','home_tuned','home_choice','mode_bundles','fresh_pool')")
+        store.conn.execute('BEGIN IMMEDIATE')
+        clear_model_display(store.conn)
+    assert store.rec_proposals.get_proposals('home_choice') is None
 
     def forbidden(*args, **kwargs):
         raise AssertionError('Refreshing discovery must not prepare or rank candidates')
 
     monkeypatch.setattr(home_prepared, 'prepare', forbidden)
+    monkeypatch.setattr(home_prepared, 'prepare_discovery', forbidden)
     monkeypatch.setattr(discover, 'pick_discovered_albums', forbidden)
-    monkeypatch.setattr(fresh_pool, 'pick', forbidden)
+    monkeypatch.setattr(discover.ContentProjection, 'fit', forbidden)
+    monkeypatch.setattr(surfaces, 'cold_candidates', forbidden)
+    monkeypatch.setattr(fresh_pool, 'prepare', forbidden)
+    # The journey gate may read the existing ranked Fresh reserve. Forbid
+    # ranking itself, rather than its bounded, eligibility-filtered reader.
+    monkeypatch.setattr(home_vibe, 'rank', forbidden)
     response = client.get('/home/discovery')
     assert 'Retained album' in response.text and 'Songs to discover' in response.text
     assert 'Finding new music for you' not in response.text
@@ -120,10 +202,9 @@ def test_discovery_survives_model_cache_invalidation_and_rechecks_eligibility(st
     assert 'data-discovery-id="song 1|artist 1"' not in response.text
 
 
-def test_discovery_publishes_even_when_mix_assembly_is_deferred(store, monkeypatch):
+def test_discovery_publishes_even_when_mix_assembly_is_deferred(store, monkeypatch, discovery_songs):
     from yt_playlist.core.activity import WorkBudgetExceeded
 
-    seed_songs(store)
     store.discovery.upsert_discovered_album('ready', 'Artist', 'Ready independently', '2026', None, 1)
     def exhausted(*args):
         raise WorkBudgetExceeded('Mix assembly is still catching up')
@@ -135,13 +216,15 @@ def test_discovery_publishes_even_when_mix_assembly_is_deferred(store, monkeypat
     assert len(selection['discovery_tracks']) == 10
 
 
-def test_new_discovery_pool_is_served_while_mix_projection_is_unchanged(store):
-    seed_songs(store)
+def test_new_discovery_pool_is_served_while_mix_projection_is_unchanged(store, discovery_songs):
     home_prepared.prepare(store, 3)
     old_mix_projection = home_prepared.load(store, 3)
     assert old_mix_projection and not old_mix_projection['discovery_albums']
+    persisted_mix = store.rec_proposals.get_proposals(home_prepared.SURFACE)
+    assert persisted_mix is not None
     store.discovery.upsert_discovered_album('new-album', 'Artist', 'Fresh arrival', '2026', None, 4)
     home_prepared.prepare_discovery(store, 4)
+    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == persisted_mix
     selection = home_prepared.discovery(store, old_mix_projection, 4)
     assert [a['browse_id'] for a in selection['discovery_albums']] == ['new-album']
 
@@ -149,8 +232,8 @@ def test_new_discovery_pool_is_served_while_mix_projection_is_unchanged(store):
 @pytest.mark.parametrize('bad_row', [None, {'browse_id': []},
     {'browse_id': 'bad', 'artist': []}, {'browse_id': 'bad', 'artist': 'Artist', 'genre': {}},
 ])
-def test_corrupt_independent_discovery_pool_cannot_crash_a_refresh(store, bad_row):
-    client = client_for(store)
+def test_corrupt_independent_discovery_pool_cannot_crash_a_refresh(store, bad_row, empty_discovery_home):
+    client = client_for(store, prepare=False)
     store.rec_proposals.put_proposals(home_prepared.DISCOVERY_SURFACE, {
         'discovery_albums': [bad_row], 'discovery_artists': [], 'discovery_tracks': []}, 1)
     assert home_prepared.load_discovery(store) is None
@@ -178,8 +261,8 @@ def test_missing_artist_art_is_queued_and_repaired_image_appears_without_reranki
 
 
 @pytest.mark.parametrize("busy", ["idle", "rebuild", "discovery"])
-def test_empty_discovery_has_one_honest_state_and_no_idle_polling(store, busy):
-    response = client_for(store, busy).get("/home/discovery")
+def test_empty_discovery_has_one_honest_state_and_no_idle_polling(store, busy, empty_discovery_home):
+    response = client_for(store, busy, prepare=False).get("/home/discovery")
     assert response.status_code == 200
     assert response.text.count('role="status"') == 1
     assert response.text.count('hx-get="/home/discovery"') == int(busy != "idle")

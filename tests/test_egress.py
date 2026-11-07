@@ -371,10 +371,12 @@ def test_deepseek_admission_uses_exact_guarded_post(guarded_transports, store, m
     monkeypatch.delenv('DEEPSEEK_API_KEY', raising=False)
     store.settings.set_setting('deepseek_api_key', 'sk-SECRET-12345678')
     monkeypatch.setattr(deepseek, '_iao', DeepSeekIAO())
+    from tests.rec.test_album_descriptions import own_album
+    own_album(store, ALBUM)
     assert album_descriptions.get(store, ALBUM, 1000)[0]['text'] == TEXT
     assert len(sent) == 1 and sent[0].full_url == 'https://api.deepseek.com/chat/completions'
     assert sent[0].get_method() == 'POST'
-    assert store.rec_proposals.get_proposals('album_description_usage')['requests'] == 1
+    assert store.album_descriptions.requests_today(1000) == 1
     assert all('SECRET' not in entry for entry in g.recent())
     assert any('verdict=ALLOW' in entry for entry in g.recent())
 

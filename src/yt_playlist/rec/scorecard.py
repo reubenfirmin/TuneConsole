@@ -158,8 +158,13 @@ def summarize(inputs, start, end, outcome_window_h=24, min_impressions=100):
                 experiment = json.loads(row["provenance"]).get("experiment") or {}
                 if not experiment:
                     continue
-                opportunities.add(experiment["comparison_id"])
-                cluster = clusters.setdefault(experiment["cluster"],
+                if experiment.get('comparison_id') is not None:
+                    opportunities.add(experiment['comparison_id'])
+                # Historical assignment-only receipts are not a controlled
+                # comparison or a known independent cluster.
+                if experiment.get('cluster') is None:
+                    continue
+                cluster = clusters.setdefault(experiment['cluster'],
                     {"played": False, "completion": False, "skip": False})
                 for metric in cluster:
                     cluster[metric] |= states[row["id"]][metric]

@@ -50,7 +50,7 @@ def playlist(store, tmp_path, monkeypatch):
     # Controlled readback failures need no transport backoff in this regression test.
     monkeypatch.setattr(executor, "with_retry", lambda read: read())
     monkeypatch.setattr(playlist_mutation, "with_retry", lambda read: read())
-    identity = store.identities.upsert_identity("Main", "bridge", None, True)
+    identity = store.accounts.upsert_account("Main", "bridge", None, True)
     pid = store.playlists.upsert_playlist(identity, "SOURCE", "Source", 3, "", 1)
     tids = [store.tracks.upsert_track(video, video, "Artist", None, 200) for video in ("a", "b", "c")]
     store.playlists.set_playlist_tracks(pid, tids)

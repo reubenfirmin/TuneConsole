@@ -31,7 +31,8 @@ class RadioPreparation:
         s.candidates_checked_at = time.monotonic()
         with self.store.read_view() as reader:
             ready = bool(reader.settings.get_setting('rec_content_model')
-                         and reader.rec_proposals.has_proposals('mode_bundles'))
+                         and (reader.recommendations.head('home') if getattr(reader, '_recommendation_files', False)
+                              else reader.rec_proposals.has_proposals('mode_bundles')))
         if not ready:
             if worker and not worker.busy and not s.preparation_requested:
                 worker.trigger_mode_refresh()
@@ -40,6 +41,9 @@ class RadioPreparation:
         candidates = candidates_factory(self.store, self.now_fn(), s.candidates.tuning,
                                         now_source=s.candidates)
         if not candidates.modes:
+            close = getattr(candidates, 'close', None)
+            if close is not None:
+                close()
             return None
         directions = self.policy.upgrade_directions(s.candidate_view(), s.history_view(), candidates,
                                                     force=s.feedback_dirty)

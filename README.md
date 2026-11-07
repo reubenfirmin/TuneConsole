@@ -1,435 +1,75 @@
 # TuneConsole
 
-**A better algorithm.**
+A local music library manager and recommender for YouTube Music. Browse your
+library, make mixes, listen to radio, explore related songs and import Spotify
+playlists or saved albums. Recommendations run on your computer; your YouTube
+Music sign-in stays in your browser.
 
-Works with your existing YouTube Music account. TuneConsole learns from your library
-and listening history to bring you new discoveries, neglected records, and old
-favorites. Shape your next mix, follow connections between songs, or switch between
-four radio streams as you listen.
+[Install TuneConsole](https://tuneconsole.com/#install) ·
+[Screenshots](https://tuneconsole.com) · [Privacy](https://tuneconsole.com/privacy)
 
-Free app and extension. Recommendations run on your computer, and your YouTube Music
-sign-in stays in your browser. Bring your Spotify playlists and saved albums along
-with the included import.
+## Run from source
 
-[**Get TuneConsole**](https://tuneconsole.com/#install) ·
-[Explore tuneconsole.com](https://tuneconsole.com) ·
-[Privacy policy](https://tuneconsole.com/privacy)
+Requires [uv](https://docs.astral.sh/uv/) and Python 3.12 or later.
 
-[![Personalized mix tapes: music close to your taste, overlooked records, new discoveries, and old favorites.](https://tuneconsole.com/shots/home.webp)](https://tuneconsole.com)
+```sh
+uv sync
+uv run yt-playlist
+```
 
-<table>
-  <tr>
-    <td width="50%" valign="top">
-      <a href="https://tuneconsole.com/shots/radio.webp"><img src="https://tuneconsole.com/shots/radio.webp" alt="TuneConsole Radio with a playing song and four streams to choose from." width="100%"></a>
-      <strong>Radio that follows your taste.</strong> Four streams to explore and switch between.
-    </td>
-    <td width="50%" valign="top">
-      <a href="https://tuneconsole.com/shots/clusters.webp"><img src="https://tuneconsole.com/shots/clusters.webp" alt="An interactive map connecting songs from M83, Shpongle, Pink Floyd, and other artists." width="100%"></a>
-      <strong>Find a new path through your music.</strong> Explore connections and turn your discoveries into playlists.
-    </td>
-  </tr>
-</table>
+Open <http://127.0.0.1:8765>. In Chrome, Chromium or Edge, open
+`chrome://extensions`, enable **Developer mode**, choose **Load unpacked** and
+select this checkout's `extension/` directory. Keep a signed-in
+<https://music.youtube.com> tab open. The extension connects automatically.
 
-## Features
+For audio analysis in a source checkout, prepare the
+[model assets](scripts/audio_model/README.md) and reload the extension.
+Packaged extension builds include those assets. Playback audio and inference
+stay in the music tab; only measurements and embeddings reach the backend.
+Collection runs independently of open app pages and developer ratings.
 
-- **Cross-identity consolidation**: sign in to several YouTube brand accounts and merge or move
-  playlists into one master library.
-- **Dedupe, merge & prune**: find duplicate and overlapping playlists, merge them, and delete
-  empties. Every destructive action is undoable.
-- **Omnisearch**: instant search across playlists, artists, albums, and tracks in your whole library.
-- **Library browsing**: dedicated Artists, Albums, and Charts views.
-- **Song actions**: create a playlist from a song or add it to an existing playlist from the shared ⋯ menu.
-- **Clusters**: a fun visual approach to building playlists.
-- **Road Trip**: build a playlist for a road trip that combines your and passenger's tastes.
-- **Recommendations & discovery**: surfaces new artists, rediscoveries, and a personalized
-  "for you" feed driven by the taste model.
-- **Metadata enrichment**: uses Last.fm, Deezer, Discogs, MusicBrainz and AcousticBrainz.
-  Edit recognized genre tags under **Enrichment / Advanced**.
-  MusicBrainz, Last.fm and Discogs share one vocabulary, seeded from MusicBrainz plus curated
-  names and aliases. Expand or search the genre families there; equivalent names share an entry,
-  while distinct subgenres retain their identity. Vocabulary upgrades preserve custom additions
-  and disabled genres. Changes apply to future matching; existing song tags stay as saved.
-- **Album descriptions**: Long play can optionally use your DeepSeek Flash API key in
-  Settings / Enrichment. Descriptions are saved locally and reused; generation defaults to
-  at most 20 requests per UTC day, with a configurable limit and pause switch. Only artist,
-  album title and year are sent. `DEEPSEEK_API_KEY` or `deepseek_api_key` in config.toml
-  also work; the environment takes precedence over a saved key.
+For development reloads, use `uv run yt-playlist --reload`.
 
-## Quickstart
+## Run in a container
 
-1. **Start the app:**
-   ```bash
-   uv sync                 # requires Python 3.12+; uv can download a compatible interpreter
-   uv run yt-playlist        # serves http://127.0.0.1:8765
-   ```
-2. **Install the browser extension** (Chrome/Chromium/Edge): go to `chrome://extensions`, turn on
-   **Developer mode**, click **Load unpacked**, and select the `extension/` directory. It connects
-   to the app automatically, there is nothing to paste (see `extension/README.md`).
-3. **Open `https://music.youtube.com` signed in**. The app pairs with the extension and starts syncing your library in the background.
+Run on the same computer as your browser:
 
-HTTP access logs are disabled by default. To include request logs in `app.log` and terminal
-output, start with `YT_PLAYLIST_ACCESS_LOG=1 uv run yt-playlist` (also works with `--reload`).
-Application messages and server error tracebacks remain enabled regardless of this setting.
-
-The new Charts Home journal and Listening analytics views are enabled for feedback.
-Start with `YT_PLAYLIST_LISTENING_CHARTS=0 uv run yt-playlist` to hide both views and
-stop their background preparation. Set the variable to `1` to enable them explicitly.
-The existing Charts rankings remain available in either mode.
-Packaged apps and containers use the same environment variable.
-
-Audio collection runs independently of developer vibe ratings. With a compatible
-extension model installed, ordinary app pages collect three ten-second excerpts
-during natural playback, near 30 seconds, halfway and two-thirds through a song.
-Keep a TuneConsole page open. Playback never seeks, and one app tab owns capture.
-Audio and inference stay in YouTube Music; only bounded measurements and frozen
-embeddings reach the app. Compatible measurements use the bundled Emotify vibe
-checkpoint and seed bounded artist/genre predictions for unmeasured recordings.
-Missing measurements retain the provider-metadata fallback. The existing six
-vibes and human annotations retain their meanings.
-
-Public extension archives currently exclude the optional research model assets.
-Those builds remain idle for automatic collection. Local model preparation is
-documented in `experiments/audio_lab/README.md`; reload the extension afterward.
-This checkpoint does not establish public model redistribution or population
-accuracy. See `experiments/audio_lab/MODEL_CHECKPOINT.md` for results and limits.
-
-The developer rating banner defaults off. To enable it, put
-`YT_PLAYLIST_AUDIO_VIBES=1` in the checkout's ignored `.env.local`, or set that
-environment variable explicitly. An explicit environment value takes precedence;
-`0` hides ratings without disabling collection. The banner accepts multiple
-existing vibe choices and preserves the prediction and sample evidence at each
-explicit edit. Regular users are never asked to label vibes. The dedicated Audio
-analysis preview retains its immediate manual/automatic single-excerpt behavior.
-
-### Docker / Podman
-
-With Docker or Podman installed on the same computer as your browser:
-
-```bash
+```sh
 docker run -d --name tuneconsole \
   -p 127.0.0.1:8765:8765 \
   -v tuneconsole-data:/data \
   ghcr.io/reubenfirmin/tuneconsole:latest
 ```
 
-For Podman, replace `docker` with `podman`. Open <http://127.0.0.1:8765>, install the
-browser extension, and keep a signed-in YouTube Music tab open. The named volume preserves
-your library, configuration, logs, and backups when you replace the container.
+Podman uses the same arguments. The volume retains your library, configuration,
+logs and backups across container replacements. Images support Linux x86-64
+and ARM64. See [packaging](packaging/README.md) for updates and local builds.
 
-Images support Linux x86-64 and ARM64. See [container packaging](packaging/README.md#docker--podman)
-for updates, local builds, and verification.
+## Development
 
-### Playlist creation dates
+FastAPI serves Jinja templates with HTMX and Alpine.js. SQLite and managed local
+files hold application data. The browser extension executes authenticated
+YouTube Music requests. Frontend libraries are vendored.
 
-**New playlists** duplicates non-generated playlists created during the past seven days.
-It reads `playlists.created_at`, never `first_seen`, `last_seen`, or the last edit time.
-TuneConsole records its own creations immediately. The browser connection does not supply
-creation dates for playlists created elsewhere; unknown dates stay out of New.
-Existing saved dates are preserved during library sync. YouTube Music authentication stays
-in the browser, with no separate Google OAuth connection.
+Run a focused check:
 
-
-## Architecture
-
-### Database upgrades and catalog identity
-
-Database upgrades run before repositories or background workers start. The ordered
-registry is `src/yt_playlist/core/migrations/registry.py`; add a new migration there
-and keep released versions unchanged. A migration uses explicit SQL on the supplied
-connection. The runner owns its transaction, version stamp and rollback; migration
-code must never commit, use `executescript`, or call repository write methods.
-
-Each migration's schema changes, data changes and version stamp commit atomically.
-SQLite's transaction journal handles rollback and crash recovery; the framework does
-not create full-database snapshots or maintain a backup collection. If a migration
-fails, its changes roll back while previously completed versions remain committed,
-and the upgrade can resume on the next launch. Startup reports failed versions
-without starting the application against a partly upgraded schema.
-
-Prepared recommendation policies share a content-addressed configuration body across
-ranker, vibe, lane and genre variants. Existing full JSON policies remain readable.
-Background preparation collects unused policies after a one-hour grace period,
-preserving impression references and policy IDs in prepared/session data. Unused
-shared policy storage has admission limits of 64 MiB and 131,072 variants; an individual
-batch is capped at 8 MiB and 16,384 variants. These admission limits apply to new
-shared records; legacy full JSON policies are collected in bounded batches.
-If unused shared records, including newly expired served
-evidence, exceed the limits, preparation defers while maintenance catches up.
-A rejected batch retains the published pools.
-Online collection targets 8 MiB each for policy rows and orphan bodies per pass,
-including the last row that crosses the target, with at most 4,096 of each.
-Prepared policy writes reserve at least 256 MiB of filesystem headroom. Served
-attribution is protected independently of those disposable-data limits.
-
-On upgrade, a one-time repair starts automatically on a separate background
-connection. The UI opens immediately; browsing, starting and tuning radio, and
-existing playback remain available. A banner shows "Compacting storage - won't
-record activity until done" while repair is active. Activity is not recorded and
-radio session checkpoint writes are skipped; personal edits return a retry message.
-Radio uses an in-memory session during repair. After repair, minimal generated
-playlist provenance is saved so subsequent plays stay excluded from taste learning;
-discarded activity and session checkpoints are never replayed. Recommendation,
-enrichment and sync workers wait until repair finishes or safely defers. Normal
-recording then resumes and the banner clears, including when final compaction is
-deferred. The deferral reason remains in the logs and maintenance status.
-
-Repair collects obsolete legacy policies, shares retained configurations, and
-reclaims empty pages with native SQLite VACUUM in WAL mode. UI reads continue
-during compaction. SQLite serializes other application instances' writers; no
-stale snapshot replaces current data. Each conversion verifies the resolved
-configuration before committing, and integrity/foreign-key checks run around
-cleanup and compaction. Durable batch progress survives interruption; Ctrl+C
-cancels outstanding SQLite work and later launches resume committed progress.
-Logs report progress and completion.
-
-Cleanup reserves 32 MiB plus bounded batch work. Compaction needs temporary space
-for SQLite's compact working database and approximately twice the occupied-page
-size plus 256 MiB and overhead on the live database filesystem. If these are the
-same filesystem, their requirements add together. This is a working-space
-estimate: SQLite disk-full errors roll back safely. Busy readers get bounded,
-interruptible retries before further batches can grow the WAL. Insufficient
-space or prolonged contention defers repair, preserves completed batches, and
-retries on the next startup. No full oversized migration backup is created for
-this derived-policy cleanup. SQLite transaction protection remains on.
-
-For a separate recovery rehearsal on another filesystem:
-
-```bash
-uv run python -m yt_playlist.core.policy_recovery \
-  --source "$HOME/.local/share/yt-playlist/state.db" \
-  --output-dir /path/with/space/tuneconsole-recovery
+```sh
+uv run pytest tests/test_radio_recovery.py
 ```
 
-The destination must be new and have approximately three times the source database's
-size available. The command opens the source read-only, keeps an untouched verified
-SQLite backup, collects unused policies on a working copy, shares retained policy
-bodies, and creates `compact.db`. `report.json` records integrity/foreign-key checks,
-non-policy table counts, exact retained configuration fingerprints and before/after
-sizes. It never replaces the source. Before using the candidate, stop all application
-writers and create a fresh candidate from that final state; a candidate created while
-the application was running excludes subsequent user changes. Preserve the stopped
-original database and its sidecars together before installing the candidate. Use the
-application version that supports the candidate's schema.
+| Reference | Contents |
+| --- | --- |
+| [Tests](tests/README.md) | Commands, fixtures, diagnostics and benchmark ownership |
+| [Database maintenance](src/yt_playlist/core/README.md) | Migrations, resumable preparation, publication and recovery |
+| [Recommendations](src/yt_playlist/rec/README.md) | Model, serving and publication boundaries |
+| [Integrations](src/yt_playlist/integrations/README.md) | Provider access and retry contracts |
+| [Frontend](src/yt_playlist/web/static/README.md) | JavaScript ownership and fragment lifecycle |
+| [Extension](extension/README.md) | Pairing, capture, messages and diagnostics |
+| [Packaging](packaging/README.md) | Builds, releases and updates |
+| [Experiments](experiments/README.md) | Experiment results and model decisions |
 
-The shared catalog separates a musical recording (`recordings.id`) from its playable
-uploads (`youtube_items.video_id`). New uploads get separate provisional recordings;
-matching titles, MusicBrainz IDs, or ISRC candidates do not merge them automatically.
-Verified associations retain their source and evidence. Playlist operations and
-YouTube ratings still address exact uploads. Missing-video album entries remain
-metadata with explicit album links and are excluded from playable recommendations.
-
-Library and discovery memberships reference this catalog. One recording enrichment
-queue retains full provider responses, identifiers, and scoped findings for either
-membership. Discovery expiry removes candidate membership while preserving catalog
-and enrichment evidence. Legacy numeric URLs/actions resolve through
-`legacy_track_refs`; raw interaction keys and ambiguous evidence remain retained.
-Failed lookups retain per-recording/provider progress and exponential retry delays (30 seconds to
-one hour). Provider outages and throttling persist cooldowns and honor longer `Retry-After` values.
-Untouched work precedes retries; successful answers are reused until that pass completes. The
-enrichment status panel shows saved retry deadlines and errors, including after a restart.
-Provider enablement, availability and effective credential changes schedule targeted coverage passes
-for existing recordings, including those with complete metadata. Other providers' answers and user
-selections remain intact. Disabled/unavailable providers remain distinct from successful, no-match,
-pending and retry outcomes; pending provider coverage contributes to the visible queue count.
-Artwork outcomes are saved separately as found, confirmed absent, or retryable. Optional archive
-retries retain release IDs and respect response-cache deadlines, use bounded backoff, and survive
-restarts. Each worker drain handles at most one due artwork retry alongside metadata work. Useful
-covers are preserved, and artwork failures do not reopen a completed metadata pass.
-Derived vectors are rebuilt in identity version 2, and incompatible model rollback
-artifacts remain available for inspection rather than being loaded into that space.
-
-Live catalog fields and exact source-entry IDs belong to `core.catalog_identity`; saved-key
-rewrites belong to `core.catalog_state`. Numbered migrations retain their own frozen definitions.
-Unmarked saved JSON uses runtime format 1; rewritten dictionaries carry `catalog_state_version`.
-New serialized formats need a versioned reader/rewriter and stamped writers. Unknown future formats
-are preserved during live rekeying. Schema changes use a new migration without changing old upgrades.
-
-### The stack
-
-TuneConsole is a single local process.
-
-ASGI lifespan owns periodic sync, recommendation/enrichment workers, the idle monitor, and the serial
-radio executor. Restart, native quit, and idle shutdown close the same work-admission gate before
-checking activity. Admitted builds and mutations remain tracked through completion, including after
-request cancellation; queued radio applies are cancelled during shutdown. Lifespan requests cooperative
-worker stops and allows 30 seconds to drain, reporting a shutdown failure if work remains. App factories
-and tests can explicitly disable periodic work with `create_app(..., background_work=False)`.
-
-The radio controller serializes playlist changes outside the bridge response pump. Ordered remote
-readback distinguishes complete, partial, and failed writes; only confirmed uploads enter applied
-state. Partial queues remain retryable and appear in the radio card and `/bridge/status` diagnostics.
-
-Playlist snapshot errors include a validation stage and a bounded envelope report:
-fixed schema names, value types, counts capped at 1,000, and at most eight sampled
-actions/items. These distinguish missing continuation envelopes, wrong contents
-types, unsupported renderers and parser failures without logging response bodies,
-unknown field names, titles, account data or continuation tokens. The read-only
-`/playlist/{local_id}/snapshot-report` also returns the failed page diagnostics.
-The two Radio page-two failures observed on 2026-10-23 recovered their next-track
-queue within about five seconds. Their original payloads were not retained, so
-their upstream cause remains unknown. Collect the new stage/envelope evidence if
-they recur before changing parsing or retry policy; an incomplete read never proves
-that songs are missing and never authorizes replaying an uncertain write.
-
-Takeout and Spotify history imports run as tracked jobs outside the ASGI loop, sharing the library
-sync lock. The import form polls phase and terminal status; disconnecting a request leaves its job
-owned until processing finishes, so shutdown waits for history writes, repair, and discovery seeding.
-
-- **Python / FastAPI**: an ASGI app served by uvicorn (`--reload` supported). Routes return
-  server-rendered HTML, not JSON.
-- **Jinja2**: every page and partial is a server-rendered template.
-- **HTMX**: hypermedia, baby.
-- **Alpine.js**: for client side interactivity that HTMX doesn't cover. Sortable.js handles drag-to-reorder and d3-force draws the Clusters graph.
-- **SQLite**: the whole library, play history, and model state live in one local SQLite file.
-  `store.py` composes per-domain DAOs (the `repos/` package) behind a single connection.
-- **ytmusicapi**: builds the YouTube Music (InnerTube) requests and parses the responses. It does
-  not make the network calls itself: a custom session routes each request through the browser
-  extension, which applies your live session and returns the response. Frontend libraries are
-  vendored locally, so nothing is fetched from a CDN at runtime.
-
-Regular song views use the `song_menu` launcher in `web/templates/_partials/song_menu_button.html`.
-`base.html` mounts one menu and playlist dialog from `_partials/song_actions.html`, backed by
-`static/song-actions.js`. Add contextual actions there; specialized tools such as merge can keep
-their own controls.
-
-### The model
-
-The recommender is local, CPU-only, and trained on your own library and listening history. Its
-implementation lives in `src/yt_playlist/rec/` and has four main parts:
-
-- **Representations.** `embed.py` maintains a collaborative track space from co-occurrence baskets
-  (playlists, albums, artists, listening sessions, genre families, and decades). The default builder
-  is PPMI plus truncated SVD; automatic model selection can select item2vec instead. A separate
-  content space encodes genre, era, musical key, and enriched audio features. It supports taste modes, clustering, and
-  cold-start candidates that are not yet in the library.
-- **Taste and scoring.** `scoring.py` represents durable taste as one centroid per coherent playlist,
-  weighted by how much that playlist is played. Candidate scores are the weighted fit across those
-  contexts, then adjusted by genre, era, artist, popularity, and breadth preferences. This avoids
-  collapsing a multi-modal library into one user vector.
-- **Recent intent.** `transient.py` and `layers.py` derive decaying signals from recent plays, likes,
-  dislikes, skips, and explicit mood feedback. Collaborative, session, and audio-space tilts affect
-  ranking without replacing durable taste; repeated evidence can graduate into persistent facet
-  weights. Machine-generated radio plays are excluded from taste evidence to prevent feedback loops.
-- **Surfaces and discovery.** Each surface in `surfaces.py` owns its candidate pool, exclusions, and
-  rotation policy. Out-of-library discovery uses YouTube Music catalog data and cached Last.fm edges,
-  but TuneConsole's local models do the ranking. `rec_worker.py` coalesces rebuild requests, persists
-  vectors, and materializes expensive proposals in the background so routes can serve the last good
-  result from SQLite.
-  Background radio collection is disabled unless `radio_discovery_enabled` is explicitly set to `1`;
-  existing discovery tracks remain available to Fresh. Enrichment processes one ordered queue of
-  library and discovery tracks and refreshes Fresh's prepared ranking and Home taste-mode buckets
-  with the resulting genre, year, and audio metadata. Cached tracks retain release years for era
-  filtering and descriptions. Fresh also works without enrichment or a fitted taste model:
-  discoveries with no usable metadata or artist signal remain available after ranked candidates.
-  Explicit genre requests still require a known matching genre.
-  Failed provider requests remain queued; successful misses count as checks. Per-provider outcomes
-  are retained in recording-linked attempt history with their input upload and full response.
-  Discovery Pools shows saved metadata and genre, era, and metadata-gap charts. Legacy discovery batch stamps are
-  requeued once because the old sink retained no provider history. Daily cleanup also expires
-  never-shown tracks from their discovery date (30 days by default), while generated playlists
-  protect their tracks. Expired tracks are removed from prepared recommendations too.
-  Further artist, album, and source modeling is planned in [schema_changes_plan.md](schema_changes_plan.md).
-  Album and artist views count tiles visible on Home's Discover tab once per visit.
-  Historical background loads are retained
-  separately and do not start the cleanup clock.
-
-Automatic selection (`rec/model_selection.py`) begins after 14 days of history and 100 modeled
-tracks. It fits alternatives in memory and requires at least 50 paired targets across two periods,
-consistent gains, and a multiple-comparison-adjusted sign test before publishing a different setup.
-Successful comparisons recur no more often than every 28 days and require 30 fresh listening tracks.
-Model Health shows readiness, the selection result, and prospective top-20 prediction measurements.
-Both setups save forecasts on the same candidate pool before exact-timestamped later plays arrive;
-generated-only plays are excluded. Daily forecast refreshes happen during model updates. Measurements
-for an applied selection continue through later checks that retain it. Restoring the exact previous
-vector snapshot pauses selection until explicitly resumed; preferences and regular training are kept.
-
-### Home recommendation audit
-
-The Home configurator's **These mixes** tab shows your top 12 available genre families by listening,
-with search for the rest. Its single action makes mixes from the selected genres, or shuffles
-away from the current genres when none are selected. Successful changes close the configurator
-to reveal the new mixes. Thin mixes search the full ranked library for the same genre family,
-then fill with nearby styles if needed; artist and album caps still apply. Fresh songs stay in the
-discovery pool, and Comfort stays limited to real listening favorites. Requests can offer fewer
-cards when choices are limited, and explain when no
-matching themes are ready. A request lasts for the current menu, including previews, until the next
-normal refresh/rotation. It does not change taste weights or record dislikes. The **Preferences**
-tab holds the existing sliders. The configurator opens as a modal with a backdrop and contained
-keyboard focus; Escape or a backdrop click closes it.
-
-`home-cards.jsonl` sits alongside `app.log` in the app's logs directory (normally
-`~/.local/share/yt-playlist/logs` on Linux, or `$YT_PLAYLIST_HOME/logs` when overridden).
-It rotates daily in UTC and keeps 30 archives. Logging starts when the updated app starts.
-
-Each JSON line snapshots a successfully rendered Home card response: UTC time, request path,
-rotation epoch, and each card's framing, displayed description, mode, recipe, genre/decade counts,
-missing-metadata counts, and ordered track identities. Counts use the same metadata fallbacks as
-the displayed description. They describe the offered tracks even if these differ from the recipe.
-Normal loads, repeated previews, and refreshes are all recorded; use the path and epoch to separate
-them when reviewing the week. These are server offers, not confirmed views or inferred rejections.
-The audit is diagnostic only and does not feed the recommendation models.
-
-### Recommendation response measurement
-
-Fresh songs exclude discoveries with neither usable ranking evidence nor genre/year/audio metadata.
-Metadata-bearing tracks may follow scored candidates as explicitly unscored fallbacks while a model
-is unavailable. The cold rankability diagnostic reports scored and fallback counts separately.
-Genre tilts use the same missing-metadata neutrality rule for cold and owned candidates: when genre
-coverage is mixed, known positive weights are geometrically centered and missing genre stays neutral.
-Hard mutes remain exclusions.
-Genre mutes apply when recommendations are served, including cached Home mixes and warm tracks;
-automatic learning leaves them in place until a manual unmute or reset.
-
-The 90-day served ledger records final track recommendations from Home mixes, playlist completion,
-Songs like, Clusters, and Road Trip drafts. Each impression preserves its final rank, lane/mode, available candidate score,
-and serving policy fingerprint. Policy records retain effective parameters, preferences, exclusions,
-recent evidence, and identities of the actual collaborative/content/artist/taste/mode models. Cached
-candidate pools also retain their build policy, separately from the policy at rendering. Metadata
-availability, ownership, artist/genre and last-play time are snapshotted when served; later enrichment
-or adoption cannot change a historical coverage slice. Diagnostic previews and ordinary library or
-search tables are excluded. Unchanged Road Trip progress polls count as a single draft offer.
-These are server-rendered offers, not proof the browser saw every row.
-
-The north-star metric is **rendered to played within 24 hours**. Completion, skip, repeat rate and
-artist/genre variety are guardrails; listening depth and days since last play describe sustained
-listening and staleness. Generated responses are measured separately from organic preference evidence.
-Open, successful playback requests, successful saves, and promotions have their own event ledger;
-a playback request is not proof playback started. Discovery conversion means a cold recommendation
-was explicitly saved into the library or its generated playlist was promoted. Merely generating a
-playlist does not count as conversion. Nothing in this measurement ledger trains the taste model.
-
-Outcomes belong to the nearest preceding impression across all surfaces, within an inclusive 24-hour
-window; report cohorts use `[start, end)`. Repeated events can credit an impression only once per
-outcome. Saved video identities preserve skip/completion attribution after discovery cleanup.
-Historical impressions without coverage/provenance remain unknown. Reports expose sample
-sizes per slice, mark fewer than 100 impressions as collecting evidence, and never infer a comparative
-verdict from observational data. Recall/projection metrics remain component diagnostics.
-
-Projection recall uses five deterministic folds grouped by track identity. Each target is excluded
-from its fold's ridge fit, content vocabulary, and audio normalization. Artists may cross folds;
-precomputed artist features are disabled to avoid sharing their fitting history. The collaborative
-embedding remains a fixed reference, so this measures metadata projection generalization rather than
-end-to-end cold-start or unseen-artist performance. Reports retain eligible, scored, unencodable, and
-insufficient-training counts, plus genre, era, and coverage slices. Each fit requires 20 usable tracks.
-
-The Taste model health panel shows response and coverage summaries. `GET /taste/scorecard` returns
-the full scorecard (optional Unix-second `start` and `end`, at most 90 days);
-`GET /taste/served/{id}` returns an impression and its stored policy for inspection.
-
-PPR defaults to a **live** 50/50 experiment with standard cosine ordering. Each final Home card and
-its alternative ordering share a comparison ID, stable candidate fingerprint and actual cached PPR
-solver configuration. The local, 90-day ledger records policy-assignment propensity (conditional on
-the selected mode, not per-track inclusion probability), score inputs, rank and final DJ position.
-Counterfactual rows never receive plays, actions or exit outcomes. Generated-playlist responses remain
-separate from organic taste evidence. The old PPR JSONL writer and lane-only log are retired; existing
-JSONL files are historical snapshots and are no longer consumed or appended.
-
-`GET /taste/experiments` reports mature live exposure, acceptance, sustained listening and skips by
-policy cohort, plus counterfactual counts. Wilson 95% intervals use epoch/mode clusters, pooling repeat
-views; outcomes mature for 24 hours. `POST /taste/experiments/decision` accepts form fields `decision`
-(`promote` or `retire`), `cohort` and `reason`. Promotion requires 100 mature clusters per live arm,
-disjoint acceptance intervals, and conservative sustained-listening and skip guardrails. Shadow
-evidence cannot authorize promotion. Retirement may stop an underpowered experiment, with that limit
-recorded explicitly. Decisions retain the last 200 records locally. Share 0 means shadow, share 1
-means retained PPR; an explicit retirement at share 0 also disables replay. These are conservative
-observational comparisons of deterministic cohort assignment, not a claim of causal improvement.
+HTTP access logging defaults off; set `YT_PLAYLIST_ACCESS_LOG=1` to enable it.
+Set `YT_PLAYLIST_LISTENING_CHARTS=0` to disable the Charts journal and Listening
+analytics and their background work. Developer vibe ratings default off;
+`YT_PLAYLIST_AUDIO_VIBES=1` enables them without changing normal collection.
+Use the [audio model settings](src/yt_playlist/rec/README.md#audio-model-settings).

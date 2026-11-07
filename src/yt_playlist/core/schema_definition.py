@@ -1,0 +1,630 @@
+"""Versioned current bootstrap and schema contract, independent of the baseline.
+
+Recognized unversioned databases and every numbered predecessor remain supported
+through the frozen historical upgrade path. Empty databases use the complete
+destination resource, covering both numbered and regular histories. The numbered
+SQL resource remains the baseline for explicit historical replay and export.
+"""
+from collections import Counter, defaultdict
+from contextlib import closing, contextmanager
+from contextvars import ContextVar
+from functools import lru_cache
+from pathlib import Path
+import re
+import sqlite3
+
+from .schema_contract import MigrationError, tokens as _tokens
+
+
+CONTRACT_FLOOR = 32
+VERSION = 107
+CURRENT_DEFINITION = Path(__file__).with_name('schema') / f'layout-{VERSION}.sql'
+CURRENT_SEEDS = CURRENT_DEFINITION.with_name(f'seeds-{VERSION}.sql')
+DEFINITION = Path(__file__).with_name('migrations') / 'schema.sql'
+SOURCE_DEFINITIONS = (DEFINITION.with_name('schema_discovery_subjects.sql'),
+               DEFINITION.with_name('schema_listening_subjects.sql'),
+               DEFINITION, DEFINITION.with_name('schema_metadata_deliveries.sql'),
+               DEFINITION.with_name('schema_archives.sql'), DEFINITION.with_name('schema_scope_account_state.sql'),
+               DEFINITION.with_name('schema_metadata_evidence.sql'), DEFINITION.with_name('schema_playback_feedback.sql'),
+               DEFINITION.with_name('schema_recommendation_work.sql'), DEFINITION.with_name('schema_home_offers.sql'),
+               DEFINITION.with_name('schema_album_note_requests.sql'),
+               DEFINITION.with_name('schema_genre_preferences.sql'),
+               DEFINITION.with_name('schema_genre_classifications.sql'),
+               DEFINITION.with_name('schema_recommendation_requests.sql'),
+               DEFINITION.with_name('schema_taste_axes.sql'),
+               DEFINITION.with_name('schema_recipe_memberships.sql'),
+               DEFINITION.with_name('schema_listening_outputs.sql'),
+               DEFINITION.with_name('schema_home_outputs.sql'),
+               DEFINITION.with_name('schema_choice_learning.sql'),
+               DEFINITION.with_name('schema_recommendation_reports.sql'),
+               DEFINITION.with_name('schema_collection_state.sql'),
+               DEFINITION.with_name('schema_session_state.sql'),
+               DEFINITION.with_name('schema_sync_state.sql'),
+               DEFINITION.with_name('schema_model_state.sql'),
+               DEFINITION.with_name('schema_tv_recommendations.sql'),
+               DEFINITION.with_name('schema_clicked_library_pools.sql'),
+               DEFINITION.with_name('schema_model_projections.sql'),
+               DEFINITION.with_name('schema_radio_policy_roots.sql'),
+               DEFINITION.with_name('schema_taste_controls.sql'),
+               DEFINITION.with_name('schema_collection_documents.sql'),
+               DEFINITION.with_name('schema_action_work.sql'),
+               DEFINITION.with_name('schema_transfer_work.sql'),
+               DEFINITION.with_name('schema_album_occurrences.sql'),
+               DEFINITION.with_name('schema_foreign_calendar_scopes.sql'))
+DEFINITIONS = (CURRENT_DEFINITION, CURRENT_SEEDS,
+               CURRENT_DEFINITION.with_name('current.json'), *SOURCE_DEFINITIONS)
+SEED_SETTINGS = {
+    'catalog_identity_version': '2',
+    'discovery_enrichment_audit_requeued': '1',
+    'enrich_ts_backfilled': '1',
+    'enrich_unattempted_batch_repaired': '1',
+    'like_ratchet_repaired': 'adjusted 0 of 0 like-touched axis weight(s); 0 like row(s) stamped '
+                            'sync-provenance; 0 once-ever graduation stamp(s) backfilled',
+    'playlist_created_at_backfilled': '1',
+}
+INITIAL_STATE = (
+    "INSERT INTO rec_change_queue(kind,item,revision) VALUES ('refresh','',1)",
+    'INSERT INTO rec_preparation VALUES (1,0,0)',
+    'INSERT INTO rec_group_clock VALUES (1,0)',
+    'INSERT INTO group_retention_state VALUES (1,0)',
+    "INSERT INTO rec_vibe_pending(position,group_key,revision,cursor) VALUES (1,'*',2,'')",
+)
+_migration_version = ContextVar('schema_definition_version',default=None)
+
+
+@contextmanager
+def migration_definitions(version):
+    """Historical callers without a version see their own frozen schema."""
+    token = _migration_version.set(version)
+    try:
+        yield
+    finally:
+        _migration_version.reset(token)
+
+
+def statements(*, version=None):
+    historical = _migration_version.get()
+    if version is None:
+        version = historical if historical is not None else VERSION
+    if historical is None and version == VERSION:
+        yield from _read_statements(CURRENT_DEFINITION)
+        return
+    yield from assembled_statements(version=version)
+
+
+def seed_statements():
+    if _migration_version.get() is None:
+        yield from _read_statements(CURRENT_SEEDS)
+        return
+    # The maintenance compiler consumes canonical seed declarations rather
+    # than depending on an already generated resource.
+    quote = lambda value: "'"+value.replace("'", "''")+"'"
+    for key, value in SEED_SETTINGS.items():
+        yield 'INSERT INTO settings(key,value) VALUES ('+quote(key)+','+quote(value)+')'
+    yield from INITIAL_STATE
+
+
+def _read_statements(path):
+    pending = ''
+    for line in path.read_text(encoding='utf-8').splitlines(keepends=True):
+        if not pending and (not line.strip() or line.lstrip().startswith('--')):
+            continue
+        pending += line
+        if sqlite3.complete_statement(pending):
+            yield pending.strip()
+            pending = ''
+    if pending.strip():
+        raise MigrationError('Incomplete current schema definition: ' + path.name)
+
+
+def assembled_statements(*, version):
+    """Frozen predecessors and offline export only; current startup reads SQL.
+
+    The complete installed format also includes the independently versioned,
+    bounded regular changes. This numbered layout is not the final rebuild
+    destination version; the builder fences its entire contract by signature.
+    """
+    # Repeated historical validations share the same shipped text. Read it for
+    # the key so a changed definition cannot reuse an older compiled layout.
+    definitions = tuple((path, path.read_text()) for path in _source_definitions(version))
+    yield from _assembled_statements(version, definitions, DEFINITION)
+
+
+@lru_cache(maxsize=32)
+def _assembled_statements(version, definitions, baseline):
+    from . import schema_transforms as transforms
+
+    result = []
+    for sql in _statements(version, definitions=definitions, baseline=baseline):
+        if version >= 103:
+            sql = transforms.entity_names(sql)
+        result.append(transforms.domain_contracts(sql) if version >= 104 else sql)
+    if version >= 105:
+        from .frozen_share_contract import fences
+        result.extend(fences())
+    return tuple(result)
+
+
+def _source_definitions(version):
+    from . import schema_transforms as transforms
+
+    for definition in SOURCE_DEFINITIONS:
+        if version < 106 and definition.name == 'schema_foreign_calendar_scopes.sql':
+            continue
+        if version < 101 and definition.name == 'schema_discovery_subjects.sql':
+            continue
+        if version < 100 and definition.name == 'schema_listening_subjects.sql':
+            continue
+        if version < 99 and definition.name == 'schema_album_occurrences.sql':
+            continue
+        if version < 98 and definition.name in ('schema_action_work.sql','schema_transfer_work.sql'):
+            continue
+        if version < 97 and definition.name == 'schema_collection_documents.sql':
+            continue
+        if version < 96 and definition.name == 'schema_taste_controls.sql':
+            continue
+        if version < 95 and definition.name in ('schema_tv_recommendations.sql','schema_clicked_library_pools.sql',
+                                               'schema_model_projections.sql','schema_radio_policy_roots.sql'):
+            continue
+        if version < 94 and definition.name in transforms.COLLECTION_DEFINITIONS:
+            continue
+        if version < 93 and definition.name in ('schema_choice_learning.sql','schema_recommendation_reports.sql'):
+            continue
+        if version < 91 and definition.name == 'schema_home_outputs.sql':
+            continue
+        if version < 90 and definition.name == 'schema_listening_outputs.sql':
+            continue
+        if version < 89 and definition.name == 'schema_recipe_memberships.sql':
+            continue
+        if version < 88 and definition.name == 'schema_taste_axes.sql':
+            continue
+        if version < 87 and definition.name == 'schema_recommendation_requests.sql':
+            continue
+        if version < 86 and definition.name == 'schema_genre_classifications.sql':
+            continue
+        yield definition
+
+
+def _statements(version, *, definitions=None, baseline=None):
+    from . import schema_transforms as transforms
+    from .genre_contract import classified_definition
+
+    if definitions is None:
+        definitions = ((path, path.read_text()) for path in _source_definitions(version))
+    if baseline is None:
+        baseline = DEFINITION
+    for definition, text in definitions:
+        pending = ''
+        for line in text.splitlines(keepends=True):
+            pending += line
+            if sqlite3.complete_statement(pending):
+                if definition.name=='schema_radio_policy_roots.sql' and re.match(
+                        r'CREATE (?:TABLE |INDEX ix_)radio_seed_policies\b',pending.lstrip(),re.I):
+                    pending = ''
+                    continue
+                sql = classified_definition(pending) if version >= 86 else pending
+                sql = transforms.taste_axes(sql) if version >= 88 else sql
+                sql = transforms.recipe_memberships(sql) if version >= 89 else sql
+                if definition == baseline:
+                    sql = transforms.collection_state(sql) if version >= 94 else sql
+                    sql = transforms.collection_documents(sql) if version >= 97 else sql
+                    sql = transforms.action_work(sql) if version >= 98 else sql
+                    sql = transforms.album_occurrences(sql) if version >= 99 else sql
+                    sql = transforms.listening_subjects(sql) if version >= 100 else sql
+                if version >= 101 and definition.name!='schema_discovery_subjects.sql':
+                    sql = transforms.discovery_subjects(sql)
+                if version >= 102:
+                    sql = transforms.catalog_writes(sql)
+                yield sql
+                pending = ''
+        if pending.strip():
+            raise MigrationError('Incomplete current schema definition: ' + definition.name)
+    if version >= 93:
+        yield from transforms.choice_fences()
+    if version >= 94:
+        yield from transforms.collection_fences()
+    if version >= 95:
+        from yt_playlist.core import model_projections
+        yield from transforms.model_control_statements()
+        yield from model_projections.guards()
+        yield from transforms.retired_recommendation_fences()
+        yield from transforms.saved_output_definitions()
+    if version >= 96:
+        yield from transforms.taste_control_fences()
+    if version >= 97:
+        yield from transforms.document_fences()
+    if version >= 98:
+        yield from transforms.action_fences()
+    if version >= 99:
+        yield from transforms.album_fences()
+    if version >= 100:
+        yield from transforms.listening_fences()
+    if 101 <= version < 102:
+        yield from transforms.discovery_fences()
+
+
+def _checks(sql):
+    tokens = _tokens(sql)
+    checks = []
+    for start, token in enumerate(tokens[:-1]):
+        if token != 'check' or tokens[start + 1] != '(':
+            continue
+        depth = 0
+        for end in range(start + 1, len(tokens)):
+            depth += (tokens[end] == '(') - (tokens[end] == ')')
+            if depth == 0:
+                checks.append(tokens[start + 2:end])
+                break
+    return Counter(checks)
+
+
+def _table_clauses(sql):
+    """Split column/table constraints without splitting composite keys or expressions."""
+    tokens = _tokens(sql)
+    start = tokens.index('(') + 1
+    depth = 0
+    for position in range(start, len(tokens)):
+        token = tokens[position]
+        if depth == 0 and token in (',', ')'):
+            yield tokens[start:position]
+            start = position + 1
+            if token == ')':
+                return
+        depth += (token == '(') - (token == ')')
+
+
+def _foreign_key_deferrals(sql):
+    """SQLite's FK pragma omits deferral; retain it on its actual owning key."""
+    result = Counter()
+    for clause in _table_clauses(sql):
+        depth = 0
+        top_level = []
+        for position, token in enumerate(clause):
+            if depth == 0:
+                top_level.append(position)
+            depth += (token == '(') - (token == ')')
+        reference = next((p for p in top_level if clause[p] == 'references'), None)
+        if reference is None:
+            continue
+        declaration = clause[2:] if clause[0] == 'constraint' else clause
+        if declaration[:2] == ('foreign', 'key'):
+            children = tuple(t for t in declaration[3:declaration.index(')')] if t != ',')
+        else:
+            children = (clause[0],)
+        parent = clause[reference + 1]
+        parent_columns = ()
+        if clause[reference + 2:reference + 3] == ('(',):
+            end = clause.index(')', reference + 3)
+            parent_columns = tuple(t for t in clause[reference + 3:end] if t != ',')
+        deferral = ()
+        for position in top_level:
+            if position > reference and clause[position] == 'deferrable':
+                start = position - (clause[position - 1] == 'not')
+                end = position + (3 if clause[position + 1:position + 2] == ('initially',) else 1)
+                deferral = clause[start:end]
+        result[(children, parent, parent_columns, deferral)] += 1
+    return result
+
+
+def _table(conn, name, sql):
+    from . import schema_inspection
+    return schema_inspection.table(conn, name, sql, lambda: _inspect_table(conn, name, sql))
+
+
+@lru_cache(maxsize=1024)
+def _table_declarations(sql):
+    """Immutable facts from exact DDL, independent of live SQLite observations."""
+    tokens = _tokens(sql)
+    # table_list resolves columns of every main/TEMP view, even when its name
+    # argument or WHERE clause names one table. Repeating that work per owner
+    # makes admission expand unrelated nested publication views hundreds of
+    # times. SQLite has already validated this stored CREATE TABLE statement;
+    # its trailing options contain exactly these two flags. Column names,
+    # defaults and CHECK expressions occur before the final closing parenthesis.
+    end = max((index for index, token in enumerate(tokens) if token == ')'), default=-1)
+    options = tokens[end+1:] if end>=0 else ()
+    flags = (int(any(options[index:index+2] == ('without', 'rowid') for index in range(len(options)-1))),
+             int('strict' in options))
+    annotations = Counter()
+    for position, token in enumerate(tokens):
+        if token == 'collate':
+            annotations[tokens[position:position + 2]] += 1
+        elif token == 'autoincrement':
+            annotations[(token,)] += 1
+    return (tuple(_checks(sql).items()), flags, tuple(annotations.items()),
+            tuple(_foreign_key_deferrals(sql).items()))
+
+
+def _inspect_table(conn, name, sql):
+    quoted = '"' + name.replace('"', '""') + '"'
+    # Structure observations are bounded by the declared schema. Fetch each
+    # result once rather than crossing the instrumented DB handle per column,
+    # key and index during every migration's admission check.
+    columns = {r[1]: (r[2].upper(), r[3], r[4], r[5], r[6])
+               for r in conn.execute(f'PRAGMA main.table_xinfo({quoted})').fetchall()}
+    grouped_keys = defaultdict(list)
+    for row in conn.execute(f'PRAGMA main.foreign_key_list({quoted})').fetchall():
+        grouped_keys[row[0]].append(row)
+    foreign_keys = Counter(tuple(tuple(r[2:]) for r in sorted(rows, key=lambda r: r[1]))
+                           for rows in grouped_keys.values())
+    unique = Counter()
+    for index in conn.execute(f'PRAGMA main.index_list({quoted})').fetchall():
+        if index[3] in ('u', 'pk'):
+            index_name = '"' + index[1].replace('"', '""') + '"'
+            unique[(index[3], tuple((r[2], r[3], r[4]) for r in conn.execute(
+                f'PRAGMA main.index_xinfo({index_name})').fetchall() if r[5]))] += 1
+    checks, flags, annotations, deferrals = _table_declarations(sql)
+    # All counts come from observed declarations and are strictly positive.
+    # Plain mappings preserve multiplicity and compare/copy directly; Counter's
+    # missing/zero normalization adds work to every unchanged-table admission.
+    return (columns, dict(foreign_keys), dict(unique), dict(checks), flags,
+            dict(annotations), dict(deferrals))
+
+
+def _schema_contract(statements):
+    from .schema_inspection import _copy_table
+
+    # Only reference DDL is cached. Every caller receives its own mappings;
+    # adjusting a predecessor's accepted owners cannot change another contract.
+    return {name: (kind, _copy_table(value) if kind == 'table' else value)
+            for name, (kind, value) in _reference_contract(tuple(statements)).items()}
+
+
+_REFERENCE_CONNECTION = ContextVar('schema_reference_connection', default=None)
+
+
+@lru_cache(maxsize=16)
+def _reference_contract(statements):
+    """Private reference observations, keyed by the complete ordered SQL."""
+    reference = sqlite3.connect(':memory:')
+    token = _REFERENCE_CONNECTION.set(reference)
+    try:
+        for sql in statements:
+            reference.execute(sql)
+        return {
+            name: (kind, _reference_table(name, sql) if kind == 'table' else _tokens(sql))
+            for name, kind, sql in reference.execute(
+                "SELECT name,type,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'").fetchall()
+        }
+    finally:
+        _REFERENCE_CONNECTION.reset(token)
+        reference.close()
+
+
+@lru_cache(maxsize=1024)
+def _reference_table(name, sql):
+    """An unchanged reference table has the same declared constraints in every layout.
+
+    Only shipped CREATE TABLE text is reused here. Observe the private contract
+    database already built by the caller, rather than constructing another
+    database for every table. The cache retains values, never connections.
+    Live observations still belong to their connection's admission session.
+    """
+    if (reference := _REFERENCE_CONNECTION.get()) is not None:
+        return _inspect_table(reference, name, sql)
+    with closing(sqlite3.connect(':memory:')) as reference:
+        reference.execute(sql)
+        return _inspect_table(reference, name, sql)
+
+
+@lru_cache(maxsize=1)
+def contract():
+    return _schema_contract(statements())
+
+
+@lru_cache(maxsize=1)
+def _normalized_vibe_contract():
+    from . import destination_schema
+    tables = [sql for sql in destination_schema.statements()
+              if re.match(r'\s*CREATE TABLE (measurements|predictions|recording_vibes)\b', sql, re.I)]
+    return _schema_contract(tables)
+
+
+@lru_cache(maxsize=1)
+def _retired_metadata_contract():
+    from . import metadata_locator_contract as locators
+    objects = _schema_contract([locators.TABLE,'CREATE TABLE metadata_legacy_records(id INTEGER)',*locators.GUARDS.values()])
+    return {name:value for name,value in objects.items() if name!='metadata_legacy_records'}
+
+
+def bootstrap(conn, registry, now, *, validation=None):
+    """Initialize the complete current state in the runner's single transaction."""
+    if len(registry) < VERSION:
+        raise MigrationError('Current bootstrap is ahead of the migration registry')
+    for sql in statements():
+        conn.execute(sql)
+    from yt_playlist.core import genre_identity
+    genre_identity.seed_catalog(conn)
+    for sql in seed_statements():
+        conn.execute(sql)
+    conn.executemany('INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)',
+                     [(m.version, m.name, now) for m in registry[:VERSION]])
+    from yt_playlist.core import group_progress
+    group_progress.install(conn)
+    (validation or validate)(conn)
+
+
+def validate(conn, *, foreign_keys=True, data=True):
+    from . import destination_schema, vibe_versions
+
+    expected = (_schema_contract(destination_schema.statements(normalized=vibe_versions.normalized(conn)))
+                if destination_schema.complete(conn) else contract())
+    _validate(conn, expected, VERSION, foreign_keys=foreign_keys, data=data)
+
+
+def _validate(conn, expected_contract, version, *, replaced=frozenset(), foreign_keys=True, data=True):
+    from . import metadata_runtime
+    from . import legacy_journals
+    from . import vibe_versions
+    from . import metadata_locator_contract as metadata_locators
+    if metadata_locators.retired(conn):
+        metadata_locators.validate(conn)
+        expected_contract = {**expected_contract, **_retired_metadata_contract()}
+        replaced = replaced | metadata_locators.REMOVED
+    if vibe_versions.normalized(conn):
+        expected_contract = {**expected_contract, **_normalized_vibe_contract()}
+    replaced = replaced | legacy_journals.retired_relations(conn)
+    runtime_views = metadata_runtime.views() if metadata_runtime.active(conn) else {}
+    objects = {r[0]: (r[1], r[2]) for r in conn.execute(
+        "SELECT name,type,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchall()}
+    file_vibe_guards = {}
+    from . import recommendation_revalidations
+    if recommendation_revalidations.available(conn):
+        recommendation_revalidations.validate(conn)
+        file_vibe_guards.update(recommendation_revalidations.guards())
+    if 'schema_changes' in objects and conn.execute(
+            "SELECT 1 FROM schema_changes WHERE version=16 AND name='file_owned_vibe_guards'").fetchone():
+        from . import vibe_provenance
+        file_vibe_guards.update(vibe_provenance.guards())
+    if 'schema_changes' in objects and conn.execute(
+            "SELECT 1 FROM schema_changes WHERE name='continuing_historical_policy_attribution'").fetchone():
+        from . import policy_history
+        file_vibe_guards.update(policy_history.capture_guards())
+    for name, (kind, expected) in expected_contract.items():
+        if name in replaced:
+            continue
+        if kind in ('index', 'trigger') and 'on' in expected:
+            owner = expected[expected.index('on') + 1]
+            # DROP TABLE retires its indexes and triggers with the owner. A
+            # replaced but still present table keeps its ordinary dependencies.
+            if owner in replaced and owner not in objects:
+                continue
+        actual = objects.get(name)
+        if actual is None or actual[0] != kind:
+            raise MigrationError(f'Missing current {kind}: {name}')
+        if kind == 'table':
+            observed = _table(conn, name, actual[1])
+            columns, *constraints = expected
+            if any(observed[0].get(key) != value for key, value in columns.items()) or observed[1:] != tuple(constraints):
+                raise MigrationError(f'Incompatible current table/constraint: {name}')
+        else:
+            if name in file_vibe_guards:
+                expected = _tokens(file_vibe_guards[name])
+            if kind == 'view' and name in runtime_views:
+                expected = _tokens(runtime_views[name])
+            if name == 'retained_group_publication_delete':
+                from yt_playlist.core import group_retention_progress
+                if group_retention_progress.available(conn):
+                    expected = _tokens(group_retention_progress.publication_guard())
+            if _tokens(actual[1]) != expected:
+                raise MigrationError(f'Incompatible current {kind}: {name}')
+    if foreign_keys and conn.execute('PRAGMA foreign_key_check').fetchone():
+        raise MigrationError('Invalid current foreign-key reference')
+    for key in SEED_SETTINGS:
+        if conn.execute('SELECT 1 FROM settings WHERE key=?', (key,)).fetchone() is None:
+            raise MigrationError(f'Missing initialized schema setting: {key}')
+    identity_version = conn.execute("SELECT value FROM settings WHERE key='catalog_identity_version'").fetchone()
+    if identity_version[0] != '2':
+        raise MigrationError('Incompatible initialized catalog identity version')
+    if data:
+        _validate_data(conn,version)
+    if version >= 80:
+        for table, column in (('rec_musical_sources', 'payload'), ('provider_attempts', 'fields_json'),
+                              ('enrichment_provider_state', 'fields_json')):
+            if any(row[1] == column for row in conn.execute(f'PRAGMA main.table_xinfo({table})')):
+                raise MigrationError(f'Superseded metadata value store remains: {table}.{column}')
+        if data and conn.execute('SELECT 1 FROM album_provider_ids GROUP BY album_id,provider '
+                        'HAVING SUM(is_primary)<>1 LIMIT 1').fetchone():
+            raise MigrationError('Album representations require exactly one preferred provider ID')
+        if any(name in objects for name in ('audio_vibe_samples', 'rec_vibe_tracks', 'rec_vibe_groups')):
+            raise MigrationError('Superseded vibe stores remain')
+        for name in ('rec_mood', 'audio_vibe_feedback', 'audio_vibe_labels', 'audio_session_labels',
+                     'rec_vectors', 'rec_content_vectors', 'rec_discovered_content_vectors',
+                     'rec_artist_vectors', 'rec_artist_content_vectors', 'rec_prepared_content',
+                     'rec_serving_policies', 'rec_policy_bases', 'rec_policy_variants',
+                     'rec_group_generations', 'rec_group_identities', 'rec_group_definitions', 'rec_group_members',
+                     'rec_group_unknown', 'rec_group_lineage', 'rec_group_head', 'rec_group_publications',
+                     'rec_group_builds', 'rec_group_graph', 'rec_group_assignments',
+                     'rec_proposal_cache_heads', 'rec_proposal_cache_chunks', 'rec_proposal_cache_builds',
+                     'track_artists', 'metadata_findings', 'identity_state_archive', 'legacy_track_evidence', 'legacy_enrichment_attempts',
+                     'playlist_group', 'hidden_playlists', 'overlap_ignored', 'playlist_provenance',
+                     'album_library_memberships', 'album_library_revisions', 'album_library_snapshots',
+                     'album_library_legacy_cohort'):
+            if name in objects:
+                raise MigrationError(f'Superseded current owner remains: {name}')
+    if version >= 82 and conn.execute(
+            "SELECT 1 FROM rec_proposals WHERE surface IN ('daily_model_schedule','tv_preparation') LIMIT 1").fetchone():
+        raise MigrationError('Retired recommendation work state remains in rec_proposals')
+    if version >= 83 and conn.execute("SELECT 1 FROM rec_proposals WHERE surface='home_shown'").fetchone():
+        raise MigrationError('Retired Home offer deduplication remains in rec_proposals')
+    if version >= 84 and conn.execute("SELECT 1 FROM rec_proposals WHERE surface IN ('album_note_requests','album_notes')").fetchone():
+        raise MigrationError('Retired album note demand remains in rec_proposals')
+    if version >= 87 and conn.execute("SELECT 1 FROM rec_proposals WHERE surface IN "
+            "('album_menu_refresh','home_genre_request','choice_window:albums','choice_window:mixes','choice_window:radio')").fetchone():
+        raise MigrationError('Retired recommendation demand remains in rec_proposals')
+    if version >= 90 and conn.execute("SELECT 1 FROM rec_proposals WHERE surface IN "
+            "('listening_analytics','listening_edition') OR substr(surface,1,16)='listening_chunk:'").fetchone():
+        raise MigrationError('Retired listening display output remains in rec_proposals')
+    if version >= 91 and conn.execute("SELECT 1 FROM rec_proposals WHERE surface IN "
+            "('home_prepared','home_tuned','home_choice','album_prepared','adaptive_group_preview',"
+            "'home_discovery','home_revisit','into_recently','trend_rollups','cleanup')").fetchone():
+        raise MigrationError('Retired Home display output remains in rec_proposals')
+    if version >= 93 and conn.execute("SELECT 1 FROM rec_proposals WHERE surface IN "
+            "('choice_bandit','group_choice_bandit','choice_interests','listening_choices',"
+            "'choice_daily','model_health','model_live_report')").fetchone():
+        raise MigrationError('Retired recommendation findings remain in rec_proposals')
+    if version >= 95 and conn.execute('SELECT 1 FROM rec_proposals LIMIT 1').fetchone():
+        raise MigrationError('Retired generic recommendation state remains')
+    if version >= 95 and conn.execute("SELECT 1 FROM settings WHERE key IN ('radio_seed_offer','rec_autotune_result') LIMIT 1").fetchone():
+        raise MigrationError('Retired saved recommendation output remains in settings')
+    if version >= 96 and conn.execute("SELECT 1 FROM settings WHERE key IN "
+            "('taste_settings_checkpoint_v1','taste_comparison_baseline_v2','ppr_experiment_decisions') LIMIT 1").fetchone():
+        raise MigrationError('Retired taste control remains in settings')
+    if version >= 97 and conn.execute("SELECT 1 FROM settings WHERE key='spotify_library_import_job' LIMIT 1").fetchone():
+        raise MigrationError('Retired Spotify import job remains in settings')
+    if version >= 33:
+        for name in ('history_items', 'history_snapshots', 'legacy_listening_observations'):
+            if name in objects:
+                raise MigrationError(f'Retired capture structure remains: {name}')
+        account = 'account_id' if version >= 103 else 'identity_id'
+        capture_check = ('SELECT 1 FROM listening_observations o JOIN listening_capture_receipts c '
+                        f'ON c.id=o.capture_id WHERE o.{account}<>c.{account} '
+                        'OR o.first_observed_at IS NOT c.captured_at OR o.last_observed_at IS NOT c.captured_at '
+                        "OR o.source_day IS NOT date(c.captured_at,'unixepoch') "
+                        "OR o.day IS NOT date(c.captured_at,'unixepoch') LIMIT 1")
+        if data and conn.execute(capture_check).fetchone():
+            raise MigrationError('Historical capture receipt does not match its observation')
+
+
+def _validate_data(conn,version=VERSION):
+    account = 'account_id' if version >= 103 else 'identity_id'
+    scope = 'playlist_scope_id' if version >= 103 else 'scope_ref'
+    scope_key = 'id' if version >= 103 else 'ref'
+    provider = 'provider_playlist_id' if version >= 103 else 'provider_id'
+    playlist_provider = 'provider_playlist_id' if version >= 103 else 'ytm_playlist_id'
+    checks = (
+        ('Invalid generated-play policy',
+         'SELECT 1 FROM play_events WHERE is_generated IS NOT NULL AND is_generated NOT IN (0,1) LIMIT 1'),
+        ('Missing exact-event calendar projection',
+         'SELECT 1 FROM play_events pe LEFT JOIN play_event_calendar c ON c.event_id=pe.id WHERE c.event_id IS NULL LIMIT 1'),
+        ('Missing exact-event source contribution',
+         'SELECT 1 FROM play_events pe WHERE NOT EXISTS (SELECT 1 FROM play_event_sources s WHERE s.event_id=pe.id) LIMIT 1'),
+        ('Invalid retained playlist membership',
+         'SELECT 1 FROM playlists p LEFT JOIN playlist_membership_refs m ON m.id=p.id '
+         f'WHERE m.id IS NULL OR m.{scope} IS NOT p.{scope} OR m.{account} IS NOT p.{account} LIMIT 1'),
+        ('Invalid playlist scope ownership',
+         f'SELECT 1 FROM playlists p WHERE NOT EXISTS (SELECT 1 FROM playlist_scopes s WHERE s.{scope_key}=p.{scope} '
+         f'AND s.{provider}=p.{playlist_provider} AND ((s.kind=\'account\' AND s.{account}=p.{account} '
+         f"AND s.{provider} IN ('LM','SE')) OR (s.kind='shared' AND s.{account} IS NULL "
+         f"AND s.{provider} NOT IN ('LM','SE')))) LIMIT 1"),
+        ('Colliding playlist positions',
+         'SELECT 1 FROM playlist_tracks GROUP BY playlist_id,position HAVING COUNT(*)>1 LIMIT 1'),
+        ('Invalid playlist position',
+         "SELECT 1 FROM playlist_tracks WHERE typeof(position)<>'integer' OR position<0 LIMIT 1"),
+        ('Discovery representative belongs to another recording',
+         'SELECT 1 FROM discovery_memberships d JOIN catalog_entries e ON e.id=d.entry_id '
+         'WHERE d.recording_id<>e.recording_id LIMIT 1'),
+        ('Artist redirects must point directly to canonical identities',
+         'SELECT 1 FROM artist_redirects r JOIN artist_redirects target ON target.retired_id=r.artist_id LIMIT 1'),
+        ('Artist redirect requires a provisional source and canonical target',
+         'SELECT 1 FROM artist_redirects r JOIN artists old ON old.id=r.retired_id '
+         'JOIN artists target ON target.id=r.artist_id WHERE old.provisional<>1 OR target.provisional<>0 '
+         'OR EXISTS(SELECT 1 FROM artist_provider_ids WHERE artist_id=r.retired_id) '
+         'OR NOT EXISTS(SELECT 1 FROM artist_provider_ids WHERE artist_id=r.artist_id) LIMIT 1'),
+    )
+    for message, sql in checks:
+        if conn.execute(sql).fetchone():
+            raise MigrationError(message)
+    for table in ('artist_scans', 'discovered_artists', 'rec_artist_similar'):
+        if conn.execute(f'SELECT 1 FROM {table} WHERE artist_id IS NULL LIMIT 1').fetchone():
+            raise MigrationError(f'Unresolved artist state: {table}')

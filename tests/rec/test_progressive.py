@@ -1,5 +1,6 @@
 """Progress without a quiet catalog, using guarded, resumable inputs."""
 from dataclasses import replace
+from tests.enrichment_support import seed_enrichment
 import json
 import logging
 from types import SimpleNamespace
@@ -16,7 +17,7 @@ from yt_playlist.rec import musical_preparation, vibe_preparation
 from yt_playlist.rec.progressive import BASIS_STATE, Budget, Preparation
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.rec.worker_queue import Job
-from yt_playlist.repos.prepared_content import PreparedContentRepo
+from yt_playlist.controllers.prepared_content import PreparedContent
 
 
 def catalog(store, n=12):
@@ -34,7 +35,8 @@ def audio(store, tid, bpm):
     # Re-enrichment may replace a selected finding. The provider convenience
     # setter is deliberately fill-only and would leave an existing BPM intact.
     with store.conn:
-        store.conn.execute('UPDATE catalog_tracks SET bpm=? WHERE id=?', (bpm, tid))
+        store.conn.execute('UPDATE recordings SET bpm=? WHERE id IN '
+                           '(SELECT recording_id FROM catalog_entries WHERE id=?)', (bpm, tid))
 
 
 def drain(preparation, now=1000):
@@ -64,14 +66,14 @@ def test_empty_then_single_recording_can_prepare_without_coverage_gate(store):
 def test_unrelated_enrichment_does_not_discard_captured_batch(store, monkeypatch):
     ids = catalog(store)
     p = Preparation(store, budget=replace(Budget(), batch=3))
-    capture = PreparedContentRepo.capture
+    capture = PreparedContent.capture
 
     def write_elsewhere(repo, pending):
         rows = capture(repo, pending)
         audio(store, ids[-1], 200)
         return rows
 
-    monkeypatch.setattr(PreparedContentRepo, 'capture', write_elsewhere)
+    monkeypatch.setattr(PreparedContent, 'capture', write_elsewhere)
     assert p.capture(1000)
     assert p.status()['prepared'] == 3
     assert p.status()['pending'] == 9
@@ -80,7 +82,7 @@ def test_unrelated_enrichment_does_not_discard_captured_batch(store, monkeypatch
 def test_hot_recording_yields_without_losing_its_pending_revision(store, monkeypatch):
     ids = catalog(store, 3)
     p = Preparation(store, budget=replace(Budget(), batch=1))
-    capture = PreparedContentRepo.capture
+    capture = PreparedContent.capture
 
     def write_same(repo, pending):
         rows = capture(repo, pending)
@@ -88,13 +90,38 @@ def test_hot_recording_yields_without_losing_its_pending_revision(store, monkeyp
         return rows
 
     with monkeypatch.context() as patch:
-        patch.setattr(PreparedContentRepo, 'capture', write_same)
+        patch.setattr(PreparedContent, 'capture', write_same)
         assert not p.capture(1000)
     assert p.status()['prepared'] == 0 and p.status()['pending'] == 3
     assert p.capture(1001)
     assert store.prepared_content.pending(3)[-1][0] == store.tracks.identity_key_for_video('v0')
     drain(p)
     assert p.status()['prepared'] == 3
+
+
+def test_repeated_unrelated_enrichment_keeps_advancing_bounded_batches(store, monkeypatch):
+    p = Preparation(store, budget=replace(Budget(), batch=3))
+    drain(p)  # Finish version bootstrap/fanout before measuring recording batches.
+    ids = catalog(store)
+    capture = PreparedContent.capture
+    writes = []
+
+    def write_elsewhere(repo, pending):
+        rows = capture(repo, pending)
+        assert store.tracks.identity_key_for_video('v11') not in {key for key, _revision in pending}
+        writes.append(True)
+        audio(store, ids[-1], 200 + len(writes))
+        return rows
+
+    with monkeypatch.context() as patch:
+        patch.setattr(PreparedContent, 'capture', write_elsewhere)
+        for prepared in (3, 6, 9):
+            assert p.capture(1000)
+            assert p.status()['prepared'] == prepared
+            assert p.status()['pending'] == 12 - prepared
+    assert len(writes) == 3
+    drain(p)
+    assert p.status()['prepared'] == 12 and p.status()['pending'] == 0
 
 
 def test_basis_publishes_accepted_inputs_while_live_metadata_keeps_changing(store, monkeypatch):
@@ -106,11 +133,11 @@ def test_basis_publishes_accepted_inputs_while_live_metadata_keeps_changing(stor
     build = content_model.build_library_content
     writes = []
 
-    def enrich_during_fit(inputs):
+    def enrich_during_fit(inputs, *, genre_axes=None):
         for i, tid in enumerate(ids):
             audio(store, tid, 300 + i)
             writes.append(tid)
-        return build(inputs)
+        return build(inputs,genre_axes=genre_axes)
 
     monkeypatch.setattr(content_model, 'build_library_content', enrich_during_fit)
     assert p.fit(1000)
@@ -120,7 +147,8 @@ def test_basis_publishes_accepted_inputs_while_live_metadata_keeps_changing(stor
     assert json.loads(store.settings.get_setting('rec_content_model'))['cont'][0][1] < 200
 
 
-def test_delta_uses_exact_published_basis_and_preserves_other_vectors(store):
+def test_delta_uses_exact_published_basis_and_preserves_other_vectors(store, monkeypatch):
+    from yt_playlist.core import fao
     ids = catalog(store, 20)
     p = Preparation(store)
     drain(p)
@@ -128,7 +156,18 @@ def test_delta_uses_exact_published_basis_and_preserves_other_vectors(store):
     before = store.rec_model.content_generation()
     key = store.tracks.identity_key_for_video('v0')
     audio(store, ids[0], 190)
+    writes, write = [], fao.write
+
+    def off_lock(path, *args, **kwargs):
+        if path.suffix == '.bin':
+            assert not store._lock.held_by_current_thread
+            assert not store.conn.in_transaction
+            writes.append(path)
+        return write(path, *args, **kwargs)
+
+    monkeypatch.setattr(fao, 'write', off_lock)
     assert p.capture(1001)
+    assert writes
     after = store.rec_model.content_generation()
     assert after['model'] == before['model']
     assert after['generation'] != before['generation']
@@ -163,7 +202,7 @@ def test_pending_and_accepted_work_survive_restart_and_timestamp_only_reenrichme
         assert not p.due(1100)
         assert store.rec_model.content_generation() == generation
         # A provider re-read with the same values retains every accepted row.
-        store.tracks.set_track_enrichment(ids[0], 'Techno', None)
+        seed_enrichment(store, ids[0], 'Techno', None)
         assert not p.due(1101)
     finally:
         store.conn.close()
@@ -175,7 +214,7 @@ def test_drain_does_not_swallow_deferred_fit_or_aged_small_update(store, monkeyp
     drain(p)
     build = content_model.build_library_content
     monkeypatch.setattr(content_model, 'build_library_content',
-                        lambda _: (_ for _ in ()).throw(WorkBudgetExceeded()))
+                        lambda _, **kwargs: (_ for _ in ()).throw(WorkBudgetExceeded()))
     assert not p.fit(1000) and not p.due(1059)
     monkeypatch.setattr(content_model, 'build_library_content', build)
     assert p.due(1060) and p.fit(1060)
@@ -200,10 +239,10 @@ def test_deferred_or_cancelled_fit_keeps_last_good_generation(store, monkeypatch
     if failure == 'memory':
         p.budget = replace(p.budget, memory_bytes=1)
     else:
-        def fail(inputs):
+        def fail(inputs, *, genre_axes=None):
             if failure == 'competing-publisher':
                 store.settings.set_setting('rec_content_generation', 'newer')
-                return build(inputs)
+                return build(inputs,genre_axes=genre_axes)
             raise WorkBudgetExceeded() if failure == 'time' else WorkClosing()
         monkeypatch.setattr(content_model, 'build_library_content', fail)
     if failure == 'cancel':
@@ -289,13 +328,13 @@ def test_external_writer_still_invalidates_capture(tmp_path, monkeypatch):
     store.init_schema()
     store.conn.execute('PRAGMA journal_mode=WAL')
     catalog(store, 2)
-    capture = PreparedContentRepo.capture
+    capture = PreparedContent.capture
     def external(repo, pending):
         rows = capture(repo, pending)
         with sqlite3.connect(store._db_path) as writer:
             writer.execute("UPDATE recordings SET bpm=200 WHERE identity_key='song 0001|artist 1'")
         return rows
-    monkeypatch.setattr(PreparedContentRepo, 'capture', external)
+    monkeypatch.setattr(PreparedContent, 'capture', external)
     try:
         assert not Preparation(store).capture(1000)
         assert store.prepared_content.progress()['pending'] == 2
@@ -338,9 +377,9 @@ def test_deferred_full_fit_reuses_exact_svd_inputs_then_retrains_on_changed_bask
     def counted(*args, **kwargs):
         calls.append(kwargs['method'])
         return train(*args, **kwargs)
-    def changed_after_svd(inputs):
+    def changed_after_svd(inputs, *, genre_axes=None):
         audio(store, ids[0], 300 + len(calls))
-        return build(inputs)
+        return build(inputs,genre_axes=genre_axes)
     monkeypatch.setattr(embedding_training, 'build_vectors_from_baskets', counted)
     with monkeypatch.context() as patch:
         patch.setattr(content_model, 'build_library_content', changed_after_svd)
@@ -353,7 +392,7 @@ def test_deferred_full_fit_reuses_exact_svd_inputs_then_retrains_on_changed_bask
     store.tracks.set_track_genre(ids[0], 'Classical')
     assert model_refresh.rebuild(store, 1003, fit_cache=cache)
     assert calls == ['svd', 'svd']
-    assert store.rec_model.rec_vectors_count() == 96
+    assert store.rec_model.rec_vectors_count() == len(ids)
 
 
 def test_unresolved_metadata_capture_notifies_full_models_without_eager_rebuild(store):

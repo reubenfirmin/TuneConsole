@@ -52,6 +52,7 @@ class Bridge:
         self.resumable_player = None  # last owned player; paused controls survive throttled heartbeats
         self.sensor_health = None  # latest extension probe of YTM tab/content-script health
         self.playback_confirmation: bool | None = None  # unknown until this worker reports its capability
+        self.account_bound_next: bool | None = None  # worker preserves and enforces the requested account
         self.source_timezone = None  # browser timezone for YouTube's local-day history shelves
 
     @property
@@ -71,6 +72,7 @@ class Bridge:
             self.source_timezone = None
             self.sensor_health = None
             self.playback_confirmation = None
+            self.account_bound_next = None
             return self._conn_id
 
     def disconnect(self, conn_id: int | None = None) -> bool:
@@ -89,6 +91,7 @@ class Bridge:
             self.resumable_player = None
             self.sensor_health = None
             self.playback_confirmation = None
+            self.account_bound_next = None
             pending, self._pending = self._pending, {}
         for fut in pending.values():
             if not fut.done():
@@ -184,6 +187,10 @@ class Bridge:
         with self._lock:
             if self._send is None:
                 raise BridgeError("no extension connected")
+            if (payload.get('type') == 'next' and 'brandId' in payload
+                    and self.account_bound_next is not True):
+                raise BridgeError('Update the TuneConsole extension before skipping for this account',
+                                  outcome='not-dispatched')
             send, loop = self._send, self._loop
             req_id = next(self._ids)
             fut = Future()

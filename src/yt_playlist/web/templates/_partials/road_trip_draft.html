@@ -1,6 +1,6 @@
 {# The Road Trip playlist, on screen and live. Everything here re-picks from the draft's cached
    candidate pool server-side (no network), so the sliders and the ✕ respond immediately:
-     · mix / familiarity  -> /road_trip/draft/{id}/mix
+     · mix / familiarity  use the saved recipe editor at /road_trip/recipes
      · a genre or era bar -> /road_trip/draft/{id}/tilt  (the SHARE that party should have, 0 = out)
      · releasing a bar    -> /road_trip/draft/{id}/unpin
      · ✕ on a row         -> /road_trip/draft/{id}/slot/{i}, refilled from the same side
@@ -54,8 +54,7 @@
   {% else %}
   {% endif %}
   {% if s.build_error %}
-  <p class="muted rt-error">Couldn't finish pulling their tracks ({{ s.build_error }}). What's here
-    is still yours to save.</p>
+  <p class="muted rt-error">Couldn't finish adding their tracks. What's here is still yours to edit and save.</p>
   {% endif %}
   <div class="rt-control-deck{{ ' is-building' if s.building }}">
   {% set embedded = true %}

@@ -3,12 +3,8 @@ bumped, last_shown updated) via the unified mark_offered."""
 from yt_playlist.core.store import Store
 
 
-def _s():
-    s = Store(":memory:"); s.init_schema(); return s
-
-
-def test_mark_offered_track_sets_first_shown_once_and_bumps_count():
-    s = _s()
+def test_mark_offered_track_sets_first_shown_once_and_bumps_count(store):
+    s = store
     s.discovery.upsert_discovered_track("a|x", "v1", "A", "X", None, None, None, None, "radio:s", 100.0)
     s.discovery.mark_offered("track", ["a|x"], 200.0)
     r = s.discovery.discovered_tracks_by_keys(["a|x"])["a|x"]
@@ -19,17 +15,17 @@ def test_mark_offered_track_sets_first_shown_once_and_bumps_count():
     assert r["last_shown"] == 300.0 and r["offered_count"] == 2
 
 
-def test_pick_albums_does_not_count_an_impression():
+def test_pick_albums_does_not_count_an_impression(store):
     from yt_playlist.rec import discover
-    s = _s()
+    s = store
     s.discovery.upsert_discovered_album("b1", "Artist", "Album", "2020", None, 100.0, genre=None)
     discover.pick_discovered_albums(s, 5, 200.0)
     alb = next(a for a in s.discovery.get_discovered_albums() if a["browse_id"] == "b1")
     assert alb["offered_count"] == 0 and alb["first_shown"] is None
 
 
-def test_visible_impressions_are_deduplicated_per_visit():
-    s = _s()
+def test_visible_impressions_are_deduplicated_per_visit(store):
+    s = store
     s.discovery.upsert_discovered_album("b1", "Artist", "Album", "2020", None, 100.0)
     s.discovery.record_discovery_impressions("album", ["b1", "b1", "unknown"], "visit1", 200.0)
     s.discovery.record_discovery_impressions("album", ["b1"], "visit1", 300.0)
@@ -38,11 +34,11 @@ def test_visible_impressions_are_deduplicated_per_visit():
     s.discovery.record_discovery_impressions("album", ["b1"], "visit2", 400.0)
     alb = s.discovery.get_discovered_albums()[0]
     assert alb["offered_count"] == 2 and alb["last_shown"] == 400.0
-    assert s.conn.execute("SELECT COUNT(*) FROM discovery_visible_impressions").fetchone()[0] == 2
+    assert s.conn.execute("SELECT COUNT(*) FROM discovery_impressions").fetchone()[0] == 2
 
 
-def test_mark_offered_album_and_artist():
-    s = _s()
+def test_mark_offered_album_and_artist(store):
+    s = store
     s.discovery.upsert_discovered_album("b1", "Artist", "Album", "2020", None, 100.0, genre="house")
     s.discovery.upsert_discovered_artist("Artist", 0.5, None, None, None, 100.0, genre="house")
     s.discovery.mark_offered("album", ["b1"], 200.0)
@@ -55,6 +51,7 @@ def test_mark_offered_album_and_artist():
 
 def test_legacy_server_counts_are_preserved_without_starting_expiry(tmp_path):
     import sqlite3
+    from yt_playlist.core.migrations import registry, runner
 
     path = tmp_path / "legacy.db"
     with sqlite3.connect(path) as db:
@@ -67,6 +64,7 @@ def test_legacy_server_counts_are_preserved_without_starting_expiry(tmp_path):
                 ('album', 'Rita Payés', 'Rueda Eterna', '2026', NULL, 100, 300, NULL, 200, 18);
         """)
     s = Store(path)
+    runner.migrate(s.conn, registry=registry.MIGRATIONS)
     s.init_schema()
     album = s.discovery.discovery_album_view(400.0, 30)[0]
     assert album["legacy_offered_count"] == 18

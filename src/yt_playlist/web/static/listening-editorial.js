@@ -114,12 +114,13 @@
             if (story.visual === 'rating_actions') {
                 const kinds=[['hearts','Hearts'],['skulls','Skulls'],['clears','Clears']];
                 const observed=new Map(story.rating_days.map(d=>[d.day,d]));
-                const maximum=Math.max(1,...story.rating_days.flatMap(d=>kinds.map(([k])=>d[k])));
+                const peak=Math.max(1,...story.rating_days.flatMap(d=>kinds.map(([k])=>d[k])));
+                const step=Math.max(1,Math.ceil(peak/4)), maximum=step*4;
                 const slot=600/days.length;
-                return `<svg viewBox="0 0 720 360" role="group" aria-label="Confirmed hearts, skulls and clears by date. Reversals count as separate actions.">${kinds.map(([kind,label],i)=>days.map((d,j)=>{
+                return `<svg viewBox="0 0 720 360" role="group" aria-label="Confirmed rating changes made in TuneConsole by date. Reversals count as separate actions."><text class="le-svg-count" x="60" y="30">Actions</text>${[0,1,2,3,4].map(i=>`<path class="le-orbit-guide" d="M60 ${280-i*55}H660"/><text class="le-svg-count" x="48" y="${285-i*55}" text-anchor="end">${i*step}</text>`).join('')}${kinds.map(([kind,label],i)=>days.map((d,j)=>{
                     const n=observed.get(d)?.[kind] || 0;
                     return n ? `<rect x="${60+j*slot+i*slot/4}" y="${280-n/maximum*220}" width="${slot/4-1}" height="${n/maximum*220}" fill="${color(i)}" ${tip(`${dateLabel(d)}: ${n} ${label.toLowerCase()}`)}/>` : '';
-                }).join('')).join('')}<path class="le-orbit-guide" d="M60 280H660"/><text class="le-svg-date" x="60" y="320">${esc(dateLabel(days[0]))}</text><text class="le-svg-date" x="660" y="320" text-anchor="end">${esc(dateLabel(days.at(-1)))}</text></svg><div class="le-format-key">${kinds.map(([key,label],i)=>`<span style="--le-ink:${color(i)}"><i></i>${label} <b>${story.rating_counts[key]}</b></span>`).join('')}</div>`;
+                }).join('')).join('')}${days.map((d,i)=>(i%3===0 && i<days.length-2) || i===days.length-1 ? `<text class="le-svg-date" x="${60+(i+.4)*slot}" y="320" text-anchor="middle">${esc(dateLabel(d))}</text>` : '').join('')}</svg><div class="le-format-key">${kinds.map(([key,label],i)=>`<span style="--le-ink:${color(i)}"><i></i>${label} <b>${story.rating_counts[key]}</b></span>`).join('')}</div>`;
             }
             if (story.visual === 'formats') {
                 const total = story.bands.reduce((n,b) => n+b.seconds,0);

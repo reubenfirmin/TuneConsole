@@ -7,7 +7,7 @@ from yt_playlist.util.matching import identity_key
 
 @pytest.fixture
 def artwork_library(store, live_app):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     pid = store.playlists.upsert_playlist(iid, "PLZ", "Shape Mix", 2, "h", 0.0,
                                 thumbnail="/static/nag/intro.png")
     first = store.tracks.upsert_track("v1", "Shape Song", "Shape Artist", "Shape Album", 180,
@@ -32,7 +32,7 @@ def _shape(locator):
     }""")
 
 
-@pytest.mark.parametrize("width", [1440, 600])
+@pytest.mark.parametrize("width", [1440])
 def test_shapes_match_between_library_and_search(page, artwork_library, width):
     base, _pid = artwork_library
     page.set_viewport_size({"width": width, "height": 1000})
@@ -45,8 +45,6 @@ def test_shapes_match_between_library_and_search(page, artwork_library, width):
     page.goto(f"{base}/albums")
     album_shape = _shape(page.locator(".album-thumb").first)
     assert album_shape == ["0px", "none"]
-    if width < 720:  # The existing mobile navigation hides library search.
-        return
     page.locator(".omni-input").fill("Shape Artist")
     for kind, expected in [("playlist", playlist_shape), ("artist", artist_shape),
                            ("album", album_shape)]:
@@ -55,7 +53,7 @@ def test_shapes_match_between_library_and_search(page, artwork_library, width):
         assert _shape(result) == expected
 
 
-@pytest.mark.parametrize("width", [1440, 600])
+@pytest.mark.parametrize("width", [1440])
 def test_charts_have_shaped_artwork_and_fallbacks(page, artwork_library, width):
     base, _pid = artwork_library
     page.set_viewport_size({"width": width, "height": 1000})

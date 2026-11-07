@@ -7,9 +7,12 @@ and their receipt journal remain exclusively in RadioMutations.
 import json
 import logging
 import time
+from copy import deepcopy
+from dataclasses import replace
 from uuid import uuid4
 
-from yt_playlist.rec import choice_evidence, choice_outcomes, measurement, musical_character
+from yt_playlist.core.activity import check_stopping, cancellable_work
+from yt_playlist.rec import choice_evidence, choice_outcomes, home_cache, measurement, musical_character
 from yt_playlist.rec.radio_candidates import POLICY_VERSION
 from yt_playlist.web.radio_playback import PlaybackObservation, PlaybackRequest, PlaybackUnavailable
 from yt_playlist.web.radio_playlist_io import PlaylistPending
@@ -145,9 +148,28 @@ class RadioListening:
             choice_outcomes.continue_playback(self.store, s.identity, s.playlist, video, now)
 
     def update(self, s, *, force=False):
+        # Planning reads the catalog and cooperatively yields to requests. Never
+        # retain the session lock during that work: status and Stop need it too.
         with self.lock:
-            self.policy.update_directions(s.candidate_view(), s.history_view(), force=force or s.feedback_dirty)
+            if s.stop.is_set() or s.directions is None:
+                return
+            view, history = s.candidate_view(), s.history_view()
+            source, dirty = s.directions, s.feedback_dirty
+            requested, replacement = s.requested_direction, s.replacement
+            before = source.snapshot()
+            planned = before.snapshot()
+        self.policy.update_directions(replace(view, directions=planned), history, force=force or dirty)
+        with self.lock:
+            if (s.stop.is_set() or s.candidate_view() != view or s.history_view() != history
+                    or s.requested_direction is not requested or s.replacement is not replacement
+                    or s.feedback_dirty != dirty or vars(source) != vars(before)):
+                return
+            s.directions = planned
             s.feedback_dirty = False
+
+    def initial_directions(self, s):
+        """Plan an unpublished first menu without blocking status or Stop."""
+        self.update(s, force=True)
 
     def feedback(self, s):
         update = self.policy.feedback(s.candidate_view(), s.feedback_context())
@@ -160,7 +182,10 @@ class RadioListening:
             s.directions.blocked.add(track['video_id'])
 
     def seed_offer(self, candidates):
-        tracks, menu_id = candidates.seed_offer(), uuid4().hex
+        tracks = candidates.seed_offer()
+        if not tracks:
+            return [], None
+        menu_id = uuid4().hex
         tracks = [{**track, 'serving_context': {**track.get('serving_context', {}),
                    'ordering_ranker': POLICY_VERSION, **musical_character.provenance(track)}} for track in tracks]
         measurement.record_recommendations(self.store, 'radio_seed', tracks,
@@ -170,7 +195,7 @@ class RadioListening:
         if not getattr(self.store, 'activity_paused', False):
             self.store.settings.set_setting('radio_seed_offer', json.dumps({'tracks': tracks, 'menu_id': menu_id,
                 'comparison': getattr(candidates, 'comparison', None)}))
-        context = getattr(candidates, 'choice_context', None) or (self.store.rec_proposals.get_proposals("home_prepared") or {}).get("choice_context", {})
+        context = getattr(candidates, 'choice_context', None) or (home_cache.read(self.store, 'home_prepared') or {}).get("choice_context", {})
         choice_evidence.safe_issue(self.store, "radio", [{"id": t["video_id"], "position": i + 1,
             "tracks": [t], "mode_id": t.get("_radio_mode"), "intent": "seed",
             "score": getattr(candidates, "prior", {}).get(t.get("_radio_mode"), {}).get(t["key"])}
@@ -182,7 +207,9 @@ class RadioListening:
     def capture_menu(self, s):
         menu_id = s.directions.menu_id
         branches = s.directions.public([])
-        context = getattr(s.candidates, 'choice_context', None) or (self.store.rec_proposals.get_proposals("home_prepared") or {}).get("choice_context", {})
+        if not branches:
+            return
+        context = getattr(s.candidates, 'choice_context', None) or (home_cache.read(self.store, 'home_prepared') or {}).get("choice_context", {})
         choice_evidence.safe_issue(self.store, "radio", [{"id": branch["id"],
             "position": branch["slot"] + 1, "active": branch["active"], "tracks": branch["tracks"],
             "mode_id": (branch["tracks"] or [{}])[0].get("_radio_mode"), "intent": "direction"}
@@ -192,24 +219,61 @@ class RadioListening:
                 "now": s.candidates.now_posterior, "now_sampled_at": s.candidates.now_sampled_at,
                 "history": [t["key"] for t in s.heard]}})
 
-    def tune(self, s, candidates):
+    def tune(self, s, candidates, *, current=lambda: True):
         """Rebuild the offered future without changing durable taste or observed listening."""
-        metadata = list(s.tracks) + s.heard + [t for b in s.directions.slots if b for t in b['tracks']]
-        if s.replacement:
-            metadata += s.replacement.proposed
-        candidates.retain(metadata)
         with self.lock:
-            selected = selected_slot(s)
-            choice = (s.requested_direction['choice'] if s.requested_direction else
-                      s.replacement.choice_id if s.replacement else None)
-            s.candidates = s.directions.candidates = candidates
-            s.directions.blocked.difference_update(s.metadata_rejected - s.rejected)
-            s.metadata_rejected.clear()
-            s.directions.active = selected
-            s.directions.update(s.heard or s.tracks[:1], [], s.transition, force=True)
-            branch = s.directions.slots[selected]
-            s.edits.queue({'slot': selected, 'tracks': list(branch['tracks']),
-                           'choice': choice if branch['tracks'] else None})
+            requested, replacement = s.requested_direction, s.replacement
+        attempt = 0
+        while True:
+            with self.lock:
+                if (not current() or s.stop.is_set() or s.directions is None
+                        or s.requested_direction is not requested or s.replacement is not replacement):
+                    return False
+                view, history = s.candidate_view(), s.history_view()
+                source, dirty = s.directions, s.feedback_dirty
+                metadata_revision = s.metadata_revision
+                before = source.snapshot()
+                planned = before.snapshot()
+                selected = selected_slot(s)
+                choice = requested['choice'] if requested else replacement.choice_id if replacement else None
+                explicit_play = (requested and requested.get('play') or replacement and replacement.play)
+                metadata = list(history.tracks + history.heard)
+                metadata += [t for b in planned.slots if b for t in [b['anchor'], *b['tracks']]]
+                if requested:
+                    metadata += requested['tracks']
+                if replacement:
+                    metadata += replacement.proposed
+            # Only private computation is cancellable. Its final check precedes
+            # publication, so cancellation cannot skip an accepted plan's save.
+            with cancellable_work(lambda: not current() or s.stop.is_set()), \
+                    self.store.priority.background(check_stopping):
+                candidates.retain(deepcopy(metadata))
+                candidates.refresh_exclusions(self.now_fn())
+                planned.candidates = candidates
+                planned.blocked.difference_update(view.metadata_rejected - view.rejected)
+                planned.active = selected
+                planned.update(list(history.heard or history.tracks[:1]), [], history.transition, force=True)
+            with self.lock:
+                check_stopping()
+                if (not current() or s.stop.is_set() or s.requested_direction is not requested
+                        or s.replacement is not replacement):
+                    return False
+                if (s.candidate_view() != view or s.history_view() != history
+                        or s.feedback_dirty != dirty or s.metadata_revision != metadata_revision
+                        or vars(source) != vars(before)):
+                    attempt += 1
+                    logger.info("Radio tuning rebase: attempt=%d", attempt)
+                    continue
+                s.candidates, s.directions = candidates, planned
+                s.metadata_rejected.clear()
+                # Explicit song navigation and its exclusions belong to the
+                # saved transaction. Tuning must not replace that request with
+                # an unrelated first track or discard its send-once intent.
+                if not explicit_play:
+                    branch = planned.slots[selected]
+                    s.edits.queue({'slot': selected, 'tracks': list(branch['tracks']),
+                                   'choice': choice if branch['tracks'] else None})
+                return True
 
     def select(self, s, proposal_id, menu_id, video_id=None, *, intent=None):
         """Queue a validated visible choice; the observer settles saved writes later."""
@@ -247,6 +311,8 @@ class RadioListening:
         if menu_id in s.seen_menus:
             return {"ok": True}, ()
         branches = s.directions.public([])
+        if not branches:
+            return {"ok": True}, ()
         self.capture_menu(s)
         choice_evidence.safe_respond(self.store, menu_id, "visible", self.now_fn(),
                                     visible=[branch["id"] for branch in branches])

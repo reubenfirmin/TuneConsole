@@ -55,7 +55,7 @@ def _eye(n):
 def test_modal_renders_a_neighbour_that_only_exists_in_the_new_pool(store, monkeypatch):
     """The end of the chain: a pool track is not in `tracks`, so resolving neighbours against the
     library alone silently dropped it even once the blend surfaced it."""
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     tid = store.tracks.upsert_track("seedvid", "Painkiller", "Judas Priest", "Painkiller", 300)
     store.discovery.upsert_discovered_track("overkill|motorhead", "ovk1", "Overkill", "Motorhead",
                                   "Overkill (Expanded Edition)", "http://t/o.jpg", "metal", "1979",

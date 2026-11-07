@@ -21,6 +21,7 @@ const video = {paused: scenario === 'paused', currentTime: 20, duration: 200,
   muted:false, volume:1, addEventListener() {}, removeEventListener() {}};
 let playerId = 'current', position = 20;
 let bufferedDuration = 49.886619437641684;
+let playerResponse = null;
 if (scenario === 'continuous_stream') {video.currentTime=650; video.duration=665;}
 let barId = scenario === 'transition' ? 'old' : 'current';
 let imageId = ['transition','conflicting_bar'].includes(scenario) ? 'old' : 'current';
@@ -37,6 +38,7 @@ const document = {addEventListener() {}, querySelector(selector) {
     getCurrentTime: () => scenario === 'continuous_stream' ? position : video.currentTime,
     // Captured from live Music playback: this is a growing stream endpoint, not song length.
     getDuration: () => bufferedDuration,
+    getPlayerResponse: () => playerResponse,
   };
   if (selector === 'ytmusic-player-bar') return {data:{videoId:barId},getAttribute:()=>''};
   if (selector === '.title.ytmusic-player-bar') return {textContent:barId === 'old' ? 'Old song' : 'Current song'};
@@ -149,6 +151,15 @@ intervals[1](); flush();
 heartbeat=sent.at(-1);
 assert.equal(heartbeat.position,null);
 assert.equal(heartbeat.duration,null);
+// A matching full-length response survives the real sensor/receiver boundary.
+// Neither the growing buffered getter nor the continuous media duration is used.
+playerResponse={videoDetails:{videoId:playerId,lengthSeconds:'195'}};
+intervals[1](); flush();
+assert.equal(sent.at(-1).duration,195);
+assert.equal(sent.at(-1).position,null);
+playerResponse.videoDetails.videoId='stale-song';
+intervals[1](); flush();
+assert.equal(sent.at(-1).duration,null);
 """
     result = subprocess.run([node, "-e", script, scenario], cwd=Path(__file__).resolve().parents[1],
                             capture_output=True, text=True, timeout=10)

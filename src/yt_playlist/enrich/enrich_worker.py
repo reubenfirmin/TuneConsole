@@ -11,7 +11,7 @@ import threading
 
 from yt_playlist.providers import enrichment
 from yt_playlist.providers.waterfall import run_waterfall, TrackSink, REGISTRY
-from yt_playlist.core.activity import activity_for, WorkClosing
+from yt_playlist.core.activity import activity_for, cancellable_work, check_stopping, WorkClosing
 
 RADIO_RETRY_SECONDS = 3600
 
@@ -51,7 +51,8 @@ class EnrichWorker:
 
     def _stop(self) -> bool:
         """should_stop for run_waterfall: abort the in-flight batch on pause or shutdown."""
-        return self._shutdown or not self._enabled()
+        return (self._shutdown or not self._enabled()
+                or getattr(self.ctx.store, '_recommendation_retirement_pending', False))
 
     @property
     def busy(self) -> bool:
@@ -114,13 +115,20 @@ class EnrichWorker:
         self._started = False
 
     def _loop(self):
+        def drain():
+            # Translate SQLite interruption before releasing the admitted
+            # activity: shutdown can close admission before setting our flag.
+            with cancellable_work(lambda: self._shutdown):
+                return self.drain_once()
+
         while not self._shutdown:
             if not self._enabled():
                 self._wake.wait(self.idle_sleep_s)
                 self._wake.clear()
                 continue
             try:
-                n = self.work.wrap("enrichment", self.drain_once)()
+                with self.ctx.store.priority.background(check_stopping):
+                    n = self.work.wrap("enrichment", drain)()
             except WorkClosing:
                 return
             except Exception:  # noqa: BLE001 - a batch failure must never crash the worker
@@ -137,6 +145,7 @@ class EnrichWorker:
         store = self.ctx.store
         if self._stop():
             return 0
+        store.enrichment_state.expire_provider_alternatives(self.ctx.now_fn())
         limit = limit or self._batch_size()
         art_completed = 0
         scope = "queue"
@@ -174,10 +183,14 @@ class EnrichWorker:
             batch = store.enrichment_queue.resweep_batch(limit, stale_before, providers=providers, now=self.ctx.now_fn())
             scope = "refresh"
         if not batch:
+            pending = store.enrichment_reports.queue_remaining()
             with self._lock:
-                self._activity = ({**self._activity, "state": "waiting",
-                                   "text": "Pending provider retries are deferred; other eligible work continues."}
-                                  if store.enrichment_reports.queue_remaining() else {})
+                self._activity = ({**self._activity,
+                                   "state": "waiting" if providers else "blocked",
+                                   "text": ("Waiting for usable metadata or pending provider retries; other eligible work continues."
+                                            if providers else "No enrichment providers are available. Check Setup."),
+                                   "updated_at": self.ctx.now_fn()}
+                                  if pending else {})
             return art_completed
         if scope == "queue":
             for track in batch:

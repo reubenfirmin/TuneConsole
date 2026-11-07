@@ -26,7 +26,7 @@ def test_known_start_share_includes_unknowns_without_rewriting_them_from_current
 
 def test_confirmed_reversals_and_clears_remain_actions_and_collection_is_undated(store, monkeypatch):
     monkeypatch.setenv('YT_PLAYLIST_LISTENING_CHARTS', '1')
-    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', 'cred', None, True)
     for i in range(9):
         seed_catalog_track(store, f'k{i}', f'Song {i}', f'Artist {i}', video_id=f'v{i}',
                            genre=('Jazz' if i < 5 else 'House') if i != 8 else None)
@@ -165,8 +165,42 @@ def test_discovery_requires_history_and_real_plays_and_retains_daily_denominator
     assert sum(d['new_tracks'] for d in story['discovery_days']) == 10
     assert sum(d['plays'] for d in story['discovery_days']) == sum(
         r[payload['columns'].index('plays')] for r in payload['rows'] if r[0] >= '2026-10-11')
+    assert 'First appearances are based on your full recorded history' in story['evidence']
+    assert 'active days before this period' in story['evidence']
+    assert 'Compared with' not in story['evidence']
     payload['rows'] = [r for r in payload['rows'] if r[0] >= '2026-10-11']
     assert not any(s['family'] == 'discovery' for s in listening_insights.candidates(payload))
+
+
+def test_rating_story_song_details_reconcile_with_confirmed_actions_and_daily_totals(store, monkeypatch):
+    monkeypatch.setenv('YT_PLAYLIST_LISTENING_CHARTS', '1')
+    store.settings.set_setting('listening_timezone', 'America/Costa_Rica')
+    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    for i in range(8):
+        seed_catalog_track(store, f'action-{i}', f'Song {i}', f'Artist {i}', video_id=f'actionvid{i}')
+        at = NOW - (i % 3) * 86400
+        ratings.record_observations(store, iid, {f'actionvid{i}': 'LIKE'}, source='sync', now=at-300)
+        ratings.record_confirmed(store, iid, f'actionvid{i}', 'DISLIKE', at-200)
+        ratings.record_confirmed(store, iid, f'actionvid{i}', 'INDIFFERENT', at-100)
+        ratings.record_confirmed(store, iid, f'actionvid{i}', 'LIKE', at)
+        ratings.record_confirmed(store, iid, f'actionvid{i}', 'LIKE', at+1)
+        ratings.record_observations(store, iid, {f'actionvid{i}': 'LIKE'}, source='sync', now=at+2)
+    seed_catalog_track(store, 'native', 'Native rating', 'Artist', video_id='nativevid')
+    ratings.record_observations(store, iid, {'nativevid': 'LIKE'}, source='action', now=NOW-10)
+    payload = listening_analytics.build(store, NOW+3)
+    story = find(payload, 'rating_actions')
+    assert story['rating_counts'] == {'hearts': 8, 'skulls': 8, 'clears': 8}
+    assert '24 confirmed rating changes across 8 songs' in story['evidence']
+    assert 'Only changes made in TuneConsole are counted' in story['evidence']
+    assert story['rating_track_count'] == 8
+    assert len(story['rating_tracks']) == 6
+    assert story['rating_other_counts'] == {'hearts': 2, 'skulls': 2, 'clears': 2}
+    for kind, total in story['rating_counts'].items():
+        assert sum(row[kind] for row in story['rating_days']) == total
+        assert sum(row[kind] for row in story['rating_tracks']) + story['rating_other_counts'][kind] == total
+    assert all(row['name'].startswith('Song ') and row['video_id'].startswith('actionvid')
+               for row in story['rating_tracks'])
+    assert story['rating_tracks'][0]['last_day'] == '2026-10-24'
 
 
 def test_new_account_and_one_old_import_do_not_establish_discovery():

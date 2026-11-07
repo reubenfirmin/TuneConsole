@@ -1,44 +1,40 @@
-// Keep the module graph on the same build as this cache-busted entry point.
+// Collection belongs to the extension. This document observes it and owns human drafts.
 const version = new URL(import.meta.url).search;
-const [{AudioPreviewSession}, {AudioVibeSampler}] = await Promise.all([
-  import('./audio-preview-session.js' + version), import('./audio-vibe-sampler.js' + version),
-]);
-
 const root = document.querySelector('[data-audio-vibe-collection]');
 const ratingRoot = document.querySelector('[data-audio-vibe-banner]');
 const RUN = 'tuneconsole.audio-vibes.run.1', VIEW = 'tuneconsole.audio-vibes.view.1';
 const OUTBOX = 'tuneconsole.audio-vibes.outbox.1';
-const TAXONOMY = root.dataset.taxonomyVersion;
-const RESTART_MESSAGE = 'Restart TuneConsole to load the listening session descriptions, then reload this page.';
-let run = read(RUN), view = read(VIEW), receivedAt = Date.now();
-let session = null, sampler = null, leader = false, acquiring = false;
-let connectionStatus = null;
-let closed = false, release = null, flushing = false, retryAt = 0, timer = null;
-let storageAvailable = true;
-let lastActivityWrite = 0;
-const requests = new Set();
+const TAXONOMY = root?.dataset.taxonomyVersion;
+const diagnosticPage = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+const diagnostics = new Map();
+let run = read(RUN), view = read(VIEW), closed = false, port = null, retryAt = 0;
+let receivedAt = Date.now(), signature = null, lastReceipt = null;
+let status = {phase: 'connecting', message: 'Connecting to the TuneConsole extension…'};
+const connecting = new Map(), requests = new Set(), loading = new Set(), reloads = new Set(), restored = new Set();
+
+function diagnose(event, detail = {}, signature = JSON.stringify(detail), slot = event) {
+  if (closed || diagnostics.get(slot) === signature) return;
+  diagnostics.set(slot, signature);
+  // Best-effort state transitions, never polling receipts, song titles or audio.
+  // Keep diagnostic delivery independent of collection and human draft requests.
+  try {
+    fetch('/audio-vibes/diagnostics', {method: 'POST', keepalive: true,
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
+        page_id: diagnosticPage, asset_version: new URL(import.meta.url).searchParams.get('v') || '',
+        path: location.pathname.slice(0, 256), event, ...detail})}).catch(() => {});
+  } catch (error) {}
+}
+diagnose('started', {runtime_available: !!globalThis.chrome?.runtime?.connect,
+  locks_available: !!navigator.locks, secure_context: window.isSecureContext});
 
 function read(key, fallback = null) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback; }
   catch (error) { return fallback; }
 }
-
 function write(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); return true; }
-  catch (error) {
-    storageAvailable = false;
-    console.warn('Browser storage is unavailable. Automatic audio sampling is paused.');
-    return false;
-  }
+  catch (error) { console.warn('Browser storage is unavailable. Keep this page open to retain unsaved labels.'); return false; }
 }
-
-function playback() {
-  if (window.tvPlaybackControls?.active()) return null;
-  const data = window.playbackStatus?.audioSnapshot ?? window.playbackStatus?.snapshot;
-  const playing = data?.connected && data.now_playing;
-  return playing ? {...playing, at: receivedAt - Math.max(0, playing.snapshot_age || 0) * 1000} : null;
-}
-
 async function request(url, body) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
@@ -51,216 +47,215 @@ async function request(url, body) {
       error.status = response.status;
       throw error;
     }
-    return await response.json();
+    const value = await response.json();
+    diagnostics.delete('request:' + url.split('?')[0].replace(/\/runs\/[^/]+$/, '/runs/:id'));
+    return value;
+  } catch (error) {
+    if (!closed) diagnose('request_failed', {api_status: error.status || 0,
+      detail: `${body ? 'POST' : 'GET'} ${url.split('?')[0]}: ${error.message}`.slice(0, 256)}, String(error.status || 0),
+      'request:' + url.split('?')[0].replace(/\/runs\/[^/]+$/, '/runs/:id'));
+    throw error;
   } finally { clearTimeout(timeout); requests.delete(controller); }
 }
-
 function compatible(value) {
   return value?.taxonomy_version === TAXONOMY && Array.isArray(value.samples);
 }
-
-function merge(value, publish = false) {
-  if (closed) return;
-  if (!compatible(value)) {
-    console.warn(RESTART_MESSAGE); return;
-  }
-  if (value.run_id === run?.id) value.collection_status = run.collection_status || null;
-  // Analysis can finish after playback has advanced. Its completed card still
-  // belongs in the stack, even though the sampler now owns a different run.
+function observe(playback) {
+  return cards?.accept({run_id: playback.id,
+    playback: {video_id: playback.video_id, title: playback.title, artist: playback.artist},
+    samples: [], prediction: null, collection_status: status,
+    choices: JSON.parse(ratingRoot.dataset.choices), taxonomy_version: TAXONOMY}, {placeholder: true});
+}
+function merge(value) {
+  if (closed || !compatible(value)) return;
+  if (value.run_id === run?.id) value.collection_status = status;
   cards?.accept(value);
   if (value.run_id !== run?.id) return;
   const previous = view?.run_id === value.run_id ? view : null;
-  // A slower GET or feedback response must not erase a newer sample result.
-  if (previous && previous.samples.length > value.samples.length) {
+  if (previous && previous.samples.length > value.samples.length)
     value = {...previous, choices: value.choices || previous.choices, feedback: value.feedback || previous.feedback};
-  }
   view = value;
-  for (const sample of value.samples) run.points[sample.point] = 'saved';
-  if (publish) { write(VIEW, value); write(RUN, run); }
-  // Finish saving before reserving the next point. This callback wakes a
-  // background page without depending on its throttled interval.
-  tick();
+  write(VIEW, value);
 }
-
-async function loadRun(id) {
+async function loadRun(id, playback = null) {
+  if (loading.has(id)) { reloads.add(id); return; }
+  loading.add(id);
   try {
-    const playback = run?.id === id ? run : null;
+    playback ||= run?.id === id ? run : null;
+    // Admit playback before starting its GET. Later responses only update that
+    // existing occurrence, including when another tab dismisses it meanwhile.
+    if (playback) await observe(playback);
     const query = playback ? '?video_id=' + encodeURIComponent(playback.video_id) : '';
     const value = await request('/audio-vibes/runs/' + encodeURIComponent(id) + query);
-    // Before its first sample, this occurrence exists only in the sampler.
-    // Its exact video still lets the server restore an earlier human answer.
     value.playback ||= playback;
-    merge(value, true);
+    merge(value);
+    restored.add(id);
+  } catch (error) { /* Durable extension metadata and the human card index retry independently. */ }
+  finally {
+    loading.delete(id);
+    if (reloads.delete(id) && !closed) loadRun(id, playback);
   }
-  catch (error) { /* The outbox and card index survive a disconnected app. */ }
 }
-
 function changed(value) {
-  if (leader && JSON.stringify(value.collection_status || null) !== JSON.stringify(connectionStatus)) {
-    value.collection_status = connectionStatus;
-    write(RUN, value);
-  }
-  const changedRun = run?.id !== value.id;
-  run = value;
-  if (changedRun) {
-    view = null;
-    loadRun(value.id);
-  }
-  if (cards) cards.accept({run_id: value.id,
-    playback: {video_id: value.video_id, title: value.title, artist: value.artist},
-    samples: [], prediction: null, collection_status: value.collection_status || null,
-    choices: JSON.parse(ratingRoot.dataset.choices), taxonomy_version: TAXONOMY},
-    {placeholder: true});
+  if (!value?.id) return;
+  const next = JSON.stringify([value.id, value.points]);
+  run = {...value, collection_status: status};
+  write(RUN, run);
+  if (next !== signature) { signature = next; loadRun(run.id); }
+  observe(run);
 }
-
-// Rating modules and their durable click queue are loaded only for developers.
-const cards = ratingRoot ? await (await import('./audio-vibe-banner.js' + version)).createCards({
-  root: ratingRoot, request, read, write, taxonomy: TAXONOMY}) : null;
-
-function tick() {
-  if (storageAvailable) sampler?.tick({collect: read(OUTBOX, []).length < 12});
-}
-
-function failed(value, capture = sampler?.active) {
-  if (!capture) return;
-  const failure = {run_id: capture.run.id, point: capture.point.key,
-    attempt: capture.run.attempts[capture.point.key] || 1,
-    phase: value.phase, message: String(value.message).slice(0, 512)};
-  capture.run.failures = [...(capture.run.failures || []), failure].slice(-9);
-  sampler.persist();
-  // Typed, bounded metadata also reaches app.log so failed attempts can be
-  // investigated alongside the successful measurements. Never send audio.
-  request('/audio-vibes/failures', failure).catch(() => {});
-}
-
-async function flush() {
-  if (!leader || flushing || closed || Date.now() < retryAt) return;
-  flushing = true;
+const cards = await (async () => {
+  if (!ratingRoot) return null;
   try {
-    let pending;
-    while (!closed && (pending = read(OUTBOX, [])[0])) {
-      try {
-        const value = await request('/audio-vibes/samples', pending);
-        write(OUTBOX, read(OUTBOX, []).filter(sample => sample.id !== pending.id));
-        merge(value, true);
-      } catch (error) {
-        if (closed) return;
-        if ([409, 413, 422].includes(error.status)) {
-          write(OUTBOX, read(OUTBOX, []).filter(sample => sample.id !== pending.id));
-          if (run?.id === pending.run_id) {
-            run.points[pending.point] = 'failed'; write(RUN, run);
-            failed({phase: 'saving', message: error.message}, {run, point: {key: pending.point}});
-            loadRun(run.id);
-          }
-        } else {
-          retryAt = Date.now() + 5000;
-          return;
-        }
-      }
+    const cards = await (await import('./audio-vibe-banner.js' + version)).createCards({
+      root: ratingRoot, request, read, write, taxonomy: TAXONOMY, diagnose});
+    diagnose('cards_ready');
+    return cards;
+  } catch (error) {
+    diagnose('cards_failed', {detail: String(error.message).slice(0, 256)});
+    return null;
+  }
+})();
+
+function restore() {
+  try { port?.postMessage({type: 'restore', run: read(RUN), samples: read(OUTBOX, [])}); }
+  catch (error) { /* No metadata is removed until the extension acknowledges storage. */ }
+}
+function receive(data) {
+  if (data.type === 'restored') {
+    const ids = new Set(data.ids);
+    write(OUTBOX, read(OUTBOX, []).filter(sample => !ids.has(sample.id)));
+  } else if (data.type === 'collection' && data.protocol === 1) {
+    status = data.status || null;
+    const recent = new Set([data.run?.id, ...(data.recent || []).map(previous => previous.id)]);
+    for (const id of restored) if (!recent.has(id)) restored.delete(id);
+    if (data.run) changed(data.run);
+    for (const previous of data.recent || []) if (!restored.has(previous.id)) loadRun(previous.id, previous);
+    if (data.receipt && data.receipt.id !== lastReceipt) {
+      lastReceipt = data.receipt.id;
+      loadRun(data.receipt.run_id);
     }
-  } finally { flushing = false; }
+  }
 }
-
-function collected(sample) {
-  const outbox = read(OUTBOX, []);
-  if (!write(OUTBOX, [...outbox, sample])) return;
-  flush();
+function disconnect(candidate) {
+  clearTimeout(connecting.get(candidate));
+  connecting.delete(candidate);
+  // A local Port.disconnect() only notifies the other end. Always settle our
+  // own attempt here, including timeout, rejection and competing candidates.
+  try { candidate.disconnect(); } catch (error) {}
 }
-
-async function becomeLeader() {
-  if (closed || leader || acquiring) return;
-  if (!navigator.locks) { console.warn('Automatic sampling needs Chrome on the local app address.'); return; }
-  acquiring = true;
-  try {
-    await navigator.locks.request('tuneconsole-audio-vibes', {ifAvailable: true}, async lock => {
-      if (!lock || closed) return;
-      leader = true;
-      run = read(RUN);
-      // Navigation interrupts an in-flight capture; retain completed/saved points.
-      if (run) for (const [key, value] of Object.entries(run.points)) {
-        if (['waiting', 'capturing', 'analysing'].includes(value)
-            || (value === 'saving' && !read(OUTBOX, []).some(sample => sample.run_id === run.id && sample.point === key))) {
-          run.points[key] = 'interrupted';
+function unavailable() {
+  if (closed || port || connecting.size) return;
+  if (!status?.update) status = {phase: 'unavailable',
+    message: 'Reload the TuneConsole extension, then reload this page to resume audio checks.'};
+  diagnose('extension_unavailable', {reason: status.update ? 'update_required' : 'disconnected'});
+  if (run) changed(run);
+  playbackHint();
+}
+function connect() {
+  if (closed || !root || port || connecting.size || Date.now() < retryAt) return;
+  retryAt = Date.now() + 2000;
+  if (!globalThis.chrome?.runtime?.connect) {
+    status = {phase: 'unavailable', message: 'Reload the TuneConsole extension, then reload this page in Chrome or Chromium.'};
+    diagnose('extension_unavailable', {reason: 'runtime_unavailable'});
+    if (run) changed(run);
+    return;
+  }
+  diagnose('extension_connecting');
+  for (const id of root.dataset.extensionIds.split(',').filter(Boolean)) {
+    try {
+      const candidate = chrome.runtime.connect(id, {name: 'tc-audio-collection'});
+      connecting.set(candidate, setTimeout(() => { disconnect(candidate); unavailable(); }, 3000));
+      candidate.onMessage.addListener(data => {
+        if (closed || (!connecting.has(candidate) && candidate !== port)) return;
+        if (data?.type === 'ready' && data.protocol === 1 && !port) {
+          clearTimeout(connecting.get(candidate));
+          port = candidate;
+          connecting.delete(candidate);
+          for (const other of connecting.keys()) disconnect(other);
+          status = null;
+          root.dataset.extensionVersion = data.extension_version || 'unknown';
+          root.dataset.collectionProtocol = String(data.protocol);
+          diagnose('extension_ready', {extension_id: id,
+            extension_version: root.dataset.extensionVersion, protocol: root.dataset.collectionProtocol});
+          if (run) changed(run);
+          restore();
+        } else if (data?.type === 'ready' && data.protocol !== 1) {
+          status = {phase: 'unavailable', update: true,
+            message: 'Update to TuneConsole extension 0.1.24 or later, then reload this page to resume audio checks.'};
+          root.dataset.extensionVersion = data.extension_version || 'unknown';
+          root.dataset.collectionProtocol = String(data.protocol ?? 'legacy');
+          diagnose('extension_legacy', {extension_id: id,
+            extension_version: root.dataset.extensionVersion, protocol: root.dataset.collectionProtocol});
+          disconnect(candidate);
+          if (run) changed(run);
+          playbackHint();
+          unavailable();
         }
-      }
-      if (run) delete run.activity;
-      session = new AudioPreviewSession({playback, automatic: false, portName: 'tc-audio-collection',
-        // Inference lives in the installed extension; the app need not carry
-        // the checkout's optional research model files to collect measurements.
-        extensionIds: root.dataset.extensionIds.split(',').filter(Boolean),
-        changed(value) {
-          const capture = sampler?.active;
-          const current = sampler?.run;
-          if (!capture) {
-            const status = ['unavailable', 'connecting'].includes(value.phase) ? value : null;
-            connectionStatus = status;
-            if (current && JSON.stringify(current.collection_status || null) !== JSON.stringify(status)) {
-              current.collection_status = status;
-              sampler.persist();
-            }
-          }
-          if (capture && capture.run === sampler.run) {
-            const previous = capture.run.activity?.phase;
-            if (['waiting', 'capturing', 'analysing'].includes(value.phase)) {
-              capture.run.points[capture.point.key] = value.phase;
-              capture.run.activity = {...value, point: capture.point.key};
-            } else delete capture.run.activity;
-            if (previous !== value.phase || Date.now() - lastActivityWrite >= 500) {
-              lastActivityWrite = Date.now(); sampler.persist();
-            }
-          }
-        }, result: value => sampler.completed(value), failure: failed});
-      sampler = new AudioVibeSampler({session, playback, cached: run,
-        save: value => write(RUN, value), changed, result: collected});
-      if (run) loadRun(run.id);
-      timer = setInterval(() => {
-        tick();
-        flush();
-      }, 500);
-      await new Promise(resolve => { release = resolve; });
-      clearInterval(timer); session.destroy(); session = sampler = null; leader = false;
-    });
-  } finally { acquiring = false; }
+        else if (candidate === port) receive(data);
+      });
+      candidate.onDisconnect.addListener(() => {
+        void chrome.runtime.lastError;
+        clearTimeout(connecting.get(candidate));
+        connecting.delete(candidate);
+        if (port === candidate) port = null;
+        unavailable();
+      });
+    } catch (error) {}
+  }
+  unavailable();
 }
-
-window.addEventListener('app-before-auto-reload', event => {
-  if (cards?.interacting()) event.preventDefault();
-});
-window.addEventListener('bridge-status', () => {
-  receivedAt = Date.now();
-  tick();
-});
+function playbackHint() {
+  const data = window.playbackStatus?.audioSnapshot ?? window.playbackStatus?.snapshot;
+  const playing = data?.connected && data.now_playing;
+  const reason = port ? 'extension_owned' : status?.phase !== 'unavailable' ? 'connecting'
+    : window.tvPlaybackControls?.active() ? 'tv_playback' : !data ? 'no_status'
+    : !data.connected ? 'disconnected' : !playing?.video_id ? 'no_track'
+    : playing.paused !== false ? 'paused' : (playing.snapshot_age || 0) > 6 ? 'stale' : 'observed';
+  diagnose('playback', {reason, ...(playing ? {
+    video_id: playing.video_id, paused: playing.paused,
+    snapshot_age: Math.min(86400, Math.max(0, playing.snapshot_age || 0))} : {}),
+    ...(data ? {connected: data.connected} : {})}, JSON.stringify([reason, playing?.video_id]));
+  if (reason !== 'observed') return;
+  // Labels may be entered before the extension reconnects. Its restore handshake
+  // adopts this occurrence only when it does not already own one.
+  const replay = run?.video_id === playing.video_id && playing.position < 5
+    && run.last_position > Math.max(30, (playing.duration || Infinity) * .8);
+  if (run?.video_id !== playing.video_id || replay || receivedAt - run.updated_at > 86400000)
+    changed({id: crypto.randomUUID(), ...playing,
+    points: {}, attempts: {}, retry_after: {}, last_position: playing.position, updated_at: receivedAt});
+  else if (run.updated_at !== receivedAt) {
+    run.last_position = playing.position;
+    run.updated_at = receivedAt;
+    write(RUN, run);
+  }
+}
+function tick() {
+  connect(); playbackHint(); cards?.tick();
+  if (port && read(OUTBOX, []).length) restore();
+  if (run && !restored.has(run.id)) loadRun(run.id);
+}
+window.addEventListener('bridge-status', () => { receivedAt = Date.now(); playbackHint(); });
+window.addEventListener('app-before-auto-reload', event => { if (cards?.interacting()) event.preventDefault(); });
 window.addEventListener('storage', event => {
-  if (event.key === RUN) {
-    const current = read(RUN);
-    if (!current) return;
-    if (leader && sampler?.run?.id === current.id) {
-      sampler.run.dismissed = current.dismissed;
-    } else if (!leader) changed(current);
-  } else if (event.key === VIEW) merge(read(VIEW));
+  if (event.key === RUN && !port) { const value = read(RUN); if (value) changed(value); }
+  if (event.key === VIEW) { const value = read(VIEW); if (value) merge(value); }
 });
-let election = setInterval(() => { becomeLeader(); cards?.tick(); }, 2000);
+let timer = setInterval(tick, 2000);
 window.addEventListener('pagehide', () => {
-  closed = true;
+  closed = true; clearInterval(timer);
   if (cards) cards.stopped = true;
-  clearInterval(election); clearInterval(timer);
   for (const controller of requests) controller.abort();
-  release?.();
+  port?.disconnect(); port = null;
+  for (const candidate of connecting.keys()) disconnect(candidate);
 });
 window.addEventListener('pageshow', event => {
   if (!event.persisted) return;
-  closed = false; run = read(RUN); view = read(VIEW);
+  closed = false;
   if (cards) cards.stopped = false;
-  if (view?.run_id !== run?.id || !compatible(view)) view = null;
-  election = setInterval(() => { becomeLeader(); cards?.tick(); }, 2000);
-  if (run) { changed(run); loadRun(run.id); }
-  cards?.restore(); cards?.tick(); becomeLeader();
+  timer = setInterval(tick, 2000);
+  tick();
 });
 if (view?.run_id !== run?.id || !compatible(view)) view = null;
-// Another (possibly older, backgrounded) app tab may own sampling. Rebuild its
-// identified current card now, without waiting for a sample or storage event.
 if (run) { changed(run); loadRun(run.id); }
-// Rehydrate completed cards from the server so a cached earlier heuristic does
-// not win the race against its replacement and become this page's frozen card.
-cards?.tick();
-becomeLeader();
+tick();

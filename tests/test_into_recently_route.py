@@ -1,3 +1,5 @@
+from fastapi import Request
+from tests.enrichment_support import seed_enrichment
 from fastapi.testclient import TestClient
 import pytest
 
@@ -13,10 +15,53 @@ def _client(store):
     return TestClient(create_app(store, lambda: FakeClient(), now_fn=lambda: NOW), base_url="http://127.0.0.1")
 
 
+def _fragment_client(store):
+    """Exercise thin/empty prepared content below the independently tested gate."""
+    from yt_playlist.web.routes.home_discovery import story_fragment
+
+    client = _client(store)
+
+    @client.app.get('/test/story-fragment')
+    def fragment(request: Request):
+        return story_fragment(client.app.state.ctx, request)
+
+    return client
+
+
 def _heard(store, *videos):
-    listener = store.identities.upsert_identity('story-listener', 'channel', None, True)
+    listener = store.accounts.upsert_account('story-listener', 'channel', None, True)
     events = [(store.tracks.identity_key_for_video(video), None, NOW - 86400) for video in videos]
     store.history.import_listening_events(listener, events, source='spotify_export', source_timezone='UTC')
+
+
+def _prepare_usable_stories(store, monkeypatch, count):
+    from tests.conftest import seed_catalog_track
+
+    subjects = [{'kind': 'artist', 'subject': 'artist:' + name, 'display': name}
+                for name in ['Band', 'Second artist', 'Third artist'][:count]]
+    for index, subject in enumerate(subjects):
+        seed_catalog_track(store, f'story{index}', f'Song {index}', subject['display'],
+                           video_id=f'story{index}', thumbnail='http://cover')
+        store.wiki.put(subject['subject'], 'artist', subject['display'], {
+            'title': subject['display'], 'extract': 'A complete story.',
+            'thumbnail': 'http://portrait', 'url': f'http://wiki/Artist_{index}'}, NOW)
+    monkeypatch.setattr(into_recently, 'ranked_subjects', lambda *a: subjects)
+    into_recently.prepare(store, NOW)
+
+
+@pytest.mark.parametrize('count', [0, 1, 2, 3])
+def test_recent_http_access_requires_three_usable_story_groups(store, monkeypatch, count):
+    from tests.home_fixture_support import returning_listener
+
+    returning_listener(store, 'vibes')
+    _prepare_usable_stories(store, monkeypatch, count)
+    response = _client(store).get('/home/into-recently')
+    assert response.status_code == (200 if count == 3 else 409)
+    if count == 3:
+        assert len(response.context['groups']) == 3
+        assert all(any(card['songs'] for card in group) for group in response.context['groups'])
+    assert _client(store).post('/home/into-recently/impressions',
+        json={'subjects': ['artist:Band']}).status_code == (204 if count == 3 else 409)
 
 
 def test_card_renders_from_fetched_summary(store, monkeypatch):
@@ -28,7 +73,7 @@ def test_card_renders_from_fetched_summary(store, monkeypatch):
                                                "extract": "Shoegaze is a subgenre of indie rock.\n\nThe second paragraph finishes here.",
                                                "thumbnail": "http://img", "url": "http://wiki/Shoegaze"})
     into_recently.prepare(store, NOW)
-    html = _client(store).get("/home/into-recently").text
+    html = _fragment_client(store).get('/test/story-fragment').text
     assert "Into recently" in html
     assert "shoegaze" in html
     assert "Shoegaze is a subgenre" in html
@@ -52,7 +97,7 @@ def test_genre_without_article_image_has_text_layout_instead_of_album_art(store,
         'thumbnail': None if kind == 'genre' else 'http://local/portrait.jpg',
         'url': f'http://wiki/{display}'})
     into_recently.prepare(store, NOW)
-    response = _client(store).get('/home/into-recently')
+    response = _fragment_client(store).get('/test/story-fragment')
     assert len(response.context['cards']) == 2
     assert response.context['cards'][0]['kind'] == 'artist'
     genre = response.context['cards'][1]
@@ -66,7 +111,7 @@ def test_genre_without_article_image_has_text_layout_instead_of_album_art(store,
 
 def test_worker_prepares_three_matching_song_cards_and_request_uses_only_the_cache(store, monkeypatch):
     from tests.conftest import seed_catalog_track
-    from yt_playlist.repos.charts import ChartsRepo
+    from yt_playlist.controllers.charts import Charts
 
     subject = {'kind': 'genre', 'subject': 'genre:dub techno', 'display': 'dub techno'}
     for i in range(4):
@@ -82,8 +127,8 @@ def test_worker_prepares_three_matching_song_cards_and_request_uses_only_the_cac
     def forbidden(*a, **kw):
         raise AssertionError('The request must not select or rank story songs')
 
-    monkeypatch.setattr(ChartsRepo, 'story_tracks', forbidden)
-    response = _client(store).get('/home/into-recently')
+    monkeypatch.setattr(Charts, 'story_tracks', forbidden)
+    response = _fragment_client(store).get('/test/story-fragment')
     assert [song['title'] for song in response.context['cards'][0]['songs']] == ['Song 0', 'Song 1', 'Song 2']
     assert response.text.count('class="into-song"') == 3
     assert response.text.count('class="into-song-play"') == 3
@@ -95,15 +140,14 @@ def test_worker_prepares_three_matching_song_cards_and_request_uses_only_the_cac
 
 def test_worker_connects_genre_and_artist_articles_using_recorded_credits(store, monkeypatch):
     from tests.conftest import seed_catalog_track
-    from yt_playlist.repos.rec_query import RecQueryRepo
+    from yt_playlist.controllers.recommendation_query import RecommendationQuery
 
     subjects = [{'kind': kind, 'subject': f'{kind}:{name}', 'display': name} for kind, name in [
         ('artist', 'Rrose'), ('artist', 'Slowdive'), ('genre', 'minimal'),
         ('artist', 'Tin Man'), ('genre', 'shoegaze')]]
     entry = store.tracks.upsert_track('collab', 'Together', 'Rrose & Guest', '', 180,
         credits=[{'name': 'Rrose', 'id': 'UC_rrose'}, {'name': 'Guest', 'id': 'UC_guest'}])
-    with store.conn:
-        store.conn.execute("UPDATE catalog_tracks SET genre='Minimal' WHERE id=?", (entry,))
+    seed_enrichment(store, entry, 'Minimal', None)
     seed_catalog_track(store, 'slow|slowdive', 'Slow', 'Slowdive', video_id='slow', genre='Shoegaze')
     seed_catalog_track(store, 'acid|tinman', 'Acid', 'Tin Man', video_id='acid', genre='Acid')
     _heard(store, 'collab', 'slow', 'acid')
@@ -117,8 +161,8 @@ def test_worker_connects_genre_and_artist_articles_using_recorded_credits(store,
     def forbidden(*a, **kw):
         raise AssertionError('Connections must be prepared by the worker')
 
-    monkeypatch.setattr(RecQueryRepo, 'artist_genre_years_for', forbidden)
-    response = _client(store).get('/home/into-recently')
+    monkeypatch.setattr(RecommendationQuery, 'artist_genre_years_for', forbidden)
+    response = _fragment_client(store).get('/test/story-fragment')
     assert [[c['display'] for c in group] for group in response.context['groups']] == [
         ['Rrose', 'minimal'], ['shoegaze', 'Slowdive'], ['Tin Man']]
     assert response.context['groups'][0][0]['songs'][0]['title'] == 'Together'
@@ -132,7 +176,7 @@ def test_common_or_familiar_genre_supports_an_artist_instead_of_leading(store, m
     seed_catalog_track(store, 'song|band', 'Song', 'Band', video_id='song', genre=genre)
     _heard(store, 'song')
     if historical:
-        identity = store.identities.upsert_identity('listener', 'channel', None, True)
+        identity = store.accounts.get_master_account().id
         events = [('song|band', None, NOW - (100 + i) * 86400) for i in range(12)]
         store.history.import_listening_events(identity, events, source='spotify_export', source_timezone='UTC')
     subjects = [{'kind': 'genre', 'subject': f'genre:{genre.lower()}', 'display': genre},
@@ -144,7 +188,7 @@ def test_common_or_familiar_genre_supports_an_artist_instead_of_leading(store, m
     monkeypatch.setattr(into_recently, 'ranked_subjects', lambda *a: subjects)
 
     assert not into_recently.prepare(store, NOW)
-    response = _client(store).get('/home/into-recently')
+    response = _fragment_client(store).get('/test/story-fragment')
     group, = response.context['groups']
     assert [card['display'] for card in group] == ['Band', genre]
     assert not group[1]['lead_allowed']
@@ -212,7 +256,7 @@ def test_wrong_fresh_articles_are_replaced_before_building_a_related_spread(stor
     assert into_recently.prepare(store, NOW, fetch_fn=fetch)
     assert not into_recently.prepare(store, NOW, fetch_fn=fetch)
     assert calls == ['Robert Hood', 'minimal']
-    response = _client(store).get('/home/into-recently')
+    response = _fragment_client(store).get('/test/story-fragment')
     assert [[c['display'] for c in group] for group in response.context['groups']] == [
         ['Robert Hood', 'minimal']]
     assert 'wrong subject' not in response.text
@@ -227,7 +271,7 @@ def test_genre_list_articles_do_not_become_stories(store, monkeypatch):
         'thumbnail': None, 'url': 'http://wiki/List'})
     into_recently.prepare(store, NOW)
     assert into_recently.load(store, NOW) == ([], False)
-    assert 'This is a list.' not in _client(store).get('/home/into-recently').text
+    assert 'This is a list.' not in _fragment_client(store).get('/test/story-fragment').text
 
 
 def test_specific_topic_redirecting_to_a_genre_primer_is_not_published(store, monkeypatch):
@@ -288,9 +332,9 @@ def test_card_caches_and_does_not_refetch(store, monkeypatch):
                 "thumbnail": None, "url": "http://wiki/K"}
     monkeypatch.setattr(wikipedia, "fetch_summary", fetch)
     into_recently.prepare(store, NOW)
-    c = _client(store)
-    c.get("/home/into-recently")
-    c.get("/home/into-recently")
+    c = _fragment_client(store)
+    c.get('/test/story-fragment')
+    c.get('/test/story-fragment')
     assert calls["n"] == 1
 
 
@@ -310,7 +354,7 @@ def test_prepared_stories_fill_the_collection_without_duplicate_articles(store, 
 
     monkeypatch.setattr(wikipedia, "fetch_summary", forbidden)
     into_recently.prepare(store, NOW)
-    cards = _client(store).get("/home/into-recently").context["cards"]
+    cards = _fragment_client(store).get('/test/story-fragment').context['cards']
     assert [card["display"] for card in cards] == ["Band 0", *[f"Band {i}" for i in range(2, 10)]]
 
 
@@ -328,7 +372,7 @@ def test_worker_lookups_are_bounded_and_do_not_hide_later_cached_stories(store, 
 
     monkeypatch.setattr(wikipedia, "fetch_summary", miss)
     assert into_recently.prepare(store, NOW)  # another small worker pass will handle the remaining subjects
-    cards = _client(store).get("/home/into-recently").context["cards"]
+    cards = _fragment_client(store).get('/test/story-fragment').context['cards']
     assert lookups == ["Band 0", "Band 1", "Band 2"]
     assert [card["display"] for card in cards] == ["Band 9"]
 
@@ -336,7 +380,7 @@ def test_worker_lookups_are_bounded_and_do_not_hide_later_cached_stories(store, 
 def test_empty_when_no_subject(store, monkeypatch):
     monkeypatch.setattr(into_recently, "ranked_subjects", lambda s, now: [])
     into_recently.prepare(store, NOW)
-    r = _client(store).get("/home/into-recently")
+    r = _fragment_client(store).get('/test/story-fragment')
     assert r.status_code == 200
     assert "Into recently" not in r.text
 
@@ -347,7 +391,7 @@ def test_empty_when_wikipedia_misses(store, monkeypatch):
                                                   "display": "Nobody"}])
     monkeypatch.setattr(wikipedia, "fetch_summary", lambda kind, display: None)
     into_recently.prepare(store, NOW)
-    r = _client(store).get("/home/into-recently")
+    r = _fragment_client(store).get('/test/story-fragment')
     assert "Into recently" not in r.text
 
 
@@ -366,7 +410,7 @@ def test_falls_back_to_next_subject_when_first_fails(store, monkeypatch):
         return None
     monkeypatch.setattr(wikipedia, "fetch_summary", fetch)
     into_recently.prepare(store, NOW)
-    html = _client(store).get("/home/into-recently").text
+    html = _fragment_client(store).get('/test/story-fragment').text
     assert "shoegaze" in html and "A genre." in html    # fell through the failed first subject
 
 
@@ -381,7 +425,7 @@ def test_artist_card_uses_local_thumbnail_color_and_cta(store, monkeypatch):
                         lambda kind, display: {"display": "Khruangbin", "title": "Khruangbin",
                                                "extract": "A trio.", "thumbnail": None, "url": "http://wiki/K"})
     into_recently.prepare(store, NOW)
-    html = _client(store).get("/home/into-recently").text
+    html = _fragment_client(store).get('/test/story-fragment').text
     assert "http://local/k.jpg" in html                 # fell back to the local thumbnail
     assert "wiki-subject" in html and "--subj" in html  # coloured/glowing heading
     assert "/clusters?seed=Khruangbin" in html and "depth=2" in html  # explore CTA deep-link
@@ -396,7 +440,7 @@ def test_card_hidden_when_no_thumbnail_anywhere(store, monkeypatch):
                         lambda kind, display: {"display": "Ghost", "title": "Ghost",
                                                "extract": "Spooky.", "thumbnail": None, "url": "u"})
     into_recently.prepare(store, NOW)
-    assert "Into recently" not in _client(store).get("/home/into-recently").text
+    assert "Into recently" not in _fragment_client(store).get('/test/story-fragment').text
 
 
 def test_refresh_failure_preserves_stale_card_and_retries(store, monkeypatch):
@@ -412,9 +456,9 @@ def test_refresh_failure_preserves_stale_card_and_retries(store, monkeypatch):
 
     monkeypatch.setattr(wikipedia, "fetch_summary", failed)
     assert not into_recently.prepare(store, NOW)  # an outage uses retry backoff, not a busy worker loop
-    client = _client(store)
-    assert "A trio." in client.get("/home/into-recently").text
-    assert "A trio." in client.get("/home/into-recently").text
+    client = _fragment_client(store)
+    assert "A trio." in client.get('/test/story-fragment').text
+    assert "A trio." in client.get('/test/story-fragment').text
     assert len(calls) == 1
     assert store.wiki.get(subj["subject"])["fetched_at"] == 0
     deadline = store.wiki._retry_after[subj["subject"]]
@@ -427,7 +471,7 @@ def test_refresh_failure_preserves_stale_card_and_retries(store, monkeypatch):
 
 
 def test_cold_fragment_only_schedules_work_and_prepared_reads_do_no_ranking(store, monkeypatch):
-    client = _client(store)
+    client = _fragment_client(store)
     scheduled = []
     monkeypatch.setattr(client.app.state.ctx.rec_worker, "trigger_story_refresh", lambda: scheduled.append(True))
 
@@ -437,7 +481,7 @@ def test_cold_fragment_only_schedules_work_and_prepared_reads_do_no_ranking(stor
     monkeypatch.setattr(into_recently, "ranked_subjects", forbidden)
     monkeypatch.setattr(into_recently, "decorate", forbidden)
     monkeypatch.setattr(wikipedia, "fetch_summary", forbidden)
-    response = client.get("/home/into-recently")
+    response = client.get('/test/story-fragment')
     assert response.status_code == 200 and scheduled == [True]
     assert 'aria-label="Preparing your stories"' in response.text
     card = {"kind": "artist", "subject": "artist:Band", "display": "Band", "extract": "A band.",
@@ -445,7 +489,7 @@ def test_cold_fragment_only_schedules_work_and_prepared_reads_do_no_ranking(stor
             "seed": "Band", "genre": None, "depth": 2}
     store.rec_proposals.put_proposals(into_recently.SURFACE,
         {"schema": into_recently.SCHEMA, "built_at": NOW, "cards": [card], "pending": False}, NOW)
-    response = client.get("/home/into-recently")
+    response = client.get('/test/story-fragment')
     assert "A band." in response.text and scheduled == [True]
     assert 'aria-label="Read about Band on Wikipedia"' in response.text
 
@@ -522,7 +566,7 @@ def test_readable_genre_clusters_survive_misses_and_keep_developed_article_near_
         raise AssertionError('All candidates have a fresh confirmed answer')
 
     assert not into_recently.prepare(store, NOW, fetch_fn=unexpected_fetch)
-    groups = _client(store).get('/home/into-recently').context['groups']
+    groups = _fragment_client(store).get('/test/story-fragment').context['groups']
     assert [[card['display'] for card in group] for group in groups] == [
         ['Developed artist', 'alternative rock'], ['Minimal artist', 'minimal'], ['Pop artist', 'indie pop']]
     assert all(not group[1]['lead_allowed'] for group in groups)
@@ -607,14 +651,13 @@ def test_story_connection_uses_recent_recording_instead_of_artists_dominant_old_
 
 
 def test_only_visible_known_stories_count_and_fragment_polls_do_not_count_again(store, monkeypatch):
-    subject = {'kind': 'artist', 'subject': 'artist:Band', 'display': 'Band'}
-    monkeypatch.setattr(into_recently, 'ranked_subjects', lambda *a: [subject])
-    store.wiki.put(subject['subject'], 'artist', 'Band', {'title': 'Band', 'extract': 'About Band.',
-        'thumbnail': 'http://portrait', 'url': 'http://wiki/Band'}, NOW)
-    into_recently.prepare(store, NOW)
+    from tests.home_fixture_support import returning_listener
+
+    returning_listener(store, 'vibes')
+    _prepare_usable_stories(store, monkeypatch, 3)
     client = _client(store)
     for _ in range(2):
-        client.get('/home/into-recently')
+        assert client.get('/home/into-recently').status_code == 200
     assert store.rec_ledger.story_views() == {}
     for subjects in [['artist:Band'], ['artist:Band', 'artist:Unknown'], ['artist:Band']]:
         assert client.post('/home/into-recently/impressions', json={'subjects': subjects}).status_code == 204

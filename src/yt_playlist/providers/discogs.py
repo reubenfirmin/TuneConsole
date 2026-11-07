@@ -19,7 +19,6 @@ from yt_playlist.util import net
 from yt_playlist.util.matching import normalize, recording_title
 
 name = "discogs"
-manages_availability = True
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +41,6 @@ def available(store=None) -> bool:
 
 def tripped() -> bool:
     return not _iao.availability().ready(_iao.now())
-
-
-def reset() -> None:
-    """Batch boundaries cannot reset shared access cooldowns or retained facts."""
 
 
 def probe(track, store=None, tok=None) -> EnrichmentResult:

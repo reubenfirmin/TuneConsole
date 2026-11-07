@@ -1,16 +1,17 @@
 .storage-maintenance {
-  padding: .7rem 1rem;
-  text-align: center;
-  color: var(--text);
-  background: var(--surface-raised, var(--surface));
-  border-bottom: 2px solid var(--accent);
-  font-size: .9rem;
+  padding: .375rem .875rem;
+  color: var(--dim);
+  background: var(--canvas);
+  border-bottom: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  font-size: var(--type-ui);
+  line-height: 1.5;
+  text-align: left;
+  white-space: nowrap;
 }
 .storage-maintenance[hidden] { display: none; }
 .storage-maintenance[data-warning="true"] {
-  padding: 1rem 1.375rem;
-  background: color-mix(in srgb, var(--danger) 25%, var(--surface));
-  border-block: 3px solid var(--danger);
-  font-size: 1rem;
-  font-weight: 700;
+  color: var(--text);
+}
+@media (min-width: 65rem) {
+  body:not(:has(.page-clusters)) .storage-maintenance { margin-inline-start: 13.5rem; }
 }

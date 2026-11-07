@@ -1,8 +1,7 @@
-import json
-
 import pytest
 
 from tests.conftest import FakeClient
+from yt_playlist.core import artist_credits
 from yt_playlist.core.migrations import Migration, MigrationError, migrate
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.store import Store
@@ -12,7 +11,7 @@ from yt_playlist.rec import artist_model
 
 
 def test_playlist_and_album_import_keep_all_ordered_credits(store):
-    identity = store.identities.upsert_identity('main','credential',None,True)
+    identity = store.accounts.upsert_account('main','credential',None,True)
     source = {'videoId':'v','title':'Song','artists':[{'name':'First','id':'UC1'},
               {'name':'Second, with comma','id':'UC2'}], 'duration_seconds':200}
     client = FakeClient(tracks={'P':[source]})
@@ -106,6 +105,7 @@ def test_populated_upgrade_retains_literal_credit_state_and_feedback_without_bac
         migrate(s.conn,registry=(*MIGRATIONS[:20],Migration(21,MIGRATIONS[20].name,interrupted)))
     assert not s.conn.execute("SELECT 1 FROM sqlite_master WHERE name='artists'").fetchone()
     assert s.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 20
+    migrate(s.conn, registry=MIGRATIONS)
     s.init_schema()
     credits = s.artists.track_credits(1)
     assert len(credits) == 1 and credits[0]['credit'] == 'Group, with comma'
@@ -115,10 +115,12 @@ def test_populated_upgrade_retains_literal_credit_state_and_feedback_without_bac
     assert s.conn.execute('SELECT item_key,kind FROM rec_feedback').fetchone()[:] == ('Group, with comma','less')
     assert s.conn.execute('SELECT artist_id FROM rec_feedback').fetchone()[0] == aid
     assert s.artists.resolve('Original credit') == aid
-    assert s.conn.execute("SELECT item_id,shown_at FROM discovery_visible_impressions WHERE kind='artist'").fetchone()[:] == (str(aid),6)
-    assert s.conn.execute('SELECT artist_id,found_at,first_shown,offered_count FROM discovered_artists').fetchone()[:] == (aid,10,40,5)
+    assert s.conn.execute("SELECT artist_id,shown_at FROM discovery_impressions WHERE artist_id IS NOT NULL").fetchone()[:] == (aid,6)
+    # Five historical offers contain this one independently retained view.
+    assert s.conn.execute('SELECT artist_id,found_at,first_shown,offered_count,legacy_offered_count FROM discovered_artists').fetchone()[:] == (aid,10,6,1,4)
     assert s.conn.execute('SELECT artist,orig_artist FROM catalog_tracks').fetchone()[:] == ('Group, with comma','Original credit')
-    assert len(json.loads(s.conn.execute('SELECT credits_json FROM artist_credit_observations').fetchone()[0])) == 1
+    credit_id = s.conn.execute('SELECT credit_id FROM artist_credit_observations ORDER BY id LIMIT 1').fetchone()[0]
+    assert len(artist_credits.read(s.conn,credit_id).members) == 1
     before = s.artists.track_credits(1)
     s.init_schema()
     assert s.artists.track_credits(1) == before
@@ -128,13 +130,14 @@ def test_populated_upgrade_retains_literal_credit_state_and_feedback_without_bac
 
 
 @pytest.mark.parametrize('existing_references', ['none','album','both'])
-def test_installed_v21_upgrades_references_atomically(tmp_path, monkeypatch, existing_references):
+def test_installed_v21_upgrades_references_atomically(
+        tmp_path, monkeypatch, existing_references, _pristine_installed_schema):
     from yt_playlist.core.migrations import registry
     from yt_playlist.core.migrations.runner import validate_catalog
 
     path = tmp_path / 'installed.db'
     s = Store(path)
-    migrate(s.conn,registry=MIGRATIONS[:21])
+    _pristine_installed_schema(21).backup(s.conn)
     aid = s.conn.execute("INSERT INTO artists(name,provisional) VALUES ('Artist',1)").lastrowid
     s.conn.execute("INSERT INTO artist_aliases VALUES (?, 'Artist', 'legacy_credit')", (aid,))
     s.conn.execute("INSERT INTO discovered_albums(browse_id,artist,title,found_at) VALUES ('release','Artist','Album',1)")
@@ -160,22 +163,27 @@ def test_installed_v21_upgrades_references_atomically(tmp_path, monkeypatch, exi
     monkeypatch.setattr(registry,'MIGRATIONS',(*MIGRATIONS[:21],Migration(22,MIGRATIONS[21].name,interrupted)))
     before = list(s.conn.iterdump())
     with pytest.raises(MigrationError,match='interrupted reference'):
-        migrate(s.conn)
+        migrate(s.conn, registry=registry.MIGRATIONS)
     assert list(s.conn.iterdump()) == before
     monkeypatch.setattr(registry,'MIGRATIONS',MIGRATIONS)
     s.conn.close()
     s = Store(path)
-    s.init_schema()
-    assert s.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == MIGRATIONS[-1].version
+    # Each installed draft needs its own real v22 rollback/reopen/retry. Later
+    # credit conversion and current Store admission belong to the populated
+    # end-to-end upgrade above, rather than another three full suffix replays.
+    migrate(s.conn, registry=MIGRATIONS[:22])
+    assert s.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 22
     assert s.conn.execute('SELECT artist_id FROM discovered_albums').fetchone()[0] == aid
     assert s.conn.execute("SELECT item_key,kind,artist_id,target_type FROM rec_feedback WHERE surface='artist'").fetchone()[:] == (
         'Artist','mute',aid,'artist')
     assert s.conn.execute("SELECT item_key,kind,artist_id FROM rec_feedback WHERE surface='for_you'").fetchone()[:] == (
         'song|artist','less',None)
     assert s.conn.execute("SELECT item_id,shown_at FROM discovery_visible_impressions WHERE kind='artist'").fetchone()[:] == (str(aid),4)
+    validate_catalog(s.conn, 22)
     assert not s.conn.execute('PRAGMA foreign_key_check').fetchall()
     before = list(s.conn.iterdump())
-    s.init_schema()
+    migrate(s.conn, registry=MIGRATIONS[:22])
     assert list(s.conn.iterdump()) == before
     assert not (tmp_path / 'backups').exists()
     assert s.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+    s.conn.close()

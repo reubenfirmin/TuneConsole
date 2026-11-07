@@ -31,7 +31,7 @@ class LaggingClient(FakeClient):
 
 
 def seed(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     tracks = [_track(vid, title, "Artist", set_video_id="set_" + vid)
               for vid, title in (("anchor", "Original"), ("next", "Next"),
                                  ("alt1", "Alternate one"), ("alt2", "Alternate two"))]

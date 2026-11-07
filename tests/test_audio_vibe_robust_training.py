@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 from scipy.special import expit
 
-from experiments.audio_lab_tools import robust_vibes as robust
-from experiments.audio_lab_tools import train_vibes as trainer
+from experiments.audio_lab_tools.training import robust_vibes as robust
+from experiments.audio_lab_tools.training import train_vibes as trainer
 from tests.test_audio_vibe_model import examples
 from yt_playlist.rec import audio_vibe_model as model
 
@@ -126,7 +126,7 @@ def test_outer_fits_are_unchanged_by_held_out_answers_or_feature_statistics(monk
         return original_predict(learned, held_out, training_songs)
 
     monkeypatch.setattr(robust, 'predict', observe)
-    original = robust.train(records, candidates=candidates, inner_folds=2)[1]
+    before, original_selection, _ = robust.outer_fold(records, records[-1], candidates=candidates, inner_folds=2)
     original_fits = fitted[:]
     fitted.clear()
     changed = deepcopy(records)
@@ -134,16 +134,14 @@ def test_outer_fits_are_unchanged_by_held_out_answers_or_feature_statistics(monk
     changed[-1]['values'] = [1e9] * len(model.FEATURES)
     changed[-1]['subgenre'] = 'detroit techno'
     changed[-1]['feedback_prediction'] = {'class': 'wide_divergence'}
-    updated = robust.train(changed, candidates=candidates, inner_folds=2)[1]
+    after, updated_selection, _ = robust.outer_fold(changed, changed[-1], candidates=candidates, inner_folds=2)
     # Held-out features legitimately change inference, but neither their extreme
     # values nor the answer can change fitting, normalization or model selection.
-    before = original['nested']['predictions'][-1]
-    after = updated['nested']['predictions'][-1]
     assert before['video_id'] == after['video_id'] == records[-1]['video_id']
     assert before['human'] != after['human']
     assert fitted == original_fits
     assert before['selected_candidate'] == after['selected_candidate']
-    assert original['outer_selections'][-1] == updated['outer_selections'][-1]
+    assert original_selection == updated_selection
 
 
 def test_hard_example_weights_use_training_errors_and_preserve_total_weight(monkeypatch):

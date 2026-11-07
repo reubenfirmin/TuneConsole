@@ -29,16 +29,19 @@ def oembed(url=IMAGE):
 
 
 @pytest.fixture
-def boundary(store, monkeypatch):
-    def install(fetch=lambda request: oembed()):
+def boundary(monkeypatch):
+    """Transport checks need no database; durable admission checks pass their Store."""
+    def install(fetch=lambda request: oembed(), *, store=None):
         clock, calls, responses, events = [1000.0], [], [], []
 
         def pace():
-            assert not store._lock.held_by_current_thread and not store.conn.in_transaction
+            if store is not None:
+                assert not store._lock.held_by_current_thread and not store.conn.in_transaction
             events.append('pace')
 
         def open_request(request, *, timeout):
-            assert not store._lock.held_by_current_thread and not store.conn.in_transaction
+            if store is not None:
+                assert not store._lock.held_by_current_thread and not store.conn.in_transaction
             calls.append((request, timeout))
             events.append('request')
             body = fetch(request)
@@ -86,7 +89,7 @@ def test_invalid_or_non_album_url_never_reaches_vendor(boundary, url):
     'https://i.scdn.co.evil.example/a', 'https://user@i.scdn.co/a', 'https://i.scdn.co:443/a',
     123, '', [], 'https://[invalid/a'])
 def test_invalid_image_is_pending_without_poisoning_other_albums(boundary, store, image):
-    b = boundary(lambda request: oembed(image) if 'abc123' in request.full_url else oembed())
+    b = boundary(lambda request: oembed(image) if 'abc123' in request.full_url else oembed(), store=store)
     with spotify.access(store), net.probe_errors() as errors:
         assert spotify.thumbnail(ALBUM) is None
         assert spotify.thumbnail(ALBUM) is None
@@ -98,7 +101,7 @@ def test_invalid_image_is_pending_without_poisoning_other_albums(boundary, store
 
 
 def test_overlapping_reports_share_one_canonical_request(boundary, store):
-    b = boundary()
+    b = boundary(store=store)
 
     def read(index):
         with spotify.access(store):
@@ -120,7 +123,7 @@ def test_outages_share_retry_after_and_persist_once(boundary, store, code, heade
     def fetch(request):
         raise urllib.error.HTTPError(request.full_url, code, 'SECRET message', headers, body)
 
-    b = boundary(fetch)
+    b = boundary(fetch, store=store)
     with spotify.access(store), net.probe_errors() as errors:
         assert spotify.thumbnail(ALBUM) is None
         assert spotify.thumbnail('https://open.spotify.com/album/another') is None
@@ -152,7 +155,7 @@ def test_failed_refresh_retains_last_good_and_automatically_recovers(boundary, s
                     'missing_type': {'thumbnail_url': IMAGE}}[failure]
         return oembed(IMAGE if len(b.calls) == 1 else IMAGE + 'new')
 
-    b = boundary(fetch)
+    b = boundary(fetch, store=store)
     with spotify.access(store):
         assert spotify.thumbnail(ALBUM) == IMAGE
         b.clock[0] += transport.POSITIVE_TTL
@@ -190,7 +193,8 @@ def test_confirmed_misses_expire_and_close_http_errors(boundary, kind):
     assert not errors and all(body.closed for body in bodies)
 
 
-def test_response_and_invalid_response_caches_are_bounded(boundary):
+def test_response_and_invalid_response_caches_are_bounded(boundary, monkeypatch):
+    monkeypatch.setattr(transport, 'CACHE_SIZE', 8)
     b = boundary(lambda request: oembed(None))
     for index in range(transport.CACHE_SIZE + 5):
         assert spotify.thumbnail(f'https://open.spotify.com/album/a{index}') is None
@@ -232,7 +236,7 @@ def test_cancellation_propagates_without_publishing_failure(boundary, store, err
     def fetch(request):
         raise error_type('cancelled')
 
-    b = boundary(fetch)
+    b = boundary(fetch, store=store)
     with spotify.access(store), net.probe_errors() as errors, pytest.raises(error_type):
         spotify.thumbnail(ALBUM)
     assert not errors and not b.iao._cache and not b.iao._waits
@@ -255,7 +259,7 @@ def test_report_and_database_proceed_while_thumbnail_waits_for_http(boundary, st
         assert release.wait(5), 'Test did not release Spotify request'
         return oembed()
 
-    b = boundary(fetch)
+    b = boundary(fetch, store=store)
     app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
     web = TestClient(app, base_url='http://127.0.0.1:8123')
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -277,7 +281,7 @@ def test_route_persists_cooldown_and_other_requests_use_it(boundary, store):
     def fetch(request):
         raise OSError('offline')
 
-    b = boundary(fetch)
+    b = boundary(fetch, store=store)
     web = TestClient(create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False),
                      base_url='http://127.0.0.1:8123')
     for album in (ALBUM, 'https://open.spotify.com/album/other'):
@@ -287,9 +291,11 @@ def test_route_persists_cooldown_and_other_requests_use_it(boundary, store):
     assert store.enrichment_state.integration_cooldown('spotify')['retry_at'] == 1060
 
 
-def test_reopened_database_keeps_wait_and_success_cannot_clear_a_newer_deadline(boundary, tmp_path):
+def test_reopened_database_keeps_wait_and_success_cannot_clear_a_newer_deadline(
+        boundary, tmp_path, _pristine_current_schema):
     path = tmp_path / 'spotify.db'
     db = Store(path)
+    _pristine_current_schema.backup(db.conn)
     db.init_schema()
     try:
         db.enrichment_state.defer_integration('spotify', now=1000, retry_after=1100, error='old')
@@ -298,7 +304,7 @@ def test_reopened_database_keeps_wait_and_success_cannot_clear_a_newer_deadline(
     db = Store(path)
     db.init_schema()
     try:
-        b = boundary()
+        b = boundary(store=db)
         with b.iao.context(db.enrichment_state), pytest.raises(IntegrationUnavailable):
             b.iao.thumbnail(ALBUM)
         assert not b.calls
@@ -308,7 +314,7 @@ def test_reopened_database_keeps_wait_and_success_cannot_clear_a_newer_deadline(
             db.enrichment_state.defer_integration('spotify', now=1100, retry_after=1300, error='new')
             return oembed()
 
-        b = boundary(fetch)
+        b = boundary(fetch, store=db)
         b.clock[0] = 1100
         with b.iao.context(db.enrichment_state):
             assert b.iao.thumbnail(ALBUM) == IMAGE
@@ -322,7 +328,7 @@ def test_reopened_database_keeps_wait_and_success_cannot_clear_a_newer_deadline(
 
 
 def test_scope_is_restored_after_report_access(boundary, store):
-    b = boundary()
+    b = boundary(store=store)
     with spotify.access(store):
         assert spotify.thumbnail(ALBUM) == IMAGE
     store.enrichment_state.defer_integration('spotify', now=1000, retry_after=1300, error='scoped')

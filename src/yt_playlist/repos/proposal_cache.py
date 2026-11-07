@@ -23,20 +23,20 @@ class PreparedCache:
 
 
 @contextmanager
-def _write(repo):
-    committed, checkpoint = False, False
+def _write(repo, *, checkpoint=True):
+    committed, deferred = False, False
     try:
         with database_operation('RecProposalsRepo.stage'), repo._lock:
             check_cancellable_work()
             if repo.conn.in_transaction:
                 raise RuntimeError('Recommendation cache staging requires an idle serving connection')
-            with deferred_autocheckpoint(repo.conn, repo._store._db_path is not None) as checkpoint:
+            with deferred_autocheckpoint(repo.conn, repo._store._db_path is not None) as deferred:
                 with repo.conn:
                     repo.conn.execute('BEGIN IMMEDIATE')
                     yield repo.conn
                 committed = True
     finally:
-        if checkpoint and committed:
+        if checkpoint and deferred and committed:
             checkpoint_wal(repo._store._db_path)
 
 
@@ -45,6 +45,8 @@ def _reads(store, table, key):
 
 
 def head(conn, surface, *, store=None):
+    if getattr(store, '_recommendation_files', False):
+        return None
     with _reads(store, 'rec_proposal_cache_heads', surface):
         row = conn.execute('SELECT cache_id,built_at FROM rec_proposal_cache_heads WHERE surface=?',
                            (surface,)).fetchone()
@@ -99,6 +101,8 @@ def logical_rows(conn, *, store=None):
 
 def dependencies(conn):
     """Known cache keys for a bounded snapshot, captured while its source lock is held."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='rec_proposal_cache_heads'").fetchone() is None:
+        return set()
     result = {('rec_proposal_cache_heads', 'key:' + surface) for surface in SURFACES}
     result.update(('rec_proposals', 'key:' + surface) for surface in SURFACES)
     for row in conn.execute('SELECT cache_id FROM rec_proposal_cache_heads'):

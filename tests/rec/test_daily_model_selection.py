@@ -5,32 +5,67 @@ import sqlite3
 import numpy as np
 import pytest
 
+from tests.prepared_fixture_support import prepared_template, roots
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
+from yt_playlist.core import embedding_files
+from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
 from yt_playlist.rec import daily_model_selection as daily, model_selection, model_setup
 from yt_playlist.util.matching import identity_key
 
 
 @pytest.fixture
-def library(store, monkeypatch):
+def library(store, monkeypatch, daily_library_template):
+    return _library(store, monkeypatch, daily_library_template)
+
+
+@pytest.fixture(scope='module')
+def daily_library_template(_pristine_current_schema, daily_catalog_template):
+    def seed(source):
+        return _seed_library(source, daily_catalog_template.restore(source))
+
+    with prepared_template(_pristine_current_schema, seed) as template:
+        yield template
+
+
+@pytest.fixture(scope='module')
+def daily_catalog_template(_pristine_current_schema):
+    with prepared_template(_pristine_current_schema, _seed_catalog) as template:
+        yield template
+
+
+def _seed_catalog(store):
     now = 200 * daily.DAY
-    account = store.identities.upsert_identity('main', 'cred', None, True)
-    entries = [store.tracks.upsert_track(str(i), f'Song{i:03d}', 'Artist', None, None,
-               created_at=-200 * daily.DAY) for i in range(160)]
-    keys = [store.tracks.identity_key_for_video(str(i)) for i in range(160)]
-    videos = {key: str(i) for i, key in enumerate(keys)}
-    for offset in (0, 80):
-        playlist = store.playlists.upsert_playlist(account, f'PL{offset}', 'Old curation', 80, 'old', -100 * daily.DAY)
-        store.playlists.set_playlist_tracks(playlist, entries[offset:offset + 80])
-    for key in keys[:20]:
-        store.history.record_play_event(account, key, videos[key], -100 * daily.DAY)
-    for index, key in enumerate(keys[20:80]):
-        store.history.record_play_event(account, key, videos[key], now - 30 * daily.DAY + (index // 2) * daily.DAY + 100)
-    assert set(map(tuple, store.conn.execute('SELECT identity_key,video_id FROM play_events'))) == {
+    with atomic_write(store):
+        account = store.accounts.upsert_account('main', 'cred', None, True)
+        entries = [store.tracks.upsert_track(str(i), f'Song{i:03d}', 'Artist', None, None,
+                   created_at=-200 * daily.DAY) for i in range(160)]
+        keys = [store.tracks.identity_key_for_video(str(i)) for i in range(160)]
+        videos = {key: str(i) for i, key in enumerate(keys)}
+        for offset in (0, 80):
+            playlist = store.playlists.upsert_playlist(account, f'PL{offset}', 'Old curation', 80, 'old', -100 * daily.DAY)
+            store.playlists.set_playlist_tracks(playlist, entries[offset:offset + 80])
+    store.history.import_listening_events(account,
+        [(key, videos[key], -100 * daily.DAY) for key in keys[:20]], source='live')
+    return dict(now=now, account=account, keys=keys, videos=videos)
+
+
+def _seed_library(store, value):
+    now, account, keys, videos = (value[name] for name in ('now', 'account', 'keys', 'videos'))
+    store.history.import_listening_events(account, [
+        (key, videos[key], now - 30 * daily.DAY + (index // 2) * daily.DAY + 100)
+        for index, key in enumerate(keys[20:80])], source='live')
+    assert set(map(tuple, store.conn.execute('SELECT identity_key,video_id FROM play_event_subjects'))) == {
         (key, videos[key]) for key in keys[:80]}
     original = [(key, np.array([1., 0.], dtype=np.float32).tobytes()) for key in keys]
     store.rec_model.replace_rec_vectors(original)
     store.settings.set_setting('rec_dim', '2')
+    return dict(now=now, account=account, keys=keys, videos=videos, original=original)
+
+
+def _library(store, monkeypatch, template):
+    value = template.restore(store)
+    keys = value['keys']
     monkeypatch.setattr(model_setup, 'CONFIGS', [('svd', 2), ('svd', 3)])
     calls = []
 
@@ -44,7 +79,7 @@ def library(store, monkeypatch):
         return vocabulary, vectors
 
     monkeypatch.setattr(daily.training, 'build_vectors_from_baskets', fit)
-    return dict(store=store, now=now, account=account, keys=keys, videos=videos, original=original, calls=calls)
+    return dict(value, store=store, calls=calls)
 
 
 def complete(library, *, start=None):
@@ -57,8 +92,65 @@ def complete(library, *, start=None):
     pytest.fail(f'Comparison did not finish: {result}')
 
 
-def test_all_prior_history_single_holdout_shared_inputs_and_full_refit(library):
+def test_all_prior_history_single_holdout_shared_inputs_and_full_refit(
+        library, daily_library_template, daily_catalog_template, file_backed_store, monkeypatch):
     store, now = library['store'], library['now']
+    # The library adds held-out plays and vectors to a private copy of the
+    # common catalog. Admission cases still receive its original empty state.
+    catalog = daily_catalog_template.source
+    assert list(map(tuple, catalog.conn.execute(
+        'SELECT identity_key,video_id,played_at FROM play_event_subjects ORDER BY id'))) == [
+            (key, daily_catalog_template.result['videos'][key], -100 * daily.DAY)
+            for key in daily_catalog_template.result['keys'][:20]]
+    assert catalog.rec_model.get_rec_vectors() == []
+    assert catalog.settings.get_setting('rec_dim') is None
+    assert catalog.model_selection.latest_daily_selection() is None
+    # Compare the real seed and both restore modes before any selection work.
+    with monkeypatch.context() as patch:
+        sibling = _library(file_backed_store, patch, daily_library_template)
+        for current in (daily_library_template.source, store, file_backed_store):
+            assert current.conn.execute('SELECT count(*) FROM tracks').fetchone()[0] == 160
+            for offset in (0, 80):
+                playlist = current.playlists.get_playlist_for_account(library['account'], f'PL{offset}')
+                assert len(current.playlists.get_playlist_track_ids(playlist.id)) == 80
+                assert current.playlists.get_playlist_track_keys(playlist.id) == set(library['keys'][offset:offset + 80])
+            assert list(map(tuple, current.conn.execute('SELECT account_id,video_id,played_at '
+                'FROM play_event_subjects ORDER BY id'))) == [
+                    (library['account'], str(i), -100 * daily.DAY) for i in range(20)] + [
+                    (library['account'], str(i), now - 30 * daily.DAY + ((i - 20) // 2) * daily.DAY + 100)
+                    for i in range(20, 80)]
+            assert current.rec_model.get_rec_vectors() == library['original']
+            assert current.settings.get_setting('rec_dim') == '2'
+            assert not current.settings.get_setting('rec_fit_inputs')
+            assert current.model_selection.latest_daily_selection() is None
+        for name, source in roots(daily_library_template.source.conn).items():
+            destinations = [roots(target.conn)[name] for target in (store, file_backed_store)]
+            assert len(set([source, *destinations])) == 3
+            for path in source.rglob('*'):
+                if path.is_file():
+                    for destination in destinations:
+                        copied = destination / path.relative_to(source)
+                        assert copied.read_bytes() == path.read_bytes()
+                        assert not copied.samefile(path)
+        assert len(list(embedding_files.references(file_backed_store.conn))) == 2
+        weights = {library['keys'][0]: 1.4}
+        vocabulary, first = daily.training.build_vectors_from_baskets([sibling['keys']], 2, 'svd', weights)
+        _, second = daily.training.build_vectors_from_baskets([sibling['keys']], 2, 'svd', {})
+        first[:] = 0
+        assert second.sum() == len(vocabulary) == 160
+        assert len(sibling['calls']) == 2 and sibling['calls'][0][2] is weights
+        sibling['keys'].clear()
+        sibling['videos'].clear()
+        sibling['original'].clear()
+        sibling['calls'].clear()
+        file_backed_store.settings.set_setting('private', 'sibling')
+    assert library['calls'] == []
+    assert len(library['keys']) == len(library['videos']) == len(library['original']) == 160
+    assert len(daily_library_template.result['keys']) == len(daily_library_template.result['videos']) == 160
+    assert len(daily_library_template.result['original']) == 160
+    assert store.settings.get_setting('private') is None
+    assert daily_library_template.source.settings.get_setting('private') is None
+    store.rec_model.set_weight('genre:jazz', 1.4, now=now - 1)
     with store.read_view() as reader:
         captured, _ = daily._capture(reader, now)
     # Training includes evidence older than any proposed 60/90-day limit.
@@ -78,6 +170,7 @@ def test_all_prior_history_single_holdout_shared_inputs_and_full_refit(library):
     assert not daily.due(store, now + daily.DAY - 1)
     assert store.model_selection.restore_model_selection(result['id'], now + 100)
     assert dict(store.rec_model.get_rec_vectors()) == dict(library['original'])
+    assert store.rec_model.weight_records()['genre:jazz']['weight'] == 1.4
     assert store.settings.get_setting('rec_dim') == '2'
     assert not daily.due(store, now + 2 * daily.DAY)
 
@@ -112,36 +205,34 @@ def test_insufficient_activity_skips_all_fits(library):
     (60, 24, 'waiting'),
 ])
 def test_initial_insufficient_attempt_does_not_require_another_30_plays(
-        store, monkeypatch, initial_targets, new_targets, expected):
-    now = 200 * daily.DAY
-    account = store.identities.upsert_identity('main', 'cred', None, True)
-    entries = [store.tracks.upsert_track(str(i), f'Song{i:03d}', 'Artist', None, None,
-               created_at=-200 * daily.DAY) for i in range(160)]
-    keys = [store.tracks.identity_key_for_video(str(i)) for i in range(160)]
-    videos = dict(zip(keys, map(str, range(160))))
-    for offset in (0, 80):
-        playlist = store.playlists.upsert_playlist(
-            account, f'PL{offset}', 'Old curation', 80, 'old', -100 * daily.DAY)
-        store.playlists.set_playlist_tracks(playlist, entries[offset:offset + 80])
-    for key in keys[:20]:
-        store.history.record_play_event(account, key, videos[key], -100 * daily.DAY)
+        store, monkeypatch, initial_targets, new_targets, expected,
+        daily_catalog_template):
+    value = daily_catalog_template.restore(store)
+    now, account, keys, videos = (value[name] for name in ('now', 'account', 'keys', 'videos'))
+    # Catalog/history and template isolation belong to
+    # test_all_prior_history_single_holdout_shared_inputs_and_full_refit.
+    # This case exercises admission using the same unchanged 160-track catalog.
     active_days = 6 if initial_targets == 26 else 8
-    for index, key in enumerate(keys[20:20 + initial_targets]):
-        store.history.record_play_event(account, key, videos[key],
-            now - 15 * daily.DAY + (index % active_days) * daily.DAY + 100 + index)
+    store.history.import_listening_events(account, [
+        (key, videos[key], now - 15 * daily.DAY + (index % active_days) * daily.DAY + 100 + index)
+        for index, key in enumerate(keys[20:20 + initial_targets])], source='live')
     setup = model_setup.current_setup(store)
     vector = np.zeros(setup['dim'], dtype=np.float32)
     vector[0] = 1.
     original = {key: vector.tobytes() for key in keys}
     store.rec_model.replace_rec_vectors(list(original.items()))
-    real_fit, fits = daily.training.build_vectors_from_baskets, []
+    fits = []
 
-    def counted_fit(*args, **kwargs):
-        fits.append((kwargs['method'], kwargs['dim']))
-        return real_fit(*args, **kwargs)
+    def counted_fit(baskets, *, method, dim, weights):
+        fits.append((method, dim))
+        vocabulary = sorted({key for basket in baskets for key in basket})
+        vectors = np.zeros((len(vocabulary), dim), dtype=np.float32)
+        vectors[:, 0] = 1.
+        return vocabulary, vectors
 
-    # Keep the default grid, thresholds and numerical fitting. Only count fits;
-    # synthetic incumbent vectors establish the modeled-track prerequisite.
+    # Keep the default grid, thresholds, capture, ranking and publication.
+    # Numerical fitting is owned by test_sparse_models and test_item2vec;
+    # completed vectors keep this admission policy independent of fit cost.
     monkeypatch.setattr(daily.training, 'build_vectors_from_baskets', counted_fit)
     result = daily.maintain(store, now)
     if initial_targets == 26:
@@ -160,8 +251,9 @@ def test_initial_insufficient_attempt_does_not_require_another_30_plays(
     assert daily.readiness(store, now + daily.DAY - 1)['reason'] == 'The next daily comparison is scheduled.'
     next_at = now + daily.DAY + 3600
     added = keys[20 + initial_targets:20 + initial_targets + new_targets]
-    for index, key in enumerate(added):
-        store.history.record_play_event(account, key, videos[key], now + daily.DAY + 100 + index)
+    store.history.import_listening_events(account, [
+        (key, videos[key], now + daily.DAY + 100 + index)
+        for index, key in enumerate(added)], source='live')
     with store.read_view() as reader:
         captured, _ = daily._capture(reader, next_at)
     assert len(captured['held']) == initial_targets + new_targets
@@ -249,10 +341,12 @@ def test_changed_historical_inputs_discard_mixed_candidate_results(library):
     assert [dim for dim, _, _ in library['calls']] == [2, 2]
 
 
-def test_file_database_reopen_resumes_completed_candidate(library, tmp_path):
-    path = tmp_path / 'library.db'
-    with sqlite3.connect(path) as destination:
-        library['store'].conn.backup(destination)
+def test_file_database_reopen_resumes_completed_candidate(file_backed_store, monkeypatch, daily_library_template):
+    # Reopen the real installed database together with its external vectors.
+    # A SQL-only backup of the memory fixture leaves those files behind.
+    library = _library(file_backed_store, monkeypatch, daily_library_template)
+    path = file_backed_store._db_path
+    file_backed_store.conn.close()
     first = Store(path)
     first.init_schema()
     try:
@@ -406,7 +500,7 @@ def test_pausing_during_full_refit_prevents_publication(library, monkeypatch):
     assert not daily.due(store, now + 2 * daily.DAY)
 
 
-def test_failure_after_vector_writes_rolls_back_the_whole_publication(library, monkeypatch):
+def test_failure_after_selection_publication_keeps_selected_vectors_and_restore_point(library, monkeypatch):
     store, now = library['store'], library['now']
     daily.maintain(store, now)
     daily.maintain(store, now + 5)
@@ -420,11 +514,15 @@ def test_failure_after_vector_writes_rolls_back_the_whole_publication(library, m
             raise ValueError('controlled publication failure')
 
     monkeypatch.setattr(store.model_selection, 'publish_selection', fail_after_writes)
-    assert daily.maintain(store, now + 10)['status'] == 'failed'
+    assert daily.maintain(store, now + 10)['status'] == 'applied'
     assert published_rows == [len(library['keys'])]
-    assert dict(store.rec_model.get_rec_vectors()) == dict(library['original'])
-    assert store.settings.get_setting('rec_dim') == '2'
-    assert not store.settings.get_setting('rec_selection_active_run')
+    selected = store.rec_model.get_rec_vectors()
+    assert len(selected) == len(library['keys'])
+    assert selected != library['original']
+    assert store.settings.get_setting('rec_dim') == '3'
+    active = int(store.settings.get_setting('rec_selection_active_run'))
+    assert dict(store.conn.execute('SELECT identity_key,vec FROM rec_model_previous_vectors WHERE run_id=?',
+                                   (active,))) == dict(library['original'])
 
 
 def test_tied_best_alternatives_keep_the_incumbent(library, monkeypatch):
@@ -445,22 +543,52 @@ def test_tied_best_alternatives_keep_the_incumbent(library, monkeypatch):
     assert result['status'] == 'retained' and result['selected']['dim'] == 2
 
 
-def test_legacy_gate_ends_but_held_projections_survive(library):
+@pytest.mark.parametrize('phase', ['preparing', 'observing'])
+def test_legacy_gate_ends_but_held_projections_survive(library, phase):
     from yt_playlist.rec import product_comparison
+    from yt_playlist.rec import choice_evidence
     store, now = library['store'], library['now']
     setup = {'method': 'svd', 'dim': 2}
     old = dict(kind='product', status='running', phase='observing', ran_at=now - daily.DAY,
                previous=setup, selected=setup, grid=[])
     run_id = store.model_selection.start_selection(old['ran_at'], old)
-    current = dict(run_id=run_id, phase='observing')
+    current = dict(run_id=run_id, phase=phase, seed='retained-compatibility',
+        started_at=now - daily.DAY, exposure_until=now + daily.DAY,
+        constraints=product_comparison.constraints(store), generation='retained-generation',
+        policy=product_comparison.POLICY)
     store.rec_proposals.put_proposals(product_comparison.SURFACE, current, now)
-    surface = product_comparison.pair_surface(run_id, 'incumbent', 'mixes')
-    held = {'retained': 'frozen held projection'}
-    store.rec_proposals.put_proposals(surface, held, now)
+    ledger = store.rec_ledger.evidence()
+    artifact = ledger.artifact({'retained': 'original comparison inputs'})
+    saved, assignments = {}, {}
+    for format in product_comparison.FORMATS:
+        for arm in ('incumbent', 'challenger'):
+            surface = product_comparison.pair_surface(run_id, arm, format)
+            saved[surface] = {'run_id': run_id, 'data': {
+                'retained': [arm, format], 'context': {'artifact': artifact}}}
+            store.rec_proposals.put_proposals(surface, saved[surface], now)
+        # Held assignments came from an observing trial before its retirement.
+        observing = {**current, 'phase': 'observing'}
+        store.rec_proposals.put_proposals(product_comparison.SURFACE, observing, now)
+        assignments[format] = product_comparison.assignment(store, format, 'held', now)
+    store.rec_proposals.put_proposals(product_comparison.SURFACE, current, now)
+    monitor = {'run_id': run_id, 'complete': False}
+    store.rec_proposals.put_proposals(product_comparison.MONITOR, monitor, now)
+    opportunity = choice_evidence.issue(store, 'mixes', [{'id': 'retained-option'}], now,
+        context={'comparison': assignments['mixes'], 'retained': {'artifact': artifact}})
+    assert choice_evidence.respond(store, opportunity, 'visible', now + 1, visible=['retained-option'])
+    original_offer = ledger.get('opportunity', opportunity)
+    original_artifact = ledger.get('artifact', artifact)
     store.settings.set_setting('rec_selection_live_run', str(run_id))
     daily.maintain(store, now)
     assert store.model_selection.selection_run(run_id)['status'] == 'retained'
     assert product_comparison.state(store)['phase'] == 'retained'
     assert product_comparison.assignment(store, 'mixes', 'new', now) is None
-    assert store.rec_proposals.get_proposals(surface) == held
+    assert all(store.rec_proposals.get_proposals(surface) == value for surface, value in saved.items())
+    for format, assignment in assignments.items():
+        surface = product_comparison.pair_surface(run_id, assignment['arm'], format)
+        assert product_comparison.prepared(store, format, 'held', now + 2,
+            existing=assignment) == (saved[surface]['data'], assignment)
+    assert ledger.get('opportunity', opportunity) == original_offer
+    assert ledger.get('artifact', artifact) == original_artifact
+    assert store.rec_proposals.get_proposals(product_comparison.MONITOR) == {**monitor, 'complete': True}
     assert not store.settings.get_setting('rec_selection_live_run')

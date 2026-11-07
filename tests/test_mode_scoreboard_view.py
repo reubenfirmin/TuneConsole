@@ -1,21 +1,13 @@
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
-from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 from yt_playlist.rec.mode_eval import choice_evidence, mode_bandit_stats
 from tests.conftest import FakeClient
 
 
-@pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    return s
-
-
 def _client(store, now=1000.0):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
                       base_url="http://127.0.0.1")
 
@@ -27,7 +19,7 @@ def test_taste_shows_offered_and_picked(store):
     ], retired_ids=[], now=1.0)
     store.modes.log_impressions(1, [("wheelhouse", 1)], now=100.0)
     store.modes.log_impressions(2, [("wheelhouse", 1)], now=110.0)
-    store.modes.log_pick(playlist_id=5, mode_id=1, now=120.0)
+    store.modes.log_pick(membership_ref_id=5, mode_id=1, now=120.0)
     r = _client(store).get("/taste/panels/generated")
     assert r.status_code == 200
     assert "House" in r.text

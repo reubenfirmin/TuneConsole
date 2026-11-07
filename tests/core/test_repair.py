@@ -10,20 +10,17 @@ import json
 import pytest
 
 from tests.historical_captures import retained_capture
-from yt_playlist.core import repair
-from yt_playlist.core.store import Store
+from yt_playlist.core import repair, listening
 
 DAY = 86400
 
 
 @pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    s.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'me','c.json',1)")
-    s.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (2,'brand','c.json',0)")
-    s.conn.commit()
-    return s
+def store(store):
+    store.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (1,'me','c.json',1)")
+    store.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (2,'brand','c.json',0)")
+    store.conn.commit()
+    return store
 
 
 def _hist(store, ident, day, keys, source="ytm_history"):
@@ -31,7 +28,7 @@ def _hist(store, ident, day, keys, source="ytm_history"):
 
 
 def _coverage(store, lo=10, hi=19, ident=1, **overrides):
-    values = dict(identity_id=ident, fingerprint='verified-fixture', imported_at=1,
+    values = dict(account_id=ident, fingerprint='verified-fixture', imported_at=1,
                   unparsed_dates=0, account_verified=1, complete=1,
                   coverage_start=lo * DAY, coverage_end=(hi + 1) * DAY)
     values.update(overrides)
@@ -43,15 +40,15 @@ def _coverage(store, lo=10, hi=19, ident=1, **overrides):
 
 
 def _ev(store, ident, key, day, source="takeout", sec=100):
-    store.conn.execute(
-        "INSERT INTO play_events(identity_id,identity_key,video_id,played_at,source) VALUES (?,?,?,?,?)",
-        (ident, key, "v", day * DAY + sec, source))
+    at = day * DAY + sec
+    event = listening.append_event(store.conn,ident,key,at,video_id='v')
+    listening.project_event(store.conn,event,ident,at,source=source,timezone='UTC')
     store.conn.commit()
 
 
 def _keys(store):
     return sorted(r[0] for r in store.conn.execute(
-        "SELECT identity_key FROM listening_observations WHERE precision='legacy_unknown'"))
+        "SELECT identity_key FROM listening_observation_subjects WHERE precision='legacy_unknown'"))
 
 
 # --- the Takeout-authoritative window -------------------------------------------------------------
@@ -208,7 +205,7 @@ def test_deleted_rows_are_backed_up(store, tmp_path):
     assert repair.purge_phantom_history(store.conn, backup_path=p) == 1
     rows = [json.loads(line) for line in p.read_text().splitlines()]
     row, = rows
-    assert row['identity_id'] == 1 and row['identity_key'] == 'phantom'
+    assert row['account_id'] == 1 and row['identity_key'] == 'phantom'
     assert row['captured_at'] == 15 * DAY + 43200 and row['source'] == 'ytm_history'
     assert row['capture_id'] and row['capture_item_id'] and row['id'] and 'raw_identity_key' in row
     assert row['precision'] == 'legacy_unknown' and row['timezone'] is None
@@ -229,7 +226,7 @@ def test_run_once_does_nothing_without_a_takeout_import(store, monkeypatch, tmp_
     _ev(store, 1, "real", 10)
     _ev(store, 1, "real", 20)
     _hist(store, 1, 15, ["phantom"])
-    repair.run_once(store)                              # takeout_imported_at is unset
+    store.history.repair_verified_imports()             # takeout_imported_at is unset
     assert "phantom" in _keys(store)
     assert store.settings.get_setting(repair.PHANTOM_PURGE_SEEN) is None
 
@@ -241,13 +238,13 @@ def test_run_once_fires_after_a_takeout_import_and_then_stops(store, monkeypatch
     _ev(store, 1, "real", 20)
     _hist(store, 1, 15, ["phantom"])
     store.settings.set_setting("takeout_imported_at", "1000.0")
-    repair.run_once(store)
+    store.history.repair_verified_imports()
     assert "phantom" not in _keys(store)
     watermark = store.settings.get_setting(repair.PHANTOM_PURGE_SEEN)
     assert watermark
 
     _hist(store, 1, 16, ["phantom2"])                   # a fresh phantom after the repair ran
-    repair.run_once(store)                              # same import: must not run again
+    store.history.repair_verified_imports()              # same import: must not run again
     assert "phantom2" in _keys(store)
     assert store.settings.get_setting(repair.PHANTOM_PURGE_SEEN) == watermark
 
@@ -309,7 +306,7 @@ def test_exact_events_and_coverage_are_scoped_to_their_account(store, tmp_path):
     _ev(store, 2, 'same-song', 15)
     assert repair.purge_phantom_history(store.conn, tmp_path / 'backup.jsonl') == 1
     assert [row[0] for row in store.conn.execute(
-        "SELECT identity_id FROM listening_observations WHERE precision='legacy_unknown'")] == [2]
+        "SELECT account_id FROM listening_observations WHERE precision='legacy_unknown'")] == [2]
 
 
 @pytest.mark.parametrize('flags', [dict(account_verified=0), dict(complete=0),
@@ -355,6 +352,8 @@ def test_missing_backup_refuses_without_leaking_deletions_to_a_later_commit(stor
 def test_backup_failure_preserves_history_and_cleans_partial_file(store, monkeypatch, tmp_path, failure):
     _coverage(store)
     _hist(store, 1, 15, ['a', 'b'])
+    backup_dir = tmp_path / 'backups'
+    backup_dir.mkdir()
 
     def fail(*args, **kwargs):
         raise OSError('injected backup failure')
@@ -386,23 +385,25 @@ def test_backup_failure_preserves_history_and_cleans_partial_file(store, monkeyp
     else:
         monkeypatch.setattr(repair.os, 'fsync' if failure == 'fsync' else 'link', fail)
     with pytest.raises(OSError, match='injected backup failure'):
-        repair.purge_phantom_history(store.conn, tmp_path / 'backup.jsonl')
+        repair.purge_phantom_history(store.conn, backup_dir / 'backup.jsonl')
     store.settings.set_setting('unrelated', 'commit')
     assert _keys(store) == ['a', 'b'] and not store.conn.in_transaction
-    assert list(tmp_path.iterdir()) == []
+    assert list(backup_dir.iterdir()) == []
 
 
 def test_existing_backup_is_never_overwritten_and_no_deletion_is_committed(store, tmp_path):
     _coverage(store)
     _hist(store, 1, 15, ['observed'])
-    backup = tmp_path / 'backup.jsonl'
+    backup_dir = tmp_path / 'backups'
+    backup_dir.mkdir()
+    backup = backup_dir / 'backup.jsonl'
     backup.write_text('prior recovery evidence\n')
     with pytest.raises(FileExistsError):
         repair.purge_phantom_history(store.conn, backup)
     store.settings.set_setting('unrelated', 'commit')
     assert _keys(store) == ['observed']
     assert backup.read_text() == 'prior recovery evidence\n'
-    assert list(tmp_path.iterdir()) == [backup]
+    assert list(backup_dir.iterdir()) == [backup]
 
 
 def test_failed_delete_rolls_back_prior_deletions_and_leaves_complete_backup(store, tmp_path):
@@ -410,7 +411,7 @@ def test_failed_delete_rolls_back_prior_deletions_and_leaves_complete_backup(sto
     _coverage(store)
     _hist(store, 1, 15, ['a', 'b'])
     store.conn.execute("CREATE TRIGGER fail_repair BEFORE DELETE ON listening_observations "
-                       "WHEN OLD.identity_key='b' BEGIN SELECT RAISE(ABORT,'injected deletion failure'); END")
+                       "WHEN OLD.unresolved_subject_key='b' BEGIN SELECT RAISE(ABORT,'injected deletion failure'); END")
     backup = tmp_path / 'backup.jsonl'
     with pytest.raises(sqlite3.IntegrityError, match='injected deletion failure'):
         repair.purge_phantom_history(store.conn, backup)

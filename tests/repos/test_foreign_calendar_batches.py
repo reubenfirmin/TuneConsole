@@ -12,7 +12,7 @@ def stamp(local, timezone='UTC'):
 
 
 def account(store, timezone='UTC'):
-    iid = store.identities.upsert_identity('main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('main', 'bridge', None, True)
     with store.conn:
         listening.calendar(store.conn, iid, timezone)
     return iid
@@ -25,13 +25,13 @@ def test_history_batch_reconciles_once_with_one_exact_lookup_per_scope(store, mo
     keys = [f'song-{i}' for i in range(size)]
     store.history.import_listening_events(iid, [(key, None, at) for key in keys])
     calls = []
-    original = listening.reconcile_foreign_days
+    original = store.listening_calendar.reconcile
 
     def reconcile(*args, **kwargs):
         calls.append(kwargs)
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(listening, 'reconcile_foreign_days', reconcile)
+    monkeypatch.setattr(store.listening_calendar, 'reconcile', reconcile)
     sql = []
     store.conn.set_trace_callback(sql.append)
     try:
@@ -79,14 +79,13 @@ def test_exact_ingestion_revisits_only_affected_recording_and_source_date(store,
         for key, day in [('song', '2026-10-20'), ('song', '2026-10-21'), ('other', '2026-10-21')]:
             listening.observe_day(store.conn, iid, key, day, 'ytm_history', 'UTC', at, reconcile=False)
     visited = []
-    original = listening_calendar._foreign_rows
+    original = store.listening_calendar.repository.exact_days
 
-    def rows(*args):
-        for row in original(*args):
-            visited.append((row['identity_key'], row['source_day']))
-            yield row
+    def rows(account_id, key, start, end):
+        visited.append((key, dt.datetime.fromtimestamp(start, dt.timezone.utc).date().isoformat()))
+        return original(account_id, key, start, end)
 
-    monkeypatch.setattr(listening_calendar, '_foreign_rows', rows)
+    monkeypatch.setattr(store.listening_calendar.repository, 'exact_days', rows)
 
     def record(timestamp):
         if ingest == 'live':
@@ -98,8 +97,8 @@ def test_exact_ingestion_revisits_only_affected_recording_and_source_date(store,
 
     record(at)
     assert visited == [('song', '2026-10-21')]
-    assert store.conn.execute("SELECT day FROM listening_observations WHERE identity_key='song' "
-                              "AND source_day='2026-10-21'").fetchone()[0] == '2026-10-20'
+    assert store.conn.execute("SELECT day FROM listening_observations WHERE account_id=? AND raw_identity_key='song' "
+                              "AND source_day='2026-10-21'",(iid,)).fetchone()[0] == '2026-10-20'
     visited.clear()
     record(at + 7200)
     assert visited == [('song', '2026-10-21')]
@@ -142,9 +141,39 @@ def test_observation_scope_plan_uses_account_recording_source_date_index(store):
         store.conn.set_trace_callback(None)
     query = next(statement for statement in sql if statement.startswith('WITH affected'))
     plan = [row[3] for row in store.conn.execute('EXPLAIN QUERY PLAN ' + query)]
-    assert any('SEARCH o USING INDEX ix_listening_observation_source_scope' in detail
-               and 'identity_key=?' in detail and 'source_day=?' in detail and 'timezone=?' in detail
-               for detail in plan)
+    for index,subject in [('ix_listening_observation_canonical_scope','recording_id'),
+                          ('ix_listening_observation_unresolved_scope','unresolved_subject_key')]:
+        assert any('SEARCH o USING INDEX '+index in detail
+                   and all(field+'=?' in detail for field in ('account_id',subject,'source_day','timezone'))
+                   for detail in plan),'\n'.join(plan)
+
+
+def test_resolved_and_unresolved_contributions_share_a_key_without_losing_ambiguity_or_scope(store):
+    iid = account(store,'America/Costa_Rica')
+    at = stamp('2026-10-21T05:30:00')
+    with store.conn:
+        listening.observe_day(store.conn,iid,'shared','2026-10-21','captured','UTC',at,reconcile=False)
+    store.history.record_play_event(iid,'shared',None,at)
+    # A recording can be admitted while an older capture still awaits explicit
+    # subject resolution. Both interpretations remain independent evidence.
+    with store.conn:
+        recording = store.conn.execute("INSERT INTO recordings(identity_key) VALUES ('shared')").lastrowid
+        listening.observe_day(store.conn,iid,'shared','2026-10-21','independent','UTC',at,reconcile=False)
+    sql = []
+    store.conn.set_trace_callback(sql.append)
+    try:
+        store.history.record_play_event(iid,'shared',None,at+7200)
+    finally:
+        store.conn.set_trace_callback(None)
+    rows = list(store.conn.execute("SELECT raw_identity_key,recording_id,day,source FROM listening_observations ORDER BY id"))
+    assert [tuple(row) for row in rows]==[('shared',None,None,'captured'),('shared',recording,None,'independent')]
+    assert store.history.listening_day_counts(iid)=={'shared':2}
+    query = next(statement for statement in sql if statement.startswith('SELECT pe.played_at,c.day'))
+    plan = [row[3] for row in store.conn.execute('EXPLAIN QUERY PLAN '+query)]
+    for index,subject in [('ix_play_event_account_subject_time','recording_id'),
+                          ('ix_play_event_account_unresolved_time','unresolved_subject_key')]:
+        assert any(index in detail and 'account_id=?' in detail and subject+'=?' in detail
+                   and 'played_at>?' in detail and 'played_at<?' in detail for detail in plan),'\n'.join(plan)
 
 
 @pytest.mark.parametrize('unrelated', [10, 60])
@@ -162,14 +191,14 @@ def test_alias_collisions_do_not_reproject_unrelated_foreign_history(store, monk
         for source in ['ytm_history', 'independent']:
             listening.observe_day(store.conn, iid, key, '2026-10-20', source,
                                   'America/New_York', at)
-    visited, original = [], listening_calendar._foreign_rows
+    visited, original = [], listening_calendar.foreign_rows
 
-    def rows(*args):
-        for row in original(*args):
+    def rows(*args, **kwargs):
+        for row in original(*args, **kwargs):
             visited.append(row['identity_key'])
             yield row
 
-    monkeypatch.setattr(listening_calendar, '_foreign_rows', rows)
+    monkeypatch.setattr(listening_calendar, 'foreign_rows', rows)
     store.tracks.upsert_track('second', 'Wise One', 'Artist', '', 180)
     new = store.tracks.catalog_subject(first)['identity_key']
     assert visited == [new, new]
@@ -179,7 +208,7 @@ def test_alias_collisions_do_not_reproject_unrelated_foreign_history(store, monk
 
 @pytest.mark.parametrize('partial', [False, True])
 def test_recording_association_scopes_accounts_sources_dst_and_ambiguity(store, monkeypatch, partial):
-    iids = [store.identities.upsert_identity(name, name, None, True) for name in ('a', 'b')]
+    iids = [store.accounts.upsert_account(name, name, None, index==0) for index,name in enumerate(('a', 'b'))]
     for iid in iids:
         with store.conn:
             listening.calendar(store.conn, iid, 'UTC')
@@ -205,14 +234,14 @@ def test_recording_association_scopes_accounts_sources_dst_and_ambiguity(store, 
                                       'ytm_history', 'America/New_York', at)
     raw = list(map(tuple, store.conn.execute('SELECT id,raw_identity_key,source_day,source,timezone '
                                              'FROM listening_observations ORDER BY id')))
-    visited, original = [], listening_calendar._foreign_rows
+    visited, original = [], listening_calendar.foreign_rows
 
-    def rows(*args):
-        for row in original(*args):
+    def rows(*args, **kwargs):
+        for row in original(*args, **kwargs):
             visited.append(row['identity_key'])
             yield row
 
-    monkeypatch.setattr(listening_calendar, '_foreign_rows', rows)
+    monkeypatch.setattr(listening_calendar, 'foreign_rows', rows)
     store.tracks.associate_youtube_item('old', recording, source='review', evidence={'same': True},
                                       now=max(times) + 1, same_recording=not partial)
     assert 'unrelated' not in visited and len(visited) == 8

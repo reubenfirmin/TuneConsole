@@ -1,9 +1,11 @@
 """A skip is a temporary recording break, including on cached Radio plans."""
 from types import SimpleNamespace
+from tests.derived_rating_support import seed_like
 
 import pytest
 
 from tests.test_radio_catalog import catalog_track
+from tests.recommendation_support import publish_bundles
 from yt_playlist.core.store import Store
 from yt_playlist.library import player_events
 from yt_playlist.rec import eligibility, radio_tuning
@@ -16,7 +18,7 @@ DAY = 86400
 
 @pytest.fixture
 def listener(store):
-    return store.identities.upsert_identity('Main', 'credential', None, True)
+    return store.accounts.upsert_account('Main', 'credential', None, True)
 
 
 def exit_event(store, listener, track, at, *, kind='track_exit', position=20, duration=200):
@@ -26,7 +28,7 @@ def exit_event(store, listener, track, at, *, kind='track_exit', position=20, du
 
 def test_first_skip_blocks_for_24_hours_without_clearing_a_heart(store, listener):
     track, _ = catalog_track(store, 'skipped')
-    store.rec_model.record_like(track['key'], 99)
+    seed_like(store, track['key'], 99)
     feedback = [tuple(row) for row in store.conn.execute('SELECT * FROM rec_feedback')]
     exit_event(store, listener, track, 100)
     assert store.player_events.skip_blackouts(100) == {track['key']: 100 + DAY}
@@ -142,11 +144,10 @@ def test_uploads_share_a_recording_break_and_unknown_uploads_can_be_resolved_lat
     assert store.player_events.skip_blackouts(102, keys=[track['key']]) == {track['key']: 100 + DAY}
 
 
-def test_a_file_backed_restart_retains_the_break(tmp_path):
+def test_a_file_backed_restart_retains_the_break(tmp_path, consumer_store):
     path = tmp_path / 'library.db'
-    store = Store(path)
-    store.init_schema()
-    iid = store.identities.upsert_identity('Main', 'credential', None, True)
+    store = consumer_store(path)
+    iid = store.accounts.upsert_account('Main', 'credential', None, True)
     track, _ = catalog_track(store, 'restart')
     exit_event(store, iid, track, 100)
     store.conn.close()
@@ -162,7 +163,7 @@ def test_a_file_backed_restart_retains_the_break(tmp_path):
 @pytest.mark.parametrize('energy', [0, .5, 1])
 def test_live_skip_removes_a_cached_radio_choice_and_cannot_return_on_refill(store, listener, energy):
     tracks = [catalog_track(store, f'radio-{i}')[0] for i in range(32)]
-    store.rec_proposals.put_proposals('mode_bundles', {'all': {'wheelhouse': tracks}})
+    publish_bundles(store, {'all': {'wheelhouse': tracks}})
     candidates = RadioCandidates(store, 100, {**radio_tuning.DEFAULTS, 'energy': energy})
     directions = RadioDirections(candidates, tracks[0])
     directions.update([tracks[0]], [], 0)

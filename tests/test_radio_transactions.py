@@ -40,10 +40,48 @@ def test_existing_radio_keeps_running_with_discarded_writes_and_resumes_saving(p
     assert c.persistence.transient is None
 
 
+def test_prepared_radio_starts_readonly_then_retains_its_publication_on_resume(poc, monkeypatch):
+    from tests.test_radio_preparation import prepare_radio_styles
+
+    c, _, frames, _, pool = poc
+    store = c.ctx.store
+    prepare_radio_styles(c, pool, monkeypatch)
+    account = store.accounts.get_master_account().id
+    provider = FakeClient(catalog={track['video_id']: {
+        'videoId': track['video_id'], 'title': track['title'],
+        'artists': [{'name': track['artist']}], 'duration_seconds': 180} for track in pool})
+    c.ctx.client_provider = lambda: {account: provider}
+    monkeypatch.setattr(playlist_generated, 'create_generated_playlist', create_generated_playlist)
+    generation = store.recommendations.head('home')['id']
+    store.activity_paused = True
+    store.conn.execute('PRAGMA query_only=ON')
+    changes = store.conn.total_changes
+    try:
+        result = c.start(seed_video_id='v1')
+        assert result['ok'], result.get('reason')
+        assert result['local_id'] is None
+        assert len(provider.created) == len(frames) == 1
+        assert c.session.candidates.prepared.generation == generation
+        assert store.conn.total_changes == changes
+        assert not store.conn.execute("SELECT 1 FROM recommendation_generation_refs WHERE kind='pending'").fetchone()
+    finally:
+        store.conn.execute('PRAGMA query_only=OFF')
+        store.activity_paused = False
+    try:
+        c.retain_provenance()
+        c.retain_provenance()
+        assert [row[0] for row in store.conn.execute(
+            "SELECT generation_id FROM recommendation_generation_refs WHERE kind='pending'")] == [generation]
+        assert c.session.candidates.prepared._lifetime.alive
+        assert len(provider.created) == len(frames) == 1
+    finally:
+        c.session.candidates.close()
+
+
 def test_radio_creation_finishing_after_repair_retains_only_source_provenance(poc, monkeypatch):
     c, _, frames, _, pool = poc
     store = c.ctx.store
-    iid = store.identities.get_master_identity().id
+    iid = store.accounts.get_master_account().id
     remote = FakeClient(catalog={t['video_id']: {'videoId': t['video_id'], 'title': t['title'],
         'artists': [{'name': t['artist']}], 'duration_seconds': 180} for t in pool})
     c.ctx.client_provider = lambda: {iid: remote}
@@ -67,7 +105,8 @@ def test_radio_creation_finishing_after_repair_retains_only_source_provenance(po
         assert result['local_id'] is None and frames
         assert store.settings.get_setting(SESSION_KEY) is None
         assert store.playlists.is_quarantined_playlist(result['playlist_id'])
-        assert json.loads(store.settings.get_setting('radio_session_playlist_ids')) == [result['playlist_id']]
+        from yt_playlist.core import radio_provenance
+        assert radio_provenance.ids(store.conn) == [result['playlist_id']]
     finally:
         store.conn.execute('PRAGMA query_only=OFF')
         store.activity_paused = False
@@ -77,7 +116,9 @@ def test_radio_creation_finishing_after_repair_retains_only_source_provenance(po
 def test_shared_protocol_journals_before_transport_and_does_not_replay_lost_reply(replacement):
     saved = {SESSION_KEY: json.dumps({'version': 2, 'phase': 'playing', 'episode_id': 'episode'})}
     settings = SimpleNamespace(get_setting=saved.get, set_setting=saved.__setitem__)
-    persistence = RadioPersistence(settings)
+    checkpoints = SimpleNamespace(load=lambda: (json.loads(saved[SESSION_KEY]), None),
+        save=lambda encoded, **_kw: settings.set_setting(SESSION_KEY, encoded))
+    persistence = RadioPersistence(checkpoints)
     before, added = {'video_id': 'a'}, {'video_id': 'b'}
     edit = PlaylistEdit('add', ('a', 'b'), track=added)
     operation = RadioPlaylistTail([before], [added], 1) if replacement else AppendOperation(added)
@@ -140,7 +181,7 @@ def test_operation_owner_rejects_overlap_and_stale_completion():
 
 def test_superseded_episode_cannot_send_a_write():
     state = json.dumps({'version': 2, 'phase': 'playing', 'episode_id': 'newer'})
-    persistence = RadioPersistence(SimpleNamespace(get_setting=lambda _key: state))
+    persistence = RadioPersistence(SimpleNamespace(load=lambda: (json.loads(state), None)))
     owner = RadioMutations(None, persistence, None, lambda: 0.)
     operation = AppendOperation({'video_id': 'a'})
     edits = RadioEdits()

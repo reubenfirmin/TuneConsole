@@ -1,7 +1,7 @@
 // MAIN-world companion for saved-playlist Radio Sessions.
 // Ask Music to fetch the saved playlist; never supply playback items ourselves.
 (() => {
-  const VERSION = 7;
+  const VERSION = 8;
   if (window.__tcRadioSession?.version === VERSION) {
     window.__tcPlaylistPoc = window.__tcRadioSession;
     return;
@@ -51,9 +51,22 @@
     let api = document.querySelector("#movie_player");
     if (typeof api?.getVideoData !== "function") api = document.querySelector("ytmusic-player")?.playerApi;
     const video = document.querySelector("video");
+    let brandKnown = false, brandId = "";
+    try {
+      const config = window.ytcfg;
+      if (config?.get) {
+        const delegated = config.get("DELEGATED_SESSION_ID");
+        if ((typeof delegated === "string" && delegated) || config.get("LOGGED_IN") === true) {
+          brandKnown = true;
+          brandId = delegated || "";
+        }
+      }
+    } catch (_) {}
     return {
       video_id: api?.getVideoData?.()?.video_id || "",
       playlist_ytm_id: api?.getPlaylistId?.() || "",
+      brand_known: brandKnown,
+      brand_id: brandId,
       paused: !video || video.paused,
       position: video?.currentTime || 0,
       duration: Number.isFinite(video?.duration) ? video.duration : null,

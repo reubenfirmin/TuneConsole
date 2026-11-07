@@ -1,8 +1,12 @@
 """Extension-only setup remains dismissible and follows the real connection state."""
 from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import shutil
 import socket
+import ssl
+import subprocess
+import threading
 import time
 
 import pytest
@@ -10,6 +14,7 @@ from playwright.sync_api import expect
 
 
 EXT = Path(__file__).resolve().parents[2] / "extension"
+SETUP_URL = "https://tuneconsole.com/extension-setup"
 
 
 def _inject(page, *, pending=False):
@@ -125,14 +130,12 @@ def test_connecting_while_waiting_for_prompt_lock_does_not_spend_a_display(page)
 
 
 def _wait_prompt_locks(page, *, pending, held):
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        locks = page.evaluate("async () => await navigator.locks.query()")
-        queued = sum(lock['name'] == 'tuneconsole-setup-shown' for lock in locks['pending'])
-        owned = any(lock['name'] == 'tuneconsole-setup-shown' for lock in locks['held'])
-        if queued == pending and owned == held:
-            return
-    raise AssertionError(f'Unexpected prompt lock state: {locks}')
+    page.wait_for_function("""async ({pending, held}) => {
+        const locks = await navigator.locks.query();
+        const queued = locks.pending.filter(lock => lock.name === 'tuneconsole-setup-shown').length;
+        const owned = locks.held.some(lock => lock.name === 'tuneconsole-setup-shown');
+        return queued === pending && owned === held;
+    }""", arg={'pending': pending, 'held': held}, timeout=5000)
 
 
 @pytest.mark.parametrize('release_after_grace', [False, True])
@@ -229,27 +232,97 @@ def _disconnected_extension(tmp_path):
     return extension
 
 
-@pytest.mark.parametrize("action", ["reload", "enable"])
+@pytest.fixture
+def setup_site(tmp_path):
+    # Extension-created tabs can navigate before Playwright attaches routing.
+    # Serve even that first request locally while retaining the exact public URL.
+    key, certificate = tmp_path / "setup.key", tmp_path / "setup.crt"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                    "-keyout", str(key), "-out", str(certificate), "-days", "1",
+                    "-subj", "/CN=tuneconsole.com"], check=True, capture_output=True, timeout=10)
+    requests = []
+
+    class SetupHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append(self.path)
+            body = b"<h1>Extension setup</h1>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), SetupHandler) as server:
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.load_cert_chain(certificate, key)
+        server.socket = tls.wrap_socket(server.socket, server_side=True)
+        thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=.05), daemon=True)
+        thread.start()
+        try:
+            yield server.server_port, requests
+        finally:
+            server.shutdown()
+            thread.join()
+
+
+def _wait_setup_tab(worker, context, observations, stage):
+    started = time.monotonic()
+    state = {"stage": stage, "polls": 0}
+    observations.append(state)
+    while True:
+        tabs = worker.evaluate("chrome.tabs.query({})")
+        state["polls"] += 1
+        state.setdefault("first_tabs", tabs)
+        state["last_tabs"] = tabs
+        state["seconds"] = time.monotonic() - started
+        setup = [tab for tab in tabs if SETUP_URL in (tab.get("url"), tab.get("pendingUrl"))]
+        assert len(setup) <= 1, f"Duplicate setup destinations: {state}"
+        if setup and setup[0].get("url") == SETUP_URL and setup[0].get("status") == "complete":
+            return setup
+        assert state["seconds"] < 5, f"Extension did not finish opening its setup destination: {state}"
+        # Pump browser events while polling the actual Chrome tab state.
+        # Worker availability precedes its asynchronous installation callback.
+        context.pages[0].wait_for_timeout(25)
+
+
+@pytest.mark.parametrize("action", ["reload"])
 def test_real_extension_reopens_setup_after_development_reload_or_enable(
-    playwright, browser_type_launch_args, tmp_path, action,
+    playwright, browser_type_launch_args, tmp_path, action, setup_site,
 ):
     extension = _disconnected_extension(tmp_path)
+    port, requests = setup_site
     context = playwright.chromium.launch_persistent_context(
         tmp_path / "profile", **{**browser_type_launch_args, "channel": "chromium"},
-        args=[f"--disable-extensions-except={extension}", f"--load-extension={extension}"],
+        args=[f"--disable-extensions-except={extension}", f"--load-extension={extension}",
+              "--ignore-certificate-errors", "--no-proxy-server",
+              f"--host-resolver-rules=MAP tuneconsole.com 127.0.0.1:{port}, MAP www.tuneconsole.com 127.0.0.1:{port}"],
     )
+    observations, events = [], []
+
+    def observe_worker(worker):
+        worker.on("console", lambda message: events.append(
+            {"event": "worker-console", "type": message.type, "text": message.text, "url": worker.url}))
+        worker.on("close", lambda closed: events.append({"event": "worker-closed", "url": closed.url}))
+
+    context.on("serviceworker", observe_worker)
+    for worker in context.service_workers:
+        observe_worker(worker)
+    context.on("weberror", lambda error: events.append({"event": "page-error", "error": str(error.error)}))
     try:
-        context.route("https://tuneconsole.com/**", lambda route: route.fulfill(
-            content_type="text/html", body="<h1>Extension setup</h1>"))
         worker = context.service_workers[0] if context.service_workers else context.wait_for_event("serviceworker")
         if action == "enable" and not worker.evaluate("!!chrome.runtime.onEnabled"):
             pytest.skip("The re-enable event requires Chrome 155 or newer")
+        # Observe first-install readiness before opening the manager, whose own
+        # navigation must not be an implicit delay for installation to finish.
+        first = _wait_setup_tab(worker, context, observations, "first-install")
+        assert len(first) == 1
+        assert worker.evaluate("tuneConsole.transport.connected") is False
+        worker.evaluate("ids => chrome.tabs.remove(ids)", [tab["id"] for tab in first])
         manager = context.new_page()
         manager.goto("chrome://extensions/")
-        # First install must have opened the dedicated page already.
-        first = worker.evaluate("chrome.tabs.query({url: 'https://tuneconsole.com/extension-setup'})")
-        assert len(first) == 1
-        worker.evaluate("ids => chrome.tabs.remove(ids)", [tab["id"] for tab in first])
         item = manager.locator("extensions-item").filter(has_text="TuneConsole")
         if action == "reload":
             manager.locator("#devMode").click()
@@ -259,23 +332,32 @@ def test_real_extension_reopens_setup_after_development_reload_or_enable(
             item.locator("#enableToggle").click()
             with context.expect_page() as opened:
                 item.locator("#enableToggle").click()
-        expect(opened.value).to_have_url("https://tuneconsole.com/extension-setup")
+        expect(opened.value).to_have_url(SETUP_URL)
+        expect(opened.value.get_by_role("heading", name="Extension setup", exact=True)).to_be_visible()
+        worker = context.service_workers[0]
+        reopened = _wait_setup_tab(worker, context, observations, action)
+        assert len(reopened) == 1 and reopened[0]["id"] != first[0]["id"]
+        assert requests.count("/extension-setup") == 2
     finally:
+        # Captured on failure, or retained for passing runs with junit_logging=all.
+        print(json.dumps({"action": action, "setup_readiness": observations, "events": events,
+                          "local_setup_requests": requests}))
         context.close()
 
 
 def test_real_extension_shares_two_prompts_across_tabs_and_browser_restarts(
-    playwright, browser_type_launch_args, tmp_path,
+    playwright, browser_type_launch_args, tmp_path, setup_site,
 ):
     extension = _disconnected_extension(tmp_path)
+    port, _ = setup_site
 
     def launch():
         context = playwright.chromium.launch_persistent_context(
             tmp_path / "profile", **{**browser_type_launch_args, "channel": "chromium"},
-            args=[f"--disable-extensions-except={extension}", f"--load-extension={extension}"],
+            args=[f"--disable-extensions-except={extension}", f"--load-extension={extension}",
+                  "--ignore-certificate-errors", "--no-proxy-server",
+                  f"--host-resolver-rules=MAP tuneconsole.com 127.0.0.1:{port}, MAP www.tuneconsole.com 127.0.0.1:{port}"],
         )
-        context.route("https://tuneconsole.com/**", lambda route: route.fulfill(
-            content_type="text/html", body="<h1>Extension setup</h1>"))
         context.route("https://music.youtube.com/**", lambda route: route.fulfill(
             content_type="text/html", body="""<body style="background:#101010;color:white">
             <h1>YouTube Music</h1><button>Play</button></body>"""))

@@ -1,7 +1,9 @@
 """#103 per-song genre candidate provenance and selection."""
 import time
+import json
 from unittest.mock import Mock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
@@ -9,7 +11,7 @@ from yt_playlist.web.app import create_app
 
 
 def _client(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                       base_url="http://127.0.0.1"), iid
 
@@ -18,7 +20,7 @@ def _seed(store, iid):
     pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
     tid = store.tracks.upsert_track("v1", "Hyperballad", "Bjork", "Post", 200)
     store.playlists.set_playlist_tracks(pid, [tid])
-    store.tracks.set_track_enrichment(tid, "Electronic", "1995")
+    store.enrichment.apply_provider_fields(tid, 'musicbrainz', {'genre': 'Electronic', 'year': '1995'})
     store.enrichment_state.log_enrichment(tid, "run", "musicbrainz", "genre", "Electronic", now=1.0)
     store.enrichment_state.log_enrichment(tid, "run", "discogs", "genre", "Art Pop", now=1.0)
     return pid, tid
@@ -90,7 +92,8 @@ def test_empty_dialog_offers_single_track_lookup(store, monkeypatch):
     assert job.done
     html = client.get(f"/track/{tid}/genre-candidates").text
     assert "Ambient" in html and "discogs" in html
-    assert "/track/genre-lookup/events/" in (open("src/yt_playlist/web/static/genre-dialog.js").read())
+    with open("src/yt_playlist/web/static/genre-dialog.js") as script:
+        assert "/track/genre-lookup/events/" in script.read()
 
 
 def test_candidate_choice_updates_canonical_genre_and_refreshes(store):
@@ -111,3 +114,40 @@ def test_custom_genre_is_accepted_and_empty_value_rejected(store):
     assert client.post(f"/track/{tid}/genre-candidates", data={"genre": "Dream Metal"}).status_code == 204
     assert store.enrichment_reports.genre_provenance(tid)["current"] == "Dream Metal"
     assert client.post(f"/track/{tid}/genre-candidates", data={"genre": ""}).status_code == 400
+
+
+@pytest.mark.parametrize('failure', ['exception', 'provider-warning', 'artwork-warning'])
+def test_lookup_stream_keeps_diagnostics_in_logs_and_internal_state(store, monkeypatch, caplog, failure):
+    diagnostic = 'sqlite3.OperationalError: genre lease corrupt [review-879-genre-stream]'
+    client, iid = _client(store)
+    _pid, tid = _seed(store, iid)
+
+    def lookup(_store, _tracks, _config, progress):
+        if failure == 'exception':
+            raise RuntimeError(diagnostic)
+        progress({'type': 'info', 'warning': True, 'text': diagnostic,
+                  'provider': diagnostic, 'error': diagnostic})
+        if failure == 'artwork-warning':
+            progress({'type': 'info', 'warning': True, 'text': 'Cover art lookup failed: ' + diagnostic})
+        progress({'type': 'track', 'i': 1, 'n': 1, 'text': diagnostic})
+        progress({'type': 'done', 'text': diagnostic})
+
+    monkeypatch.setattr('yt_playlist.web.routes.enrich.waterfall.run_waterfall', lookup)
+    with client:
+        started = client.post(f'/track/{tid}/genre-lookup')
+        assert started.status_code == 200
+        job_id = started.json()['job_id']
+        response = client.get(f'/track/genre-lookup/events/{job_id}')
+        assert response.status_code == 200
+        assert diagnostic not in response.text
+        events = [json.loads(line.removeprefix('data: ')) for line in response.text.splitlines()
+                  if line.startswith('data: ')]
+        assert events[-1] == {'type': 'end', 'error': failure == 'exception'}
+        assert diagnostic in caplog.text
+        job = client.app.state.ctx.jobs.get(job_id)
+        assert job.done
+        assert job.error == (diagnostic if failure == 'exception' else None)
+        if failure != 'exception':
+            assert any(event['warning'] for event in events[:-1])
+            assert next(event for event in events if event['type'] == 'track')['i'] == 1
+        assert store.enrichment_reports.genre_provenance(tid)['current'] == 'Electronic'

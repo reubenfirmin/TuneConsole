@@ -1,8 +1,13 @@
 """Discovery provenance and lifecycle evidence. Callers own transactions and the Store lock."""
 import json
 
+from . import discovery_provenance as typed, legacy_evidence
 
-def retain_artist(conn, artist_id, source, score, identity_id=None):
+
+def retain_artist(conn, artist_id, source, score, account_id=None, *, import_key=None):
+    if typed.available(conn):
+        return typed.retain_artist(conn,artist_id,typed.origin(conn,source,
+            account_id=account_id,import_key=import_key),score)
     # Historical-schema fixtures also exercise the current identity helpers.
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='discovery_artist_sources'").fetchone():
         return
@@ -10,10 +15,12 @@ def retain_artist(conn, artist_id, source, score, identity_id=None):
         conn.execute('DELETE FROM discovery_artist_sources WHERE artist_id=?', (artist_id,))
     conn.execute('INSERT INTO discovery_artist_sources VALUES (?,?,?,?) '
                  'ON CONFLICT(artist_id,source) DO UPDATE SET score=MAX(score,excluded.score)',
-                 (artist_id,source,identity_id,score or 0))
+                 (artist_id,source,account_id,score or 0))
 
 
 def reconcile_artist_sources(conn, previous, target):
+    if typed.available(conn):
+        return typed.reconcile_artist_sources(conn,previous,target)
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='discovery_artist_sources'").fetchone():
         return
     if not conn.execute('SELECT 1 FROM discovered_artists WHERE artist_id=?', (target,)).fetchone():
@@ -22,21 +29,28 @@ def reconcile_artist_sources(conn, previous, target):
                             'ON d.artist_id=s.artist_id WHERE s.artist_id=?', (previous,)).fetchall():
         conn.execute('INSERT INTO discovery_artist_sources VALUES (?,?,?,?) '
                      'ON CONFLICT(artist_id,source) DO UPDATE SET score=MAX(score,excluded.score)',
-                     (target,row['source'],row['identity_id'],row['score']))
+                     (target,row['source'],row['account_id'],row['score']))
     conn.execute('DELETE FROM discovery_artist_sources WHERE artist_id=?', (previous,))
 
 
 def reconcile_artist(conn, previous, target, *, source):
     """Fold scan/candidate lifecycles, retaining pre-merge evidence and distinct visible offers."""
+    if typed.available(conn):
+        return typed.reconcile_artist(conn,previous,target,source=source)
     reconcile_artist_sources(conn,previous,target)
+    if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='discovery_artist_image_state'").fetchone():
+        conn.execute('INSERT INTO discovery_artist_image_state(artist_id,retry_at) '
+            'SELECT ?,retry_at FROM discovery_artist_image_state WHERE artist_id=? '
+            'ON CONFLICT(artist_id) DO UPDATE SET retry_at=MAX(retry_at,excluded.retry_at)',(target,previous))
+        conn.execute('DELETE FROM discovery_artist_image_state WHERE artist_id=?',(previous,))
     for table,clock in (('artist_scans','scanned_at'),('discovered_artists','found_at')):
         rows = [dict(r) for r in conn.execute(f'SELECT * FROM {table} WHERE artist_id IN (?,?)',
                                              (previous,target))]
         if not rows:
             continue
         for row in rows:
-            conn.execute('INSERT OR IGNORE INTO identity_state_archive VALUES (?,?,?,?)',
-                ('artist_reconcile:'+table,json.dumps([previous,target,row['artist']]),json.dumps(row),source))
+            legacy_evidence.retain(conn, 'artist_reconcile:'+table,
+                json.dumps([previous,target,row['artist']]),json.dumps(row),source)
         winner = max(rows,key=lambda r:(r[clock] if r[clock] is not None else float('-inf'),
                                        r['artist_id']==target,json.dumps(r,sort_keys=True)))
         if table=='discovered_artists':
@@ -69,11 +83,18 @@ def reconcile_artist(conn, previous, target, *, source):
     conn.execute("DELETE FROM discovery_visible_impressions WHERE kind='artist' AND item_id=?",(str(previous),))
 
 
-def remove_spotify_artists(conn):
+def remove_spotify_artists(conn, *, account_id=None, import_key=None):
+    if typed.available(conn):
+        return typed.remove_spotify_artists(conn,account_id=account_id,import_key=import_key)
+    # The predecessor captured the account but no import key. Removing one
+    # account must retain other accounts' independent captured contributions.
+    predicate = ("source LIKE 'spotify_export:%' OR source='spotify_model'" if account_id is None else
+                 "source=? OR source='spotify_model'")
+    parameters = () if account_id is None else (f'spotify_export:{account_id}',)
     affected = [r[0] for r in conn.execute(
-        "SELECT DISTINCT artist_id FROM discovery_artist_sources WHERE source LIKE 'spotify_export:%' OR source='spotify_model'")]
+        'SELECT DISTINCT artist_id FROM discovery_artist_sources WHERE '+predicate, parameters)]
     derived = {r[0] for r in conn.execute("SELECT artist_id FROM discovery_artist_sources WHERE source='spotify_model'")}
-    conn.execute("DELETE FROM discovery_artist_sources WHERE source LIKE 'spotify_export:%' OR source='spotify_model'")
+    conn.execute('DELETE FROM main.discovery_artist_sources WHERE '+predicate, parameters)
     removed = 0
     for aid in affected:
         if not conn.execute('SELECT 1 FROM discovery_artist_sources WHERE artist_id=?', (aid,)).fetchone():
@@ -83,17 +104,24 @@ def remove_spotify_artists(conn):
             # independent membership survives and the clean model refreshes it.
             conn.execute("UPDATE discovered_artists SET because='[]',fits='[]',score=("
                          'SELECT MAX(score) FROM discovery_artist_sources WHERE artist_id=?) WHERE artist_id=?', (aid,aid))
+        else:
+            conn.execute('UPDATE discovered_artists SET score=(SELECT MAX(score) FROM discovery_artist_sources '
+                'WHERE artist_id=?) WHERE artist_id=? AND NOT EXISTS(SELECT 1 FROM discovery_artist_sources '
+                "WHERE artist_id=? AND source NOT LIKE 'spotify_export:%')", (aid, aid, aid))
     return removed
 
 
 def source_identity(token):
-    for kind in ('radio', 'genre'):
+    for kind in ('radio', 'genre', 'artist'):
         if token.startswith(kind + ':'):
             return kind, token[len(kind) + 1:]
     return 'album', token
 
 
 def retain(conn, recording_id, token, video_id, now, *, first_found_at=None):
+    if typed.available(conn):
+        return typed.retain(conn,recording_id,typed.origin(conn,token),video_id,now,
+            first_found_at=now if first_found_at is None else first_found_at)
     kind, identifier = source_identity(token)
     conn.execute(
         "INSERT INTO discovery_sources(recording_id,source_token,input_video_id,found_at,"
@@ -133,6 +161,9 @@ def prepare_reassociation(conn, video_id, previous):
 
 def finish_reassociation(conn, video_id, previous, target, member, remaining, now, *, association_id):
     """Exact source evidence follows its upload; a split never copies aggregate offer counts."""
+    if typed.available(conn):
+        return typed.finish_reassociation(conn,video_id,previous,target,member,remaining,now,
+            association_id=association_id)
     sources = conn.execute('SELECT * FROM discovery_sources WHERE recording_id=? '
                            + ('' if remaining is None else 'AND input_video_id=?'),
                            (previous,) if remaining is None else (previous,video_id)).fetchall()
@@ -149,9 +180,9 @@ def finish_reassociation(conn, video_id, previous, target, member, remaining, no
         for original in [row,conn.execute('SELECT * FROM discovery_sources WHERE recording_id=? AND source_token=?',
                                          (target,row['source_token'])).fetchone()]:
             if original is not None:
-                conn.execute('INSERT OR IGNORE INTO identity_state_archive VALUES (?,?,?,?)',
-                             ('discovery_reassociation',json.dumps([association_id,original['recording_id'],original['source_token']]),
-                              json.dumps(dict(original)),'exact upload reassociation; retained pre-merge evidence'))
+                legacy_evidence.retain(conn,
+                             'discovery_reassociation',json.dumps([association_id,original['recording_id'],original['source_token']]),
+                              json.dumps(dict(original)),'exact upload reassociation; retained pre-merge evidence')
         retain(conn,target,row['source_token'],row['input_video_id'],row['last_found_at'],
                first_found_at=row['found_at'])
         conn.execute('DELETE FROM discovery_sources WHERE recording_id=? AND source_token=?',

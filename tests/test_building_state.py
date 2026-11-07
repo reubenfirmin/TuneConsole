@@ -2,10 +2,14 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.home_fixture_support import returning_listener
 
 
 def _app(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
+    # This consumer test starts after the listener earned Mix tapes and Discover.
+    # Missing current output must still exercise the real busy/cache response.
+    returning_listener(store, 'mixes')
     return create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
 
 

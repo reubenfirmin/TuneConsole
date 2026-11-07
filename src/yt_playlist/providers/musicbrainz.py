@@ -11,7 +11,6 @@ from yt_playlist.providers import descriptive_tags, genres
 logger = logging.getLogger(__name__)
 
 name = "musicbrainz"
-manages_availability = True
 _iao = MusicBrainzIAO()
 
 
@@ -26,10 +25,6 @@ def available(store=None) -> bool:
 
 def tripped() -> bool:
     return not _iao.availability().ready(_iao.now())
-
-
-def reset() -> None:
-    """Batch boundaries do not reset vendor availability or retained responses."""
 
 
 def probe(track, store=None) -> EnrichmentResult:

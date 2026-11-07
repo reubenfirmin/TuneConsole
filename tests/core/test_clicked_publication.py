@@ -1,0 +1,243 @@
+"""Home clicked publication proves complete ranked state before bounded cutover."""
+from dataclasses import replace
+import json
+from pathlib import Path
+import sqlite3
+
+import pytest
+
+from tests.core.test_predecessor_writes import installed
+from tests.core.test_ranked_state_preparation import seed
+from tests.preparation_timing_support import preparation_costs
+from yt_playlist.core import library_pool_state, recommendation_outputs as files
+from yt_playlist.core.migrations import MigrationError, regular
+from yt_playlist.core.preparation import clicked_publication as publication, ranked_state as preparation
+from yt_playlist.core.store import Store
+
+
+def ready(conn, size=128, *, worker_size=128):
+    owner = publication.OWNER
+    owner.worker.install(conn)
+    for _ in range(2000):
+        if owner.worker.step(conn, batch_size=worker_size).status == 'prepared':
+            break
+    else:
+        pytest.fail('Clicked preparation did not finish bounded fixture')
+    for _ in range(100):
+        stage = owner.step(conn, batch_size=size)
+        if stage.complete:
+            return stage.id
+    pytest.fail('Clicked publication map did not finish bounded fixture')
+
+
+def rejection_inputs(store):
+    seed(store)
+    owner = publication.OWNER
+    owner.worker.install(store.conn)
+    for _ in range(100):
+        if owner.worker.step(store.conn).status == 'prepared':
+            assert owner.selected(store.conn) is None
+            return
+    pytest.fail('Clicked preparation did not finish bounded rejection prefix')
+
+
+@pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
+def test_preopened_readers_preserve_all_lanes_unknown_clock_and_original_bytes(installed, monkeypatch):
+    store, _ = installed
+    originals, _ = seed(store)
+    owner = publication.OWNER
+    other = Store(store._db_path)
+    try:
+        other.init_schema(defer_metadata=True)
+        stage = ready(store.conn, size=1)
+        assert owner.stage(store.conn, stage).copied == 4
+        def no_file_writes(*args, **kwargs):
+            pytest.fail('Publication must not publish or fsync files')
+        monkeypatch.setattr(files, 'publish', no_file_writes)
+        owner.publish(store.conn, stage=stage)
+        assert owner.selected(other.conn) == stage
+        for surface in library_pool_state.SURFACES:
+            assert owner.value(other.conn, stage, surface) == originals[surface]
+            assert other.rec_proposals.get_proposals(surface) == json.loads(originals[surface])
+            assert other.rec_proposals.has_proposals(surface)
+            header = owner.capture(other.conn, stage, surface)
+            assert header['built_at'] is None
+            assert header['run_id'] is None and header['display_digest'] is None
+            assert not other.conn.execute('SELECT 1 FROM recommendation_heads WHERE surface=?', (surface,)).fetchone()
+        regular.validate(other.conn)
+    finally:
+        other.conn.close()
+    reopened = Store(store._db_path)
+    try:
+        reopened.init_schema(defer_metadata=True)
+        assert reopened.rec_proposals.get_proposals('home_pool:wheelhouse') == json.loads(originals['home_pool:wheelhouse'])
+    finally:
+        reopened.conn.close()
+
+
+@pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.parametrize('failure', ['header', 'candidate', 'missing', 'extra', 'policy', 'genre', 'slot', 'output', 'original', 'omitted'])
+def test_incorrect_ranked_fields_members_or_files_cannot_publish(installed, staged_custody, failure):
+    store, _ = installed
+    staged_custody(installed, 'clicked-pools', rejection_inputs)
+    owner, surface = publication.OWNER, 'home_pool:wheelhouse'
+    header = preparation.head(store.conn, surface)
+    with store.conn:
+        if failure == 'header':
+            store.conn.execute('UPDATE prepared_clicked_pools_generations SET epoch=epoch+1 WHERE surface=?', (surface,))
+        elif failure == 'candidate':
+            store.conn.execute('UPDATE prepared_clicked_pools_candidates SET score=99 WHERE surface=?', (surface,))
+        elif failure == 'missing':
+            store.conn.execute('DELETE FROM prepared_clicked_pools_candidates WHERE surface=? AND rank=1', (surface,))
+        elif failure == 'extra':
+            store.conn.execute('INSERT INTO prepared_clicked_pools_candidates SELECT surface,preparation_revision,pool_digest,'
+                '99,recording_id,raw_key,score,intensity_band,genre_key FROM prepared_clicked_pools_candidates '
+                'WHERE surface=? AND rank=0', (surface,))
+        elif failure == 'policy':
+            store.conn.execute("UPDATE prepared_clicked_pools_policies SET policy_version=NULL,resolution_reason='missing_policy' WHERE surface=?", (surface,))
+        elif failure == 'genre':
+            store.conn.execute("UPDATE prepared_clicked_pools_genres SET raw_key='invented' WHERE surface=? AND position=0", (surface,))
+        elif failure == 'slot':
+            store.conn.execute("UPDATE prepared_clicked_pools_slots SET mode_key='invented' WHERE surface=?", (surface,))
+        elif failure == 'output':
+            store.conn.execute("UPDATE prepared_clicked_pools_outputs SET filename='/missing' WHERE surface=?", (surface,))
+        elif failure == 'original':
+            store.conn.execute("UPDATE prepared_clicked_pools_parts SET filename='/missing' WHERE surface=?", (surface,))
+        elif failure == 'omitted':
+            store.conn.execute('DELETE FROM prepared_clicked_pools_heads WHERE surface=?', (surface,))
+    stage = owner.step(store.conn).id
+    with pytest.raises((MigrationError, OSError, ValueError)):
+        owner.publish(store.conn, stage=stage)
+    assert owner.selected(store.conn) is None
+    if failure == 'omitted':
+        assert preparation.head(store.conn, surface) is None
+    else:
+        assert preparation.head(store.conn, surface)['preparation_revision'] == header['preparation_revision']
+    regular.migrate(store.conn)
+
+
+@pytest.mark.parametrize('installed', [93], indirect=True)
+def test_compatible_writes_deletes_and_reference_changes_withdraw_selection(installed):
+    store, _ = installed
+    originals, _ = seed(store)
+    owner, surface = publication.OWNER, 'home_pool:wheelhouse'
+    first = ready(store.conn)
+    owner.publish(store.conn, stage=first)
+    with store.read_snapshot() as snapshot:
+        assert snapshot.store.rec_proposals.get_proposals(surface) == json.loads(originals[surface])
+        store.rec_proposals.put_proposals(surface, {'parameters':{'lane':'wheelhouse', 'epoch':1,
+            'include_genres':[], 'avoid_genres':[]}, 'tracks':[]}, 17)
+        assert not snapshot.publish(lambda:None)
+    assert owner.selected(store.conn) is None
+    assert store.rec_proposals.get_proposals(surface)['parameters']['epoch'] == 1
+    second = ready(store.conn)
+    owner.publish(store.conn, stage=second)
+    assert owner.value(store.conn, first, surface) == originals[surface]
+    with store.conn:
+        store.conn.execute('DELETE FROM rec_proposals WHERE surface=?', (surface,))
+    assert owner.selected(store.conn) is None
+    assert store.rec_proposals.get_proposals(surface) is None
+    third = ready(store.conn)
+    owner.publish(store.conn, stage=third)
+    assert owner.capture(store.conn, third, surface) is None
+    with store.conn:
+        store.conn.execute("INSERT INTO genre_family(key,name) VALUES ('arrived','Arrived')")
+    assert owner.selected(store.conn) is None
+    fourth = ready(store.conn)
+    owner.publish(store.conn, stage=fourth)
+    header = owner.capture(store.conn, first, 'home_pool:explore')
+    with pytest.raises(sqlite3.IntegrityError, match='retained'):
+        with store.conn:
+            store.conn.execute('DELETE FROM prepared_clicked_pools_candidates WHERE surface=? AND preparation_revision=?',
+                ('home_pool:explore', header['preparation_revision']))
+
+
+@pytest.mark.parametrize('installed', [93], indirect=True)
+def test_source_race_and_interrupted_cutover_leave_no_partial_publication(installed):
+    store, _ = installed
+    seed(store)
+    owner = publication.OWNER
+    stage = ready(store.conn)
+    other = Store(store._db_path)
+    try:
+        def race(conn, header):
+            publication.verify_document(conn, header)
+            with other.conn:
+                other.conn.execute('UPDATE rec_proposals SET built_at=built_at WHERE surface=?', (header['surface'],))
+        with pytest.raises(MigrationError):
+            replace(owner, verify_document=race).publish(store.conn, stage=stage)
+        assert owner.selected(store.conn) is None
+        stage = ready(store.conn)
+        with store.conn:
+            store.conn.execute('CREATE TRIGGER controlled_clicked_interruption BEFORE INSERT ON '+owner.table('head')+
+                " BEGIN SELECT RAISE(ABORT,'controlled interruption'); END")
+        with pytest.raises(sqlite3.IntegrityError, match='controlled interruption'):
+            owner.publish(store.conn, stage=stage)
+        assert not store.conn.execute('SELECT 1 FROM '+owner.table('generations')+' WHERE revision=?', (stage,)).fetchone()
+        with store.conn:
+            store.conn.execute('DROP TRIGGER controlled_clicked_interruption')
+        owner.publish(store.conn, stage=stage)
+    finally:
+        other.conn.close()
+
+
+@pytest.mark.parametrize('installed', [93], indirect=True)
+def test_full_ranked_set_and_paged_plan_are_verified_without_sql_scan(installed, preparation_costs):
+    store, _ = installed
+    # One full ranked budget exercises paging and damage/recovery. The other
+    # three lanes retain real nonempty projections; the all-lane controls own
+    # their exact lane semantics without three more identical capacity seeds.
+    originals, _ = seed(store, lane_counts={'wheelhouse': 8192})
+    owner, surface = publication.OWNER, 'home_pool:wheelhouse'
+    # Keep the full paged-plan/recovery budget with the supported largest
+    # slice; separate preparation controls retain small-slice continuation.
+    stage = ready(store.conn, worker_size=512)
+    owner.publish(store.conn, stage=stage)
+    header = owner.capture(store.conn, stage, surface)
+    assert store.conn.execute('SELECT count(*) FROM prepared_clicked_pools_candidates WHERE surface=? AND preparation_revision=?',
+        (surface, header['preparation_revision'])).fetchone()[0] == 8192
+    assert owner.value(store.conn, stage, surface) == originals[surface]
+    assert len(store.rec_proposals.get_proposals(surface)['tracks']) == 8192
+    query = store.conn.execute('EXPLAIN QUERY PLAN SELECT g.* FROM '+owner.table('map')+' m JOIN '+owner.header+
+        ' g ON g.surface=m.source AND g.preparation_revision=m.generation WHERE m.stage=? AND m.source=?', (stage, surface)).fetchall()
+    assert all('SCAN' not in row[-1] for row in query)
+    reference = tuple(header[key] for key in ('plan_filename', 'plan_digest', 'plan_bytes'))
+    plan = preparation.document_plan.load(surface, reference)
+    Path(plan.units.indexes[0][1]).unlink()
+    with pytest.raises(OSError):
+        owner.publish(store.conn, stage=stage)
+    regular.migrate(store.conn)
+    publication.repair(store.conn, surface)
+    owner.publish(store.conn, stage=stage)
+
+
+@pytest.mark.parametrize('installed', [93], indirect=True)
+def test_missing_original_or_output_and_failed_preparation_do_not_block_ddl(installed):
+    store, _ = installed
+    seed(store)
+    owner, surface = publication.OWNER, 'home_pool:wheelhouse'
+    stage = ready(store.conn)
+    owner.publish(store.conn, stage=stage)
+    for suffix in ('parts', 'outputs'):
+        filename = store.conn.execute('SELECT filename FROM prepared_clicked_pools_'+suffix+' WHERE surface=? LIMIT 1', (surface,)).fetchone()[0]
+        Path(filename).unlink()
+        with pytest.raises(OSError):
+            owner.publish(store.conn, stage=stage)
+        store.init_schema(defer_metadata=True)
+        regular.migrate(store.conn)
+        publication.repair(store.conn, surface)
+        owner.publish(store.conn, stage=stage)
+    with store.conn:
+        store.conn.execute('UPDATE rec_proposals SET built_at=17 WHERE surface=?', (surface,))
+    def fail(*args, **kwargs):
+        assert not store.conn.in_transaction
+        raise OSError('controlled failed ranked preparation')
+    with pytest.raises(OSError, match='controlled failed'):
+        replace(owner.worker, prepare=fail).step(store.conn)
+    progress = owner.worker.progress(store.conn)
+    assert progress.status == 'failed'
+    store.init_schema(defer_metadata=True)
+    regular.migrate(store.conn)
+    assert owner.worker.progress(store.conn) == progress
+    owner.worker.step(store.conn, retry=True)
+    owner.publish(store.conn, stage=ready(store.conn))

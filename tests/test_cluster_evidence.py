@@ -22,7 +22,7 @@ def test_evidence_detaches_all_values_and_presentation_from_sqlite(store):
 
     store.conn.close()
     assert evidence.playlists[0].artist == 'Other'
-    assert evidence.path_genres == ('techno',)
+    assert evidence.path_genres == ('Techno',)
     assert evidence.path_years == ('1999',)
     assert [r['kind'] for r in connection_reasons(evidence)] == ['playlist', 'genre', 'decade']
     assert search_results(matches)[0]['sub'] == '2 tracks'
@@ -86,7 +86,7 @@ def test_quarantine_and_explicit_adoption_agree_across_all_evidence_reads(store)
 
 
 def test_playlist_cap_is_strict_and_duplicate_path_tracks_do_not_inflate_counts(store):
-    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', 'cred', None, True)
     child = _track(store, 'Child', 'Artist')
     path = _track(store, 'Parent', 'Other')
     _playlist(store, iid, 'Small', [child, path])
@@ -97,14 +97,15 @@ def test_playlist_cap_is_strict_and_duplicate_path_tracks_do_not_inflate_counts(
 
 
 def test_shared_album_and_same_account_day_are_grounded_separately(store):
-    iid = store.identities.upsert_identity('main', 'cred', None, True)
-    other = store.identities.upsert_identity('other', 'other-cred', None, False)
+    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    other = store.accounts.upsert_account('other', 'other-cred', None, False)
     child = _track(store, 'Child', 'Artist', album='Album', album_browse_id='release')
     path = _track(store, 'Parent', 'Artist', album='Album', album_browse_id='release')
     store.history.record_history_plays(iid, 43200, [(child, 'Today')], source_timezone='UTC')
     store.history.record_history_plays(other, 43200, [(path, 'Today')], source_timezone='UTC')
     evidence = store.cluster_evidence.connection(child, [path])
     assert evidence.album == AlbumNeighbor('Album', 'Artist')
+    assert evidence.same_artist == 'Artist'
     assert not evidence.same_day
     store.history.record_history_plays(iid, 43201, [(path, 'Today')], source_timezone='UTC')
     assert store.cluster_evidence.connection(child, [path]).same_day

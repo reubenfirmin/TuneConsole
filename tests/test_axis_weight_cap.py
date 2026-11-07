@@ -9,15 +9,9 @@ the Catalog surface's top 60 came back 100% tagged.
 """
 import pytest
 
-from yt_playlist.core.store import Store
+from tests.repository_mock_support import no_database, repository_store
 from yt_playlist.rec import rec_params
 from yt_playlist.rec.scoring import AXIS_WEIGHT_UNBOUNDED, axis_adjusted_scores
-
-
-def _store():
-    s = Store(":memory:")
-    s.init_schema()
-    return s
 
 
 # Two tracks: a superb fit with no preference behind it, and a mediocre fit in a favored genre.
@@ -74,8 +68,11 @@ def test_the_knob_is_in_range_and_never_reorders_equals(cap):
     assert out["a"] == out["b"]
 
 
-def test_the_store_wired_knob_defaults_to_bounded_and_preserves_explicit_override():
-    s = _store()
+def test_the_store_wired_knob_defaults_to_bounded_and_preserves_explicit_override(no_database):
+    s = repository_store(settings={'get_setting': None, 'set_setting': None})
     assert rec_params.get_param(s, "axis_weight_cap") == 1.4
     rec_params.set_param(s, "axis_weight_cap", AXIS_WEIGHT_UNBOUNDED)
+    s.settings.set_setting.assert_called_once_with(
+        rec_params.SETTING_PREFIX + 'axis_weight_cap', str(AXIS_WEIGHT_UNBOUNDED))
+    s.settings.get_setting.return_value = str(AXIS_WEIGHT_UNBOUNDED)
     assert rec_params.get_param(s, "axis_weight_cap") == AXIS_WEIGHT_UNBOUNDED

@@ -1,7 +1,12 @@
 """Genre evidence belongs to the requested mix rather than the original artist or recording."""
 import pytest
 
-from yt_playlist.providers import discogs, lastfm, musicbrainz
+from yt_playlist.providers import discogs, genres, lastfm, musicbrainz
+
+
+@pytest.fixture(autouse=True)
+def isolated_genre_matcher(monkeypatch):
+    monkeypatch.setattr(genres, '_active', None)
 
 
 @pytest.mark.parametrize('title', [

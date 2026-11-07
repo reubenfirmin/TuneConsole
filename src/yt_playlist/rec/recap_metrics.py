@@ -66,7 +66,8 @@ class MonthProfile:
 def profile(month, events, meta, spans, playlists):
     since, until = month_bounds(month)
     rows = [p for p in events if calendar_day(p)[:7] == month]
-    signature = frozenset((p["identity_id"], p["source"]) for p in rows)
+    signature = frozenset((p['account_id'],source) for p in rows
+                          for source in p.get('sources',(p.get('source','unknown'),)))
     complete = bool(signature) and all(
         source in {"live", "takeout"} and spans[(identity, source)][0] < since
         and spans[(identity, source)][1] >= until for identity, source in signature)
@@ -82,17 +83,17 @@ def profile(month, events, meta, spans, playlists):
         day = day_number(p)
         result.tracks[key] += 1
         artist = card.get("artist")
-        family = genre_map.family(card["genre"]) if card.get("genre") else None
+        family = card.get('family',genre_map.family(card.get('genre'))) or None
         year = str(card.get("mb_year", ""))[:4]
         decade = f"{int(year) // 10 * 10}s" if year.isdigit() and 1900 <= int(year) <= 2100 else None
-        for name, value, counts in (("artist", artist, result.artists),
+        for name, value, counts in (("artist", card.get('artist_ids',(artist,) if artist else ()), result.artists),
                                      ("family", family, result.families),
                                      ("decade", decade, result.decades)):
-            if value:
-                counts[value] += 1
-                groups[name][value].add(day)
-                result.cohorts.setdefault((name, value), set()).add(key)
-        by_identity[p["identity_id"]].append(p)
+            for item in (value if isinstance(value,(tuple,list)) else (value,) if value else ()):
+                counts[item] += 1
+                groups[name][item].add(day)
+                result.cohorts.setdefault((name, item), set()).add(key)
+        by_identity[p["account_id"]].append(p)
     result.artist_days, result.family_days, result.decade_days = (
         dict(groups[name]) for name in ("artist", "family", "decade"))
     sessions = []

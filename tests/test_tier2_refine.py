@@ -5,7 +5,7 @@ from tests import model_support
 def test_for_you_tier2_prefers_high_play_context(store):
     """Tier-2 re-ranks the feed by play-weighted per-playlist taste: a deep cut from a heavily-
     played context outranks one from a barely-played context."""
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AX", None, None) for i in range(10)]
     B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BX", None, None) for i in range(10)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", 10, "h", 0.0), A)
@@ -25,7 +25,7 @@ def test_for_you_tier2_prefers_high_play_context(store):
 
 
 def test_for_you_unaffected_without_vectors(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.tracks.upsert_track("v1", "Hit", "Fav", None, None)
     store.tracks.upsert_track("v2", "Bench", "Fav", None, None)
     store.history.record_history_plays(iid, 1.0, ["hit|fav"], source_timezone="UTC")

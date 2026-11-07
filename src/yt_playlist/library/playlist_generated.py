@@ -20,8 +20,12 @@ logger = logging.getLogger(__name__)
 GC_PLAYED_FRACTION = 0.5
 
 
+class TrackLengthLimitError(ValueError):
+    """The proposed set has no songs allowed by the current duration policy."""
+
+
 def _gc_eligible(store, playlist, recency, now, grace_s):
-    if not store.playlists.is_quarantined_playlist(playlist.scope_ref):
+    if not store.playlists.is_quarantined_playlist(playlist.playlist_scope_id):
         return False
     created = playlist.first_seen or now
     if now - created < grace_s:
@@ -39,7 +43,7 @@ def _gc_eligible_now(store, playlist, now, grace_s):
 
 def _gc_targets(store, recency, now, grace_s):
     """Keep saved attempts discoverable even after sync prunes their local rows."""
-    playlists = {(pl.identity_id, pl.ytm_playlist_id): pl for pl in store.playlists.get_playlists()}
+    playlists = {(pl.account_id, pl.provider_playlist_id): pl for pl in store.playlists.get_playlists()}
     targets = {target: pl for target, pl in playlists.items()
                if _gc_eligible(store, pl, recency, now, grace_s)}
     retries = playlist_gc_retry.states(store)
@@ -50,7 +54,7 @@ def _gc_targets(store, recency, now, grace_s):
         # Recheck eligibility and saved intent under the target claim. A missing
         # library row is not proof that the earlier remote deletion succeeded.
         targets[target] = playlists.get(target) or SimpleNamespace(
-            id=None, identity_id=target[0], ytm_playlist_id=target[1], title=target[1])
+            id=None, account_id=target[0], provider_playlist_id=target[1], title=target[1])
     return targets.values()
 
 
@@ -77,28 +81,28 @@ def gc_generated_playlists(store, clients, now, grace_days=None, *, retry_only=F
     recency = store.charts.get_playlist_track_recency(include_generated=True)
     collected = []
     for pl in _gc_targets(store, recency, now, grace_s):
-        client = clients.get(pl.identity_id)
+        client = clients.get(pl.account_id)
         if client is None:                                # can't delete remotely without its client
             continue
         try:
-            with claim_deletion_target(store, pl.identity_id, pl.ytm_playlist_id):
-                current = store.playlists.get_playlist_for_account(pl.identity_id, pl.ytm_playlist_id)
+            with claim_deletion_target(store, pl.account_id, pl.provider_playlist_id):
+                current = store.playlists.get_playlist_for_account(pl.account_id, pl.provider_playlist_id)
                 if current is not None:
                     if not _gc_eligible_now(store, current, now, grace_s):
-                        playlist_gc_retry.clear(store, pl.identity_id, pl.ytm_playlist_id)
+                        playlist_gc_retry.clear(store, pl.account_id, pl.provider_playlist_id)
                         continue
                     pl = current
                 else:
-                    action = (store.actions.get_pending_deletion(pl.identity_id, pl.ytm_playlist_id)
-                              or store.actions.get_failed_deletion(pl.identity_id, pl.ytm_playlist_id))
+                    action = (store.actions.get_pending_deletion(pl.account_id, pl.provider_playlist_id)
+                              or store.actions.get_failed_deletion(pl.account_id, pl.provider_playlist_id))
                     if action is None or action.kind != GC_GENERATED:
-                        playlist_gc_retry.clear(store, pl.identity_id, pl.ytm_playlist_id)
+                        playlist_gc_retry.clear(store, pl.account_id, pl.provider_playlist_id)
                         continue
                     entry = next(e for e in json.loads(action.undo_json)["deletions"]
-                                 if (e["identity"], e["ytm"]) == (pl.identity_id, pl.ytm_playlist_id))
-                    pl = SimpleNamespace(id=None, identity_id=pl.identity_id,
-                                         ytm_playlist_id=pl.ytm_playlist_id,
-                                         title=entry.get("title", pl.ytm_playlist_id))
+                                 if (e["identity"], e["ytm"]) == (pl.account_id, pl.provider_playlist_id))
+                    pl = SimpleNamespace(id=None, account_id=pl.account_id,
+                                         provider_playlist_id=pl.provider_playlist_id,
+                                         title=entry.get("title", pl.provider_playlist_id))
                 previous = playlist_gc_retry.read(store, pl)
                 if (retry_only and previous is None) or (previous and previous["next_retry_at"] > now):
                     continue
@@ -108,7 +112,7 @@ def gc_generated_playlists(store, clients, now, grace_days=None, *, retry_only=F
                     backup_path = resume_gc_deletion(store, pl, clients, now)
                     if backup_path is None:
                         if pl.id is None:
-                            playlist_gc_retry.clear(store, pl.identity_id, pl.ytm_playlist_id)
+                            playlist_gc_retry.clear(store, pl.account_id, pl.provider_playlist_id)
                             continue
                         phase = "backup"
                         backup_path = backup_playlist(store, pl.id, now, client)
@@ -116,13 +120,13 @@ def gc_generated_playlists(store, clients, now, grace_days=None, *, retry_only=F
                         # adoption or local removal during that wait must still prevent
                         # a fresh destructive request; retain the durable backup.
                         current = store.playlists.get_playlist_for_account(
-                            pl.identity_id, pl.ytm_playlist_id)
+                            pl.account_id, pl.provider_playlist_id)
                         if current is None or not _gc_eligible_now(store, current, now, grace_s):
-                            playlist_gc_retry.clear(store, pl.identity_id, pl.ytm_playlist_id)
+                            playlist_gc_retry.clear(store, pl.account_id, pl.provider_playlist_id)
                             continue
                         pl = current
                         logger.warning("GC: deleting unplayed generated playlist %s (backup at %s)",
-                                       pl.ytm_playlist_id, backup_path)
+                                       pl.provider_playlist_id, backup_path)
                         phase = "delete"
                         delete_backed_up(store, pl, client, backup_path, now, kind=GC_GENERATED)
                 except WorkClosing:
@@ -130,20 +134,20 @@ def gc_generated_playlists(store, clients, now, grace_days=None, *, retry_only=F
                 except Exception as exc:  # one playlist's failure must not stop the sweep
                     playlist_gc_retry.failed(store, pl, state, exc, phase)
                     continue
-                playlist_gc_retry.clear(store, pl.identity_id, pl.ytm_playlist_id)
-                collected.append({"ytm": pl.ytm_playlist_id, "title": pl.title, "backup": backup_path})
+                playlist_gc_retry.clear(store, pl.account_id, pl.provider_playlist_id)
+                collected.append({"ytm": pl.provider_playlist_id, "title": pl.title, "backup": backup_path})
                 if previous:
                     logger.info("GC: resolved playlist %s (account %s) after %d attempts",
-                                pl.ytm_playlist_id, pl.identity_id, state["attempts"])
+                                pl.provider_playlist_id, pl.account_id, state["attempts"])
         except WorkClosing:
             raise
         except Exception as exc:  # retain the journal if admission or retry storage fails
             logger.warning("GC: could not finish collection of playlist %s (account %s): %s",
-                           pl.ytm_playlist_id, pl.identity_id, exc)
+                           pl.provider_playlist_id, pl.account_id, exc)
     return collected
 
-def create_generated_playlist(store, title, tracks, client, now, identity_id=None, group=None,
-                              recipe=None, *, max_duration_s=None) -> dict:
+def create_generated_playlist(store, title, tracks, client, now, account_id=None, group=None,
+                              recipe=None, *, max_duration_s=None, on_created=None) -> dict:
     """Create a NEW playlist on YouTube from recommendation tracks (dicts with video_id + metadata),
     record its generated origin and quarantine until explicit adoption, and optimistically
     materialize it into the store so it shows up in the Playlists tab right away (a later sync
@@ -167,18 +171,31 @@ def create_generated_playlist(store, title, tracks, client, now, identity_id=Non
     # materialization reuses each result, including unknowns, without another lookup (#26).
     max_duration = rec_params.max_track_duration_s(store) if max_duration_s is None else max_duration_s
     eligible = []
+    recording = not getattr(store, 'activity_paused', False)
     for t in uniq:
         dur = t.get("duration")
+        if dur is None:
+            dur = store.tracks.duration_for_video(t["video_id"])
         if dur is None:
             dur = store.tracks.known_duration(t.get("title") or "", t.get("artist") or "")
         if dur is None:
             dur = fetch_song_duration(client, t["video_id"])
+            if dur is not None and recording:
+                # Retain newly learned lengths even when every song is rejected,
+                # so the next preview does not offer the same unusable DJ mix.
+                with store._lock:
+                    if not getattr(store, 'activity_paused', False):
+                        store.tracks.observe_track_entry(
+                            t["video_id"], t.get("title") or "", t.get("artist") or "",
+                            now=now, duration_s=dur)
         if dur is None or dur <= max_duration:
             eligible.append({**t, "duration": dur})
     excluded = len(uniq) - len(eligible)
     uniq = eligible
     if not uniq:
-        raise ValueError("No tracks are within the maximum track length set in Taste Model.")
+        raise TrackLengthLimitError(
+            f"No songs in this set are within the {max_duration / 60:g}-minute maximum track length "
+            "set in Taste Model. Choose another set or increase the limit.")
     title = (title or "Generated playlist").strip()
     if recipe is not None:                                # recipe-driven: version the title
         title = versioned_title(store, title)
@@ -187,7 +204,9 @@ def create_generated_playlist(store, title, tracks, client, now, identity_id=Non
         # would diverge from the preview (the shuffle is seed-stable but its input differs once rows
         # are pruned). Pruning just drops rows; the survivors keep their already-good spacing.
     new_pid = client.create_playlist(title, GENERATED_DESCRIPTION)
-    recording = not getattr(store, 'activity_paused', False)
+    if on_created is not None:
+        on_created(new_pid, title)
+    recording = recording and not getattr(store, 'activity_paused', False)
     if recording:
         store.playlists.mark_generated_playlist(new_pid)
         store.playlists.set_playlist_group(new_pid, group)
@@ -198,7 +217,7 @@ def create_generated_playlist(store, title, tracks, client, now, identity_id=Non
     db_pid = None
     confirmed = set(addition.confirmed)
     confirmed_tracks = [t for t in uniq if t['video_id'] in confirmed]
-    if recording and identity_id is not None:            # optimistic local materialization
+    if recording and account_id is not None:            # optimistic local materialization
         track_ids, keys = [], []
         for t in uniq:
             if t["video_id"] not in confirmed:
@@ -207,7 +226,7 @@ def create_generated_playlist(store, title, tracks, client, now, identity_id=Non
             track_ids.append(store.tracks.upsert_track(
                 t["video_id"], ti, ar, t.get("album") or "", t["duration"], thumbnail=t.get("thumbnail")))
         keys = [store.tracks.catalog_subject(tid)["identity_key"] for tid in track_ids]
-        db_pid = store.playlists.upsert_playlist(identity_id, new_pid, title, len(track_ids),
+        db_pid = store.playlists.upsert_playlist(account_id, new_pid, title, len(track_ids),
                                        content_hash(list(dict.fromkeys(keys))), now, created_at=now)
         store.playlists.set_playlist_tracks(db_pid, track_ids)
         store.playlists.ensure_playlist_thumbnail(db_pid)
@@ -218,7 +237,7 @@ def create_generated_playlist(store, title, tracks, client, now, identity_id=Non
                                     "added": added, "skipped": len(skipped) + excluded,
                                     "addition": addition.diagnostics(), "added_handles": handles,
                                     "partial": bool(addition.failure)}),
-                        "{}", "executed", json.dumps(capture_copy(client, new_pid, identity_id,
+                        "{}", "executed", json.dumps(capture_copy(client, new_pid, account_id,
                             [t["video_id"] for t in uniq if t["video_id"] not in skipped],
                             title=title, description=GENERATED_DESCRIPTION, addition=addition)), now)
     if recording and recipe is not None:

@@ -10,7 +10,6 @@ import datetime as dt
 
 import pytest
 
-from yt_playlist.core.store import Store
 from yt_playlist.rec import trend_rollups as tr
 from yt_playlist.rec import trend_payload, trend_statistics as stats
 
@@ -18,28 +17,26 @@ DAY = 86400
 
 
 @pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    s.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'me','c.json',1)")
-    s.conn.commit()
-    return s
+def store(store):
+    store.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (1,'me','c.json',1)")
+    store.conn.commit()
+    return store
 
 
 def _ev(store, key, when, playlist=None):
     ts = when.timestamp() if isinstance(when, dt.datetime) else float(when)
-    store.conn.execute(
-        "INSERT INTO play_events(identity_id,identity_key,video_id,played_at,playlist_ytm_id,is_generated) "
-        "VALUES (1,?,?,?,?,?)", (key, "v" + key, ts, playlist,
-                                  int(bool(playlist) and store.playlists.is_quarantined_playlist(playlist))))
-    store.conn.commit()
+    from yt_playlist.core import listening
+    with store.conn:
+        event_id = listening.append_event(store.conn,1,key,ts,video_id='v'+key,playlist_ytm_id=playlist,
+            is_generated=int(bool(playlist) and store.playlists.is_quarantined_playlist(playlist)))
+        listening.project_event(store.conn,event_id,1,ts,timezone='UTC',source='live')
 
 
 def _generated(store, pid, ytm, title="Radio"):
     from yt_playlist.core.playlist_scopes import ensure
-    store.conn.execute("INSERT INTO playlists(id,identity_id,ytm_playlist_id,title,scope_ref) VALUES (?,1,?,?,?)",
+    store.conn.execute("INSERT INTO playlists(id,account_id,provider_playlist_id,title,playlist_scope_id) VALUES (?,1,?,?,?)",
                        (pid, ytm, title,ensure(store.conn,ytm,1)))
-    store.playlists.set_playlist_group(ytm,'Generated',identity_id=1)
+    store.playlists.set_playlist_group(ytm,'Generated',account_id=1)
     store.playlists.mark_generated_playlist(ytm)
     store.conn.commit()
 
@@ -134,16 +131,14 @@ def test_month_review_falls_back_to_history_without_a_ledger(store):
 
 def _owned(store, pid, tid, key, artist, ytm="PL_own", generated=False):
     from yt_playlist.core.playlist_scopes import ensure
-    store.conn.execute("INSERT OR IGNORE INTO playlists(id,identity_id,ytm_playlist_id,title,scope_ref) "
+    store.conn.execute("INSERT OR IGNORE INTO playlists(id,account_id,provider_playlist_id,title,playlist_scope_id) "
                        "VALUES (?,1,?,'p',?)", (pid, ytm,ensure(store.conn,ytm,1)))
     if generated:
-        store.playlists.set_playlist_group(ytm,'Generated',identity_id=1)
+        store.playlists.set_playlist_group(ytm,'Generated',account_id=1)
         store.playlists.mark_generated_playlist(ytm)
     from tests.conftest import seed_catalog_track
     seed_catalog_track(store,key,'t',artist,track_id=tid,video_id='v'+key)
-    store.conn.execute("INSERT INTO playlist_tracks(playlist_id,track_id,position) VALUES (?,?,0)",
-                       (pid, tid))
-    store.conn.commit()
+    store.playlists.set_playlist_tracks(pid,[tid])
 
 
 def test_compute_months_does_not_call_a_catalog_artist_new():

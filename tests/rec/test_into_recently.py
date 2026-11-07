@@ -1,6 +1,8 @@
 from yt_playlist.rec import into_recently
 from types import SimpleNamespace
+from unittest.mock import Mock
 from yt_playlist.web import theme
+from yt_playlist.util import genre_map
 
 
 class FakeWiki:
@@ -31,6 +33,10 @@ class FakeStore:
         self._corpus = corpus            # {genre: count}
         self.wiki = wiki
         self.recent = recent
+        self.genres = Mock(spec=('feature_axes',))
+        self.genres.feature_axes.side_effect = lambda labels: {
+            label: (genre_map.family(label), genre_map.subgenre(label))
+            for label in labels if label}
         self.charts = SimpleNamespace(top_artists=self.top_artists,
                                       corpus_distribution=self.corpus_distribution,
                                       story_activity=self.story_activity)

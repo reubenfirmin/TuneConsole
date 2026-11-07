@@ -43,12 +43,12 @@ def album_zip(*titles):
 
 
 def test_album_preview_detects_ambiguity_before_any_save_and_keeps_confirmed_release(store):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     client = AlbumClient()
     alternate = {**client.results["One Artist"][0], "browseId": "MPRE-alternate"}
     client.results["One Artist"].append(alternate)
     prepared = prepare_spotify_library(load_spotify_library(album_zip("One", "Two")), client,
-                                       store=store, identity_id=iid)
+                                       store=store, account_id=iid)
     assert [a["resolution"]["status"] for a in prepared["albums"]] == ["ambiguous", "matched"]
     assert prepared["albums"][0]["resolution"]["match"] is None
     assert client.album_ratings == [] and store.collection.get_saved_albums() == []
@@ -88,16 +88,16 @@ def test_export_release_year_prevents_confident_wrong_year():
 
 
 def test_preview_and_import_deduplicate_only_within_the_destination(store):
-    first = store.identities.upsert_identity("First", "bridge", None, True)
-    second = store.identities.upsert_identity("Second", "bridge", None, False)
+    first = store.accounts.upsert_account("First", "bridge", None, True)
+    second = store.accounts.upsert_account("Second", "bridge", None, False)
     client = AlbumClient()
     raw = album_zip("One")
     assert import_spotify_library(store, raw, client, first, 100)["albums_imported"] == 1
     client.searches.clear()
-    own = prepare_spotify_library(load_spotify_library(raw), client, store=store, identity_id=first)
+    own = prepare_spotify_library(load_spotify_library(raw), client, store=store, account_id=first)
     assert own["albums"][0]["resolution"]["status"] == "skipped"
     assert client.searches == []
-    other = prepare_spotify_library(load_spotify_library(raw), client, store=store, identity_id=second)
+    other = prepare_spotify_library(load_spotify_library(raw), client, store=store, account_id=second)
     assert other["albums"][0]["resolution"]["status"] == "matched"
     assert import_spotify_library(store, None, client, second, 101, prepared=other)["albums_imported"] == 1
     assert client.album_ratings == [("OLAK-One", "LIKE")] * 2
@@ -106,14 +106,14 @@ def test_preview_and_import_deduplicate_only_within_the_destination(store):
 @pytest.mark.parametrize("failure", ["lookup", "save"])
 def test_failure_between_successes_is_isolated_and_retry_keeps_successes(store, monkeypatch, failure):
     monkeypatch.setattr("yt_playlist.library.spotify_library.with_retry", lambda operation: operation())
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     client = AlbumClient()
     failed = client.failed_searches if failure == "lookup" else client.failed_saves
     failed.add("Two Artist" if failure == "lookup" else "OLAK-Two")
     report = import_spotify_library(store, album_zip("One", "Two", "Three"), client, iid, 100)
     assert report["albums_imported"] == 2 and report["albums_unmatched"] == 1
     assert [row["status"] for row in report["details"]["albums"]] == ["imported", "unmatched", "imported"]
-    assert {row["browse"] for row in store.collection.get_saved_albums(identity_id=iid)} == {"MPRE-One", "MPRE-Three"}
+    assert {row["browse"] for row in store.collection.get_saved_albums(account_id=iid)} == {"MPRE-One", "MPRE-Three"}
     failed.clear()
     again = import_spotify_library(store, album_zip("One", "Two", "Three"), client, iid, 101)
     assert again["albums_imported"] == 1 and again["albums_skipped"] == 2
@@ -121,7 +121,7 @@ def test_failure_between_successes_is_isolated_and_retry_keeps_successes(store, 
 
 
 def test_catalog_fallback_uses_youtube_candidate_and_does_not_fabricate_listens(store):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     client = AlbumClient()
     del client._albums["MPRE-One"]["title"]
     del client._albums["MPRE-One"]["artists"]
@@ -135,7 +135,7 @@ def test_catalog_fallback_uses_youtube_candidate_and_does_not_fabricate_listens(
 
 
 def test_explicit_album_playlist_uses_destination_journal_and_survives_retry(store):
-    iid = store.identities.upsert_identity("Destination", "bridge", None, True)
+    iid = store.accounts.upsert_account("Destination", "bridge", None, True)
     client = AlbumClient()
     prepared = prepare_spotify_library(load_spotify_library(album_zip("One")), client)
     prepared["albums"][0]["action"] = "playlist"
@@ -143,7 +143,7 @@ def test_explicit_album_playlist_uses_destination_journal_and_survives_retry(sto
     assert first["albums_as_playlists"] == 1 and first["albums_imported"] == 0
     assert client.album_ratings == [] and store.collection.get_saved_albums() == []
     assert client.added == [(client.created[0][0], ["yt-One"])]
-    assert store.playlists.get_playlists()[0].identity_id == iid
+    assert store.playlists.get_playlists()[0].account_id == iid
     again = import_spotify_library(store, None, client, iid, 101, prepared=prepared)
     assert again["albums_as_playlists"] == 1 and again["tracks_imported"] == 0
     assert len(client.created) == len(client.added) == 1

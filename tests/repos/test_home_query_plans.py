@@ -5,8 +5,8 @@ import pytest
 
 from tests.conftest import seed_catalog_track
 from tests.historical_captures import retained_capture
-from yt_playlist.core import listening
-from yt_playlist.core.migrations import v026_listening_observations
+from yt_playlist.core import catalog, listening
+from yt_playlist.core.migrations import v026_listening_observations, v103_entity_names
 from yt_playlist.rec import taste_analysis
 
 
@@ -76,7 +76,7 @@ def test_small_metadata_lookup_does_not_scan_unrequested_library(store):
 @pytest.mark.parametrize('independent', [False, True])
 def test_indexed_evidence_matches_original_projection(store, generated, independent):
     for account in ('main', 'other'):
-        store.identities.upsert_identity(account, 'bridge', None, account == 'main')
+        store.accounts.upsert_account(account, 'bridge', None, account == 'main')
     ts = 1792497600  # a fixed UTC noon
     for account in (1, 2):
         store.history.import_listening_events(account, [('song', None, ts), ('song', None, ts + 3600)],
@@ -85,7 +85,7 @@ def test_indexed_evidence_matches_original_projection(store, generated, independ
         store.history.record_history_plays(account, ts, [('song', 'Today')], source_timezone='UTC')
         store.history.record_history_plays(account, ts + 86400, [('coarse-only', 'Today')], source_timezone='UTC')
     with store.conn:
-        store.conn.execute('UPDATE play_events SET is_generated=? WHERE identity_id=1', (generated,))
+        store.conn.execute('UPDATE play_events SET is_generated=? WHERE account_id=1', (generated,))
         if independent:
             day = listening.day_at(ts, 'UTC')
             listening.observe_day(store.conn, 1, 'song', day, 'independent', 'UTC', ts)
@@ -94,6 +94,7 @@ def test_indexed_evidence_matches_original_projection(store, generated, independ
     retained_capture(store.conn, 1, ts, ['legacy', 'legacy'])
     retained_capture(store.conn, 1, ts + 86400, [])
     original = v026_listening_observations.PROJECTIONS[2]
+    original = v103_entity_names.transform(original)
     original = original[original.index(' AS') + 3:]
     expected = Counter(map(tuple, store.conn.execute(original)))
     actual = Counter(map(tuple, store.conn.execute('SELECT * FROM eligible_listening_evidence')))
@@ -105,7 +106,7 @@ def test_indexed_evidence_matches_original_projection(store, generated, independ
 
 
 def test_shared_facets_keep_independent_song_genre_and_song_year_deduplication(store):
-    iid = store.identities.upsert_identity('main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('main', 'bridge', None, True)
     a = store.tracks.upsert_track('a', 'Song', 'Artist', 'First', 200)
     b = store.tracks.upsert_track('b', 'Song', 'Artist', 'Second', 200)
     store.tracks.associate_youtube_item('b', store.tracks.catalog_subject(a)['recording_id'],
@@ -114,8 +115,9 @@ def test_shared_facets_keep_independent_song_genre_and_song_year_deduplication(s
     store.tracks.set_track_genre(a, 'Techno')
     # Entry choices preserve deliberately different upload facets.
     with store.conn:
-        store.conn.executemany("INSERT INTO entry_field_choices(entry_id,field,value_json,source) VALUES (?,?,?,'user')",
-                               [(b, 'genre', '"Ambient"'), (a, 'mb_year', '"1990"'), (b, 'mb_year', '"2000"')])
+        catalog.choose_field(store.conn, b, 'genre', 'Ambient')
+        catalog.choose_field(store.conn, a, 'mb_year', '1990')
+        catalog.choose_field(store.conn, b, 'mb_year', '2000')
     store.history.import_listening_events(iid, [(key, 'a', 1792497600), (key, 'a', 1792497600 + 86400)])
     plays = store.rec_query.play_counts()
     facets = store.rec_query.play_weighted_facets(plays)

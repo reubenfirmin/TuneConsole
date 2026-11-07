@@ -1,26 +1,35 @@
 """A complete worker-published offer for onboarding transition checks."""
 from tests.conftest import seed_catalog_track
-from yt_playlist.rec import home_cards, home_prepared
+from tests.home_fixture_support import publish_menu
 
 
-def publish_personal_mix(store, now=1000):
-    tracks = []
-    for i in range(4):
-        key = f"prepared {i}|artist"
-        seed_catalog_track(store, key, f"Prepared {i}", "Artist", video_id=f"prepared-{i}", genre="house")
-        tracks.append({"key": key, "title": f"Prepared {i}", "artist": "Artist",
-                       "video_id": f"prepared-{i}", "album": "", "thumbnail": None, "genre": "house"})
-    proto = home_cards._proto(store, "comfort", "A mix for you", tracks, now)
-    proto["recipe"] = {"lane": "comfort"}
-    result = home_cards.CardsResult([proto], [{"proto": proto, "pool": None}], None, None,
-                                    [], [], home_cards._epoch(store, "cards"), None)
-    home_prepared.remember(store, store.rec_proposals.get_proposals("home_prepared"), result, now)
-    return tracks
+def finish_partial_import(store, now=1000):
+    """One verified playlist with unrelated continuation failures (#559)."""
+    from yt_playlist.library.sync_outcomes import finish_attempt
+
+    return finish_attempt(store, {
+        'status': 'partial', 'accounts': {'1': {
+            'label': 'Main', 'status': 'partial', 'resources': {
+                'playlist_listing': {'status': 'complete', 'entries': [
+                    {'playlistId': 'PL_READY', 'title': 'Liked Music'},
+                    {'playlistId': 'PL_RETRY', 'title': 'Alternative Mix'}]},
+                'playlists': {'status': 'partial', 'items': {
+                    'PL_READY': {'status': 'complete'},
+                    'PL_RETRY': {'status': 'failed', 'message': 'Incomplete continuation page'}}},
+            }}}, 'resources': {},
+    }, now)
 
 
-def publish_personal_album(store, now=1000):
+def publish_personal_mix(store, now=1000, count=4):
+    payload = publish_menu(store, now, count=count, surface='home_tuned')
+    return [track for proto in payload['menus'][0]['protos'] for track in proto['tracks']]
+
+
+def publish_personal_album(store, now=1000, count=1):
     seed_catalog_track(store, 'album track|artist', 'Album track', 'Artist', video_id='album-track')
     store.rec_proposals.put_proposals('album_prepared', {
         'built_at': now, 'context': {}, 'items': [{
-            'browse_id': 'first-album', 'title': 'Your next record', 'artist': 'Artist',
-            'classification': 'discovery', 'score': .9, 'genre': 'Jazz'}]}, now)
+            'browse_id': 'first-album' if index == 0 else f'next-album-{index}',
+            'title': 'Your next record' if index == 0 else f'Another record {index}',
+            'artist': 'Artist' if index == 0 else f'Another artist {index}',
+            'classification': 'discovery', 'score': .9, 'genre': 'Jazz'} for index in range(count)]}, now)

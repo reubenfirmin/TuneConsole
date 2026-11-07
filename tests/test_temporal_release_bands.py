@@ -1,26 +1,50 @@
 """#63: date cards use the actual library's release years, without listening history."""
+from contextlib import ExitStack
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
-from yt_playlist.rec import mode_surfaces as ms, rec_params, surfaces
+from yt_playlist.core import genre_classifications
+from yt_playlist.rec import candidate_refresh, measurement, mode_surfaces as ms, ppr, surfaces, vibe_pools
 from yt_playlist.util.matching import identity_key
 
 
 def _library(store, monkeypatch, years, *, modes=1):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
-    tracks, vectors, membership = [], [], {}
+    iid = store.accounts.upsert_account("main", "cred", None, True)
+    rows, vectors, membership = [], [], {}
+    first_recording = store.conn.execute('SELECT coalesce(max(id),0)+1 FROM recordings').fetchone()[0]
+    first_entry = store.conn.execute('SELECT coalesce(max(id),0)+1 FROM catalog_entries').fetchone()[0]
     for mid in range(1, modes + 1):
         direction = np.eye(modes, dtype=np.float32)[mid - 1]
         for i, year in enumerate(years):
             title, artist = f"Release {mid} {i}", f"Artist {mid} {i}"
-            tid = store.tracks.upsert_track(f"v{mid}_{i}", title, artist, f"Album {mid} {i}", 200)
-            store.tracks.set_track_genre(tid, "house" if mid == 1 else "techno")
-            if year is not None:
-                store.tracks.set_track_year(tid, str(year))
             key = identity_key(title, artist)
+            offset = len(rows)
+            rows.append((first_recording + offset, first_entry + offset, f"v{mid}_{i}",
+                         title, artist, f"Album {mid} {i}", year, key, mid))
             vectors.append((key, direction.tobytes()))
             membership[key] = mid
-            tracks.append(tid)
+    # These cases own catalog reads and date selection, not metadata ingestion,
+    # provider evidence or explicit choice files. Seed existing playable inputs
+    # in one transaction; all SQL constraints and the genre projection stay real.
+    with store._lock, store.conn:
+        store.conn.execute('BEGIN IMMEDIATE')
+        store.conn.executemany('INSERT INTO recordings(id,identity_key,title,artist) VALUES (?,?,?,?)',
+            [(rid, key, title, artist) for rid, _, _, title, artist, _, _, key, _ in rows])
+        store.conn.executemany('INSERT INTO youtube_items(video_id,recording_id,title,artist,'
+            'orig_title,orig_artist,album,duration_s,mb_year) VALUES (?,?,?,?,?,?,?,?,?)',
+            [(video, rid, title, artist, title, artist, album, 200, year)
+             for rid, _, video, title, artist, album, year, _, _ in rows])
+        store.conn.executemany('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
+            [(entry, rid, video) for rid, entry, video, *_ in rows])
+        store.conn.executemany("INSERT INTO library_memberships VALUES (?,'fixture',NULL)",
+            [(row[1],) for row in rows])
+        store.conn.executemany("INSERT INTO recording_aliases VALUES (?,?,'fixture')",
+            [(row[7], row[0]) for row in rows])
+        for rid, _, _, _, _, _, _, _, mid in rows:
+            genre_classifications.write(store.conn, 'recordings', rid, "house" if mid == 1 else "techno")
+    tracks = [row[1] for row in rows]
     pid = store.playlists.upsert_playlist(iid, "PL_library", "Library", len(tracks), "h", 0)
     store.playlists.set_playlist_tracks(pid, tracks)
     store.rec_model.replace_rec_content_vectors(vectors)
@@ -29,20 +53,76 @@ def _library(store, monkeypatch, years, *, modes=1):
          "centroid": np.eye(modes, dtype=np.float32)[mid - 1], "size": len(years), "rep_keys": []}
         for mid in range(1, modes + 1)
     ], retired_ids=[], now=1)
-    # Isolate the temporal fallback. Its years, vectors, buckets and assembly remain real.
-    for name in ("for_you", "explore_for_you", "comfort_listening"):
-        monkeypatch.setattr(surfaces, name, lambda *args, **kwargs: [])
-    monkeypatch.setattr(surfaces, "cold_candidates", lambda *args, **kwargs: [])
+    _temporal_fallback(monkeypatch)
     return membership
 
 
+def _temporal_fallback(monkeypatch):
+    # Dates, vectors, per-band capacity, typed publication and assembly stay
+    # real. Independent scorer/PPR/vibe producers do not supply date buckets.
+    for name in ("for_you", "explore_for_you", "comfort_listening"):
+        monkeypatch.setattr(surfaces, name, lambda *args, **kwargs: [])
+    monkeypatch.setattr(surfaces, "cold_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(ppr, 'mode_rankings', lambda *args, **kwargs: {})
+    monkeypatch.setattr(vibe_pools, 'prepare', lambda *args, **kwargs: None)
+    # Date selection does not consume model/listening fingerprints. Keep real
+    # policy rows, files and generation references; their fingerprint producers
+    # have independent owners in test_serving_policy and test_candidate_refresh.
+    monkeypatch.setattr(measurement, 'serving_policy', lambda *args, **kwargs:
+                        ('temporal-fixture', {'ranker': 'temporal-fixture'}))
+    monkeypatch.setattr(candidate_refresh, 'prepared_settings', lambda *args, **kwargs:
+                        {'rec_candidate_preferences': 'temporal-fixture'})
+
+
+@pytest.fixture(scope='module')
+def temporal_templates(_pristine_current_schema):
+    from tests.prepared_fixture_support import prepared_template
+
+    with ExitStack() as resources:
+        templates = {}
+
+        def template(years, *, prepared=True):
+            # Track ordering matters to the full-page regression. Do not merge
+            # alternating and blocked years merely because their counts match.
+            key = (tuple(years), prepared)
+            if key not in templates:
+                def build(source):
+                    with pytest.MonkeyPatch.context() as patch:
+                        membership = _library(source, patch, key[0], modes=2)
+                        payload = ms.prepare_bundles(source, now=1000) if prepared else None
+                    return membership, payload
+
+                templates[key] = resources.enter_context(
+                    prepared_template(_pristine_current_schema, build))
+            return templates[key]
+
+        yield template
+
+
+@pytest.fixture
+def temporal_library(store, monkeypatch, temporal_templates):
+    _temporal_fallback(monkeypatch)
+
+    def restore(years, *, prepared=True):
+        return temporal_templates(years, prepared=prepared).restore(store)
+
+    return restore
+
+
 @pytest.mark.parametrize("years", [(1970, 1995, 2020), (2021, 2023, 2025)])
-def test_computed_bands_rotate_relative_to_library(store, monkeypatch, years):
-    membership = _library(store, monkeypatch, list(years) * 40, modes=2)
-    payload = ms.prepare_bundles(store, now=1000)
+def test_computed_bands_rotate_relative_to_library(store, temporal_library, years):
+    # Twelve distinct artists per year fill an entire card in either mode;
+    # 72 known dates also exceed the real 30-date credibility threshold.
+    membership, payload = temporal_library(list(years) * ms.PROTO_SIZE)
     cuts = payload["_meta"]["year_cuts"]
     assert years[0] <= cuts[0] < years[1] <= cuts[1] < years[2]
-    assert store.rec_proposals.get_proposals("mode_bundles")["_meta"]["year_cuts"] == cuts
+    with store.read_view() as reader:
+        head = reader.recommendations.head("home")
+        assert head["status"] == "published"
+        framing = reader.recommendations.framing("home", generation=head["id"])
+        assert framing["generation_id"] == head["id"]
+        assert framing["presence"] & 2
+        assert [framing["year_low"], framing["year_high"]] == cuts
 
     for epoch, (year, label) in enumerate(zip(years, ("Throwback", "Time Flies", "Recent Picks"))):
         cards = ms.assemble_cards(store, now=1000, epoch=epoch)
@@ -52,13 +132,14 @@ def test_computed_bands_rotate_relative_to_library(store, monkeypatch, years):
         assert len(card["tracks"]) == ms.PROTO_SIZE
         assert {track["year"] for track in card["tracks"]} == {year}
         assert {membership[track["key"]] for track in card["tracks"]} == {card["mode_id"]}
+        assert {track["serving_context"]["recommendation_generation_id"]
+                for track in card["tracks"]} == {head["id"]}
     assert store.history.play_events_since(0) == []
 
 
 @pytest.mark.parametrize("epoch,year", [(1, 1995), (2, 2020)])
-def test_credible_date_bands_survive_a_bucket_full_of_older_tracks(store, monkeypatch, epoch, year):
-    membership = _library(store, monkeypatch, [1970] * 40 + [1995] * 40 + [2020] * 40, modes=2)
-    ms.prepare_bundles(store, now=1000)
+def test_credible_date_bands_survive_a_bucket_full_of_older_tracks(store, temporal_library, epoch, year):
+    membership, _payload = temporal_library([1970] * 40 + [1995] * 40 + [2020] * 40)
     cards = ms.assemble_cards(store, now=1000, epoch=epoch)
     assert len(cards) == 1, f"The full library has 40 releases per mode from {year}"
     assert {track["year"] for track in cards[0]["tracks"]} == {year}
@@ -67,11 +148,36 @@ def test_credible_date_bands_survive_a_bucket_full_of_older_tracks(store, monkey
 
 
 @pytest.mark.parametrize("cap", [12, 40])
-def test_each_date_band_keeps_candidates_past_newer_and_unknown_releases(store, monkeypatch, cap):
-    membership = _library(store, monkeypatch,
-                          [None] * 60 + [2020] * 60 + [1995] * 60 + [1970] * 60, modes=2)
-    rec_params.set_param(store, "modes_cand_per_mode", cap)
-    payload = ms.prepare_bundles(store, now=1000)
+def test_each_date_band_keeps_candidates_past_newer_and_unknown_releases(cap):
+    # Test the per-band allocation with controlled repository output. The
+    # computed-band cases above own actual catalog reads, cut calculation,
+    # typed publication and complete rotating cards; repeating that pipeline
+    # for each capacity adds no allocation case.
+    per_band = cap + 1
+    membership, years, metadata, vectors = {}, {}, {}, []
+    for mid in (1, 2):
+        for index, year in enumerate(
+                [None] * per_band + [2020] * per_band + [1995] * per_band + [1970] * per_band):
+            key = f'mode-{mid}-{index}'
+            membership[key], years[key] = mid, year
+            metadata[key] = {'video_id': key, 'title': key, 'artist': key, 'album': key}
+            # Decreasing similarity makes the leading unknown/newer rows
+            # deterministically precede the older dates in both modes.
+            direction = np.eye(2)[mid - 1] * (1 - index / (8 * per_band))
+            vectors.append(direction)
+    keys = list(membership)
+    reads = []
+
+    def tracks(requested):
+        reads.append(list(requested))
+        return metadata
+
+    store = SimpleNamespace(rec_query=SimpleNamespace(tracks_by_keys=tracks),
+                            modes=SimpleNamespace(genres_for=lambda requested: dict.fromkeys(requested, 'House')))
+    payload = {'1': {}, '2': {}}
+    ms._build_temporal(store, payload, [1, 2], np.eye(2), keys, np.asarray(vectors), cap,
+                       years=years, year_cuts=[1970, 1995])
+    assert reads == [keys]
 
     # Each rotating card gets the configured candidate depth; unknown years cannot spend it.
     for mid in (1, 2):
@@ -79,30 +185,24 @@ def test_each_date_band_keeps_candidates_past_newer_and_unknown_releases(store, 
         assert len(candidates) == 3 * cap
         for year in (1970, 1995, 2020):
             assert sum(track["year"] == year for track in candidates) == cap
+            # The highest-similarity records within each date band survive.
+            expected = [key for key in keys if membership[key] == mid and years[key] == year][:cap]
+            assert [track['key'] for track in candidates if track['year'] == year] == expected
         assert {membership[track["key"]] for track in candidates} == {mid}
-    assert len(payload["all"]["temporal"]) == 480
+    assert len(payload["all"]["temporal"]) == 2 * 4 * per_band
 
-    for epoch, year in enumerate((1970, 1995, 2020)):
-        cards = ms.assemble_cards(store, now=1000, epoch=epoch)
-        assert len(cards) == 1
-        card = cards[0]
-        assert len(card["tracks"]) == ms.PROTO_SIZE
-        assert {track["year"] for track in card["tracks"]} == {year}
-        assert len({track["artist"] for track in card["tracks"]}) >= 6
-        assert {membership[track["key"]] for track in card["tracks"]} == {card["mode_id"]}
-    assert store.history.play_events_since(0) == []
 
 
 def test_missing_years_do_not_make_a_sparse_library_credible(store, monkeypatch):
-    _library(store, monkeypatch, [1990] * 29 + [None] * 50)
+    _library(store, monkeypatch, [1990] * 29 + [None])
     payload = ms.prepare_bundles(store, now=1000)
-    assert len(payload["all"]["temporal"]) == 79
+    assert len(payload["all"]["temporal"]) == 30
     assert payload["_meta"]["year_cuts"] is None
     assert all(ms.assemble_cards(store, now=1000, epoch=epoch) == [] for epoch in range(3))
 
 
 def test_single_year_catalog_omits_empty_bands_and_unknown_dates(store, monkeypatch):
-    _library(store, monkeypatch, [2024] * 40 + [None] * 20)
+    _library(store, monkeypatch, [2024] * 30 + [None])
     payload = ms.prepare_bundles(store, now=1000)
     assert payload["_meta"]["year_cuts"] == [2024, 2024]
     cards = ms.assemble_cards(store, now=1000, epoch=0)
@@ -110,3 +210,54 @@ def test_single_year_catalog_omits_empty_bands_and_unknown_dates(store, monkeypa
     assert {track["year"] for track in cards[0]["tracks"]} == {2024}
     assert ms.assemble_cards(store, now=1000, epoch=1) == []
     assert ms.assemble_cards(store, now=1000, epoch=2) == []
+
+
+def test_temporal_template_restores_private_catalog_vectors_payload_and_files(
+        store, file_backed_store, temporal_templates):
+    from tests.prepared_fixture_support import roots
+
+    template = temporal_templates([1970, 1995, 2020] * 40)
+    membership, payload = template.restore(store)
+    other_membership, other_payload = template.restore(file_backed_store)
+    assert len(membership) == len(other_membership) == 240
+    assert set(membership.values()) == {1, 2}
+    assert (membership, payload) == (other_membership, other_payload) == template.result
+    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    sql = 'SELECT id,video_id,title,artist,genre,mb_year FROM catalog_tracks ORDER BY id'
+    expected = [tuple(row) for row in template.source.conn.execute(sql)]
+    vectors = template.source.rec_model.get_rec_content_vectors()
+    assert len(vectors) == 240
+    for private in (store, file_backed_store):
+        assert [tuple(row) for row in private.conn.execute(sql)] == expected
+        assert private.rec_model.get_rec_content_vectors() == vectors
+        assert private.history.play_events_since(0) == []
+
+    first_roots, second_roots = roots(store.conn), roots(file_backed_store.conn)
+    assert set(first_roots.values()).isdisjoint(second_roots.values())
+    assert set(first_roots.values()).isdisjoint(template.files.values())
+    assert set(second_roots.values()).isdisjoint(template.files.values())
+    retained = []
+    for name, root in template.files.items():
+        for source in root.rglob('*'):
+            if not source.is_file():
+                continue
+            first = first_roots[name] / source.relative_to(root)
+            second = second_roots[name] / source.relative_to(root)
+            original = source.read_bytes()
+            assert first.read_bytes() == second.read_bytes() == original
+            assert len({(path.stat().st_dev, path.stat().st_ino) for path in (source, first, second)}) == 3
+            retained.append((source, first, second, original))
+    assert retained
+    membership.clear()
+    payload['_meta']['year_cuts'][0] = -1
+    store.tracks.set_track_title(expected[0][0], 'Private temporal catalog mutation')
+    assert [tuple(row) for row in store.conn.execute(sql)] != expected
+    store.rec_model.replace_rec_content_vectors([(key, bytes(len(blob))) for key, blob in vectors])
+    assert store.rec_model.get_rec_content_vectors() != vectors
+    retained[0][1].write_bytes(b'private temporal file mutation')
+    assert (other_membership, other_payload) == template.result
+    for unchanged in (file_backed_store, template.source):
+        assert [tuple(row) for row in unchanged.conn.execute(sql)] == expected
+        assert unchanged.rec_model.get_rec_content_vectors() == vectors
+    for source, _first, second, original in retained:
+        assert source.read_bytes() == second.read_bytes() == original

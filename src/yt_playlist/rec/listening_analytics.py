@@ -5,8 +5,6 @@ import hashlib
 import json
 import math
 
-from yt_playlist.core.db_revisions import setting_reads
-from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
 from yt_playlist.rec.listening_dates import day, midnight, timezone_name
 
 SCHEMA = 2
@@ -27,7 +25,7 @@ def document(value):
         return {}
 
 
-def capture_start(store, identity, video, playlist, status, at, *, album=False):
+def capture_start(store, identity, video, playlist, status, at, *, album=False, inline=False):
     """Freeze the first rating readout; later likes must not rewrite 'already liked'.
 
     Serving only offers a small immutable source record. Durable writes and all
@@ -35,6 +33,10 @@ def capture_start(store, identity, video, playlist, status, at, *, album=False):
     """
     from yt_playlist.core.features import listening_charts_enabled
     if not listening_charts_enabled():
+        return
+    if inline:
+        store.player_events.record_player_event(identity, 'listen_start', video, None, None, playlist,
+            json.dumps({'rating': status, 'album': album}), at)
         return
     capture = getattr(store, 'choice_capture', None)
     if capture is not None:
@@ -44,23 +46,18 @@ def capture_start(store, identity, video, playlist, status, at, *, album=False):
 
 
 def calculate(reader, now):
-    repo = ListeningAnalyticsRepo(reader)
+    repo = reader.listening_analytics
     metadata = {}
-    names = {str(row['id']): row['name'] for batch in repo.batches('SELECT id,name FROM artists') for row in batch}
+    names = repo.artist_names()
     for batch in repo.catalog_rows():
         for row in batch:
             row['artist'] = names.get(str(row['artist_id']), row['artist'])
         metadata.update((row['identity_key'], row) for row in batch)
-    with setting_reads(reader, ('radio_session_playlist_ids', 'listening_timezone')):
-        radio_ids = set(json.loads(reader.settings.get_setting('radio_session_playlist_ids') or '[]'))
-        zone = timezone_name(reader.settings.get_setting('listening_timezone'))
+    radio_ids = set(reader.playlists.radio_playlist_ids())
+    zone = timezone_name(reader.settings.get_setting('listening_timezone'))
     date_of = lambda at: day(at, zone)
-    mixes = {row['provider_id'] for batch in repo.batches(
-        "SELECT DISTINCT s.provider_id FROM playlist_provenance p JOIN playlist_scopes s ON s.ref=p.ytm "
-        "WHERE p.origin='tuneconsole'") for row in batch}
-    videos = {row['video_id']: row['identity_key'] for batch in repo.batches(
-        'SELECT y.video_id,r.identity_key FROM youtube_items y JOIN recordings r ON r.id=y.recording_id')
-        for row in batch}
+    mixes = repo.mix_playlist_ids()
+    videos = repo.video_keys()
 
     def format_of(playlist, album=False):
         if playlist in radio_ids:
@@ -84,7 +81,7 @@ def calculate(reader, now):
     for batch in repo.player(now):
         for event in batch:
             payload = document(event['payload'])
-            identity = (event['identity_id'], event['video_id'], event['playlist_ytm_id'])
+            identity = (event['account_id'], event['video_id'], event['playlist_ytm_id'])
             if event['kind'] == 'listen_start':
                 starts[(*identity, event['at'])] = payload
                 contexts[identity] = payload
@@ -141,7 +138,7 @@ def calculate(reader, now):
     for batch in repo.plays(now):
         for play in batch:
             key, date = play['identity_key'], date_of(play['played_at'])
-            identity = (play['identity_id'], play['video_id'], play['playlist_ytm_id'])
+            identity = (play['account_id'], play['video_id'], play['playlist_ytm_id'])
             # Start captures share the play's timestamp; never borrow a later
             # replay's rating, another account's state or an unrelated playlist.
             start = starts.get((*identity, play['played_at']), {})
@@ -241,26 +238,15 @@ def build(store, now):
     with store.read_snapshot() as snapshot:
         payload = calculate(snapshot.store, now)
         from yt_playlist.rec.listening_editions import prepare
-        edition = prepare(payload, ListeningAnalyticsRepo(snapshot.store), now)
-        prior = ListeningAnalyticsRepo(snapshot.store).prepared() or {}
+        edition = prepare(payload, snapshot.store.listening_analytics, now)
         chunks, manifest = partition(payload)
+        plan = snapshot.store.listening_analytics.prepare_generation(
+                chunks, json.dumps(manifest, separators=(',', ':'), allow_nan=False),
+                json.dumps(edition, separators=(',', ':'), allow_nan=False), now,
+                input_revision=snapshot._changes)
 
         def publish():
-            repo = ListeningAnalyticsRepo(store)
-            for key, encoded in chunks.items():
-                repo.publish(encoded, now, 'listening_chunk:' + key)
-            repo.publish(json.dumps(edition, separators=(',', ':'), allow_nan=False), now, 'listening_edition')
-            repo.publish(json.dumps(manifest, separators=(',', ':'), allow_nan=False), now)
-            store.conn.execute("INSERT OR IGNORE INTO settings(key,value) VALUES ('listening_timezone',?)",
-                               (payload['timezone'],))
-            active = tuple('listening_chunk:' + key for key in
-                           {*chunks, *(item['key'] for item in prior.get('chunks', []))})
-            # Publication and retirement share one guarded transaction.
-            if active:
-                store.conn.execute("DELETE FROM rec_proposals WHERE surface LIKE 'listening_chunk:%' "
-                    'AND surface NOT IN (' + ','.join('?' for _ in active) + ')', active)
-            else:
-                store.conn.execute("DELETE FROM rec_proposals WHERE surface LIKE 'listening_chunk:%'")
+            store.listening_analytics.publish_generation(plan, payload['timezone'])
         if snapshot.publish(publish):
             return payload
     return None

@@ -1,5 +1,6 @@
 """Generated membership cannot erase independently eligible recommendations."""
 import numpy as np
+from tests.derived_rating_support import seed_dislike
 import pytest
 
 from yt_playlist.rec import library_pool, road_trip_candidates, surfaces
@@ -8,7 +9,7 @@ from yt_playlist.util.matching import identity_key
 
 @pytest.mark.parametrize('source', ['wheelhouse', 'catalog', 'comfort', 'library_pool', 'road_trip'])
 def test_generated_membership_preserves_candidates_and_user_feedback(store, source):
-    iid = store.identities.upsert_identity('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', 'cred', None, True)
     tids = [store.tracks.upsert_track(f'v{i}', f'Song {i}', f'Artist {i}', '', 200)
             for i in range(12)]
     keys = [identity_key(f'Song {i}', f'Artist {i}') for i in range(12)]
@@ -42,7 +43,7 @@ def test_generated_membership_preserves_candidates_and_user_feedback(store, sour
     assert picked() == before
     if source == 'wheelhouse':
         assert all(row['eligible'] for row in surfaces.taste_comparison(store, now, keys=keys))
-    store.rec_model.record_dislike(keys[0], until=None, now=now)
+    seed_dislike(store, keys[0], until=None, now=now)
     muted = picked()
     assert ('v0' if source == 'road_trip' else keys[0]) not in muted
     assert len(muted) == 11

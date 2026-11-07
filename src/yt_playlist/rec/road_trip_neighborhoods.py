@@ -37,7 +37,9 @@ class ArtistNeighborhoods:
         songs = [c for c in songs if c["artist"].casefold() == name.casefold()]
         genres = Counter(c["genre"] for c in songs if c["genre"])
         years = [c["year"] for c in songs[:5] if c.get("year")]
-        self.contexts[name] = {"genre": genres.most_common(1)[0][0] if genres else "",
+        genre = genres.most_common(1)[0][0] if genres else ''
+        family = next((c['family'] for c in songs if c['genre']==genre and c.get('family')), '')
+        self.contexts[name] = {"genre": genre, "family":family,
                                "year": round(statistics.median(years)) if years else None,
                                "related": list(related)}
 
@@ -65,7 +67,7 @@ class ArtistNeighborhoods:
             for candidate in fresh:
                 candidate.update(cluster_genre=candidate["genre"], anchors=[name])
         elif anchor and (context := self.contexts.get(anchor)):
-            family = genre_map.family(context["genre"])
+            family = context.get('family',genre_map.family(context["genre"]))
             fresh = [c for c in fresh if self.anchors(c, {anchor: context})
                      and (not c["genre"] or c["genre"] == context["genre"]
                           or (family and c["family"] == family))]
@@ -101,7 +103,7 @@ class ArtistNeighborhoods:
             direct = next((n for n in contexts if n.casefold() == candidate["artist"].casefold()), None)
             anchors = [direct] if direct else self.anchors(candidate, contexts)
             anchors = [n for n in anchors if not contexts[n]["genre"] or not candidate["genre"]
-                       or genre_map.family(contexts[n]["genre"]) == candidate["family"]]
+                       or contexts[n].get('family',genre_map.family(contexts[n]["genre"])) == candidate["family"]]
             if anchors:
                 matching = [n for n in anchors if n in self.for_genre(candidate.get("cluster_genre"))]
                 if not matching:
@@ -126,6 +128,9 @@ class ArtistNeighborhoods:
             if name not in self.contexts:
                 batch = candidates.artist_context(client, name)
                 self.remember(name, candidates.to_candidates(batch.rows, store), batch.related)
+        genre_axes = store.genres.feature_axes(self.contexts[name]['genre'] for name in self.artists)
+        for name in self.artists:
+            self.contexts[name]['family'] = genre_axes.get(self.contexts[name]['genre'], ('', None))[0]
 
     def resolve(self, pool, store, client, genre, cap):
         """Return a bounded seed neighborhood; None allows an independent genre acquisition."""
@@ -137,7 +142,7 @@ class ArtistNeighborhoods:
                 return ClusterBatch(pool, [])  # an obsolete derived slider cannot broaden discovery
             return None
         genre = axes.canonical_genre(genre)
-        family = genre_map.family(genre)
+        family = store.genres.feature_axes([genre]).get(genre, ('', None))[0]
         kept = []
         for candidate in pool:
             if candidate["source"] == "theirs" and axes.matches(candidate, "genre:" + genre):

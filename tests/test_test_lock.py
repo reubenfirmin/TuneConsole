@@ -119,6 +119,28 @@ def test_wait_timeout_does_not_collect_tests(test_sessions):
     assert not (second / "collected").exists()
 
 
+@pytest.mark.parametrize('selection', [('test_probe.py',), ('-k', 'probe')])
+def test_targeted_check_runs_while_full_suite_owns_the_lock(test_sessions, selection):
+    start, lock_path = test_sessions
+    owner, first = start('owner', hold=True)
+    _wait_for(first / 'started', owner)
+    before = lock_path.read_text()
+    focused, second = start('focused', *selection)
+    assert '1 passed' in _finish(focused)
+    assert (second / 'started').exists()
+    assert lock_path.read_text() == before
+    assert owner.poll() is None
+
+
+def test_full_suite_with_capture_disabled_still_respects_the_lock(test_sessions):
+    start, _ = test_sessions
+    owner, first = start('owner', hold=True)
+    _wait_for(first / 'started', owner)
+    contender, second = start('contender', '-s')
+    assert 'Test lock busy' in _finish(contender, expected=4)
+    assert not (second / 'collected').exists()
+
+
 def test_killed_owner_releases_lock_without_deleting_file(test_sessions):
     start, lock_path = test_sessions
     owner, first = start("owner", hold=True)

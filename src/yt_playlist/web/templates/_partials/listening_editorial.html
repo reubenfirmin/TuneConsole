@@ -1,3 +1,25 @@
+{% macro rating_marks(counts) %}
+<div class="le-rating-marks">
+  {% for kind, singular, plural in [('hearts', 'heart', 'hearts'), ('skulls', 'skull', 'skulls'), ('clears', 'rating removed', 'ratings removed')] %}
+  {% set count = counts[kind] %}
+  {% if count %}
+  {% set label = count|string ~ ' ' ~ (singular if count == 1 else plural) %}
+  <span class="le-rating-mark le-rating-mark-{{ kind }}" role="img" aria-label="{{ label }}" title="{{ label }}">
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      {% if kind == 'hearts' %}
+      <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+      {% elif kind == 'skulls' %}
+      <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C7.58 2 4 5.58 4 10c0 2.4 1.06 4.55 2.73 6.02.17.15.27.36.27.59V19c0 .55.45 1 1 1h.5v.5a1 1 0 1 0 2 0V20h1v.5a1 1 0 1 0 2 0V20h.5c.55 0 1-.45 1-1v-2.39c0-.23.1-.44.27-.59A7.99 7.99 0 0 0 20 10c0-4.42-3.58-8-8-8ZM9 8.5A1.5 1.5 0 1 0 9 11.5 1.5 1.5 0 0 0 9 8.5Zm6 0A1.5 1.5 0 1 0 15 11.5 1.5 1.5 0 0 0 15 8.5Z"/>
+      {% else %}
+      <path d="M4 5v14l11-7zM17 5h3v14h-3z"/>
+      {% endif %}
+    </svg>
+    {% if count > 1 %}<span class="le-rating-count" aria-hidden="true">{{ count }}</span>{% endif %}
+  </span>
+  {% endif %}
+  {% endfor %}
+</div>
+{% endmacro %}
 <div class="listening-edition" x-data='listeningEditorial({{ listening_edition|tojson }})' data-listening-edition>
   <div class="le-stories">
   {% for story in listening_edition.stories %}
@@ -12,6 +34,29 @@
       </div>
       <figure class="le-figure">
         <div class="le-composition" x-html="composition({{ loop.index0 }})"></div>
+        {% if story.visual == 'rating_actions' and story.rating_tracks %}
+        <div class="le-rating-songs">
+          <p class="le-rating-caption">{% if story.rating_track_count > story.rating_tracks|length %}Latest {{ story.rating_tracks|length }} of {{ story.rating_track_count }} songs{% else %}{{ story.rating_track_count }} songs{% endif %}</p>
+          <table aria-label="Songs with confirmed rating changes">
+            <thead><tr><th scope="col">Song</th><th scope="col">Rating changes</th></tr></thead>
+            <tbody>
+            {% for song in story.rating_tracks %}
+              <tr>
+                <th scope="row">
+                  {% if song.video_id %}<a href="https://music.youtube.com/watch?v={{ song.video_id|urlencode }}" target="_blank" rel="noopener">{{ song.name }}</a>{% else %}{{ song.name }}{% endif %}
+                  <span class="le-rating-artist">{{ song.artist }}</span>
+                  <time datetime="{{ song.last_day }}">{{ song.last_day }}</time>
+                </th>
+                <td>{{ rating_marks(song) }}</td>
+              </tr>
+            {% endfor %}
+            {% if story.rating_track_count > story.rating_tracks|length %}
+              <tr class="le-rating-other"><th scope="row">{{ story.rating_track_count - story.rating_tracks|length }} other songs</th><td>{{ rating_marks(story.rating_other_counts) }}</td></tr>
+            {% endif %}
+            </tbody>
+          </table>
+        </div>
+        {% endif %}
       </figure>
     </article>
   {% endfor %}

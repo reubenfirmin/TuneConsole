@@ -1,5 +1,6 @@
 import json
 import logging
+from copy import deepcopy
 
 import pytest
 
@@ -7,6 +8,9 @@ from yt_playlist.core import logsetup
 from yt_playlist.rec import home_audit
 from yt_playlist.rec.surfaces import ForYouItem
 from yt_playlist.rec import home_cards as home
+from tests.home_fixture_support import home_routes_only, without_metadata_providers
+
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
 
 
 @pytest.fixture
@@ -47,17 +51,47 @@ def test_audit_snapshots_actual_genres_and_decades_with_unknown_coverage(store, 
     assert card["genres"] == {"jazz": 1, "britpop": 1}
     assert card["decades"] == {"1990": 1, "2000": 1}
     assert card["unknown_genre_count"] == card["unknown_decade_count"] == 1
-    assert card["track_keys"] == ["owned|artist", "new|a", "unknown|b"]
+    assert 'track_keys' not in card and 'recipe' not in card
 
 
-def test_routes_audit_mode_offers_previews_and_refreshes(store, audit_path):
-    from tests.test_mode_cards_route import _seed_bundles, _client
-    _seed_bundles(store)
-    client = _client(store)
-    assert client.get("/home/cards").status_code == 200
-    assert client.get("/home/cards").status_code == 200
-    assert client.post("/home/breadth", data={"breadth_bias": "0.5"}).status_code == 200
-    assert client.post("/home/refresh-cards").status_code == 200
+def test_routes_audit_mode_offers_previews_and_refreshes(
+        store, audit_path, monkeypatch, home_routes_only, without_metadata_providers):
+    from fastapi.testclient import TestClient
+    from tests.conftest import FakeClient, seed_catalog_track
+    from yt_playlist.rec import home_prepared
+    from yt_playlist.web.app import create_app
+
+    # This consumer owns HTTP audit capture, not candidate preparation. Supply
+    # completed offers while retaining actual metadata, epochs and audit files.
+    offers = []
+    for index, lane in enumerate(('wheelhouse', 'explore', 'fresh')):
+        key = f'audit {index}|artist'
+        seed_catalog_track(store, key, f'Audit {index}', 'Artist', video_id=f'audit-{index}', genre='Jazz')
+        proto = home._proto(store, lane, f'A {lane} mix', [
+            {'key': key, 'title': f'Audit {index}', 'artist': 'Artist',
+             'video_id': f'audit-{index}', 'genre': 'Jazz'}], 1000)
+        proto.update(mode_id=index + 1 if lane != 'fresh' else None,
+                     recipe={'lane': lane})
+        offers.append(proto)
+
+    def completed(reader):
+        protos = deepcopy(offers)
+        return home.CardsResult(protos, [{'proto': p, 'pool': None} for p in protos],
+                                None, None, [], [], home._epoch(reader, 'cards'), None)
+
+    monkeypatch.setattr(home_prepared, 'load', lambda *args, **kwargs: {})
+    monkeypatch.setattr(home_prepared, 'peek', lambda *args, **kwargs: {})
+    monkeypatch.setattr(home_prepared, 'cards', lambda reader, *args, **kwargs: completed(reader))
+    monkeypatch.setattr(home.HomeCards, 'cards', lambda service, request: completed(service.store))
+    monkeypatch.setattr(home_prepared, 'remember', lambda *args, **kwargs: None)
+    identity = store.accounts.upsert_account('main', 'cred', None, True)
+    app = create_app(store, lambda: {identity: FakeClient()}, now_fn=lambda: 1000,
+                     background_work=False)
+    with TestClient(app, base_url='http://127.0.0.1') as client:
+        assert client.get("/home/cards").status_code == 200
+        assert client.get("/home/cards").status_code == 200
+        assert client.post("/home/breadth", data={"breadth_bias": "0.5"}).status_code == 200
+        assert client.post("/home/refresh-cards").status_code == 200
     rows = _rows(audit_path)
     assert [r["source"] for r in rows] == ["/home/cards", "/home/cards", "/home/breadth", "/home/refresh-cards"]
     assert [r["menu_epoch"] for r in rows] == [0, 0, 0, 1]
@@ -68,12 +102,11 @@ def test_routes_audit_mode_offers_previews_and_refreshes(store, audit_path):
         for lane in ("wheelhouse", "explore"):
             card = cards[lane]
             assert card["mode_id"] in {1, 2}
-            assert card["recipe"]["model"] == "mode"
-            assert card["recipe"]["mode_id"] == card["mode_id"]
+            assert 'recipe' not in card and 'track_keys' not in card
             assert card["epoch"] == row["menu_epoch"]
         # Fresh comes from the shared pool and keeps its own epoch across menu refreshes.
         assert cards["fresh"]["mode_id"] is None
-        assert cards["fresh"]["recipe"]["model"] == "fresh"
+        assert 'recipe' not in cards['fresh']
         assert cards["fresh"]["epoch"] == 0
         assert all(c["genres"] for c in cards.values())
 

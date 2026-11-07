@@ -14,6 +14,9 @@ def status(store):
 
 
 def report(store, phase, now, *, reason=None):
+    from yt_playlist.core.group_progress import PHASES
+    if phase not in PHASES:
+        raise ValueError('Unsupported grouping progress phase')
     store.settings.set_setting(PROGRESS, json.dumps({'phase': phase, 'at': now, 'reason': reason}))
 
 
@@ -29,12 +32,7 @@ class Preparation:
     def __init__(self, store, *, policy=group_discovery.Policy(), budget=Budget()):
         self.store, self.policy, self.budget = store, policy, budget
         self.retry_at = 0
-        self.rebuild_requested = False
         self._pending = None
-
-    def request_rebuild(self):
-        self.rebuild_requested = True
-        self.retry_at = 0
 
     def due(self, now):
         if now < self.retry_at or self.store.settings.get_setting('rec_group_shadow') == '0':
@@ -44,7 +42,7 @@ class Preparation:
         if self.store.taste_groups.expired_builds():
             return True
         previous = self.store.taste_groups.head_checkpoint()
-        if self.rebuild_requested or previous is None:
+        if previous is None:
             return bool(self.store.prepared_content.changed_since(-1))
         if previous['policy'] != musical_profiles.canonical(self.policy.manifest()):
             return True
@@ -61,10 +59,11 @@ class Preparation:
             with work_budget(self.budget.seconds):
                 if self._pending is not None:
                     snapshot, prepared = self._pending
-                    if snapshot.publish(lambda: None, allow_stale_tables=group_publication.STAGED_TABLES):
+                    if (self.store.taste_groups.head_generation() == prepared['generation']
+                            or snapshot.is_current(allow_stale_tables=self.store.taste_groups.staged_tables)):
                         return self._publish_pending(now)
                     self._pending = None
-                    group_publication.abandon(self.store.taste_groups, prepared)
+                    self.store.taste_groups.abandon_staged(prepared)
                 return self._prepare(now)
         except group_publication.BuildUnavailable:
             report(self.store, 'deferred', now, reason='build-owned')
@@ -85,30 +84,32 @@ class Preparation:
             # contributes interests; discovered candidates do not manufacture user interests.
             recordings, after = [], ''
             while page := reader.taste_groups.corpus_page(after, max_bytes=self.budget.input_bytes):
+                axes = reader.genres.feature_axes({payload['library'].get('genre')
+                    for _key, payload, _profile in page if payload['library'] is not None})
                 for key, payload, profile in page:
                     check_stopping()
                     if payload['library'] is not None:
-                        recordings.append(group_similarity.recording(key, payload['library'], profile))
+                        recordings.append(group_similarity.recording(key, payload['library'], profile, genre_axes=axes))
                 after = page[-1][0]
             fingerprint = group_versions.fingerprint([self.policy.manifest(), [
-                [r.key, r.genre, r.year, r.values, r.support, r.profile_version] for r in recordings]])
+                [r.key, r.genre, r.family, r.year, r.values, r.support, r.profile_version] for r in recordings]])
             previous = reader.taste_groups.head(members=True)
-            legacy_modes = reader.modes.list_modes(active_only=False)
-            legacy_versions = reader.taste_groups.legacy_versions()
+            # Legacy offers carry their own captured evidence. Reimporting
+            # mutable retired modes on every build recreates collected history
+            # and pins obsolete centroids. Existing legacy versions stay readable.
+            legacy_modes, legacy_versions = [], ()
             reader.settings.get_setting(CHECKPOINT)
             parent = previous['generation'] if previous else None
             resumable = reader.taste_groups.resumable_build(fingerprint, serial,
                 musical_profiles.canonical(self.policy.manifest()), parent)
-            if (previous and previous['fingerprint'] == fingerprint and not self.rebuild_requested and
-                    resumable is None and
-                    all(group_versions.legacy_definition(mode)[0] in legacy_versions for mode in legacy_modes)):
+            if previous and previous['fingerprint'] == fingerprint and resumable is None:
                 # Operational stamps and unchanged legacy rewrites are not new musical input.
                 checkpoint = json.dumps({'generation': previous['generation'], 'serial': serial, 'at': now})
                 if snapshot.publish(lambda: self.store.settings.publish_values({CHECKPOINT: checkpoint})):
                     report(self.store, 'ready', now)
                     # Expired unrelated builds and old graph caches do not get
                     # to consume every turn before a new plan can make progress.
-                    reader.conn.rollback()
+                    snapshot.release_reader()
                     while self.store.taste_groups.cleanup_staged():
                         check_stopping()
                 else:
@@ -137,16 +138,25 @@ class Preparation:
 
     def _publish_pending(self, now):
         snapshot, prepared = self._pending
-        owner = self.store.taste_groups.stage(prepared)
-        if snapshot.publish(lambda: self.store.taste_groups.finish_staged(prepared['generation'], owner),
-                            allow_stale_tables=group_publication.STAGED_TABLES):
+        if self.store.taste_groups.head_generation() == prepared['generation']:
+            # A prior attempt may have committed the head before its checkpoint
+            # failed. Finish that acknowledgement without staging it again.
+            self.store.taste_groups.checkpoint_preparation(prepared['generation'], prepared['serial'], now)
+            published = True
+        else:
+            owner = self.store.taste_groups.stage(prepared)
+            def publish():
+                self.store.taste_groups.finish_preparation(prepared['generation'], owner,
+                    prepared['serial'], now)
+            published = snapshot.publish_ordered(publish,
+                allow_stale_tables=self.store.taste_groups.staged_tables)
+        if published:
             self._pending = None
-            self.rebuild_requested = False
             report(self.store, 'ready', now)
             self.store.maintenance_diagnostics.record('published', phase='rec: adaptive grouping',
                 reasons=('shadow-generation',))
             return True
         self._pending = None
-        group_publication.abandon(self.store.taste_groups, prepared)
+        self.store.taste_groups.abandon_staged(prepared)
         report(self.store, 'deferred', now, reason='inputs-changed')
         return False

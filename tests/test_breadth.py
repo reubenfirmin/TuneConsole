@@ -1,26 +1,32 @@
+import pytest
+
+from tests.repository_mock_support import no_database, repository_store
 from yt_playlist.rec import taste_analysis
 
 
-def _tag(store, iid, n, genre, prefix):
-    for i in range(n):
-        t = store.tracks.upsert_track(f"{prefix}{i}", f"{prefix}{i}", "A", None, None)
-        store.tracks.set_track_genre(t, genre)
+@pytest.fixture
+def breadth_store(no_database):
+    return repository_store(
+        rec_query={'genre_play_distribution': {}},
+        genres={'feature_axes': {'Techno': ('techno', None),
+                                 'Hard Rock': ('rock', None),
+                                 'Jazz': ('jazz', None),
+                                 'Hip Hop': ('hip hop', None)}},
+        values={'_read_only': True},
+    )
 
 
-def test_narrow_library_has_low_breadth(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
-    _tag(store, iid, 10, "Techno", "t")          # one family only
-    assert taste_analysis.taste_breadth(store)["breadth"] == 0.0
+def test_narrow_library_has_low_breadth(breadth_store):
+    breadth_store.rec_query.genre_play_distribution.return_value = {'Techno': 10}
+    assert taste_analysis.taste_breadth(breadth_store)["breadth"] == 0.0
 
 
-def test_eclectic_library_has_high_breadth(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
-    for g, pfx in [("Techno", "t"), ("Hard Rock", "r"), ("Jazz", "j"), ("Hip Hop", "h")]:
-        _tag(store, iid, 5, g, pfx)              # four very different families, even mix
-    assert taste_analysis.taste_breadth(store)["breadth"] > 0.9
+def test_eclectic_library_has_high_breadth(breadth_store):
+    breadth_store.rec_query.genre_play_distribution.return_value = {
+        'Techno': 5, 'Hard Rock': 5, 'Jazz': 5, 'Hip Hop': 5,
+    }
+    assert taste_analysis.taste_breadth(breadth_store)["breadth"] > 0.9
 
 
-def test_breadth_zero_when_untagged(store):
-    store.identities.upsert_identity("main", "cred", None, True)
-    store.tracks.upsert_track("x", "X", "A", None, None)   # no genre
-    assert taste_analysis.taste_breadth(store)["breadth"] == 0.0
+def test_breadth_zero_when_untagged(breadth_store):
+    assert taste_analysis.taste_breadth(breadth_store)["breadth"] == 0.0

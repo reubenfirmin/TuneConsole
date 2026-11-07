@@ -44,7 +44,7 @@ def test_lookup_none_on_deezer_error_body(monkeypatch):
 
 def test_waterfall_probe_fills_bpm_and_records_evidence(store, monkeypatch):
     from yt_playlist.providers.waterfall import run_waterfall
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     t1 = store.tracks.upsert_track("v1", "Song", "Artist", "Alb", 200)
     pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1000.0)
     store.playlists.set_playlist_tracks(pid, [t1])

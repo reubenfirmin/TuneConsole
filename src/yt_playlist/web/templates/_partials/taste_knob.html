@@ -4,16 +4,6 @@
         data-target="param-{{ p.name }}" data-default="{{ p.default }}" onclick="resetKnob(this)"
         hx-post="/taste/reset-param" hx-vals='{"name":"{{ p.name }}"}' hx-swap="none" aria-label="Reset {{ p.label }} to default">{{ arrow_icon('reset') }}{% if not compact %} Reset{% endif %}</button>
 {%- endmacro %}
-{% if p.boolean %}
-<div class="knob knob-toggle">
-  <label>
-    <input type="checkbox" id="param-{{ p.name }}" name="value" {% if p.value %}checked{% endif %} aria-describedby="help-param-{{ p.name }}"
-           hx-post="/taste/param" hx-vals='{"name":"{{ p.name }}"}' hx-trigger="change" hx-swap="none">
-    {{ p.label }}
-  </label>
-  <p class="knob-help" id="help-param-{{ p.name }}">{{ p.help }}</p>
-</div>
-{% else %}
 <div class="knob" data-param="{{ p.name }}">
   <div class="knob-head">
     <label for="param-{{ p.name }}">{{ p.label }}</label>
@@ -50,4 +40,3 @@
   {% if p.effective_note %}<p class="knob-origin album-effective-note">{{ p.effective_note }}</p>{% endif %}
   {% if p.effective_reset %}<button type="button" class="btn-ghost" hx-post="/taste/reset-album-tuning" hx-swap="none">Clear temporary album adjustments</button>{% endif %}
 </div>
-{% endif %}

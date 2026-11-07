@@ -15,7 +15,7 @@ from yt_playlist.core.activity import check_stopping, WorkClosing
 
 import numpy as np
 
-from yt_playlist.util import genre_map, net
+from yt_playlist.util import net
 from yt_playlist.util.matching import identity_key, normalize, track_artist
 from yt_playlist.util.thumbnails import best_thumb
 from yt_playlist.rec import artist_model, content_model, embed, embedding_vectors as vectors, rec_params, discovery_pool
@@ -113,7 +113,8 @@ class ContentProjection:
     (artist_model.artist_neighbors); see the TODO in fit() for the seam to fold it in once #28 lands.
     """
 
-    def __init__(self, model, W, aidx=None, AV=None, artist_keys=None):
+    def __init__(self, model, W, aidx=None, AV=None, artist_keys=None, *, genre_axes=None):
+        self.genre_axes = genre_axes
         self.model = model          # embed content model: {'cat': {tok: col}, 'ncat': int, 'cont': [...]}
         self.W = W                  # (F, dim), F = content_dim + artist_dim
         self.aidx = aidx or {}      # {normalized_artist: row} into the collaborative artist vectors (#28)
@@ -126,7 +127,7 @@ class ContentProjection:
         """Augmented feature row: the content vector (genre/subgenre/decade + audio) concatenated with
         the track artist's collaborative vector (#28 §2c). The artist block lets tracks missing audio
         (or even genre) still ground on the artist-relationship signal; a missing block is zeros."""
-        xc = content_model.encode_content(self.model, genre, year, audio)
+        xc = content_model.encode_content(self.model, genre, year, audio,genre_axes=self.genre_axes)
         xc = np.zeros(self.content_dim) if xc is None else xc
         av = np.zeros(self.adim)
         if artist and self.AV is not None:
@@ -150,18 +151,21 @@ class ContentProjection:
         Evaluation disables the precomputed artist block because its fitting history is shared
         with the reference embedding. Production keeps that relational feature.
         """
-        reference = vectors.load_vectors(store)
-        dao = store.rec_query
-        content, audio = dao.track_content(), dao.track_audio_features()
-        artist_vectors = artist_model.load_artist_vectors(store) if include_artist else None
-        refs = store.artists.track_keys(library=True) if include_artist else {}
-        artist_keys = store.artists.name_keys() if include_artist else {}
+        with store.read_view() as reader:
+            reference = vectors.load_vectors(reader)
+            dao = reader.rec_query
+            content, audio = dao.track_content(), dao.track_audio_features()
+            artist_vectors = artist_model.load_artist_vectors(reader) if include_artist else None
+            refs = reader.artists.track_keys(library=True) if include_artist else {}
+            artist_keys = reader.artists.name_keys() if include_artist else {}
+            axes = reader.genres.feature_axes([*(value[0] for value in content.values()),
+                *(row.get('genre') for row in reader.discovery.get_discovered_tracks())])
         return cls.fit_from_inputs(reference, content, audio, lam=lam, training_keys=training_keys,
-                                   artist_vectors=artist_vectors, refs=refs, artist_keys=artist_keys)
+                                   artist_vectors=artist_vectors, refs=refs, artist_keys=artist_keys,genre_axes=axes)
 
     @classmethod
     def fit_from_inputs(cls, reference, content, audio, lam=1.0, *, training_keys=None,
-                        artist_vectors=None, refs=None, artist_keys=None):
+                        artist_vectors=None, refs=None, artist_keys=None, genre_axes=None):
         """Fit detached evidence; each fold still learns its own feature statistics."""
         _, V, idx = reference
         if V is None:
@@ -171,10 +175,10 @@ class ContentProjection:
             idx = {key: row for key, row in idx.items() if key in allowed}
             content = {key: value for key, value in content.items() if key in idx}
             audio = {key: value for key, value in audio.items() if key in idx}
-        model = content_model.build_content_model(content, audio)
+        model = content_model.build_content_model(content, audio,genre_axes=genre_axes)
         _, AV, aidx = artist_vectors if artist_vectors is not None else ([], None, {})
         refs = refs or {}
-        proj = cls(model, None, aidx, AV,artist_keys)
+        proj = cls(model, None, aidx, AV,artist_keys,genre_axes=genre_axes)
         rows = []
         for k in idx:                                   # only library tracks that ARE in the embedding
             g, y = content.get(k, (None, None))
@@ -273,12 +277,14 @@ def _rank_candidates(bridges, pt, dim) -> list[dict]:
             proxy += w * v
         if strength <= 0 or not np.any(proxy):
             continue
-        taste, fits = pt.score(proxy)
-        if taste <= 0:
+        contributions = pt.context_contributions(proxy)
+        if contributions.sum() <= 0:
             continue
+        order = np.argsort(-contributions)[:3]
+        fits = [pt.titles[i] for i in order if contributions[i] > 0]
         because = [n for _, _, n in sorted(bl, key=lambda x: -x[1])[:3]]
         out.append({"cand": cand, "score": round(float(strength), 4),
-                    "because": because, "fits": [t for t, _ in fits]})
+                    "because": because, "fits": fits})
     out.sort(key=lambda c: -c["score"])
     return out
 
@@ -472,7 +478,7 @@ def populate_radio_tracks(ctx, now, seeds=6, per_seed_limit=12) -> int:
     if client is None:
         return 0
     owned = store.rec_query.library_keys()
-    have = {r["identity_key"] for r in store.discovery.get_discovered_tracks()}
+    have = store.discovery.discovered_track_keys()
     added = 0
     seed_tracks = store.charts.top_tracks(seeds)
     for t in seed_tracks:
@@ -515,8 +521,9 @@ def populate_discovered_tracks(ctx, now, budget=4) -> int:
         return 0
     owned = store.rec_query.library_keys()
     have = store.discovery.discovered_source_tokens('album')
-    todo = [a for a in store.discovery.get_discovered_albums() if a["browse_id"] not in have
-            and not store.settings.get_setting("discovery_tracks_fetched:" + a["browse_id"])][:budget]
+    albums = store.discovery.get_discovered_albums()
+    fetched = store.discovery.fetched_albums(a['browse_id'] for a in albums)
+    todo = [a for a in albums if a["browse_id"] not in have and a['browse_id'] not in fetched][:budget]
     n = 0
     for alb in todo:
         try:
@@ -538,17 +545,10 @@ def populate_discovered_tracks(ctx, now, budget=4) -> int:
                                           alb["browse_id"], now,credits=t.get('artists') or data.get('artists'))
             n += 1
         if (data or {}).get("tracks"):
-            store.settings.set_setting("discovery_tracks_fetched:" + alb["browse_id"], "1")
+            store.discovery.remember_album_fetch(alb['browse_id'])
     if n:
         vectors.build_discovered_content_vectors(store)
     return n
-
-
-def _discovery_facet_w(store, genre, now, *, leans=None):
-    """#18 facet overlay for a discovered candidate: its genre-family multiplier, or None to exclude
-    (muted family). Untagged → neutral 1.0."""
-    fam = genre_map.family(genre) if genre else None
-    return discovery_facet_weight(store, fam, now, **({'leans': leans} if leans is not None else {}))
 
 
 def pick_discovered_albums(store, n, now, recent_frac=0.7, *, facet_leans=None):
@@ -563,10 +563,12 @@ def pick_discovered_albums(store, n, now, recent_frac=0.7, *, facet_leans=None):
         return []
     wmap, family_weights = {}, {}
     kept = []
+    axes = store.genres.feature_axes(a.get('genre') for a in albums)
     for a in albums:
-        family = genre_map.family(a["genre"]) if a.get("genre") else None
+        family = axes[a['genre']][0] if a.get('genre') else None
         if family not in family_weights:
-            family_weights[family] = _discovery_facet_w(store, a.get("genre"), now, leans=facet_leans)
+            family_weights[family] = discovery_facet_weight(store, family, now,
+                **({'leans': facet_leans} if facet_leans is not None else {}))
         w = family_weights[family]
         if w is None:                                    # muted family: excluded from discovery
             continue
@@ -629,10 +631,12 @@ def pick_discovered_artists(store, n, now, *, facet_leans=None):
         return []
     scored = []
     family_weights = {}
+    axes = store.genres.feature_axes(a.get('genre') for a in arts)
     for a in arts:
-        family = genre_map.family(a["genre"]) if a.get("genre") else None
+        family = axes[a['genre']][0] if a.get('genre') else None
         if family not in family_weights:
-            family_weights[family] = _discovery_facet_w(store, a.get("genre"), now, leans=facet_leans)
+            family_weights[family] = discovery_facet_weight(store, family, now,
+                **({'leans': facet_leans} if facet_leans is not None else {}))
         w = family_weights[family]
         if w is None:                                    # muted family: excluded from discovery
             continue

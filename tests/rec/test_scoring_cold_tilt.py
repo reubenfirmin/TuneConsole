@@ -3,7 +3,23 @@ without changing the warm path (default content_vecs=None -> library content vec
 import numpy as np
 import pytest
 
+from tests.repository_mock_support import no_database, repository_store
 from yt_playlist.rec import scoring
+
+
+@pytest.fixture
+def store(no_database):
+    return repository_store(
+        settings={'get_setting': None},
+        rec_model={'disliked_identity_keys': set(), 'recent_liked_with_ts': [],
+                   'content_generation': {'model': None, 'library': []}},
+        rec_signals={'recent_mood_events': []},
+        player_events={'recent_skips_with_ts': []},
+        rec_eligibility={'generated_only_keys': set()},
+        history={'play_events_since': [], 'recent_plays_with_ts': []},
+        playlists={'radio_playlist_ids': []},
+        values={'transient_radio_playlists': set()},
+    )
 
 
 def test_apply_mood_default_content_vecs_uses_library_loader(monkeypatch, store):

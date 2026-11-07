@@ -6,6 +6,7 @@ html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
 h2.section { scroll-margin-top: 5rem; }  /* clear the sticky top bar when jumped to */
 
 body {
+  --app-topbar-height: 0px;
   margin: 0;
   font-family: var(--font-sans);
   font-size: var(--type-body);
@@ -63,7 +64,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .topbar nav { display: flex; gap: 0.15rem; margin-left: auto; min-width: 0;
   overflow-x: auto; scrollbar-width: none; }
 .topbar nav::-webkit-scrollbar { display: none; }
-.nav-group { display: contents; }
+.nav-sections, .nav-group { display: contents; }
 .nav-group-label { display: none; }
 .topbar nav a {
   color: var(--dim); font-weight: var(--weight-medium); font-size: var(--type-ui); letter-spacing: 0.01em;
@@ -245,13 +246,24 @@ main:not(.page-clusters) .page-head p {
     width: 100%;
     margin: 0;
     flex: 1 1 auto;
+    min-height: 0;
     flex-direction: column;
     align-items: stretch;
     gap: 1.1rem;
     overflow: visible;
   }
+  /* Keep playback and Tools reachable when the window is short. Only the
+     library/explore links scroll; the Tools popup stays outside that clip. */
+  body:not(:has(.page-clusters)) .topbar .nav-sections {
+    display: flex;
+    flex-direction: column;
+    gap: 1.1rem;
+    min-height: 0;
+    overflow-y: auto;
+  }
   body:not(:has(.page-clusters)) .topbar .nav-group {
     display: flex;
+    flex: none;
     flex-direction: column;
     gap: 0.1rem;
   }
@@ -277,6 +289,7 @@ main:not(.page-clusters) .page-head p {
     border-inline-start: 3px solid var(--control-selected-border);
   }
   body:not(:has(.page-clusters)) .topbar .tools-menu {
+    flex: none;
     width: 100%;
     margin-top: auto;
   }
@@ -304,4 +317,10 @@ main:not(.page-clusters) .page-head p {
   body:not(:has(.page-clusters)) .authbar {
     position: relative;
   }
+}
+
+@media (min-width: 65rem) and (max-height: 55rem) {
+  body:not(:has(.page-clusters)) .topbar { padding-block: 1rem; gap: .75rem; }
+  body:not(:has(.page-clusters)) .topbar .brand { padding-block-end: .5rem; }
+  body:not(:has(.page-clusters)) .topbar nav { gap: .75rem; }
 }

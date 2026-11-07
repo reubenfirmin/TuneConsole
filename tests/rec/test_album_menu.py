@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from tests.core.test_predecessor_writes import installed
 from yt_playlist.rec import album_choices, album_tuning, rec_params
 
 
@@ -14,12 +15,12 @@ def records():
             for i in range(12)]
 
 
-def test_default_menu_reserves_discovery_and_excludes_duplicate_artists(store):
+def test_default_menu_reserves_discovery_and_excludes_duplicate_artists():
     pool = records()
     pool[7]['artist'] = pool[6]['artist']
     pool[8]['artist'] = pool[0]['artist']
     for epoch in range(8):
-        items, policy = album_choices.menu(pool, album_tuning.defaults(store), epoch)
+        items, policy = album_choices.menu(pool, {'novelty': .5}, epoch)
         assert len(items) == len({item['artist'] for item in items}) == 4
         assert policy['discovery_offered'] == policy['discovery_requested'] == 2
         assert policy['coverage_gap'] == 0
@@ -28,29 +29,30 @@ def test_default_menu_reserves_discovery_and_excludes_duplicate_artists(store):
         assert len(policy['eligible_options']) == len(pool)
 
 
-def test_explicit_refresh_gets_four_different_records_and_reports_constraint_shortages(store):
+def test_explicit_refresh_gets_four_different_records_and_reports_constraint_shortages():
     pool = records()
-    first, _ = album_choices.menu(pool, album_tuning.defaults(store))
+    first, _ = album_choices.menu(pool, {'novelty': .5})
     excluded = [item['browse_id'] for item in first]
-    second, policy = album_choices.menu(pool, album_tuning.defaults(store), 1, exclude=excluded)
+    second, policy = album_choices.menu(pool, {'novelty': .5}, 1, exclude=excluded)
     assert len(second) == 4 and not set(excluded) & {item['browse_id'] for item in second}
     assert policy['previous_selection'] == sorted(excluded)
     # A sparse genre/artist pool still supplies a complete set where possible.
-    sparse, _ = album_choices.menu(pool[:4], album_tuning.defaults(store), exclude=excluded)
+    sparse, _ = album_choices.menu(pool[:4], {'novelty': .5}, exclude=excluded)
     assert len(sparse) == 4
 
 
-def test_discovery_shortage_and_genre_restriction_remain_explicit(store):
+def test_discovery_shortage_and_genre_restriction_remain_explicit():
     pool = records()[:7]
-    items, policy = album_choices.menu(pool, album_tuning.defaults(store), genres=['techno'])
+    axes = {'Techno': ('techno', 'techno'), 'Jazz': ('jazz', 'jazz')}
+    items, policy = album_choices.menu(pool, {'novelty': .5}, genres=['techno'], genre_axes=axes)
     assert all(item['genre'] == 'Techno' for item in items)
     assert policy['discovery_requested'] == 2 and policy['discovery_offered'] == 1
     assert policy['coverage_gap'] == 1
     assert len(items) == 4
-    assert album_choices.menu(pool, album_tuning.defaults(store), genres=['not-present'])[0] == []
+    assert album_choices.menu(pool, {'novelty': .5}, genres=['not-present'], genre_axes=axes)[0] == []
 
 
-def test_comfort_and_novelty_change_familiarity_and_reach_without_an_era_bias(store):
+def test_comfort_and_novelty_change_familiarity_and_reach_without_an_era_bias():
     pool = records()[:6]
     near, familiar = album_choices.menu(pool, {'novelty': 0})
     far, novel = album_choices.menu(pool, {'novelty': 1})
@@ -75,17 +77,44 @@ def test_album_overrides_expire_without_changing_shared_taste(store):
     for bad in (float('nan'), float('inf'), -.1, True):
         with pytest.raises(ValueError):
             album_tuning.apply(store, 100, {'novelty': bad}, [])
-    store.settings.set_setting(album_tuning.SETTING, json.dumps({
-        'until': 1000, 'values': defaults, 'genres': 'jazz'}))
-    assert album_tuning.state(store, 101)['genres'] == []
+    before = list(store.conn.iterdump())
+    current = album_tuning.state(store, 101)
+    with pytest.raises(ValueError, match='Unsupported temporary album control selections'):
+        store.settings.set_setting(album_tuning.SETTING, json.dumps({
+            'until': 1000, 'values': defaults, 'genres': 'jazz'}))
+    assert list(store.conn.iterdump()) == before
+    assert album_tuning.state(store, 101) == current
     store.settings.set_setting(album_tuning.SETTING, json.dumps({'until': 1000,
         'values': {'discovery': .75, 'stretch': .2, 'variety': .4, 'recency': .5}, 'genres': ['jazz']}))
     assert album_tuning.state(store, 101) == {
         'values': {'novelty': .75}, 'genres': ['jazz'], 'remaining': 899}
 
 
+@pytest.mark.parametrize('installed', [93], indirect=True)
+def test_installed_album_controls_decode_legacy_values_and_ignore_malformed_genres(installed):
+    store, _ = installed
+    assert not store.conn.execute(
+        "SELECT 1 FROM main.sqlite_schema WHERE name='album_menu_controls'").fetchone()
+    defaults = album_tuning.defaults(store)
+    malformed = json.dumps({'until': 1000, 'values': defaults, 'genres': 'jazz'})
+    store.settings.set_setting(album_tuning.SETTING, malformed)
+    assert store.settings.get_setting(album_tuning.SETTING) == malformed
+    assert album_tuning.state(store, 101) == {
+        'values': defaults, 'genres': [], 'remaining': 0}
+    legacy = json.dumps({'until': 1000, 'values': {
+        'discovery': .75, 'stretch': .2, 'variety': .4, 'recency': .5}, 'genres': ['jazz']})
+    store.settings.set_setting(album_tuning.SETTING, legacy)
+    assert store.settings.get_setting(album_tuning.SETTING) == legacy
+    assert album_tuning.state(store, 101) == {
+        'values': {'novelty': .75}, 'genres': ['jazz'], 'remaining': 899}
+    assert album_tuning.state(store, 1000) == {
+        'values': defaults, 'genres': [], 'remaining': 0}
+    assert store.settings.get_setting('radio_tuning') is None
+
+
 @pytest.mark.parametrize('action', ['known', 'saved'])
 def test_current_album_state_and_reversals_reconcile_without_refitting(store, action):
+    store.accounts.upsert_account('Main', 'credentials', None, True)
     prepared = records()[6:10]
     target = prepared[0]
 
@@ -121,6 +150,7 @@ def test_current_album_state_and_reversals_reconcile_without_refitting(store, ac
 
 @pytest.mark.parametrize('classification', ['known', 'rediscovery'])
 def test_prepared_familiarity_does_not_survive_its_current_state_or_lose_its_origin(store, classification):
+    store.accounts.upsert_account('Main', 'credentials', None, True)
     prepared = [{**records()[6], 'classification': classification, 'unsaved_classification': 'familiar_artist'}]
     assert album_choices.eligible(store, prepared, 100)[0]['classification'] == 'familiar_artist'
     album_choices.set_feedback(store, prepared[0]['browse_id'], 'known', 101)

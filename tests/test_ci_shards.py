@@ -1,13 +1,16 @@
 """Exact parametrized-case coverage and measurements across isolated serial runners."""
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
 
-from ci_test_shards import BASELINE, partition, pytest_configure as configure_shard, verify
+from ci_test_shards import BASELINE, DIAGNOSTIC_BYTES, _diagnostic, load_report, partition, pytest_configure as configure_shard, refresh_baseline, verify
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "packaging"))
 from ci_plan import timing_source
@@ -36,9 +39,9 @@ def test_retained_measured_timings_balance_four_whole_file_groups(suite):
     assert set(owners.values()) == {1, 2, 3, 4}
     assert sum(loads) == pytest.approx(sum(row["seconds"] for row in timings.values()))
     assert max(loads) - min(loads) < 2
-    assert baseline["run"].endswith("/40050066995")
+    assert baseline["run"].startswith('https://github.com/reubenfirmin/TuneConsole/actions/runs/')
     assert baseline["failed_cases"]  # Diagnostic timing input must not claim a passing source run.
-    assert baseline['refresh_run'].endswith('/40193589708')
+    assert len(nodes) == baseline['measurements'][suite]['cases']
 
 
 def reports(total=2, nodeids=None):
@@ -94,6 +97,28 @@ def test_every_parameter_case_executes_once_and_all_phases_feed_timings():
     assert result["phase_seconds"] == pytest.approx({"setup": .3, "call": .3, "teardown": .3})
 
 
+@pytest.mark.parametrize("total", [1, 2, 4])
+def test_browser_budget_counts_all_runners_and_is_independent_of_case_count(total):
+    rows = reports(total, [f"file-{n}.py::test_case" for n in range(8)])
+    for row in rows:
+        row.update(suite="browser", elapsed_seconds=1200 / total)
+    assert verify(rows, "browser", total)["test_runner_minutes"] == 20
+    rows[-1]["elapsed_seconds"] += .001
+    with pytest.raises(ValueError, match="aggregate.*1200s total budget"):
+        verify(rows, "browser", total)
+    for row in rows:
+        row["suite"] = "unit"
+    assert verify(rows, "unit", total)["test_runner_minutes"] > 20
+
+
+@pytest.mark.parametrize("elapsed", [None, "300", float("nan"), float("inf"), -1])
+def test_invalid_process_timings_cannot_establish_the_budget(elapsed):
+    rows = reports()
+    rows[0]["elapsed_seconds"] = elapsed
+    with pytest.raises(ValueError, match="invalid elapsed time"):
+        verify(rows, "unit")
+
+
 def test_serial_control_requires_explicit_total_and_has_identical_case_coverage():
     rows = reports()
     control = deepcopy(rows[0])
@@ -147,6 +172,241 @@ def test_intentional_setup_skips_are_retained_as_completed_cases():
     assert result["cases"] == 3 and result["skipped"] == [node]
 
 
+def diagnostic_reports():
+    rows = reports()
+    browser = reports(nodeids=['browser/' + node for node in rows[0]['expected']])
+    for row in browser:
+        row.update(suite='browser', elapsed_seconds=700)
+    return rows + browser
+
+
+def test_failed_complete_receipts_refresh_estimates_without_accepting_coverage_or_browser_budget():
+    rows = diagnostic_reports()
+    node = rows[0]['executions'][0]
+    rows[0]['tests'][node]['call']['outcome'] = 'failed'
+    rows[0]['exitstatus'] = 1
+    result = refresh_baseline(rows, 'https://example.test/run', total=2)
+    assert result['failed_cases'] == [node]
+    assert result['unit']['one.py']['seconds'] == pytest.approx(.6)
+    assert result['measurements']['browser']['shard_seconds'] == [700, 700]
+    assert result['measurements']['unit']['case_digest'] == verify(reports(), 'unit')['case_digest']
+    with pytest.raises(ValueError, match='did not pass'):
+        verify(rows[:2], 'unit')
+    with pytest.raises(ValueError, match='1200s total budget'):
+        verify(rows[2:], 'browser')
+
+
+@pytest.mark.parametrize('fault', ['missing', 'duplicate', 'repeated-phase', 'active', 'journal',
+                                  'interrupted', 'missing-call', 'exit', 'revision', 'missing-suite', 'overlap'])
+def test_diagnostic_refresh_rejects_incomplete_or_inconsistent_work(fault):
+    rows = diagnostic_reports()
+    node = rows[0]['executions'][0]
+    if fault == 'missing':
+        rows[0]['tests'].pop(node)
+    elif fault == 'duplicate':
+        rows[0]['executions'].append(node)
+    elif fault == 'repeated-phase':
+        rows[0]['repeated_phases'].append([node, 'call'])
+    elif fault == 'active':
+        rows[0]['active'] = {'nodeid': node, 'phase': 'call'}
+    elif fault == 'journal':
+        rows[0]['journal_incomplete'] = True
+    elif fault in ('interrupted', 'missing-call'):
+        rows[0]['tests'][node].pop('teardown' if fault == 'interrupted' else 'call')
+    elif fault == 'exit':
+        rows[0]['exitstatus'] = 2
+    elif fault == 'revision':
+        for row in rows[2:]:
+            row['revision'] = 'another source'
+    elif fault == 'overlap':
+        rows[2:] = deepcopy(rows[:2])
+        for row in rows[2:]:
+            row['suite'] = 'browser'
+    else:
+        rows = rows[:2]
+    with pytest.raises(ValueError):
+        refresh_baseline(rows, 'https://example.test/run', total=2)
+
+
+def test_completed_setup_failure_retains_its_cost_and_identity_in_diagnostic_estimates():
+    rows = diagnostic_reports()
+    node = rows[0]['executions'][0]
+    phases = rows[0]['tests'][node]
+    phases['setup']['outcome'] = 'failed'
+    phases.pop('call')
+    rows[0]['exitstatus'] = 1
+    result = refresh_baseline(rows, 'https://example.test/run', total=2)
+    assert result['failed_cases'] == [node]
+    assert result['unit']['one.py']['seconds'] == pytest.approx(.5)
+
+
+def test_explicit_baseline_cli_never_emits_passing_coverage_for_a_failed_run(tmp_path):
+    rows = diagnostic_reports()
+    node = rows[0]['executions'][0]
+    rows[0]['tests'][node]['call']['outcome'] = 'failed'
+    rows[0]['exitstatus'] = 1
+    for row in rows:
+        directory = tmp_path / f"{row['suite']}-{row['index']}"
+        directory.mkdir()
+        (directory / 'shard.json').write_text(json.dumps(row))
+    command = [sys.executable, str(BASELINE.parent.parent / 'ci_test_shards.py'), str(tmp_path)]
+    output = tmp_path / 'baseline.json'
+    subprocess.run([*command, 'baseline', '--total=2', '--run=https://example.test/run',
+                    '--output=' + str(output)], check=True, capture_output=True, text=True)
+    assert json.loads(output.read_text())['failed_cases'] == [node]
+    rejected = subprocess.run([*command, 'unit', '--total=2'], capture_output=True, text=True)
+    assert rejected.returncode != 0 and 'did not pass' in rejected.stderr
+    assert not (tmp_path / 'unit-timings.json').exists()
+    assert not (tmp_path / 'browser-timings.json').exists()
+
+
+def test_killed_shard_retains_completed_phases_failure_details_and_active_call(tmp_path):
+    report = tmp_path / 'evidence' / 'shard.json'
+    blocked = tmp_path / 'blocked'
+    case = tmp_path / 'test_receipts.py'
+    case.write_text('''from pathlib import Path
+import time
+def test_pass():
+    assert True
+def test_failure():
+    print("retained captured output")
+    assert False, "retained assertion diagnostic"
+def test_block():
+    Path(__file__).with_name("blocked").write_text("call entered")
+    time.sleep(300)
+def test_unknown_tail():
+    raise AssertionError("must remain unexecuted")
+''')
+    configuration = tmp_path / 'pytest.ini'
+    configuration.write_text('[pytest]\n')
+    env = {**os.environ, 'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1'}
+    with (tmp_path / 'child.log').open('w') as output:
+        child = subprocess.Popen([sys.executable, '-m', 'pytest', '-p', 'ci_test_shards',
+            '-c', str(configuration), '--rootdir', str(tmp_path), str(case),
+            '--ci-shard=1/1', '--ci-suite=unit', '--ci-shard-report=' + str(report)],
+            cwd=Path(__file__).resolve().parents[1], env=env, stdout=output, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 30
+            while not blocked.exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            assert blocked.exists(), (tmp_path / 'child.log').read_text()
+            child.kill()
+            child.wait(timeout=5)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+    recovered = load_report(report)
+    nodes = recovered['selected']
+    assert len(nodes) == 4
+    assert recovered['executions'] == nodes[:3]
+    assert recovered['active'] == {'nodeid': nodes[2], 'phase': 'call'}
+    for node in nodes[:2]:
+        assert set(recovered['tests'][node]) == {'setup', 'call', 'teardown'}
+    failed = recovered['tests'][nodes[1]]['call']
+    assert failed['outcome'] == 'failed'
+    assert 'retained assertion diagnostic' in failed['diagnostic']
+    assert 'retained captured output' in failed['captured']
+    assert set(recovered['tests'][nodes[2]]) == {'setup'}
+    assert nodes[3] not in recovered['tests'] and 'exitstatus' not in recovered
+    with pytest.raises(ValueError, match='did not pass'):
+        verify([recovered], 'unit', total=1)
+    # Even a forged success cannot turn the interrupted active call into coverage.
+    recovered['exitstatus'] = 0
+    with pytest.raises(ValueError, match='incomplete'):
+        verify([recovered], 'unit', total=1)
+    with report.with_suffix('.events.jsonl').open('ab') as stream:
+        stream.write(b'{"event":"partial')
+    partial = load_report(report)
+    assert partial['journal_incomplete'] and partial['tests'] == recovered['tests']
+
+
+@pytest.mark.parametrize('change_directory', [False, True])
+def test_journal_keeps_its_io_during_product_fault_injection(tmp_path, monkeypatch, change_directory):
+    import ci_test_shards as journal
+
+    monkeypatch.chdir(tmp_path)
+    shard = journal.Shard(None, 1, 1, Path('evidence/shard.json'), 'unit', {})
+    product_directory = tmp_path / 'product'
+    product_directory.mkdir()
+    node = 'test_product.py::test_fault'
+    shard.report.update(expected=[node], selected=[node], file_owners={'test_product.py': 1}, estimated_seconds=[1])
+    def fail(*args, **kwargs):
+        raise OSError('product-only fault')
+    with monkeypatch.context() as patch:
+        if change_directory:
+            patch.chdir(product_directory)
+        patch.setattr(json, 'dumps', fail)
+        patch.setattr(os, 'fsync', fail)
+        assert journal._diagnostic('failure details') == 'failure details'
+        shard.event('start', nodeid=node)
+        for phase in ('setup', 'call', 'teardown'):
+            shard.event('phase', nodeid=node, phase=phase)
+            shard.event('outcome', nodeid=node, phase=phase, result={'outcome': 'passed', 'seconds': .01})
+        shard.event('end', nodeid=node)
+        shard.pytest_sessionfinish(None, 0)
+    recovered = load_report(shard.path)
+    assert verify([recovered], 'unit', total=1)['cases'] == 1
+    events = [json.loads(line) for line in shard.journal.read_text().splitlines()]
+    assert [event['sequence'] for event in events] == list(range(len(events)))
+    assert events[-1]['event'] == 'finish'
+    assert shard.path == tmp_path / 'evidence/shard.json'
+    assert not (product_directory / 'evidence').exists()
+
+
+def test_real_journal_sync_failure_propagates_without_reusing_sequence_or_certifying_completion(tmp_path, monkeypatch):
+    import ci_test_shards as journal
+
+    shard = journal.Shard(None, 1, 1, tmp_path / 'shard.json', 'unit', {})
+    shard.report.update(expected=['test_product.py::test_fault'], selected=['test_product.py::test_fault'],
+                        file_owners={'test_product.py': 1}, estimated_seconds=[1])
+    def fail(fd):
+        raise OSError('actual journal sync failure')
+    monkeypatch.setattr(shard, '_sync', fail)
+    with pytest.raises(OSError, match='actual journal sync failure'):
+        shard.event('start', nodeid='test_product.py::test_fault')
+    before = shard.journal.read_bytes()
+    with pytest.raises(OSError, match='unavailable after a recording failure'):
+        shard.event('end', nodeid='test_product.py::test_fault')
+    shard.pytest_sessionfinish(None, 3)
+    assert shard.journal.read_bytes() == before
+    events = [json.loads(line) for line in before.splitlines()]
+    assert [event['sequence'] for event in events] == [0]
+    recovered = load_report(shard.path)
+    assert recovered['journal_incomplete'] and 'exitstatus' not in recovered
+    assert recovered['active'] == {'nodeid': 'test_product.py::test_fault', 'phase': 'starting'}
+    with pytest.raises(ValueError, match='did not pass'):
+        verify([recovered], 'unit', total=1)
+
+
+def test_failed_terminal_sync_cannot_certify_a_passing_shard(tmp_path, monkeypatch):
+    import ci_test_shards as journal
+
+    shard = journal.Shard(None, 1, 1, tmp_path / 'shard.json', 'unit', {})
+    node = 'test_product.py::test_fault'
+    shard.report.update(expected=[node], selected=[node], file_owners={'test_product.py': 1}, estimated_seconds=[1])
+    shard.event('start', nodeid=node)
+    for phase in ('setup', 'call', 'teardown'):
+        shard.event('outcome', nodeid=node, phase=phase, result={'outcome': 'passed', 'seconds': .01})
+    shard.event('end', nodeid=node)
+    def fail(fd):
+        raise OSError('terminal sync failed')
+    monkeypatch.setattr(shard, '_sync', fail)
+    with pytest.raises(OSError, match='terminal sync failed'):
+        shard.pytest_sessionfinish(None, 0)
+    recovered = load_report(shard.path)
+    assert recovered['journal_incomplete'] and 'exitstatus' not in recovered
+    with pytest.raises(ValueError, match='did not pass'):
+        verify([recovered], 'unit', total=1)
+
+
+def test_retained_diagnostics_are_bounded_and_keep_exception_tail():
+    text = 'first line\n' + ('verbose output\n' * DIAGNOSTIC_BYTES) + 'last exception'
+    retained = _diagnostic(text)
+    assert len(json.dumps(retained, ensure_ascii=False).encode()) <= DIAGNOSTIC_BYTES
+    assert retained.startswith('first line') and retained.endswith('last exception')
+
+
 def test_all_shards_pin_one_trusted_unexpired_baseline_artifact():
     class Source:
         repository = "owner/repo"
@@ -163,7 +423,8 @@ def test_all_shards_pin_one_trusted_unexpired_baseline_artifact():
                  "head_repository": {"full_name": "owner/repo"},
                  "id": 123, "run_attempt": 2, 'run_started_at': '2026-10-26T12:00:00Z'},
             ]}
-    assert timing_source(Source()) == {"timing_run": "123", "timing_artifact": "55"}
+    assert timing_source(Source(), {'refreshed_at': '2026-10-25T12:33:40Z'}) == {
+        "timing_run": "123", "timing_artifact": "55"}
 
 
 @pytest.mark.parametrize('started,expected', [

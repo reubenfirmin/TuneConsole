@@ -4,8 +4,10 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -54,7 +56,8 @@ def test_ci_is_serial_and_default_count_is_bounded(tmp_path, monkeypatch):
 def mini_suite(tmp_path):
     """Both controller and workers load the real plugins with an isolated lock."""
     repo = Path(__file__).resolve().parents[1]
-    (tmp_path / "pytest.ini").write_text("[pytest]\ntestpaths = tests\n")
+    (tmp_path / "pytest.ini").write_text(
+        f"[pytest]\ntestpaths = tests\npythonpath = {repo}\naddopts = -p pytest_coverage_guard\n")
     (tmp_path / "tests").mkdir()
     lock_path = tmp_path / "owner.lock"
     (tmp_path / "conftest.py").write_text(
@@ -85,12 +88,51 @@ def mini_suite(tmp_path):
         )
 
     def run(*args, **env):
-        return subprocess.run(
+        child = subprocess.Popen(
             [sys.executable, "-m", "pytest", "-p", "xdist.plugin", "-q", *args],
             cwd=tmp_path,
             env={**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTEST_ADDOPTS": "",
-                 "CI": "", **env}, capture_output=True, text=True, timeout=30,
+                 "CI": "", **env}, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
         )
+        completed = None
+        try:
+            stdout, stderr = child.communicate(timeout=30)
+            completed = subprocess.CompletedProcess(child.args, child.returncode, stdout, stderr)
+            return completed
+        finally:
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait(timeout=5)
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            # A reaped coordinator does not establish that its worker/browser
+            # group has stopped. Verify the owned group before releasing files.
+            deadline = time.monotonic() + 2
+            while True:
+                remaining = []
+                for path in Path('/proc').glob('[0-9]*/stat'):
+                    try:
+                        state, _, group, *_ = path.read_text().rsplit(')', 1)[1].split()
+                    except FileNotFoundError:
+                        continue
+                    if int(group) == child.pid and state != 'Z':
+                        remaining.append(int(path.parent.name))
+                if not remaining:
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f'Owned child group {child.pid} still running: {remaining}')
+                time.sleep(.01)
+            if completed is not None:
+                completed.cleanup_receipt = {'group': child.pid, 'remaining': remaining}
 
     return tmp_path, lock_path, run
 
@@ -109,18 +151,21 @@ def test_full_run_executes_every_case_once_on_parallel_file_workers(mini_suite):
     assert json.loads(lock_path.read_text())["pid"] not in {record["pid"] for record in records.values()}
 
 
-@pytest.mark.parametrize("args,env,count", [
-    (("tests/test_one.py",), {}, 2),
-    (("-n", "0"), {}, 4),
-    ((), {"CI": "true"}, 4),
+@pytest.mark.parametrize("args,env,count,locked", [
+    (("tests/test_one.py",), {}, 2, False),
+    (("-n", "0"), {}, 4, True),
+    ((), {"CI": "true"}, 4, True),
 ])
-def test_focused_override_and_ci_runs_remain_serial(mini_suite, args, env, count):
+def test_focused_override_and_ci_runs_remain_serial(mini_suite, args, env, count, locked):
     root, lock_path, run = mini_suite
     result = run(*args, **env)
     assert result.returncode == 0, result.stdout + result.stderr
     pids = [json.loads(path.read_text())["pid"] for path in root.glob("*-*.json")]
     assert len(pids) == count
-    assert set(pids) == {json.loads(lock_path.read_text())["pid"]}
+    assert len(set(pids)) == 1
+    assert lock_path.exists() is locked
+    if locked:
+        assert set(pids) == {json.loads(lock_path.read_text())["pid"]}
 
 
 def test_explicit_workers_cannot_parallelize_a_focused_check(mini_suite):
@@ -136,6 +181,171 @@ def test_worker_failures_fail_the_session(mini_suite):
     result = run(FAIL_PROBE="1")
     assert result.returncode == 1, result.stdout + result.stderr
     assert "4 failed" in result.stdout
+
+
+@pytest.mark.parametrize("with_coverage", [False, True])
+def test_coordinator_records_live_progress_from_every_worker(mini_suite, with_coverage):
+    root, _, run = mini_suite
+    for module in (root / 'tests').glob('test_*.py'):
+        with module.open('a') as stream:
+            stream.write('''
+@pytest.fixture(autouse=True)
+def sqlite_temporary_storage(request):
+    import sqlite3
+    from contextlib import closing
+    directory = request.config._sqlite_test_storage
+    with closing(sqlite3.connect('')) as connection:
+        connection.execute('PRAGMA cache_size=-16')
+        connection.execute('CREATE TABLE probe(value BLOB)')
+        connection.executemany('INSERT INTO probe VALUES (zeroblob(65536))', [()] * 8)
+        connection.commit()
+        files = []
+        for descriptor in Path('/proc/self/fd').iterdir():
+            try:
+                target = str(descriptor.readlink())
+            except FileNotFoundError:
+                continue
+            if 'etilqs_' in target:
+                files.append(target.removesuffix(' (deleted)'))
+        assert files and all(Path(path).is_relative_to(directory) for path in files), files
+        usage = os.statvfs(directory)
+        Path(f'{NAME}-{request.node.callspec.params["case"]}-sqlite.json').write_text(json.dumps({
+            'directory': str(directory), 'files': files,
+            'free_bytes': usage.f_bavail * usage.f_frsize, 'free_inodes': usage.f_favail}))
+''')
+    progress = root / "progress.jsonl"
+    options = ["--test-progress", str(progress)]
+    if with_coverage:
+        options += ["-n", "2", "-p", "pytest_cov.plugin", "--cov=.", "--cov-context=test", "--cov-report=",
+                    "--cov-config=" + str(Path(__file__).resolve().parents[1] / "pyproject.toml")]
+    result = run(*options)
+    assert result.returncode == 0, result.stdout + result.stderr
+    events = [json.loads(line) for line in progress.read_text().splitlines()]
+    assert len([row for row in events if row["event"] == "start"]) == 4
+    assert len([row for row in events if row["event"] == "end"]) == 4
+    phases = [row for row in events if row["event"] == "phase"]
+    assert len(phases) == 12
+    assert {row["worker"] for row in phases} == {"gw0", "gw1"}
+    assert all(row["outcome"] == "passed" for row in phases)
+    assert events[-1]["event"] == "finish" and events[-1]["exitstatus"] == 0
+    assert "start tests/test_one.py::test_probe[0]" in result.stdout
+    storage = [json.loads(path.read_text()) for path in root.glob('*-sqlite.json')]
+    assert len(storage) == 4 and len({row['directory'] for row in storage}) == 2
+    assert all(row['free_bytes'] > 0 and row['free_inodes'] > 0 for row in storage)
+    assert all(not Path(row['directory']).parent.exists() for row in storage)
+    if with_coverage:
+        from coverage import Coverage
+
+        coverage = Coverage(data_file=str(root / ".coverage"))
+        coverage.load()
+        assert {f"tests/test_{name}.py::test_probe[{case}]|run" for name in ("one", "two") for case in (0, 1)} <= (
+            coverage.get_data().measured_contexts())
+
+
+def test_coverage_without_explicit_workers_keeps_the_serial_controller(mini_suite):
+    root, _, run = mini_suite
+    result = run("-p", "pytest_cov.plugin", "--cov=local_test_workers", "--cov-report=",
+                 "--cov-config=" + str(Path(__file__).resolve().parents[1] / "pyproject.toml"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    pids = [json.loads(path.read_text())["pid"] for path in root.glob("*-*.json")]
+    assert len(pids) == 4 and len(set(pids)) == 1
+
+
+def test_parallel_workers_remove_explicit_basetemp(mini_suite):
+    root, _, run = mini_suite
+    (root / "tests" / "test_temp.py").write_text(
+        "def test_temp(tmp_path, tmp_path_factory):\n"
+        "    (tmp_path / 'fixture.db').write_bytes(b'disposable')\n"
+        "    shared = tmp_path_factory.mktemp('shared')\n"
+        "    (shared / 'fixture.db').write_bytes(b'disposable')\n"
+    )
+    basetemp = root / "temp"
+    result = run("--basetemp", str(basetemp))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "5 passed" in result.stdout
+    assert not basetemp.exists()
+
+
+@pytest.mark.parametrize('ending,exitstatus', [('passed', 0), ('failed', 1), ('interrupt', 2)])
+def test_fixture_files_survive_finalizers_and_are_removed_afterward(mini_suite, ending, exitstatus):
+    root, _, run = mini_suite
+    (root / 'tests' / 'test_custody.py').write_text('''import json
+import os
+from pathlib import Path
+import sqlite3
+import pytest
+
+@pytest.fixture
+def owner(tmp_path):
+    database = tmp_path / 'owned.sqlite3'
+    with sqlite3.connect(database) as connection:
+        connection.execute('CREATE TABLE retained(value)')
+    try:
+        yield database
+    finally:
+        with sqlite3.connect(database) as connection:
+            assert connection.execute('SELECT count(*) FROM retained').fetchone()[0] == 0
+        Path('finalized.json').write_text(json.dumps({'workspace': str(tmp_path)}))
+
+def test_first(owner):
+    assert owner.is_file()
+    if os.environ['ENDING'] == 'interrupt':
+        raise KeyboardInterrupt('Controlled fixture-custody interruption')
+    assert os.environ['ENDING'] != 'failed', 'Controlled assertion failure'
+
+def test_next():
+    assert not Path(json.loads(Path('finalized.json').read_text())['workspace']).exists()
+''')
+    basetemp = root / 'custody-temp'
+    result = run('tests/test_custody.py', '--basetemp', str(basetemp), ENDING=ending)
+    assert result.returncode == exitstatus, result.stdout + result.stderr
+    observation = json.loads((root / 'finalized.json').read_text())
+    assert not Path(observation['workspace']).exists()
+    assert not basetemp.exists()
+    assert 'unable to open database file' not in result.stdout + result.stderr
+    if ending != 'interrupt':
+        expected = '2 passed' if ending == 'passed' else '1 failed, 1 passed'
+        assert expected in result.stdout  # The following cleanup assertion passed.
+
+
+def test_parallel_runtime_stop_keeps_storage_until_worker_finalizers_finish(mini_suite):
+    root, _, run = mini_suite
+    for name in ('one', 'two'):
+        (root / 'tests' / f'test_{name}.py').write_text('''import json
+from pathlib import Path
+import sqlite3
+import time
+import pytest
+
+@pytest.fixture
+def owner(tmp_path):
+    database = tmp_path / 'owned.sqlite3'
+    with sqlite3.connect(database) as connection:
+        connection.execute('CREATE TABLE retained(value)')
+    name = Path(__file__).stem
+    Path(name + '.started.json').write_text(json.dumps({'workspace': str(tmp_path)}))
+    try:
+        yield database
+    finally:
+        time.sleep(.2)
+        with sqlite3.connect(database) as connection:
+            assert connection.execute('SELECT count(*) FROM retained').fetchone()[0] == 0
+        Path(name + '.finalized.json').write_text(json.dumps({'workspace': str(tmp_path)}))
+
+def test_interrupted(owner):
+    time.sleep(10)
+''')
+    basetemp = root / 'parallel-custody-temp'
+    result = run('--basetemp', str(basetemp), '--test-time-limit=2')
+    assert result.returncode == 2, result.stdout + result.stderr
+    started = list(root.glob('*.started.json'))
+    assert len(started) == 2, result.stdout + result.stderr
+    for path in started:
+        observation = json.loads(path.read_text())
+        assert path.with_name(path.name.replace('.started.', '.finalized.')).is_file(), result.stdout + result.stderr
+        assert not Path(observation['workspace']).exists()
+    assert not basetemp.exists()
+    assert 'unable to open database file' not in result.stdout + result.stderr
 
 
 def test_lingering_worker_barrier_blocks_admission_before_collection(mini_suite):

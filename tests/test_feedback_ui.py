@@ -2,11 +2,11 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
-from tests.test_mode_cards_route import prepare_home
+from tests.home_fixture_support import publish_menu, returning_listener
 
 
 def _seed(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     store.tracks.upsert_track("v1", "Hit", "Fav", None, None)
     store.tracks.upsert_track("v2", "Bench", "Fav", None, None)   # deep cut -> appears in for_you
     now = 1000.0
@@ -21,21 +21,12 @@ def test_home_proto_curation_not_pre_listen_taste_chips(store):
     # The Home proto-playlists are drafts you curate before listening, so each row offers a plain
     # "remove from this playlist", NOT taste feedback that only makes sense after hearing a track.
     # Cards are now lazy-loaded; assert against /home/cards instead of /.
-    import numpy as np
-    from yt_playlist.rec import mode_surfaces as ms
     _, c = _seed(store)
-    store.modes.replace_modes([
-        {"mode_id": 1, "label": "a", "families": [["house", 1]],
-         "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 80, "rep_keys": []},
-    ], retired_ids=[], now=1000.0)
-    payload = {"1": {}}
-    for surf in ms.CARD_SURFACES:
-        payload["1"][surf] = [{"key": f"{surf}{i}", "video_id": f"{surf}{i}", "title": f"Song {surf} {i}",
-                               "artist": f"Art {i}", "album": "", "thumbnail": None,
-                               "plays": 0, "reason": "", "lane": "", "genre": ""} for i in range(4)]
-    store.rec_proposals.put_proposals("mode_bundles", payload, 1000.0)
-    prepare_home(store)
-    html = c.get("/home/cards").text
+    publish_menu(store, now=1000)
+    returning_listener(store, 'mixes', now=1000)
+    response = c.get("/home/cards")
+    assert response.status_code == 200
+    html = response.text
     assert "gen-rm" in html and "Remove from this playlist" in html
     for chip in ("More like this", "Not the vibe", "Wrong era", "Too mainstream", "Already know it"):
         assert chip not in html
@@ -65,7 +56,7 @@ def test_mute_artist_via_chip(store):
 
 
 def test_feedback_axis_routes_through_graduation_and_eventually_moves_weight(store):
-    iid = store.identities.upsert_identity("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", "cred", None, True)
     from fastapi.testclient import TestClient
     from yt_playlist.web.app import create_app
     from tests.conftest import FakeClient
@@ -73,7 +64,7 @@ def test_feedback_axis_routes_through_graduation_and_eventually_moves_weight(sto
                    base_url="http://127.0.0.1")
 
     # Why-chip steering goes through the graduation ledger now (#43 / §4b), not a direct nudge: a single
-    # event moves the ledger but leaves the permanent weight neutral (it is below THEME_THRESHOLD).
+    # event moves the ledger but leaves the permanent weight neutral (it is below theme_threshold).
     c.post("/recs/feedback", data={"item": "a|b", "kind": "less", "axis": "era:1990"})
     assert store.rec_model.get_weights(now=1.0).get("era:1990", 1.0) == 1.0     # one event: ledger only, weight untouched
     assert (store.rec_signals.get_theme("era:1990") or 0) < 0

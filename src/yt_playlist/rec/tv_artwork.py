@@ -17,11 +17,7 @@ def request(store, name, now):
     if store.artists.resolve(name) is None:
         return False
     key = search_squash(name)
-    requests = store.rec_proposals.get_proposals(REQUESTS) or {}
-    if key not in requests:
-        requests[key] = name
-        store.rec_proposals.put_proposals(REQUESTS, dict(list(requests.items())[-LIMIT:]), now)
-    return True
+    return store.tv.request_artwork(key, name, now)
 
 
 def images(store, name):
@@ -34,11 +30,15 @@ def images(store, name):
         summary = store.wiki.get(f'artist:{store.artists.key(aid)}')
         if summary and summary.get('found') and summary.get('thumbnail'):
             photos.append(summary['thumbnail'])
-    for note in (store.rec_proposals.get_proposals('album_notes') or {}).values():
+    notes = store.memoized_read('tv-artwork-notes',
+        lambda: store.rec_proposals.get_proposals('album_notes') or {})
+    for note in notes.values():
         art = note.get('artwork') or {}
         if search_squash(note.get('artist') or '') == key and art.get('kind') == 'artist' and art.get('url'):
             photos.append(art['url'])
-    cached = (store.rec_proposals.get_proposals(SURFACE) or {}).get(key, {})
+    artwork = store.memoized_read('tv-artwork-images',
+        lambda: store.rec_proposals.get_proposals(SURFACE) or {})
+    cached = artwork.get(key, {})
     photos.extend(cached.get('images', []))
     return list(dict.fromkeys(photos))[:6], cached
 
@@ -52,6 +52,8 @@ def prepare(store, client, names, now):
     if not pending:
         return False
     name = pending[0]
+    key = search_squash(name)
+    observation = store.tv.artwork_observation(key)
     photos, _ = images(store, name)
     failed = False
     try:
@@ -78,11 +80,7 @@ def prepare(store, client, names, now):
             vendor_retry_at = getattr(exc, 'retry_at', 0)
     failed = failed or bool(errors)
     vendor_retry_at = max([vendor_retry_at, *(net.retry_after(error, now) for error in errors)])
-    cache.pop(search_squash(name), None)
-    cache[search_squash(name)] = {'images': list(dict.fromkeys(photos))[:6],
+    value = {'images': list(dict.fromkeys(photos))[:6],
         'retry_at': max(now + (60 if failed else 86400), vendor_retry_at), 'at': now}
-    store.rec_proposals.put_proposals(SURFACE, dict(list(cache.items())[-LIMIT:]), now)
-    if not failed and search_squash(name) in requests:
-        requests.pop(search_squash(name))
-        store.rec_proposals.put_proposals(REQUESTS, requests, now)
-    return len(pending) > 1
+    published = store.tv.publish_artwork(key, value, now, observation, complete=not failed)
+    return len(pending) > 1 or not published

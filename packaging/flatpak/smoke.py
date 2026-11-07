@@ -16,9 +16,15 @@ APP = "com.tuneconsole.TuneConsole"
 IDENTITY_PROBE = """
 import importlib.metadata as m, json, os
 from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
-from yt_playlist.core import updatecheck
+from yt_playlist.core import destination_schema, schema_definition, updatecheck
+from yt_playlist.core.migrations import regular
+from yt_playlist.core.migrations.registry import MIGRATIONS
 assert os.environ.get('FLATPAK_ID') == 'com.tuneconsole.TuneConsole'
 assert updatecheck.is_dev_install() or updatecheck.install_kind() == 'flatpak'
+definition = destination_schema.definition()
+assert definition['numbered_history'] == [[item.version,item.name] for item in MIGRATIONS]
+assert definition['regular_history'] == [[item.version,item.name] for item in regular.CHANGES]
+assert all(path.is_file() for path in schema_definition.DEFINITIONS)
 print(json.dumps({'version':m.version('yt-playlist'),'origin':EXTENSION_ORIGIN}))
 """
 
@@ -80,9 +86,11 @@ print(ET.parse('/app/share/metainfo/com.tuneconsole.TuneConsole.metainfo.xml').f
         headers["Origin"] = "https://example.com"
         assert request("/bridge/ws", headers)[0] == 403
         inside("""
-from yt_playlist.core import paths
+from yt_playlist.core import destination_schema, paths, vibe_versions
 from yt_playlist.core.store import Store
 store=Store(paths.db_path()); store.init_schema()
+assert destination_schema.complete(store.conn)
+assert vibe_versions.normalized(store.conn)
 store.settings.set_setting('flatpak_smoke','persisted')
 assert paths.app_log_path().is_file()
 """)

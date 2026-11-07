@@ -2,8 +2,8 @@
 
 
 def test_summary_counts_exact_generated_and_other_account_fallback_without_duplicates(store):
-    first = store.identities.upsert_identity('Main', 'main', None, True)
-    second = store.identities.upsert_identity('Other', 'other', 'brand', False)
+    first = store.accounts.upsert_account('Main', 'main', None, True)
+    second = store.accounts.upsert_account('Other', 'other', 'brand', False)
     entry = store.tracks.upsert_track('v', 'One', 'Artist', 'Release', 100, album_browse_id='B')
     key = store.tracks.catalog_subject(entry)['identity_key']
     store.collection.cache_album_tracklist('B', 'Release', 'Artist', None, [],

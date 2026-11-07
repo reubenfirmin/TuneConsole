@@ -1,6 +1,6 @@
 """The transient model: a reactive, persistent read on recent interaction.
 
-Inputs are signed track-key events at a point in recency: mood feedback (rec_mood), recent plays
+Inputs are signed track-key events at a point in recency: mood feedback (mood_events), recent plays
 (history), recent ACTION-provenance likes (rec_feedback kind='like' observed live through the
 extension; sync-discovered likes carry no true action timestamp and are excluded at the repo level,
 see recent_liked_with_ts), recent dislikes (rec_feedback kind='dislike'), recent skips (#84,
@@ -15,7 +15,6 @@ import json
 
 import numpy as np
 
-from yt_playlist.util import genre_map
 from yt_playlist.rec import embedding_vectors as vectors, rec_params
 
 # Historical generated radio playlist IDs remain provenance after the deck controller's removal.
@@ -37,10 +36,9 @@ def radio_list_ids(store) -> list[str]:
     Other generated sources also retain their provenance/identity quarantine in the history reader
     and evidence_plays. Deliberate context choices enter through choice learning. Trends/stats keep
     counting plays (descriptive, a different pipeline)."""
-    ids = [store.settings.get_setting(k) for k in _RADIO_SETTING_KEYS]
-    sessions = json.loads(store.settings.get_setting("radio_session_playlist_ids") or "[]")
+    sessions = store.playlists.radio_playlist_ids()
     transient = sorted(store.transient_radio_playlists.copy())
-    return list(dict.fromkeys(i for i in ids + sessions + transient if i))
+    return list(dict.fromkeys(i for i in sessions + transient if i))
 
 
 def evidence_plays(store, limit):
@@ -83,15 +81,21 @@ def facets_for(store, keys) -> dict:
     keys = list(dict.fromkeys(keys))
     if not keys:
         return {}
+    if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
+        with store.read_view() as reader:
+            return facets_for(reader, keys)
     dao = store.rec_query
     genres, decades, artists = dao.track_genres(keys), dao.track_decades(keys), dao.track_artists(keys)
+    axes = store.genres.feature_axes(genres.values())
+    families = {genre: axes.get(genre, ('', None))[0] for genre in set(genres.values())}
+    subgenres = {genre: axes.get(genre, ('', None))[1] for genre in families}
     out: dict = {}
     for k in keys:
         if k in genres:
-            fam = genre_map.family(genres[k])
+            fam = families[genres[k]]
             if fam:
                 out.setdefault(f"genre:{fam}", []).append(k)
-            sub = genre_map.subgenre(genres[k])
+            sub = subgenres[genres[k]]
             if sub and sub != fam:
                 out.setdefault(f"genre:{sub}", []).append(k)
         if k in decades:
@@ -123,16 +127,12 @@ def facet_leans(store, now) -> dict:
     skip_w, skip_hl = gp(store, "skip_transient_w"), gp(store, "skip_halflife_d")
     limit = gp(store, "recent_play_limit")
     leans: dict = {}
+    contributions = []
 
     def add(keys, signed, drop_artist=False):
         if not keys or signed == 0:
             return
-        fac = facets_for(store, keys)
-        n = len(set(keys)) or 1
-        for f, fk in fac.items():
-            if drop_artist and f.startswith("artist:"):
-                continue
-            leans[f] = leans.get(f, 0.0) + signed * (len(fk) / n)
+        contributions.append((list(dict.fromkeys(keys)), signed, drop_artist))
 
     for ts, direction, keys in store.rec_signals.recent_mood_events():
         add(keys, direction * decay_weight(now - ts, mood_hl))
@@ -156,6 +156,34 @@ def facet_leans(store, now) -> dict:
     # the read only asks the store for skips that could still matter, not the whole history.
     for k, ts in store.player_events.recent_skips_with_ts(now - 4 * skip_hl * 86400):
         add([k], -skip_w * decay_weight(now - ts, skip_hl), drop_artist=True)
+    # Capture metadata once for this snapshot, preserving each event's decay,
+    # denominator, ordering and artist suppression during accumulation.
+    by_key = {}
+    for facet, keys in facets_for(store, [key for keys, _, _ in contributions for key in keys]).items():
+        for key in keys:
+            by_key.setdefault(key, []).append(facet)
+    for keys, signed, drop_artist in contributions:
+        counts = {}
+        for key in keys:
+            for facet in by_key.get(key, ()):
+                if not drop_artist or not facet.startswith('artist:'):
+                    counts[facet] = counts.get(facet, 0) + 1
+        for facet, count in counts.items():
+            leans[facet] = leans.get(facet, 0.0) + signed * (count / len(keys))
+    # Mix choices are broad raw-genre preferences, never synthetic plays or
+    # centroids over whichever recordings happen to match today's catalog.
+    from yt_playlist.rec import choice_learning
+    choice_genres = {}
+    for interest in choice_learning.contexts(store, now):
+        if interest['format'] != 'mixes' or interest.get('descriptor_id') is None:
+            continue
+        descriptor = store.rec_ledger.mix_descriptor(interest['descriptor_id'])
+        families = {value[0] for value in store.genres.feature_axes(descriptor['genres']).values()}
+        for family in families - {None, ''}:
+            axis = 'genre:' + family
+            choice_genres[axis] = max(choice_genres.get(axis, 0.), min(1., interest['weight']) / max(1, len(families)))
+    for axis, strength in choice_genres.items():
+        leans[axis] = leans.get(axis, 0.) + strength
     return leans
 
 

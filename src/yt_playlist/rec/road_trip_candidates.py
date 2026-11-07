@@ -73,6 +73,7 @@ def _rank_scores(cands, value_of):
 
 
 def own_candidates(store, now, state=None):
+    """Detach eligible rows; the transition resolves their current families in one batch."""
     songs = store.rec_query.library_songs()
     plays = store.rec_query.play_counts()
     hard = store.rec_model.suppressed_keys("for_you", now)
@@ -315,6 +316,10 @@ def to_candidates(rows, store=None):
                                row["duration"] or facts.get("duration"), "theirs", genre, facts.get("year"))
         candidate["input"] = row.get("input")
         out.append(candidate)
+    if store is not None:
+        axes = store.genres.feature_axes(candidate['genre'] for candidate in out)
+        for candidate in out:
+            candidate['family'] = axes.get(candidate['genre'], ('', None))[0]
     return out
 
 

@@ -40,7 +40,7 @@ class OccurrenceClient(FakeClient):
 
 
 def _action(store, before, current):
-    iid = store.identities.upsert_identity("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", "bridge", None, True)
     pid = store.playlists.upsert_playlist(iid, "KEEP", "Kept playlist", len(current), "", 1)
     aid = store.actions.record_action(APPLY_MERGE, "{}", "{}", "executed", json.dumps({
         "restored": [{"ytm": "KEEP", "identity": iid, "prev": before, "post": current}],

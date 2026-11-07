@@ -50,6 +50,28 @@ def test_nonfinite_values_retain_existing_decoder_behavior():
     assert json.dumps(value) == '[NaN, Infinity, -Infinity]'
 
 
+@pytest.mark.parametrize('number', ['NaN', 'Infinity', '-Infinity', '1e999'])
+@pytest.mark.parametrize('padding', ['', ' ' * 80])
+def test_finite_mode_rejects_invalid_numbers_in_unselected_nested_values(number, padding):
+    encoded = padding + '{"keep":1,"discard":{"nested":[' + number + ']}}'
+    with pytest.raises(ValueError, match='Non-finite'):
+        bounded_json.loads(encoded, keys={'keep'}, finite=True)
+
+
+def test_finite_mode_preserves_numbers_and_cancellation(monkeypatch):
+    value = [{'number': n / 10, 'nested': [None, True, n]} for n in range(100)]
+    encoded = json.dumps(value)
+    assert bounded_json.loads(encoded, finite=True) == value
+    calls = []
+    def cancel():
+        calls.append(True)
+        if len(calls) == 3:
+            raise WorkBudgetExceeded('cancel finite read')
+    monkeypatch.setattr(bounded_json, 'check_cancellable_work', cancel)
+    with pytest.raises(WorkBudgetExceeded, match='cancel finite read'):
+        bounded_json.loads(encoded, finite=True)
+
+
 def test_container_decoder_calls_are_bounded(monkeypatch):
     expected = [{'key': str(n), 'nested': {'x': [1, 2]}, 'text': 'long scalar' * 40}
                 for n in range(50)]

@@ -5,14 +5,14 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import FakeClient
+from tests.conftest import FakeClient, _track
 from yt_playlist.rec import measurement, scorecard, surfaces
 from yt_playlist.web.app import create_app
 
 
 @pytest.fixture
 def measured(store):
-    iid = store.identities.upsert_identity("Main", "cred", None, True)
+    iid = store.accounts.upsert_account("Main", "cred", None, True)
     ids, vectors = [], []
     for vid, title, xy in [("seed", "Seed", [1., 0.]), ("near", "Near", [.9, .1]),
                            ("far", "Far", [0., 1.])]:
@@ -122,12 +122,22 @@ def test_open_start_and_scorecard_range_are_observed_without_inventing_a_play(me
 
 
 def test_cluster_save_is_a_generated_response_and_not_discovery_conversion(measured):
-    store, http, _, _, clock, _, _ = measured
+    store, http, _, remote, clock, iid, _ = measured
+    remote._catalog['cold'] = _track('cold', 'Cold', 'New artist', 200)
     measurement.record_recommendations(store, "clusters", [{"key": "cold|new artist"}], 100)
     clock[0] = 110
     result = http.post("/clusters/save", data={"name": "Cluster", "keep_keys": '["cold|new artist"]',
                                                "central_keys": "[]"})
-    assert result.status_code == 200 and "Saved" in result.text
+    assert result.status_code == 200
+    created = next(p for p in store.playlists.get_playlists() if p.provider_playlist_id == remote.created[-1][0])
+    assert created.account_id == iid
+    assert store.playlists.get_playlist_groups()[created.provider_playlist_id] == 'Generated'
+    assert remote.added[-1] == (created.provider_playlist_id, ['cold'])
+    assert [track['videoId'] for track in remote.get_playlist(created.provider_playlist_id)['tracks']] == ['cold']
+    assert [track['video_id'] for track in store.charts.playlist_tracks_detail(created.id)] == ['cold']
+    assert f'data-generated-playlist="{created.provider_playlist_id}"' in result.text
+    assert f'window.location.assign("/playlist/{created.id}")' in result.text
+    assert f'genComplete("", "{created.provider_playlist_id}", false, false, true)' in result.text
     score = scorecard.recommendation_scorecard(store, 90, 105)
     assert score["save"] == 1 and score["conversion"] == 0
     html = http.get("/taste/recall").text
@@ -136,6 +146,7 @@ def test_cluster_save_is_a_generated_response_and_not_discovery_conversion(measu
 
 
 def test_migration_from_previous_schema_preserves_old_impressions_and_new_ledger_on_reopen(tmp_path):
+    from tests.historical_support import upgrade_fixture
     from yt_playlist.core.migrations import migrate
     from yt_playlist.core.migrations.registry import MIGRATIONS
     from yt_playlist.core.store import Store
@@ -143,6 +154,8 @@ def test_migration_from_previous_schema_preserves_old_impressions_and_new_ledger
     path = tmp_path / "measurement.db"
     store = Store(path)
     migrate(store.conn, registry=MIGRATIONS[:8])
+    original_history = [tuple(row) for row in store.conn.execute(
+        'SELECT version,name,applied_at FROM schema_migrations ORDER BY version')]
     # Seed the previous schema using its own columns, before policy bases exist.
     with store.conn:
         store.conn.execute(
@@ -150,15 +163,28 @@ def test_migration_from_previous_schema_preserves_old_impressions_and_new_ledger
             '(request_id,surface,lane,identity_key,rank,model_version,provenance,served_at) '
             'VALUES (?,?,?,?,?,?,?,?)',
             ('legacy', 'home', '', 'old|artist', 1, 'legacy', '{}', 50))
-    store.init_schema()
+    legacy_columns = 'id,request_id,surface,lane,identity_key,rank,model_version,provenance,served_at'
+    original_impression = tuple(store.conn.execute(
+        f'SELECT {legacy_columns} FROM rec_served_impressions').fetchone())
+    upgrade_fixture(store)
+    assert [tuple(row) for row in store.conn.execute(
+        'SELECT version,name,applied_at FROM schema_migrations ORDER BY version')][:8] == original_history
     measurement.record_recommendations(store, "home", [{"key": "new|artist", "score": .4}], 100)
     store.rec_ledger.record_recommendation_outcomes("save", "save", ["new|artist"], 110)
     store.conn.close()
     reopened = Store(path)
     reopened.init_schema()
+    assert [tuple(row) for row in reopened.conn.execute(
+        'SELECT version,name,applied_at FROM schema_migrations ORDER BY version')][:8] == original_history
+    assert tuple(reopened.conn.execute(
+        f'SELECT {legacy_columns} FROM rec_served_impressions WHERE id=1').fetchone()) == original_impression
     score = scorecard.recommendation_scorecard(reopened, 40, 105)
     assert score["impressions"] == 2 and score["save"] == 1
     trace = scorecard.served_recommendation(reopened, 2)
     assert trace["configuration"]["algorithm"] == "served-ranking-v2"
     assert score["by_ownership"]["unknown"]["impressions"] == 2
+    measurement.record_recommendations(reopened, "home", [{"key": "later|artist", "score": .7}], 120)
+    reopened.rec_ledger.record_recommendation_outcomes("save", "save", ["later|artist"], 130)
+    continued = scorecard.recommendation_scorecard(reopened, 115, 125)
+    assert continued["impressions"] == 1 and continued["save"] == 1
     reopened.conn.close()

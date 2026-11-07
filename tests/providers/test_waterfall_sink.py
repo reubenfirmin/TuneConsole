@@ -6,7 +6,6 @@ from yt_playlist.providers.base import EnrichmentResult
 
 class _FakeProvider:
     name = "fake"
-    def reset(self): pass
     def tripped(self): return False
     def available(self, store): return True
     def probe(self, t, store):
@@ -22,7 +21,7 @@ def test_catalog_sink_retains_discovery_findings_and_full_answers():
         s, s.enrichment_queue.next_enrich_batch(10), cfg, on_progress=lambda e: None,
         registry={"fake": _FakeProvider()})
     row = s.discovery.discovered_tracks_by_keys(["a|x"])["a|x"]
-    assert row["genre"] == "techno" and row["year"] == "2019"
+    assert row["genre"] == "Techno" and row["year"] == "2019"
     assert row["audio"]["bpm"] == 128.0
     assert completed == [s.tracks.catalog_subject(1)["recording_id"]]
     assert s.enrichment_state.enrichment_attempts("a|x")["fake"]["fields"]["label"] == "x"

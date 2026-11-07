@@ -1,25 +1,46 @@
-"""Repository ownership retains the model publisher's atomic transaction."""
+"""Ordered model publication preserves progress and acknowledges completed fits."""
+from dataclasses import replace
 import sqlite3
 import struct
 
 import pytest
 
 from yt_playlist.rec import embed, embedding_vectors as vectors, model_refresh
-from yt_playlist.repos.rec_model import VectorChanges
+from yt_playlist.core.rec_model_policy import VectorChanges
 
 
-def test_publication_owners_require_an_outer_transaction(store):
-    for publish in (
-        lambda: store.rec_model.publish_training_generation({}),
-        lambda: store.settings.publish_values({'generation': 'new'}),
-        lambda: store.modes.publish_generation([], []),
-        lambda: store.rec_refresh.acknowledge(1),
-    ):
-        with pytest.raises(RuntimeError, match='transaction'):
-            publish()
+def assert_prepared_changes(changes, expected):
+    assert {name: replace(delta, publication=None) for name, delta in changes.items()} == expected
+    assert all(delta.publication is not None and delta.publication.name == name
+               for name, delta in changes.items())
 
 
-def test_late_mode_failure_rolls_back_vectors_settings_and_queue(store, monkeypatch):
+@pytest.fixture(autouse=True)
+def canonical_vector_owners(store):
+    # Publication fixtures own real subjects independently of the vector writer.
+    with store.conn:
+        store.conn.executemany('INSERT INTO recordings(identity_key) VALUES (?)',
+            [(key,) for key in ('song', 'same', 'update', 'removed', 'added', 'a', 'b', 'c')])
+        store.conn.execute("INSERT INTO artists(id,name,provisional) VALUES (1,'Artist',1)")
+        store.conn.execute("INSERT INTO artist_aliases VALUES (1,'artist','fixture')")
+
+
+def test_publication_owners_commit_their_own_writes(store):
+    store.rec_refresh.enqueue()
+    revision = store.rec_refresh.revision()
+    store.modes.publish_generation([], [])
+    store.rec_refresh.acknowledge(revision)
+    assert store.rec_refresh.revision() is None
+    assert not store.conn.in_transaction
+
+
+def test_settings_publication_owns_its_write_without_an_outer_transaction(store):
+    store.settings.publish_values({'generation': 'new'})
+    assert store.settings.get_setting('generation') == 'new'
+    assert not store.conn.in_transaction
+
+
+def test_late_mode_failure_keeps_published_progress_and_pending_queue_for_retry(store, monkeypatch):
     old, new = struct.pack('f', 1), struct.pack('f', 2)
     store.rec_model.replace_rec_vectors([('song', old)])
     store.settings.set_setting('generation', 'old')
@@ -34,10 +55,15 @@ def test_late_mode_failure_rolls_back_vectors_settings_and_queue(store, monkeypa
     with pytest.raises(sqlite3.IntegrityError, match='late publication failure'):
         model_refresh.rebuild(store, 10)
     assert not store.conn.in_transaction
-    assert store.rec_model.get_rec_vectors() == [('song', old)]
-    assert store.settings.get_setting('generation') == 'old'
+    assert store.rec_model.get_rec_vectors() == [('song', new)]
+    assert store.settings.get_setting('generation') == 'new'
     assert store.modes.list_modes() == []
     assert store.rec_refresh.revision() == revision
+    store.conn.execute('DROP TRIGGER fail_mode')
+    assert model_refresh.rebuild(store, 10) is prepared
+    assert store.rec_model.get_rec_vectors() == [('song', new)]
+    assert len(store.modes.list_modes()) == 1
+    assert store.rec_refresh.revision() is None
 
 
 @pytest.mark.parametrize('space', ['settings', 'arbitrary_sql'])
@@ -46,7 +72,7 @@ def test_vector_publisher_rejects_other_owners_and_sql(store, space):
     with store.read_snapshot() as snapshot, pytest.raises(ValueError, match='model table'):
         changes = {'rec_vectors': VectorChanges((('song', struct.pack('f', 1)),), ()),
                    space: VectorChanges((), ())}
-        snapshot.publish(lambda: store.rec_model.publish_training_generation(changes))
+        snapshot.publish_ordered(lambda: store.rec_model.publish_training_generation(changes))
     assert store.rec_model.get_rec_vectors() == []
     assert store.settings.get_setting('preserved') == 'yes'
 
@@ -58,10 +84,11 @@ def test_vector_changes_preserve_unchanged_rows_and_omit_unrequested_spaces(stor
     with store.read_snapshot() as snapshot:
         changes = snapshot.store.rec_model.prepare_training_changes({
             'rec_vectors': [('same', old), ('update', new), ('added', new)]})
-        assert changes == {'rec_vectors': VectorChanges((('update', new), ('added', new)), ('removed',))}
-        assert snapshot.publish(lambda: store.rec_model.publish_training_generation(changes))
+        assert_prepared_changes(changes, {
+            'rec_vectors': VectorChanges((('update', new), ('added', new)), ('removed',))})
+        assert snapshot.publish_ordered(lambda: store.rec_model.publish_training_generation(changes))
     assert dict(store.rec_model.get_rec_vectors()) == {'same': old, 'update': new, 'added': new}
-    assert store.rec_model.get_rec_artist_vectors() == [('artist', old)]
+    assert store.rec_model.get_rec_artist_vectors() == [('@artist:1', old)]
 
 
 def test_identical_vectors_do_not_write_or_invalidate_an_existing_snapshot(store):
@@ -72,7 +99,7 @@ def test_identical_vectors_do_not_write_or_invalidate_an_existing_snapshot(store
         changes = snapshot.store.rec_model.prepare_training_changes({'rec_vectors': [('song', blob)]})
         assert changes == {}
         before = store.conn.total_changes
-        assert snapshot.publish(lambda: store.rec_model.publish_training_generation(changes))
+        assert snapshot.publish_ordered(lambda: store.rec_model.publish_training_generation(changes))
         assert store.conn.total_changes == before
         assert previous.publish(lambda: None)
 
@@ -82,8 +109,8 @@ def test_empty_target_removes_a_space_and_invalidates_its_readers(store):
     with store.read_snapshot() as previous, store.read_snapshot() as snapshot:
         previous.store.rec_model.get_rec_vectors()
         changes = snapshot.store.rec_model.prepare_training_changes({'rec_vectors': []})
-        assert changes == {'rec_vectors': VectorChanges((), ('song',))}
-        assert snapshot.publish(lambda: store.rec_model.publish_training_generation(changes))
+        assert_prepared_changes(changes, {'rec_vectors': VectorChanges((), ('song',))})
+        assert snapshot.publish_ordered(lambda: store.rec_model.publish_training_generation(changes))
         assert not previous.publish(lambda: pytest.fail('missed changed vector space'))
     assert store.rec_model.get_rec_vectors() == []
 
@@ -94,7 +121,7 @@ def test_concurrent_model_write_invalidates_prepared_delta(store):
     with store.read_snapshot() as snapshot:
         changes = snapshot.store.rec_model.prepare_training_changes({'rec_vectors': [('song', new)]})
         store.rec_model.replace_rec_vectors([('song', latest)])
-        assert not snapshot.publish(lambda: store.rec_model.publish_training_generation(changes))
+        assert not snapshot.publish_ordered(lambda: store.rec_model.publish_training_generation(changes))
     assert store.rec_model.get_rec_vectors() == [('song', latest)]
 
 
@@ -112,11 +139,17 @@ def test_delta_loads_and_tied_rankings_match_full_replacement(store, space):
     replace = getattr(store.rec_model, f'replace_rec{space}_vectors')
     load = getattr(store.rec_model, f'get_rec{space}_vectors')
     blob = struct.pack('ff', 1, 0)
-    replace([('a', blob), ('c', blob)])
-    target = [('a', blob), ('b', blob), ('c', blob)]
+    keys = ['a', 'b', 'c']
+    if 'artist' in space:
+        with store.conn:
+            store.conn.executemany('INSERT INTO artists(id,name,provisional) VALUES (?,?,1)',
+                                   [(2, 'B'), (3, 'C')])
+        keys = ['@artist:1', '@artist:2', '@artist:3']
+    replace([(keys[0], blob), (keys[2], blob)])
+    target = [(key, blob) for key in keys]
     with store.read_snapshot() as snapshot:
         changes = snapshot.store.rec_model.prepare_training_changes({f'rec{space}_vectors': target})
-        assert snapshot.publish(lambda: store.rec_model.publish_training_generation(changes))
+        assert snapshot.publish_ordered(lambda: store.rec_model.publish_training_generation(changes))
     rows = load()
     keys, matrix, _ = vectors.load_vector_rows(rows)
     ranked = embed._rank(keys, matrix, matrix[0], set(), 3)
@@ -132,8 +165,9 @@ def test_discovery_order_only_change_preserves_the_encoder_order(store):
     target = [('a', blob), ('b', blob)]
     with store.read_snapshot() as snapshot:
         changes = snapshot.store.rec_model.prepare_training_changes({'rec_discovered_content_vectors': target})
-        assert changes == {'rec_discovered_content_vectors': VectorChanges(tuple(target), (), replace=True)}
-        assert snapshot.publish(lambda: store.rec_model.publish_training_generation(changes))
+        assert_prepared_changes(changes, {
+            'rec_discovered_content_vectors': VectorChanges(tuple(target), (), replace=True)})
+        assert snapshot.publish_ordered(lambda: store.rec_model.publish_training_generation(changes))
     assert store.rec_model.get_rec_discovered_content_vectors() == target
 
 
@@ -143,6 +177,7 @@ def test_discovery_updates_and_appends_do_not_require_replacement(store):
     target = [('b', new), ('a', old), ('c', new)]
     with store.read_snapshot() as snapshot:
         changes = snapshot.store.rec_model.prepare_training_changes({'rec_discovered_content_vectors': target})
-        assert changes == {'rec_discovered_content_vectors': VectorChanges((('b', new), ('c', new)), ())}
-        assert snapshot.publish(lambda: store.rec_model.publish_training_generation(changes))
+        assert_prepared_changes(changes, {
+            'rec_discovered_content_vectors': VectorChanges((('b', new), ('c', new)), ())})
+        assert snapshot.publish_ordered(lambda: store.rec_model.publish_training_generation(changes))
     assert store.rec_model.get_rec_discovered_content_vectors() == target

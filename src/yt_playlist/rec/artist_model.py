@@ -10,7 +10,6 @@ import numpy as np
 
 from yt_playlist.rec import (content_model, embedding_training as training,
                              embedding_vectors as vectors, rec_params, vector_math)
-from yt_playlist.util import genre_map
 from yt_playlist.util.matching import normalize
 
 def artist_baskets(store):
@@ -56,12 +55,14 @@ def artist_content_profiles(store):
     def _p(artist):
         return prof.setdefault(artist, {"families": set(), "subs": set(), "decades": set(), "audio": {}})
 
-    for k, (genre, year) in dao.track_content().items():
+    content = dao.track_content()
+    axes = store.genres.feature_axes({genre for genre, _year in content.values()})
+    for k, (genre, year) in content.items():
         for artist in refs.get(k,()):
             p = _p(artist)
             if genre:
-                p["families"].add(genre_map.family(genre))
-                sub = genre_map.subgenre(genre)
+                family, sub = axes[genre]
+                p["families"].add(family)
                 if sub:
                     p["subs"].add(sub)
             if year and str(year)[:4].isdigit():
@@ -133,10 +134,13 @@ def _discovered_artist_profiles(store):
     """Genre-only content profiles for the out-of-corpus discovered-artist pool (from each entry's
     `genre` field), so OOC artists encode into the SAME artist-content space and become placeable."""
     out = {}
-    for a in store.discovery.get_discovered_artists():
+    discovered = store.discovery.get_discovered_artists()
+    axes = store.genres.feature_axes({a.get('genre') for a in discovered})
+    for a in discovered:
         artist, genre = store.artists.key(a.get('artist_id') or a.get('artist')), a.get("genre")
         if artist and genre:
-            out[artist] = {"families": {genre_map.family(genre)}, "subs": set(), "decades": set(), "audio": {}}
+            family, sub = axes[genre]
+            out[artist] = {"families": {family}, "subs": {sub} if sub else set(), "decades": set(), "audio": {}}
     return out
 
 
@@ -212,8 +216,8 @@ def artist_neighbors(store, artist, topn=12, exclude=None):
 def related_artist_scores(store, seed_artists, topn=12, exclude_owned=True):
     """Canonical artist keys mapped to blended scores, in descending rank order.
 
-    Exclude seeds, and optionally owned artists for discovery. Internal candidate expansion keeps
-    these identities; related_artists converts them to public names for presentation callers.
+    Exclude seeds, and optionally owned artists for discovery. Candidate expansion
+    retains these identities so artists sharing a display name stay distinct.
     """
     seeds = {store.artists.key(a) for a in seed_artists if a}
     seeds.discard(None)
@@ -221,13 +225,6 @@ def related_artist_scores(store, seed_artists, topn=12, exclude_owned=True):
     if exclude_owned:
         excl |= {a for refs in store.artists.track_keys(library=True).values() for a in refs}
     return dict(_ranked(_blended_set_scores(store, seeds), excl, topn))
-
-
-def related_artists(store, seed_artists, topn=12, exclude_owned=True):
-    """Present artists related to a set of seeds, optionally excluding owned artists."""
-    ranked = related_artist_scores(store, seed_artists, topn=topn, exclude_owned=exclude_owned)
-    public = store.artists.public_keys(ranked)
-    return [(public[a], score) for a, score in ranked.items()]
 
 
 def artist_track_candidates(store, seed_artists, topn=24, include_out_of_corpus=True, *,

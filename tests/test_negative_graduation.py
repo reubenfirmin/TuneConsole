@@ -2,16 +2,9 @@
 """Track negatives never establish permanent artist, genre, or era preferences."""
 import pytest
 
-from yt_playlist.core.store import Store
 from yt_playlist.rec import graduation, rec_params
+from tests.retained_rating_support import apply_model_ratings
 from yt_playlist.util.matching import identity_key
-
-
-@pytest.fixture
-def store():
-    s = Store(":memory:")
-    s.init_schema()
-    return s
 
 
 def _two_billy_idol_tracks(store):
@@ -33,7 +26,7 @@ def _two_billy_idol_tracks(store):
 
 def test_two_dislikes_do_not_graduate_artist_genre_or_era(store):
     k1, k2 = _two_billy_idol_tracks(store)
-    graduation.apply_dislikes(store, {k1: "DISLIKE", k2: "DISLIKE"}, now=100.0)
+    apply_model_ratings(store, {k1: "DISLIKE", k2: "DISLIKE"}, now=100.0)
 
     w = store.rec_model.get_weights(now=100.0)
     for axis in ("artist:Billy Idol", "genre:jazz", "era:1980"):
@@ -45,7 +38,7 @@ def test_two_dislikes_do_not_graduate_artist_genre_or_era(store):
 
 def test_positive_graduate_moods_still_graduates_artist(store):
     """Positive signals (likes, positive vibe taps) are unaffected: a signed=+1 mood event that
-    crosses THEME_THRESHOLD still graduates the artist axis, same as before #84."""
+    crosses theme_threshold still graduates the artist axis, same as before #84."""
     tid = store.tracks.upsert_track("v1", "S", "Coltrane", None, None, 1)
     store.tracks.set_track_genre(tid, "jazz")
     store.tracks.set_track_year(tid, "1960")
@@ -77,8 +70,8 @@ def test_negative_vibe_tap_also_leaves_permanent_facets_alone(store):
 
 def test_repeat_dislikes_preserve_original_evidence_time(store):
     k1, k2 = _two_billy_idol_tracks(store)
-    graduation.apply_dislikes(store, {k1: "DISLIKE", k2: "DISLIKE"}, now=100.0)
-    graduation.apply_dislikes(store, {k1: "DISLIKE", k2: "DISLIKE"}, now=200.0)
+    apply_model_ratings(store, {k1: "DISLIKE", k2: "DISLIKE"}, now=100.0)
+    apply_model_ratings(store, {k1: "DISLIKE", k2: "DISLIKE"}, now=200.0)
     assert set(store.rec_model.disliked_with_ts()) == {(k1, 100.0), (k2, 100.0)}
     assert store.rec_signals.get_theme("genre:jazz") is None
 
