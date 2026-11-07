@@ -3,7 +3,7 @@ import numpy as np
 from tests.enrichment_support import seed_enrichment
 import pytest
 
-from tests.radio_session_support import poc, play
+from tests.radio_session_support import memory_checkpoint_files, poc, play
 from tests.recommendation_support import publish_bundles
 from yt_playlist.rec import embedding_vectors as embed, radio_tuning
 from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, GENRE_POOL_LIMIT, RadioCandidates
@@ -136,7 +136,8 @@ def test_genre_identity_handles_equivalents_without_collapsing_families():
     assert policy.contrast({"genre": None}) < policy.contrast({"genre": "Electronic"})
 
 
-def test_dj_can_alternate_genre_endpoints_without_restarting_or_rejecting_songs(poc, genre_pools, monkeypatch):
+def test_dj_can_alternate_genre_endpoints_without_restarting_or_rejecting_songs(
+        poc, genre_pools, monkeypatch, memory_checkpoint_files):
     c, remote, frames, _, _ = poc
     monkeypatch.setattr(radio_session, "RadioCandidates", RadioCandidates)
     seed = genre_pools["1"][0]
@@ -174,7 +175,8 @@ def test_dj_can_alternate_genre_endpoints_without_restarting_or_rejecting_songs(
     assert not c.session.rejected
 
 
-def test_pending_genre_pin_rebases_after_a_native_song_change(poc, genre_pools, monkeypatch):
+def test_pending_genre_pin_rebases_after_a_native_song_change(
+        poc, genre_pools, monkeypatch, memory_checkpoint_files):
     c, remote, _, _, _ = poc
     monkeypatch.setattr(radio_session, "RadioCandidates", RadioCandidates)
     assert c.start(genre_pools["1"][0]["video_id"])["ok"]

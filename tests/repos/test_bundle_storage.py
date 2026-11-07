@@ -10,7 +10,7 @@ from tests.core.test_compact_groups_migration import predecessor
 from tests.repos.test_compact_group_publication import database
 from tests.repos.test_typed_recommendation_publication import recommendations as historical_recommendations, publish, collect
 from yt_playlist.core.activity import WorkClosing
-from yt_playlist.core import policy_config, recommendation_revalidations as revalidations
+from yt_playlist.core import bundle_plan, policy_config, recommendation_plan, recommendation_revalidations as revalidations
 from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
 from yt_playlist.rec import home_vibe, musical_character, vibe_pools
 from yt_playlist.rec import bundle_storage
@@ -125,7 +125,7 @@ def test_sparse_explanations_use_actual_rank_ranges_and_read_only_covering_files
     for item in items[:10]:
         item.pop('reason')
     value = {'all': {'wheelhouse': items}}
-    monkeypatch.setattr(bundle_storage, 'EXPLANATION_BYTES', 200)
+    monkeypatch.setattr(bundle_plan, 'EXPLANATION_BYTES', 200)
     prepared = prepare(store, value)
     displays = [output for output in prepared.outputs if output.pool_digest]
     assert displays[0].first_rank == 10
@@ -168,7 +168,7 @@ def test_invalid_legacy_inputs_fail_before_ownership_or_file_publication(recomme
 
 def test_conversion_budget_is_checked_before_accumulating_all_slots(recommendations, monkeypatch):
     store = recommendations
-    monkeypatch.setattr(publication, 'MAX_PLAN_BYTES', 10)
+    monkeypatch.setattr(recommendation_plan, 'MAX_PLAN_BYTES', 10)
     with pytest.raises(ValueError, match='budget'):
         prepare(store, bundle(store))
     assert not store.conn.execute('SELECT 1 FROM recommendation_generations').fetchone()
