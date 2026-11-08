@@ -99,10 +99,11 @@ def test_cards_route_renders_mode_cards(store, home_routes_only):
 
 
 def test_mix_choice_capture_failure_keeps_playable_cards_and_logs(
-        store, mode_cards_home_template, monkeypatch, caplog):
+        store, monkeypatch, caplog):
     from yt_playlist.rec import choice_evidence
 
-    mode_cards_home_template.restore(store)
+    seed_modes(store, 1, 2)
+    publish_menu(store, prefix='song', count=2, mode_ids=(1, 2))
     calls = []
 
     def unavailable(writer, format, options, now, **kwargs):
@@ -144,11 +145,23 @@ def test_mix_regeneration_submits_and_closes_the_requesting_views_offer(store):
     assert all(row['opportunity_id'] != other for row in closes)
 
 
-def test_mode_card_recipe_carries_a_journey(store, mode_cards_home_template):
+def test_mode_card_recipe_carries_a_journey(store):
     # A saved mode card must record a DJ journey in its recipe so the playlist page can show + tune
     # the Flow lever (parity with the per-lane _carded cards). Regression: the mode-card recipe was
     # just {"model": "mode", "mode_id": N} with no journey, so the saved playlist showed no Flow.
-    mode_cards_home_template.restore(store)
+    seed_modes(store, 1, 2)
+    # Keep real card completion and its recipe constructor, then exercise HTTP
+    # serialization. Whole-menu ranking and preparation have their own owners.
+    tracks = [{'key': f'song {i}|artist {i}', 'video_id': f'v{i}',
+               'title': f'Song {i}', 'artist': f'Artist {i}', 'genre': 'house'}
+              for i in range(4)]
+    seed_publication_subjects(store, tracks)
+    protos = [home_cards._complete_card(store, {
+        'lane': lane, 'mode_id': mid, 'label': 'Mode mix',
+        'ranker': 'cosine', 'tracks': tracks[index*2:index*2+2]}, 1000, 0, None, None)
+        for index, (mid, lane) in enumerate(((1, 'wheelhouse'), (2, 'explore')))]
+    publish_cards(store, home_cards.CardsResult(protos,
+        [{'proto': proto, 'pool': None} for proto in protos], None, None, [], [], 0, None), 1000)
     with prepared_client(store, background_work=False) as client:
         r = client.get("/home/cards")
     assert r.status_code == 200

@@ -6,6 +6,7 @@ from contextlib import ExitStack, closing
 
 import pytest
 from tests.compaction_fixture_support import compaction_inputs
+from tests.genre_catalog_support import use_shipped_catalog
 from tests.store_fixture_support import PristineSchema, initialize_consumer
 from yt_playlist.core.store import Store
 
@@ -418,6 +419,7 @@ def _pristine_installed_schema(tmp_path_factory):
                 directory.mkdir()
                 with pytest.MonkeyPatch.context() as patch:
                     patch.setenv("YT_PLAYLIST_HOME", str(directory / "app-home"))
+                    use_shipped_catalog(patch)
                     # Empty SQL construction needs neither Store diagnostics
                     # nor a disk commit for every historical version. Consumers
                     # still own real disk/Store admission and populated upgrades.

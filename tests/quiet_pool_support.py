@@ -1,14 +1,15 @@
 """Real Fresh worker/preparation with controlled failures below their boundaries."""
 import json
 import threading
+from contextlib import closing
 from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
 
 from tests.home_fixture_support import prepared_client, publish_menu, returning_listener
-from tests.prepared_fixture_support import prepared_template
-from tests.store_fixture_support import bounded_consumer_schema, reuse_reporting_reader
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator
+from yt_playlist.core.store import Store
 from yt_playlist.rec import (choice_evidence, fresh_pool, home_cache, home_cards,
                              measurement, mode_surfaces, road_trip_candidates)
 
@@ -16,12 +17,31 @@ from yt_playlist.rec import (choice_evidence, fresh_pool, home_cache, home_cards
 DIAGNOSTIC = 'internal-diagnostic-879-fresh: invalid stored ranking document'
 
 
+@pytest.fixture(scope='module')
+def quiet_schema():
+    with bounded_consumer_schema(
+            (('house', 'House'), ('jazz', 'Jazz'), ('techno', 'Techno')), snapshot_guards=False) as schema:
+        yield schema
+
+
 @pytest.fixture
-def quiet_pool(quiet_home_template, tmp_path, monkeypatch, home_routes_only, without_metadata_providers):
-    with quiet_home_template.open(tmp_path / 'quiet.db') as store:
+def quiet_pool(quiet_schema, tmp_path, monkeypatch, home_routes_only, without_metadata_providers):
+    store = Store(tmp_path / 'quiet.db')
+    with closing(store.conn):
+        # Job/error behavior consumes uncontended SQL and completed cards.
+        # Keep worker execution, publication files and HTTP rendering real.
+        store.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(store, quiet_schema, snapshot_guards=False)
         store.conn.execute('PRAGMA wal_autocheckpoint=0')
-        with reuse_reporting_reader(store, monkeypatch):
-            yield from quiet_case(store, quiet_home_template.result, monkeypatch)
+        with mock_snapshot_coordinator(store, monkeypatch):
+            selected = quiet_input(store)
+            assert {card['lane'] for card in selected} == {'comfort', 'wheelhouse', 'explore'}
+            tracks = [track for card in selected for track in card['tracks']]
+            assert len(tracks) == 3 and all(track['genre'] == 'Jazz' for track in tracks)
+            assert len(store.rec_query.tracks_by_keys([track['key'] for track in tracks])) == 3
+            assert store.discovery.get_discovered_tracks() == []
+            assert store.recommendations.head('fresh') is None
+            yield from quiet_case(store, selected, monkeypatch)
 
 
 def quiet_case(store, selected, monkeypatch):
@@ -112,17 +132,11 @@ def quiet_case(store, selected, monkeypatch):
             assert ctx.work.wait(10), 'Fresh work did not drain before fixture teardown'
 
 
-@pytest.fixture(scope='module')
-def quiet_home_template():
-    def build(source):
-        returning_listener(source, 'mixes', now=1000)
-        source.accounts.upsert_account('main', 'cred', None, True)
-        # Job recovery consumes completed library cards. One actual subject per
-        # lane retains titles and genre selection without rebuilding rank models.
-        payload = publish_menu(source, count=3, tracks_per_card=1, genre='Jazz', mode_ids=(0, 0, 0),
-            genre_options=[{'family': 'jazz', 'label': 'Jazz'}, {'family': 'techno', 'label': 'Techno'}])
-        return payload['menus'][0]['protos']
-
-    with bounded_consumer_schema((('house', 'House'), ('jazz', 'Jazz'), ('techno', 'Techno'))) as schema:
-        with prepared_template(schema, build) as template:
-            yield template
+def quiet_input(source):
+    returning_listener(source, 'mixes', now=1000)
+    source.accounts.upsert_account('main', 'cred', None, True)
+    # One subject per lane retains titles and genre selection without fitting
+    # lower recommendation models or copying a second prepared library.
+    payload = publish_menu(source, count=3, tracks_per_card=1, genre='Jazz', mode_ids=(0, 0, 0),
+        genre_options=[{'family': 'jazz', 'label': 'Jazz'}, {'family': 'techno', 'label': 'Techno'}])
+    return payload['menus'][0]['protos']

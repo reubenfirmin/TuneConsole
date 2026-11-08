@@ -92,6 +92,29 @@ def state(conn):
     return result
 
 
+@pytest.mark.parametrize('version', [20, 92])
+def test_genuine_history_ignores_and_restores_a_consumers_catalog(
+        _pristine_installed_schema, genuine_replays, version):
+    from tests.genre_catalog_support import bound_catalog
+    from yt_playlist.util import genre_catalog, genre_map
+
+    genuine_replays(version)
+    expected = genuine_replays.state(version)
+    with pytest.MonkeyPatch.context() as patch:
+        bound_catalog(patch, entries=(('fixture only', 'Fixture Only'),))
+        assert genre_map.family('Fixture Only') == 'fixture only'
+        private_families = genre_map._load()
+        source = _pristine_installed_schema(version)
+        assert state(source) == expected
+        # Building the shared source must also restore the consumer's private
+        # vocabulary and its derived cache, rather than exposing shipped state.
+        assert set(genre_catalog.catalog()[0]) == {'fixture only'}
+        assert genre_map.family('Fixture Only') == 'fixture only'
+        assert genre_map._load() is private_families
+        with pytest.raises(sqlite3.OperationalError, match='readonly'):
+            source.execute("INSERT INTO settings VALUES ('private','forbidden')")
+
+
 @pytest.mark.parametrize(('version', 'chain'), [(version, chain) for version in VERSIONS
                                              for chain in ('genuine', 'fixture')])
 def test_installed_sql_input_matches_independent_real_replay(

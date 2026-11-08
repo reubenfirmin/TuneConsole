@@ -92,7 +92,7 @@ def finish(store, prepared, owner):
 @pytest.mark.parametrize('restart', [False, True])
 @pytest.mark.parametrize('error', [WorkBudgetExceeded, WorkClosing])
 def test_preparation_resumes_exact_plan_and_legacy_versions(database, monkeypatch, request, restart, error):
-    tracks = recordings([('House', 12, .3)])
+    tracks = recordings([('House', 5, .3)])
     seed(database, tracks)
     legacy_version = legacy(database)
     # Model an already published historical definition. Current preparation
@@ -101,8 +101,8 @@ def test_preparation_resumes_exact_plan_and_legacy_versions(database, monkeypatc
     worker = group_preparation.Preparation(database)
     # Unchanged compact definitions reuse their completed membership. Give the
     # next publication genuinely new content so interruption exercises a prefix.
-    seed(database, recordings([('House', 13, .3)]))
-    monkeypatch.setattr(group_publication, 'BATCH_ROWS', 4)
+    seed(database, recordings([('House', 6, .3)]))
+    monkeypatch.setattr(group_publication, 'BATCH_ROWS', 2)
     original = interrupt(monkeypatch, error=error)
     if error is WorkClosing:
         with pytest.raises(WorkClosing):
@@ -156,7 +156,7 @@ def test_preparation_resumes_exact_plan_and_legacy_versions(database, monkeypatc
 
 
 def test_foreign_live_lease_cannot_be_adopted(database, monkeypatch):
-    tracks = recordings([('House', 12, .3)])
+    tracks = recordings([('House', 5, .3)])
     first = publish(database, tracks)
     plan = pending(database, tracks, first)
     monkeypatch.setattr(group_publication, 'BATCH_ROWS', 4)
@@ -179,9 +179,9 @@ def test_foreign_live_lease_cannot_be_adopted(database, monkeypatch):
 
 
 def test_cleanup_prefix_is_finished_before_rebuilding_same_generation(database, monkeypatch):
-    tracks = recordings([('House', 12, .3)])
+    tracks = recordings([('House', 9, .3)])
     first = publish(database, tracks)
-    plan = pending(database, recordings([('House', 13, .3)]), first)
+    plan = pending(database, recordings([('House', 10, .3)]), first)
     monkeypatch.setattr(group_publication, 'BATCH_ROWS', 4)
     original = interrupt(monkeypatch, member_batches=2)
     with pytest.raises(WorkBudgetExceeded):
@@ -218,7 +218,7 @@ def test_cleanup_prefix_is_finished_before_rebuilding_same_generation(database, 
 
 
 def test_different_output_cannot_reuse_staged_prefix(database, monkeypatch):
-    tracks = recordings([('House', 12, .3)])
+    tracks = recordings([('House', 5, .3)])
     first = publish(database, tracks)
     plan = pending(database, tracks, first)
     monkeypatch.setattr(group_publication, 'BATCH_ROWS', 4)
@@ -238,7 +238,7 @@ def test_different_output_cannot_reuse_staged_prefix(database, monkeypatch):
 
 
 def test_unpublished_legacy_collision_waits_then_cleans_expired_owner(database, monkeypatch):
-    tracks = recordings([('House', 12, .3)])
+    tracks = recordings([('House', 5, .3)])
     first = publish(database, tracks)
     version = legacy(database)
     old = pending(database, tracks, first)
@@ -269,12 +269,12 @@ def test_unpublished_legacy_collision_waits_then_cleans_expired_owner(database, 
 
 @pytest.mark.parametrize('change', ['input', 'unrelated-setting', 'external-writer'])
 def test_cached_plan_revalidates_original_guard_between_turns(database, monkeypatch, change):
-    tracks = recordings([('House', 12, .3)])
+    tracks = recordings([('House', 5, .3)])
     seed(database, tracks)
     worker = group_preparation.Preparation(database)
     assert worker.step(1000)
     first = database.taste_groups.head(members=True)
-    seed(database, recordings([('House', 13, .3)]))
+    seed(database, recordings([('House', 6, .3)]))
     monkeypatch.setattr(group_publication, 'BATCH_ROWS', 4)
     original = interrupt(monkeypatch)
     assert not worker.step(2000)

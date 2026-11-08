@@ -1,14 +1,57 @@
 """Exercise occurrence order through the real album HTTP page and expansion."""
 import re
+from contextlib import ExitStack
 
 import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
+from tests.home_fixture_support import home_page_bytecode, without_metadata_providers
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.core import albums, catalog
 from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.library.album_fetch import UPLOAD_RELEASE_PREFIX
 from yt_playlist.web.app import create_app
+
+
+pytestmark = pytest.mark.usefixtures('album_routes', 'without_metadata_providers')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+def test_album_page_input_keeps_empty_occurrences_and_real_guards(_pristine_current_schema):
+    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert _pristine_current_schema._revision_script
+    assert not _pristine_current_schema.execute('SELECT 1 FROM album_track_occurrences').fetchone()
+    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.fixture
+def album_routes(monkeypatch, home_page_bytecode):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import album, app_update, audio_preview
+
+    # Keep the real album controller, HTTP middleware and templates. Unrelated
+    # routes and metadata-provider setup are below the page's boundary.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+        for module in (app_update, audio_preview, album)])
+    templates = webapp.Jinja2Templates
+
+    def compiled(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        result.env.bytecode_cache = home_page_bytecode
+        return result
+
+    monkeypatch.setattr(webapp, 'Jinja2Templates', compiled)
+    client_type = TestClient
+    with ExitStack() as clients:
+        monkeypatch.setattr(__name__ + '.TestClient',
+            lambda *args, **kwargs: clients.enter_context(client_type(*args, **kwargs)))
+        yield
 
 
 def payload(videos):
@@ -42,7 +85,8 @@ def test_album_page_and_expansion_follow_published_occurrences(store,ownership,c
         def get_library_upload_album(self, _browse):
             return live
     provider = Provider(albums={browse:live})
-    client = TestClient(create_app(store,lambda:{account:provider},now_fn=lambda:1),base_url='http://127.0.0.1')
+    client = TestClient(create_app(store,lambda:{account:provider},now_fn=lambda:1,
+                                   background_work=False),base_url='http://127.0.0.1')
     expected = [t.get('videoId') if t.get('title') else '' for t in current['tracks']]
     for route in ('/album?browse=','/album/inline?browse='):
         response = client.get(route+browse)
@@ -85,7 +129,8 @@ def test_published_table_keeps_local_and_unresolved_positions_and_exact_upload_c
     assert [t['title'] for t in detail]==['Local title','Unresolved occurrence','Exact','Captured title','Exact']
     assert [t['video_id'] for t in detail]==['','','exact','','exact']
     assert [t['track_id'] for t in detail]==[local,None,exact,unresolved,exact]
-    client = TestClient(create_app(store,lambda:{account:FakeClient()},now_fn=lambda:1),base_url='http://127.0.0.1')
+    client = TestClient(create_app(store,lambda:{account:FakeClient()},now_fn=lambda:1,
+                                   background_work=False),base_url='http://127.0.0.1')
     response = client.get('/album?browse=mixed')
     assert re.findall(r'<tr class="srow" data-vid="([^"]*)"',response.text)==['','','exact','','exact']
     assert 'Unresolved occurrence' in response.text and 'Local title' in response.text

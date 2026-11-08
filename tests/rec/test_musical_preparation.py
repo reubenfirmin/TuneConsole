@@ -222,8 +222,8 @@ def test_file_backed_format_cutover_preserves_last_good_and_retries(store, tmp_p
         'SELECT * FROM rec_musical_source_profiles WHERE source_key=?', (key,)).fetchone())
     progress = tmp_path / 'cutover.json'
     for _ in range(100):
-        # The incomplete one-row checkpoint above owns the partial-input
-        # condition. Complete this independent cutover with ordinary batches.
+        # The one-row checkpoint above owns the partial-input condition.
+        # Complete this independent cutover with ordinary batches.
         if runtime_preparation.step(store.conn, progress)['complete']:
             break
     else:

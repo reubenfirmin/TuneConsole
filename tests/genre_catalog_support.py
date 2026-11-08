@@ -4,6 +4,18 @@ from functools import lru_cache
 from yt_playlist.util import genre_catalog
 
 
+# Captured during collection, before consumer fixtures replace these functions.
+_SHIPPED_CATALOG = {name: getattr(genre_catalog, name) for name in (
+    'catalog', 'family_labels', 'builtin_names', 'legacy_names', 'legacy_entries')}
+
+
+def use_shipped_catalog(patch):
+    """Build shared genuine history independently of a consumer's vocabulary."""
+    for name, function in _SHIPPED_CATALOG.items():
+        patch.setattr(genre_catalog, name, function)
+    _isolate_catalog_caches(patch)
+
+
 def _isolate_catalog_caches(patch):
     """Derived values must have the same lifetime as the patched vocabulary."""
     from yt_playlist.rec import musical_profiles

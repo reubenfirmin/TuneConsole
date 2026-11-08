@@ -171,6 +171,30 @@ def test_passing_run_accepts_pytest_removing_its_workspace_first(probe_suite):
     assert all(not Path(path).parent.exists() for path in created)
 
 
+def test_function_and_shared_directory_cleanup_precedes_the_teardown_report(probe_suite):
+    checkout, run = probe_suite
+    (checkout / 'test_probe.py').write_text('''from pathlib import Path
+
+def test_probe(tmp_path, tmp_path_factory, request):
+    shared = tmp_path_factory.mktemp('shared')
+    for directory in (tmp_path, shared):
+        (directory / 'fixture.db').write_bytes(b'fixture data')
+    request.config.cleanup_paths = (tmp_path, shared, shared.parent)
+''', encoding='utf-8')
+    (checkout / 'conftest.py').write_text('''import pytest
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item, call):
+    report = yield
+    if report.when == 'teardown':
+        assert all(not path.exists() for path in item.config.cleanup_paths)
+    return report
+''', encoding='utf-8')
+    result = run()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert '1 passed' in result.stdout
+
+
 def test_default_fixture_storage_uses_the_checkout_filesystem(probe_suite):
     checkout, run = probe_suite
     result = run()

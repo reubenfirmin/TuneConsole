@@ -64,9 +64,20 @@ def pytest_runtest_protocol(item, nextitem):
             monitor.stop()
         item.session._setupstate.teardown_exact(None)
         raise
-    # A completed protocol has run its fixture finalizers and report hooks.
-    # Interrupted protocols drain above and leave directory removal to session
-    # cleanup, including failures raised by a fixture finalizer.
+    return result
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_teardown(item, nextitem):
+    # Keep directory removal inside pytest's measured teardown, after fixture
+    # finalizers have closed their files and before the teardown report exists.
+    try:
+        return (yield)
+    finally:
+        _remove_test_workspace(item, nextitem)
+
+
+def _remove_test_workspace(item, nextitem):
     # Remove only this function's fixture, never factory-created shared
     # templates or another session's active, locked base directory.
     directory = item.stash.get(_FUNCTION_WORKSPACE, None)
@@ -75,7 +86,15 @@ def pytest_runtest_protocol(item, nextitem):
             shutil.rmtree(directory)
         except FileNotFoundError:
             pass  # An explicit pytest retention override may clean first.
-    return result
+    # The final test has also closed module/session fixtures. Charge their
+    # remaining directories to its teardown; sessionfinish remains the fallback
+    # for interruption, collection-only runs and cleanup failures.
+    factory = getattr(item.config, '_tmp_path_factory', None)
+    if nextitem is None and factory is not None and factory._basetemp is not None:
+        try:
+            shutil.rmtree(factory._basetemp)
+        except FileNotFoundError:
+            pass
 
 
 def pytest_make_parametrize_id(val, argname):

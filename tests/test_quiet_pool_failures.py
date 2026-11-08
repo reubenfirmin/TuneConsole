@@ -3,24 +3,13 @@ import re
 
 import pytest
 
-from tests.quiet_pool_support import DIAGNOSTIC, quiet_home_template, quiet_pool
+from tests.quiet_pool_support import DIAGNOSTIC, quiet_pool, quiet_schema
 from tests.home_fixture_support import home_routes_only, without_metadata_providers
 from tests.test_home_other_genres import genre_routes, template_bytecode
 from yt_playlist.core.action_errors import ActionInputError
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.rec import candidate_refresh, fresh_pool
 from yt_playlist.web.jobs import start_fresh_pool
-
-
-def test_quiet_fresh_input_keeps_playable_library_cards_and_no_discoveries(quiet_home_template):
-    store = quiet_home_template.source
-    cards = quiet_home_template.result
-    assert {card['lane'] for card in cards} == {'comfort', 'wheelhouse', 'explore'}
-    tracks = [track for card in cards for track in card['tracks']]
-    assert len(tracks) == 3 and all(track['genre'] == 'Jazz' for track in tracks)
-    assert len(store.rec_query.tracks_by_keys([track['key'] for track in tracks])) == 3
-    assert store.discovery.get_discovered_tracks() == []
-    assert store.recommendations.head('fresh') is None
 
 
 @pytest.mark.parametrize('kind', ['json', 'value'])

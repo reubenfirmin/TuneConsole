@@ -158,6 +158,10 @@ def test_platform_ci_exercises_release_build_and_packaged_smoke_on_both_architec
         assert {entry["arch"] for entry in job["strategy"]["matrix"]["include"]} == arches
         commands = "\n".join(step.get("run", "") for step in job["steps"])
         if name == "macos":
+            assert {entry["arch"]: entry["runner"]
+                    for entry in job["strategy"]["matrix"]["include"]} == {
+                        "arm64": "macos-15", "x86_64": "macos-15-intel"}
+            assert 'test "$(uname -m)" = "${{ matrix.arch }}"' in commands
             assert "packaging/macos/build.sh" in commands
             assert "packaging/macos/smoke.sh" in commands
         else:

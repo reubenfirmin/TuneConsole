@@ -5,10 +5,28 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
+from tests.home_fixture_support import home_routes_only, without_metadata_providers
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.library import tv_stream
 from yt_playlist.library.playlist_generated import create_generated_playlist
 from yt_playlist.rec import tv
 from yt_playlist.web.app import create_app
+
+
+pytestmark = pytest.mark.usefixtures('home_routes_only', 'without_metadata_providers')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+def test_tv_stream_input_keeps_empty_receipts_and_real_guards(_pristine_current_schema):
+    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert _pristine_current_schema._revision_script
+    assert not _pristine_current_schema.execute('SELECT 1 FROM tv_continuation_receipts').fetchone()
+    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def video(index, duration=200):
