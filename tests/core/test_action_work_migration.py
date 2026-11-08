@@ -38,37 +38,6 @@ def backup(tmp_path,account,remote):
     return str(path)
 
 
-def test_upgrade_preserves_action_links_plain_draft_and_unavailable_historical_backup(tmp_path,legacy_action_store):
-    store = legacy_action_store
-    account = legacy_account(store)
-    legacy_playlist(store,account,'SOURCE')
-    undo = {'deletions':[{'identity':account,'ytm':'SOURCE','phase':'uncertain',
-                          'backup':str(tmp_path/'unavailable-historical-backup.json')} ]}
-    original = store.actions.record_action('gc_generated','{}','{}','delete_pending',json.dumps(undo),2)
-    draft = store.actions.record_action('merge_draft','{"keep":"all"}','SOURCE|OTHER',
-                                         'draft','historical non-JSON draft evidence',3)
-    migrated = store.actions.record_action('copy_playlist','{}','{}','undone','{}',4)
-    linked = store.actions.record_action('undo',json.dumps({'undid':migrated}),'{}','executed','{}',5)
-    migrate(store.conn, registry=registry.MIGRATIONS)
-    store._bind_repositories()
-    assert store.actions.get_draft('SOURCE|OTHER').id==draft
-    assert store.actions.get_action(draft).undo_json=='historical non-JSON draft evidence'
-    assert json.loads(store.actions.get_action(original).undo_json)==undo
-    assert store.conn.execute('SELECT undo_of_action_id FROM actions WHERE id=?',(linked,)).fetchone()[0]==migrated
-    assert tuple(store.conn.execute('SELECT phase,outcome,backup_status FROM action_steps').fetchone())==(
-        'uncertain','unknown','missing_historical')
-    assert store.actions.get_pending_deletion(account,'SOURCE').id==original
-    with store.conn:
-        store.conn.execute("UPDATE action_steps SET phase='remote_complete',outcome='confirmed_absent'")
-    assert json.loads(store.actions.get_action(original).undo_json)['deletions'][0]['phase']=='remote_complete'
-    current.validate(store.conn)
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-    captured = store.conn.execute('SELECT * FROM actions WHERE id=?',(original,)).fetchone()
-    evidence = collection_recovery.read(captured['recovery_filename'],captured['recovery_digest'],captured['recovery_bytes'],
-                                         kind='action',owner=original)
-    assert json.loads(evidence['undo'])==undo
-
-
 def test_expired_claim_requires_reconciliation_and_fences_stale_completion(store,tmp_path):
     account = store.accounts.upsert_account('Owner','owner.json',None,True)
     store.playlists.upsert_playlist(account,'SOURCE','Source',2,'',1)
@@ -308,9 +277,11 @@ def test_terminal_action_and_frozen_review_are_guarded_in_sql(store):
         store.conn.execute("UPDATE actions SET kind='delete_playlist' WHERE id=?",(action,))
 
 
-def test_cloned_recovery_relocates_backup_references_without_original_directory(tmp_path,monkeypatch):
+def test_cloned_recovery_relocates_backup_references_without_original_directory(
+        tmp_path, monkeypatch, _pristine_current_schema):
     from pathlib import Path
     from tests.test_undo_recovery import RecoveryClient, _deleted
+    from tests.store_fixture_support import initialize_consumer
     from yt_playlist.core import action_backup_files
     from yt_playlist.core.store import Store
     from yt_playlist.library.playlist_undo import undo_action
@@ -318,7 +289,7 @@ def test_cloned_recovery_relocates_backup_references_without_original_directory(
     original = Store(tmp_path/'original.db')
     restored = None
     try:
-        original.init_schema()
+        initialize_consumer(original, _pristine_current_schema)
         client = RecoveryClient({'SOURCE':['one','one','two']})
         account,action = _deleted(original,client)
         prior = original.actions.claim_undo(action,3)

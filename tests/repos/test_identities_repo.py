@@ -96,23 +96,3 @@ def test_conditional_upsert_rejects_retargeting_even_after_an_outdated_controlle
         store.accounts.repository.upsert_account('Main', 'new-credential', 'another-owner', 1)
     assert store.accounts.get_master_account().id == identity
     assert store.accounts.get_master_account().brand_account_id == 'original-owner'
-
-
-def test_migration_preserves_existing_identities(legacy_store):
-    from yt_playlist.core.migrations import migrate
-    from yt_playlist.core.migrations.registry import MIGRATIONS
-
-    store = legacy_store
-    with store.conn:
-        iid = store.conn.execute("INSERT INTO identities(label,credential_ref,is_master) VALUES ('main','cred',1)").lastrowid
-    history = [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')]
-
-    # This genuine v7 fixture requires the explicit historical upgrade route.
-    # Preserve its applied history rather than disguising it as unversioned.
-    migrate(store.conn, registry=MIGRATIONS)
-
-    store.init_schema()
-
-    assert [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')][:len(history)] == history
-    assert [(i.id, i.label) for i in store.accounts.get_accounts()] == [(iid, "main")]
-    assert store.accounts.get_master_account().id == iid

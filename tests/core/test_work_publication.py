@@ -6,13 +6,20 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.prepared_fixture_support import coordinates
+from tests.independent_schema_support import independent_regular_ddl
+from tests.prepared_fixture_support import capture_template, coordinates
+from tests.store_fixture_support import publication_consumer_reads
 from tests.test_installed_fixture import state
 from yt_playlist.core import file_owners, recommendation_work
 from yt_playlist.core.migrations import MigrationError, migrate, registry, regular
 from yt_playlist.core.preparation.recommendation_state import BYTE_LIMITS, JOBS
 from yt_playlist.core.preparation import work_publication
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Publication owns SQL/files and does not construct an HTTP lifespan."""
 
 
 def prepare(store):
@@ -22,30 +29,35 @@ def prepare(store):
     return JOBS['work'].step(store.conn).prepared_revision
 
 
+def test_work_schema_input_keeps_real_installed_history_and_guards(_bounded_installed_schema):
+    source = _bounded_installed_schema(81).source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 81
+    assert source._snapshot_revisions.conn is source.conn
+
+
 @pytest.fixture(scope='module')
-def published_work_template(tmp_path_factory, _pristine_installed_schema):
+def published_work_template(tmp_path_factory, _bounded_installed_schema):
     root = tmp_path_factory.mktemp('published-work-template')
-    with closing(sqlite3.connect(':memory:')) as template:
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setenv('YT_PLAYLIST_HOME', str(root / 'app-home'))
-            source = Store(root / 'source.db')
-            with closing(source.conn):
-                _pristine_installed_schema(81).backup(source.conn)
-                source.init_schema()
-                work_publication.publish(source.conn, revision=prepare(source))
-                assert not coordinates(source.conn)
-                source.conn.backup(template)
-        template.execute('PRAGMA query_only=ON')
-        yield template
+    with _bounded_installed_schema(81).open(root / 'source.db') as source:
+        work_publication.publish(source.conn, revision=prepare(source))
+        assert not coordinates(source.conn)
+        yield capture_template(source, None)
+
+
+def test_published_work_input_keeps_read_only_history_and_real_private_guards(published_work_template):
+    source = published_work_template.source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 81
+    assert source._snapshot_revisions.conn is source.conn
+    assert source.model_selection.next_daily_at() == 123
+    assert source.tv_preparation.state() == {'failed': False, 'at': 99}
 
 
 @pytest.fixture
 def published_work(tmp_path, published_work_template):
-    store = Store(tmp_path / 'invalid.db')
-    with closing(store.conn):
-        published_work_template.backup(store.conn)
+    with published_work_template.open(tmp_path / 'invalid.db') as store:
         history = [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')]
-        store.init_schema()
         assert recommendation_work.prepared_owner(store.conn)
         assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 81
         assert store.conn.execute('PRAGMA foreign_keys').fetchone()[0] == 1
@@ -68,7 +80,7 @@ def published_state(conn):
 
 
 @pytest.mark.parametrize('installed', [79, 81], indirect=True)
-def test_publication_preserves_originals_and_supports_existing_and_new_readers(installed, request):
+def test_publication_preserves_originals_and_supports_existing_and_new_readers(installed, publication_consumer_reads):
     store, version = installed
     revision = prepare(store)
     assert revision is not None and not recommendation_work.available(store.conn)
@@ -79,28 +91,6 @@ def test_publication_preserves_originals_and_supports_existing_and_new_readers(i
     assert recommendation_work.available(store.conn)
     assert store.model_selection.next_daily_at() == 123
     assert store.tv_preparation.state() == {'failed': False, 'at': 99}
-    if version == 81:
-        clone = request.getfixturevalue('published_work')
-        template = request.getfixturevalue('published_work_template')
-        control = Store(request.getfixturevalue('tmp_path') / 'genuine-published.db')
-        with closing(control.conn):
-            # The installed fixture defers regular changes. Independently replay
-            # the matrix's original non-deferred admission and full producer.
-            migrate(control.conn, registry=registry.MIGRATIONS[:81])
-            control.init_schema()
-            work_publication.publish(control.conn, revision=prepare(control))
-            assert published_state(clone.conn) == published_state(template) == published_state(control.conn)
-            assert template.execute('PRAGMA query_only').fetchone()[0] == 1
-            before = list(template.iterdump())
-            with pytest.raises(sqlite3.OperationalError, match='readonly'):
-                template.execute('UPDATE prepared_model_selection_schedule SET next_at=999')
-            assert clone._db_path != control._db_path and clone._evidence_key != control._evidence_key
-            for module in file_owners.owners().values():
-                assert module.directory(clone.conn) != module.directory(control.conn)
-            clone.model_selection.schedule_daily(456, 200)
-            assert clone.model_selection.next_daily_at() == 456
-            assert control.model_selection.next_daily_at() == 123
-            assert list(template.iterdump()) == before
     # Prove runtime reads the admitted typed owner. The temporary change is
     # rolled back and cannot conceal a stale retained source write.
     store.conn.execute('BEGIN')
@@ -109,7 +99,7 @@ def test_publication_preserves_originals_and_supports_existing_and_new_readers(i
     store.conn.rollback()
     reopened = Store(store._db_path)
     try:
-        reopened.init_schema()
+        reopened.init_schema(defer_metadata=True)
         assert reopened.model_selection.next_daily_at() == 123
         reopened.model_selection.schedule_daily(234, 200)
         reopened.tv_preparation.record(True, 201)
@@ -131,7 +121,47 @@ def test_publication_preserves_originals_and_supports_existing_and_new_readers(i
     assert [tuple(r) for r in store.conn.execute('SELECT * FROM published_work_originals ORDER BY surface')] == original
     assert store.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == version
     assert JOBS['work'].progress(store.conn).prepared_revision is None
+
+
+@pytest.mark.parametrize('installed', [79, 81], indirect=True)
+def test_real_independent_ddl_keeps_work_publication_and_original_history(installed, independent_regular_ddl):
+    store, version = installed
+    work_publication.publish(store.conn, revision=prepare(store))
+    # The real runner must commit independent DDL over a published owner.
+    # Complete application-registry upgrades belong to its retained owners in
+    # test_independent_schema_changes, rather than every publication consumer.
     regular.migrate(store.conn)
+    assert recommendation_work.available(store.conn)
+    assert store.model_selection.next_daily_at() == 123
+    assert store.tv_preparation.state() == {'failed': False, 'at': 99}
+    assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
+
+
+@pytest.mark.parametrize('installed', [81], indirect=True)
+def test_private_work_input_matches_independent_real_publication(
+        installed, published_work, published_work_template):
+    control, _ = installed
+    work_publication.publish(control.conn, revision=prepare(control))
+    template = published_work_template.source.conn
+    assert published_state(published_work.conn) == published_state(template) == published_state(control.conn)
+
+
+@pytest.mark.parametrize('installed', [81], indirect=True)
+def test_private_work_copy_cannot_mutate_its_source_or_independent_producer(
+        installed, published_work, published_work_template):
+    control, _ = installed
+    work_publication.publish(control.conn, revision=prepare(control))
+    template = published_work_template.source.conn
+    before = list(template.iterdump())
+    with pytest.raises(sqlite3.OperationalError, match='readonly'):
+        template.execute('UPDATE prepared_model_selection_schedule SET next_at=999')
+    assert published_work._db_path != control._db_path and published_work._evidence_key != control._evidence_key
+    for module in file_owners.owners().values():
+        assert module.directory(published_work.conn) != module.directory(control.conn)
+    published_work.model_selection.schedule_daily(456, 200)
+    assert published_work.model_selection.next_daily_at() == 456
+    assert control.model_selection.next_daily_at() == 123
+    assert list(template.iterdump()) == before
 
 
 @pytest.mark.parametrize('installed', [81], indirect=True)
@@ -154,11 +184,9 @@ def test_stale_or_corrupted_staging_cannot_publish(installed):
 
 
 @pytest.mark.parametrize('version', [79, 81])
-def test_interrupted_publication_rolls_back_and_explicit_historical_route_still_works(tmp_path, version):
-    store = Store(tmp_path / 'historical.db')
-    try:
-        migrate(store.conn, registry=registry.MIGRATIONS[:version])
-        store.init_schema()
+def test_interrupted_publication_rolls_back_and_explicit_historical_route_still_works(
+        tmp_path, version, _bounded_installed_schema):
+    with _bounded_installed_schema(version).open(tmp_path / 'historical.db') as store:
         revision = prepare(store)
         class InterruptCommit:
             def __getattr__(self, name):
@@ -182,8 +210,6 @@ def test_interrupted_publication_rolls_back_and_explicit_historical_route_still_
         assert store.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 82
         assert not recommendation_work.prepared_owner(store.conn)
         assert recommendation_work.read(store.conn, 'daily_model_schedule') == {'next_at': 999}
-    finally:
-        store.conn.close()
 
 
 @pytest.mark.parametrize('surface,payload', [

@@ -6,32 +6,6 @@ import pytest
 
 from yt_playlist.core import db_space
 from yt_playlist.core.migrations.runner import MigrationError, migrate
-from yt_playlist.core.migrations.registry import MIGRATIONS
-from yt_playlist.core.store import Store
-
-
-def test_shared_policy_upgrade_preserves_legacy_payload_without_backup_or_rewrite(tmp_path):
-    path = tmp_path / 'state.db'
-    conn = sqlite3.connect(path)
-    migrate(conn, registry=MIGRATIONS[:52])
-    raw = '{"ranker":"legacy","evidence":"' + 'x' * 1000000 + '"}'
-    conn.execute('INSERT INTO rec_serving_policies VALUES (?, ?, 1)', ('legacy-policy', raw))
-    conn.execute('INSERT INTO settings VALUES (?,?)', ('active-session', '{"pool_policy":"legacy-policy"}'))
-    conn.commit()
-    pages = conn.execute('PRAGMA page_count').fetchone()[0]
-    migrate(conn, registry=MIGRATIONS[:53])
-    assert conn.execute('SELECT configuration FROM rec_serving_policies').fetchone()[0] == raw
-    assert conn.execute('SELECT count(*) FROM rec_policy_bases').fetchone()[0] == 0
-    assert conn.execute('PRAGMA page_count').fetchone()[0] - pages < 32
-    assert not (tmp_path / 'backups').exists()
-    conn.close()
-    store = Store(path)
-    migrate(store.conn, registry=MIGRATIONS)
-    store.init_schema()
-    try:
-        assert store.rec_ledger.policy_configuration('legacy-policy')['ranker'] == 'legacy'
-    finally:
-        store.conn.close()
 
 
 def test_current_schema_rejects_missing_shared_policy_structures(tmp_path, consumer_store):

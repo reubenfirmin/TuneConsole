@@ -234,13 +234,79 @@ def test_block():
             assert any(payload in (capture.text or "") for capture in case.findall("system-out"))
 
 
-@pytest.mark.parametrize("workers", [0, 2])
-@pytest.mark.parametrize("interruption,blocked_phase", [
-    ("signal", "call"), ("deadline", "call"), ("deadline", "setup"),
-    ("pace", "call"), ("pace", "setup"), ("pace-sqlite", "call"),
-    ("pace-coverage-lock", "call"), ("deadline-coverage-lock", "call"),
-    ("pace-storage", "call")])
-def test_progress_and_coverage_survive_interrupt_after_live_test_start(tmp_path, workers, interruption, blocked_phase):
+PROBE_CASES = [(workers, interruption, phase) for interruption, phase in (
+    ('signal', 'call'), ('deadline', 'call'), ('deadline', 'setup'),
+    ('pace', 'call'), ('pace', 'setup'), ('pace-sqlite', 'call'),
+    ('pace-coverage-lock', 'call'), ('deadline-coverage-lock', 'call'),
+    ('pace-storage', 'call')) for workers in (0, 2)]
+
+
+@pytest.fixture(scope='module', params=PROBE_CASES,
+    ids=lambda case: f'{case[1]}-{case[2]}-{case[0]}')
+def interrupted_probe(request, tmp_path_factory):
+    workers, interruption, phase = request.param
+    workflow = _interrupted_probe(tmp_path_factory.mktemp('interrupted-probe'), workers, interruption, phase)
+    try:
+        yield workflow
+    finally:
+        workflow.close()
+
+
+@pytest.fixture(scope='module')
+def initialized_probe(interrupted_probe):
+    return next(interrupted_probe)
+
+
+def test_interruption_monitor_is_initialized_before_worker_collection(initialized_probe):
+    marker = json.loads((initialized_probe.root / 'coordinator.json').read_text())
+    assert marker['pid'] == initialized_probe.child.pid
+    assert marker['monitor'] == ('RuntimeTarget' if initialized_probe.interruption.startswith('pace') else
+                                 'SessionLimit' if initialized_probe.interruption.startswith('deadline') else None)
+    assert initialized_probe.child.poll() is None
+
+
+@pytest.fixture(scope='module')
+def live_probe(initialized_probe, interrupted_probe):
+    return next(interrupted_probe)
+
+
+def test_live_blocked_phase_has_readable_progress_and_completed_predecessors(live_probe):
+    rows = [json.loads(line) for line in live_probe.progress.read_text().splitlines()]
+    assert rows[-1]['nodeid'].endswith('test_block')
+    assert sum(row['event'] == 'end' for row in rows) == 3
+    assert live_probe.child.poll() is None
+
+
+@pytest.fixture(scope='module')
+def teardown_probe(live_probe, interrupted_probe):
+    return next(interrupted_probe)
+
+
+def test_real_interruption_finishes_teardown_without_starting_the_next_case(teardown_probe):
+    assert (teardown_probe.root / 'test_block.cleaned').exists()
+    assert not (teardown_probe.root / 'test_unstarted.cleaned').exists()
+
+
+@pytest.fixture(scope='module')
+def stopped_probe(teardown_probe, interrupted_probe):
+    return next(interrupted_probe)
+
+
+def test_interrupted_workers_drain_and_the_coordinator_exits_with_interrupted_status(stopped_probe):
+    assert stopped_probe.child.returncode == 2
+
+
+@pytest.fixture(scope='module')
+def durable_probe(stopped_probe, interrupted_probe):
+    return next(interrupted_probe)
+
+
+def test_interrupted_receipts_keep_per_test_coverage_and_release_both_ownership_locks(durable_probe):
+    assert (durable_probe.root / 'coverage.json').exists()
+    assert durable_probe.child.poll() == 2
+
+
+def _interrupted_probe(tmp_path, workers, interruption, blocked_phase):
     repo = Path(__file__).resolve().parents[1]
     progress, output = tmp_path / "progress.jsonl", tmp_path / "console.log"
     (tmp_path / "pytest.ini").write_text("[pytest]\npythonpath = .\ntmp_path_retention_policy = failed\n")
@@ -248,12 +314,33 @@ def test_progress_and_coverage_survive_interrupt_after_live_test_start(tmp_path,
     (tmp_path / "subject.py").write_text(
         "def prepare():\n    return 10\n"
         "def choose(value):\n    if value:\n        return 'yes'\n    return 'no'\n")
-    if interruption == 'pace-storage':
-        # Fail only the monitor's stop publication. Real workers, teardown,
-        # progress and coverage still have space, without filling a filesystem.
-        (tmp_path / 'conftest.py').write_text('''import errno
+    # Advance only the monitor's clock after the parent has inspected the live
+    # blocked receipt. Real processes, signals, coverage locks and SQL remain
+    # active; elapsed idle seconds are not a behavioral input to this check.
+    (tmp_path / 'conftest.py').write_text('''import errno
+import json
+import os
+import signal
 from pathlib import Path
+import pytest_time_limit
+
+clock = pytest_time_limit._monotonic
+start_timer = pytest_time_limit.SessionLimit.start_timer
+def bounded_timer(self, delay, interval=0):
+    start_timer(self, delay, interval)
+    if isinstance(self, pytest_time_limit.RuntimeTarget):
+        signal.setitimer(signal.ITIMER_REAL, .01, .01)
+def pytest_configure(config):
+    if os.environ['PROBE_PACE'] == '1':
+        pytest_time_limit._monotonic = lambda: 10. if Path('expire').exists() else 0.
+        pytest_time_limit.SessionLimit.start_timer = bounded_timer
 def pytest_sessionstart(session):
+    if not hasattr(session.config, 'workerinput'):
+        monitor = session.config.pluginmanager.getplugin('test-session-time-limit')
+        Path('coordinator.json').write_text(json.dumps({
+            'pid': os.getpid(), 'monitor': type(monitor).__name__ if monitor else None}))
+    if os.environ['PROBE_STORAGE'] != '1':
+        return
     original = Path.write_text
     def write(path, *args, **kwargs):
         if path.name == 'state.pending' and path.parent.name.startswith('runtime-monitor'):
@@ -293,7 +380,9 @@ def block():
         collector = Coverage.current()._collector
         previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
         try:
-            time.sleep(4)
+            while not Path('expire').exists():
+                time.sleep(.001)
+            signal.raise_signal(signal.SIGALRM)
             collector.lock_data()
             try:
                 signal.pthread_sigmask(signal.SIG_SETMASK, previous)
@@ -337,11 +426,19 @@ def test_unstarted():
         child = subprocess.Popen(command, cwd=tmp_path, stdout=stream, stderr=subprocess.STDOUT, start_new_session=True,
             env={**os.environ, "PYTHONPATH": str(repo), "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
                  "PYTEST_ADDOPTS": "", "PROBE_BLOCKED_PHASE": blocked_phase,
-                 "PROBE_DEADLINE": str(int(interruption == 'deadline')),
+                 "PROBE_DEADLINE": str(int(interruption.startswith('deadline'))),
+                 "PROBE_PACE": str(int(interruption.startswith('pace'))),
+                 "PROBE_STORAGE": str(int(interruption == 'pace-storage')),
                  "PROBE_SQLITE": str(int(interruption == 'pace-sqlite')),
                  "PROBE_COVERAGE_LOCK": str(int(interruption.endswith('coverage-lock')))})
+        state = SimpleNamespace(root=tmp_path, child=child, progress=progress,
+                                interruption=interruption, workers=workers)
         try:
             deadline = time.monotonic() + 15
+            while not (tmp_path / 'coordinator.json').exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(.002)
+            assert (tmp_path / 'coordinator.json').exists(), output.read_text()
+            yield state
             while not (tmp_path / "entered").exists() and child.poll() is None and time.monotonic() < deadline:
                 time.sleep(.02)
             assert (tmp_path / "entered").exists(), output.read_text()
@@ -351,10 +448,15 @@ def test_unstarted():
             live = [json.loads(line) for line in progress.read_text().splitlines()]
             assert live[-1]["event"] == ("phase" if blocked_phase == "call" else "start")
             assert live[-1]["nodeid"].endswith("test_block")
+            yield state
             if interruption == "signal":
                 os.killpg(child.pid, signal.SIGINT)
-            elif interruption == 'deadline':
+            else:
                 (tmp_path / 'expire').touch()
+            while not (tmp_path / 'test_block.cleaned').exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(.002)
+            assert (tmp_path / 'test_block.cleaned').exists(), output.read_text()
+            yield state
             child.wait(timeout=15)
         finally:
             if child.poll() is None:
@@ -363,6 +465,7 @@ def test_unstarted():
     assert child.returncode == 2, output.read_text()
     assert (tmp_path / "test_block.cleaned").exists(), output.read_text()
     assert not (tmp_path / "test_unstarted.cleaned").exists()
+    yield state
     if interruption.startswith("deadline"):
         assert '--test-time-limit=2s expired' in (tmp_path / 'test_block.stop').read_text()
     elif interruption.startswith("pace"):
@@ -405,6 +508,7 @@ def test_unstarted():
         config = SimpleNamespace(add_cleanup=owner.callback)
         assert _reserve(config, (tmp_path / '.coverage').resolve()) is False
         assert config._tuneconsole_coverage_owner['pid'] == os.getpid()
+    yield state
 
 
 @pytest.mark.parametrize('monitor', ['pace', 'deadline'])

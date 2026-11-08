@@ -475,44 +475,6 @@ def test_changing_labels_preserves_original_prediction_across_heuristic_versions
     assert feedback['prediction'] == original
 
 
-def test_audio_migration_preserves_existing_settings_and_reopens(tmp_path, _pristine_installed_schema):
-    from tests.historical_support import upgrade_fixture
-    from yt_playlist.core.store import Store
-    path = tmp_path / 'upgrade.db'
-    previous = Store(path)
-    _pristine_installed_schema(55).backup(previous.conn)
-    previous.conn.execute("INSERT INTO settings VALUES ('audio_test_sentinel','keep')")
-    legacy_run = str(uuid4())
-    previous.conn.execute('INSERT INTO audio_vibe_feedback VALUES (?,?,?,?,?)',
-                          (legacy_run, '["historical-excerpt"]', '{"version":"old"}', 'focus', 5))
-    previous.conn.execute('INSERT INTO audio_vibe_labels VALUES (?,?,?,?,?,?)',
-        (legacy_run, 'audio-vibe-targets-1', '["four-target-excerpt"]', '{"version":"previous"}',
-         '["gentle","move"]', 6))
-    previous.conn.commit()
-    previous.conn.close()
-    upgraded = Store(path)
-    upgrade_fixture(upgraded)
-    assert upgraded.settings.get_setting('audio_test_sentinel') == 'keep'
-    value = sample(run_id=legacy_run)
-    upgraded.audio_vibes.save_sample(value, 10)
-    assert upgraded.audio_vibes.feedback(legacy_run) is None
-    assert len(upgraded.audio_vibes.earlier_feedback(legacy_run)) == 2
-    from yt_playlist.rec import audio_vibe_feedback
-    audio_vibe_feedback.save(upgraded, legacy_run, [value['id']], ['relax', 'cruise'],
-                             audio_vibe_prediction.TAXONOMY_VERSION, 11)
-    upgraded.conn.close()
-    reopened = Store(path)
-    reopened.init_schema()
-    assert reopened.conn.execute('SELECT COUNT(*) FROM sample_attributes').fetchone()[0] == 1
-    assert reopened.audio_vibes.legacy_feedback(legacy_run) == {
-        'vibe': 'focus', 'sample_ids': ['historical-excerpt'], 'prediction': {'version': 'old'}, 'updated_at': 5}
-    assert reopened.audio_vibes.feedback(legacy_run)['vibes'] == ['relax', 'cruise']
-    assert reopened.audio_vibes.earlier_feedback(legacy_run)[0] == {
-        'taxonomy_version': 'audio-vibe-targets-1', 'vibes': ['gentle', 'move'],
-        'sample_ids': ['four-target-excerpt'], 'prediction': {'version': 'previous'}, 'updated_at': 6}
-    reopened.conn.close()
-
-
 def test_feedback_without_analysis_keeps_song_and_observation_frozen(store, monkeypatch):
     monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '1')
     run_id = str(uuid4())

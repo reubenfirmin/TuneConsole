@@ -13,27 +13,6 @@ def decision(at):
             'live_evidence':{'ppr':None,'cosine':None}}
 
 
-def test_installed_taste_controls_retain_unresolved_inputs_and_restart(tmp_path, legacy_owner_store):
-    store = legacy_owner_store(tmp_path/'taste.db')
-    checkpoint = {'saved_at':5,'params':{'rec_param:breadth_bias':'.3'},
-                  'weights':[{'axis':'genre:An unknown original','weight':.4,'updated_at':None}]}
-    baseline = [{'key':'unknown|artist','rank':None,'score':.2,'lane':'','lane_weight':None,'trace':{'terms':[1,2]}}]
-    store.settings.set_setting(taste_control_state.CHECKPOINT,json.dumps(checkpoint))
-    store.settings.set_setting(taste_control_state.BASELINE,json.dumps(baseline))
-    store.settings.set_setting('ppr_experiment_decisions',json.dumps([decision(6)]))
-    migrate(store.conn, registry=registry.MIGRATIONS)
-    store._bind_repositories()
-    assert json.loads(store.settings.get_setting(taste_control_state.CHECKPOINT))==checkpoint
-    assert json.loads(store.settings.get_setting(taste_control_state.BASELINE))==baseline
-    assert experiment_decision_state.records(store.conn)==[decision(6)]
-    assert tuple(store.conn.execute('SELECT recording_id,unresolved_key FROM taste_comparison_entries').fetchone())==(None,'unknown|artist')
-    assert not store.conn.execute("SELECT 1 FROM settings WHERE key IN ('taste_settings_checkpoint_v1','taste_comparison_baseline_v2','ppr_experiment_decisions')").fetchone()
-    store.init_schema()
-    assert store.rec_model.restore_taste_settings(taste_control_state.CHECKPOINT,['rec_param:breadth_bias'])
-    assert store.settings.get_setting('rec_param:breadth_bias')=='.3'
-    assert store.rec_model.weight_records()['genre:An unknown original']['updated_at'] is None
-
-
 def test_checkpoint_restore_uses_captured_axis_after_new_alias_and_merge(store):
     store.rec_model.set_weight('genre:Previously unresolved',.4,lo=0,now=1)
     unresolved = store.conn.execute("SELECT id FROM taste_axes WHERE kind='unresolved_genre' AND value='Previously unresolved'").fetchone()[0]

@@ -63,6 +63,60 @@ def test_cached_table_mappings_are_isolated_from_each_caller(definition, monkeyp
         assert schema_definition._reference_contract.cache_info().misses == 2
 
 
+def test_nested_sessions_reuse_only_their_connection_and_restore_the_parent():
+    definition = 'CREATE TABLE example(value TEXT UNIQUE)'
+    with closing(sqlite3.connect(':memory:')) as first, closing(sqlite3.connect(':memory:')) as other:
+        for conn in (first, other):
+            conn.execute(definition)
+        statements = []
+        first.set_trace_callback(statements.append)
+        with schema_inspection.reuse_tables(first) as outer:
+            outer.refresh()
+            expected = schema_definition._table(first, 'example', definition)
+            with schema_inspection.reuse_tables(first) as nested:
+                assert nested is outer
+                actual = schema_definition._table(first, 'example', definition)
+                actual[0].clear()
+            with schema_inspection.reuse_tables(other) as independent:
+                assert independent is not outer
+                independent.refresh()
+                assert schema_definition._table(other, 'example', definition) == expected
+            assert schema_definition._table(first, 'example', definition) == expected
+            assert statements.count('PRAGMA main.table_xinfo("example")') == 1
+        with schema_inspection.reuse_tables(first) as later:
+            assert later is not outer
+            later.refresh()
+            assert schema_definition._table(first, 'example', definition) == expected
+        assert statements.count('PRAGMA main.table_xinfo("example")') == 2
+
+
+def test_nested_session_refresh_observes_external_commits_and_own_ddl(tmp_path):
+    definition = 'CREATE TABLE example(value TEXT UNIQUE)'
+    with closing(sqlite3.connect(tmp_path / 'observations.db')) as conn:
+        with conn:
+            conn.execute(definition)
+        statements = []
+        conn.set_trace_callback(statements.append)
+        with schema_inspection.reuse_tables(conn) as outer:
+            outer.refresh()
+            expected = schema_definition._table(conn, 'example', definition)
+            with closing(sqlite3.connect(tmp_path / 'observations.db')) as other, other:
+                other.execute("INSERT INTO example VALUES ('external commit')")
+            with schema_inspection.reuse_tables(conn) as nested:
+                assert nested is outer
+                nested.refresh()
+                assert schema_definition._table(conn, 'example', definition) == expected
+                assert statements.count('PRAGMA main.table_xinfo("example")') == 2
+                with conn:
+                    conn.execute('ALTER TABLE example ADD COLUMN added INTEGER')
+                changed = conn.execute("SELECT sql FROM sqlite_schema WHERE name='example'").fetchone()[0]
+                actual = schema_definition._table(conn, 'example', changed)
+                assert set(actual[0]) == {'value', 'added'}
+                assert statements.count('PRAGMA main.table_xinfo("example")') == 3
+            assert schema_definition._table(conn, 'example', changed) == actual
+            assert statements.count('PRAGMA main.table_xinfo("example")') == 3
+
+
 def test_reference_reuse_across_layouts_preserves_changed_constraints_and_live_observations(monkeypatch):
     parent = 'CREATE TABLE parent(id INTEGER PRIMARY KEY)'
     child = ('CREATE TABLE child(id INTEGER PRIMARY KEY, parent INTEGER REFERENCES parent(id) '

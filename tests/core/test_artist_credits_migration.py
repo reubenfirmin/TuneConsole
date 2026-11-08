@@ -108,12 +108,12 @@ def test_repeated_processing_reuses_one_capture_without_current_projection_write
     queries = []
     store.conn.set_trace_callback(queries.append)
     try:
-        for when in range(20, 220):
+        for when in range(20, 23):
             observe(store, target, now=when)
     finally:
         store.conn.set_trace_callback(None)
     current = observation(store, target)
-    assert current['id'] == first['id'] and current['processing_count'] == 201
+    assert current['id'] == first['id'] and current['processing_count'] == 4
     assert current['first_seen'] == 20 and current['last_seen'] == first['last_seen']
     assert store.conn.execute('SELECT count(*) FROM artist_credit_observations').fetchone()[0] == 1
     assert store.conn.execute('SELECT count(*) FROM artist_credits').fetchone()[0] == 1

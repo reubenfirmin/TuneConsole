@@ -97,6 +97,38 @@ def applied(conn):
     return list(conn.execute('SELECT version,name FROM schema_changes ORDER BY version'))
 
 
+@pytest.fixture(scope='module')
+def completed_regular(regular_layout):
+    with closing(sqlite3.connect(':memory:')) as source:
+        regular_layout.backup(source)
+        regular.migrate(source)
+        source.execute('PRAGMA query_only=ON')
+        yield source
+
+
+@pytest.fixture
+def completed_installed(tmp_path, completed_regular):
+    path = tmp_path / 'completed-regular.db'
+    with closing(sqlite3.connect(path, factory=ReservationConnection)) as conn:
+        completed_regular.backup(conn)
+        yield path, conn
+
+
+def test_completed_regular_input_keeps_real_history_and_read_only_sql(completed_regular):
+    assert applied(completed_regular) == [(change.version, change.name) for change in regular.CHANGES]
+    assert completed_regular.execute('SELECT max(version) FROM schema_migrations').fetchone() == (93,)
+    assert not completed_regular.execute('PRAGMA foreign_key_check').fetchone()
+    with pytest.raises(sqlite3.OperationalError, match='readonly'):
+        completed_regular.execute("INSERT INTO settings VALUES ('private','forbidden')")
+
+
+def test_regular_prefix_input_keeps_exact_committed_history_and_read_only_sql(regular_prefixes):
+    source = regular_prefixes(1)
+    assert applied(source) == [(regular.CHANGES[0].version, regular.CHANGES[0].name)]
+    assert source.execute('PRAGMA query_only').fetchone() == (1,)
+    assert not source.execute('PRAGMA foreign_key_check').fetchone()
+
+
 def contents(conn):
     # The runner creates its empty ledger in the first change's transaction.
     # Its rollback can remove that empty table; every other schema/data byte
@@ -289,9 +321,8 @@ def test_final_change_rolls_back_and_can_retry_from_original_layout(installed, f
     assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone() == (93,)
 
 
-def test_later_calls_and_connections_reinspect_live_tables(installed, regular_prefixes):
-    path, conn = installed
-    regular.migrate(conn)
+def test_later_calls_and_connections_reinspect_live_tables(completed_installed):
+    path, conn = completed_installed
     statements = []
     conn.set_trace_callback(statements.append)
     regular.migrate(conn)
@@ -306,6 +337,9 @@ def test_later_calls_and_connections_reinspect_live_tables(installed, regular_pr
     with pytest.raises(MigrationError, match='identities'):
         regular.migrate(conn)
 
+
+def test_private_regular_prefix_upgrade_keeps_other_connections_and_source_unchanged(installed, regular_prefixes):
+    path, conn = installed
     source = regular_prefixes(1)
     with closing(sqlite3.connect(path.with_name('private-prefix.db'))) as private:
         source.backup(private)

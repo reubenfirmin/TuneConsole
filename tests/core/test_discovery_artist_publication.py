@@ -39,21 +39,22 @@ def test_empty_publication_predecessor_keeps_pending_ddl_and_revision_guards(
     assert not conn.execute('SELECT 1 FROM main.discovered_artists').fetchone()
 
 
-def prepare(conn):
+def prepare(conn, *, installed=False):
     # These are completed lower inputs for publication. Reuse the production
     # table-inspection session while real workers build them; all validators,
     # source copying and file writes still run.
     with schema_inspection.reuse_tables(conn):
         owner = publication.owner(conn)
-        owner.worker.install(conn)
+        if not installed:
+            owner.worker.install(conn)
         for _ in range(300):
             if owner.worker.step(conn, batch_size=8).status == 'prepared':
                 return owner
         pytest.fail('Discovery explanation fixture did not prepare')
 
 
-def ready(conn, size=8):
-    owner = prepare(conn)
+def ready(conn, size=8, *, installed=False):
+    owner = prepare(conn, installed=installed)
     for _ in range(300):
         stage = owner.step(conn, batch_size=size)
         if stage.complete:

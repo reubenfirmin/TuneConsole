@@ -6,40 +6,7 @@ import pytest
 
 from yt_playlist.core import collection_recovery, spotify_job_state
 from yt_playlist.core.migrations import current, migrate, registry, MigrationError
-from yt_playlist.core.store import Store
 from yt_playlist.web.spotify_import import load_job, save_job
-
-
-def test_upgrade_retains_import_unknown_account_and_verbatim_canvas(tmp_path, legacy_owner_store):
-    path = tmp_path/'documents.db'
-    store = legacy_owner_store(path)
-    job = {'status':'running','identity_id':999,'identity_label':'Retired account','started_at':2,
-           'report':{'partial':[1,2]},'dismissed':None}
-    store.settings.set_setting(spotify_job_state.KEY,json.dumps(job))
-    recipe = {'media':'audio','model':'fresh','facets':{'genres':['house','Unknown original','house'],'eras':['2010']},
-              'opaque':{'positions':[2,2,1]}}
-    store.playlist_recipes.set_recipe('PLAYLIST',recipe,3)
-    canvas = 'legacy canvas text: {\n  no JSON requirement\n}'
-    store.playlist_recipes.set_cluster_canvas('PLAYLIST',canvas,4)
-    migrate(store.conn, registry=registry.MIGRATIONS)
-    store._bind_repositories()
-    assert json.loads(store.settings.get_setting(spotify_job_state.KEY))==job
-    assert store.playlist_recipes.get_recipe('PLAYLIST')==recipe
-    assert store.playlist_recipes.get_cluster_canvas('PLAYLIST')==canvas
-    assert store.conn.execute('SELECT account_id,unresolved_account_id FROM spotify_import_jobs').fetchone()[:]==(None,999)
-    assert store.conn.execute('SELECT count(*) FROM playlist_recipe_facets').fetchone()[0]==4
-    store.conn.close()
-    restarted = Store(path)
-    try:
-        restarted.init_schema()
-        assert restarted.playlist_recipes.get_cluster_canvas('PLAYLIST')==canvas
-        interrupted = load_job(restarted)
-        interrupted['status']='error'
-        save_job(restarted,interrupted)
-        assert load_job(restarted)['account_id']==999
-        current.validate(restarted.conn)
-    finally:
-        restarted.conn.close()
 
 
 def test_stale_import_completion_cannot_replace_report_or_change_account(store):

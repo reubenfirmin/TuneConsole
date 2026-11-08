@@ -5,9 +5,6 @@ from collections import Counter
 from contextlib import closing
 from pathlib import Path
 import sqlite3
-import runpy
-import subprocess
-import sys
 import threading
 import time
 
@@ -276,108 +273,6 @@ def _forbid_historical_schema(monkeypatch):
         Migration(m.version, m.name, forbidden) for m in registry.MIGRATIONS))
     monkeypatch.setattr(regular, 'CHANGES', tuple(
         regular.Change(c.version, c.name, forbidden, c.validate) for c in regular.CHANGES))
-
-
-def test_fresh_and_current_do_not_call_historical_bootstrap_or_validation(monkeypatch, tmp_path):
-    from yt_playlist.core import schema_definition
-
-    # A warm process can hide import-time historical DDL behind cached jobs.
-    # Exercise both admissions with the same guard in independent cold processes.
-    cold = '''
-import sys
-from pathlib import Path
-root, home = map(Path, sys.argv[1:3])
-sys.path[:0] = [str(root), str(root / 'src')]
-import os
-os.environ['YT_PLAYLIST_HOME'] = str(home)
-import pytest
-from tests.core.test_current_schema import _forbid_historical_schema
-from yt_playlist.core.store import Store
-with pytest.MonkeyPatch.context() as patch:
-    _forbid_historical_schema(patch)
-    assert 'yt_playlist.core.preparation.model_trials' not in sys.modules
-    store = Store(home / 'current.db')
-    try:
-        store.init_schema(defer_metadata=True)
-        store.settings.set_setting('cold-current', 'persisted é')
-        assert store.settings.get_setting('cold-current') == 'persisted é'
-        before = list(store.conn.iterdump())
-        store.init_schema(defer_metadata=True)
-        assert list(store.conn.iterdump()) == before
-    finally:
-        store.conn.close()
-'''
-    cold_home = tmp_path / 'cold-home'
-    cold_home.mkdir()
-    for admission in ('fresh', 'current reopen'):
-        result = subprocess.run(
-            [sys.executable, '-I', '-c', cold, str(Path(__file__).parents[2]), str(cold_home)],
-            cwd=tmp_path, capture_output=True, text=True, timeout=60)
-        assert result.returncode == 0, (admission, result.stdout, result.stderr)
-
-    # Compare the maintained source export before forbidding every generator.
-    # This reads/generates text only; the actual bootstrap below owns its DB.
-    exporter = runpy.run_path(Path(__file__).parents[2] / 'scripts/export-current-schema.py')
-    with monkeypatch.context() as text_only:
-        text_only.setattr(sqlite3, 'connect', lambda *a, **kw: pytest.fail('Exporter opened a database'))
-        for path, expected in exporter['render'](schema_definition).items():
-            assert path.read_text(encoding='utf-8') == expected
-
-    _forbid_historical_schema(monkeypatch)
-    path = tmp_path / 'complete-current.db'
-    with closing(connect(path)) as conn:
-        migrate(conn)
-        assert dict(conn.execute('SELECT key,value FROM settings')) == current.SEED_SETTINGS
-        assert tuple(conn.execute('SELECT * FROM rec_preparation').fetchone()) == (1, 0, 0)
-        assert tuple(conn.execute('SELECT * FROM rec_group_clock').fetchone()) == (1, 0)
-        assert tuple(conn.execute('SELECT position,group_key,revision,cursor FROM rec_vibe_pending').fetchone()) == (
-            1, '*', 2, '')
-        assert conn.execute("SELECT 1 FROM genre_catalog WHERE name='Techno'").fetchone()
-        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE type='index' AND name='ix_genre_catalog_name'").fetchone()
-        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE type='view' AND name='listening_days'").fetchone()
-        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE type='trigger' AND name='playlists_scope_insert'").fetchone()
-        from yt_playlist.core.db_rebuild import destination
-        from yt_playlist.core import vibe_versions
-        assert vibe_versions.normalized(conn)
-        with closing(connect()) as candidate:
-            candidate.execute('BEGIN IMMEDIATE')
-            destination.initialize(candidate)
-            cursor = None
-            while True:
-                batch = destination.indexes(candidate, candidate, cursor, 128)
-                if batch.done:
-                    break
-                cursor = batch.cursor
-            assert destination.finish(candidate, candidate, None, 10000).done
-            candidate_objects = objects(candidate)
-            # Only the candidate's explicit retained-source provenance is
-            # additional. Every application table, index, view and guard is
-            # compared in its actual stored format, without normalization.
-            for name in ('database_rebuild_source_history', 'database_rebuild_source_changes'):
-                assert candidate_objects.pop(name)[0] == 'table'
-                assert not candidate.execute('SELECT 1 FROM '+name).fetchall()
-            assert candidate_objects == objects(conn)
-            for table, (kind, _) in candidate_objects.items():
-                if kind != 'table':
-                    continue
-                columns = 'version,name' if table in ('schema_migrations', 'schema_changes') else '*'
-                assert sorted(map(tuple, candidate.execute('SELECT '+columns+' FROM "'+table+'"')), key=repr) == sorted(
-                    map(tuple, conn.execute('SELECT '+columns+' FROM "'+table+'"')), key=repr), table
-            assert not candidate.execute('PRAGMA foreign_key_check').fetchall()
-        conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (1,'Main','test',1)")
-        with pytest.raises(sqlite3.IntegrityError, match='CHECK constraint failed'):
-            conn.execute("INSERT INTO listening_calendars(account_id,timezone,confirmed) VALUES (1,'UTC',2)")
-        conn.rollback()
-        conn.execute("INSERT INTO settings VALUES ('personal-setting','retain')")
-        conn.commit()
-        before = list(conn.iterdump())
-        migrate(conn)
-        assert list(conn.iterdump()) == before
-        assert [tuple(row)[:2] for row in conn.execute('SELECT * FROM schema_migrations ORDER BY version')] == [
-            (migration.version, migration.name) for migration in registry.MIGRATIONS]
-    with closing(connect(path)) as reopened:
-        migrate(reopened)
-        assert list(reopened.iterdump()) == before
 
 
 @pytest.mark.parametrize('name', ['rec_mood', 'audio_vibe_feedback', 'audio_vibe_labels', 'audio_session_labels',

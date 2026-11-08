@@ -22,6 +22,12 @@ class TableInspections:
 
 @contextmanager
 def reuse_tables(conn):
+    # Nested admission/worker checks belong to the caller's bounded session.
+    # Transaction entry still refreshes data_version before reusing observations.
+    session = _SESSION.get()
+    if session is not None and session.conn is conn:
+        yield session
+        return
     session = TableInspections(conn)
     token = _SESSION.set(session)
     try:

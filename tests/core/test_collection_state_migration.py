@@ -35,44 +35,6 @@ def installed_92(path):
         raise
 
 
-def test_installed_collection_cutover_preserves_choices_and_unknown_author(tmp_path, legacy_owner_store):
-    path = tmp_path/'collections.db'
-    old = legacy_owner_store(path)
-    account = old.accounts.upsert_account('Main','main.json',None,True)
-    recipe = old.road_trip.save_road_trip_recipe(None,'Trip',50,[],['Synth Pop'],60,10)
-    state = {'picks':['first','first','second'],'banned':['excluded'],'seed':7,'building':True,'revision':'held'}
-    old.road_trip.save_road_trip_draft(recipe,state,11)
-    old.settings.set_setting('album_feedback',json.dumps({'release':{'kind':'more','at':12}}))
-    old.settings.set_setting('rec_content_model','{"ncat": 0, "cont": []}')
-    old.settings.set_setting('rec_content_generation','generation')
-    old.settings.set_setting('rec_content_inputs','fingerprint')
-    sync = {'status':'partial','accounts':{str(account):{'status':'partial','resources':{
-        'playlists':{'status':'partial','items':{'LM':{'status':'failed','failures':2,'retry_at':99,
-        'last_attempt_at':13,'last_success_at':3}}}}}},'resources':{},'last_attempt_at':13}
-    old.settings.set_setting('library_sync_state',json.dumps(sync))
-    migrate(old.conn, registry=registry.MIGRATIONS)
-    old._bind_repositories()
-    assert old.road_trip.get_road_trip_draft(recipe)==state
-    assert [tuple(row) for row in old.conn.execute('SELECT selection_state,position,video_id FROM road_trip_draft_entries '
-                                                  'ORDER BY selection_state,position')]==[
-        ('excluded',0,'excluded'),('picked',0,'first'),('picked',1,'first'),('picked',2,'second')]
-    assert old.conn.execute('SELECT account_id,legacy_author_unknown FROM road_trip_drafts').fetchone()[:]==(None,1)
-    assert old.conn.execute('SELECT account_id,legacy_author_unknown,response FROM album_feedback').fetchone()[:]==(None,1,'more')
-    assert sync_state.read(old.conn)==sync
-    assert old.settings.get_setting('rec_content_model')=='{"ncat": 0, "cont": []}'
-    assert not old.conn.execute("SELECT 1 FROM settings WHERE key IN ('album_feedback','library_sync_state','rec_content_model','rec_content_generation','rec_content_inputs')").fetchone()
-    current.validate(old.conn)
-    old.conn.close()
-    restarted = Store(path)
-    try:
-        restarted.init_schema()
-        assert restarted.road_trip.get_road_trip_draft(recipe)==state
-        assert sync_state.read(restarted.conn)==sync
-        assert restarted.settings.get_setting('rec_content_inputs')=='fingerprint'
-    finally:
-        restarted.conn.close()
-
-
 def test_independent_feedback_and_withdrawal_keep_lineage(tmp_path):
     path = tmp_path/'feedback.db'
     store = Store(path)

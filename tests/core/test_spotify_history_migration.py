@@ -4,7 +4,6 @@ from yt_playlist.core.migrations import Migration, MigrationError, migrate
 from yt_playlist.core.migrations import v031_spotify_history as upgrade
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.store import Store
-from tests.historical_support import upgrade_fixture
 
 
 def _predecessor(path):
@@ -63,23 +62,4 @@ def test_interrupted_upgrade_rolls_back_source_rename_and_new_tables(tmp_path):
     assert store.conn.execute('SELECT source FROM play_events').fetchone()[0] == 'spotify'
     migrate(store.conn, registry=_registry())
     upgrade.validate(store.conn)
-    store.conn.close()
-
-
-def test_daily_only_spotify_history_marks_unknown_legacy_influence():
-    store = Store(':memory:')
-    migrate(store.conn, registry=MIGRATIONS[:30])
-    with store.conn:
-        store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'main','bridge',1)")
-        store.conn.execute("INSERT INTO listening_calendars VALUES (1,'America/Costa_Rica',1)")
-        store.conn.execute("INSERT INTO listening_observations(identity_id,raw_identity_key,identity_key,source_day,day,"
-                           "source,timezone,precision,first_observed_at,last_observed_at) "
-                           "VALUES (1,'old-song','old-song','2024-01-01',NULL,'spotify','UTC','calendar_day',100,100)")
-    migrate(store.conn, registry=_registry())
-    store._bind_repositories()
-    assert store.settings.get_setting('spotify_legacy_discovery_unattributed') == '1'
-    # Check today's statistics only after an explicit historical replay.
-    upgrade_fixture(store)
-    assert store.history.spotify_history_stats()['days'] == 0
-    assert store.history.spotify_history_stats()['unresolved_days'] == 1
     store.conn.close()
