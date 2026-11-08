@@ -54,6 +54,15 @@ def admit_regular_connection(conn, *, clock=1234):
     registry entries, tables, changed programs, data or histories fail here.
     These fixtures have no unfinished preparation capture to retire.
     """
+    expected = regular_expectation(conn, clock=clock)
+    compatibility = migrate(conn, clock=lambda: clock)
+    assert compatibility == expected['compatibility']
+    assert_regular_expectation(conn, expected)
+    return captured(conn)
+
+
+def regular_expectation(conn, *, clock=1234):
+    """Capture the independent row/DDL oracle before the actual runner starts."""
     before = captured(conn)
     assert 'schema_changes' not in before
     assert tuple(change.name for change in regular.CHANGES) == CHANGE_NAMES
@@ -108,16 +117,20 @@ def admit_regular_connection(conn, *, clock=1234):
         'taste_mode_retention': [(1, 0, 0, max((row[0] for row in before['taste_modes']), default=0), 0)],
         'prediction_id_state': [(1, max((row[0] for row in before['predictions']), default=0))],
     })
-    compatibility = migrate(conn, clock=lambda: clock)
-    assert compatibility == (len(before['schema_migrations']) < current.VERSION)
-    expected = {**before, **additions}
+    return {'rows': {**before, **additions}, 'definitions': {**definitions, **allowed},
+            'compatibility': len(before['schema_migrations']) < current.VERSION}
+
+
+def assert_regular_expectation(conn, expected):
+    """Compare actual committed output with the separately captured oracle."""
+    rows = expected['rows']
     actual_rows = captured(conn)
-    changed = {name: (expected.get(name), actual_rows.get(name))
-               for name in expected.keys() | actual_rows.keys()
-               if expected.get(name) != actual_rows.get(name)}
+    changed = {name: (rows.get(name), actual_rows.get(name))
+               for name in rows.keys() | actual_rows.keys()
+               if rows.get(name) != actual_rows.get(name)}
     assert not changed, changed
     actual = dict(conn.execute('SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL'))
     assert {name: current._tokens(sql) for name, sql in actual.items()} == {
-        name: current._tokens(sql) for name, sql in {**definitions, **allowed}.items()}
+        name: current._tokens(sql) for name, sql in expected['definitions'].items()}
     assert regular.validate(conn) == len(CHANGE_NAMES)
     return captured(conn)

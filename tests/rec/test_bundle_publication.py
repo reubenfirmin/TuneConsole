@@ -5,10 +5,8 @@ from dataclasses import replace
 
 import pytest
 
-from tests.core.test_compact_groups_migration import predecessor
-from tests.repos.test_compact_group_publication import database
-from tests.repos.test_bundle_storage import recommendations, historical_recommendations, collect
-from tests.repos.test_typed_recommendation_publication import plan, publish as publish_plan
+from tests.repos.test_bundle_storage import bundle_template, recommendations
+from tests.repos.test_typed_recommendation_publication import collect, plan, publish as publish_plan
 from yt_playlist.rec import measurement, mode_surfaces
 from yt_playlist.repos import recommendation_publication as publication
 from yt_playlist.core import policy_config, recommendation_pools as pools

@@ -28,13 +28,25 @@ def finish(store, limit=2000):
 
 
 def seed_recipe_owners(store, owners):
-    # Exercise ordinary file publication and each owner's committed SQL writes.
+    # Collection scans SQL custody, not the recipe controller's write policy.
+    # Publish real distinct files and insert their complete lower input in one
+    # SQL batch instead of admitting and committing each recipe separately.
+    root = recovery.directory(store.conn)
+    rows = []
     for i in range(owners):
-        store.playlist_recipes.set_recipe(f'owned-{i}', {'model': 'fixture', 'value': i}, 1)
+        reference = recovery.publish_at(root, 'playlist-recipe', i + 1, {'model': 'fixture', 'value': i})
+        rows.append((i + 1, f'owned-{i}', f'{i:032x}', *reference))
+    with store.conn:
+        store.conn.executemany(
+            "INSERT INTO playlist_scopes(id,provider_playlist_id,kind) VALUES (?,?,'shared')",
+            [(f'owned-{i}', f'owned-{i}') for i in range(owners)])
+        store.conn.executemany(
+            'INSERT INTO rec_recipes(id,playlist_scope_id,revision,created_at,model,'
+            "recovery_filename,recovery_digest,recovery_bytes) VALUES (?,?,?,1,'fixture',?,?,?)", rows)
     return owners
 
 
-@pytest.fixture(scope='session')
+@pytest.fixture(scope='module')
 def recipe_owner_templates(_pristine_current_schema, tmp_path_factory):
     directory = tmp_path_factory.mktemp('recipe-owner-templates')
     templates = {}
@@ -48,6 +60,27 @@ def recipe_owner_templates(_pristine_current_schema, tmp_path_factory):
                     database=home / 'library.db'))
             return templates[owners]
         yield template
+
+
+def test_collection_schema_input_keeps_admitted_history_and_real_guards(_pristine_current_schema):
+    source = _pristine_current_schema
+    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert not source.execute('PRAGMA foreign_key_check').fetchone()
+    assert source.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 107
+
+
+@pytest.mark.parametrize('owners', [16, 1024])
+def test_collection_owner_input_keeps_exact_recipe_sql_and_distinct_readable_files(recipe_owner_templates, owners):
+    source = recipe_owner_templates(owners).source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    rows = source.conn.execute('SELECT id,playlist_scope_id,created_at,model,'
+                              'recovery_filename,recovery_digest,recovery_bytes FROM rec_recipes ORDER BY id').fetchall()
+    assert len(rows) == owners
+    assert len({row[4] for row in rows}) == owners
+    for i, row in enumerate(rows):
+        assert tuple(row[:4]) == (i + 1, f'owned-{i}', 1, 'fixture')
+        assert recovery.read(*row[4:], kind='playlist-recipe', owner=i + 1) == {'model': 'fixture', 'value': i}
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.mark.parametrize('owners', [16])

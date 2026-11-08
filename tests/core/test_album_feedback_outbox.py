@@ -10,7 +10,7 @@ import uuid
 import pytest
 
 from tests.core.test_collection_owner_writes import feedback_writer_templates, feedback_writer_prefix
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from yt_playlist.core import album_feedback_outbox as outbox, album_feedback_storage
 from yt_playlist.core.activity import Activity, WorkBudgetExceeded, WorkClosing, cancellable_work
 from yt_playlist.core.db_writes import atomic_write

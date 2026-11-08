@@ -182,7 +182,7 @@ def prepared_discovery_store(version, discovery_prepared_inputs, tmp_path, monke
 def canonical_discovery_store(version, canonical_discovery_inputs, tmp_path, monkeypatch):
     template = canonical_discovery_inputs(version)
     with template.open(tmp_path / 'canonical-discovery.db') as store:
-        with reuse_reporting_reader(store, monkeypatch), schema_inspection.reuse_tables(store.conn):
+        with schema_inspection.reuse_tables(store.conn):
             yield store, template.result
         with closing(sqlite3.connect(store._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
             reader.row_factory = sqlite3.Row
@@ -250,9 +250,10 @@ def seed_canonical_visits(store, identities):
         store.conn.execute("INSERT INTO main.recording_aliases VALUES ('song alias',?,'captured')", (rid,))
         store.conn.execute("INSERT INTO main.discovery_visible_impressions VALUES ('visit','track','song alias',1)")
         store.conn.execute('UPDATE main.album_discovery_memberships SET offered_count=5,first_shown=0,last_shown=1')
-    artifact, document_stage = artist_ready(store.conn)
-    artifact.publish(store.conn, stage=document_stage)
-    prepare_subjects(store.conn)
+    with schema_inspection.reuse_tables(store.conn):
+        artifact, document_stage = artist_ready(store.conn)
+        artifact.publish(store.conn, stage=document_stage)
+        prepare_subjects(store.conn)
     return account, aid, rid, album
 
 
@@ -450,7 +451,7 @@ def test_selected_discovery_consumers_read_exact_values_without_legacy_tables(di
 
 
 @pytest.mark.parametrize('version', [79, 93])
-def test_discovery_writes_withdraw_and_reconcile_published_visits(discovery_upgrade_inputs, version, tmp_path, monkeypatch, independent_regular_ddl):
+def test_discovery_writes_withdraw_and_reconcile_published_visits(discovery_upgrade_inputs, version, tmp_path, monkeypatch):
     prepared = discovery_upgrade_inputs(version, version)
     with prepared.open(tmp_path / 'published-discovery.db') as store, reuse_reporting_reader(store, monkeypatch) as reader, schema_inspection.reuse_tables(store.conn):
         reconcile_discovery_visits(store, reader)
@@ -461,10 +462,8 @@ def reconcile_discovery_visits(store, other):
     owner = publication.owner(store.conn)
     stage = owner.selected(store.conn)
     assert stage is not None
-    with closing(sqlite3.connect(store._db_path)) as ddl:
-        ddl.row_factory = sqlite3.Row
-        ddl.execute('PRAGMA foreign_keys=ON')
-        regular.migrate(ddl)
+    # Concurrent regular DDL has its own publication-verification tests below.
+    # This case owns actual visit invalidation and the next published generation.
     store.discovery.record_discovery_impressions('artist', ['@artist:'+str(aid)], 'new-visit', 8)
     assert owner.selected(store.conn) is None
     assert other.discovery.get_discovered_artists()[0]['offered_count'] == 10
@@ -629,7 +628,7 @@ def test_slow_verification_leaves_real_writes_and_regular_migrations_available(
         rejection_store, monkeypatch, independent_regular_ddl):
     store = rejection_store
     aid, = store.conn.execute('SELECT artist_id FROM main.discovered_artists').fetchone()
-    owner, stage = ready(store.conn)
+    owner, stage = stage_discovery(store.conn)
     entered, release = threading.Event(), threading.Event()
     original = collection_recovery.read
     def slow(*args, **kwargs):

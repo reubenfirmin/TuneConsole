@@ -7,10 +7,10 @@ import threading
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_collection_feedback_publication import prepare
 from tests.repos.test_album_aliases import release
-from tests.prepared_fixture_support import prepared_template
+from tests.prepared_fixture_support import historical_template
 from yt_playlist.core import album_feedback_storage
 from yt_playlist.core.preparation import collection_feedback_publication
 from yt_playlist.core.store import Store
@@ -57,7 +57,7 @@ def seed_feedback_writers(store):
 
 
 @pytest.fixture(scope='module')
-def feedback_writer_templates(_pristine_installed_schema, tmp_path_factory):
+def feedback_writer_templates(_bounded_installed_schema, tmp_path_factory):
     # Source-only, partial and selected cases share just the ordinary catalog
     # and evidence prefix. Every case still prepares its own owner and opens
     # its second Store before exercising both real overlapping writes.
@@ -67,9 +67,10 @@ def feedback_writer_templates(_pristine_installed_schema, tmp_path_factory):
         def get(version):
             if version not in templates:
                 database = tmp_path_factory.mktemp('feedback-writer-prefix') / 'source.db'
-                templates[version] = resources.enter_context(prepared_template(
-                    _pristine_installed_schema(version), seed_feedback_writers,
-                    database=database, defer_metadata=True))
+                completed = _bounded_installed_schema(version)
+                templates[version] = resources.enter_context(historical_template(
+                    completed.source.conn, seed_feedback_writers,
+                    database=database, completed=completed))
             return templates[version]
 
         yield get
