@@ -136,7 +136,6 @@ def collect():
 async def lifespan(app):
     thread.start()
     assert await asyncio.to_thread(entered.wait, 5)
-    asyncio.get_running_loop().call_soon(collect)
     try:
         yield
     finally:
@@ -146,9 +145,14 @@ async def lifespan(app):
         connection.close()
         faulthandler.cancel_dump_traceback_later()
 
+class CollectingServer(AppServer):
+    async def startup(self, sockets=None):
+        await super().startup(sockets=sockets)
+        asyncio.get_running_loop().call_soon(collect)
+
 app = FastAPI(lifespan=lifespan)
 app.state.ctx = SimpleNamespace(work=Activity())
-AppServer(uvicorn.Config(app, host="127.0.0.1", port=0,
+CollectingServer(uvicorn.Config(app, host="127.0.0.1", port=0,
     timeout_graceful_shutdown=.1, log_config=None)).run()
 '''
     with output.open("w") as logs:

@@ -127,3 +127,18 @@ def completed_destination_schema(completed_destination_sql, monkeypatch):
             conn.execute(sql)
 
     monkeypatch.setattr(destination, 'initialize', initialize)
+
+
+def admitted_rebuild_format(conn):
+    """Completed shape admission beneath converter/compaction coordination.
+
+    Cold schema/installed-format owners perform the actual shape comparison.
+    Retain real immutable numbered/regular receipts here; SQL integrity and FKs
+    are still checked by the real builder and installer.
+    """
+    from yt_playlist.core.migrations import regular
+
+    version = runner.history(conn, registry.MIGRATIONS)
+    assert version == current.VERSION
+    assert regular.validate(conn) == len(regular.CHANGES)
+    return version

@@ -1,16 +1,86 @@
 """Completed track spaces can serve through a refresh; retired artist vocabularies cannot."""
+from contextlib import closing
+
 import pytest
 from tests.derived_rating_support import seed_dislike, seed_like
-from tests.historical_support import upgrade_fixture
-from tests.prepared_fixture_support import historical_template
+from tests.core.test_early_schema_upgrade import rename_owner, restore_programs
+from tests.genre_catalog_support import bound_catalog
+from tests.prepared_fixture_support import capture_template
 
 from yt_playlist.core import embeddings
+from yt_playlist.core.migrations import registry, regular, runner
+from yt_playlist.core.store import Store
 from yt_playlist.rec import invalidation
 
 
 TRACK_SPACES = ('rec_vectors', 'rec_content_vectors', 'rec_discovered_content_vectors')
 ARTIST_SPACES = ('rec_artist_vectors', 'rec_artist_content_vectors')
 MODEL = '{"ncat":1,"cont":[]}'
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Invalidation owns SQL and retained files, without an HTTP lifespan."""
+
+
+@pytest.fixture(scope='module')
+def identity_journey(_pristine_installed_schema, tmp_path_factory):
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('identity-upgrade-home')))
+        bound_catalog(patch)
+        source = Store(tmp_path_factory.mktemp('identity-upgrade') / 'installed.db')
+        with closing(source.conn):
+            _pristine_installed_schema(33).backup(source.conn)
+            source.conn.execute('PRAGMA journal_mode=WAL')
+            source.conn.execute('PRAGMA synchronous=NORMAL')
+            original = _identity_inputs(source, current=False)
+            yield dict(conn=source.conn, source=source, version=33, original=original)
+
+
+def assert_identity_history(journey):
+    conn = journey['conn']
+    assert list(map(tuple, conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
+        (entry.version, entry.name) for entry in registry.MIGRATIONS[:journey['version']]]
+    assert list(map(tuple, conn.execute('SELECT id,identity_key FROM recordings'))) == journey['original']['subjects']
+    assert list(map(tuple, conn.execute('SELECT id,started_at,result_json FROM rec_model_selection_runs'))) == journey['original']['evidence']
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_identity_upgrade_input_keeps_populated_models_vectors_and_evidence(identity_journey):
+    assert_identity_history(identity_journey)
+    for table in (*TRACK_SPACES, *ARTIST_SPACES):
+        assert identity_journey['conn'].execute('SELECT count(*) FROM ' + table).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize('version', range(34, 103))
+def test_actual_identity_owner_preserves_catalog_and_rollback_evidence(identity_journey, version):
+    runner.migrate(identity_journey['conn'], registry=registry.MIGRATIONS[:version])
+    identity_journey['version'] = version
+    assert_identity_history(identity_journey)
+
+
+def test_actual_identity_account_rename_preserves_rollback_evidence(identity_journey):
+    rename_owner(identity_journey)
+    assert_identity_history(identity_journey)
+
+
+def test_actual_identity_program_restoration_preserves_rollback_evidence(identity_journey):
+    restore_programs(identity_journey)
+    assert_identity_history(identity_journey)
+
+
+@pytest.mark.parametrize('version', range(104, len(registry.MIGRATIONS) + 1))
+def test_actual_final_identity_owner_preserves_rollback_evidence(identity_journey, version):
+    runner.migrate(identity_journey['conn'], registry=registry.MIGRATIONS[:version])
+    identity_journey['version'] = version
+    assert_identity_history(identity_journey)
+
+
+@pytest.mark.parametrize('version', range(1, len(regular.CHANGES) + 1))
+def test_actual_regular_identity_owner_preserves_rollback_evidence(identity_journey, version):
+    regular.migrate(identity_journey['conn'], changes=regular.CHANGES[:version])
+    assert regular.validate(identity_journey['conn']) == version
+    assert_identity_history(identity_journey)
 
 
 def test_invalidation_input_keeps_shipped_history_and_read_only_guards(_pristine_current_schema):
@@ -52,17 +122,17 @@ def _identity_inputs(store, *, current):
 
 
 @pytest.fixture(scope='module')
-def upgraded_identity_template(_pristine_installed_schema):
-    def build(source):
-        original = _identity_inputs(source, current=False)
-        assert original['history'][-1][0] == 33
-        # Both runtime invalidators consume this same genuine populated upgrade;
-        # each check restores private SQL, vectors and rollback evidence.
-        upgrade_fixture(source)
-        return original
+def upgraded_identity_template(identity_journey):
+    source = identity_journey['source']
+    source.init_schema(defer_metadata=True)
+    return capture_template(source, identity_journey['original'])
 
-    with historical_template(_pristine_installed_schema(33), build, database=':memory:') as template:
-        yield template
+
+def test_completed_identity_upgrade_keeps_private_read_only_admission(upgraded_identity_template):
+    conn = upgraded_identity_template.source.conn
+    assert conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == len(registry.MIGRATIONS)
+    assert upgraded_identity_template.revision_guards
 
 
 @pytest.mark.parametrize('change', ['model', 'artist'])

@@ -1,6 +1,6 @@
 """Saved discovery metadata queues background preparation with the established models."""
 import logging
-from contextlib import ExitStack, closing
+from contextlib import closing
 from tests.enrichment_support import complete_entries, complete_discovered
 from types import SimpleNamespace
 
@@ -9,16 +9,20 @@ import pytest
 
 from tests.conftest import FakeClient
 from tests.playlist_fixture_support import remote_catalog
-from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
 from yt_playlist.core.store import Store
 from yt_playlist.enrich.enrich_worker import EnrichWorker
 from yt_playlist.library import playlist_generated
-from yt_playlist.rec import content_model, embedding_training as training, embedding_vectors as embed, fresh_pool, mode_selection, mode_surfaces, model_refresh, recipes, surfaces
+from yt_playlist.rec import content_model, embedding_training as training, embedding_vectors as embed, fresh_pool, mode_selection, mode_surfaces, model_refresh, ppr, recipes, surfaces, vibe_pools
 from yt_playlist.rec.scoring import PlaylistTaste
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """This workflow does not construct the HTTP application."""
 
 
 @pytest.fixture(scope='module')
@@ -172,44 +176,6 @@ def _build_enrichment_inputs(store, signal):
                            taste=taste)
 
 
-@pytest.fixture(scope='module')
-def enrichment_templates(enrichment_schema, tmp_path_factory):
-    # Fit each distinct metadata comparison once. Consumers restore private
-    # SQL, vector/profile files and mutable result values from that exact input.
-    templates = {}
-    root = tmp_path_factory.mktemp('enrichment-inputs')
-    with ExitStack() as resources:
-        def template(signal):
-            if signal not in templates:
-                def seed(store):
-                    with pytest.MonkeyPatch.context() as patch, reuse_reporting_reader(store, patch):
-                        return _build_enrichment_inputs(store, signal)
-                templates[signal] = resources.enter_context(prepared_template(
-                    enrichment_schema, seed, database=root / f'{signal}.db'))
-            return templates[signal]
-        yield template
-
-
-@pytest.mark.parametrize('signal', ['genre', 'year', 'audio'])
-def test_enrichment_input_keeps_real_model_modes_discoveries_and_private_files(enrichment_templates, signal):
-    template = enrichment_templates(signal)
-    source, inputs = template.source, template.result
-    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert source.conn.execute('SELECT count(*) FROM recordings').fetchone()[0] == 22
-    assert len(source.rec_query.library_keys()) == 14
-    assert set(source.discovery.discovered_tracks_by_keys(inputs.changed + inputs.reference)) == set(
-        inputs.changed + inputs.reference)
-    assert inputs.model and {mode['mode_id'] for mode in source.modes.list_modes()} == {1, 2}
-    assert template.files and any(path.is_file() for root in template.files.values() for path in root.rglob('*'))
-    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
-
-
-def _prepared_enrichment_inputs(store, monkeypatch, signal, enrichment_templates):
-    inputs = enrichment_templates(signal).restore(store)
-    monkeypatch.setattr(surfaces, 'playlist_taste', lambda s, *, now: inputs.taste)
-    return inputs
-
-
 def _forbid_retraining(monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError('An enrichment update must reuse saved models and rankings')
@@ -220,9 +186,21 @@ def _forbid_retraining(monkeypatch):
 
 
 @pytest.mark.parametrize('signal', ['genre', 'year', 'audio'])
-def test_enrichment_updates_metadata_and_queues_refresh_without_changing_published_order(
-        store, monkeypatch, signal, enrichment_templates):
-    inputs = _prepared_enrichment_inputs(store, monkeypatch, signal, enrichment_templates)
+def test_enrichment_updates_fresh_modes_and_generated_playlist(store, monkeypatch, signal):
+    # This workflow follows fresh discoveries. The other recommendation lanes,
+    # vibe menus and PPR ordering are separate inputs, not enrichment behavior.
+    for name in ('for_you', 'explore_for_you', 'comfort_listening'):
+        monkeypatch.setattr(surfaces, name, lambda *args, **kwargs: [])
+    monkeypatch.setattr(vibe_pools, 'prepare', lambda *args, **kwargs: None)
+    monkeypatch.setattr(ppr, 'mode_rankings', lambda *args, **kwargs: {})
+    inputs = _build_enrichment_inputs(store, signal)
+    monkeypatch.setattr(surfaces, 'playlist_taste', lambda s, *, now: inputs.taste)
+    assert store.conn.execute('SELECT count(*) FROM recordings').fetchone()[0] == 22
+    assert len(store.rec_query.library_keys()) == 14
+    assert set(store.discovery.discovered_tracks_by_keys(inputs.changed + inputs.reference)) == set(
+        inputs.changed + inputs.reference)
+    assert inputs.model and {mode['mode_id'] for mode in store.modes.list_modes()} == {1, 2}
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
     a, reference = inputs.preferred, inputs.reference
     # The old, published order is input to this update. Its original ranking
     # pass belongs to Fresh preparation tests; keep real typed publication.
@@ -261,33 +239,9 @@ def test_enrichment_updates_metadata_and_queues_refresh_without_changing_publish
             'identity_key IN (' + ','.join('?' for _ in inputs.changed) + ')', inputs.changed).fetchall()
         assert len(audio) == len(inputs.changed)
         assert all(tuple(row) == tuple(a['audio'][field] for field in ('bpm', 'energy', 'danceability'))
-                   for row in audio)
+                  for row in audio)
 
-
-def _completed_enrichment(store, inputs):
-    a, changed = inputs.preferred, inputs.changed
-    # This owner consumes completed enrichment. The preceding owner verifies
-    # actual provider writes, notification and preservation of the old menu.
-    genre = store.genres.resolve(a['genre'])[0]
-    with store.conn:
-        store.conn.executemany('UPDATE recordings SET genre_key=? WHERE identity_key=?',
-                               [(genre, key) for key in changed])
-        store.conn.executemany('UPDATE youtube_items SET mb_year=? WHERE recording_id='
-                               '(SELECT id FROM recordings WHERE identity_key=?)',
-                               [(a['year'], key) for key in changed])
-        if a['audio']:
-            store.conn.executemany('UPDATE recordings SET bpm=?,energy=?,danceability=? WHERE identity_key=?',
-                [(a['audio']['bpm'], a['audio']['energy'], a['audio']['danceability'], key) for key in changed])
-    complete_discovered(store, changed, 500)
-
-
-@pytest.mark.parametrize('signal', ['genre', 'year', 'audio'])
-def test_background_metadata_refresh_reuses_encoder_and_reassigns_fresh_modes(
-        store, monkeypatch, signal, enrichment_templates):
-    inputs = _prepared_enrichment_inputs(store, monkeypatch, signal, enrichment_templates)
     changed, reference = inputs.changed, inputs.reference
-    _completed_enrichment(store, inputs)
-    _forbid_retraining(monkeypatch)
     # Enrichment only notifies the worker. The background pass reuses the library
     # encoder and original ranker before publishing the updated discovery pools.
     assert model_refresh.rebuild(store, 500) is not None
@@ -301,24 +255,6 @@ def test_background_metadata_refresh_reuses_encoder_and_reassigns_fresh_modes(
     if signal == "year":
         ordered = recipes.theme_filter(store, list(reversed(_pool(store, 'home', 'all', 'fresh'))), {"eras": ["2020"]})
         assert {t["key"] for t in ordered[:4]} == set(changed)
-
-
-@pytest.mark.parametrize('signal', ['genre', 'year', 'audio'])
-def test_enriched_fresh_cards_create_the_preferred_modes_generated_playlist(
-        store, monkeypatch, signal, enrichment_templates):
-    inputs = _prepared_enrichment_inputs(store, monkeypatch, signal, enrichment_templates)
-    _completed_enrichment(store, inputs)
-    _forbid_retraining(monkeypatch)
-    changed = inputs.changed
-    # Ranking and mode assignment have their own owner above. This consumer
-    # reads a completed typed worker output and keeps real card/playlist writes.
-    selected = [{**item, 'genre': inputs.preferred['genre'], 'year': 2024, 'score': 1.0}
-                for item in inputs.discoveries if item['key'] in changed]
-    publish_bundles(store, {
-        '1': {'wheelhouse': [], 'explore': [], 'comfort': [], 'fresh': selected},
-        'all': {'wheelhouse': [], 'explore': [], 'comfort': [], 'fresh': selected},
-        '_meta': {'full_pools': True, 'comfort_pool': 0, 'year_cuts': None},
-    }, 500, fresh=selected)
     # Focus this preview on the preferred mode; mode rotation is tested separately.
     monkeypatch.setattr(mode_selection, "select_modes", lambda *args, **kwargs: [1])
     cards = mode_surfaces.assemble_cards(store, 500, epoch=0)

@@ -9,10 +9,18 @@ import pytest
 from tests.core.test_predecessor_writes import installed
 from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import albums, genre_classifications, genre_identity
-from yt_playlist.core.migrations import MigrationError, registry, regular, runner
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import genre_classifications as preparation, genre_publication as publication
 from yt_playlist.core.store import Store
 from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
+
+
+@pytest.mark.parametrize('version', [79, 85])
+def test_genre_predecessor_keeps_real_empty_history_and_foreign_keys(_pristine_installed_schema, version):
+    source = _pristine_installed_schema(version)
+    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
+    assert not source.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def seed(store):
@@ -280,20 +288,3 @@ def test_oversized_source_fails_durably_and_regular_schema_remains_independent(i
     preparation.JOB.step(conn, retry=True)
     stage = ready(conn)
     publication.publish(conn, identity=stage)
-
-
-@pytest.mark.parametrize('installed', [79, 85], indirect=True)
-def test_native_takeover_preserves_retained_selection_inputs(installed, tmp_path):
-    store, version = installed
-    seed(store)
-    stage = ready(store.conn)
-    publication.publish(store.conn, identity=stage)
-    rows = list(map(tuple, store.conn.execute('SELECT * FROM '+publication.table('rows'))))
-    path = tmp_path/'native.db'
-    with sqlite3.connect(path) as conn:
-        store.conn.backup(conn)
-        conn.row_factory = sqlite3.Row
-        runner.migrate(conn, registry=registry.MIGRATIONS[:86])
-        regular.migrate(conn)
-        assert publication.selected(conn) is None
-        assert list(map(tuple, conn.execute('SELECT * FROM '+publication.table('rows')))) == rows

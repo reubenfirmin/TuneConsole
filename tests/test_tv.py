@@ -23,14 +23,24 @@ def tv_schema():
         yield schema
 
 
+@pytest.fixture(scope='module')
+def tv_launch_schema():
+    # This HTTP workflow owns ordinary playlist writes. It does not use
+    # guarded background snapshots; TV preparation keeps the guarded input.
+    with bounded_consumer_schema((('house', 'House'),), snapshot_guards=False) as schema:
+        yield schema
+
+
 @pytest.fixture
-def store(request, tmp_path, tv_schema, monkeypatch):
+def store(request, tmp_path, monkeypatch):
     if 'tv_journey_inputs' in request.fixturenames:
         yield request.getfixturevalue('store')
         return
     database = Store(tmp_path / 'tv.db')
     with closing(database.conn):
-        initialize_consumer(database, tv_schema)
+        launch = 'tv_launch_web' in request.fixturenames
+        schema = request.getfixturevalue('tv_launch_schema' if launch else 'tv_schema')
+        initialize_consumer(database, schema, snapshot_guards=not launch)
         # These cases own TV serving and publication, independently of the
         # periodic WAL checkpoint policy covered by test_publication_checkpoint.
         database.conn.execute('PRAGMA wal_autocheckpoint=0')
@@ -39,15 +49,21 @@ def store(request, tmp_path, tv_schema, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def tv_http_routes(monkeypatch):
+def tv_http_routes(request, monkeypatch):
     """Build the real TV, playlist and bridge routes used by these checks."""
     from yt_playlist.providers import genres
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, home, playlists
+    from yt_playlist.web.routes import app_update, audio_preview, home, home_tv, playlists
 
     monkeypatch.setattr(genres, 'configure', lambda *args, **kwargs: None)
-    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
-        module.build(ctx) for module in (app_update, audio_preview, home, playlists)])
+    routes = (app_update, audio_preview, home_tv, playlists) if 'tv_launch_web' in request.fixturenames else (
+        app_update, audio_preview, home, playlists)
+    if 'tv_launch_web' in request.fixturenames:
+        from fastapi import APIRouter
+        from yt_playlist.web.routes import audio_vibes
+
+        monkeypatch.setattr(audio_vibes, 'build', lambda ctx: APIRouter())
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx) for module in routes])
     monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
 
 
@@ -507,13 +523,25 @@ def test_refill_continues_across_menu_changes_and_keeps_prepared_videos(store, m
 
 
 @pytest.fixture
-def tv_launch_web(store, prepared_tv_predecessors, completed_video_catalog):
+def tv_launch_web(store, monkeypatch, prepared_tv_predecessors, completed_video_catalog):
     from tests.test_tv_stream import video
+    from yt_playlist.rec import onboarding, onboarding_outputs
 
     iid = store.accounts.upsert_account('main', 'cred', None, True)
     store.settings.set_setting('last_sync_at', '1')
     prepared_tv_predecessors()
-    seeds = prepare_tv_formats(store)
+    # TV consumes completed Mix tapes readiness. The real prerequisite journey
+    # is tested above; this workflow keeps TV eligibility and writes real.
+    monkeypatch.setattr(onboarding, 'prepared_mixes_ready', lambda *args, **kwargs: True)
+    monkeypatch.setattr(onboarding_outputs, 'prepared_mixes_ready', lambda *args, **kwargs: True)
+    seeds = [{'key': f'prepared {index}|artist', 'title': f'Prepared {index}',
+              'artist': 'Artist', 'video_id': f'prepared-{index}', 'genre': 'house'}
+             for index in range(4)]
+    seed_publication_subjects(store, seeds)
+    store.settings.set_setting('radio_seed_offer', json.dumps({
+        'menu_id': 'prepared-radio', 'tracks': seeds}))
+    complete_entries(store, list(store.tracks.track_ids_for_videos(
+        [seed['video_id'] for seed in seeds]).values()), 1000)
     # HTTP serving consumes completed resolution. Resolver and bounded worker
     # publication remain real in test_preparation_publishes_in_bounded_slices_and_recovers_after_failure.
     client = Videos([])
@@ -537,17 +565,9 @@ def tv_launch_web(store, prepared_tv_predecessors, completed_video_catalog):
         yield web, client
 
 
-@pytest.fixture
-def saved_tv(store, tv_launch_web):
-    web, client = tv_launch_web
-    response = web.post('/home/tv/play')
-    assert response.status_code == 200, response.text
-    result = response.json()
-    playlist = store.playlists.get_playlist(result['playlist_id'])
-    return web, client, playlist, result['items']
+def test_precalculated_serving_parameters_generation_and_sidebar_launch(store, tv_launch_web, caplog):
+    from collections import Counter
 
-
-def test_precalculated_tv_parameters_validate_length_without_creating_playlists(tv_launch_web):
     web, client = tv_launch_web
     assert web.get('/home/tv').json() == {'ready': True, 'max_minutes': 15}
     assert not client.created
@@ -556,12 +576,11 @@ def test_precalculated_tv_parameters_validate_length_without_creating_playlists(
     assert web.post('/home/tv', data={'max_minutes': '0'}).status_code == 400
     assert web.post('/home/tv', data={'max_minutes': 'nan'}).status_code == 400
     assert not client.created
-
-
-def test_tv_launch_preserves_artist_cap_quarantine_and_recipe(store, saved_tv):
-    from collections import Counter
-
-    web, client, playlist, items = saved_tv
+    response = web.post('/home/tv/play')
+    assert response.status_code == 200, response.text
+    result = response.json()
+    playlist = store.playlists.get_playlist(result['playlist_id'])
+    items = result['items']
     assert len(items) == tv.QUEUE_SIZE
     assert Counter(item['source_artist'] for item in items) == {
         'Artist': 3, 'Other artist 0': 3, 'Other artist 1': 3, 'Other artist 2': 3}
@@ -571,21 +590,12 @@ def test_tv_launch_preserves_artist_cap_quarantine_and_recipe(store, saved_tv):
     assert web.get(f'/home/tv/playlist/{playlist.id}').json()['items'] == items
     assert web.get('/home/tv').json()['ready']  # saving does not exhaust the pool
     assert web.get('/home/tv/playlist/999999').status_code == 404
-
-
-def test_saved_tv_sidebar_launch_uses_the_video_player(saved_tv):
-    web, client, playlist, _ = saved_tv
     searches = len(client.searches)
     assert '"is_video": true' in web.get('/playlists').text
     assert 'Play on TV' in web.get(f'/playlist/{playlist.id}').text
     assert web.post('/play', json={'url': f'https://music.youtube.com/playlist?list={playlist.provider_playlist_id}'}).json() == {
         'ok': True, 'tv_url': f'/?tv_playlist={playlist.id}#tv'}
     assert len(client.searches) == searches
-
-
-def test_tv_events_validate_errors_and_deduplicate_real_play_history(store, saved_tv, caplog):
-    web, client, playlist, items = saved_tv
-    searches = len(client.searches)
     event_url = f'/home/tv/playlist/{playlist.id}/event'
     video = items[0]['video_id']
     assert web.post(event_url, data={'kind': 'player_error', 'video_id': video,
@@ -608,10 +618,6 @@ def test_tv_events_validate_errors_and_deduplicate_real_play_history(store, save
     assert web.post(event_url, data={'kind': 'play', 'video_id': 'not-in-playlist'}).status_code == 400
     assert web.post(event_url, data={'kind': 'play', 'video_id': video, 'position': 'nan'}).status_code == 400
     assert len(client.searches) == searches
-
-
-def test_muted_tv_pool_requests_preparation_without_creating_another_playlist(store, saved_tv):
-    web, client, _, items = saved_tv
     for artist in {item['source_artist'] for item in items}:
         store.rec_model.record_feedback('for_you', 'artist:' + artist, 'mute', now=1)
     assert not web.get('/home/tv').json()['ready']

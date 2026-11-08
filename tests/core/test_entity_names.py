@@ -10,6 +10,8 @@ from yt_playlist.core.migrations import current, registry
 from yt_playlist.core.migrations.v103_entity_names import transform
 from yt_playlist.core.store import Store
 from tests.prepared_fixture_support import capture_template
+from tests.genre_catalog_support import bound_catalog
+from tests.independent_schema_support import independent_regular_ddl
 
 
 def rows(conn):
@@ -25,6 +27,7 @@ def names_predecessor_template(tmp_path_factory):
     root = tmp_path_factory.mktemp('names-predecessor')
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv('YT_PLAYLIST_HOME', str(root / 'app-home'))
+        bound_catalog(patch, entries=(('jazz', 'Jazz'),))
         source = installed_predecessor(root / 'source.db')
         try:
             template = capture_template(source, None)
@@ -107,7 +110,17 @@ def installed_predecessor(path):
     return store
 
 
-def test_predecessor_keeps_read_projections_and_physical_writers_after_regular_ddl(tmp_path, legacy_names):
+def test_name_predecessor_input_keeps_physical_ids_and_original_numbered_history(names_predecessor_template):
+    source = names_predecessor_template.source
+    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 102
+    assert tuple(source.conn.execute('SELECT id,label FROM identities').fetchone()) == (3, 'Main')
+    assert tuple(source.conn.execute('SELECT id,scope_ref FROM playlist_membership_refs').fetchone()) == (55, '@account:3:LM')
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_predecessor_keeps_read_projections_and_physical_writers_after_regular_ddl(
+        tmp_path, legacy_names, independent_regular_ddl):
     from yt_playlist.core import entity_names
     from yt_playlist.core.storage_maintenance import StorageMaintenance
     setup = legacy_names(tmp_path/'deferred.db')

@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,28 +12,82 @@ from tests.core.test_collection_control_preparation import finish
 from tests.core.test_saved_output_preparation import seed
 from tests.core.test_saved_output_publication import publish
 from tests import file_custody_support as fixture_files
+from tests.prepared_fixture_support import assert_upgrade_phase, capture_template, custody_predecessor, custody_upgrade_cases
 from yt_playlist.core import entity_names, recommendation_outputs as files
 from yt_playlist.core import saved_preparation_files as recovery
 from yt_playlist.core.db_revisions import Revisions
-from yt_playlist.core.migrations import registry, runner
 from yt_playlist.core.preparation import saved_outputs as preparation, saved_output_publication as publication
 from yt_playlist.core.store import Store
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Saved file recovery does not construct the HTTP lifecycle."""
+
+
 @pytest.fixture
-def installed(tmp_path, _pristine_installed_schema):
-    path = tmp_path / 'installed.db'
-    setup = Store(path)
-    try:
-        _pristine_installed_schema(79).backup(setup.conn)
-    finally:
-        setup.conn.close()
-    store = Store(path)
-    try:
-        store.init_schema(defer_metadata=True)
+def installed(tmp_path, _bounded_installed_schema):
+    with _bounded_installed_schema(79).open(tmp_path/'installed.db') as store:
         yield store, 79
-    finally:
-        store.conn.close()
+
+
+@pytest.fixture(scope='module')
+def saved_templates(staged_custody_templates, upgraded_custody_inputs, _bounded_installed_schema):
+    native_template = None
+
+    def native(target, *, phase='captured'):
+        completed = template('selected')
+        return upgraded_custody_inputs(79, target, 'saved-recovery-native',
+            lambda _store: completed.result, prepared=completed, phase=phase)
+
+    def template(kind):
+        nonlocal native_template
+        if kind == 'native-precedence':
+            if native_template is None:
+                converted = native(95, phase='converted')
+                source = converted.source
+                source.conn.execute('PRAGMA query_only=OFF')
+                entity_names.predecessor_reads(source.conn)
+                source._snapshot_revisions = Revisions(source.conn)
+                source._bind_repositories()
+                native_template = capture_template(source, converted.result)
+            return native_template
+        return staged_custody_templates(79, 'saved-recovery-'+kind, lambda store: _prepare(store, kind),
+            completed=_bounded_installed_schema(79), admit=False)
+    template.native = native
+    template.release = lambda: upgraded_custody_inputs.release(79, 'saved-recovery-native')
+    return template
+
+
+def test_saved_recovery_schema_input_keeps_real_history_and_private_guards(_bounded_installed_schema):
+    assert_upgrade_phase(_bounded_installed_schema(79), 79)
+
+
+@pytest.mark.parametrize('kind', ['selected', 'unfinished'])
+def test_saved_recovery_input_keeps_exact_originals_and_distinct_selection(saved_templates, kind):
+    template = saved_templates(kind)
+    assert_upgrade_phase(template, 79)
+    assert _originals(template.source.conn)
+    selected = publication.selected(template.source.conn, 'radio_seed_offer')
+    assert (selected is not None) is (kind == 'selected')
+
+
+NATIVE_PHASES = [item for item in custody_upgrade_cases((79,)) if item[1] <= 95] + [
+    (79, 95, 'input'), (79, 95, 'converted')]
+
+
+@pytest.mark.parametrize('version,target,phase', NATIVE_PHASES)
+def test_saved_recovery_native_phase_keeps_history_and_exact_originals(saved_templates, version, target, phase):
+    template = saved_templates.native(target, phase=phase)
+    assert_upgrade_phase(template, custody_predecessor(version, target) if phase == 'input' else target)
+    assert _originals(template.source.conn)
+
+
+def test_saved_recovery_native_input_keeps_real_private_revision_guards(saved_templates):
+    template = saved_templates('native-precedence')
+    assert_upgrade_phase(template, 95)
+    assert template.source._snapshot_revisions.conn is template.source.conn
+    assert _originals(template.source.conn)
 
 
 def _prepare(store, kind):
@@ -49,13 +104,6 @@ def _prepare(store, kind):
         store.settings.set_setting('radio_seed_offer', expected['radio_seed_offer'])
         progress = preparation.JOBS['radio-seed'].step(store.conn, batch_size=1)
         assert progress.status != 'prepared'
-    elif kind == 'native-precedence':
-        entity_names.clear_predecessor_reads(store.conn)
-        Revisions.unbind(store.conn)
-        runner.migrate(store.conn, registry=registry.MIGRATIONS[:95])
-        entity_names.predecessor_reads(store.conn)
-        store._snapshot_revisions = Revisions(store.conn)
-        store._bind_repositories()
     return expected
 
 
@@ -81,23 +129,48 @@ def _hashes(root):
             for path in root.glob('*/*.json')}
 
 
+@pytest.fixture(scope='module')
+def recovery_exports(saved_templates, tmp_path_factory):
+    reports = {}
+
+    def get(kind):
+        if kind not in reports:
+            template = saved_templates(kind)
+            producer, expected = template.source, template.result
+            before = list(producer.conn.iterdump())
+            originals, custody = _originals(producer.conn), _custody(producer.conn)
+            root = recovery.directory(producer.conn)
+            hashes = _hashes(root)
+            selected = {source: publication.selected(producer.conn, source) for source in expected}
+            report = fixture_files.snapshot_library(producer._db_path,
+                tmp_path_factory.mktemp('saved-recovery-export')/'recovered')
+            assert list(producer.conn.iterdump()) == before
+            assert _hashes(root) == hashes
+            assert 'saved_preparation' in report['manifests']
+            with closing(sqlite3.connect(report['snapshot'])) as backup:
+                assert list(backup.iterdump()) == before
+            reports[kind] = SimpleNamespace(producer=producer, expected=expected, before=before,
+                originals=originals, custody=custody, root=root, hashes=hashes, selected=selected, report=report)
+        return reports[kind]
+    return get
+
+
+@pytest.mark.parametrize('kind', ['selected', 'unfinished', 'native-precedence'])
+def test_saved_recovery_export_preserves_exact_source_and_snapshot(recovery_exports, kind):
+    state = recovery_exports(kind)
+    assert state.report['snapshot']
+    assert state.originals
+
+
 @pytest.mark.parametrize('kind', ['selected', 'unfinished', 'native-precedence'])
 @pytest.mark.parametrize('original', [False, True], ids=['restored', 'snapshot'])
 def test_recovered_saved_outputs_own_exact_history_and_continue_without_source(
-        installed, tmp_path, monkeypatch, kind, original):
-    producer, _ = installed
-    expected = _prepare(producer, kind)
-    before = list(producer.conn.iterdump())
-    originals, custody = _originals(producer.conn), _custody(producer.conn)
-    root = recovery.directory(producer.conn)
-    hashes = _hashes(root)
-    selected = {source: publication.selected(producer.conn, source) for source in expected}
-    report = fixture_files.snapshot_library(producer._db_path, tmp_path / 'recovered')
-    assert list(producer.conn.iterdump()) == before
-    assert _hashes(root) == hashes
-    assert 'saved_preparation' in report['manifests']
+        recovery_exports, tmp_path, monkeypatch, kind, original):
+    state = recovery_exports(kind)
+    producer, expected, before = state.producer, state.expected, state.before
+    originals, custody, root, hashes = state.originals, state.custody, state.root, state.hashes
+    selected, report = state.selected, state.report
     with closing(sqlite3.connect(report['snapshot'])) as backup:
-        assert list(backup.iterdump()) == before
         if original:
             path = tmp_path / 'restored.db'
             with closing(sqlite3.connect(path)) as destination:
@@ -182,3 +255,9 @@ def test_missing_saved_file_cannot_report_success(installed, tmp_path):
         assert list(store.conn.iterdump()) == before
     finally:
         hidden.rename(path)
+
+
+def test_saved_recovery_native_inputs_close_after_every_consumer(saved_templates):
+    for source in saved_templates.release():
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            source.conn.execute('SELECT 1')

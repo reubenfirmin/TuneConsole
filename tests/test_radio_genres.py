@@ -1,10 +1,12 @@
 """Genre endpoints must escape style clusters and remain reversible during playback."""
 from copy import deepcopy
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from tests.radio_session_support import controlled_radio_checkpoints, poc, play
+from tests.radio_session_support import (control_radio_checkpoints, controlled_radio_checkpoints,
+                                         poc, play, radio_controller)
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.store_fixture_support import reuse_reporting_reader
 from yt_playlist.controllers.genres import Genres
@@ -83,6 +85,10 @@ def test_completed_genre_evidence_keeps_every_native_catalog_subject(genre_evide
 
 @pytest.fixture
 def prepared_genre_inputs(store, genre_evidence, monkeypatch):
+    prepare_genre_controller(store, genre_evidence, monkeypatch)
+
+
+def prepare_genre_controller(store, genre_evidence, monkeypatch):
     # The two controller scenarios change playback and tuning, with fixed
     # taxonomy. Keep actual selection/pinning and use completed lower-layer
     # meanings; the candidate scenarios below retain real taxonomy reads.
@@ -96,6 +102,28 @@ def prepared_genre_inputs(store, genre_evidence, monkeypatch):
                 **(original(controller, missing) if missing else {})}
 
     monkeypatch.setattr(Genres, 'feature_axes', feature_axes)
+    from yt_playlist.rec.stored_radio import PreparedRadio
+    from yt_playlist.rec import radio_candidates, radio_directions
+
+    # Taxonomy is a completed, fixed input to these controller transitions.
+    # Avoid reopening the same prepared axis lookup for every candidate score;
+    # the real GenrePolicy and live feedback exclusions still decide eligibility.
+    monkeypatch.setattr(PreparedRadio, 'genre_axes', lambda reader, label: axes.get(label, (None, None)))
+    # Two future songs in each of the four real branches suffice to detect a
+    # stale genre pin after repeated endpoint changes. Sequence depth and
+    # continuation/refill limits have their own direction and candidate owners.
+    monkeypatch.setattr(radio_directions, 'DEPTH', 2)
+    prepared_inputs = radio_candidates._prepared_inputs
+
+    def controller_inputs(*args, **kwargs):
+        generation, model, space, modes, bundles = prepared_inputs(*args, **kwargs)
+        # Keep the seed and every distinct contrasting genre. Repeating four
+        # equivalent Electronic clusters belongs to the candidate escape check,
+        # rather than every controller endpoint reversal.
+        modes = {mid: mode for mid, mode in modes.items() if mid in {'1', '6', '7', '8', '9'}}
+        return generation, model, space, modes, bundles
+
+    monkeypatch.setattr(radio_candidates, '_prepared_inputs', controller_inputs)
     # Metadata and musical evidence stay fixed during the native playback race.
     # Supply those completed reads below the real candidate and genre policy;
     # listening, eligibility, scheduling and playlist reconciliation stay live.
@@ -226,43 +254,84 @@ def test_genre_identity_handles_equivalents_without_collapsing_families():
     assert policy.contrast({"genre": None}) < policy.contrast({"genre": "Electronic"})
 
 
-def test_dj_can_alternate_genre_endpoints_without_restarting_or_rejecting_songs(
-        controlled_radio_checkpoints, poc, genre_pools, monkeypatch, prepared_genre_inputs):
-    c, remote, frames, _, _ = poc
-    monkeypatch.setattr(radio_session, "RadioCandidates", RadioCandidates)
-    seed = genre_pools["1"][0]
-    assert c.start(seed["video_id"])["ok"]
-    play(c, remote.ids[0])
-    playlist = c.session.playlist
-    initial_frames = list(frames)
+@pytest.fixture(scope='module')
+def endpoint_session(radio_genre_template, genre_evidence, tmp_path_factory):
+    with pytest.MonkeyPatch.context() as patch:
+        path = tmp_path_factory.mktemp('genre-endpoints') / 'radio.db'
+        with radio_genre_template.open(path) as source, reuse_reporting_reader(source, patch):
+            prepare_genre_controller(source, genre_evidence, patch)
+            control_radio_checkpoints(patch)
+            patch.setattr(radio_session, 'RadioCandidates', RadioCandidates)
+            pool = [track for rows in radio_genre_template.result.values() for track in rows]
+            with radio_controller(patch, source, pool) as controller:
+                patch.setattr(radio_session, 'RadioCandidates', RadioCandidates)
+                c, remote, frames, _, _ = controller
+                assert c.start(radio_genre_template.result['1'][0]['video_id'])['ok']
+                play(c, remote.ids[0])
+                yield SimpleNamespace(c=c, remote=remote, frames=frames, playlist=c.session.playlist,
+                                      initial_frames=list(frames))
 
-    def tune(theme):
-        assert c.tune({**radio_tuning.DEFAULTS, "theme": theme})["ok"]
-        c.advance(c.session)
-        assert not c.status()["updating"]
-        assert c.session.playlist == playlist
-        assert frames == initial_frames
 
-    tune(0)
+def tune_endpoint(state, theme):
+    c = state.c
+    assert c.tune({**radio_tuning.DEFAULTS, 'theme': theme})['ok']
+    c.advance(c.session)
+    assert not c.status()['updating']
+    assert c.session.playlist == state.playlist
+    assert state.frames == state.initial_frames
+
+
+def test_endpoint_session_starts_with_the_observed_electronic_song(endpoint_session):
+    c = endpoint_session.c
+    assert genre(c.session.history_view().current) == 'electronic'
+    assert c.session.playlist == endpoint_session.playlist
+
+
+@pytest.fixture(scope='module')
+def contrasting_endpoint(endpoint_session):
+    state = endpoint_session
+    c = state.c
+    tune_endpoint(state, 0)
     first = c.session.tracks[c.session.position + 1]
     assert first["genre"] != "Electronic"
     # The song on air, rather than the seed or the previous slider value,
     # establishes the next genre pin.
     play(c, first["video_id"])
-    playing = c.session.history_view().current
-    history = list(c.session.heard)
-    for theme in (1, 0, 1):
-        tune(theme)
-        future = c.session.tracks[c.session.position + 1:]
-        assert future
-        if theme == 1:
-            assert all(genre(t) == genre(playing) for t in future)
-            assert all(genre(t) == genre(playing) for b in c.session.directions.slots for t in b["tracks"])
-        else:
-            assert genre(future[0]) != genre(playing)
-        assert c.session.heard == history
-        assert c.session.observed_video == playing["video_id"]
+    state.playing = c.session.history_view().current
+    state.history = list(c.session.heard)
+    return state
+
+
+def test_eclectic_endpoint_plays_a_contrasting_song_without_new_navigation(contrasting_endpoint):
+    state = contrasting_endpoint
+    assert genre(state.playing) != 'electronic'
+    assert state.frames == state.initial_frames
+
+
+@pytest.mark.parametrize('theme', [1, 0, 1], ids=['pinned', 'eclectic', 'repinned'])
+def test_each_endpoint_reversal_uses_the_song_on_air_and_preserves_history(contrasting_endpoint, theme):
+    state = contrasting_endpoint
+    c = state.c
+    tune_endpoint(state, theme)
+    future = c.session.tracks[c.session.position + 1:]
+    assert future
+    if theme == 1:
+        assert all(genre(track) == genre(state.playing) for track in future)
+        assert all(genre(track) == genre(state.playing)
+                   for branch in c.session.directions.slots for track in branch['tracks'])
+    else:
+        assert genre(future[0]) != genre(state.playing)
+    assert c.session.heard == state.history
+    assert c.session.observed_video == state.playing['video_id']
     assert not c.session.rejected
+
+
+def test_dj_can_alternate_genre_endpoints_without_restarting_or_rejecting_songs(contrasting_endpoint):
+    state = contrasting_endpoint
+    assert state.c.session.heard == state.history
+    assert state.c.session.playlist == state.playlist
+    assert state.frames == state.initial_frames
+    assert not state.c.session.rejected
 
 
 def test_pending_genre_pin_rebases_after_a_native_song_change(

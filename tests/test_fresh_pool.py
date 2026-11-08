@@ -14,7 +14,7 @@ from tests.home_fixture_support import publish_cards, publish_menu, without_meta
 from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects, seed_publication_subjects
 from tests.prepared_fixture_support import capture_template, prepared_template
-from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store, reuse_reporting_reader
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import embedding_vectors as embed, fresh_pool, mode_surfaces, road_trip_candidates, surfaces
@@ -184,8 +184,8 @@ def fresh_template_bytecode(tmp_path_factory):
 
 @pytest.fixture
 def fresh_workflow_home(fresh_workflow_menu, fresh_template_bytecode,
-                        without_metadata_providers, monkeypatch):
-    with fresh_workflow_menu.open(':memory:') as store:
+                        without_metadata_providers, monkeypatch, tmp_path):
+    with fresh_workflow_menu.open(tmp_path / 'fresh.db') as store, reuse_reporting_reader(store, monkeypatch):
         payload = fresh_workflow_menu.result
         selected = [{**proto, 'mode_id': None, 'ranker': 'completed-library-selection'}
                     for proto in payload['menus'][0]['protos']]
@@ -577,13 +577,16 @@ def test_failed_or_empty_search_stops_polling_and_allows_retry(store, monkeypatc
 
 
 @pytest.mark.parametrize('deferred', [False, True])
-def test_completed_search_with_insufficient_tracks_is_retryable(store, monkeypatch, prepared_fresh_home, deferred):
+def test_completed_search_with_insufficient_tracks_is_retryable(fresh_workflow_home, monkeypatch, deferred):
     from yt_playlist.rec import candidate_refresh
+    store, client = fresh_workflow_home
     if deferred:
         candidate_refresh.checked(store, 940)
     monkeypatch.setattr(fresh_pool, "populate", lambda *args, **kwargs: 0)
     monkeypatch.setattr(surfaces, "cold_candidates", lambda *args, **kwargs: [])
-    client = prepared_client(store)
+    # This route owns completed/deferrable empty-search handling. Ranking has
+    # independent owners; retain real candidate publication and job settlement.
+    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', lambda *args, **kwargs: ({}, []))
     response = client.post("/home/fresh-pool", data={"include_genres": ["jazz"]})
     assert client.app.state.ctx.work.wait(20)
     match = re.search(r'hx-get="/home/fresh-pool/(\d+)"', response.text)

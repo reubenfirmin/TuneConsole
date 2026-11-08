@@ -1,5 +1,6 @@
 """Home cutover must select exact files and retain their real evidence roots."""
 from dataclasses import replace
+from contextlib import ExitStack, closing
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import json
@@ -11,7 +12,9 @@ import pytest
 
 from tests.core.test_home_output_preparation import seed, root_rows
 from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.genre_catalog_support import bound_catalog
 from tests.independent_schema_support import independent_regular_ddl
+from tests.prepared_fixture_support import historical_template
 from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import group_evidence, recommendation_custody
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -24,11 +27,12 @@ def disable_periodic_library_sync():
     pass
 
 
-def test_home_publication_input_keeps_installed_history_and_guards(_bounded_installed_schema):
-    source = _bounded_installed_schema(90).source
+@pytest.mark.parametrize('version', [79, 90])
+def test_home_publication_input_keeps_installed_history_and_guards(_bounded_installed_schema, version):
+    source = _bounded_installed_schema(version).source
     assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
     assert list(map(tuple, source.conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
-        (entry.version, entry.name) for entry in registry.MIGRATIONS[:90]]
+        (entry.version, entry.name) for entry in registry.MIGRATIONS[:version]]
     assert source._snapshot_revisions.conn is source.conn
     assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
@@ -67,12 +71,54 @@ def real_roots(store):
         recommendation_custody.retain(store.conn, 'prepared', 'proposal:home_prepared:recommendations', generation)
 
 
-@pytest.mark.parametrize('installed', [79, 90], indirect=True)
-def test_preopened_and_pinned_readers_select_exact_files_without_legacy_payload(installed):
-    store, _ = installed
-    originals = seed(store)
-    real_roots(store)
-    roots = root_rows(store.conn)
+@pytest.fixture(scope='module')
+def rooted_home_inputs(_bounded_installed_schema, tmp_path_factory):
+    templates = {}
+    with ExitStack() as resources:
+        def get(version):
+            if version not in templates:
+                completed = _bounded_installed_schema(version)
+                def seed_roots(source):
+                    originals = seed(source)
+                    real_roots(source)
+                    return originals, root_rows(source.conn)
+                templates[version] = resources.enter_context(historical_template(
+                    completed.source.conn, seed_roots,
+                    database=tmp_path_factory.mktemp('rooted-home') / 'input.db', completed=completed))
+            return templates[version]
+        yield get
+
+
+@pytest.mark.parametrize('version', [79, 90])
+def test_rooted_home_input_retains_exact_outputs_and_actual_publication_roots(rooted_home_inputs, version):
+    template = rooted_home_inputs(version)
+    originals, roots = template.result
+    assert set(originals) == {'adaptive_group_preview', 'home_prepared'}
+    assert root_rows(template.source.conn) == roots
+    assert sum(map(len, roots.values())) > 4
+    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert publication.OWNER.selected(template.source.conn) is None
+
+
+@pytest.fixture
+def rooted_home(request, rooted_home_inputs, tmp_path, monkeypatch):
+    version = request.param
+    bound_catalog(monkeypatch)
+    template = rooted_home_inputs(version)
+    # Open the populated private input directly; do not clone and discard an
+    # empty installed Store before restoring this same catalog and custody.
+    with template.open(tmp_path / 'rooted-home.db') as store:
+        history = list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
+        yield store, template.result
+        assert list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version'))) == history
+        with closing(sqlite3.connect(store._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
+            reader.row_factory = sqlite3.Row
+            runner.validate_version(reader, version)
+
+
+@pytest.mark.parametrize('rooted_home', [79, 90], indirect=True)
+def test_preopened_and_pinned_readers_select_exact_files_without_legacy_payload(rooted_home):
+    store, (originals, roots) = rooted_home
     other = Store(store._db_path)
     try:
         other.init_schema(defer_metadata=True)
@@ -103,6 +149,8 @@ def test_preopened_and_pinned_readers_select_exact_files_without_legacy_payload(
         regular.validate(other.conn)
     finally:
         other.conn.close()
+
+
 @pytest.mark.parametrize('installed', [90], indirect=True)
 @pytest.mark.parametrize('failure', ['metadata', 'file', 'policy', 'extra_policy', 'root', 'root_original', 'missing_root', 'missing_output'])
 def test_missing_or_incorrect_documents_and_custody_cannot_publish(installed, failure):

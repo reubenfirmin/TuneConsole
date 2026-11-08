@@ -12,12 +12,41 @@ import time
 import pytest
 from tests.metadata_provenance_support import metadata_provenance
 
-from tests.db_rebuild_support import (completed_destination_schema, completed_destination_sql,
+from tests.db_rebuild_support import (admitted_rebuild_format, completed_destination_schema, completed_destination_sql,
                                       production64)
+from tests.rebuild_startup_support import startup_destination
 from yt_playlist.core.db_rebuild import build, destination, source
 from yt_playlist.core import vibe_versions
-from yt_playlist.core.migrations import registry, runner
+from yt_playlist.core.migrations import registry, regular, runner
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(scope='module')
+def installation_destination(startup_destination):
+    """Completed catalog conversion below installation and feedback replay.
+
+    Registered populated-domain conversion has independent real owners in
+    test_db_rebuild_populated. Keep this contract's actual source-history copy,
+    retained journal heads/files, checkpoint, compaction and installer.
+    """
+    def journals(reader, target, cursor, limit):
+        for table in ('legacy_archive_heads', 'legacy_archive_cutovers'):
+            if reader.execute('SELECT 1 FROM sqlite_schema WHERE name=?', (table,)).fetchone():
+                fields = source.columns(reader, table)
+                target.executemany('INSERT INTO '+table+'('+','.join(fields)+') VALUES ('+
+                    ','.join('?' for _ in fields)+')', reader.execute('SELECT '+','.join(fields)+' FROM '+table))
+        return build.Batch(done=True)
+
+    return replace(startup_destination, version='completed-catalog-installation-v1',
+        stages=(startup_destination.stages[0], build.Stage('retained-journals', journals)),
+        runtime_stages=None, compact=False)
+
+
+def test_installation_destination_keeps_private_current_schema_and_catalog(installation_destination):
+    with closing(sqlite3.connect(':memory:')) as conn, conn:
+        installation_destination.initialize(conn)
+        assert conn.execute('SELECT id FROM recordings ORDER BY id').fetchall() == [(3,), (8,), (19,)]
+        assert not conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.fixture
@@ -32,6 +61,58 @@ def development93(development93_template, tmp_path, record_property):
     record_property('development93_prefix_seconds', seconds)
     record_property('development93_clone_seconds', time.perf_counter() - started)
     return path
+
+
+@pytest.fixture(scope='module')
+def development_admission(development93_template, tmp_path_factory):
+    path = tmp_path_factory.mktemp('admitted-development93') / 'source.db'
+    source = Store(path)
+    with closing(source.conn):
+        development93_template[0].backup(source.conn)
+        yield source
+
+
+def test_development_admission_input_keeps_the_installed_catalog(development_admission):
+    conn = development_admission.conn
+    assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 93
+    assert [row[0] for row in conn.execute('SELECT id FROM recordings ORDER BY id')] == [3, 8, 19]
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.mark.parametrize('version', range(1, len(regular.CHANGES) + 1))
+def test_each_real_development_admission_owner_keeps_installed_history(development_admission, version):
+    conn = development_admission.conn
+    regular.migrate(conn, changes=regular.CHANGES[:version])
+    assert regular.validate(conn) == version
+    assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 93
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.fixture(scope='module')
+def admitted_development93_template(development_admission):
+    from tests.prepared_fixture_support import capture_template
+
+    development_admission.init_schema()
+    return capture_template(development_admission, None)
+
+
+def test_admitted_development_input_keeps_real_regular_history_and_private_guards(
+        admitted_development93_template):
+    from yt_playlist.core.migrations import regular
+
+    conn = admitted_development93_template.source.conn
+    assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 93
+    assert regular.validate(conn) == len(regular.CHANGES)
+    assert conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert admitted_development93_template.revision_guards
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.fixture
+def admitted_development93(admitted_development93_template, tmp_path):
+    path = tmp_path / 'development93.db'
+    with admitted_development93_template.open(path):
+        return path
 
 
 @pytest.fixture(autouse=True)
@@ -346,10 +427,19 @@ def test_rebuild_retires_history_with_partial_installed_preparation(development9
         store.conn.close()
 
 
-@pytest.mark.parametrize('after_copy', [False, True])
-def test_rebuild_resumes_final_compaction_without_repeating_converters(development93, tmp_path, after_copy, monkeypatch):
-    output = tmp_path/'resumable.db'
-    contract = destination.for_source(development93)
+@pytest.fixture(scope='module', params=[False, True], ids=['during-copy', 'after-copy'])
+def compaction_resume_input(development93_template, tmp_path_factory, request, installation_destination):
+    root = tmp_path_factory.mktemp('compaction-resume')
+    original = root / 'development93.db'
+    with closing(sqlite3.connect(original)) as conn:
+        development93_template[0].backup(conn)
+    return original, root / 'resumable.db', request.param, replace(installation_destination, compact=True)
+
+
+def test_final_compaction_keeps_restartable_output_at_each_interruption(
+        compaction_resume_input, monkeypatch):
+    development93, output, after_copy, contract = compaction_resume_input
+    monkeypatch.setattr(build, '_format', admitted_rebuild_format)
     converted = []
     stopped = False
     if after_copy:
@@ -369,6 +459,14 @@ def test_rebuild_resumes_final_compaction_without_repeating_converters(developme
         build.construct(development93, output, contract, progress=interrupt, cancelled=lambda: stopped)
     assert converted
     assert output.with_name(output.name+'.compacted').exists() == after_copy
+
+
+def test_rebuild_resumes_final_compaction_without_repeating_converters(
+        compaction_resume_input, monkeypatch):
+    development93, output, _after_copy, contract = compaction_resume_input
+    if not output.exists():
+        test_final_compaction_keeps_restartable_output_at_each_interruption(compaction_resume_input, monkeypatch)
+    monkeypatch.setattr(build, '_format', admitted_rebuild_format)
     resumed = []
     report = build.construct(development93, output, contract,
                              progress=lambda phase, detail: resumed.append(detail.get('stage')))
@@ -817,10 +915,11 @@ def seed_released_evidence(path):
 
 @pytest.mark.parametrize('source_fixture',['production64','development93'])
 @pytest.mark.parametrize('failure',[None,'staging','reopening'])
-def test_real_import_installs_or_rolls_back_with_feedback_retained(request,source_fixture,failure):
+def test_real_import_installs_or_rolls_back_with_feedback_retained(
+        request, source_fixture, failure, installation_destination):
     from yt_playlist.core import legacy_journals, playback_feedback
     from yt_playlist.core.db_rebuild import job
-    path = request.getfixturevalue(source_fixture)
+    path = request.getfixturevalue('admitted_development93' if source_fixture == 'development93' else source_fixture)
     store = Store(path)
     store.init_schema()
     original_files = {}
@@ -832,7 +931,7 @@ def test_real_import_installs_or_rolls_back_with_feedback_retained(request,sourc
         original_files = {p.relative_to(legacy_journals.directory(store.conn)):p.read_bytes()
                           for p in legacy_journals.references(store.conn)}
     inode = path.stat().st_ino
-    contract = destination.for_source(path)
+    contract = installation_destination
     captured = False
     def progress(phase,detail):
         nonlocal captured

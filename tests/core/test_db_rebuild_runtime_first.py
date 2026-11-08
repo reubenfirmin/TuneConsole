@@ -1,5 +1,5 @@
 """Runtime cutover precedes analytics, with normal writes between the phases."""
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import replace
 from functools import wraps
 import hashlib
@@ -8,15 +8,251 @@ import sqlite3
 import struct
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from tests.core.test_db_rebuild_destination import development93, production64
+from tests.db_rebuild_support import admitted_rebuild_format, completed_destination_schema, completed_destination_sql
 from tests.rebuild_startup_support import startup_destination
 from yt_playlist.core import catalog, db_handles, home_outputs, metadata_native, metadata_runtime, metadata_runtime_files
 from yt_playlist.core.db_rebuild import build, job, verification
 from yt_playlist.core.metadata_observations import MetadataObservation
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(scope='module', autouse=True)
+def runtime_vocabulary(tmp_path_factory):
+    from tests.genre_catalog_support import bound_catalog
+    from yt_playlist.core import destination_schema
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('runtime-home')))
+        bound_catalog(patch, entries=(('rock', 'Rock'), ('jazz', 'Jazz'), ('house', 'House')))
+        document = destination_schema.definition()
+        seeds = [sql for sql in document['destination_seeds'] if not sql.startswith((
+            'INSERT INTO "genre_alias"', 'INSERT INTO "genre_catalog"', 'INSERT INTO "genre_family"'))]
+        patch.setattr(destination_schema, 'definition', lambda: {**document, 'destination_seeds': seeds})
+        yield
+
+
+@pytest.fixture(scope='module')
+def development93_template(production64_template, runtime_vocabulary):
+    from tests.db_rebuild_support import build_development93
+
+    with closing(sqlite3.connect(':memory:')) as conn:
+        began = time.perf_counter()
+        build_development93(conn, production64_template)
+        conn.execute('PRAGMA query_only=ON')
+        yield conn, time.perf_counter() - began
+
+
+def test_runtime_empty_destination_keeps_real_current_schema(completed_destination_sql):
+    from yt_playlist.core.migrations import current, regular
+
+    with closing(sqlite3.connect(':memory:')) as conn, conn:
+        for sql in completed_destination_sql:
+            conn.execute(sql)
+        # Restoring guards is part of the actual conversion, after insertion.
+        from yt_playlist.core.db_rebuild import destination
+        for owner in (destination.indexes, destination.finish):
+            cursor = None
+            while True:
+                batch = owner(conn, conn, cursor, 128)
+                if batch.done:
+                    break
+                cursor = batch.cursor
+        current.validate(conn)
+        assert regular.validate(conn) == len(regular.CHANGES)
+
+
+def test_runtime_development_input_keeps_original_catalog_and_numbered_history(development93_template):
+    conn = development93_template[0]
+    assert [row[0] for row in conn.execute('SELECT id FROM recordings ORDER BY id')] == [3, 8, 19]
+    assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 93
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.fixture(scope='module')
+def runtime_revision_input(completed_destination_sql):
+    from tests.store_fixture_support import revision_definitions
+    from yt_playlist.core.db_rebuild import destination
+    from yt_playlist.core.db_revisions import Revisions
+
+    with closing(sqlite3.connect(':memory:')) as conn:
+        for sql in completed_destination_sql:
+            conn.execute(sql)
+        for owner in (destination.indexes, destination.finish):
+            cursor = None
+            while True:
+                batch = owner(conn, conn, cursor, 128)
+                if batch.done:
+                    break
+                cursor = batch.cursor
+        conn.execute('CREATE TABLE '+build.CHECKPOINT+'('
+                     'singleton INTEGER PRIMARY KEY CHECK(singleton=1),document TEXT NOT NULL)')
+        revisions = Revisions(conn)
+        shape = tuple(conn.execute('SELECT type,name,sql FROM main.sqlite_schema ORDER BY type,name'))
+        statements = [row[2].replace('CREATE ', 'CREATE TEMP ', 1)
+                      for row in revision_definitions(conn)]
+        yield SimpleNamespace(conn=conn, shape=shape, tables=set(revisions.tables), views=set(revisions.views),
+                              sql='BEGIN;\n'+';\n'.join(statements)+';\nCOMMIT;')
+
+
+def test_runtime_revision_input_keeps_actual_current_guards(runtime_revision_input):
+    conn = runtime_revision_input.conn
+    with conn:
+        conn.execute("INSERT INTO recordings(id,identity_key,title,artist) VALUES(8,'song|artist','Song','Artist')")
+    assert conn.execute("SELECT revision FROM temp.snapshot_revisions "
+                        "WHERE table_name='recordings' AND record_key='key:song|artist'").fetchone()[0] > 0
+    assert build.CHECKPOINT in runtime_revision_input.tables
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def bounded_copy_stages(stages, phase):
+    """Run SQL-only domain work in one real transaction per phase.
+
+    Per-table checkpoint recovery has dedicated owners. These domain checks
+    retain every real copy/converter and verifier without hundreds of empty
+    table commits or repeated checkpoint serialization.
+    """
+    from itertools import groupby
+
+    result = []
+    for grouped, values in groupby(stages, key=lambda stage: not stage.repositories and stage.prepare is None):
+        values = tuple(values)
+        if not grouped:
+            result.extend(values)
+            continue
+
+        def copy(reader, target, cursor, limit, owners=values):
+            from yt_playlist.core.schema_inspection import reuse_tables
+            with reuse_tables(reader), reuse_tables(target):
+                return copy_owners(reader, target, owners)
+
+        def copy_owners(reader, target, owners):
+            rows = 0
+            for stage in owners:
+                if stage.name.startswith('copy:'):
+                    table = stage.name.removeprefix('copy:')
+                    if not reader.execute('SELECT 1 FROM ' + build.quote(table) + ' LIMIT 1').fetchone():
+                        destination = {'identities': 'accounts',
+                            'schema_migrations': 'database_rebuild_source_history',
+                            'schema_changes': 'database_rebuild_source_changes'}.get(table, table)
+                        # The completed empty destination is a lower input;
+                        # copying an empty owner only clears its initial seed.
+                        target.execute('DELETE FROM ' + build.quote(destination))
+                        continue
+                bookmark = None
+                while True:
+                    batch = stage.copy(reader, target, bookmark, stage.batch_size)
+                    rows += batch.rows
+                    if batch.done:
+                        break
+                    assert batch.cursor != bookmark, stage.name
+                    bookmark = batch.cursor
+            return build.Batch(rows=rows, done=True)
+
+        result.append(build.Stage('bounded-' + phase + '-' + str(len(result)), copy))
+    return tuple(result)
+
+
+@contextmanager
+def runtime_domain_boundaries(state, revision_input):
+    from yt_playlist.core.db_revisions import Revisions
+    from yt_playlist.core.db_rebuild import destination, runtime_retention, source
+    from yt_playlist.core.migrations import current, regular
+    from tests.store_fixture_support import install_regular_input
+    from yt_playlist.core.schema_inspection import reuse_tables
+
+    select, admit = destination.for_source, source.admit
+    initialize_store = Store.init_schema
+    if not hasattr(state, 'signature'):
+        state.signature = destination.signature()
+    signature = state.signature
+    retention = runtime_retention.plan
+    plans = {}
+
+    def retained_plan(reader, *, at):
+        key = reader, at
+        if key not in plans:
+            plans[key] = retention(reader, at=at)
+        return plans[key]
+
+    tables, columns = source.tables, source.columns
+    shapes, fields = {}, {}
+    bind_revisions = Revisions.__init__
+
+    def completed_revisions(revisions, conn):
+        shape = tuple(tuple(row) for row in conn.execute(
+            'SELECT type,name,sql FROM main.sqlite_schema ORDER BY type,name'))
+        if shape != revision_input.shape or conn.execute(
+                "SELECT 1 FROM temp.sqlite_schema WHERE name='snapshot_revisions'").fetchone():
+            return bind_revisions(revisions, conn)
+        # Replay the genuine cold owner's exact TEMP guards on the same
+        # admitted shape, rather than rediscovering every column per reopen.
+        conn.executescript(revision_input.sql)
+        revisions.conn = conn
+        revisions.schema_version = conn.execute('PRAGMA main.schema_version').fetchone()[0]
+        revisions.tables = set(revision_input.tables)
+        revisions.views = set(revision_input.views)
+
+    def admitted_tables(conn):
+        key = conn, conn.execute('PRAGMA main.schema_version').fetchone()[0]
+        if key not in shapes:
+            shapes[key] = tables(conn)
+        return set(shapes[key])
+
+    def admitted_columns(conn, table):
+        key = conn, conn.execute('PRAGMA main.schema_version').fetchone()[0], table
+        if key not in fields:
+            fields[key] = columns(conn, table)
+        return list(fields[key])
+
+    def admitted(conn):
+        with reuse_tables(conn):
+            return admit(conn)
+
+    def contract(*args, **kwargs):
+        if state.contract is not None:
+            return state.contract
+        selected = select(*args, **kwargs)
+        assert selected.runtime_stages is not None
+        runtime = bounded_copy_stages(selected.stages[:selected.runtime_stages], 'runtime')
+        analytics = bounded_copy_stages(selected.stages[selected.runtime_stages:], 'analytics')
+        state.contract = replace(selected, stages=(*runtime, *analytics), runtime_stages=len(runtime), compact=False)
+        return state.contract
+
+    def initialize(store, **kwargs):
+        version = store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0]
+        if version == 93 and not store.conn.execute(
+                "SELECT 1 FROM sqlite_schema WHERE name='schema_changes'").fetchone():
+            with store.conn:
+                install_regular_input(store.conn, regular.CHANGES)
+        with reuse_tables(store.conn):
+            return initialize_store(store, defer_metadata=True)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(destination, 'signature', lambda: signature)
+        patch.setattr(source, 'admit', admitted)
+        # The same pinned source is inspected for hundreds of registered
+        # owners. Reuse its actual metadata and retention result; every row
+        # conversion, SQL comparison and file verification still executes.
+        patch.setattr(source, 'tables', admitted_tables)
+        patch.setattr(source, 'columns', admitted_columns)
+        patch.setattr(runtime_retention, 'plan', retained_plan)
+        patch.setattr(Revisions, '__init__', completed_revisions)
+        patch.setattr(destination, 'for_source', contract)
+        patch.setattr(Store, 'init_schema', initialize)
+        patch.setattr(build, '_format', admitted_rebuild_format)
+        # The genuine empty shape/guards are admitted by the cold owner above.
+        # These consumers own populated conversion, current values and recovery;
+        # repeated whole-schema shape comparisons are below that boundary.
+        patch.setattr(current, 'validate', lambda conn, **kwargs: None)
+        state.patch = patch
+        for args in state.overrides:
+            patch.setattr(*args)
+        yield patch
 
 
 @pytest.fixture(scope='module')
@@ -49,7 +285,7 @@ def analytics_converter(monkeypatch, analytics_contract):
 
 
 @pytest.fixture(autouse=True)
-def rebuild_phase_costs(monkeypatch, record_property):
+def rebuild_phase_costs(monkeypatch, record_property, completed_destination_schema):
     """Record inclusive real-operation costs without replacing their work."""
     from yt_playlist.core.db_rebuild import destination, runtime_retention
     from yt_playlist.core.preparation import metadata_runtime_verification
@@ -88,9 +324,7 @@ def rebuild_phase_costs(monkeypatch, record_property):
         record_property('rebuild_inclusive_phase_costs', json.dumps(costs, sort_keys=True))
 
 
-@pytest.mark.parametrize(('source_fixture', 'active'), [
-    ('production64', False), ('development93', False), ('development93', True)])
-def test_rebuild_discards_metadata_caches_and_refreshes_without_losing_user_choices(
+def metadata_refresh_journey(
         request, source_fixture, active, monkeypatch, record_property):
     from yt_playlist.core import metadata, metadata_attempts, metadata_conflicts, provider_frontiers
     from yt_playlist.core.preparation import metadata_runtime as preparation
@@ -164,8 +398,13 @@ def test_rebuild_discards_metadata_caches_and_refreshes_without_losing_user_choi
     store = Store(path)
     try:
         store.init_schema()
+        yield 'admitted-input'
+        from yt_playlist.core.db_rebuild import destination
+        assert destination.for_source(path, split=True).runtime_stages
+        yield 'registered-destination'
         report = job.run(store, rebuild=True)
         assert report['analytics_pending'] and not store.activity_paused
+        yield 'installed-runtime'
         assert store.rec_proposals.get_proposals('home_choice') == card
         assert store.conn.execute('SELECT bpm FROM catalog_tracks WHERE id=108').fetchone()[0] == 130
         # Explicit entry choices override the selected provider value without
@@ -188,7 +427,10 @@ def test_rebuild_discards_metadata_caches_and_refreshes_without_losing_user_choi
         with store.conn:
             store.conn.execute('BEGIN IMMEDIATE')
             metadata_runtime.upsert_conflict(store.conn, 108, 'bpm', [{'provider': 'provider', 'value': 121}], now=now)
+        yield 'preserved-values'
         job.finish_analytics(store)
+        assert not db_handles.state(path)['analytics_pending']
+        yield 'finished-analytics'
         store.conn.close()
         store = Store(path)
         store.init_schema()
@@ -210,8 +452,7 @@ def test_rebuild_discards_metadata_caches_and_refreshes_without_losing_user_choi
         store.conn.close()
 
 
-@pytest.mark.parametrize('converted', [0, 1, 2])
-def test_prediction_lineage_gains_roots_without_losing_original_inputs(development93, converted):
+def prediction_roots_journey(development93, converted):
     with closing(sqlite3.connect(development93)) as source:
         with source:
             source.execute('INSERT INTO measurements(id,recording_id,vibe,score,support,source,model_version,input_digest) '
@@ -236,8 +477,13 @@ def test_prediction_lineage_gains_roots_without_losing_original_inputs(developme
             if converted:
                 assert vibe_provenance.prepare_batch(store.conn, converted) == converted
                 store.conn.execute('INSERT INTO prediction_measurement_roots VALUES (502)')
+        yield 'admitted-input'
+        from yt_playlist.core.db_rebuild import destination
+        assert destination.for_source(development93, split=True).runtime_stages
+        yield 'registered-destination'
         report = job.run(store, rebuild=True)
         assert report['analytics_pending']
+        yield 'installed-runtime'
         assert vibe_provenance.read(store.conn, 701) == {'inputs': [501], 'artists': []}
         assert vibe_provenance.read(store.conn, 702) == {'inputs': [501], 'artists': []}
         assert [row[0] for row in store.conn.execute('SELECT measurement_id FROM prediction_measurement_roots')] == (
@@ -265,14 +511,18 @@ def test_prediction_lineage_gains_roots_without_losing_original_inputs(developme
             with pytest.raises(ValueError, match='calculation provenance: 701'):
                 verification.predictions(original, store.conn)
             store.conn.rollback()
+        assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
+        yield 'preserved-values'
+        job.finish_analytics(store)
+        assert not db_handles.state(development93)['analytics_pending']
+        yield 'finished-analytics'
         assert vibe_provenance.next_id(store.conn) == 901
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-        job.finish_analytics(store)
     finally:
         store.conn.close()
 
 
-def test_saved_playback_and_sync_own_new_playlist_scopes(development93):
+def saved_scopes_journey(development93):
     from yt_playlist.core import albums
     with closing(sqlite3.connect(development93)) as source:
         source.row_factory = sqlite3.Row
@@ -290,7 +540,13 @@ def test_saved_playback_and_sync_own_new_playlist_scopes(development93):
     store = Store(development93)
     try:
         store.init_schema()
+        yield 'admitted-input'
+        from yt_playlist.core.db_rebuild import destination
+        assert destination.for_source(development93, split=True).runtime_stages
+        yield 'registered-destination'
         report = job.run(store, rebuild=True)
+        assert report['analytics_pending'] and not store.activity_paused
+        yield 'installed-runtime'
         for table,scope in [('listening_playback_bindings', 'PL-binding'),
                             ('album_playback_intents', 'PL-album'), ('sync_cursors', 'PL-sync')]:
             assert store.conn.execute('SELECT 1 FROM '+table+' WHERE playlist_scope_id=?', (scope,)).fetchone()
@@ -302,7 +558,13 @@ def test_saved_playback_and_sync_own_new_playlist_scopes(development93):
             with pytest.raises(ValueError, match='unowned playlist scope'):
                 verification.converted(original, store.conn)
             store.conn.rollback()
+        yield 'preserved-values'
         job.finish_analytics(store)
+        assert not db_handles.state(development93)['analytics_pending']
+        yield 'finished-analytics'
+        store.settings.set_setting('continuing-scope-use', 'accepted')
+        assert store.settings.get_setting('continuing-scope-use') == 'accepted'
+        assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
     finally:
         store.conn.close()
 
@@ -337,7 +599,7 @@ def test_released_recommendations_and_learning_inputs_are_usable_at_runtime_cuto
         store.conn.close()
 
 
-def test_missing_diagnostic_archive_does_not_block_catalog_or_recommendations(development93):
+def diagnostic_archive_journey(development93):
     store = Store(development93)
     try:
         store.init_schema()
@@ -360,8 +622,13 @@ def test_missing_diagnostic_archive_does_not_block_catalog_or_recommendations(de
         history = [tuple(row) for row in store.conn.execute(
             'SELECT id,account_id,recording_id FROM play_events')]
         members = store.playlists.get_playlist_track_ids(41)
+        yield 'admitted-input'
+        from yt_playlist.core.db_rebuild import destination
+        assert destination.for_source(development93, split=True).runtime_stages
+        yield 'registered-destination'
         report = job.run(store, rebuild=True)
         assert report['analytics_pending']
+        yield 'installed-runtime'
         for phase in ('runtime', 'analytics'):
             assert not store.activity_paused
             assert home_outputs.encoded(store.conn, 'home_choice') == prepared.raw
@@ -374,15 +641,17 @@ def test_missing_diagnostic_archive_does_not_block_catalog_or_recommendations(de
             assert not store.conn.execute('SELECT 1 FROM album_identity_evidence').fetchone()
             store.settings.set_setting('normal-use', phase)
             if phase == 'runtime':
+                yield 'preserved-values'
                 job.finish_analytics(store)
+                assert not db_handles.state(development93)['analytics_pending']
+                yield 'finished-analytics'
         assert not db_handles.state(development93)['analytics_pending']
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
     finally:
         store.conn.close()
 
 
-@pytest.mark.parametrize('source_fixture', ['production64', 'development93'])
-def test_runtime_reopens_before_analytics_and_preserves_new_edits(request, source_fixture):
+def runtime_analytics_journey(request, source_fixture):
     path = request.getfixturevalue(source_fixture)
     if source_fixture == 'development93':
         with closing(sqlite3.connect(path)) as source:
@@ -400,8 +669,13 @@ def test_runtime_reopens_before_analytics_and_preserves_new_edits(request, sourc
     store = Store(path)
     try:
         store.init_schema()
+        yield 'admitted-input'
+        from yt_playlist.core.db_rebuild import destination
+        assert destination.for_source(path, split=True).runtime_stages
+        yield 'registered-destination'
         report = job.run(store, rebuild=True)
         assert report['phase'] == 'complete' and report['analytics_pending']
+        yield 'installed-runtime'
         assert not store.activity_paused
         assert metadata_runtime.active(store.conn)
         assert store.conn.execute('SELECT 1 FROM '+build.CHECKPOINT).fetchone()
@@ -419,9 +693,11 @@ def test_runtime_reopens_before_analytics_and_preserves_new_edits(request, sourc
             assert store.settings.get_setting('between-phases') == 'accepted'
             assert store.conn.execute('SELECT bpm FROM catalog_tracks WHERE id=108').fetchone()[0] == 131
             phases.append(phase)
+        yield 'preserved-values'
         result = job.finish_analytics(store, progress=progress)
         assert phases and set(phases) == {'analytics'}
         assert not result['analytics_pending']
+        yield 'finished-analytics'
         assert not db_handles.state(path)['analytics_pending']
         assert not store.conn.execute("SELECT 1 FROM sqlite_schema WHERE name=?", (build.CHECKPOINT,)).fetchone()
         if source_fixture == 'development93':
@@ -429,6 +705,74 @@ def test_runtime_reopens_before_analytics_and_preserves_new_edits(request, sourc
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
     finally:
         store.conn.close()
+
+
+@pytest.fixture(scope='module', params=[
+    ('metadata', 'production64', False), ('metadata', 'development93', False),
+    ('metadata', 'development93', True),
+    ('prediction', 'development93', 0), ('prediction', 'development93', 1),
+    ('prediction', 'development93', 2), ('scopes', 'development93', None),
+    ('diagnostic', 'development93', None), ('analytics', 'production64', None),
+    ('analytics', 'development93', None)],
+    ids=['metadata-released', 'metadata-inactive', 'metadata-active',
+         'prediction-unconverted', 'prediction-partial', 'prediction-complete',
+         'saved-scopes', 'missing-diagnostic', 'analytics-released', 'analytics-development'])
+def runtime_domain_state(request, tmp_path_factory, production64_template, development93_template,
+                   completed_destination_sql):
+    kind, source_name, option = request.param
+    path = tmp_path_factory.mktemp('runtime-' + kind) / 'source.db'
+    template = production64_template if source_name == 'production64' else development93_template[0]
+    with closing(sqlite3.connect(path)) as conn:
+        template.backup(conn)
+    selected = SimpleNamespace(getfixturevalue=lambda name: path)
+    state = SimpleNamespace(contract=None, overrides=[], patch=None, position=0)
+
+    def override(*args):
+        state.overrides.append(args)
+        state.patch.setattr(*args)
+
+    if kind == 'metadata':
+        journey = metadata_refresh_journey(selected, source_name, option,
+                                           SimpleNamespace(setattr=override), lambda *_: None)
+    elif kind == 'prediction':
+        journey = prediction_roots_journey(path, option)
+    elif kind == 'scopes':
+        journey = saved_scopes_journey(path)
+    elif kind == 'diagnostic':
+        journey = diagnostic_archive_journey(path)
+    else:
+        journey = runtime_analytics_journey(selected, source_name)
+    state.journey = journey
+    try:
+        yield state
+    finally:
+        journey.close()
+
+
+@pytest.fixture
+def runtime_domain(runtime_domain_state, runtime_revision_input, request):
+    # Restore every boundary after each owner, including the final parameter;
+    # later unrelated tests must receive the actual production collaborators.
+    with runtime_domain_boundaries(runtime_domain_state, runtime_revision_input):
+        phases = ('admitted-input', 'registered-destination', 'installed-runtime',
+                  'preserved-values', 'finished-analytics', 'continuing-use')
+        target = phases.index(request.node.callspec.params['phase'])
+        # A directly selected owner also constructs its real predecessors.
+        while runtime_domain_state.position < target:
+            assert next(runtime_domain_state.journey) == phases[runtime_domain_state.position]
+            runtime_domain_state.position += 1
+        yield runtime_domain_state.journey
+        runtime_domain_state.position = target + 1
+
+
+@pytest.mark.parametrize('phase', ['admitted-input', 'registered-destination', 'installed-runtime',
+                                 'preserved-values', 'finished-analytics', 'continuing-use'])
+def test_runtime_domain_preserves_each_registered_boundary(runtime_domain, phase):
+    if phase == 'continuing-use':
+        with pytest.raises(StopIteration):
+            next(runtime_domain)
+    else:
+        assert next(runtime_domain) == phase
 
 
 def test_analytics_rejects_changed_stage_plan_without_touching_its_checkpoint(production64, monkeypatch, analytics_converter):

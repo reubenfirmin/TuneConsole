@@ -34,6 +34,15 @@ FORMATS = [(version, state) for version in (79, 93) for state in ('source-only',
 FORMATS.append((107, 'native'))
 
 
+@pytest.mark.parametrize('version', [79, 93, 107])
+def test_feedback_schema_input_keeps_numbered_history_and_real_guards(_bounded_installed_schema, version):
+    source = _bounded_installed_schema(version).source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
+    assert source._snapshot_revisions.conn is source.conn
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
 def prepare_owner(store, key, state):
     if state == 'selected':
         select(store, key)

@@ -1,7 +1,6 @@
 """Temporary fully Themed backfill must outlive finite prepared Home lists (#286)."""
 import json
 import time
-from tests.enrichment_support import seed_enrichment
 from tests.derived_rating_support import seed_dislike
 
 import numpy as np
@@ -12,14 +11,59 @@ from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, RadioCandidates
 from yt_playlist.rec.radio_directions import DEPTH, RadioDirections
 from yt_playlist.rec.radio_genres import genre
 from yt_playlist.core import catalog
+from yt_playlist.core.db_writes import atomic_write
+from yt_playlist.util.matching import identity_key
 from tests.radio_candidate_support import catalog_inputs, intensity_inputs
+from tests.genre_catalog_support import bound_shipped_catalog
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
+
+
+@pytest.fixture(scope='module')
+def radio_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+def test_radio_schema_keeps_real_sql_without_catalog_or_prepared_inputs(radio_schema):
+    assert radio_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert radio_schema.execute('SELECT count(*) FROM recordings').fetchone()[0] == 0
+    assert radio_schema.execute('SELECT count(*) FROM genre_catalog').fetchone()[0] == 0
+    assert radio_schema.execute('SELECT count(*) FROM recommendation_generations').fetchone()[0] == 0
+    assert radio_schema._revision_script
+    assert not radio_schema.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.fixture
+def store(radio_schema, monkeypatch):
+    from yt_playlist.core import genre_identity
+    from yt_playlist.core.store import Store
+
+    # Keep shipped spelling, aliases and families for the five genres consumed
+    # here. Vocabulary curation and schema admission have separate owners.
+    bound_shipped_catalog(monkeypatch, ('downtempo', 'synthwave', 'indie rock', 'drum bass', 'jungle'))
+    database = Store(':memory:')
+    try:
+        initialize_consumer(database, radio_schema)
+        with database.conn:
+            genre_identity.seed_catalog(database.conn)
+        yield database
+    finally:
+        database.conn.close()
 
 
 def catalog_track(store, video, label="Downtempo", *, artist=None, duration=200, available=None):
     artist = artist or f"Artist {video}"
-    tid = store.tracks.upsert_track(video, video, artist, "", duration, available=available)
-    seed_enrichment(store, tid, label, "2001")
-    key = store.tracks.catalog_subject(tid)["identity_key"]
+    key = identity_key(video, artist)
+    # Candidate hydration consumes completed catalog facts and artist credits.
+    # Provider deliveries and metadata ingestion have their own owners.
+    with atomic_write(store):
+        seed_publication_subjects(store, [{'key': key, 'video_id': video, 'title': video,
+            'artist': artist, 'genre': label, 'year': '2001', 'duration_s': duration}])
+        tid = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?', (video,)).fetchone()[0]
+        store.artists.observe(tid, artist, source='fixture')
+        if available is not None:
+            store.conn.execute('UPDATE youtube_items SET available=? WHERE video_id=?', (available, video))
     return dict(key=key, video_id=video, title=video, artist=artist, genre=label), tid
 
 
@@ -76,8 +120,11 @@ def test_album_links_survive_prepared_and_catalog_hydration_and_metadata_refresh
 
 
 def test_themed_fills_all_four_streams_with_unprepared_catalog_tracks(store, seed, monkeypatch):
-    for i in range(30):
-        catalog_track(store, f"catalog-{i}")
+    seed_publication_subjects(store, [
+        {'key': f'catalog-{i}|artist catalog-{i}', 'video_id': f'catalog-{i}',
+         'title': f'catalog-{i}', 'artist': f'Artist catalog-{i}',
+         'genre': 'Downtempo', 'year': '2001', 'duration_s': 200}
+        for i in range(30)])
     c = candidates(store)
 
     def forbidden(*args, **kwargs):

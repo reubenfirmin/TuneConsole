@@ -2,19 +2,80 @@
 import hashlib
 import json
 import sqlite3
+from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
 from ytmusicapi.exceptions import YTMusicServerError
 
 from tests.core.test_action_work_migration import legacy_account, legacy_playlist
+from tests.genre_catalog_support import bound_catalog
+from tests.prepared_fixture_support import assert_upgrade_phase, historical_template
+from tests.store_fixture_support import install_regular_input, reuse_reporting_reader
 from tests.test_undo_recovery import RecoveryClient
 from yt_playlist.core import action_work, fao
-from yt_playlist.core.migrations import migrate, registry
+from yt_playlist.core.migrations import migrate, registry, regular
 from yt_playlist.core.preparation.deletion_readback import JOB
 from yt_playlist.core.store import Store
 from yt_playlist.library import executor, playlist_deletion
 from yt_playlist.repos.models import Playlist
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Deletion SQL and provider coordination do not start an HTTP app."""
+
+
+@pytest.fixture(autouse=True)
+def controlled_provider_retry_clock(monkeypatch):
+    from yt_playlist.util.retry import with_retry
+
+    # Preserve all actual failed reads and bounded retries. Provider backoff
+    # time is below the uncertain-write/readback boundary exercised here.
+    monkeypatch.setattr(executor, 'with_retry',
+                        lambda fn, **options: with_retry(fn, sleep=lambda delay: None, **options))
+
+
+@pytest.fixture(scope='module', autouse=True)
+def isolated_deletion_home(tmp_path_factory):
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('pending-deletion-home')))
+        bound_catalog(patch)
+        yield
+
+
+@pytest.fixture(scope='module')
+def deletion_inputs(_bounded_installed_schema, tmp_path_factory):
+    with ExitStack() as resources:
+        templates = {}
+
+        def complete_regular(store):
+            with store.conn:
+                install_regular_input(store.conn, regular.CHANGES)
+
+        def get(version):
+            if version not in templates:
+                completed = _bounded_installed_schema(version)
+                templates[version] = resources.enter_context(historical_template(
+                    completed.source.conn, complete_regular, completed=completed,
+                    database=tmp_path_factory.mktemp('deletion-input') / 'source.db'))
+            return templates[version]
+
+        yield get
+
+
+@pytest.mark.parametrize('version', [97, 106])
+def test_deletion_schema_input_keeps_actual_numbered_history_and_snapshot_guards(
+        _bounded_installed_schema, version):
+    assert_upgrade_phase(_bounded_installed_schema(version), version)
+
+
+@pytest.mark.parametrize('version', [97, 106])
+def test_deletion_completed_regular_input_keeps_the_historical_format_without_actions(deletion_inputs, version):
+    template = deletion_inputs(version)
+    assert_upgrade_phase(template, version)
+    assert regular.validate(template.source.conn) == len(regular.CHANGES)
+    assert not template.source.conn.execute('SELECT 1 FROM main.actions').fetchone()
 
 
 class InterruptedDeletion(RecoveryClient):
@@ -49,14 +110,15 @@ def _merge(store, account, memberships, client, now):
 @pytest.mark.parametrize('remote_present',[True,False],ids=['present','absent'])
 def test_imported_pending_requires_readback_before_keeper_writes(tmp_path,monkeypatch,
                                                                already_converted,remote_present,
-                                                               _pristine_installed_schema):
+                                                               deletion_inputs):
     monkeypatch.setenv('YT_PLAYLIST_HOME',str(tmp_path/'home'))
     path = tmp_path/'actions.db'
     store = Store(path)
+    resources = ExitStack()
     try:
-        # Replay the empty historical prefix once; every case still publishes
-        # its own real backup, interrupted intent and optional buggy cutover.
-        _pristine_installed_schema(97).backup(store.conn)
+        # Completed empty SQL and regular guards are lower inputs. Each case
+        # publishes its own backup, interrupted intent and actual buggy cutover.
+        deletion_inputs(97).source.conn.backup(store.conn)
         store._bind_repositories()
         account = legacy_account(store)
         memberships = [legacy_playlist(store,account,remote) for remote in ('SOURCE','KEEP')]
@@ -109,6 +171,7 @@ def test_imported_pending_requires_readback_before_keeper_writes(tmp_path,monkey
         store = Store(path)
         store.init_schema()
         version = 98 if already_converted else 97
+        resources.enter_context(reuse_reporting_reader(store, monkeypatch))
         assert store.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == version
         if already_converted:
             step = _step(store,action.id)
@@ -162,16 +225,17 @@ def test_imported_pending_requires_readback_before_keeper_writes(tmp_path,monkey
             validate_version(reader, version)
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
     finally:
+        resources.close()
         store.conn.close()
 
 
 def test_current_unsent_intent_survives_repair_and_admits_keeper_write(tmp_path,monkeypatch,
-                                                                  _pristine_installed_schema):
+                                                                  deletion_inputs):
     monkeypatch.setenv('YT_PLAYLIST_HOME',str(tmp_path/'home'))
     path = tmp_path/'unsent.db'
     store = Store(path)
     try:
-        _pristine_installed_schema(106).backup(store.conn)
+        deletion_inputs(106).source.conn.backup(store.conn)
         store._bind_repositories()
         account = store.accounts.upsert_account('Owner','owner.json',None,True)
         memberships = [store.playlists.upsert_playlist(account,remote,remote,2,'',1)

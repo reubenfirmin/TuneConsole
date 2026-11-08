@@ -30,6 +30,16 @@ def isolated_template_home(tmp_path_factory):
         yield
 
 
+def test_http_genre_input_keeps_current_schema_and_snapshot_guards(_pristine_current_schema):
+    from yt_playlist.core.migrations import current, regular
+
+    conn = _pristine_current_schema
+    assert conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == current.VERSION
+    assert regular.validate(conn) == len(regular.CHANGES)
+    assert 'CREATE TEMP TRIGGER' in conn._revision_script
+
+
 @pytest.fixture(scope='module')
 def genre_controls_schema():
     with bounded_consumer_schema((('jazz', 'Jazz'), ('techno', 'Techno'), ('trance', 'Trance'),

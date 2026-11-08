@@ -1,13 +1,32 @@
 """Onboarding consumes the feature owners' real serving selection and exclusions."""
+from contextlib import closing
 from copy import deepcopy
+from types import SimpleNamespace
 from tests.derived_rating_support import seed_dislike
 
 import pytest
 
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+from yt_playlist.core.audio_vibe_contract import INTENSITY_CHANNELS
 from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.rec import album_feedback, growth_readiness, home_prepared, measurement, musical_character, vibe_preparation
+from yt_playlist.rec import album_feedback, growth_readiness, home_prepared, home_vibe, measurement, musical_character, vibe_preparation
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    # These SQL/preparation owners create no web application.
+    yield
+
+
+@pytest.fixture(scope='module', autouse=True)
+def worker_template_home(tmp_path_factory):
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('readiness-home')))
+        patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+        patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+        patch.delenv('DEEPSEEK_API_KEY', raising=False)
+        yield
 
 
 @pytest.fixture(scope='module')
@@ -22,20 +41,6 @@ def test_readiness_schema_keeps_empty_current_owners_and_snapshot_guards(_pristi
     assert _pristine_current_schema.execute('SELECT count(*) FROM recordings').fetchone()[0] == 0
     assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
     assert _pristine_current_schema._revision_script
-
-
-@pytest.fixture(scope='module')
-def vibe_menu_template(_pristine_current_schema, tmp_path_factory):
-    from tests.prepared_fixture_support import prepared_template
-    from tests.store_fixture_support import reuse_reporting_reader
-
-    def seed(source):
-        with pytest.MonkeyPatch.context() as patch, reuse_reporting_reader(source, patch):
-            return publish_vibe_menus(source)
-
-    path = tmp_path_factory.mktemp('readiness-menu-inputs') / 'source.db'
-    with prepared_template(_pristine_current_schema, seed, database=path) as template:
-        yield template
 
 
 @pytest.fixture(autouse=True)
@@ -153,32 +158,34 @@ def test_compatible_vibe_evidence_survives_model_replacement_and_still_rechecks_
     assert not growth_readiness.vibes(store, 1002)
 
 
-def vibe_menu_inputs(store, *, lane_count=8, fresh_count=48, comfort_count=36):
+def vibe_menu_inputs(store, *, lane_count=8, fresh_count=48, comfort_count=36, artist_count=None):
     lanes = {}
     audio_inputs = {}
     for lane in ('wheelhouse', 'explore', 'fresh', 'comfort'):
         tracks = []
         # The journey producer keeps its actual Fresh and Comfort capacities.
         for index in range(fresh_count if lane == 'fresh' else comfort_count if lane == 'comfort' else lane_count):
-            key = f'{lane} {index}|{lane} artist {index}'
+            artist = f'Artist {index % artist_count}' if artist_count else f'{lane} artist {index}'
+            key = f'{lane} {index}|{artist.lower()}'
             soft = index % 2 == 0
             audio_inputs[key] = {'energy': .1 if soft else .9, 'mood_relaxed': .9 if soft else .1,
                                  'mood_happy': .8 if soft else .2}
             tracks.append({'key': key, 'video_id': key, 'title': f'{lane} {index}',
-                           'artist': f'{lane} artist {index}', 'genre': 'Jazz', 'score': .8})
+                           'artist': artist, 'genre': 'Jazz', 'score': .8})
         lanes[lane] = tracks
     seed_publication_subjects(store, [track for tracks in lanes.values() for track in tracks],
                               discoveries=[track['key'] for track in lanes['fresh']])
     return lanes, audio_inputs
 
 
-def publish_vibe_menus(store):
+def publish_vibe_menus(store, *, lane_count=16, fresh_count=48, comfort_count=36):
     from tests.musical_support import prepare_profiles
     from yt_playlist.core import artists, metadata
 
     # Worker-update and full serving agreement owners retain actual measured
     # metadata, ordinary profile preparation, and all 116 catalog subjects.
-    lanes, audio_inputs = vibe_menu_inputs(store, lane_count=16)
+    lanes, audio_inputs = vibe_menu_inputs(store, lane_count=lane_count,
+                                          fresh_count=fresh_count, comfort_count=comfort_count)
     entries = dict(store.conn.execute('SELECT r.identity_key,e.id FROM catalog_entries e '
                                      'JOIN recordings r ON r.id=e.recording_id'))
     with atomic_write(store):
@@ -187,9 +194,105 @@ def publish_vibe_menus(store):
             for field, value in audio.items():
                 metadata.select(store.conn, entries[key], field, value, 'fixture')
     prepare_profiles(store)
-    bundle = {'all': lanes, '_meta': {'comfort_pool': 36}}
+    bundle = {'all': lanes, '_meta': {'comfort_pool': comfort_count}}
     publish_bundles(store, bundle, vibes=True)
     return lanes
+
+
+def fixed_worker_fit(patch):
+    from yt_playlist.rec import vibe_joint_model
+    from yt_playlist.repos import proposal_cache
+
+    fit = vibe_joint_model.fit
+    patch.setattr(vibe_joint_model, 'fit', lambda rows, vibe, **kwargs:
+                  fit(rows, vibe, fixed=vibe_joint_model.INITIAL, **kwargs))
+    # These checks observe committed SQL and published files. WAL checkpoint
+    # scheduling is below the worker/readiness boundary and has separate owners.
+    patch.setattr(proposal_cache, 'checkpoint_wal', lambda *_args, **_kwargs: None)
+
+
+@pytest.fixture(scope='module')
+def worker_vibe_input(_pristine_current_schema, tmp_path_factory):
+    from tests.store_fixture_support import initialize_consumer
+    from yt_playlist.core import artists, metadata
+    from yt_playlist.core.store import Store
+    from yt_playlist.rec import rec_params
+
+    path = tmp_path_factory.mktemp('worker-vibe-inputs') / 'source.db'
+    source = Store(path)
+    with closing(source.conn):
+        initialize_consumer(source, _pristine_current_schema)
+        source.conn.execute('PRAGMA synchronous=NORMAL')
+        rec_params.set_param(source, 'comfort_min_pool', 4)
+        lanes, audio = vibe_menu_inputs(source, lane_count=8, fresh_count=4, comfort_count=4, artist_count=4)
+        entries = dict(source.conn.execute('SELECT r.identity_key,e.id FROM catalog_entries e '
+                                          'JOIN recordings r ON r.id=e.recording_id'))
+        with atomic_write(source):
+            for key, fields in audio.items():
+                artists.observe(source.conn, entries[key], key.split('|', 1)[1], now=1000)
+                for field, value in fields.items():
+                    metadata.select(source.conn, entries[key], field, value, 'fixture')
+        yield source, lanes
+
+
+def test_worker_vibe_catalog_keeps_each_real_lane_and_measured_input(worker_vibe_input):
+    source, lanes = worker_vibe_input
+    assert {lane: len(tracks) for lane, tracks in lanes.items()} == {
+        'wheelhouse': 8, 'explore': 8, 'fresh': 4, 'comfort': 4}
+    assert source.conn.execute('SELECT count(*) FROM recordings').fetchone()[0] == 24
+    assert source.prepared_content.has_pending()
+
+
+@pytest.fixture(scope='module')
+def worker_vibe_profiles(worker_vibe_input):
+    from tests.musical_support import prepare_profiles
+    from tests.store_fixture_support import reuse_reporting_reader
+
+    source, lanes = worker_vibe_input
+    with pytest.MonkeyPatch.context() as patch, reuse_reporting_reader(source, patch):
+        fixed_worker_fit(patch)
+        prepare_profiles(source)
+    return source, lanes
+
+
+def test_normal_worker_publishes_each_measured_profile(worker_vibe_profiles):
+    source, lanes = worker_vibe_profiles
+    keys = [track['key'] for tracks in lanes.values() for track in tracks]
+    assert set(source.musical_profiles.by_keys(keys)) == set(keys)
+    assert not source.prepared_content.has_pending()
+
+
+@pytest.fixture(scope='module')
+def worker_vibe_template(worker_vibe_profiles):
+    from tests.prepared_fixture_support import capture_template
+    from tests.store_fixture_support import reuse_reporting_reader
+
+    source, lanes = worker_vibe_profiles
+    with pytest.MonkeyPatch.context() as patch, reuse_reporting_reader(source, patch):
+        fixed_worker_fit(patch)
+        patch.setattr(measurement, 'serving_policy', lambda *args, **kwargs:
+                      ('readiness-fixture', {'ranker': 'readiness-fixture'}))
+        publish_bundles(source, {'all': lanes, '_meta': {'comfort_pool': 4}}, vibes=True)
+    return capture_template(source, lanes)
+
+
+def test_worker_vibe_input_keeps_real_metadata_profiles_and_all_six_presets(worker_vibe_template):
+    from yt_playlist.rec import home_vibe, vibe_pools
+
+    source = worker_vibe_template.source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert len(worker_vibe_template.result['fresh']) == 4
+    assert source.conn.execute('SELECT count(*) FROM recordings').fetchone()[0] == 24
+    assert all(len(vibe_pools.assemble(source, 1000, preset)) == 4 for preset in home_vibe.PRESETS)
+
+
+@pytest.fixture
+def worker_vibe_store(worker_vibe_template, tmp_path, monkeypatch):
+    from tests.store_fixture_support import reuse_reporting_reader
+    fixed_worker_fit(monkeypatch)
+    with worker_vibe_template.open(tmp_path / 'worker.db') as source, reuse_reporting_reader(source, monkeypatch):
+        source.conn.execute('PRAGMA synchronous=NORMAL')
+        yield source
 
 
 @pytest.fixture
@@ -198,10 +301,11 @@ def completed_vibe_inputs(store, monkeypatch):
 
     # These consumers inspect completed menus, policy compatibility and live
     # feedback. The real worker/update owners below cover profile production.
-    # Eight candidates per lane preserve four full cards and contrasting
-    # presets. Default inventory thresholds retain their real producer owner.
-    lanes, audio_inputs = vibe_menu_inputs(store, fresh_count=8, comfort_count=8)
-    rec_params.set_param(store, 'comfort_min_pool', 8)
+    # Eight candidates per lane and four per temporal band preserve full
+    # cards, rotations and contrasting presets. Inventory thresholds retain
+    # their real producer owner.
+    lanes, audio_inputs = vibe_menu_inputs(store, fresh_count=8, comfort_count=12)
+    rec_params.set_param(store, 'comfort_min_pool', 12)
     profiles = {}
     for soft in (True, False):
         attributes = {'energy': .1 if soft else .9, 'mood_relaxed': .9 if soft else .1,
@@ -216,13 +320,20 @@ def completed_vibe_inputs(store, monkeypatch):
     monkeypatch.setattr(musical_character, 'load',
                         lambda _reader, keys: {key: deepcopy(by_key[key]) for key in keys})
     store.settings.set_setting('rec_vibe_version', vibe_preparation.version())
-    return {'all': lanes, '_meta': {'comfort_pool': 8}}
+    return {'all': lanes, '_meta': {'comfort_pool': 12}}
 
 
 @pytest.fixture
 def completed_vibe_menus(store, completed_vibe_inputs):
     publish_bundles(store, completed_vibe_inputs, vibes=True)
     return completed_vibe_inputs['all']
+
+
+@pytest.fixture
+def vibe_menus(completed_vibe_menus):
+    # These consumers own readiness, serving selection and current exclusions.
+    # The worker owners below separately produce actual measured profiles.
+    return completed_vibe_menus
 
 
 def test_vibe_gate_checks_real_menus_for_every_preset_and_current_exclusions(store, vibe_menus):
@@ -268,73 +379,175 @@ def test_worker_readiness_reads_compact_output_and_one_live_eligibility_batch(st
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize('inferred_support', [False, True])
-def test_readiness_follows_normal_worker_updates_between_menu_publications(
-        store, vibe_menus, monkeypatch, inferred_support):
-    from yt_playlist.core import metadata_evidence
-    from yt_playlist.rec import home_vibe, musical_preparation, vibe_pools
+@pytest.fixture(scope='module', params=[False, True], ids=['without-inference', 'with-inference'])
+def worker_update_state(worker_vibe_template, tmp_path_factory, request):
     from yt_playlist.rec.progressive import Preparation
+
+    path = tmp_path_factory.mktemp('worker-readiness') / 'source.db'
+    with worker_vibe_template.open(path) as source:
+        source.conn.execute('PRAGMA synchronous=NORMAL')
+        entries = [source.conn.execute('SELECT id FROM catalog_tracks WHERE identity_key=?',
+                                       (track['key'],)).fetchone()[0]
+                   for track in worker_vibe_template.result['fresh'][3:]]
+        worker = Preparation(source)
+        try:
+            yield SimpleNamespace(store=source, worker=worker, entries=entries,
+                                  inferred=request.param, turn=0, position=0)
+        finally:
+            worker.close()
+
+
+@pytest.fixture
+def worker_update(worker_update_state, monkeypatch, request):
     from yt_playlist.rec import vibe_joint_preparation
     from yt_playlist.controllers.vibe_predictions import VibePredictions
+    from tests.store_fixture_support import reuse_reporting_reader
 
-    if not inferred_support:
-        # Exercise genuinely unavailable support separately from the qualified
-        # model's valid predictions. Keep real metadata edits, capture, profile
+    fixed_worker_fit(monkeypatch)
+    monkeypatch.setattr(measurement, 'serving_policy', lambda *args, **kwargs:
+                        ('readiness-fixture', {'ranker': 'readiness-fixture'}))
+    if not worker_update_state.inferred:
+        # Exercise unavailable support separately from real cohort predictions.
+        # Keep real metadata edits, capture, profile
         # publication and readiness reads; only inferred evidence is unavailable.
         monkeypatch.setattr(VibePredictions, 'groups', lambda _, keys: {
             key: {'stats': {}, 'inputs': {}} for key in keys})
         monkeypatch.setattr(vibe_joint_preparation, 'posterior', lambda *_: None)
+    with reuse_reporting_reader(worker_update_state.store, monkeypatch):
+        state = worker_update_state
+        steps = [(test_normal_worker_captures_null_choice_without_republishing_menu, (state, monkeypatch))]
+        steps += [(test_normal_worker_publishes_each_null_choice_inference_channel, (state, vibe))
+                  for vibe in (*home_vibe.PRESETS, *INTENSITY_CHANNELS)]
+        steps += [
+            (test_normal_worker_scored_null_choice_changes_readiness_without_republishing_menu, (state,)),
+            (test_normal_worker_null_choice_readiness_survives_menu_republication, (state,)),
+            (test_normal_worker_captures_withdrawn_choice_without_republishing_menu, (state, monkeypatch))]
+        steps += [(test_normal_worker_publishes_each_restored_inference_channel, (state, vibe))
+                  for vibe in (*home_vibe.PRESETS, *INTENSITY_CHANNELS)]
+        steps += [(test_normal_worker_restored_readiness_is_visible_without_menu_republication, (state,))]
+        target = next(index for index, (owner, args) in enumerate(steps)
+                      if owner.__name__ == request.node.originalname
+                      and ('vibe' not in request.node.callspec.params
+                           or args[-1] == request.node.callspec.params['vibe']))
+        # Selecting a later channel or readiness owner alone still establishes
+        # the actual preceding edits and worker publications.
+        while state.position < target:
+            owner, args = steps[state.position]
+            owner(*args)
+            state.position += 1
+        yield worker_update_state
+        state.position = target + 1
 
-    lanes = vibe_menus
-    # Three supported Fresh candidates cannot fill the four-supported-song
-    # requirement. Change only the decisive lane, keeping the other 52 real
-    # library candidates and their current evidence available throughout.
-    entries = [store.conn.execute('SELECT id FROM catalog_tracks WHERE identity_key=?',
-                                 (item['key'],)).fetchone()[0]
-               for item in lanes['fresh'][3:]]
 
-    def check(expected):
-        # Derive the expected answer from the actual current serving output,
-        # including ranking changes, rather than from the cached summary.
-        with store.read_view() as reader:
-            menus = [vibe_pools.assemble(reader, 1000, preset) for preset in home_vibe.PRESETS]
-            usable = all(len(cards) == 4 and all(sum(growth_readiness._supported(track, preset)
-                         for track in card['tracks']) >= 4 for card in cards)
-                         for preset, cards in zip(home_vibe.PRESETS, menus))
-            distinct = len({tuple(tuple(track['key'] for track in card['tracks']) for card in cards)
-                            for cards in menus}) > 1
-            assert (usable and distinct) is expected
-            assert growth_readiness.vibes(reader, 1000) is expected
+def check_worker_readiness(store, expected):
+    from yt_playlist.rec import home_vibe, vibe_pools
 
-    def update_inputs(*, withdraw):
-        head = store.recommendations.head('home')['id']
-        with store.conn:
-            store.conn.execute('BEGIN IMMEDIATE')
-            for entry in entries:
-                for field in ('energy', 'mood_relaxed', 'mood_happy'):
-                    metadata_evidence.choose(store.conn, entry, field, None,
-                                             withdraw=withdraw, now=1001)
-        worker = Preparation(store)
-        for turn in range(1000):
-            if (not store.prepared_content.has_pending() and not musical_preparation.due(store)
-                    and not vibe_preparation.due(store)):
+    # Derive the answer from every actual current serving menu, independently
+    # of the compact summary, including the four supported songs per card.
+    with store.read_view() as reader:
+        menus = [vibe_pools.assemble(reader, 1000, preset) for preset in home_vibe.PRESETS]
+        usable = all(len(cards) == 4 and all(sum(growth_readiness._supported(track, preset)
+                     for track in card['tracks']) >= 4 for card in cards)
+                     for preset, cards in zip(home_vibe.PRESETS, menus))
+        distinct = len({tuple(tuple(track['key'] for track in card['tracks']) for card in cards)
+                        for cards in menus}) > 1
+        assert (usable and distinct) is expected
+        assert growth_readiness.vibes(reader, 1000) is expected
+
+
+def worker_turn(state):
+    state.turn += 1
+    state.worker.capture(1002 + state.turn * 5)
+
+
+def change_worker_measurement(state, patch, *, withdraw):
+    from yt_playlist.core import metadata_evidence
+    from yt_playlist.rec import musical_preparation, vibe_joint_preparation
+
+    store = state.store
+    head = store.recommendations.head('home')['id']
+    with store.conn:
+        store.conn.execute('BEGIN IMMEDIATE')
+        for entry in state.entries:
+            for field in ('energy', 'mood_relaxed', 'mood_happy'):
+                metadata_evidence.choose(store.conn, entry, field, None, withdraw=withdraw, now=1001)
+    # Separate changed-recording capture from the eight model channel turns.
+    # Both use the actual normal worker; numeric fits have named owners below.
+    with patch.context() as capture_patch:
+        capture_patch.setattr(vibe_joint_preparation, 'admitted', lambda *_args, **_kwargs: False)
+        for _ in range(100):
+            if not store.prepared_content.has_pending() and not musical_preparation.due(store):
                 break
-            worker.capture(1002 + turn * 5)
+            worker_turn(state)
         else:
-            pytest.fail('Normal profile/Vibe preparation did not drain')
-        assert store.recommendations.head('home')['id'] == head
+            pytest.fail('Normal changed-recording capture did not drain')
+    assert store.recommendations.head('home')['id'] == head
 
-    check(True)
-    update_inputs(withdraw=False)
-    check(inferred_support)
+
+def finish_worker_channel(state, vibe):
+    from yt_playlist.rec import vibe_joint_preparation
+
+    head = state.store.recommendations.head('home')['id']
+    for _ in range(100):
+        value = vibe_joint_preparation.state(state.store, vibe)
+        if vibe_joint_preparation.current(state.store, value):
+            assert value['outcome'] == 'ready'
+            break
+        worker_turn(state)
+    else:
+        pytest.fail('Normal worker did not publish channel ' + vibe)
+    assert state.store.recommendations.head('home')['id'] == head
+
+
+def finish_worker_scores(state):
+    from yt_playlist.rec import musical_preparation
+
+    for _ in range(100):
+        if (not state.store.prepared_content.has_pending() and not musical_preparation.due(state.store)
+                and not vibe_preparation.due(state.store)):
+            break
+        worker_turn(state)
+    else:
+        pytest.fail('Normal profile/Vibe preparation did not drain')
+
+
+def test_normal_worker_captures_null_choice_without_republishing_menu(worker_update, monkeypatch):
+    check_worker_readiness(worker_update.store, True)
+    change_worker_measurement(worker_update, monkeypatch, withdraw=False)
+
+
+@pytest.mark.parametrize('vibe', (*home_vibe.PRESETS, *INTENSITY_CHANNELS))
+def test_normal_worker_publishes_each_null_choice_inference_channel(worker_update, vibe):
+    finish_worker_channel(worker_update, vibe)
+
+
+def test_normal_worker_scored_null_choice_changes_readiness_without_republishing_menu(worker_update):
+    finish_worker_scores(worker_update)
+    check_worker_readiness(worker_update.store, worker_update.inferred)
+
+
+def test_normal_worker_null_choice_readiness_survives_menu_republication(worker_update):
+    store = worker_update.store
     # Republishing the retained menu cannot invent unavailable support; valid
     # model inference can still support songs whose own measurements are null.
     publish_bundles(store, deepcopy(store._fixture_bundle_payload), vibes=True)
-    check(inferred_support)
-    update_inputs(withdraw=True)
+    check_worker_readiness(store, worker_update.inferred)
+
+
+def test_normal_worker_captures_withdrawn_choice_without_republishing_menu(worker_update, monkeypatch):
+    change_worker_measurement(worker_update, monkeypatch, withdraw=True)
+
+
+@pytest.mark.parametrize('vibe', (*home_vibe.PRESETS, *INTENSITY_CHANNELS))
+def test_normal_worker_publishes_each_restored_inference_channel(worker_update, vibe):
+    finish_worker_channel(worker_update, vibe)
+
+
+def test_normal_worker_restored_readiness_is_visible_without_menu_republication(worker_update):
+    finish_worker_scores(worker_update)
     # Restored evidence revalidates the retained menu immediately, without
     # waiting for an unrelated complete recommendation publication.
-    check(True)
+    check_worker_readiness(worker_update.store, True)
 
 
 def test_missing_readiness_waits_for_worker_without_reading_profiles_or_ranked_pools(
@@ -424,13 +637,13 @@ def test_legacy_publication_without_summary_does_not_restore_full_bundle(store, 
 
 @pytest.mark.parametrize('summary', [True, False])
 def test_compact_gate_agrees_with_served_menus_for_genres_rotation_and_feedback(
-        store, summary, vibe_menus, monkeypatch):
+        store, summary, completed_vibe_inputs, monkeypatch):
     from yt_playlist.core import json_cache
     from yt_playlist.rec import home_vibe, vibe_pools, vibe_readiness, vibe_readiness_index
     from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 
-    lanes = vibe_menus
-    bundle = deepcopy(store._fixture_bundle_payload)
+    lanes = completed_vibe_inputs['all']
+    bundle = deepcopy(completed_vibe_inputs)
     bundle['all']['temporal'] = [{**track, 'year': (1980, 1995, 2020)[index % 3]}
                                for index, track in enumerate(lanes['comfort'])]
     bundle['_meta'].update(comfort_pool=0, year_cuts=[1990, 2000])

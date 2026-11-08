@@ -22,6 +22,24 @@ from yt_playlist.rec.rec_worker import RecWorker
 pytestmark = pytest.mark.parametrize('installed', [79, 93, 107], indirect=True)
 
 
+def test_outbox_schema_input_keeps_numbered_history_and_private_revision_guards(installed):
+    store, version = installed
+    source = store._fixture_installed_template.source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
+    assert store._snapshot_revisions.conn is store.conn
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_feedback_prefix_keeps_three_releases_and_the_original_response(installed, feedback_writer_prefix):
+    store, _ = installed
+    assert set(album_feedback_storage.original(store.conn)) == {'baseline-release'}
+    events = store.rec_ledger.evidence().records('response')
+    assert len(events) == 1
+    assert events[0]['opportunity_id'] == 'baseline-release'
+    assert feedback_writer_prefix.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+
+
 @pytest.fixture
 def pair(installed, feedback_writer_prefix):
     store, _ = installed

@@ -29,6 +29,15 @@ REPORT = {'matched': 0, 'unmatched': 0, 'plays_added': 0, 'events_added': 0,
           'span_days': 0, 'unmatched_artists': {}, 'skipped': 0, 'unparsed_dates': 0}
 
 
+def test_history_import_schema_input_keeps_current_sql_and_real_revision_guards(_pristine_current_schema):
+    from yt_playlist.core.migrations import registry
+
+    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert _pristine_current_schema.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == len(registry.MIGRATIONS)
+    assert _pristine_current_schema._revision_script
+    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
+
+
 def context(store):
     return SimpleNamespace(store=store, setup=None, rec_worker=None, now_fn=lambda: 1000,
                            work=Activity(), bridge=Bridge(),
@@ -203,7 +212,7 @@ def test_import_error_is_terminal_visible_and_keeps_retry_form(store, monkeypatc
 
 
 @asynccontextmanager
-async def held_history_import(imports, monkeypatch, report=REPORT):
+async def held_history_import(imports, monkeypatch, report=REPORT, *, wall_clock=time.monotonic):
     """Own the worker through failed assertions, with diagnostics before releasing it."""
     ctx = imports.ctx
     entered, release = threading.Event(), threading.Event()
@@ -224,14 +233,14 @@ async def held_history_import(imports, monkeypatch, report=REPORT):
     def measured(function, operation):
         @wraps(function)
         def call(*args, **kwargs):
-            wall, cpu = time.monotonic(), time.thread_time()
+            wall, cpu = wall_clock(), time.thread_time()
             worker['operation'] = operation
             if operation == 'post-import settings':
                 settings_entered.set()
             try:
                 return function(*args, **kwargs)
             finally:
-                operations.append({'operation': operation, 'wall': time.monotonic() - wall,
+                operations.append({'operation': operation, 'wall': wall_clock() - wall,
                                    'cpu': time.thread_time() - cpu})
                 worker['operation'] = 'finishing import'
         return call
@@ -334,15 +343,28 @@ def test_cancelled_import_stays_owned_during_real_post_import_lock_wait(store, m
     store.accounts.upsert_account('main', 'credential', None, True)
     imports = HistoryImports(context(store))
     report = {**REPORT, 'unmatched': 3, 'unmatched_artists': {'New Artist': 3}}
+    clock = [1000.0]
 
     async def run():
-        async with held_history_import(imports, monkeypatch, report) as held:
+        async with held_history_import(imports, monkeypatch, report, wall_clock=lambda: clock[0]) as held:
             await cancel_held_import(imports, held)
             with store._lock:
                 held.release.set()
                 assert await asyncio.to_thread(held.settings_entered.wait, 5)
-                assert not await asyncio.to_thread(imports.ctx.work.wait, 2)
-                snapshot = json.loads(held.diagnostics())
+                assert not imports.ctx.work.wait(0)
+                # Wait for the observed lock frame, rather than sleeping two
+                # seconds and assuming the worker has reached it. The real
+                # worker remains blocked on this thread's actual Store lock.
+                deadline = time.monotonic() + 1
+                while True:
+                    snapshot = json.loads(held.diagnostics())
+                    if any('acquire' in line for line in snapshot['stack']):
+                        break
+                    assert time.monotonic() < deadline, snapshot
+                    await asyncio.sleep(0)
+                # Only this helper's diagnostic wall clock advances; runtime
+                # scheduling, cancellation, locks and SQL keep their real clocks.
+                clock[0] += 2
                 assert snapshot['active'] == ['_run'] and not snapshot['status']['done']
                 assert snapshot['worker']['operation'] == 'post-import settings'
                 assert f'owner={threading.get_ident()}' in snapshot['store_lock']

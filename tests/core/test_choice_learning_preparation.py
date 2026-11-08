@@ -5,12 +5,25 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import choice_learning_state as learning, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import choice_learning as preparation
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Learning preparation owns SQL and files below the HTTP lifecycle."""
+
+
+@pytest.mark.parametrize('version', [79, 92])
+def test_choice_learning_input_keeps_real_history_and_snapshot_guards(_bounded_installed_schema, version):
+    source = _bounded_installed_schema(version).source
+    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
+    assert source._snapshot_revisions.conn is source.conn
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def finish(conn, size=16):
@@ -57,8 +70,8 @@ def originals():
 def test_prepared_mix_descriptor_survives_installed_learning_projection(installed):
     from yt_playlist.core import mix_choices
     store, _ = installed
-    regular.migrate(store.conn)
     with store.conn:
+        mix_choices.install(store.conn)
         descriptor = mix_choices.descriptor(store.conn, {'genres':['House'], 'label':'Stay close'})
         value = {'contexts':[{'format':'mixes','descriptor_id':descriptor,'keys':[],
                              'feature':None,'mode_id':None,'at':10,'days':1}]}

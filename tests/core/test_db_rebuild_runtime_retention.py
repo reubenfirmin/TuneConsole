@@ -7,11 +7,12 @@ import json
 from pathlib import Path
 import shutil
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
 from tests.core.test_db_rebuild_destination import production64, development93
-from tests.db_rebuild_support import completed_destination_schema, completed_destination_sql
+from tests.db_rebuild_support import admitted_rebuild_format, completed_destination_schema, completed_destination_sql
 from tests.rebuild_startup_support import startup_destination
 from yt_playlist.core import group_storage
 from yt_playlist.core.db_rebuild import build, destination
@@ -351,13 +352,49 @@ def legacy_repair_contracts(startup_destination):
 
 @pytest.fixture
 def legacy_repair_converter(monkeypatch, legacy_repair_contracts):
+    from yt_playlist.core.migrations import current
+    from yt_playlist.core.schema_inspection import reuse_tables
+    from yt_playlist.core.store import Store
+
     monkeypatch.setattr(destination, 'for_source',
                         lambda *args, legacy=False, **kwargs: legacy_repair_contracts[int(legacy)])
+    # The cold input owner admits the exact cloned shape. Both ordinary open
+    # and the analytics reader retain their real regular-change/file receipts.
+    monkeypatch.setattr(current, 'validate', lambda *_args, **_kwargs: None)
+    initialize = Store.init_schema
+
+    def admitted_store(store, **kwargs):
+        # These exact cloned shapes have a real cold admission owner below.
+        # Recovery still reopens SQL/files and checks installed change receipts.
+        with reuse_tables(store.conn):
+            return initialize(store, **kwargs)
+
+    monkeypatch.setattr(Store, 'init_schema', admitted_store)
+
+
+def test_rebuild_input_repair_destination_keeps_real_catalog_and_provider_owner(legacy_repair_contracts):
+    from yt_playlist.core import metadata_runtime
+    from yt_playlist.core.db_rebuild import installed_format
+
+    with closing(sqlite3.connect(':memory:')) as conn, conn:
+        legacy_repair_contracts[0].initialize(conn)
+        installed_format.validate(conn)
+        assert metadata_runtime.active(conn)
+        assert conn.execute('SELECT recording_id FROM provider_attempts').fetchall() == [(8,)]
+        assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_rebuild_input_released_repair_source_keeps_numbered_catalog(production64_template):
+    conn = production64_template
+    assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 64
+    assert [row[0] for row in conn.execute('SELECT id FROM recordings ORDER BY id')] == [3, 8, 19]
 
 
 @pytest.fixture(scope='module')
 def legacy_runtime_template(tmp_path_factory,production64_template,legacy_repair_contracts):
     from yt_playlist.core.db_rebuild import job
+    from yt_playlist.core.migrations import current
+    from yt_playlist.core.schema_inspection import reuse_tables
     from yt_playlist.core.store import Store
 
     root = tmp_path_factory.mktemp('legacy-runtime')
@@ -366,10 +403,14 @@ def legacy_runtime_template(tmp_path_factory,production64_template,legacy_repair
         patch.setenv('YT_PLAYLIST_AUDIO_VIBES','0')
         patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL','')
         patch.delenv('DEEPSEEK_API_KEY',raising=False)
+        # The destination's full shape has a genuine cold admission owner.
+        # This input owns the old installed checkpoint and retained files.
+        patch.setattr(current, 'validate', lambda *_args, **_kwargs: None)
         path = inspect.unwrap(production64)(root,production64_template)
         store = Store(path)
         try:
-            store.init_schema()
+            with reuse_tables(store.conn):
+                store.init_schema()
             first = job.run(store,destination=legacy_repair_contracts[1])
             assert first['phase']=='complete' and first['analytics_pending']
         finally:
@@ -390,6 +431,7 @@ def test_rebuild_input_legacy_runtime_keeps_original_and_pending_old_plan(
         assert pending['stages'] == [stage.name for stage in legacy_repair_contracts[1].stages]
         assert pending['stage'] == 1
         assert metadata_runtime.active(conn)
+        assert admitted_rebuild_format(conn) == 107
         assert conn.execute('SELECT recording_id,provider FROM provider_attempts').fetchall() == [(8, 'fixture')]
         assert not conn.execute('PRAGMA foreign_key_check').fetchall()
 
@@ -406,8 +448,7 @@ def legacy_runtime(legacy_runtime_template,tmp_path,legacy_repair_converter):
         assert _workspace_contents(legacy_runtime_template)==original,'Legacy runtime template was modified'
 
 
-@pytest.mark.parametrize('interrupt',[False,True])
-def test_existing_large_runtime_finishes_original_checkpoint_and_repairs_current_database(legacy_runtime,interrupt):
+def old_runtime_repair_journey(legacy_runtime, interrupt):
     from yt_playlist.core import db_handles, metadata_retention
     from yt_playlist.core.db_rebuild import job
     from yt_playlist.core.storage_maintenance import StorageMaintenance
@@ -421,6 +462,20 @@ def test_existing_large_runtime_finishes_original_checkpoint_and_repairs_current
             job.run(store)
         assert db_handles.state(production64)['id']==first['id']
         store.settings.set_setting('accepted-after-old-runtime','keep')
+        yield 'pending-gate'
+        # Finish the actual earlier shipped analytics plan independently of
+        # today's repair. Both persist real checkpoints and files; repeating
+        # the old reader inside each repair scenario adds no repair coverage.
+        with job.install.owner(production64):
+            copied = job._copy_analytics(store, db_handles.state(production64),
+                                         progress=lambda *_: None, cancelled=lambda: False)
+        assert copied['id'] == first['id']
+        assert copied['legacy_runtime'] and copied['analytics_complete'] and copied['analytics_pending']
+        assert not store.conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?',
+                                      (build.CHECKPOINT,)).fetchone()
+        assert not store.activity_paused
+        assert store.settings.get_setting('accepted-after-old-runtime') == 'keep'
+        yield 'old-analytics'
         def progress(phase,detail):
             if detail['stage']=='finalize:copy':
                 assert maintenance.status()['active']
@@ -437,6 +492,7 @@ def test_existing_large_runtime_finishes_original_checkpoint_and_repairs_current
             store = Store(production64)
             store.init_schema()
             maintenance = StorageMaintenance(store)
+            yield 'current-repair'
             try:
                 maintenance.start()
                 maintenance.join(30)
@@ -449,6 +505,7 @@ def test_existing_large_runtime_finishes_original_checkpoint_and_repairs_current
             assert store.settings.get_setting('accepted-after-repair-failure')=='also keep'
         else:
             final = job.finish_analytics(store,progress=progress)
+            yield 'current-repair'
         assert final['id']==first['id'] and not final['analytics_pending']
         assert final['finalization']['original']!=first['original']
         assert store.settings.get_setting('accepted-after-old-runtime')=='keep'
@@ -457,6 +514,44 @@ def test_existing_large_runtime_finishes_original_checkpoint_and_repairs_current
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
     finally:
         store.conn.close()
+
+
+@pytest.fixture(scope='module', params=[False, True], ids=['uninterrupted', 'interrupted'])
+def old_runtime_repair_state(legacy_runtime_template, tmp_path_factory, request):
+    from yt_playlist.core import db_handles
+
+    original = _workspace_contents(legacy_runtime_template)
+    root = tmp_path_factory.mktemp('old-runtime-repair')
+    path = _clone_captured_rebuild(legacy_runtime_template, root / 'workspace', 'production64.db')
+    journey = old_runtime_repair_journey((path, db_handles.state(path)), request.param)
+    try:
+        yield SimpleNamespace(journey=journey, position=0)
+    finally:
+        journey.close()
+        assert _workspace_contents(legacy_runtime_template) == original
+
+
+@pytest.fixture
+def old_runtime_repair(old_runtime_repair_state, legacy_repair_converter, monkeypatch, request):
+    monkeypatch.setattr(build, '_format', admitted_rebuild_format)
+    state = old_runtime_repair_state
+    phases = ('pending-gate', 'old-analytics', 'current-repair', 'continuing-use')
+    target = phases.index(request.node.callspec.params['phase'])
+    while state.position < target:
+        assert next(state.journey) == phases[state.position]
+        state.position += 1
+    yield state.journey
+    state.position = target + 1
+
+
+@pytest.mark.parametrize('phase', ['pending-gate', 'old-analytics', 'current-repair', 'continuing-use'])
+def test_existing_large_runtime_finishes_original_checkpoint_and_repairs_current_database(
+        old_runtime_repair, phase):
+    if phase == 'continuing-use':
+        with pytest.raises(StopIteration):
+            next(old_runtime_repair)
+    else:
+        assert next(old_runtime_repair) == phase
 
 
 @pytest.mark.parametrize('phase',['closing','original_moved','installed','reopening','complete'])

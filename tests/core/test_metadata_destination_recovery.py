@@ -3,6 +3,7 @@ from contextlib import ExitStack, closing
 import hashlib
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,12 +12,17 @@ from tests.core.test_metadata_owner_cutover import seed
 from tests.core.test_metadata_preparation import finish
 from tests.core.test_metadata_publication import publish as read_publication
 from tests import file_custody_support as custody
-from tests.prepared_fixture_support import capture_template, roots
+from tests.prepared_fixture_support import assert_upgrade_phase, capture_template, custody_predecessor, custody_upgrade_cases, roots
+from tests.store_fixture_support import reuse_reporting_reader
 from yt_playlist.core import metadata_delivery_files as files, metadata_destination_files as recovery
-from yt_playlist.core import policy_documents
-from yt_playlist.core.migrations import migrate, registry
+from yt_playlist.core import policy_documents, schema_inspection
 from yt_playlist.core.preparation import metadata_destinations as destinations, metadata_evidence
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """File recovery does not construct the HTTP lifecycle."""
 
 
 def prepared(store, *, unfinished=False):
@@ -33,27 +39,65 @@ def prepared(store, *, unfinished=False):
 
 
 @pytest.fixture(scope='module')
-def destination_templates(tmp_path_factory, _pristine_installed_schema):
+def destination_templates(tmp_path_factory, _bounded_installed_schema, upgraded_custody_inputs):
     root = tmp_path_factory.mktemp('metadata-destination-templates')
     templates = {}
     with ExitStack() as resources:
+        patch = resources.enter_context(pytest.MonkeyPatch.context())
+        def native(target, *, phase='captured'):
+            completed = template('selected')
+            return upgraded_custody_inputs(79, target, 'metadata-destination-recovery',
+                lambda _store: completed.result, prepared=completed, phase=phase)
+
         def template(kind):
             if kind not in templates:
+                if kind == 'native-precedence':
+                    templates[kind] = native(107)
+                    return templates[kind]
                 directory = root / kind
                 directory.mkdir()
                 source = Store(directory / 'source.db')
                 resources.callback(source.conn.close)
-                if kind == 'native-precedence':
-                    result = template('selected').restore(source)
-                    migrate(source.conn, registry=registry.MIGRATIONS)
-                else:
-                    _pristine_installed_schema(79).backup(source.conn)
-                    source._bind_repositories()
-                    result = prepared(source, unfinished=kind == 'unfinished')
+                completed = _bounded_installed_schema(79)
+                completed.restore(source)
+                for name in ('_schema_compatibility', '_rebuild_source_version', '_schema_recovery_pending'):
+                    setattr(source, name, getattr(completed.source, name))
+                source._bind_repositories()
+                resources.enter_context(reuse_reporting_reader(source, patch))
+                resources.enter_context(schema_inspection.reuse_tables(source.conn))
+                result = prepared(source, unfinished=kind == 'unfinished')
                 source._bind_repositories()
                 templates[kind] = capture_template(source, result)
             return templates[kind]
+        template.native = native
+        template.release = lambda: upgraded_custody_inputs.release(79, 'metadata-destination-recovery')
         yield template
+
+
+def test_metadata_recovery_schema_input_keeps_real_history_and_private_guards(_bounded_installed_schema):
+    assert_upgrade_phase(_bounded_installed_schema(79), 79)
+
+
+@pytest.mark.parametrize('kind', ['selected', 'unfinished'])
+def test_metadata_recovery_input_keeps_exact_ranges_and_distinct_selection(destination_templates, kind):
+    template = destination_templates(kind)
+    assert_upgrade_phase(template, 79)
+    assert contents(template.source.conn)
+    assert destinations.selected(template.source.conn) == (template.result[-1] if kind == 'selected' else None)
+
+
+@pytest.mark.parametrize('version,target,phase', custody_upgrade_cases((79,)))
+def test_metadata_recovery_native_phase_keeps_history_and_exact_ranges(destination_templates, version, target, phase):
+    template = destination_templates.native(target, phase=phase)
+    assert_upgrade_phase(template, custody_predecessor(version, target) if phase == 'input' else target)
+    assert contents(template.source.conn)
+
+
+def test_metadata_recovery_native_input_keeps_current_guards_and_exact_ranges(destination_templates):
+    template = destination_templates('native-precedence')
+    assert_upgrade_phase(template, 107)
+    assert template.source._snapshot_revisions.conn is template.source.conn
+    assert contents(template.source.conn)
 
 
 @pytest.fixture
@@ -81,24 +125,52 @@ def hashes(root):
             for path in root.glob('*/*.json')}
 
 
+@pytest.fixture(scope='module')
+def recovery_exports(destination_templates, tmp_path_factory):
+    reports = {}
+
+    def get(kind):
+        if kind not in reports:
+            template = destination_templates(kind)
+            producer = template.source
+            _, _, key, identity = template.result
+            expected = producer.enrichment_state.metadata_observations(key)
+            sources = {row[0]: producer.musical_profiles.source_input(row[0]) for row in producer.conn.execute(
+                'SELECT source_key FROM rec_musical_sources')}
+            expected_ranges = contents(producer.conn)
+            assert expected and expected_ranges
+            source_root = recovery.directory(producer.conn)
+            before_files, before_sql = hashes(source_root), list(producer.conn.iterdump())
+            history = [tuple(row) for row in producer.conn.execute('SELECT * FROM schema_migrations ORDER BY version')]
+            report = custody.snapshot_library(producer._db_path, tmp_path_factory.mktemp('metadata-recovery-export')/'recovered')
+            assert hashes(source_root) == before_files
+            assert list(producer.conn.iterdump()) == before_sql
+            assert 'metadata_preparation' in report['manifests']
+            with closing(sqlite3.connect(report['snapshot'])) as backup:
+                assert list(backup.iterdump()) == before_sql
+            reports[kind] = SimpleNamespace(producer=producer, key=key, identity=identity, expected=expected,
+                sources=sources, expected_ranges=expected_ranges, source_root=source_root,
+                before_files=before_files, before_sql=before_sql, history=history, report=report)
+        return reports[kind]
+    return get
+
+
+@pytest.mark.parametrize('kind', ['selected', 'unfinished', 'native-precedence'])
+def test_metadata_recovery_export_preserves_exact_source_and_snapshot(recovery_exports, kind):
+    state = recovery_exports(kind)
+    assert state.report['snapshot']
+    assert state.expected_ranges
+
+
 @pytest.mark.parametrize('kind', ['selected', 'unfinished', 'native-precedence'])
 @pytest.mark.parametrize('original', [False, True], ids=['restored', 'snapshot'])
-def test_recovered_ranges_reads_and_continuation_survive_missing_source(prepared_source, tmp_path, kind, original, monkeypatch):
-    producer, (entry, _, key, identity) = prepared_source(kind)
-    expected = producer.enrichment_state.metadata_observations(key)
-    sources = {row[0]: producer.musical_profiles.source_input(row[0]) for row in producer.conn.execute(
-        'SELECT source_key FROM rec_musical_sources')}
-    expected_ranges = contents(producer.conn)
-    assert expected and expected_ranges
-    source_root = recovery.directory(producer.conn)
-    before_files, before_sql = hashes(source_root), list(producer.conn.iterdump())
-    history = [tuple(row) for row in producer.conn.execute('SELECT * FROM schema_migrations ORDER BY version')]
-    report = custody.snapshot_library(producer._db_path, tmp_path / 'recovered')
-    assert hashes(source_root) == before_files
-    assert list(producer.conn.iterdump()) == before_sql
-    assert 'metadata_preparation' in report['manifests']
+def test_recovered_ranges_reads_and_continuation_survive_missing_source(recovery_exports, tmp_path, kind, original, monkeypatch):
+    state = recovery_exports(kind)
+    producer, key, identity = state.producer, state.key, state.identity
+    expected, sources, expected_ranges = state.expected, state.sources, state.expected_ranges
+    source_root, before_files, before_sql, history = state.source_root, state.before_files, state.before_sql, state.history
+    report = state.report
     with closing(sqlite3.connect(report['snapshot'])) as backup:
-        assert list(backup.iterdump()) == before_sql
         if original:
             database = tmp_path / 'restored.db'
             with closing(sqlite3.connect(database)) as target:
@@ -218,6 +290,7 @@ def test_prepared_sources_keep_distinct_states_and_private_custody(destination_t
     assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
     with pytest.raises(sqlite3.OperationalError, match='readonly'):
         template.source.conn.execute("INSERT INTO settings VALUES ('private-template', 'forbidden')")
+    template.source.conn.rollback()
     for consumer in (first, second):
         assert contents(consumer.conn) == expected
         assert [tuple(row) for row in consumer.conn.execute(
@@ -253,3 +326,9 @@ def test_prepared_sources_keep_distinct_states_and_private_custody(destination_t
     assert contents(second.conn) == contents(template.source.conn) == expected
     assert second.settings.get_setting('private-fixture') is None
     assert list(template.source.conn.iterdump()) == before
+
+
+def test_metadata_recovery_native_inputs_close_after_every_consumer(destination_templates):
+    for source in destination_templates.release():
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            source.conn.execute('SELECT 1')

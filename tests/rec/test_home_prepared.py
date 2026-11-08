@@ -173,17 +173,17 @@ def test_capacity_projection_preserves_worker_menu_after_feedback(store):
         assert selections(reader, True) == selections(reader, False) == original
 
 
-def test_capacity_projection_does_not_hide_invalid_collection_data(store, prepared):
+def test_capacity_projection_does_not_hide_invalid_collection_data(store, cached_menu):
     from copy import deepcopy
-    damaged = deepcopy(prepared)
+    damaged = deepcopy(cached_menu)
     damaged['discovery_tracks'] = [{'key': 'incomplete'}]
     store.rec_proposals.put_proposals('home_tuned', damaged, 1000)
     with store.read_view() as reader:
-        assert home_prepared.peek(reader, 1000, readiness_only=True)['tuning'] == prepared['tuning']
+        assert home_prepared.peek(reader, 1000, readiness_only=True)['tuning'] == cached_menu['tuning']
         assert home_prepared._load_surface(reader, 'home_tuned', readiness_only=True) is None
 
 
-def test_replacement_context_preserves_metadata_without_copying_replaced_offers(store, prepared):
+def test_replacement_context_preserves_metadata_without_copying_replaced_offers(store, cached_menu):
     with store.read_view() as reader:
         full = home_prepared.peek(reader, 1000)
         metadata = home_prepared.selection_context(reader, 1000)
@@ -191,13 +191,13 @@ def test_replacement_context_preserves_metadata_without_copying_replaced_offers(
                             if key not in ('menus', 'album_choices', 'album_choice_context', 'play_exposure')}
         metadata['fingerprint']['breadth']['families']['changed'] = 99
         assert 'changed' not in home_prepared.selection_context(reader, 1000)['fingerprint']['breadth']['families']
-    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == prepared
+    assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == cached_menu
 
 
-def test_replacement_keeps_collection_fallback_without_restoring_its_profiles(store, prepared, monkeypatch):
+def test_replacement_keeps_collection_fallback_without_restoring_its_profiles(store, cached_menu, monkeypatch):
     from yt_playlist.core import json_cache
 
-    payload = deepcopy(prepared)
+    payload = deepcopy(cached_menu)
     track = {**payload['menus'][0]['protos'][0]['tracks'][0],
              'musical': {'captured': ['previous collection evidence'] * 20000}}
     payload['rediscover_tracks'] = [track]
@@ -465,11 +465,12 @@ def test_initial_import_can_offer_catalog_mix_before_tags_or_models(catalog_impo
     assert next(p for p in result.protos if p['lane'] == 'explore')['tracks'] == catalog['tracks']
 
 
-def test_explicit_metadata_choice_during_build_allows_captured_candidate_heads_to_finish(store, monkeypatch):
+def test_explicit_metadata_choice_during_build_allows_captured_candidate_heads_to_finish(catalog_import, monkeypatch):
     from yt_playlist.core import catalog
 
-    entries = [store.tracks.upsert_track(f'import-{i}', f'Song {i}', f'Artist {i}', None, None)
-               for i in range(24)]
+    store = catalog_import
+    entries = [row[0] for row in store.conn.execute('SELECT id FROM catalog_entries ORDER BY id')]
+    assert len(entries) == 4
     assert mode_surfaces.prepare_bundles(store, 1000)
     before = {surface: store.recommendations.head(surface)['id'] for surface in ('home', 'fresh')}
     calculate = mode_surfaces._calculate_bundles

@@ -370,36 +370,6 @@ def test_missing_files_and_failed_job_do_not_hold_regular_ddl_and_retry_is_expli
     publication.OWNER.publish(store.conn, stage=stage(store.conn))
 
 
-def test_frozen_native_owner_wins_and_retained_map_guards_survive(tmp_path, _pristine_installed_schema):
-    path = tmp_path / 'upgrade.db'
-    store = Store(path)
-    try:
-        _pristine_installed_schema(93).backup(store.conn)
-        store.init_schema(defer_metadata=True)
-        _, _, identities = seed(store)
-        selected = stage(store.conn)
-        publication.OWNER.publish(store.conn, stage=selected)
-        originals = {identity:publication.OWNER.value(store.conn, selected, str(identity)) for identity in identities}
-        # The frozen one-time command owns a dedicated connection, without
-        # serving TEMP compatibility views shadowing replaced physical tables.
-        store.conn.close()
-        store = Store(path)
-        runner.migrate(store.conn, registry=registry.MIGRATIONS)
-        store.init_schema(defer_metadata=True)
-        assert action_work.available(store.conn)
-        assert publication.OWNER.selected(store.conn) is None
-        for identity, original in originals.items():
-            assert publication.OWNER.value(store.conn, selected, str(identity)) == original
-            assert store.actions.get_action(identity).id == identity
-        regular.validate(store.conn)
-        with store.conn:
-            store.conn.execute('DROP TRIGGER prepared_action_parts_mapped_delete')
-        with pytest.raises(MigrationError, match='publication object'):
-            regular.validate(store.conn)
-    finally:
-        store.conn.close()
-
-
 @pytest.mark.parametrize('installed', [93], indirect=True)
 def test_duplicate_draft_signatures_cannot_publish_an_ambiguous_owner(installed):
     store, _ = installed

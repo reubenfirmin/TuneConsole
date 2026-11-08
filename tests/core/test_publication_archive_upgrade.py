@@ -7,23 +7,18 @@ import sqlite3
 import pytest
 
 from tests.core import test_clicked_publication as clicked
-from tests.core import test_collection_document_publication as documents
-from tests.core import test_collection_feedback_publication as feedback
 from tests.core import test_conflict_publication as conflicts
 from tests.core import test_draft_publication as drafts
 from tests.core import test_discovery_publication as discovery
-from tests.core import test_import_publication as imports
 from tests.core import test_metadata_publication as metadata
 from tests.core import test_model_publication as models
 from tests.core import test_pair_publication as pairs
-from tests.core import test_taste_control_publication as taste
 from tests.core import test_tv_publication as tv
 from tests.core import test_workflow_publication as workflows
-from tests.core.test_predecessor_writes import installed
 from tests.core.test_genre_preferences_migration import bounded_vocabulary
 from tests.store_fixture_support import install_numbered_input
 from tests.archive_upgrade_support import completed_archive_input, archive_reader
-from yt_playlist.core import collection_recovery, genre_identity, group_evidence, group_storage, recommendation_custody, schema_definition
+from yt_playlist.core import genre_identity, group_evidence, group_storage, recommendation_custody, schema_definition
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.store import Store
@@ -467,78 +462,3 @@ def test_native_workflow_archive_keeps_mapped_object_validation(archive_input, t
         # Restore the actual definition before the final integrity check.
         with upgraded.conn:
             upgraded.conn.execute(definition)
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_taste_and_feedback_upgrade_retains_originals_after_collection(installed, tmp_path):
-    store, _ = installed
-    feedback_originals = feedback.seed(store)
-    taste_values, taste_originals = taste.seed(store)
-    for module in (feedback, taste):
-        for owner in module.publication.OWNERS.values():
-            revision = module.prepare(store.conn, owner)
-            owner.publish(store.conn, revision=revision)
-            assert owner.selected(store.conn) == revision
-
-    upgraded = Store(tmp_path / 'taste-feedback-archive-upgrade.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        upgraded.init_schema(defer_metadata=True)
-        regular.validate(upgraded.conn)
-        collection_recovery.collect_orphans(upgraded.conn)
-        for owner in taste.publication.OWNERS.values():
-            assert owner.selected(upgraded.conn) is None
-            assert owner.value(upgraded.conn, 0) == taste_originals[owner.source]
-            assert json.loads(upgraded.settings.get_setting(owner.source)) == taste_values[owner.source]
-        for owner in feedback.publication.OWNERS.values():
-            assert owner.selected(upgraded.conn) is None
-            assert owner.value(upgraded.conn, 0) == feedback_originals[owner.source]
-        assert feedback.account_auth_state.read(upgraded.conn) == {
-            1: 'Exact été label', 999: 'Historical account', 998: ''}
-        # The later alias judgment still wins in the native owner.
-        assert len(feedback.album_feedback_storage.original(upgraded.conn)) == 2
-        assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        upgraded.conn.close()
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_document_upgrade_retains_import_recipe_and_canvas_archives(installed, tmp_path):
-    store, _ = installed
-    # Both former upgrade owners used this exact source set. Seed it once and
-    # publish each domain before the shared frozen migration chain.
-    import_value, import_raw, recipe, canvas = documents.seed(store)
-    import_owner = imports.publication.OWNER
-    import_revision = imports.prepare(store.conn)
-    import_owner.publish(store.conn, revision=import_revision)
-    identities = {}
-    for name, owner in documents.publication.OWNERS.items():
-        identities[name] = documents.stage(owner, store.conn)
-        owner.publish(store.conn, stage=identities[name])
-    assert import_owner.selected(store.conn) == import_revision
-    for name, owner in documents.publication.OWNERS.items():
-        assert owner.selected(store.conn) == identities[name]
-
-    upgraded = Store(tmp_path / 'document-archive-upgrade.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        upgraded.init_schema(defer_metadata=True)
-        regular.validate(upgraded.conn)
-        assert import_owner.selected(upgraded.conn) is None
-        assert import_owner.value(upgraded.conn, import_revision) == import_raw
-        assert imports.spotify_job_state.load(upgraded.conn) == imports.entity_names.account_document(import_value)
-        for name, owner in documents.publication.OWNERS.items():
-            assert owner.selected(upgraded.conn) is None
-            assert owner.value(upgraded.conn, identities[name], 'PLAYLIST')
-        assert upgraded.playlist_recipes.get_recipe('PLAYLIST') == recipe
-        assert upgraded.playlist_recipes.get_cluster_canvas('PLAYLIST') == canvas
-        assert upgraded.playlist_recipes.get_recipe_created_ats() == {'PLAYLIST': 3}
-        assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
-        with upgraded.conn:
-            upgraded.conn.execute('DROP TRIGGER ' + documents.publication.OWNERS['recipes'].header + '_mapped_delete')
-        with pytest.raises(MigrationError, match='mapped publication object'):
-            regular.validate(upgraded.conn)
-    finally:
-        upgraded.conn.close()

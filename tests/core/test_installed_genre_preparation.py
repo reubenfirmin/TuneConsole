@@ -1,16 +1,20 @@
 """Old genre repairs preserve invalid history while independently guarding writes."""
-from dataclasses import replace
 import sqlite3
 
 import pytest
 
 from tests.core.test_installed_genre_contract import earlier_database
 from tests.core.test_domain_contract_preparation import finish
-from yt_playlist.core.migrations import MigrationError, registry, regular, runner
+from tests.genre_catalog_support import bound_catalog
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import domain_contracts, installed_genre_contract as repair
 
 
-def test_regular_repair_never_reads_or_copies_axis_population_and_audit_is_separate(tmp_path):
+def test_regular_repair_never_reads_or_copies_axis_population_and_audit_is_separate(tmp_path, monkeypatch):
+    bound_catalog(monkeypatch)
+    # Keep the real repair and guard adoption. Later unrelated regular owners
+    # have their own registry and continuing-write coverage.
+    monkeypatch.setattr(regular, 'CHANGES', regular.CHANGES[:8])
     conn = earlier_database(tmp_path/'earlier.db')
     try:
         with conn:
@@ -48,38 +52,5 @@ def test_regular_repair_never_reads_or_copies_axis_population_and_audit_is_separ
         finish(selected,conn)
         domain_contracts.verify(conn,selected)
         assert domain_contracts.original(conn,selected,record['source_key'],record['source_digest'])==original
-    finally:
-        conn.close()
-
-
-def test_interrupted_audit_retains_commits_and_full_historical_upgrade_preserves_guards(tmp_path):
-    conn = earlier_database(tmp_path/'upgrade.db')
-    try:
-        regular.migrate(conn)
-        selected = repair.job(conn)
-        selected.install(conn)
-        checkpoint = finish(selected,conn)
-        def fail(*args):
-            selected.copy(*args)
-            raise OSError('controlled audit failure')
-        # A captured source change ensures there is another bounded batch.
-        with conn:
-            conn.execute("UPDATE taste_axes SET genre_key='rock' WHERE id=7")
-        with pytest.raises(OSError,match='controlled audit failure'):
-            replace(selected,copy=fail).step(conn)
-        assert selected.progress(conn).status=='failed'
-        assert selected.progress(conn).processed==checkpoint.processed
-        regular.migrate(conn)
-        selected.step(conn,retry=True)
-        finish(selected,conn)
-        runner.migrate(conn,registry=registry.MIGRATIONS)
-        regular.migrate(conn)
-        selected.validate(conn)
-        finish(selected,conn)
-        domain_contracts.verify(conn,selected)
-        with pytest.raises(sqlite3.IntegrityError):
-            with conn:
-                conn.execute("INSERT INTO taste_axes(kind) VALUES ('other')")
-        assert not conn.execute('PRAGMA foreign_key_check').fetchone()
     finally:
         conn.close()

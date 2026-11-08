@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -327,83 +328,93 @@ def test_populated_predecessor_admission_preserves_exact_contents(version, prede
         assert not conn.execute('PRAGMA foreign_key_check').fetchall(), version
 
 
-@pytest.mark.parametrize('version', FULL_REPLAY_VERSIONS)
-def test_explicit_predecessor_replay_matches_current_contract(
-        tmp_path, version, predecessor_templates, numbered_contract, monkeypatch, record_property):
+@pytest.fixture(scope='module', params=FULL_REPLAY_VERSIONS)
+def populated_replay(request, tmp_path_factory, predecessor_templates):
     from tests.prepared_fixture_support import cleanup_memory_files, roots
-    from yt_playlist.core import schema_definition
-    from yt_playlist.core.migrations import runner
     from yt_playlist.core.store import Store
 
-    # Every starting version still executes its entire real upgrade suffix.
-    # Keep disk transactions at the start, middle and end of the history;
-    # the remaining cases exercise the same SQL and retained rows in memory.
-    path = tmp_path / 'upgrade.db' if version in (1, 24, 72) else ':memory:'
+    version = request.param
+    root = tmp_path_factory.mktemp(f'populated-replay-{version}')
+    path = root / 'upgrade.db' if version in (1, 24, 72) else ':memory:'
     store = Store(path)
     try:
-        conn = store.conn
         source = predecessor_templates[version].resolve().as_uri() + '?mode=ro'
         with closing(sqlite3.connect(source, uri=True)) as predecessor:
-            predecessor.backup(conn)
-        populate(conn, version)
-        inspections, validations, measurements = Counter(), [], []
-        inspect = schema_definition._inspect_table
-        validate = runner._validate_migration_structure
-
-        def inspect_table(connection, name, sql):
-            if connection is conn:
-                inspections[(name, sql)] += 1
-            return inspect(connection, name, sql)
-
-        def validate_structure(connection, installed):
-            if connection is conn:
-                validations.append(installed)
-            return validate(connection, installed)
-
-        monkeypatch.setattr(schema_definition, '_inspect_table', inspect_table)
-        monkeypatch.setattr(runner, '_validate_migration_structure', validate_structure)
-
-        def measured_replay(phase):
-            inspections.clear()
-            validations.clear()
-            before = schema_definition._reference_contract.cache_info()
-            started = time.perf_counter()
-            migrate(conn, registry=registry.MIGRATIONS)
-            elapsed = time.perf_counter() - started
-            after = schema_definition._reference_contract.cache_info()
-            measurements.append({
-                'phase': phase, 'seconds': elapsed, 'validation_versions': list(validations),
-                'table_inspections': sum(inspections.values()),
-                'distinct_table_definitions': len(inspections),
-                'reference_constructions': after.misses - before.misses,
-                'reference_reuses': after.hits - before.hits,
-            })
-            # Settings can acquire a new definition during older replays, but
-            # each unchanged definition needs only one real owner inspection.
-            settings = [count for (name, _sql), count in inspections.items() if name == 'settings']
-            assert settings and max(settings) == 1
-
-        # Exercise every genuine starting-version replay. Regular admission
-        # consumes the resulting current layout and has one populated control
-        # below, rather than repeating all its DDL after every starting version.
-        measured_replay('upgrade')
-        current.validate(conn)
-        assert objects(conn) == numbered_contract
-        for key in current.SEED_SETTINGS:
-            assert conn.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone() is not None
-        assert conn.execute("SELECT value FROM settings WHERE key='personal-setting'").fetchone()[0] == 'retain'
-        assert tuple(conn.execute('SELECT id,title,artist FROM tracks').fetchone()) == (17, 'Song', 'Artist')
-        assert conn.execute('SELECT COUNT(*) FROM listening_observations').fetchone()[0] == 1
-        before = list(conn.iterdump())
-        measured_replay('idempotence')
-        assert sum(count for (name, _sql), count in inspections.items() if name == 'settings') == 1
-        record_property('historical_replay', json.dumps(measurements))
-        assert list(conn.iterdump()) == before
-        assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+            predecessor.backup(store.conn)
+        populate(store.conn, version)
+        yield SimpleNamespace(store=store, version=version)
     finally:
         cleanup_memory_files(store, roots(store.conn))
         store.conn.close()
-    assert not (tmp_path / 'backups').exists()
+    assert not (root / 'backups').exists()
+
+
+def test_populated_replay_input_keeps_exact_historical_contents(populated_replay):
+    conn = populated_replay.store.conn
+    assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == populated_replay.version
+    assert conn.execute("SELECT value FROM settings WHERE key='personal-setting'").fetchone()[0] == 'retain'
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def measured_replay(conn, target, monkeypatch, record_property):
+    from yt_playlist.core import schema_definition
+    from yt_playlist.core.migrations import runner
+
+    inspections, validations = Counter(), []
+    inspect, validate = schema_definition._inspect_table, runner._validate_migration_structure
+
+    def inspect_table(connection, name, sql):
+        if connection is conn:
+            inspections[(name, sql)] += 1
+        return inspect(connection, name, sql)
+
+    def validate_structure(connection, installed):
+        if connection is conn:
+            validations.append(installed)
+        return validate(connection, installed)
+
+    monkeypatch.setattr(schema_definition, '_inspect_table', inspect_table)
+    monkeypatch.setattr(runner, '_validate_migration_structure', validate_structure)
+    before = schema_definition._reference_contract.cache_info()
+    started = time.perf_counter()
+    migrate(conn, registry=registry.MIGRATIONS[:target])
+    after = schema_definition._reference_contract.cache_info()
+    record_property('historical_replay', json.dumps({
+        'target': target, 'seconds': time.perf_counter()-started, 'validation_versions': validations,
+        'table_inspections': sum(inspections.values()), 'distinct_table_definitions': len(inspections),
+        'reference_constructions': after.misses-before.misses, 'reference_reuses': after.hits-before.hits,
+    }))
+    settings = [count for (name, _sql), count in inspections.items() if name == 'settings']
+    if target == len(registry.MIGRATIONS):
+        assert settings
+    assert not settings or max(settings) == 1
+    assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == target
+
+
+@pytest.mark.parametrize('target', (33, 79, 94, 102, 103, 107))
+def test_populated_replay_conversion_keeps_every_real_historical_edge(populated_replay, target, monkeypatch, record_property):
+    # Retain each complete suffix on the same private connection. Boundaries
+    # separate catalog, grouped evidence, subject, rename and current owners.
+    measured_replay(populated_replay.store.conn, max(populated_replay.version, target), monkeypatch, record_property)
+
+
+def test_explicit_predecessor_replay_matches_current_contract(populated_replay, numbered_contract):
+    conn = populated_replay.store.conn
+    current.validate(conn)
+    assert objects(conn) == numbered_contract
+    for key in current.SEED_SETTINGS:
+        assert conn.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone() is not None
+    assert conn.execute("SELECT value FROM settings WHERE key='personal-setting'").fetchone()[0] == 'retain'
+    assert tuple(conn.execute('SELECT id,title,artist FROM tracks').fetchone()) == (17, 'Song', 'Artist')
+    assert conn.execute('SELECT COUNT(*) FROM listening_observations').fetchone()[0] == 1
+
+
+def test_populated_replay_idempotence_keeps_exact_current_contents(populated_replay, monkeypatch, record_property):
+    conn = populated_replay.store.conn
+    before = list(conn.iterdump())
+    measured_replay(conn, len(registry.MIGRATIONS), monkeypatch, record_property)
+    assert list(conn.iterdump()) == before
+    assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
 
 
 @pytest.mark.parametrize('change,error', [

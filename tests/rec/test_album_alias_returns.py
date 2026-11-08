@@ -1,11 +1,10 @@
 """Deliberate returns follow verified releases without multiplying shared dates."""
 from copy import deepcopy
-from tests.enrichment_support import seed_enrichment, use_existing_album_tracks
+from tests.enrichment_support import use_existing_album_tracks
 
 import numpy as np
 import pytest
 
-from tests import model_support
 from tests.repos.test_album_aliases import OLD, ALIAS, release
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
 from yt_playlist.core.store import Store
@@ -50,11 +49,11 @@ def seed_return_catalog(store, first, before, saved):
     if not before:
         remember_album(store, second, payload)
     keys = [f'track {index}|all them witches' for index in range(9)]
-    for row in store.conn.execute('SELECT id FROM tracks').fetchall():
-        seed_enrichment(store, row[0], 'Rock', '2015')
-    store.rec_model.replace_rec_vectors([
-        (key, np.array([1., 0.], dtype=np.float32).tobytes()) for key in keys])
-    assert model_support.build_content_model(store) >= len(keys)
+    vectors = [(key, np.array([1., 0.], dtype=np.float32).tobytes()) for key in keys]
+    # The return-weight boundary consumes published spaces, independently of
+    # the content encoder's training and provider metadata ingestion.
+    store.rec_model.replace_rec_vectors(vectors)
+    store.rec_model.replace_rec_content_vectors(vectors)
     return payload, keys
 
 

@@ -1,11 +1,15 @@
 """Compiled serving inputs have typed owners and atomic, retained publications."""
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
-from tests.prepared_fixture_support import historical_template
+from tests.genre_catalog_support import bound_catalog
+from tests.core.test_early_schema_upgrade import rename_owner, restore_programs
+from tests.prepared_fixture_support import assert_upgrade_phase, capture_template, custody_predecessor, custody_upgrade_cases
+from tests.store_fixture_support import install_regular_input
 
 from yt_playlist.core import choice_learning_state as owner
-from yt_playlist.core.migrations import migrate, registry, v093_choice_learning
+from yt_playlist.core.migrations import migrate, registry, regular, v093_choice_learning
 from yt_playlist.core.migrations.runner import MigrationError
 from yt_playlist.core.store import Store
 
@@ -22,9 +26,17 @@ def predecessor(tmp_path, _pristine_installed_schema):
     store.conn.close()
 
 
-def upgrade(store):
-    migrate(store.conn, registry=registry.MIGRATIONS)
-    store.init_schema()
+@pytest.fixture(scope='module', autouse=True)
+def isolated_learning_home(tmp_path_factory):
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('choice-learning-home')))
+        bound_catalog(patch)
+        yield
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These SQL owners do not construct an HTTP application."""
 
 
 def interests():
@@ -35,31 +47,116 @@ def interests():
             'album_track_days': {'release': {'song|artist': 2}}, 'interest_version': 'effective'}
 
 
-@pytest.fixture(scope='module')
-def upgraded_learning_template(_pristine_installed_schema):
+def seed_learning_input(store):
     from tests.group_support import publish, recordings
 
-    def build(store):
-        store.tracks.upsert_track('video', 'Song', 'Artist', 'Album', 100, album_browse_id='release')
-        store.rec_proposals.put_proposals('choice_interests', interests(), None)
-        store.rec_proposals.put_proposals('choice_bandit', {'rows': [{'mode_id': 99, 'estimate': .5}], 'expires_at': None}, None)
-        head = publish(store, recordings([('Jazz', 16, .2)]), now=10)
-        group = head['groups'][0]
-        value = {'policy': 'compiled-statistics', 'generation': head['generation'], 'at': 11,
-                 'rows': [{'group_id': group['group_id'], 'version': group['version'], 'estimate': .6,
-                           'shared_from': None, 'menus': ['opportunity']}], 'excluded': {'unseen': 0}}
-        store.rec_proposals.put_proposals('group_choice_bandit', value, 11)
-        upgrade(store)
-        return {'head': head, 'group': group, 'group_estimates': value}
+    store.tracks.upsert_track('video', 'Song', 'Artist', 'Album', 100, album_browse_id='release')
+    store.rec_proposals.put_proposals('choice_interests', interests(), None)
+    store.rec_proposals.put_proposals('choice_bandit', {'rows': [{'mode_id': 99, 'estimate': .5}], 'expires_at': None}, None)
+    # Four members suffice for a real retained group estimate. Numerical graph
+    # discovery at corpus scale is below this compiled-input upgrade boundary.
+    head = publish(store, recordings([('Jazz', 4, .2)]), now=10)
+    group = head['groups'][0]
+    value = {'policy': 'compiled-statistics', 'generation': head['generation'], 'at': 11,
+             'rows': [{'group_id': group['group_id'], 'version': group['version'], 'estimate': .6,
+                       'shared_from': None, 'menus': ['opportunity']}], 'excluded': {'unseen': 0}}
+    store.rec_proposals.put_proposals('group_choice_bandit', value, 11)
+    return {'head': head, 'group': group, 'group_estimates': value}
 
-    with historical_template(_pristine_installed_schema(92), build, database=':memory:') as template:
-        yield template
+
+@pytest.fixture(scope='module')
+def learning_native_schema(_bounded_installed_schema, tmp_path_factory):
+    with _bounded_installed_schema(92).open(
+            tmp_path_factory.mktemp('choice-learning-regular-input') / 'source.db') as source:
+        with source.conn:
+            install_regular_input(source.conn, regular.CHANGES)
+        yield capture_template(source, None)
+
+
+@pytest.fixture(scope='module')
+def learning_native_inputs(upgraded_custody_inputs, learning_native_schema):
+    renamed = None
+    restored = False
+
+    def original(target, **options):
+        return upgraded_custody_inputs(92, target, 'choice-learning-native', seed_learning_input,
+                                       prepared=learning_native_schema, **options)
+
+    def get(target, **options):
+        nonlocal renamed, restored
+        phase = options.get('phase', 'captured')
+        if target == 103 and phase != 'input':
+            if renamed is None:
+                predecessor = original(103, phase='input')
+                conn = predecessor.source.conn
+                conn.execute('PRAGMA query_only=OFF')
+                try:
+                    renamed = rename_owner(dict(conn=conn, source=predecessor.source,
+                                                result=predecessor.result))
+                finally:
+                    conn.execute('PRAGMA query_only=ON')
+            if phase != 'converted' and not restored:
+                conn = renamed['conn']
+                conn.execute('PRAGMA query_only=OFF')
+                try:
+                    restore_programs(renamed)
+                    restored = True
+                finally:
+                    conn.execute('PRAGMA query_only=ON')
+            if phase in ('converted', 'programs'):
+                return SimpleNamespace(source=renamed['source'], result=renamed['result'])
+        return original(target, **options)
+    return get
+
+
+def test_choice_learning_schema_input_keeps_actual_92_history_and_private_guards(_bounded_installed_schema):
+    assert_upgrade_phase(_bounded_installed_schema(92), 92)
+
+
+def test_choice_learning_regular_input_has_complete_real_guards_without_advancing_numbered_history(
+        learning_native_schema):
+    assert_upgrade_phase(learning_native_schema, 92)
+    assert regular.validate(learning_native_schema.source.conn) == len(regular.CHANGES)
+
+
+def test_choice_learning_input_keeps_original_null_clocks_unknowns_and_group_estimates(learning_native_inputs):
+    template = learning_native_inputs(92)
+    assert_upgrade_phase(template, 92)
+    source = template.source
+    assert source.rec_proposals.get_proposals('choice_interests') == interests()
+    assert source.rec_proposals.get_proposals('group_choice_bandit') == template.result['group_estimates']
+    assert source.conn.execute("SELECT built_at FROM rec_proposals WHERE surface='choice_interests'").fetchone()[0] is None
+
+
+CHOICE_UPGRADES = [step for case in custody_upgrade_cases((92,))
+                  for step in ([case, (92, 103, 'programs')] if case == (92, 103, 'converted') else [case])]
+
+
+@pytest.mark.parametrize('version,target,phase', CHOICE_UPGRADES)
+def test_actual_choice_learning_upgrade_keeps_values_and_original_group_evidence(
+        learning_native_inputs, version, target, phase):
+    template = learning_native_inputs(target, phase=phase)
+    actual = custody_predecessor(version, target) if phase == 'input' else target
+    assert_upgrade_phase(template, actual)
+    if actual >= 93:
+        assert owner.read(template.source.conn, 'choice_interests') == interests()
+
+
+def test_choice_learning_serving_input_keeps_current_history_and_real_snapshot_guards(learning_native_inputs):
+    template = learning_native_inputs(107)
+    assert_upgrade_phase(template, 107)
+    assert template.source._snapshot_revisions.conn is template.source.conn
+
+
+@pytest.fixture(scope='module')
+def upgraded_learning_template(learning_native_inputs):
+    return learning_native_inputs(107)
 
 
 @pytest.fixture
-def upgraded_learning(file_backed_store, upgraded_learning_template):
-    upgraded_learning_template.restore(file_backed_store)
-    return file_backed_store
+def upgraded_learning(tmp_path, upgraded_learning_template):
+    with upgraded_learning_template.open(tmp_path / 'learning.db') as store:
+        yield store
 
 
 def test_registered_cutover_preserves_values_unknowns_subjects_and_restart(upgraded_learning):

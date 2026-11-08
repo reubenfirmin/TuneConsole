@@ -18,6 +18,11 @@ def controlled_radio_checkpoints(monkeypatch):
     core/test_radio_choice_persistence.py. Genre controllers consume committed
     snapshots without exercising database/file publication on every tune.
     """
+    return control_radio_checkpoints(monkeypatch)
+
+
+def control_radio_checkpoints(monkeypatch):
+    """Install the controller's completed checkpoint-storage collaborator."""
     from yt_playlist.controllers.radio_checkpoints import RadioCheckpoints
 
     saves = []

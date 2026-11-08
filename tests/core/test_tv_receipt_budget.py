@@ -1,149 +1,131 @@
-"""Real full-size plans and bounded SQL copying have separate owners."""
-from contextlib import closing
-from dataclasses import replace
-import hashlib
+"""Full-size receipt preparation and both atomic cutover outcomes stay real."""
 import json
 import sqlite3
-from unittest.mock import Mock
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
-from tests.catalog_migration_support import catalog_reader
-from tests.genre_catalog_support import bound_catalog
-from tests.store_fixture_support import install_numbered_input
+from tests.core.test_tv_state_preparation import finish
 from tests.test_tv_stream import video
-from yt_playlist.core.migrations import runner
-from yt_playlist.core.preparation import tv_state as preparation
-
-
-SURFACE = 'tv_continuations'
-JOB = preparation.JOBS['continuations']
+from yt_playlist.core import schema_inspection
+from yt_playlist.core.preparation import tv_publication as publication, tv_state as preparation
 
 
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
-    """These file/SQL owners have no HTTP lifespan."""
+    """Receipt SQL and files do not start the HTTP lifecycle."""
 
 
-@pytest.fixture(scope='module', autouse=True)
-def isolated_app_home(tmp_path_factory):
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('tv-receipt-home')))
-        patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
-        patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
-        patch.delenv('DEEPSEEK_API_KEY', raising=False)
-        bound_catalog(patch)
-        yield
-
-
-def head(conn):
-    generations, current, _ = preparation.tables(SURFACE)
-    return conn.execute(f'SELECT g.* FROM {current} h JOIN {generations} g '
-                        'USING(source,preparation_revision)').fetchone()
+def test_receipt_schema_input_keeps_real_installed_history_and_snapshot_guards(_bounded_installed_schema):
+    source = _bounded_installed_schema(93).source
+    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 93
+    assert source._snapshot_revisions.conn is source.conn
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.fixture(scope='module')
-def installed(tmp_path_factory):
-    path = tmp_path_factory.mktemp('tv-receipt-budget') / 'installed.db'
-    with closing(sqlite3.connect(path)) as conn:
-        conn.execute('PRAGMA foreign_keys=ON')
-        conn.execute('PRAGMA journal_mode=WAL')
-        install_numbered_input(conn, 93)
-    with catalog_reader(path, 93, snapshot_guards=True) as store:
-        yield {'store': store, 'conn': store.conn}
+def receipt_source(_bounded_installed_schema, tmp_path_factory):
+    path = tmp_path_factory.mktemp('tv-receipt-budget')/'source.db'
+    with _bounded_installed_schema(93).open(path) as store, schema_inspection.reuse_tables(store.conn):
+        store.conn.execute('PRAGMA synchronous=NORMAL')
+        value = {f'{number+1}:stream:request:{number}': {'playlist_id': number+101, 'stream': 'next',
+            'items': [video(index) for index in range(60)]} for number in range(60)}
+        raw = json.dumps(value, indent=2)
+        with store.conn:
+            store.conn.execute('INSERT INTO rec_proposals VALUES (?,?,?)', ('tv_continuations', raw, 9007199254740993))
+        original = tuple(store.conn.execute('SELECT * FROM rec_proposals WHERE surface=?', ('tv_continuations',)).fetchone())
+        yield SimpleNamespace(store=store, value=value, raw=raw, original=original,
+                              owner=publication.OWNERS['continuations'])
 
 
-def test_receipt_budget_uses_the_real_supported_v93_predecessor(installed):
-    # Validate main tables without the consumer's account-name TEMP views.
-    with closing(sqlite3.connect(installed['store']._db_path.as_uri() + '?mode=ro', uri=True)) as conn:
-        conn.row_factory = sqlite3.Row
-        runner.validate_version(conn, 93)
-    assert installed['conn'].execute('PRAGMA foreign_keys').fetchone()[0] == 1
-
-
-@pytest.fixture(scope='module')
-def prior_generation(installed):
-    conn = installed['conn']
-    installed['store'].rec_proposals.put_proposals(SURFACE, {}, None)
-    JOB.install(conn)
-    for _ in range(3):
-        if JOB.step(conn, batch_size=128).status == 'prepared':
-            break
-    assert JOB.progress(conn).status == 'prepared'
-    installed['previous'] = dict(head(conn))
-    return installed
-
-
-def test_real_empty_generation_is_complete_before_its_replacement(prior_generation):
-    state = prior_generation
-    assert state['previous']['row_count'] == 0
-    assert preparation.read_original(state['conn'], state['previous']) == '{}'
+def test_full_budget_source_keeps_sixty_receipts_and_exact_stored_timestamp(receipt_source):
+    assert len(receipt_source.value) == 60
+    assert sum(len(receipt['items']) for receipt in receipt_source.value.values()) == 3600
+    assert receipt_source.original[1] == receipt_source.raw
+    assert receipt_source.original[2] == float(9007199254740993)
+    assert receipt_source.owner.selected(receipt_source.store.conn) is None
 
 
 @pytest.fixture(scope='module')
-def full_plan(prior_generation):
-    state = prior_generation
-    value = {f'{number + 1}::request:{number}': {
-        'playlist_id': number + 101, 'stream': f'stream-{number}',
-        'items': [video(index) for index in range(60)]} for number in range(60)}
-    state['store'].rec_proposals.put_proposals(SURFACE, value, 30)
-    # Use the worker's actual bounded source projection, including exact bytes.
-    row = dict(JOB.definition._read(state['conn'], 'rec_proposals', '["tv_continuations"]'))
-    assert not state['conn'].in_transaction
-    plan = preparation.prepare(state['conn'], row)
-    assert not state['conn'].in_transaction
-    state.update(value=value, row=row, plan=plan)
+def checkpointed_receipts(receipt_source):
+    receipt_source.owner.worker.install(receipt_source.store.conn)
+
+    def capture_plan(conn, row):
+        receipt_source.plan = preparation.prepare(conn, row)
+        return receipt_source.plan
+
+    worker = replace(receipt_source.owner.worker, prepare=capture_plan)
+    receipt_source.checkpoint = worker.step(receipt_source.store.conn, batch_size=512)
+    return receipt_source
+
+
+def test_full_budget_first_slice_commits_a_bounded_prefix_without_selecting_output(checkpointed_receipts):
+    state = checkpointed_receipts
+    assert state.checkpoint.processed == 512
+    assert state.checkpoint.status != 'prepared'
+    assert state.owner.selected(state.store.conn) is None
+    assert not state.store.conn.in_transaction
+    assert state.plan.row_count == 3660
+    assert state.plan.part_count > 0
+
+
+@pytest.fixture(scope='module')
+def receipts(checkpointed_receipts):
+    # The first slice computed the genuine full-size Plan and published all
+    # originals. Reuse that exact lower input while the real 512-unit batches
+    # copy every row and advance their SQL checkpoints.
+    state = checkpointed_receipts
+
+    def completed_plan(conn, row):
+        assert bytes(row['payload']) == state.raw.encode()
+        assert row['built_at'] == state.original[2]
+        return state.plan
+
+    worker = replace(state.owner.worker, prepare=completed_plan)
+    state.revision = finish(worker, state.store.conn, size=512).prepared_revision
+    state.owner.install(state.store.conn)
     return state
 
 
-def test_real_full_budget_planning_keeps_every_item_and_publishes_all_original_parts(full_plan):
-    state, plan = full_plan, full_plan['plan']
-    assert plan.row_count == 3660 and plan.part_count > 1
-    assert plan.digest == hashlib.sha256(state['row']['payload']).hexdigest()
-    assert plan.size == len(state['row']['payload'])
-    assert len(plan.units) == plan.part_count + 3660
-    assert sum(unit[0] == 'tv_continuation_receipts' for unit in plan.units) == 60
-    assert sum(unit[0] == 'tv_continuation_items' for unit in plan.units) == 3600
-    raw = ''.join(preparation.files.read(*reference, surface=SURFACE, chunk_key=str(position))
-                  for kind, position, reference in plan.units if kind == 'file')
-    assert raw.encode() == state['row']['payload']
-    assert json.loads(raw) == state['value']
+def test_full_budget_preparation_retains_sixty_receipts_and_all_three_thousand_six_hundred_items(receipts):
+    conn = receipts.store.conn
+    assert len(receipts.value) == 60
+    assert conn.execute('SELECT count(*) FROM '+preparation.relation('tv_continuation_receipts')+
+        ' WHERE preparation_revision=?', (receipts.revision,)).fetchone()[0] == 60
+    assert conn.execute('SELECT count(*) FROM '+preparation.relation('tv_continuation_items')).fetchone()[0] == 3600
+    assert receipts.store.rec_proposals._proposal_json(receipts.owner.source) == receipts.raw == receipts.original[1]
+    # Source timestamp affinity is REAL; preserve its actual stored value.
+    assert receipts.original[2] == float(9007199254740993)
+    assert receipts.owner.selected(conn) is None
+    assert receipts.owner.worker.progress(conn).prepared_revision == receipts.revision
 
 
-def test_actual_128_unit_slices_copy_full_receipt_budget_without_selecting_partial_state(full_plan):
-    state, conn = full_plan, full_plan['conn']
+@pytest.fixture(scope='module')
+def interrupted_receipts(receipts):
+    conn = receipts.store.conn
+    with conn:
+        conn.execute('CREATE TRIGGER controlled_tv_interrupt BEFORE INSERT ON '+receipts.owner.tables[1]+
+            " BEGIN SELECT RAISE(ABORT,'controlled TV interruption'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='controlled TV interruption'):
+        receipts.owner.publish(conn, revision=receipts.revision)
+    return receipts
 
-    def planned(connection, row):
-        assert connection is conn and row == state['row']
-        assert not conn.in_transaction
-        return state['plan']
 
-    # Planning/files have their genuine full-size owner above. Exercise the
-    # real coordinator, checkpoints and copy_batch with that exact result.
-    planner = Mock(side_effect=planned)
-    job = replace(JOB, prepare=planner)
-    tables = [preparation.relation(name) for name in preparation.RELATIONS[SURFACE]] + [preparation.tables(SURFACE)[2]]
-    for _ in range(40):
-        before = sum(conn.execute('SELECT count(*) FROM ' + table).fetchone()[0] for table in tables)
-        progress = job.step(conn, batch_size=128)
-        after = sum(conn.execute('SELECT count(*) FROM ' + table).fetchone()[0] for table in tables)
-        assert 0 <= after - before <= 128
-        if progress.status == 'prepared':
-            break
-        assert head(conn)['preparation_revision'] == state['previous']['preparation_revision']
-    assert progress.status == 'prepared'
-    assert planner.call_count == (len(state['plan'].units) + 127) // 128
-    assert dict(head(conn))['row_count'] == 3660
-    assert head(conn)['preparation_revision'] != state['previous']['preparation_revision']
-    assert conn.execute('SELECT count(*) FROM ' + preparation.relation('tv_continuation_items')).fetchone()[0] == 3600
+def test_interrupted_full_budget_cutover_leaves_no_partial_generation_or_selection(interrupted_receipts):
+    state = interrupted_receipts
+    assert not state.store.conn.execute('SELECT 1 FROM '+state.owner.tables[0]).fetchone()
+    assert state.owner.selected(state.store.conn) is None
+    assert not state.store.conn.in_transaction
+
+
+def test_explicit_retry_selects_exact_full_budget_without_changing_source_affinity(interrupted_receipts):
+    state = interrupted_receipts
+    conn = state.store.conn
+    with conn:
+        conn.execute('DROP TRIGGER controlled_tv_interrupt')
+    state.owner.publish(conn, revision=state.revision)
+    assert state.store.rec_proposals._proposal_json(state.owner.source) == state.raw
+    assert state.store.rec_proposals.get_proposals(state.owner.source) == state.value
+    assert tuple(conn.execute('SELECT * FROM rec_proposals WHERE surface=?', (state.owner.source,)).fetchone()) == state.original
     assert not conn.in_transaction and not conn.execute('PRAGMA foreign_key_check').fetchone()
-
-
-def test_completed_full_generation_and_prior_original_remain_exact(full_plan):
-    state, conn = full_plan, full_plan['conn']
-    current = head(conn)
-    assert current['row_count'] == 3660 and current['part_count'] > 1
-    assert preparation.read_original(conn, current).encode() == state['row']['payload']
-    assert json.loads(preparation.read_original(conn, current)) == state['value']
-    assert preparation.read_original(conn, state['previous']) == '{}'
-    assert not conn.execute('PRAGMA foreign_key_check').fetchone()

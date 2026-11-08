@@ -1,6 +1,7 @@
 """Verify automatic worker selection and real subprocess ownership on tiny suites."""
 
 import fcntl
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -54,6 +55,10 @@ def test_ci_is_serial_and_default_count_is_bounded(tmp_path, monkeypatch):
 
 @pytest.fixture
 def mini_suite(tmp_path):
+    return _mini_suite(tmp_path)
+
+
+def _mini_suite(tmp_path):
     """Both controller and workers load the real plugins with an isolated lock."""
     repo = Path(__file__).resolve().parents[1]
     (tmp_path / "pytest.ini").write_text(
@@ -87,7 +92,8 @@ def mini_suite(tmp_path):
             "    assert not os.environ.get('FAIL_PROBE')\n"
         )
 
-    def run(*args, **env):
+    @contextmanager
+    def start(*args, **env):
         child = subprocess.Popen(
             [sys.executable, "-m", "pytest", "-p", "xdist.plugin", "-q", *args],
             cwd=tmp_path,
@@ -95,11 +101,8 @@ def mini_suite(tmp_path):
                  "CI": "", **env}, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, start_new_session=True,
         )
-        completed = None
         try:
-            stdout, stderr = child.communicate(timeout=30)
-            completed = subprocess.CompletedProcess(child.args, child.returncode, stdout, stderr)
-            return completed
+            yield child
         finally:
             try:
                 os.killpg(child.pid, signal.SIGTERM)
@@ -131,9 +134,16 @@ def mini_suite(tmp_path):
                 if time.monotonic() >= deadline:
                     raise RuntimeError(f'Owned child group {child.pid} still running: {remaining}')
                 time.sleep(.01)
-            if completed is not None:
-                completed.cleanup_receipt = {'group': child.pid, 'remaining': remaining}
+            child.cleanup_receipt = {'group': child.pid, 'remaining': remaining}
 
+    def run(*args, **env):
+        with start(*args, **env) as child:
+            stdout, stderr = child.communicate(timeout=30)
+            completed = subprocess.CompletedProcess(child.args, child.returncode, stdout, stderr)
+        completed.cleanup_receipt = child.cleanup_receipt
+        return completed
+
+    run.start = start
     return tmp_path, lock_path, run
 
 
@@ -308,8 +318,100 @@ def test_next():
         assert expected in result.stdout  # The following cleanup assertion passed.
 
 
-def test_parallel_runtime_stop_keeps_storage_until_worker_finalizers_finish(mini_suite):
-    root, _, run = mini_suite
+@pytest.fixture(scope='module')
+def worker_custody_steps(tmp_path_factory):
+    root = tmp_path_factory.mktemp('parallel-worker-custody')
+    sequence = _worker_custody_workflow(root)
+    try:
+        yield sequence
+    finally:
+        sequence.close()
+
+
+@pytest.fixture(scope='module')
+def worker_custody_coordinator(worker_custody_steps):
+    return next(worker_custody_steps)
+
+
+def test_worker_custody_coordinator_installs_the_real_runtime_monitor(worker_custody_coordinator):
+    state = worker_custody_coordinator
+    assert json.loads((state.root / 'coordinator.json').read_text())['pid'] == state.child.pid
+    assert state.child.poll() is None
+
+
+@pytest.fixture(scope='module')
+def worker_custody_live(worker_custody_coordinator, worker_custody_steps):
+    return next(worker_custody_steps)
+
+
+def test_both_parallel_workers_own_live_sqlite_files_before_runtime_stop(worker_custody_live):
+    state = worker_custody_live
+    started = list(state.root.glob('*.started.json'))
+    assert len(started) == 2
+    for path in started:
+        assert (Path(json.loads(path.read_text())['workspace']) / 'owned.sqlite3').is_file()
+
+
+@pytest.fixture(scope='module')
+def worker_custody_finalizing(worker_custody_live, worker_custody_steps):
+    return next(worker_custody_steps)
+
+
+def test_runtime_stop_retains_both_workspaces_while_real_finalizers_are_blocked(worker_custody_finalizing):
+    state = worker_custody_finalizing
+    assert len(list(state.root.glob('*.finalizing'))) == 2
+    assert not list(state.root.glob('*.finalized.json'))
+    assert state.child.poll() is None and state.basetemp.is_dir()
+    for path in state.root.glob('*.started.json'):
+        assert (Path(json.loads(path.read_text())['workspace']) / 'owned.sqlite3').is_file()
+
+
+@pytest.fixture(scope='module')
+def worker_custody_stopped(worker_custody_finalizing, worker_custody_steps):
+    return next(worker_custody_steps)
+
+
+def test_parallel_runtime_stop_keeps_storage_until_worker_finalizers_finish(worker_custody_stopped):
+    state = worker_custody_stopped
+    root, basetemp, result = state.root, state.basetemp, state.result
+    assert result.returncode == 2, result.stdout + result.stderr
+    started = list(root.glob('*.started.json'))
+    assert len(started) == 2, result.stdout + result.stderr
+    for path in started:
+        observation = json.loads(path.read_text())
+        assert path.with_name(path.name.replace('.started.', '.finalized.')).is_file(), result.stdout + result.stderr
+        assert not Path(observation['workspace']).exists()
+    assert not basetemp.exists()
+    assert 'unable to open database file' not in result.stdout + result.stderr
+    assert result.cleanup_receipt['remaining'] == []
+
+
+def _worker_custody_workflow(root):
+    root, _, run = _mini_suite(root)
+    with (root / 'conftest.py').open('a') as config:
+        config.write('''
+import json, os, signal, time
+import pytest
+import pytest_time_limit
+
+# Deadline accounting has independent owners. Install the actual monitor, then
+# deliver its real signal only after the parent observes both live SQL owners.
+start_timer = pytest_time_limit.SessionLimit.start_timer
+def parent_gated_timer(self, delay, interval=0):
+    start_timer(self, delay, interval)
+    signal.setitimer(signal.ITIMER_REAL, 0)
+pytest_time_limit.SessionLimit.start_timer = parent_gated_timer
+
+@pytest.hookimpl(wrapper=True, trylast=True)
+def pytest_sessionstart(session):
+    yield
+    if not hasattr(session.config, 'workerinput'):
+        Path('coordinator.json').write_text(json.dumps({'pid': os.getpid()}))
+        deadline = time.monotonic() + 15
+        while not Path('collect').exists():
+            assert time.monotonic() < deadline
+            time.sleep(.002)
+''')
     for name in ('one', 'two'):
         (root / 'tests' / f'test_{name}.py').write_text('''import json
 from pathlib import Path
@@ -327,25 +429,45 @@ def owner(tmp_path):
     try:
         yield database
     finally:
-        time.sleep(.2)
+        Path(name + '.finalizing').touch()
+        deadline = time.monotonic() + 15
+        while not Path('release-finalizers').exists():
+            assert time.monotonic() < deadline
+            time.sleep(.002)
         with sqlite3.connect(database) as connection:
             assert connection.execute('SELECT count(*) FROM retained').fetchone()[0] == 0
         Path(name + '.finalized.json').write_text(json.dumps({'workspace': str(tmp_path)}))
 
 def test_interrupted(owner):
-    time.sleep(10)
+    while True:
+        time.sleep(.02)
 ''')
     basetemp = root / 'parallel-custody-temp'
-    result = run('--basetemp', str(basetemp), '--test-time-limit=2')
-    assert result.returncode == 2, result.stdout + result.stderr
-    started = list(root.glob('*.started.json'))
-    assert len(started) == 2, result.stdout + result.stderr
-    for path in started:
-        observation = json.loads(path.read_text())
-        assert path.with_name(path.name.replace('.started.', '.finalized.')).is_file(), result.stdout + result.stderr
-        assert not Path(observation['workspace']).exists()
-    assert not basetemp.exists()
-    assert 'unable to open database file' not in result.stdout + result.stderr
+    with run.start('--basetemp', str(basetemp), '--test-time-limit=2') as child:
+        state = SimpleNamespace(root=root, basetemp=basetemp, child=child)
+
+        def wait_for(observed):
+            deadline = time.monotonic() + 15
+            while not observed() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(.002)
+            assert observed(), f'Owned workers exited before their expected boundary: {child.poll()}'
+
+        try:
+            wait_for(lambda: (root / 'coordinator.json').exists())
+            yield state
+            (root / 'collect').touch()
+            wait_for(lambda: len(list(root.glob('*.started.json'))) == 2)
+            yield state
+            os.killpg(child.pid, signal.SIGALRM)
+            wait_for(lambda: len(list(root.glob('*.finalizing'))) == 2)
+            yield state
+            (root / 'release-finalizers').touch()
+            stdout, stderr = child.communicate(timeout=15)
+            state.result = subprocess.CompletedProcess(child.args, child.returncode, stdout, stderr)
+        finally:
+            (root / 'release-finalizers').touch()
+    state.result.cleanup_receipt = child.cleanup_receipt
+    yield state
 
 
 def test_lingering_worker_barrier_blocks_admission_before_collection(mini_suite):

@@ -1,9 +1,10 @@
 import numpy as np
-from tests.enrichment_support import seed_enrichment
 import pytest
 
 from tests import model_support
-from tests.store_fixture_support import bounded_consumer_schema
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import album_choices, choice_evidence, embedding_vectors, rec_params, scoring, taste_viz
 from yt_playlist.rec.taste_context import PlaylistTaste
 
@@ -27,14 +28,19 @@ def test_album_interest_input_has_real_empty_owners_and_snapshot_guards(_pristin
 
 
 def album(store, browse, title, genre, size, year='2020'):
-    store.collection.add_saved_album({"browse": browse, "title": title, "artist": title, "year": year})
-    keys = []
-    for index in range(size):
-        track = store.tracks.upsert_track(f"{browse}-{index}", f"Track {index}", title, title, 100,
-                                         album_browse_id=browse)
-        seed_enrichment(store, track, genre, year)
-        keys.append(f"track {index}|{title.lower()}")
-    return keys
+    tracks = [{'key': f'track {index}|{title.lower()}', 'video_id': f'{browse}-{index}',
+               'title': f'Track {index}', 'artist': title, 'album': title,
+               'genre': genre, 'year': year, 'duration_s': 100} for index in range(size)]
+    # Interest scoring owns the saved release, real membership and both model
+    # spaces. Supply completed catalog facts below provider ingestion.
+    with atomic_write(store):
+        store.collection.add_saved_album({"browse": browse, "title": title, "artist": title, "year": year})
+        seed_publication_subjects(store, tracks)
+        for track in tracks:
+            entry = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?',
+                                       (track['video_id'],)).fetchone()[0]
+            store.tracks.albums.link(entry, browse, title=title, artist=title)
+    return [track['key'] for track in tracks]
 
 
 def test_saved_album_only_library_seeds_both_spaces_without_history(store):
@@ -102,6 +108,8 @@ def test_context_allocation_does_not_prefer_the_average_of_separated_interests()
 def test_album_recommendations_use_interest_ranking_for_new_releases(store):
     album(store, "release-a", "Techno", "Techno", 2)
     album(store, "release-b", "Folk", "Folk", 2)
+    entry = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?', ('release-a-0',)).fetchone()[0]
+    store.artists.observe(entry, 'Techno', source='fixture')
     model_support.build_content_model(store)
     discoveries = [{"browse_id": "new-techno", "title": "New", "artist": "New artist",
                     "genre": "Techno", "year": "2020", "thumbnail": None},
@@ -120,8 +128,9 @@ def test_album_recommendations_use_interest_ranking_for_new_releases(store):
 
 def test_companion_work_is_limited_to_the_frontier_with_identical_track_selection(store, monkeypatch):
     keys = []
-    for i in range(40):
-        keys.extend(album(store, f'saved-{i}', f'Artist {i}', 'Jazz' if i % 2 else 'Techno', 1))
+    with atomic_write(store):
+        for i in range(40):
+            keys.extend(album(store, f'saved-{i}', f'Artist {i}', 'Jazz' if i % 2 else 'Techno', 1))
     model_support.build_content_model(store)
     discoveries = [{'browse_id': f'new-{i}', 'artist': f'New artist {i}', 'title': f'New record {i}',
                     'genre': 'Jazz' if i % 2 else 'Techno', 'year': '2020'} for i in range(40)]

@@ -20,6 +20,18 @@ from yt_playlist.web import spotify_import
 pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Import publication checks do not start the HTTP lifecycle."""
+
+
+def test_import_rejection_schema_input_keeps_installed_history_and_snapshot_guards(_bounded_installed_schema):
+    source = _bounded_installed_schema(93).source
+    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 93
+    assert source._snapshot_revisions.conn is source.conn
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
 def prepare(conn):
     publication.OWNER.worker.install(conn)
     return finish(publication.OWNER.worker, conn).prepared_revision
@@ -30,6 +42,19 @@ def rejection_inputs(store):
     revision = prepare(store.conn)
     assert publication.OWNER.selected(store.conn) is None
     return raw, revision
+
+
+def test_import_rejection_input_keeps_exact_original_fields_and_unselected_custody(
+        _bounded_installed_schema, staged_custody_templates):
+    template = staged_custody_templates(93, 'spotify-import', rejection_inputs,
+        completed=_bounded_installed_schema(93))
+    raw, revision = template.result
+    header = publication.OWNER.capture(template.source.conn)
+    assert header['track_entries'] == json.loads(raw)['track_entries'] == 0
+    assert template.source.settings.get_setting(spotify_job_state.KEY) == raw
+    assert publication.OWNER.selected(template.source.conn) is None
+    assert publication.OWNER.worker.progress(template.source.conn).prepared_revision == revision
+    assert not template.source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.mark.parametrize('installed', [79, 93, 96], indirect=True)

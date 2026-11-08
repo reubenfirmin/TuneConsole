@@ -2,18 +2,26 @@
 from dataclasses import replace
 import json
 import logging
+import sqlite3
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from tests.rec.test_progressive import catalog, drain
+from tests.rec.test_progressive import catalog, drain, _pristine_current_schema
+from tests.store_fixture_support import initialize_consumer
 from yt_playlist.rec import content_model, embedding_vectors, progressive, taste_modes
 from yt_playlist.core.activity import WorkBudgetExceeded
-from yt_playlist.core import activity
+from yt_playlist.core import activity, content_preparation_state
 from yt_playlist.core.store import Store
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.repos.prepared_content import PreparedContentRepo
+
+
+def test_recovery_schema_input_keeps_completed_sql_and_real_guards(_pristine_current_schema):
+    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert _pristine_current_schema._revision_script
+    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def test_preallocated_encoding_preserves_exact_vectors_and_empty_rows():
@@ -59,12 +67,7 @@ def test_matrix_reuse_preserves_exact_modes_without_decoding_again(store, monkey
     assert serialized(actual) == serialized(expected)
 
 
-def test_periodic_audit_repairs_a_lost_queue_in_bounded_batches(store, monkeypatch, record_property):
-    # This case establishes queue/model semantics, independently of scheduler
-    # delays. Keep real budget contexts and snapshot publication; only their
-    # monotonic clock is controlled. Deadline expiry is checked separately.
-    monkeypatch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: 0.0))
-    record_property('work_budget_clock', 'controlled; production budget values unchanged')
+def _repair_after_losing_a_queue_prefix(store):
     catalog(store, 19)
     with store.conn:
         store.conn.execute('DELETE FROM rec_content_pending')
@@ -94,9 +97,97 @@ def test_periodic_audit_repairs_a_lost_queue_in_bounded_batches(store, monkeypat
     assert not p.repair(1100)
     assert p.repair(2000)
     assert [row[0] for row in store.prepared_content.pending(100)] == expected[1:] + expected[:1]
-    drain(p, 2000)
-    assert p.fit(2060)
-    before = store.rec_model.content_generation()
+    return p
+
+
+@pytest.fixture(scope='module')
+def periodic_audit_home(tmp_path_factory):
+    return tmp_path_factory.mktemp('periodic-audit') / 'app-home'
+
+
+@pytest.fixture(scope='module')
+def periodic_audit_queue(periodic_audit_home, _pristine_current_schema):
+    # Queue repair has no reopen contract. Keep its original in-memory SQL
+    # writer; file durability is exercised by the restart cases below.
+    store = Store(':memory:')
+    try:
+        initialize_consumer(store, _pristine_current_schema)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv('YT_PLAYLIST_HOME', str(periodic_audit_home))
+            patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+            patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+            patch.delenv('DEEPSEEK_API_KEY', raising=False)
+            patch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: 0.0))
+            patch.setattr(progressive.vibe_joint_preparation, 'qualified', lambda: False)
+            p = _repair_after_losing_a_queue_prefix(store)
+        yield p
+    finally:
+        store.conn.close()
+
+
+def test_periodic_audit_requeues_a_lost_prefix_without_reordering_existing_work(periodic_audit_queue):
+    p = periodic_audit_queue
+    expected = [row[0] for row in p.store.conn.execute('SELECT identity_key FROM recordings ORDER BY identity_key')]
+    assert [row[0] for row in p.store.prepared_content.pending(100)] == expected[1:] + expected[:1]
+    assert p._repair_after is None
+    assert not p.store.conn.in_transaction
+
+
+@pytest.fixture(scope='module')
+def periodic_audit_inputs(periodic_audit_queue, periodic_audit_home):
+    p = periodic_audit_queue
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('YT_PLAYLIST_HOME', str(periodic_audit_home))
+        patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+        patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+        patch.delenv('DEEPSEEK_API_KEY', raising=False)
+        patch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: 0.0))
+        patch.setattr(progressive.vibe_joint_preparation, 'qualified', lambda: False)
+        drain(p, 2000)
+    return p
+
+
+def test_periodic_audit_captures_every_repaired_input(periodic_audit_inputs):
+    p = periodic_audit_inputs
+    assert not p.store.prepared_content.pending(100)
+    assert p.store.conn.execute('SELECT count(*) FROM prepared_recording_inputs').fetchone()[0] == 19
+    assert not p.store.conn.in_transaction
+
+
+@pytest.fixture(scope='module')
+def periodic_audit_publication(periodic_audit_inputs, periodic_audit_home):
+    p = periodic_audit_inputs
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('YT_PLAYLIST_HOME', str(periodic_audit_home))
+        patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+        patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+        patch.delenv('DEEPSEEK_API_KEY', raising=False)
+        patch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: 0.0))
+        patch.setattr(progressive.vibe_joint_preparation, 'qualified', lambda: False)
+        assert p.fit(2060)
+    return p, p.store.rec_model.content_generation()
+
+
+def test_periodic_audit_publishes_every_repaired_input(periodic_audit_publication):
+    p, before = periodic_audit_publication
+    assert len(before['library']) == 19
+    assert not p.store.prepared_content.pending(100)
+    assert not p.store.conn.in_transaction
+
+
+def test_periodic_audit_repairs_a_lost_queue_in_bounded_batches(
+        periodic_audit_publication, periodic_audit_home, monkeypatch, record_property):
+    # Real queue scans, fitting and publication continue on the same writer.
+    # Only the budget clock is controlled; deadline rejection has its own case.
+    p, before = periodic_audit_publication
+    store = p.store
+    monkeypatch.setenv('YT_PLAYLIST_HOME', str(periodic_audit_home))
+    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+    monkeypatch.delenv('DEEPSEEK_API_KEY', raising=False)
+    monkeypatch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: 0.0))
+    monkeypatch.setattr(progressive.vibe_joint_preparation, 'qualified', lambda: False)
+    record_property('work_budget_clock', 'controlled; production budget values unchanged')
     key = before['library'][0][0]
     with store.conn:
         store.conn.execute('DELETE FROM prepared_recording_inputs WHERE recording_id='
@@ -288,22 +379,48 @@ def test_repair_fences_each_read_owner_and_ignores_independent_owners(store, mon
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
-def test_memory_deferral_survives_restart_and_recovers_without_new_activity(tmp_path):
-    path = tmp_path / 'recovery.db'
+@pytest.fixture(scope='module')
+def blocked_memory_input(tmp_path_factory, _pristine_current_schema):
+    path = tmp_path_factory.mktemp('memory-recovery') / 'recovery.db'
     store = Store(path)
-    store.init_schema()
     try:
-        catalog(store, 12)
-        # Admit the small input corpus, then reject the encoder/clustering peak.
-        p = progressive.Preparation(store, budget=replace(progressive.Budget(), memory_bytes=128 * 1024))
-        drain(p)
-        assert not p.fit(1000)
+        initialize_consumer(store, _pristine_current_schema)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv('YT_PLAYLIST_HOME', str(path.parent / 'app-home'))
+            patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+            patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+            patch.delenv('DEEPSEEK_API_KEY', raising=False)
+            patch.setattr(progressive.vibe_joint_preparation, 'qualified', lambda: False)
+            catalog(store, 12)
+            # Admit all inputs, then reject the real encoder/clustering peak.
+            p = progressive.Preparation(store, budget=replace(progressive.Budget(), memory_bytes=128 * 1024))
+            drain(p)
+            assert not p.fit(1000)
         warning = progressive.maintenance_view(store)
-        assert warning['blocked'] and warning['reason'] == 'matrix-memory-budget'
-        assert warning['next_attempt_at'] == 1900
-        assert set(warning['phase_bytes']) == {'encoding', 'clustering', 'publication'}
+    finally:
         store.conn.close()
-        store = Store(path)
+    return path, warning
+
+
+def test_memory_deferral_persists_exact_budget_and_retry_inputs(blocked_memory_input):
+    path, warning = blocked_memory_input
+    assert warning['blocked'] and warning['reason'] == 'matrix-memory-budget'
+    assert warning['next_attempt_at'] == 1900
+    assert set(warning['phase_bytes']) == {'encoding', 'clustering', 'publication'}
+    # Inspect the closed writer's durable state independently before reopening.
+    with sqlite3.connect(f'file:{path}?mode=ro', uri=True) as conn:
+        conn.row_factory = sqlite3.Row
+        raw = content_preparation_state.get(conn, progressive.FIT_STATE)
+        persisted = json.loads(raw)
+        assert persisted['reason'] == warning['reason']
+        assert persisted['next_attempt_at'] == 1900
+        assert conn.execute('SELECT count(*) FROM prepared_recording_inputs').fetchone()[0] == 12
+
+
+def test_memory_deferral_survives_restart_and_recovers_without_new_activity(blocked_memory_input, monkeypatch):
+    monkeypatch.setattr(progressive.vibe_joint_preparation, 'qualified', lambda: False)
+    store = Store(blocked_memory_input[0])
+    try:
         store.init_schema()
         reopened = progressive.Preparation(store)
         assert not reopened.due(1899) and not reopened.fit(1899)

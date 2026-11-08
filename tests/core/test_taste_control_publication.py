@@ -18,6 +18,18 @@ from yt_playlist.core.store import Store
 pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Taste SQL and file publication do not start the HTTP lifecycle."""
+
+
+def test_optional_owner_input_keeps_installed_85_history_and_snapshot_guards(_bounded_installed_schema):
+    source = _bounded_installed_schema(85).source
+    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 85
+    assert source._snapshot_revisions.conn is source.conn
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
 def prepare(conn, owner):
     owner.worker.install(conn)
     return finish(owner.worker, conn).prepared_revision

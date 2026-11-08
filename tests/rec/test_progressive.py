@@ -9,25 +9,53 @@ import numpy as np
 import pytest
 
 from tests.conftest import seed_catalog_track
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.core import catalog as catalog_writes
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.store import Store
 from yt_playlist.rec import content_model, embedding_training, embedding_vectors, model_refresh, rec_params
-from yt_playlist.rec import musical_preparation, vibe_preparation
+from yt_playlist.rec import musical_preparation, vibe_preparation, vibe_joint_preparation
 from yt_playlist.rec.progressive import BASIS_STATE, Budget, Preparation
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.rec.worker_queue import Job
 from yt_playlist.controllers.prepared_content import PreparedContent
 
 
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('techno', 'Techno'), ('jazz', 'Jazz'),
+                                 ('rock', 'Rock'), ('folk', 'Folk'),
+                                 ('classical', 'Classical'))) as schema:
+        yield schema
+
+
+def test_progressive_schema_input_keeps_completed_sql_and_real_guards(_pristine_current_schema):
+    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert _pristine_current_schema._revision_script
+    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
+
+
 def catalog(store, n=12):
-    ids = []
-    for i in range(n):
-        tid = seed_catalog_track(store, f'song {i:04}|artist {i}', f'Song {i:04}',
-                                 f'Artist {i}', video_id=f'v{i}',
-                                 genre=('Techno', 'Jazz', 'Rock')[i % 3],
-                                 bpm=80 + i, energy=(i % 10) / 10)
-        ids.append(tid)
+    # Preparation consumes selected catalog inputs. Provider observations and
+    # per-field reconciliation have their own owners; retain every recording,
+    # artist credit and audio value without repeating that ingestion workflow.
+    items = [dict(key=f'song {i:04}|artist {i}', title=f'Song {i:04}',
+                  artist=f'Artist {i}', video_id=f'v{i}',
+                  genre=('Techno', 'Jazz', 'Rock')[i % 3]) for i in range(n)]
+    seed_publication_subjects(store, items)
+    ids = [store.conn.execute('SELECT id FROM recordings WHERE identity_key=?',
+                             (item['key'],)).fetchone()[0] for item in items]
+    first_artist = store.conn.execute('SELECT coalesce(max(id),0)+1 FROM artists').fetchone()[0]
+    with store.conn:
+        store.conn.executemany('UPDATE recordings SET bpm=?,energy=? WHERE id=?',
+                               [(80 + i, (i % 10) / 10, rid) for i, rid in enumerate(ids)])
+        store.conn.executemany('INSERT INTO artists(id,name,provisional) VALUES (?,?,1)',
+                               [(first_artist + i, item['artist']) for i, item in enumerate(items)])
+        store.conn.executemany("INSERT INTO artist_aliases VALUES (?,?,'fixture')",
+                               [(first_artist + i, item['artist'].lower()) for i, item in enumerate(items)])
+        store.conn.executemany("INSERT INTO entry_artists VALUES (?,0,?,?,'fixture')",
+                               [(rid, first_artist + i, items[i]['artist']) for i, rid in enumerate(ids)])
     return ids
 
 
@@ -353,12 +381,17 @@ def test_full_fit_memory_limit_preserves_previous_publication_and_pending_work(s
     assert store.rec_refresh.has_pending_changes()
 
 
-def test_grouping_settings_are_not_held_behind_metadata_accumulation(store):
+def test_grouping_settings_are_not_held_behind_metadata_accumulation(store, monkeypatch):
+    # Joint audio-model qualification is independent of grouping scheduling.
+    monkeypatch.setattr(vibe_joint_preparation, 'qualified', lambda: False)
     catalog(store, 96)
     p = Preparation(store)
     drain(p)
     assert p.fit(1000)
-    assert model_refresh.rebuild(store, 1000)
+    # The full-model producer owns its numerical rebuild. This scheduling
+    # input says both completed fits are present; the checkpoint remains real.
+    store.settings.publish_values({'rec_fit_inputs': 'completed-track-fit',
+                                   'rec_artist_fit_inputs': 'completed-artist-fit'})
     p.completed_full(p.full_checkpoint(1000))
     assert not p.due(1060) and not p.full_due(1060)
     rec_params.set_param(store, 'modes_k', 2)

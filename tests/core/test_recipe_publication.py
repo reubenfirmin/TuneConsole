@@ -10,10 +10,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.core.test_predecessor_writes import admitted_installed as installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_recipe_membership_preparation import seed, finish, head
 from tests.genre_catalog_support import bound_catalog
 from tests.store_fixture_support import bounded_consumer_schema
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import genre_identity, recipe_memberships, schema_admission, schema_definition
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.migrations.runner import Context
@@ -34,6 +35,14 @@ SELECTED = {**LISTS, 'genres':['Canonical known','Unadmitted genre'],
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     """These SQL/file owners never start the web lifespan or sync worker."""
+
+
+@pytest.mark.parametrize('version', [79, 88])
+def test_recipe_consumer_inputs_keep_installed_history_and_snapshot_guards(_bounded_installed_schema, version):
+    source = _bounded_installed_schema(version).source
+    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
+    assert source._snapshot_revisions.conn is source.conn
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.fixture
@@ -299,7 +308,7 @@ def test_admitted_native_recipe_reader_matches_published_values(native_recipe_in
 
 
 @pytest.mark.parametrize('installed',[88],indirect=True)
-def test_duplicate_resolved_identity_stops_selection_without_losing_ordered_intent(installed):
+def test_duplicate_resolved_identity_stops_selection_without_losing_ordered_intent(installed, independent_regular_ddl):
     store,_=installed
     original=seed(store)
     stage=ready(store.conn)
@@ -340,7 +349,7 @@ def test_compatible_replacement_reference_edit_and_delete_withdraw_and_reconcile
 
 @pytest.mark.parametrize('installed',[88],indirect=True)
 @pytest.mark.parametrize('damage',['wrong','missing','extra'])
-def test_independent_verification_rejects_bad_prepared_members(installed,damage):
+def test_independent_verification_rejects_bad_prepared_members(installed,damage,independent_regular_ddl):
     store,_=installed
     seed(store,LISTS)
     preparation.JOB.install(store.conn)
@@ -360,7 +369,7 @@ def test_independent_verification_rejects_bad_prepared_members(installed,damage)
 
 
 @pytest.mark.parametrize('installed',[79],indirect=True)
-def test_missing_original_repair_and_failed_preparation_do_not_block_regular_schema(installed):
+def test_missing_original_repair_and_failed_preparation_do_not_block_regular_schema(installed,independent_regular_ddl):
     store,_=installed
     seed(store,LISTS)
     stage=ready(store.conn)
@@ -382,7 +391,7 @@ def test_missing_original_repair_and_failed_preparation_do_not_block_regular_sch
 
 
 @pytest.mark.parametrize('installed',[88],indirect=True)
-def test_slow_file_check_allows_compatible_write_and_fences_stale_selection(installed,monkeypatch):
+def test_slow_file_check_allows_compatible_write_and_fences_stale_selection(installed,monkeypatch,independent_regular_ddl):
     store,_=installed
     seed(store,LISTS)
     stage=ready(store.conn)

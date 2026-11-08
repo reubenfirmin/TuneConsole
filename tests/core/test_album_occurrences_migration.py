@@ -15,6 +15,9 @@ from yt_playlist.library.album_catalog import remember_album
 def installed_98(path):
     store = Store(path)
     try:
+        # Construct the genuine empty predecessor atomically instead of
+        # syncing each CREATE statement to disk before the seed transaction.
+        store.conn.execute('BEGIN')
         for sql in current.statements(version=98):
             store.conn.execute(sql)
         genre_identity.seed_catalog(store.conn)
@@ -87,6 +90,14 @@ def test_owner_source_count_and_frozen_capture_guards(store):
     with pytest.raises(sqlite3.OperationalError,match='view'):
         store.conn.execute('DELETE FROM album_tracks')
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
+
+
+def test_occurrence_predecessor_keeps_real_98_history_and_owned_track_table(legacy_owner_schema):
+    source = legacy_owner_schema(98)
+    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 98
+    assert source.execute("SELECT type FROM sqlite_schema WHERE name='album_tracks'").fetchone()[0] == 'table'
+    assert not source.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def test_interruption_rolls_back_owner_replacement_then_restart_preserves_it(tmp_path,monkeypatch,legacy_owner_store):

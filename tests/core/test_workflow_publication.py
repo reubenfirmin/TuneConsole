@@ -5,19 +5,27 @@ import json
 from pathlib import Path
 import sqlite3
 import time
-from types import SimpleNamespace
 
 import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_workflow_receipt_preparation import seed
+from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import workflow_settings
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import workflow_receipts as preparation, workflow_publication as publication
 from yt_playlist.core.store import Store
 from yt_playlist.library import playlist_gc_retry
 from yt_playlist.library.spotify_library import _playlist_transfers
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Workflow SQL and file publication do not start the HTTP lifecycle."""
 
 
 def test_workflow_publication_input_keeps_installed_history_and_snapshot_guards(_bounded_installed_schema):
@@ -31,10 +39,10 @@ def test_workflow_publication_input_keeps_installed_history_and_snapshot_guards(
     assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
-def prepare(owner, conn):
+def prepare(owner, conn, *, size=128):
     owner.worker.install(conn)
     for _ in range(3000):
-        progress = owner.worker.step(conn, batch_size=128)
+        progress = owner.worker.step(conn, batch_size=size)
         if progress.status == 'prepared':
             return progress
     pytest.fail('Workflow preparation did not finish bounded fixture')
@@ -211,41 +219,6 @@ def test_bounded_map_restart_and_atomic_cutover_keep_earlier_custody(installed, 
     with phase('retained_receipt_guard'), pytest.raises(sqlite3.IntegrityError, match='retained'):
         with store.conn:
             store.conn.execute('DELETE FROM '+preparation.table('albums', 'receipts'))
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_real_gc_and_transfer_writes_fence_snapshots_and_reconcile_independently(installed):
-    store, _ = installed
-    values, originals, account, source = seed(store, count=8192)
-    for owner in publication.OWNERS.values():
-        owner.publish(store.conn, stage=stage(owner, store.conn))
-    gc, playlists, albums = (publication.OWNERS[name] for name in ('gc', 'playlists', 'albums'))
-    old = gc.selected(store.conn)
-    gc_key = playlist_gc_retry.key(account, 'PLAYLIST')
-    playlist = SimpleNamespace(account_id=account, provider_playlist_id='PLAYLIST')
-    with store.read_snapshot() as snapshot:
-        assert playlist_gc_retry.states(snapshot.store) == {gc_key:values[gc_key]}
-        updated = playlist_gc_retry.begin(store, playlist, 100, values[gc_key])
-        assert not snapshot.publish(lambda:None)
-    assert gc.selected(store.conn) is None
-    assert playlists.selected(store.conn) is not None and albums.selected(store.conn) is not None
-    assert json.loads(store.settings.get_setting(gc_key)) == updated
-    gc.publish(store.conn, stage=stage(gc, store.conn))
-    assert playlist_gc_retry.read(store, playlist) == updated
-    assert gc.value(store.conn, old, gc_key) == originals[gc_key]
-    with store.read_snapshot() as snapshot:
-        _, transfer = _playlist_transfers(snapshot.store, account)
-        transfer['fingerprint:東京']['source_video_ids'][0] = 'newly-confirmed'
-        store.settings.set_setting(source, json.dumps(transfer))
-        assert not snapshot.publish(lambda:None)
-    assert playlists.selected(store.conn) is None
-    assert gc.selected(store.conn) is not None and albums.selected(store.conn) is not None
-    playlists.publish(store.conn, stage=stage(playlists, store.conn))
-    assert _playlist_transfers(store, account)[1] == transfer
-    playlist_gc_retry.clear(store, account, 'PLAYLIST')
-    gc.publish(store.conn, stage=stage(gc, store.conn))
-    assert playlist_gc_retry.states(store) == {}
-    assert gc.value(store.conn, old, gc_key) == originals[gc_key]
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

@@ -32,6 +32,20 @@ def isolation_template(isolation_schema):
         yield template
 
 
+def test_isolation_schema_input_has_read_only_sql_and_real_guards(isolation_schema):
+    assert isolation_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert isolation_schema._revision_script
+    assert not isolation_schema.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_isolation_template_retains_both_selected_surfaces_and_exact_model_inputs(isolation_template):
+    store = isolation_template.source
+    assert store.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert {head['surface'] for head in isolation_template.result} == {'home', 'fresh'}
+    _saved(store)
+    assert len(store.rec_model.get_rec_content_vectors()) == 1
+
+
 @pytest.fixture(params=["memory", "file"])
 def database(request, tmp_path, isolation_schema, isolation_template, ranking_inputs, monkeypatch):
     path = ":memory:" if request.param == "memory" else tmp_path / "state.db"

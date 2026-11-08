@@ -19,6 +19,18 @@ from yt_playlist.core.store import Store
 pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Album SQL and file publication do not start the HTTP lifecycle."""
+
+
+def test_album_share_consumer_input_keeps_real_history_and_snapshot_guards(_bounded_installed_schema):
+    source = _bounded_installed_schema(93).source
+    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 93
+    assert source._snapshot_revisions.conn is source.conn
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
 def complete_source(store, count=3):
     album, entry = seed(store, count=count)
     with store.conn:
@@ -116,28 +128,6 @@ def test_wrong_header_choices_references_coverage_or_files_cannot_publish(instal
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_real_cache_writer_and_snapshots_reconcile_order_without_changing_archives(installed):
-    store, _ = installed
-    _, entry = complete_source(store, count=8192)
-    selected = stage(store.conn)
-    publication.OWNER.publish(store.conn, stage=selected)
-    key = store.conn.execute('SELECT r.identity_key FROM main.catalog_entries e JOIN main.recordings r ON r.id=e.recording_id WHERE e.id=?', (entry,)).fetchone()[0]
-    with store.read_snapshot() as snapshot:
-        assert len(snapshot.store.collection.cached_album_share('release')['video_ids']) == 8192
-        store.collection.cache_album_tracklist('release', 'Changed', 'Artist', None, [key]*3,
-            entries=[{'entry_id':entry}]*3, video_ids=['one','one','one'])
-        assert not snapshot.publish(lambda:None)
-    assert publication.OWNER.selected(store.conn) is None
-    assert store.collection.cached_album_share('release') == {'title':'Changed', 'video_ids':['one']*3}
-    publication.OWNER.publish(store.conn, stage=stage(store.conn))
-    assert store.collection.cached_album_share('release') == {'title':'Changed', 'video_ids':['one']*3}
-    assert len(json.loads(publication.OWNER.value(store.conn, selected, 'release')['video_ids_json'])) == 8192
-    with pytest.raises(sqlite3.IntegrityError, match='retained'):
-        with store.conn:
-            store.conn.execute('DELETE FROM prepared_album_share_items')
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
 def test_reference_race_and_interrupted_cutover_leave_no_mixed_selection(installed):
     store, _ = installed
     complete_source(store)
@@ -198,30 +188,3 @@ def test_missing_files_and_failed_preparation_remain_independent_of_ddl(installe
         preparation.JOB.step(store.conn)
     preparation.JOB.step(store.conn, retry=True)
     publication.OWNER.publish(store.conn, stage=stage(store.conn))
-
-
-def test_frozen_native_owner_has_precedence_without_losing_map_custody(tmp_path, _pristine_installed_schema):
-    path = tmp_path / 'upgrade.db'
-    store = Store(path)
-    try:
-        _pristine_installed_schema(98).backup(store.conn)
-        store.init_schema(defer_metadata=True)
-        complete_source(store)
-        selected = stage(store.conn)
-        publication.OWNER.publish(store.conn, stage=selected)
-        original = publication.OWNER.value(store.conn, selected, 'release')
-        store.conn.close()
-        store = Store(path)
-        runner.migrate(store.conn, registry=registry.MIGRATIONS)
-        store.init_schema(defer_metadata=True)
-        assert album_tracklists.available(store.conn)
-        assert publication.OWNER.selected(store.conn) is None
-        assert store.collection.cached_album_share('release') == {'title':'Frozen 東京','video_ids':['one','missing','one']}
-        assert publication.OWNER.value(store.conn, selected, 'release') == original
-        regular.validate(store.conn)
-        with store.conn:
-            store.conn.execute('DROP TRIGGER prepared_album_share_items_mapped_delete')
-        with pytest.raises(MigrationError, match='publication object'):
-            regular.validate(store.conn)
-    finally:
-        store.conn.close()

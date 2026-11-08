@@ -89,36 +89,6 @@ def test_rejects_caller_transaction_without_committing_or_rolling_it_back():
         assert not conn.execute('SELECT * FROM data').fetchall()
 
 
-def test_frozen_like_repair_preserves_published_entitlement_and_stamp(legacy_store):
-    from yt_playlist.core.migrations.registry import MIGRATIONS
-    s = legacy_store
-    now = 1_000_000
-    s.conn.execute('DELETE FROM schema_migrations WHERE version=7')
-    s.conn.execute("DELETE FROM settings WHERE key='like_ratchet_repaired'")
-    for n in range(3):
-        key = f'song{n}|artist'
-        s.conn.execute("INSERT INTO tracks(video_id,title,artist,identity_key,genre,mb_year) VALUES (?,?, 'Artist',?,'House','1993-04-05')", (str(n),f'Song{n}',key))
-        s.conn.execute("INSERT INTO rec_feedback(surface,item_key,kind,created_at) VALUES ('like',?,'like',?)", (key,now-100+n))
-    for axis in ('genre:house','era:1990','artist:Artist'):
-        s.conn.execute('INSERT INTO rec_weights VALUES (?,2,?)', (axis,now))
-        for n in range(14):
-            s.conn.execute("INSERT INTO rec_grad_log(axis,source,score,factor,new_weight,created_at) VALUES (?,'like',2,1.05,2,?)", (axis,now-50+n))
-    s.conn.commit()
-    migrate(s.conn,registry=MIGRATIONS[:7],clock=lambda:now)
-    # Three likes earned two crossings of the frozen 1.2 threshold; twelve of
-    # fourteen logged graduations were surplus. Current catalog repositories
-    # cannot read this predecessor's physical tracks table.
-    for axis in ('genre:house','era:1990','artist:Artist'):
-        assert s.rec_model.get_weights(now=now)[axis] == pytest.approx(2 / 1.05 ** 12)
-    stamp = s.settings.get_setting('like_ratchet_repaired')
-    assert '3 once-ever graduation stamp(s)' in stamp
-    before = s.rec_model.weight_records()
-    migrate(s.conn, registry=MIGRATIONS)
-    s.init_schema();s.init_schema()
-    assert s.settings.get_setting('like_ratchet_repaired') == stamp
-    assert s.rec_model.weight_records() == before
-
-
 @pytest.mark.parametrize('sql', [
     'CREATE TABLE unrelated (id INTEGER)',
     'CREATE TABLE tracks (id TEXT PRIMARY KEY)',

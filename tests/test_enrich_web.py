@@ -6,13 +6,44 @@ import pytest
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
-from tests.store_fixture_support import file_consumer_store as store
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('rock', 'Rock'), ('pop', 'Pop'))) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def enrichment_routes_only(monkeypatch, enrichment_template_bytecode):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, enrich
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        app_update.build(ctx), audio_preview.build(ctx), enrich.build(ctx)])
+    templates = webapp.Jinja2Templates
+
+    def compiled_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        result.env.bytecode_cache = enrichment_template_bytecode
+        return result
+
+    monkeypatch.setattr(webapp, 'Jinja2Templates', compiled_templates)
+
+
+@pytest.fixture(scope='module')
+def enrichment_template_bytecode(tmp_path_factory):
+    from jinja2 import FileSystemBytecodeCache
+
+    return FileSystemBytecodeCache(str(tmp_path_factory.mktemp('enrichment-bytecode')))
 
 
 def _client(store):
     iid = store.accounts.upsert_account("main", "cred", None, True)
-    app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
-    return TestClient(app, base_url="http://127.0.0.1")
+    app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0,
+                     background_work=False)
+    return TestClient(app, base_url="http://127.0.0.1", backend_options={'use_uvloop': True})
 
 
 def _seed(store):
@@ -321,8 +352,13 @@ def test_current_value_outside_provider_candidates_can_be_kept(store):
 
 
 def test_conflict_review_is_paginated(store):
-    for i in range(21):
-        tid = store.tracks.upsert_track(f"vid{i}", f"Conflict song {i:02}", "Artist", None, 200)
+    from tests.recommendation_support import seed_publication_subjects
+
+    seed_publication_subjects(store, [
+        {'key': f'conflict song {i:02}|artist', 'video_id': f'vid{i}',
+         'title': f'Conflict song {i:02}', 'artist': 'Artist', 'duration_s': 200}
+        for i in range(21)])
+    for tid, in store.conn.execute('SELECT id FROM catalog_entries').fetchall():
         store.enrichment.upsert_conflict(tid, "genre", [{"provider": "a", "value": "Rock"},
                                              {"provider": "b", "value": "Pop"}])
     c = _client(store)

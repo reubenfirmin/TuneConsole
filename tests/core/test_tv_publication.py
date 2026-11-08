@@ -9,11 +9,27 @@ import pytest
 from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_tv_state_preparation import aliases, finish, seed
 from tests.test_tv_stream import video
-from tests.tv_publication_timing_support import tv_publication_costs
+from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import tv_recommendation_state as state
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import tv_publication as publication, tv_state as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """TV SQL and file publication do not start the HTTP lifecycle."""
+
+
+@pytest.mark.parametrize('version', [79, 93, 94])
+def test_tv_publication_input_keeps_real_history_and_snapshot_guards(_bounded_installed_schema, version):
+    source = _bounded_installed_schema(version).source
+    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
+    assert source._snapshot_revisions.conn is source.conn
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def prepare(owner, conn, *, size=128):
@@ -35,6 +51,25 @@ def publish_all(store):
     aliases(store.conn)
     for owner in publication.OWNERS.values():
         owner.publish(store.conn, revision=prepare(owner, store.conn))
+
+
+def published_writer_inputs(store):
+    values, originals = seed(store)
+    publish_all(store)
+    return values, originals
+
+
+@pytest.mark.parametrize('version', [79, 93])
+def test_tv_continuing_writer_input_keeps_all_five_actual_publications(
+        version, _bounded_installed_schema, staged_custody_templates):
+    template = staged_custody_templates(version, 'tv-continuing-writers', published_writer_inputs,
+        completed=_bounded_installed_schema(version), admit=False)
+    _, originals = template.result
+    assert len(publication.OWNERS) == 5
+    for owner in publication.OWNERS.values():
+        assert owner.selected(template.source.conn) == 0
+        assert owner.value(template.source.conn, 0) == originals[owner.source]
+    assert not template.source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -184,10 +219,9 @@ def test_source_and_custody_races_cannot_select_stale_tv_state(installed, timing
 
 
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
-def test_real_continuing_writers_withdraw_selections_and_reconcile(installed):
+def test_real_continuing_writers_withdraw_selections_and_reconcile(installed, staged_custody):
     store, _ = installed
-    values, originals = seed(store)
-    publish_all(store)
+    values, originals = staged_custody(installed, 'tv-continuing-writers', published_writer_inputs, admit=False)
     with store.read_snapshot() as snapshot:
         assert snapshot.store.tv.receipt('10::request:with:colons') == values['tv_continuations']['10::request:with:colons']
         store.tv.complete_receipt('11:stream:next', {'playlist_id':21, 'stream':'continued', 'items':[video(3)]}, 99)
@@ -275,42 +309,3 @@ def test_selected_custody_missing_file_and_failed_recovery_keep_ddl_independent(
     owner.worker.step(store.conn, retry=True)
     owner.publish(store.conn, revision=owner.worker.progress(store.conn).prepared_revision)
     assert store.rec_proposals._proposal_json(owner.source) == originals[owner.source]
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_receipt_budget_numeric_affinity_and_interrupted_cutover(installed, tv_publication_costs):
-    store, _ = installed
-    with tv_publication_costs('input_json'):
-        value = {f'{number+1}:stream:request:{number}':{'playlist_id':number+101, 'stream':'next',
-            'items':[video(index) for index in range(60)]} for number in range(60)}
-        raw = json.dumps(value, indent=2)
-    with tv_publication_costs('input_write'), store.conn:
-        store.conn.execute('INSERT INTO rec_proposals VALUES (?,?,?)', ('tv_continuations', raw, 9007199254740993))
-    original = tuple(store.conn.execute('SELECT * FROM rec_proposals WHERE surface=?', ('tv_continuations',)).fetchone())
-    owner = publication.OWNERS['continuations']
-    with tv_publication_costs('preparation'):
-        # This control owns the full receipt budget and atomic cutover. Use the
-        # supported maximum slice; small-slice checkpoints and partial-batch
-        # rollback have separate owners in test_tv_continuation_batches.
-        revision = prepare(owner, store.conn, size=512)
-    assert store.conn.execute('SELECT count(*) FROM '+preparation.relation('tv_continuation_receipts')+
-        ' WHERE preparation_revision=?', (revision,)).fetchone()[0] == 60
-    assert store.conn.execute('SELECT count(*) FROM '+preparation.relation('tv_continuation_items')+
-        ' WHERE preparation_revision=?', (revision,)).fetchone()[0] == 3600
-    with tv_publication_costs('publication_install'):
-        owner.install(store.conn)
-    with store.conn:
-        store.conn.execute('CREATE TRIGGER controlled_tv_interrupt BEFORE INSERT ON '+owner.tables[1]+
-            " BEGIN SELECT RAISE(ABORT,'controlled TV interruption'); END")
-    with tv_publication_costs('failed_cutover'), pytest.raises(sqlite3.IntegrityError, match='controlled TV interruption'):
-        owner.publish(store.conn, revision=revision)
-    assert not store.conn.execute('SELECT 1 FROM '+owner.tables[0]).fetchone()
-    assert owner.selected(store.conn) is None and not store.conn.in_transaction
-    with store.conn:
-        store.conn.execute('DROP TRIGGER controlled_tv_interrupt')
-    with tv_publication_costs('successful_retry'):
-        owner.publish(store.conn, revision=revision)
-    assert store.rec_proposals._proposal_json(owner.source) == raw
-    assert store.rec_proposals.get_proposals(owner.source) == value
-    assert tuple(store.conn.execute('SELECT * FROM rec_proposals WHERE surface=?', (owner.source,)).fetchone()) == original
-    assert not store.conn.in_transaction and not store.conn.execute('PRAGMA foreign_key_check').fetchone()

@@ -1,12 +1,12 @@
 """Verified release identity groups choice dates without rewriting evidence."""
 from copy import deepcopy
 from contextlib import ExitStack
-from tests.enrichment_support import seed_enrichment, use_existing_album_tracks
+from tests.enrichment_support import use_existing_album_tracks
 
 import numpy as np
 import pytest
 
-from tests import model_support
+from tests.conftest import seed_catalog_track
 from tests.prepared_fixture_support import prepared_template
 from tests.store_fixture_support import bounded_consumer_schema, reuse_reporting_reader
 from tests.repos.test_album_aliases import OLD, ALIAS, release
@@ -58,33 +58,31 @@ def seed_choice_catalog(store, first):
                                    (track['videoId'],)).fetchone()[0]
         with store.conn:
             store.conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'fixture',NULL)", (entry,))
-        seed_enrichment(store, entry, 'Rock', '2015')
         tracks.append({'key': key, 'video_id': track['videoId']})
         vectors.append((key, np.array([1., 0.], dtype=np.float32).tobytes()))
     store.collection.add_saved_album({'browse': 'anchor', 'title': 'Anchor', 'artist': 'Anchor'})
-    entry = store.tracks.upsert_track('anchor-video', 'Anchor', 'Anchor', 'Anchor', 181,
-                                     album_browse_id='anchor')
-    seed_enrichment(store, entry, 'Folk', '1990')
+    anchor = seed_catalog_track(store, 'anchor|anchor', 'Anchor', 'Anchor', video_id='anchor-video')
+    store.tracks.albums.link(anchor, 'anchor', title='Anchor', artist='Anchor')
     vectors.append(('anchor|anchor', np.array([0., 1.], dtype=np.float32).tobytes()))
     store.rec_model.replace_rec_vectors(vectors)
-    model_support.build_content_model(store)
+    # Scoring consumes completed spaces; fitting genre/year encoders has its
+    # own model owners. Both spaces still publish real private vector files.
+    store.rec_model.replace_rec_content_vectors(vectors)
     return payload, tracks
 
 
 @pytest.fixture(scope='module')
-def choice_catalogs(_pristine_current_schema, tmp_path_factory):
+def choice_catalogs(_pristine_current_schema):
     with ExitStack() as resources:
         templates = {}
 
         def template(first):
             if first not in templates:
                 def build(source):
-                    with pytest.MonkeyPatch.context() as patch, reuse_reporting_reader(source, patch):
+                    with pytest.MonkeyPatch.context() as patch:
                         use_existing_album_tracks(source, patch)
                         return seed_choice_catalog(source, first)
-                templates[first] = resources.enter_context(prepared_template(
-                    _pristine_current_schema, build,
-                    database=tmp_path_factory.mktemp('album-choice-catalog') / 'source.db'))
+                templates[first] = resources.enter_context(prepared_template(_pristine_current_schema, build))
             return templates[first]
 
         yield template
@@ -96,21 +94,27 @@ def choice_catalog(store, choice_catalogs, first):
     return deepcopy(choice_catalogs(first).result)
 
 
+@pytest.fixture
+def other_choice_store(choice_catalogs, first, tmp_path):
+    with choice_catalogs(first).open(tmp_path / 'other-choice.db') as database:
+        yield database
+
+
 @pytest.mark.parametrize('first', [OLD, ALIAS])
 def test_choice_catalog_copies_keep_models_payloads_and_aliases_private(
-        store, file_backed_store, first, choice_catalogs, choice_catalog):
+        store, other_choice_store, first, choice_catalogs, choice_catalog):
     from tests.prepared_fixture_support import roots
 
     template = choice_catalogs(first)
     second = ALIAS if first == OLD else OLD
-    other_catalog = template.restore(file_backed_store)
+    other_catalog = deepcopy(template.result)
     assert choice_catalog == other_catalog == template.result
     vectors = (template.source.rec_model.get_rec_vectors(),
                template.source.rec_model.get_rec_content_vectors())
     assert len(vectors[0]) == len(vectors[1]) == 10
-    namespaces = [set(roots(target.conn).values()) for target in (template.source, store, file_backed_store)]
+    namespaces = [set(roots(target.conn).values()) for target in (template.source, store, other_choice_store)]
     assert all(left.isdisjoint(right) for index, left in enumerate(namespaces) for right in namespaces[index + 1:])
-    for target in (store, file_backed_store):
+    for target in (store, other_choice_store):
         assert (target.rec_model.get_rec_vectors(), target.rec_model.get_rec_content_vectors()) == vectors
         assert target.collection.album_id(second) is None
         assert not target.rec_query.play_counts()
@@ -121,7 +125,7 @@ def test_choice_catalog_copies_keep_models_payloads_and_aliases_private(
     tracks[0]['video_id'] = 'private-video'
     store.rec_model.replace_rec_vectors([('anchor|anchor', np.array([1., 1.], dtype=np.float32).tobytes())])
     assert other_catalog == template.result
-    for other in (template.source, file_backed_store):
+    for other in (template.source, other_choice_store):
         assert other.collection.album_id(second) is None
         assert (other.rec_model.get_rec_vectors(), other.rec_model.get_rec_content_vectors()) == vectors
 

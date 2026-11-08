@@ -118,13 +118,22 @@ def vibe_http_calculation(completed, selection):
 
 
 @pytest.fixture(scope='module')
-def vibe_http_schema():
+def vibe_http_schema(tmp_path_factory):
     # HTTP consumers exercise real catalog/SQL/files with their six input
     # genres plus the ordinary menu's House; full vocabulary is owned by admission.
-    with bounded_consumer_schema((('jazz', 'Jazz'), ('techno', 'Techno'), ('classical', 'Classical'),
-                                 ('ambient', 'Ambient'), ('trance', 'Trance'), ('indie-rock', 'Indie Rock'),
-                                 ('house', 'House'))) as schema:
+    with pytest.MonkeyPatch.context() as patch, bounded_consumer_schema((
+            ('jazz', 'Jazz'), ('techno', 'Techno'), ('classical', 'Classical'),
+            ('ambient', 'Ambient'), ('trance', 'Trance'), ('indie-rock', 'Indie Rock'),
+            ('house', 'House'))) as schema:
+        patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('vibe-http-home')))
         yield schema
+
+
+def test_vibe_http_schema_keeps_every_offered_family_and_snapshot_guards(vibe_http_schema):
+    assert {row[0] for row in vibe_http_schema.execute('SELECT name FROM genre_family')} == {
+        'Jazz', 'Techno', 'Classical', 'Ambient', 'Trance', 'Indie Rock', 'House'}
+    assert vibe_http_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert vibe_http_schema._revision_script
 
 
 @pytest.fixture(scope='module')
@@ -500,22 +509,161 @@ def test_vibe_policy_change_reissues_choice_without_rewriting_history(
     assert store.rec_ledger.evidence().get('opportunity', offered['id']) == offered
 
 
-def test_genre_requests_restrict_vibes_and_survive_clear(store, measured_home_store, home_clients):
-    client = home_clients([1000.0])
-    client.post("/home/mix-genres", data={"genres": "jazz"})
-    client.post("/home/steer", data={"axis": "genre:jazz", "weight": "1.5"})
+@pytest.fixture(scope='module')
+def genre_vibe_candidates(vibe_http_schema):
+    from tests.test_home_other_genres import install_genre_http_inputs
+
+    def seed(source):
+        bundles = genre_bundles(source, genres=['Jazz', 'Techno', 'Trance', 'Ambient'], tracks_per_lane=8)
+        # Only Jazz needs distinct full Vibe reserves. The three other themes
+        # need four ordinary choices each, and share those catalog subjects.
+        for mid in ('1', '2', '3'):
+            shared = bundles[mid]['wheelhouse'][:4]
+            for lane in mode_surfaces.CARD_SURFACES:
+                bundles[mid][lane] = [{**track, 'lane': lane} for track in shared]
+        for lane in ('comfort', 'fresh'):
+            bundles['0'][lane] = bundles['0'][lane][:4]
+        bundles['all'] = {lane: [track for mid in ('0', '1', '2', '3')
+                                for track in bundles[mid][lane]]
+                          for lane in mode_surfaces.CARD_SURFACES}
+        tracks = {track['key']: track for lane in bundles['all'].values() for track in lane}
+        for track in tracks.values():
+            track['video_id'] = track['key']
+        fresh = bundles['0']['fresh']
+        seed_publication_subjects(source, tracks.values(), discoveries=[track['key'] for track in fresh])
+        profile = musical_character.compact(musical_profiles.resolve([], selected={
+            'energy': .7, 'mood_relaxed': .3, 'mood_happy': .7}))
+        profiles = {key: profile for key in tracks}
+        # Completed musical candidates are below the genre request controller.
+        # Its real serving selector still applies current SQL eligibility,
+        # family filtering, per-card capacities and persisted focus. Numeric
+        # Vibe preparation has independent model and pool owners.
+        pools = {lane: [{**track, 'musical': profile} for track in items]
+                 for lane, items in bundles['all'].items()}
+        library = {track['key']: track for lane in ('wheelhouse', 'explore') for track in pools[lane]}
+        for lane in ('wheelhouse', 'explore'):
+            pools[lane] = list(library.values())
+        bundles['_vibes'] = {
+            'version': home_vibe.VERSION, 'profile_version': musical_character.VERSION,
+            'pools': {preset: copy.deepcopy(pools) for preset in ('release', 'cruise')},
+            'genres': {}}
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(musical_character, 'load', lambda _store, keys:
+                          {key: profiles[key] for key in keys if key in profiles})
+            install_genre_http_inputs(patch)
+            publish_bundles(source, bundles, 1, fresh=fresh)
+        return profiles
+
+    with prepared_template(vibe_http_schema, seed) as template:
+        yield template
+
+
+def test_genre_vibe_candidates_keep_real_catalog_and_four_themes(genre_vibe_candidates):
+    source = genre_vibe_candidates.source
+    assert source.conn.execute('SELECT count(*) FROM recordings').fetchone()[0] == 36
+    assert len(source.modes.list_modes(active_only=True)) == 4
+    assert source.recommendations.head('vibe:release')
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+
+
+@pytest.fixture(scope='module')
+def genre_vibe_template(genre_vibe_candidates):
+    from tests.prepared_fixture_support import capture_template
+    from tests.test_home_other_genres import _publish_menu, install_genre_http_inputs
+
+    with genre_vibe_candidates.open(':memory:') as source, pytest.MonkeyPatch.context() as patch:
+        install_genre_http_inputs(patch)
+        _publish_menu(source, 1000)
+        yield capture_template(source, genre_vibe_candidates.result)
+
+
+def test_genre_vibe_input_keeps_real_prepared_home_and_short_ordinary_jazz_pool(genre_vibe_template):
+    from yt_playlist.rec import home_cache, home_prepared
+
+    assert home_prepared._valid(home_cache.read(genre_vibe_template.source, home_prepared.SURFACE))
+    assert genre_vibe_template.source.recommendations.head('home')
+
+
+@pytest.fixture
+def genre_vibe_client(genre_vibe_session, genre_vibe_template, vibe_template_bytecode, monkeypatch,
+                      home_routes_only, without_metadata_providers, request):
+    from fastapi.testclient import TestClient
+    from tests.conftest import FakeClient
+    from tests.test_home_other_genres import install_genre_http_inputs
+    from yt_playlist.web.app import create_app
+
+    install_genre_http_inputs(monkeypatch)
+    profiles = genre_vibe_template.result
+    # Musical calculation is below genre controls. Real family matching,
+    # candidate selection, persisted focus and all HTTP rendering remain real.
+    monkeypatch.setattr(musical_character, 'load', lambda _store, keys:
+                        {key: profiles[key] for key in keys if key in profiles})
+    from yt_playlist.rec import home_cards
+    monkeypatch.setattr(home_cards.HomeCards, 'audit', lambda *_args, **_kwargs: None)
+    source = genre_vibe_session
+    account = source.accounts.upsert_account('main', 'cred', None, True)
+    app = create_app(source, lambda: {account: FakeClient()}, now_fn=lambda: 1000,
+                     background_work=False)
+    app.state.ctx.templates.env.bytecode_cache = vibe_template_bytecode
+    with TestClient(app, base_url='http://127.0.0.1', backend_options={'use_uvloop': True}) as client:
+        steps = [test_explicit_genre_focus_keeps_its_learned_lean,
+                 test_steering_another_genre_cannot_expand_explicit_focus,
+                 test_vibe_selection_preserves_explicit_genre_request_and_lean,
+                 test_vibe_rotation_preserves_explicit_genre_restriction,
+                 test_genre_requests_restrict_vibes_and_survive_clear,
+                 test_reset_clears_vibe_after_preserving_explicit_genre_focus]
+        target = next(index for index, owner in enumerate(steps) if owner.__name__ == request.node.originalname)
+        while source._genre_completed < target:
+            steps[source._genre_completed]((source, client))
+            source._genre_completed += 1
+        yield source, client
+        source._genre_completed = target + 1
+
+
+@pytest.fixture(scope='module')
+def genre_vibe_session(genre_vibe_template, tmp_path_factory):
+    path = tmp_path_factory.mktemp('genre-vibe-session') / 'source.db'
+    with genre_vibe_template.open(path) as source:
+        source.conn.execute('PRAGMA synchronous=NORMAL')
+        source._genre_completed = 0
+        yield source
+
+
+def test_explicit_genre_focus_keeps_its_learned_lean(genre_vibe_client):
+    store, client = genre_vibe_client
+    response = client.post("/home/mix-genres", data={"genres": "jazz"})
+    assert offered(response) == {'jazz'}
+    response = client.post("/home/steer", data={"axis": "genre:jazz", "weight": "1.5"})
+    assert offered(response) == {'jazz'}
+    assert store.rec_model.get_lean('genre:jazz') == 1.5
+
+
+def test_steering_another_genre_cannot_expand_explicit_focus(genre_vibe_client):
+    store, client = genre_vibe_client
     response = client.post("/home/steer", data={"axis": "genre:techno", "weight": "2"})
     assert offered(response) == {"jazz"}  # A dial cannot expand the explicit genre focus.
     assert store.rec_model.get_lean("genre:techno") == 2
+
+
+def test_vibe_selection_preserves_explicit_genre_request_and_lean(genre_vibe_client):
+    store, client = genre_vibe_client
     response = select_vibe(client, 'release')
     assert 'data-requested-genres=\'["jazz"]\'' in response.text
     assert store.rec_model.get_lean("genre:jazz") == 1.5
     assert offered(response) == {'jazz'}
     assert store.rec_proposals.get_proposals('home_genre_request')['include_genres'] == ['jazz']
+
+
+def test_vibe_rotation_preserves_explicit_genre_restriction(genre_vibe_client):
+    store, client = genre_vibe_client
     # Vibe rotations keep the explicit genre restriction until clear/expiry.
     store.rec_ledger.refresh_card('cards', max(1, rec_params.get_param(store, 'erosion_view_cap')), 1000)
     assert store.rec_proposals.get_proposals('home_genre_request')['epoch'] != mix_tuning.card_epoch(store)
     assert offered(client.get('/home/cards')) == {'jazz'}
+
+
+def test_genre_requests_restrict_vibes_and_survive_clear(genre_vibe_client):
+    store, client = genre_vibe_client
     # The ordinary Jazz pool has only two lanes. Keep the previous usable
     # Jazz board while background preparation fills the newly requested set.
     response = select_vibe(client, '', expected_phase='waiting')
@@ -524,20 +672,51 @@ def test_genre_requests_restrict_vibes_and_survive_clear(store, measured_home_st
     assert store.rec_model.get_lean("genre:jazz") == 1.5
     assert response.headers['X-Mix-Tuning-Active'] == 'true'
     assert offered(response) == {'jazz'}
+
+
+def test_reset_clears_vibe_after_preserving_explicit_genre_focus(genre_vibe_client):
+    store, client = genre_vibe_client
     client.post("/home/vibe", data={"vibe": "cruise"})
     client.post("/home/fingerprint/reset")
     assert store.settings.get_setting(home_vibe.SETTING) is None
 
 
 def test_clearing_the_only_vibe_clears_tuning_indicator_and_deadline(
-        store, measured_home_store, home_clients):
-    client = home_clients([1000.0])
-    client.post('/home/vibe', data={'vibe': 'relax'})
-    response = client.post('/home/vibe', data={'vibe': ''})
-    assert response.status_code == 200
-    assert response.headers['X-Mix-Tuning-Active'] == 'false'
-    assert float(response.headers['X-Mix-Tuning-Remaining']) == 0
-    assert 'data-tuning-active="false"' in client.get('/home/fingerprint').text
+        vibe_http_schema, home_routes_only, without_metadata_providers, monkeypatch):
+    from fastapi import Response
+    from fastapi.testclient import TestClient
+    from tests.conftest import FakeClient
+    from yt_playlist.core.store import Store
+    from yt_playlist.web.app import create_app
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, home_tuning
+    from yt_playlist.web.routes.home_views import HomeViews
+
+    # Clearing persisted controls does not require a fitted catalog or menu.
+    # Keep the actual request controller, SQL settings and rendered fingerprint.
+    # Card composition has separate HTTP owners.
+    monkeypatch.setattr(HomeViews, 'cards_safe', lambda *args, **kwargs: Response())
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        app_update.build(ctx), home_tuning.build(ctx, HomeViews(ctx))])
+    store = Store(':memory:')
+    try:
+        initialize_consumer(store, vibe_http_schema)
+        identity = store.accounts.upsert_account('main', 'cred', None, True)
+        app = create_app(store, lambda: {identity: FakeClient()}, now_fn=lambda: 1000.,
+                         background_work=False)
+        with TestClient(app, base_url='http://127.0.0.1',
+                        backend_options={'use_uvloop': True}) as client:
+            selected = client.post('/home/vibe', data={'vibe': 'relax'})
+            assert selected.status_code == 200
+            assert selected.headers['X-Mix-Tuning-Active'] == 'true'
+            assert float(selected.headers['X-Mix-Tuning-Remaining']) > 0
+            response = client.post('/home/vibe', data={'vibe': ''})
+            assert response.status_code == 200
+            assert response.headers['X-Mix-Tuning-Active'] == 'false'
+            assert float(response.headers['X-Mix-Tuning-Remaining']) == 0
+            assert 'data-tuning-active="false"' in client.get('/home/fingerprint').text
+    finally:
+        store.conn.close()
 
 
 def test_invalid_vibe_does_not_change_controls_or_deadline(store, prepared_client):

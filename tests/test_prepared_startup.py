@@ -2,6 +2,7 @@
 import threading
 
 from fastapi.testclient import TestClient
+from tests.home_fixture_support import home_routes_only, without_metadata_providers
 
 from yt_playlist.core import profile_files
 from yt_playlist.rec import home_prepared, model_refresh, vibe_pools, vibe_readiness
@@ -29,7 +30,8 @@ def test_empty_preparation_serves_home_with_missing_features_and_preparation_not
         assert not any(growth['ready_formats'].values()) and not growth['vibes_ready']
 
 
-def test_startup_serves_http_before_workers_are_allowed_to_catch_up(store, monkeypatch):
+def test_startup_serves_http_before_workers_are_allowed_to_catch_up(
+        store, monkeypatch, home_routes_only, without_metadata_providers):
     forbidden = forbid_preparation(monkeypatch)
     app = web_app.create_app(store, forbidden, background_work=True)
     ctx = app.state.ctx

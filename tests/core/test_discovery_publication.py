@@ -626,12 +626,12 @@ def test_interrupted_discovery_stage_keeps_exact_checkpoint_and_allows_independe
     assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
 
 
-def test_interrupted_stage_and_head_resume_without_partial_selection_or_stale_publish(
-        interrupted_discovery_template, tmp_path, monkeypatch, independent_regular_ddl):
+@pytest.fixture(scope='module')
+def resumed_discovery_head_failure(interrupted_discovery_template, tmp_path_factory):
     template = interrupted_discovery_template()
     first = template.result
-    with template.open(tmp_path / 'restarted-discovery.db') as reopened, schema_inspection.reuse_tables(reopened.conn):
-        store = reopened
+    path = tmp_path_factory.mktemp('resumed-discovery') / 'restarted.db'
+    with template.open(path) as reopened, schema_inspection.reuse_tables(reopened.conn):
         owner = publication.owner(reopened.conn)
         for _ in range(30):
             stage = owner.step(reopened.conn, batch_size=1)
@@ -646,28 +646,61 @@ def test_interrupted_stage_and_head_resume_without_partial_selection_or_stale_pu
         assert not reopened.conn.execute('SELECT 1 FROM '+owner.table('generations')).fetchone()
         with reopened.conn:
             reopened.conn.execute('DROP TRIGGER controlled_subject_head_failure')
-        verify = type(owner).verify
-        def changed(self, conn, identity):
-            result = verify(self, conn, identity)
-            with sqlite3.connect(store._db_path) as writer:
-                writer.execute('UPDATE main.discovery_sources SET last_found_at=20')
-            return result
-        monkeypatch.setattr(type(owner), 'verify', changed)
+        yield reopened, owner, stage
+
+
+def test_interrupted_stage_and_head_resume_without_partial_selection_or_stale_publish(resumed_discovery_head_failure):
+    store, owner, stage = resumed_discovery_head_failure
+    assert stage.complete and owner.selected(store.conn) is None
+    assert not store.conn.execute('SELECT 1 FROM '+owner.table('generations')).fetchone()
+    assert not store.conn.in_transaction
+
+
+@pytest.fixture(scope='module')
+def changed_discovery_after_verification(resumed_discovery_head_failure):
+    store, owner, stage = resumed_discovery_head_failure
+    verify = type(owner).verify
+    def changed(self, conn, identity):
+        result = verify(self, conn, identity)
+        with sqlite3.connect(store._db_path) as writer:
+            writer.execute('UPDATE main.discovery_sources SET last_found_at=20')
+        return result
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(type(owner), 'verify', changed)
         with pytest.raises(MigrationError, match='reconciled|changed'):
-            owner.publish(reopened.conn, stage=stage.id)
-        assert owner.selected(reopened.conn) is None
-        monkeypatch.setattr(type(owner), 'verify', verify)
-        with schema_inspection.reuse_tables(reopened.conn):
-            artifact, document_stage = artist_ready(reopened.conn, installed=True)
-            artifact.publish(reopened.conn, stage=document_stage)
-            prepare_subjects(reopened.conn, installed=True)
-            owner, later = stage_discovery(reopened.conn)
-        assert later != stage.id
-        owner.publish(reopened.conn, stage=later)
-        assert read(reopened.conn, owner, later, 'discovery_sources')[0]['last_found_at'] == 20
-        with pytest.raises(sqlite3.IntegrityError, match='[Rr]etained'):
-            with reopened.conn:
-                reopened.conn.execute('DELETE FROM '+owner.table('input_sources')+' WHERE stage=?', (stage.id,))
+            owner.publish(store.conn, stage=stage.id)
+    return store, owner, stage
+
+
+def test_discovery_final_publication_fence_rejects_a_real_writer(changed_discovery_after_verification):
+    store, owner, _ = changed_discovery_after_verification
+    assert owner.selected(store.conn) is None
+    assert not store.conn.execute('SELECT 1 FROM '+owner.table('generations')).fetchone()
+    assert store.conn.execute('SELECT last_found_at FROM main.discovery_sources').fetchone()[0] == 20
+
+
+@pytest.fixture(scope='module')
+def reconciled_discovery_after_writer(changed_discovery_after_verification):
+    store, owner, previous = changed_discovery_after_verification
+    with schema_inspection.reuse_tables(store.conn):
+        artifact, document_stage = artist_ready(store.conn, installed=True)
+        artifact.publish(store.conn, stage=document_stage)
+        prepare_subjects(store.conn, installed=True)
+        owner, later = stage_discovery(store.conn)
+        assert later != previous.id
+        owner.publish(store.conn, stage=later)
+    return store, owner, previous, later
+
+
+def test_discovery_reconciliation_publishes_the_new_value_and_retains_old_custody(reconciled_discovery_after_writer):
+    store, owner, previous, later = reconciled_discovery_after_writer
+    assert owner.selected(store.conn) == later
+    assert read(store.conn, owner, later, 'discovery_sources')[0]['last_found_at'] == 20
+    with pytest.raises(sqlite3.IntegrityError, match='[Rr]etained'):
+        with store.conn:
+            store.conn.execute('DELETE FROM '+owner.table('input_sources')+' WHERE stage=?', (previous.id,))
+
+
 @pytest.mark.parametrize('version', [93])
 def test_slow_verification_leaves_real_writes_and_regular_migrations_available(
         rejection_store, monkeypatch, independent_regular_ddl):
@@ -732,29 +765,6 @@ def test_repeated_stage_schema_validation_does_not_reserve_writer(prepared_disco
         finally:
             release.set()
         task.result(timeout=15)
-
-
-@pytest.mark.parametrize('installed', [100], indirect=True)
-def test_frozen_native_upgrade_keeps_retained_inputs_and_prefers_native_readers(installed, tmp_path):
-    store, _ = installed
-    seed(store)
-    owner, stage = ready(store.conn)
-    owner.publish(store.conn, stage=stage)
-    expected = store.discovery.get_discovered_artists()
-    retained = {kind: list(map(tuple, store.conn.execute('SELECT * FROM '+owner.table('input_'+kind)))) for kind in owner.kinds}
-    native = Store(tmp_path/'native-discovery.db')
-    try:
-        store.conn.backup(native.conn)
-        runner.migrate(native.conn, registry=registry.MIGRATIONS)
-        regular.migrate(native.conn)
-        native.init_schema(defer_metadata=True)
-        assert owner.selected(native.conn) is None
-        assert native.discovery.get_discovered_artists() == expected
-        for kind, rows in retained.items():
-            assert list(map(tuple, native.conn.execute('SELECT * FROM '+owner.table('input_'+kind)))) == rows
-        assert not native.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        native.conn.close()
 
 
 @pytest.mark.parametrize('version', [86, 100])

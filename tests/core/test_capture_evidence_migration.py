@@ -6,11 +6,12 @@ import sqlite3
 import pytest
 
 from tests.historical_captures import legacy_capture
-from tests.historical_support import upgrade_fixture
+from tests.core.test_early_schema_upgrade import rename_owner, restore_programs
+from tests.genre_catalog_support import bound_catalog
 from tests.prepared_fixture_support import capture_template, cleanup_memory_files, roots
 from yt_playlist.core import catalog, repair
 from yt_playlist.core.migrations import Migration, MigrationError, migrate
-from yt_playlist.core.migrations import current
+from yt_playlist.core.migrations import current, regular
 from yt_playlist.core.migrations import v033_capture_evidence as capture
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.store import Store
@@ -20,6 +21,11 @@ def _predecessor(stack, path=':memory:'):
     store = Store(path)
     stack.callback(store.conn.close)
     migrate(store.conn, registry=MIGRATIONS[:32])
+    seed_capture_predecessor(store)
+    return store
+
+
+def seed_capture_predecessor(store):
     with store.conn:
         store.conn.executemany('INSERT INTO identities(id,label,credential_ref,is_master) VALUES (?,?,?,?)',
                                [(1, 'Main', 'main', 1), (2, 'Other', 'other', 0)])
@@ -34,7 +40,6 @@ def _predecessor(stack, path=':memory:'):
     legacy_capture(store.conn, 1, 1792540801, ['ytm'], source='ytm_history')
     legacy_capture(store.conn, 2, 1792540802, ['unknown'], source='independent')
     legacy_capture(store.conn, 2, 1792540803, [])
-    return store
 
 
 @pytest.fixture
@@ -43,51 +48,185 @@ def predecessor():
         yield lambda path=':memory:': _predecessor(stack, path)
 
 
-@pytest.fixture(scope='session')
-def converted_capture_template():
-    with ExitStack() as stack:
-        source = _predecessor(stack)
-        # One genuine populated conversion supplies the independent runtime
-        # consumers below, including another account's same-source capture and
-        # a resolved recording whose upload will later be reassociated.
-        legacy_capture(source.conn, 2, 1792540801, ['ytm'], source='ytm_history')
-        with source.conn:
-            source.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (3,'Correction','third',0)")
-            source.conn.execute("INSERT INTO listening_calendars VALUES (3,'UTC',0)")
-            entries = []
-            for video, title in [('old', 'Old'), ('correct', 'Correct')]:
-                key = f'{video}|artist'
-                recording = source.conn.execute(
-                    'INSERT INTO recordings(identity_key,title,artist) VALUES (?,?,?)',
-                    (key, title, 'Artist')).lastrowid
-                source.conn.execute(
-                    'INSERT INTO youtube_items(video_id,recording_id,title,artist,duration_s) VALUES (?,?,?,?,200)',
-                    (video, recording, title, 'Artist'))
-                entries.append(source.conn.execute(
-                    'INSERT INTO catalog_entries(recording_id,video_id) VALUES (?,?)',
-                    (recording, video)).lastrowid)
-                source.conn.execute('INSERT INTO recording_aliases VALUES (?,?,?)', (key, recording, 'fixture'))
-        receipt_id = legacy_capture(source.conn, 3, 1792540800, ['old|artist'], source='unknown')
-        original = {
-            'originals': _originals(source.conn),
-            'days': list(map(tuple, source.conn.execute('SELECT * FROM listening_days ORDER BY identity_id,identity_key'))),
-            'observations': [dict(r) for r in source.conn.execute('SELECT * FROM listening_observations')],
-            'receipts': list(map(tuple, source.conn.execute('SELECT * FROM history_snapshots ORDER BY id'))),
-            'entries': entries, 'receipt_id': receipt_id,
-        }
-        migrate(source.conn, registry=_registry())
-        capture.validate(source.conn)
-        upgrade_fixture(source)
-        files = roots(source.conn)
-        cleanup_memory_files(source, files)
-        current.validate(source.conn)
-        yield capture_template(source, original)
+def seed_converted_capture(source):
+    seed_capture_predecessor(source)
+    # Keep both accounts' same-source captures and the resolved recording used
+    # by the independent reassociation owner below.
+    legacy_capture(source.conn, 2, 1792540801, ['ytm'], source='ytm_history')
+    with source.conn:
+        source.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (3,'Correction','third',0)")
+        source.conn.execute("INSERT INTO listening_calendars VALUES (3,'UTC',0)")
+        entries = []
+        for video, title in [('old', 'Old'), ('correct', 'Correct')]:
+            key = f'{video}|artist'
+            recording = source.conn.execute(
+                'INSERT INTO recordings(identity_key,title,artist) VALUES (?,?,?)',
+                (key, title, 'Artist')).lastrowid
+            source.conn.execute(
+                'INSERT INTO youtube_items(video_id,recording_id,title,artist,duration_s) VALUES (?,?,?,?,200)',
+                (video, recording, title, 'Artist'))
+            entries.append(source.conn.execute(
+                'INSERT INTO catalog_entries(recording_id,video_id) VALUES (?,?)',
+                (recording, video)).lastrowid)
+            source.conn.execute('INSERT INTO recording_aliases VALUES (?,?,?)', (key, recording, 'fixture'))
+    receipt_id = legacy_capture(source.conn, 3, 1792540800, ['old|artist'], source='unknown')
+    return {
+        'originals': _originals(source.conn),
+        'days': list(map(tuple, source.conn.execute('SELECT * FROM listening_days ORDER BY identity_id,identity_key'))),
+        'observations': [dict(r) for r in source.conn.execute('SELECT * FROM listening_observations')],
+        'receipts': list(map(tuple, source.conn.execute('SELECT * FROM history_snapshots ORDER BY id'))),
+        'entries': entries, 'receipt_id': receipt_id,
+    }
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These historical SQL owners do not start an HTTP app."""
+
+
+@pytest.fixture(scope='module', autouse=True)
+def isolated_capture_home(tmp_path_factory):
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('capture-upgrade-home')))
+        bound_catalog(patch, entries=(('house', 'House'), ('rock', 'Rock'), ('jazz', 'Jazz')))
+        yield
+
+
+@pytest.fixture(scope='module')
+def capture_journey(tmp_path_factory, _pristine_installed_schema):
+    path = tmp_path_factory.mktemp('like-capture-upgrade') / 'installed.db'
+    source = Store(path)
+    with closing(source.conn):
+        _pristine_installed_schema(6).backup(source.conn)
+        source.conn.execute('PRAGMA journal_mode=WAL')
+        source.conn.execute('PRAGMA synchronous=NORMAL')
+        source._bind_repositories()
+        yield dict(source=source, conn=source.conn, path=path, version=6)
+
+
+def assert_journey_history(state):
+    assert list(map(tuple, state['conn'].execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
+        (migration.version, migration.name) for migration in MIGRATIONS[:state['version']]]
+    assert not state['conn'].execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_frozen_like_input_keeps_the_genuine_six_version_predecessor(capture_journey):
+    assert_journey_history(capture_journey)
+    assert not capture_journey['conn'].execute('SELECT 1 FROM tracks').fetchone()
+
+
+def test_actual_frozen_like_repair_keeps_earned_crossings_and_once_ever_stamp(capture_journey):
+    store, now = capture_journey['source'], 1_000_000
+    with store.conn:
+        for number in range(3):
+            key = f'song{number}|artist'
+            store.conn.execute("INSERT INTO tracks(video_id,title,artist,identity_key,genre,mb_year) "
+                "VALUES (?,?,'Artist',?,'House','1993-04-05')", (str(number), f'Song{number}', key))
+            store.conn.execute("INSERT INTO rec_feedback(surface,item_key,kind,created_at) VALUES ('like',?,'like',?)",
+                               (key, now-100+number))
+        for axis in ('genre:house', 'era:1990', 'artist:Artist'):
+            store.conn.execute('INSERT INTO rec_weights VALUES (?,2,?)', (axis, now))
+            store.conn.executemany("INSERT INTO rec_grad_log(axis,source,score,factor,new_weight,created_at) "
+                "VALUES (?,'like',2,1.05,2,?)", [(axis, now-50+number) for number in range(14)])
+    migrate(store.conn, registry=MIGRATIONS[:7], clock=lambda: now)
+    capture_journey['version'] = 7
+    for axis in ('genre:house', 'era:1990', 'artist:Artist'):
+        assert store.rec_model.get_weights(now=now)[axis] == pytest.approx(2 / 1.05 ** 12)
+    stamp = store.settings.get_setting('like_ratchet_repaired')
+    assert '3 once-ever graduation stamp(s)' in stamp
+    capture_journey['like'] = dict(stamp=stamp, weights=store.rec_model.weight_records())
+    assert_journey_history(capture_journey)
+
+
+@pytest.mark.parametrize('version', range(8, 33))
+def test_actual_early_upgrade_keeps_the_frozen_like_entitlement(capture_journey, version):
+    migrate(capture_journey['conn'], registry=MIGRATIONS[:version])
+    capture_journey['version'] = version
+    assert_journey_history(capture_journey)
+    assert capture_journey['conn'].execute("SELECT value FROM settings WHERE key='like_ratchet_repaired'").fetchone()[0] == capture_journey['like']['stamp']
+
+
+def test_capture_predecessor_keeps_exact_original_rows_days_and_receipts(capture_journey):
+    original = seed_converted_capture(capture_journey['source'])
+    capture_journey['original'] = original
+    assert original['originals'] and len(original['receipts']) == 6
+    assert_journey_history(capture_journey)
+
+
+def test_actual_capture_conversion_preserves_every_raw_key_and_item_identity(capture_journey):
+    migrate(capture_journey['conn'], registry=_registry())
+    capture_journey['version'] = 33
+    capture.validate(capture_journey['conn'])
+    assert list(map(tuple, capture_journey['conn'].execute(
+        'SELECT identity_id,raw_identity_key,identity_key,recording_id,source,last_observed_at,'
+        'capture_id,capture_item_id FROM listening_observations WHERE capture_id IS NOT NULL '
+        'ORDER BY capture_item_id'))) == capture_journey['original']['originals']
+    assert_journey_history(capture_journey)
+
+
+@pytest.mark.parametrize('version', range(34, 103))
+def test_actual_later_capture_upgrade_keeps_receipts_and_original_precision(capture_journey, version):
+    migrate(capture_journey['conn'], registry=MIGRATIONS[:version])
+    capture_journey['version'] = version
+    assert_journey_history(capture_journey)
+    assert capture_journey['conn'].execute('SELECT count(*) FROM listening_capture_receipts').fetchone()[0] == 6
+
+
+def test_actual_capture_account_rename_keeps_both_earlier_contracts(capture_journey):
+    rename_owner(capture_journey)
+    assert_journey_history(capture_journey)
+
+
+def test_actual_capture_program_restoration_preserves_the_declared_contract(capture_journey):
+    restore_programs(capture_journey)
+    assert_journey_history(capture_journey)
+
+
+@pytest.mark.parametrize('version', range(104, len(MIGRATIONS)+1))
+def test_actual_final_capture_upgrade_keeps_receipts_and_foreign_keys(capture_journey, version):
+    migrate(capture_journey['conn'], registry=MIGRATIONS[:version])
+    capture_journey['version'] = version
+    assert_journey_history(capture_journey)
+
+
+@pytest.mark.parametrize('version', range(1, len(regular.CHANGES)+1))
+def test_each_actual_regular_owner_preserves_capture_receipts_and_both_histories(capture_journey, version):
+    regular.migrate(capture_journey['conn'], changes=regular.CHANGES[:version])
+    assert regular.validate(capture_journey['conn']) == version
+    assert_journey_history(capture_journey)
+
+
+@pytest.mark.parametrize('restart', [1, 2])
+def test_fresh_store_admission_preserves_frozen_like_stamp_weights_and_captures(capture_journey, restart):
+    source = Store(capture_journey['path'])
+    with closing(source.conn):
+        source.init_schema()
+        assert source.settings.get_setting('like_ratchet_repaired') == capture_journey['like']['stamp']
+        assert source.rec_model.weight_records() == capture_journey['like']['weights']
+        assert source.conn.execute('SELECT count(*) FROM listening_capture_receipts').fetchone()[0] == 6
+        assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.fixture(scope='module')
+def converted_capture_template(capture_journey):
+    source = capture_journey['source']
+    source.init_schema()
+    cleanup_memory_files(source, roots(source.conn))
+    current.validate(source.conn)
+    return capture_template(source, capture_journey['original'])
+
+
+def test_completed_capture_input_keeps_actual_snapshot_guards_and_current_history(converted_capture_template):
+    source = converted_capture_template.source
+    assert source._snapshot_revisions.conn is source.conn
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == len(MIGRATIONS)
 
 
 @pytest.fixture
-def converted_capture(store, converted_capture_template):
-    converted_capture_template.restore(store)
-    return store
+def converted_capture(converted_capture_template):
+    with converted_capture_template.open(':memory:') as store:
+        yield store
 
 
 def _registry(apply=capture.apply):

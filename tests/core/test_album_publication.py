@@ -76,8 +76,16 @@ def test_native_album_predecessor_has_the_exact_numbered_contract(album_native_n
 @pytest.fixture(scope='module')
 def album_native_input(album_native_numbered_input, tmp_path_factory):
     path = tmp_path_factory.mktemp('native-album-input') / 'installed.db'
-    with prepared_template(album_native_numbered_input, rich_source,
-                           database=path, defer_metadata=True) as template:
+    with ExitStack() as resources:
+        with pytest.MonkeyPatch.context() as patch:
+            bound_catalog(patch)
+
+            def seed_source(store):
+                with reuse_reporting_reader(store, patch), schema_inspection.reuse_tables(store.conn):
+                    return rich_source(store)
+
+            template = resources.enter_context(prepared_template(
+                album_native_numbered_input, seed_source, database=path, defer_metadata=True))
         yield template
 
 
@@ -147,67 +155,101 @@ def projection(conn, tracks, states, links, keys):
         'keys':list(map(tuple, conn.execute('SELECT * FROM '+keys+' ORDER BY browse_id')))}
 
 
-@pytest.mark.parametrize('installed', [79, 93, 98], indirect=True)
-def test_preopened_projection_groups_match_frozen_native_without_losing_originals(
-        installed, album_native_reference, monkeypatch):
-    store, _ = installed
-    album, _ = rich_source(store)
+@pytest.fixture(scope='module', params=[79, 93, 98])
+def album_reader_source(request, _bounded_installed_schema, tmp_path_factory):
+    path = tmp_path_factory.mktemp('album-reader-source') / 'source.db'
+    template = _bounded_installed_schema(request.param)
+    with template.open(path) as store:
+        with pytest.MonkeyPatch.context() as patch:
+            bound_catalog(patch)
+            with reuse_reporting_reader(store, patch), schema_inspection.reuse_tables(store.conn):
+                rich_source(store)
+        yield capture_template(store, request.param)
+
+
+def test_album_reader_source_keeps_full_partial_and_unresolved_rows(album_reader_source):
+    source = album_reader_source.source
+    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == album_reader_source.result
+    assert source.conn.execute('SELECT count(*) FROM main.catalog_entries').fetchone()[0] == 2
+    assert source.conn.execute('SELECT count(*) FROM main.album_fetch_state').fetchone()[0] == 3
+    assert source.conn.execute("SELECT count(*) FROM main.album_tracks WHERE legacy_track_key='unknown|subject'").fetchone()[0] == 1
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.fixture(scope='module')
+def preopened_album_publication(album_reader_source, album_native_reference, tmp_path_factory):
+    path = tmp_path_factory.mktemp('preopened-album-publication') / 'reader.db'
+    with album_reader_source.open(path) as store, pytest.MonkeyPatch.context() as patch:
+        bound_catalog(patch)
+        with reuse_reporting_reader(store, patch), schema_inspection.reuse_tables(store.conn):
+            yield from _publish_with_preopened_reader(store, album_native_reference.source, patch)
+
+
+def _publish_with_preopened_reader(store, native, patch):
     sources = {owner:[dict(row) for row in store.conn.execute('SELECT * FROM main.'+owner+' ORDER BY '+key)]
         for owner,key in [('album_tracks','id'), ('album_fetch_state','album_id')]}
     preopened = Store(store._db_path)
     # Compare every installed version with the same genuinely converted album
     # reference. Its measured owners below keep native conversion out of these
     # publication/reader checks; each case still stages its own source rows.
-    native = album_native_reference.source
     reads = ExitStack()
     try:
         preopened.init_schema(defer_metadata=True)
         # Snapshot admission/lifetime is owned separately. Reuse this reader's
         # real SQL view while comparing the many repository projections below.
-        reads.enter_context(reuse_reporting_reader(preopened, monkeypatch))
+        reads.enter_context(reuse_reporting_reader(preopened, patch))
         reads.enter_context(schema_inspection.reuse_tables(preopened.conn))
         reads.enter_context(schema_inspection.reuse_tables(native.conn))
         identity = stage(store.conn, size=1)
         evidence = store.conn.execute('SELECT evidence_changes FROM rec_preparation WHERE id=1').fetchone()[0]
         publication.publish(store.conn, identity=identity)
         assert store.conn.execute('SELECT evidence_changes FROM rec_preparation WHERE id=1').fetchone()[0] == evidence+1
-        actual = projection(store.conn, *(publication.relation(store.conn, owner) for owner in publication.RELATIONS))
-        expected = projection(native.conn, 'main.album_tracks', 'main.album_fetch_state', 'main.album_track_links', 'main.album_tracklist_keys')
-        assert actual == expected
-        # A reader opened before installation sees the destination. Mask the
-        # fallback branch's original columns to prove they supply no values.
-        def mask_original(operation, owner, column, *unused):
-            return sqlite3.SQLITE_IGNORE if operation == sqlite3.SQLITE_READ and owner in sources else sqlite3.SQLITE_OK
-        preopened.conn.set_authorizer(mask_original)
-        try:
-            assert preopened.collection.cached_album_tracklist_ids() == {'release','release-alias'}
-            assert preopened.collection.has_published_album_tracklist('release-alias')
-            assert not preopened.collection.has_published_album_tracklist('partial')
-        finally:
-            preopened.conn.set_authorizer(None)
-        assert preopened.charts.album_tracks_detail('release') == native.charts.album_tracks_detail('release')
-        assert preopened.charts.album_tracks_detail('partial') == native.charts.album_tracks_detail('partial')
-        assert preopened.charts.album_browse_ids() == native.charts.album_browse_ids()
-        assert preopened.charts.corpus_distribution('album') == native.charts.corpus_distribution('album')
-        assert preopened.collection.complete_album_tracklist_ids() == native.collection.complete_album_tracklist_ids()
-        assert preopened.rec_query.owned_albums() == native.rec_query.owned_albums()
-        assert preopened.tracks.album_tracks_for_waterfall('release-alias') == native.tracks.album_tracks_for_waterfall('release-alias')
-        assert preopened.tracks.album_tracks_for_waterfall('partial') == native.tracks.album_tracks_for_waterfall('partial')
-        assert preopened.enrichment_reports.conflict_count_for_album('release') == native.enrichment_reports.conflict_count_for_album('release')
-        assert preopened.enrichment_reports.unresolved_conflicts_for_album('partial') == native.enrichment_reports.unresolved_conflicts_for_album('partial')
-        assert preopened.enrichment_queue._select_enrich_batch(5) == native.enrichment_queue._select_enrich_batch(5)
-        assert [tuple(row)[1:] for row in store.conn.execute('SELECT * FROM '+publication.table('groups')+' WHERE stage=? ORDER BY album_id', (identity,))] == [
-            (row['album_id'],row['provider_id'],store.conn.execute('SELECT count(*) FROM main.album_tracks WHERE album_id=? AND is_full=1', (row['album_id'],)).fetchone()[0],
-             row['order_status'],row['status'],row['expected_count'],row['fetched_at'])
-            for row in native.conn.execute("SELECT * FROM main.album_tracklists WHERE capture_kind='legacy_full' ORDER BY album_id")]
-        for owner, expected_rows in sources.items():
-            key = 'id' if owner == 'album_tracks' else 'album_id'
-            assert [dict(row) for row in store.conn.execute('SELECT * FROM main.'+owner+' ORDER BY '+key)] == expected_rows
-        regular.validate(preopened.conn)
-        assert store.conn.execute('SELECT count(*) FROM main.catalog_entries').fetchone()[0] == 2
+        yield store, preopened, native, sources, identity
     finally:
         reads.close()
         preopened.conn.close()
+
+
+def test_preopened_album_publication_matches_every_frozen_native_relation(preopened_album_publication):
+    store, _, native, _, _ = preopened_album_publication
+    actual = projection(store.conn, *(publication.relation(store.conn, owner) for owner in publication.RELATIONS))
+    expected = projection(native.conn, 'main.album_tracks', 'main.album_fetch_state', 'main.album_track_links', 'main.album_tracklist_keys')
+    assert actual == expected
+
+
+def test_preopened_projection_groups_match_frozen_native_without_losing_originals(preopened_album_publication):
+    store, preopened, native, sources, identity = preopened_album_publication
+    # This reader predates publication. Ignore original payload columns to prove
+    # the selected typed publication supplies its values.
+    def mask_original(operation, owner, column, *unused):
+        return sqlite3.SQLITE_IGNORE if operation == sqlite3.SQLITE_READ and owner in sources else sqlite3.SQLITE_OK
+    preopened.conn.set_authorizer(mask_original)
+    try:
+        assert preopened.collection.cached_album_tracklist_ids() == {'release','release-alias'}
+        assert preopened.collection.has_published_album_tracklist('release-alias')
+        assert not preopened.collection.has_published_album_tracklist('partial')
+    finally:
+        preopened.conn.set_authorizer(None)
+    assert preopened.charts.album_tracks_detail('release') == native.charts.album_tracks_detail('release')
+    assert preopened.charts.album_tracks_detail('partial') == native.charts.album_tracks_detail('partial')
+    assert preopened.charts.album_browse_ids() == native.charts.album_browse_ids()
+    assert preopened.charts.corpus_distribution('album') == native.charts.corpus_distribution('album')
+    assert preopened.collection.complete_album_tracklist_ids() == native.collection.complete_album_tracklist_ids()
+    assert preopened.rec_query.owned_albums() == native.rec_query.owned_albums()
+    assert preopened.tracks.album_tracks_for_waterfall('release-alias') == native.tracks.album_tracks_for_waterfall('release-alias')
+    assert preopened.tracks.album_tracks_for_waterfall('partial') == native.tracks.album_tracks_for_waterfall('partial')
+    assert preopened.enrichment_reports.conflict_count_for_album('release') == native.enrichment_reports.conflict_count_for_album('release')
+    assert preopened.enrichment_reports.unresolved_conflicts_for_album('partial') == native.enrichment_reports.unresolved_conflicts_for_album('partial')
+    assert preopened.enrichment_queue._select_enrich_batch(5) == native.enrichment_queue._select_enrich_batch(5)
+    assert [tuple(row)[1:] for row in store.conn.execute('SELECT * FROM '+publication.table('groups')+' WHERE stage=? ORDER BY album_id', (identity,))] == [
+        (row['album_id'],row['provider_id'],store.conn.execute('SELECT count(*) FROM main.album_tracks WHERE album_id=? AND is_full=1', (row['album_id'],)).fetchone()[0],
+         row['order_status'],row['status'],row['expected_count'],row['fetched_at'])
+        for row in native.conn.execute("SELECT * FROM main.album_tracklists WHERE capture_kind='legacy_full' ORDER BY album_id")]
+    for owner, expected_rows in sources.items():
+        key = 'id' if owner == 'album_tracks' else 'album_id'
+        assert [dict(row) for row in store.conn.execute('SELECT * FROM main.'+owner+' ORDER BY '+key)] == expected_rows
+    regular.validate(preopened.conn)
+    assert store.conn.execute('SELECT count(*) FROM main.catalog_entries').fetchone()[0] == 2
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

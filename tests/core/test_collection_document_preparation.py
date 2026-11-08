@@ -36,8 +36,8 @@ def finish(job, conn, size=128):
     pytest.fail('Collection document preparation did not finish bounded fixture')
 
 
-def seed(store, count=3):
-    account = store.accounts.upsert_account('Import', 'import.json', None, True)
+def seed(store, count=3, *, master=True):
+    account = store.accounts.upsert_account('Import', 'import.json', None, master)
     job = {'status': 'running', 'identity_id': account, 'phase': 'import', 'started_at': 2,
            'finished_at': None, 'identity_label': '東京', 'report_schema': 1, 'dismissed': None,
            'playlists_found': 2, 'track_entries': 0, 'report': {'partial': [1, 2, None]}, 'preview_token': ''}

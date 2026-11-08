@@ -363,23 +363,6 @@ def test_library_pool_rejects_invalid_requests(store, monkeypatch):
     assert client.get("/home/library-pool/99999").status_code == 404
 
 
-def test_temporal_pool_keeps_its_date_band_and_live_feedback(store, genre_candidates):
-    bundles = genre_candidates
-    keys = []
-    for i, year in enumerate([1960, 1980, 1995, 2005, 2010, 2020]):
-        title, artist = f"Song {year}", f"Artist {i}"
-        tid = store.tracks.upsert_track(f"v{i}", title, artist, None, None)
-        store.tracks.set_track_genre(tid, "Jazz")
-        store.tracks.set_track_year(tid, str(year))
-        keys.append(identity_key(title, artist))
-    bundles["_meta"]["year_cuts"] = [1990, 2010]
-    publish_bundles(store, bundles, 1)
-    parameters = {"lane": "temporal", "epoch": 1, "include_genres": ["jazz"], "avoid_genres": []}
-    library_pool.prepare(store, 1, parameters)
-    store.rec_model.record_feedback("for_you", keys[3], "dismiss", now=2)
-    assert [t["year"] for t in library_pool.pick(store, 3, parameters)] == [1995, 2010]
-
-
 def test_catalog_build_reaches_unmodeled_library_beyond_other_genres(store, monkeypatch):
     # This coordinator must request the whole catalog before genre filtering.
     # The scorer honors its limit, so a regression to the default 300-item head

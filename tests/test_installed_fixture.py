@@ -9,7 +9,9 @@ from yt_playlist.core.migrations import registry, runner
 from yt_playlist.core.store import Store
 
 
-VERSIONS = (69, 79, 82, 83, 93, 97, 102, 107)
+# Account renaming and original-custody takeover have distinct real owners.
+# Reuse their completed SQL when constructing the final independent replay.
+VERSIONS = (69, 79, 82, 83, 93, 97, 102, 103, 104, 107)
 
 
 @pytest.fixture(autouse=True)
@@ -90,11 +92,13 @@ def state(conn):
     return result
 
 
-@pytest.mark.parametrize('version', VERSIONS)
+@pytest.mark.parametrize(('version', 'chain'), [(version, chain) for version in VERSIONS
+                                             for chain in ('genuine', 'fixture')])
 def test_installed_sql_input_matches_independent_real_replay(
-        _pristine_installed_schema, genuine_replays, version):
-    replay = genuine_replays(version)
-    assert state(_pristine_installed_schema(version)) == genuine_replays.state(version)
+        _pristine_installed_schema, genuine_replays, version, chain):
+    replay = genuine_replays(version) if chain == 'genuine' else _pristine_installed_schema(version)
+    if chain == 'fixture':
+        assert state(replay) == genuine_replays.state(version)
     assert replay.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
     assert not replay.execute('PRAGMA foreign_key_check').fetchone()
     with pytest.raises(sqlite3.OperationalError, match='readonly'):
