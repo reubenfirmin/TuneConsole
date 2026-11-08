@@ -3,9 +3,12 @@ import ast
 import json
 from pathlib import Path
 import re
+from unicodedata import normalize
 
 ROOT = Path(__file__).resolve().parents[2]/'src'/'yt_playlist'
 OPERATIONS = {'open','read_text','read_bytes','write_text','write_bytes','unlink'}
+CALL_NAMES = OPERATIONS | {'load','dump','replace','rename','copy','copy2','copyfile','rmtree'}
+CALL_IDENTIFIER = re.compile(r'\b(?:' + '|'.join(sorted(CALL_NAMES)) + r')\b')
 
 # A boundary names the actual non-asset operation and its narrow owner. Adding
 # another raw file operation elsewhere requires an explicit inventory decision.
@@ -84,16 +87,28 @@ def boundary(row):
     return None
 
 
-def audit(root=ROOT):
-    return [{**row,'boundary':boundary(row)} for row in inventory(root)]
+def audit(root=ROOT, *, paths=None):
+    return [{**row,'boundary':boundary(row)} for row in inventory(root, paths=paths)]
 
 
-def inventory(root=ROOT):
+def inventory(root=ROOT, *, paths=None):
     results = []
-    for path in sorted(root.rglob('*.py')):
-        tree = ast.parse(path.read_text())
+    for path in sorted(root.rglob('*.py') if paths is None else paths):
+        source = path.read_text()
+        # Any candidate's terminal identifier must occur in its source. Python
+        # normalizes identifiers, so normalize before this conservative filter.
+        # Comments and strings may keep an unnecessary parse, never hide a call.
+        normalized = normalize('NFKC', source)
+        if not CALL_IDENTIFIER.search(normalized):
+            continue
+        tree = ast.parse(source)
         class Visitor(ast.NodeVisitor):
             scopes = []
+            def visit_Name(self, node):
+                pass  # Identifiers and literals cannot contain nested calls.
+            visit_Constant = visit_Name
+            def visit_Attribute(self, node):
+                self.visit(node.value)
             def visit_FunctionDef(self,node):
                 self.scopes.append(node.name)
                 self.generic_visit(node)
@@ -101,6 +116,14 @@ def inventory(root=ROOT):
             visit_AsyncFunctionDef = visit_FunctionDef
             visit_ClassDef = visit_FunctionDef
             def visit_Call(self,node):
+                # Most production calls cannot be file operations. Inspect the
+                # actual terminal identifier before unparsing nested receivers.
+                function = node.func
+                terminal = function.attr if isinstance(function, ast.Attribute) else (
+                    function.id if isinstance(function, ast.Name) else None)
+                if terminal not in CALL_NAMES:
+                    self.generic_visit(node)
+                    return
                 name = ast.unparse(node.func)
                 operation = name.rsplit('.',1)[-1]
                 if ((operation in OPERATIONS and not name.startswith('fao.') and name not in

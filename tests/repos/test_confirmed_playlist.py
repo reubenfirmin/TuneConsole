@@ -2,6 +2,7 @@ import sqlite3
 
 import pytest
 
+from tests.store_fixture_support import file_consumer_store as store
 from yt_playlist.library.playlist_metadata import content_hash
 from yt_playlist.util.matching import identity_key
 
@@ -173,13 +174,31 @@ def test_membership_failure_cannot_publish_metadata_or_catalog(store):
 
 
 @pytest.mark.parametrize("incremental", [False, True])
-def test_late_membership_batch_failure_rolls_back_prior_batches(store, incremental):
+def test_late_membership_batch_failure_rolls_back_prior_batches(store, monkeypatch, incremental):
     pid = _playlist(store)
     store.playlists.publish_confirmed_tracks(pid, "Radio", [_track(0)], 2)
     before = store.playlists.get_playlist(pid)
     retained = {table: list(map(tuple, store.conn.execute(f'SELECT * FROM {table} ORDER BY 1')))
                 for table in ('youtube_items', 'recordings', 'catalog_entries')}
     tracks = [_track(i) for i in range(131)]
+    # Catalog observation is below this membership-batch boundary. The small
+    # failure cases above retain real ingestion and its independent commits.
+    # Supply already observed uploads while keeping every membership write,
+    # rejection, rollback, hash and retry in the real repository.
+    with store.conn:
+        store.conn.executemany('INSERT INTO recordings(id,identity_key,title,artist) VALUES (?,?,?,?)',
+            [(i + 1, identity_key(track['title'], track['artist']), track['title'], track['artist'])
+             for i, track in enumerate(tracks[1:], 1)])
+        store.conn.executemany('INSERT INTO youtube_items(video_id,recording_id,title,artist,album) '
+            'VALUES (?,?,?,?,?)', [(track['video_id'], i + 1, track['title'], track['artist'], track['album'])
+                                  for i, track in enumerate(tracks[1:], 1)])
+        store.conn.executemany('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
+            [(i + 1, i + 1, track['video_id']) for i, track in enumerate(tracks[1:], 1)])
+    entries = {track['video_id']: i + 1 for i, track in enumerate(tracks)}
+    def observed(video, *args, library, **kwargs):
+        assert not library
+        return entries[video]
+    monkeypatch.setattr(store.tracks, 'upsert_track', observed)
     with store.conn:
         store.conn.execute("CREATE TEMP TRIGGER reject_late_membership BEFORE INSERT ON playlist_items "
                            "WHEN NEW.video_id='v130' BEGIN SELECT RAISE(ABORT,'late membership failure'); END")

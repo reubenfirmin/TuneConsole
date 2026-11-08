@@ -8,8 +8,58 @@ from copy import deepcopy
 from contextlib import closing, contextmanager, nullcontext
 import sqlite3
 
+import pytest
+
 from yt_playlist.core import repair
 from yt_playlist.core.db_revisions import Revisions
+
+
+@pytest.fixture
+def file_consumer_store(tmp_path, _pristine_current_schema, monkeypatch):
+    """Private WAL input for consumers that do not own snapshot construction."""
+    from yt_playlist.core.store import Store
+
+    directory = tmp_path / 'consumer'
+    directory.mkdir()
+    database = Store(directory / 'consumer.db')
+    with closing(database.conn):
+        initialize_consumer(database, _pristine_current_schema)
+        database.conn.execute('PRAGMA wal_autocheckpoint=0')
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
+
+
+@pytest.fixture
+def publication_consumer_reads(request, monkeypatch):
+    """Reuse real reporting reads below installed publication workflows.
+
+    Explicit snapshots, reopens, publication guards and final installed-format
+    validation keep their own connections. Independent native-upgrade cases
+    in the same module have no installed consumer to configure.
+    """
+    fixture = next((name for name in ('installed', 'unadmitted_installed')
+                    if name in request.fixturenames), None)
+    if fixture is None:
+        yield
+        return
+    from yt_playlist.core import schema_inspection
+
+    store, _ = request.getfixturevalue(fixture)
+    with reuse_reporting_reader(store, monkeypatch), schema_inspection.reuse_tables(store.conn):
+        yield
+
+
+def assert_installed_consumer_input(store, version):
+    """Check the actual admitted SQL and private guards beneath consumers."""
+    from yt_playlist.core.migrations import registry, regular
+
+    source = store._fixture_installed_template.source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert list(map(tuple, store.conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
+        (entry.version, entry.name) for entry in registry.MIGRATIONS[:version]]
+    assert regular.validate(store.conn) == regular.validate(source.conn)
+    assert store._snapshot_revisions.conn is store.conn
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def revision_definitions(conn):

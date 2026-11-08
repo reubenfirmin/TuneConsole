@@ -5,6 +5,7 @@ import sqlite3
 
 import pytest
 
+from tests.compaction_fixture_support import completed_installed as admitted_installed
 from tests.core.test_predecessor_writes import consumer_installed as installed
 from yt_playlist.core import home_offers
 from yt_playlist.core.migrations import MigrationError, migrate, registry, regular
@@ -13,15 +14,35 @@ from yt_playlist.core.preparation.recommendation_state import BYTE_LIMITS, JOBS
 from yt_playlist.core.store import Store
 
 
+@pytest.fixture
+def disable_periodic_library_sync():
+    # These cases open stores directly and never construct an HTTP application.
+    pass
+
+
+@pytest.mark.parametrize('version', [79, 82])
+def test_offer_input_keeps_both_histories_and_private_snapshot_guards(compaction_inputs, version):
+    from yt_playlist.core.db_revisions import Revisions
+
+    source = compaction_inputs(version).source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert list(map(tuple, source.conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
+        (entry.version, entry.name) for entry in registry.MIGRATIONS[:version]]
+    assert list(map(tuple, source.conn.execute('SELECT version,name FROM schema_changes ORDER BY version'))) == [
+        (entry.version, entry.name) for entry in regular.CHANGES]
+    assert isinstance(source._snapshot_revisions, Revisions)
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
 def prepare(store):
     store.rec_proposals.put_proposals('home_shown', {'epoch': 12, 'signatures': ['second', 'first']}, 100)
     JOBS['home-offers'].install(store.conn)
     return JOBS['home-offers'].step(store.conn).prepared_revision
 
 
-@pytest.mark.parametrize('installed', [79, 82], indirect=True)
-def test_publication_and_continuing_writes_share_one_owner(installed):
-    store, _ = installed
+@pytest.mark.parametrize('admitted_installed', [79, 82], indirect=True)
+def test_publication_and_continuing_writes_share_one_owner(admitted_installed):
+    store, _ = admitted_installed
     revision = prepare(store)
     original = tuple(store.conn.execute("SELECT * FROM rec_proposals WHERE surface='home_shown'").fetchone())
     offer_publication.publish(store.conn, revision=revision)
@@ -89,24 +110,20 @@ def test_stale_corrupt_and_interrupted_publications_cannot_admit_a_head(installe
     offer_publication.publish(store.conn, revision=revision)
 
 
-def test_retained_source_supports_the_explicit_frozen_upgrade(tmp_path):
-    store = Store(tmp_path / 'frozen.db')
-    try:
-        migrate(store.conn, registry=registry.MIGRATIONS[:82])
-        store.init_schema()
-        offer_publication.publish(store.conn, revision=prepare(store))
-        store.rec_proposals.put_proposals('home_shown', {'epoch': 14, 'signatures': ['new']}, 200)
-        store.rec_proposals.put_proposals('home_shown', {'epoch': 14, 'signatures': ['last', 'new']}, 300)
-        # The compatible current source still feeds the actual frozen upgrade.
-        with closing(sqlite3.connect(store._db_path)) as converter, converter:
-            converter.row_factory = sqlite3.Row
-            converter.execute('PRAGMA foreign_keys=ON')
-            migrate(converter, registry=registry.MIGRATIONS[:83])
-        assert not home_offers.prepared_owner(store.conn)
-        assert home_offers.read(store.conn) == {'epoch': 14, 'signatures': ['last', 'new']}
-        assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 83
-    finally:
-        store.conn.close()
+@pytest.mark.parametrize('admitted_installed', [82], indirect=True)
+def test_retained_source_supports_the_explicit_frozen_upgrade(admitted_installed):
+    store, _ = admitted_installed
+    offer_publication.publish(store.conn, revision=prepare(store))
+    store.rec_proposals.put_proposals('home_shown', {'epoch': 14, 'signatures': ['new']}, 200)
+    store.rec_proposals.put_proposals('home_shown', {'epoch': 14, 'signatures': ['last', 'new']}, 300)
+    # The compatible current source still feeds the actual frozen upgrade.
+    with closing(sqlite3.connect(store._db_path)) as converter, converter:
+        converter.row_factory = sqlite3.Row
+        converter.execute('PRAGMA foreign_keys=ON')
+        migrate(converter, registry=registry.MIGRATIONS[:83])
+    assert not home_offers.prepared_owner(store.conn)
+    assert home_offers.read(store.conn) == {'epoch': 14, 'signatures': ['last', 'new']}
+    assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 83
 
 
 @pytest.mark.parametrize('payload', [

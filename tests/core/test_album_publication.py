@@ -10,11 +10,14 @@ from tests.core.test_album_owner_preparation import finish, seed
 from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.genre_catalog_support import bound_catalog
 from tests.prepared_fixture_support import capture_template, prepared_template
-from tests.store_fixture_support import install_numbered_input
-from yt_playlist.core import albums
+from tests.store_fixture_support import install_numbered_input, publication_consumer_reads, reuse_reporting_reader
+from yt_playlist.core import albums, schema_inspection
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import album_occurrences as preparation, album_publication as publication
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 
 
 def stage(conn, size=32):
@@ -54,6 +57,88 @@ def rejection_inputs(store):
     assert publication.selected(store.conn) is None
 
 
+@pytest.fixture(scope='module')
+def album_native_numbered_input():
+    with closing(sqlite3.connect(':memory:')) as schema:
+        with pytest.MonkeyPatch.context() as patch:
+            bound_catalog(patch)
+            install_numbered_input(schema, 98)
+        schema.execute('PRAGMA query_only=ON')
+        yield schema
+
+
+def test_native_album_predecessor_has_the_exact_numbered_contract(album_native_numbered_input):
+    runner.validate_version(album_native_numbered_input, 98)
+    assert album_native_numbered_input.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert album_native_numbered_input.execute('SELECT count(*) FROM album_tracks').fetchone()[0] == 0
+
+
+@pytest.fixture(scope='module')
+def album_native_input(album_native_numbered_input, tmp_path_factory):
+    path = tmp_path_factory.mktemp('native-album-input') / 'installed.db'
+    with prepared_template(album_native_numbered_input, rich_source,
+                           database=path, defer_metadata=True) as template:
+        yield template
+
+
+def test_native_album_input_keeps_full_partial_and_unresolved_occurrences(album_native_input):
+    source = album_native_input.source
+    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 98
+    assert source.conn.execute('SELECT count(*) FROM main.catalog_entries').fetchone()[0] == 2
+    assert source.conn.execute('SELECT count(*) FROM main.album_fetch_state').fetchone()[0] == 3
+    assert source.conn.execute("SELECT count(*) FROM main.album_tracks WHERE legacy_track_key='unknown|subject'").fetchone()[0] == 1
+    assert album_native_input.revision_guards
+
+
+@pytest.fixture(scope='module')
+def album_native_reference(album_native_input, tmp_path_factory):
+    path = tmp_path_factory.mktemp('native-album-reference') / 'reference.db'
+    with album_native_input.open(path) as store:
+        # Exercise the registered album takeover itself. Earlier unrelated
+        # migrations are completed numbered input, with their own upgrade tests.
+        runner.migrate(store.conn, registry=registry.MIGRATIONS[:99])
+        store.init_schema(defer_metadata=True)
+        yield capture_template(store, None)
+
+
+def test_native_album_reference_runs_registered_takeover_and_keeps_source_groups(album_native_reference):
+    source = album_native_reference.source
+    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 99
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source.collection.cached_album_tracklist_ids() == {'release', 'release-alias'}
+    assert not source.collection.has_published_album_tracklist('partial')
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.fixture(scope='module')
+def album_published_native_input(album_native_input, tmp_path_factory):
+    path = tmp_path_factory.mktemp('published-native-album-input') / 'published.db'
+    with album_native_input.open(path) as store:
+        identity = stage(store.conn)
+        publication.publish(store.conn, identity=identity)
+        yield capture_template(store, identity)
+
+
+def test_native_album_upgrade_input_keeps_selected_publication_and_retained_tracks(album_published_native_input):
+    source = album_published_native_input.source
+    assert publication.selected(source.conn) == album_published_native_input.result
+    assert source.conn.execute('SELECT count(*) FROM '+publication.table('tracks')).fetchone()[0] > 0
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+
+
+@pytest.mark.parametrize('version', [79, 93, 98])
+def test_album_reader_input_keeps_each_installed_contract(_bounded_installed_schema, version):
+    template = _bounded_installed_schema(version)
+    source = template.source
+    with closing(sqlite3.connect(source._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
+        reader.row_factory = sqlite3.Row
+        runner.validate_version(reader, version)
+        regular.validate(reader)
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source.conn.execute('SELECT count(*) FROM main.album_tracks').fetchone()[0] == 0
+    assert template.revision_guards
+
+
 def projection(conn, tracks, states, links, keys):
     return {
         'tracks':sorted([tuple(row) for row in conn.execute('SELECT album_id,entry_id,recording_id,legacy_track_key,position,disc_number,track_number,is_full,source FROM '+tracks)], key=repr),
@@ -63,18 +148,25 @@ def projection(conn, tracks, states, links, keys):
 
 
 @pytest.mark.parametrize('installed', [79, 93, 98], indirect=True)
-def test_preopened_projection_groups_match_frozen_native_without_losing_originals(installed, tmp_path):
+def test_preopened_projection_groups_match_frozen_native_without_losing_originals(
+        installed, album_native_reference, monkeypatch):
     store, _ = installed
     album, _ = rich_source(store)
     sources = {owner:[dict(row) for row in store.conn.execute('SELECT * FROM main.'+owner+' ORDER BY '+key)]
         for owner,key in [('album_tracks','id'), ('album_fetch_state','album_id')]}
     preopened = Store(store._db_path)
-    native = Store(tmp_path / 'native.db')
+    # Compare every installed version with the same genuinely converted album
+    # reference. Its measured owners below keep native conversion out of these
+    # publication/reader checks; each case still stages its own source rows.
+    native = album_native_reference.source
+    reads = ExitStack()
     try:
         preopened.init_schema(defer_metadata=True)
-        store.conn.backup(native.conn)
-        runner.migrate(native.conn, registry=registry.MIGRATIONS[:99])
-        native.init_schema(defer_metadata=True)
+        # Snapshot admission/lifetime is owned separately. Reuse this reader's
+        # real SQL view while comparing the many repository projections below.
+        reads.enter_context(reuse_reporting_reader(preopened, monkeypatch))
+        reads.enter_context(schema_inspection.reuse_tables(preopened.conn))
+        reads.enter_context(schema_inspection.reuse_tables(native.conn))
         identity = stage(store.conn, size=1)
         evidence = store.conn.execute('SELECT evidence_changes FROM rec_preparation WHERE id=1').fetchone()[0]
         publication.publish(store.conn, identity=identity)
@@ -114,7 +206,7 @@ def test_preopened_projection_groups_match_frozen_native_without_losing_original
         regular.validate(preopened.conn)
         assert store.conn.execute('SELECT count(*) FROM main.catalog_entries').fetchone()[0] == 2
     finally:
-        native.conn.close()
+        reads.close()
         preopened.conn.close()
 
 
@@ -365,19 +457,17 @@ def test_interrupted_copy_cutover_failed_preparation_and_independent_ddl(install
     publication.publish(store.conn, identity=stage(store.conn))
 
 
-def test_native_upgrade_keeps_custody_and_validates_its_guards(tmp_path, _pristine_installed_schema):
+def test_native_upgrade_keeps_custody_and_validates_its_guards(tmp_path, album_published_native_input):
     path = tmp_path / 'upgrade.db'
     store = Store(path)
     try:
-        _pristine_installed_schema(98).backup(store.conn)
-        store.init_schema(defer_metadata=True)
-        seed(store)
-        identity = stage(store.conn)
-        publication.publish(store.conn, identity=identity)
+        album_published_native_input.restore(store)
         before = list(map(tuple, store.conn.execute('SELECT * FROM '+publication.table('tracks'))))
         store.conn.close()
         store = Store(path)
-        runner.migrate(store.conn, registry=registry.MIGRATIONS)
+        # The next registered replacement retires noncanonical read views;
+        # custody and native-reader precedence must survive both boundaries.
+        runner.migrate(store.conn, registry=registry.MIGRATIONS[:100])
         store.init_schema(defer_metadata=True)
         assert publication.selected(store.conn) is None
         assert publication.relation(store.conn, 'album_tracks') == 'album_tracks'

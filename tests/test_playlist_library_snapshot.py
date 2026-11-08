@@ -82,7 +82,7 @@ def test_regular_playlist_keeps_upstream_count_author_and_description():
     assert playlist['description'] == 'Author • 12 songs'
 
 
-def test_display_variant_on_page_27_does_not_discard_preceding_or_following_pages():
+def test_display_variant_on_page_27_does_not_discard_preceding_or_following_pages(monkeypatch):
     responses = [_first_page(_page('VL1', continuation='page2'))]
     for page in range(2, 27):
         responses.append({'continuationContents': {'gridContinuation':
@@ -94,6 +94,9 @@ def test_display_variant_on_page_27_does_not_discard_preceding_or_following_page
         {'continuationContents': {'gridContinuation': _page('VLFINAL')}},
     ])
     client, bridge = _production_client(responses)
+    # This in-memory bridge exercises pagination and parsing. Request pacing
+    # has independent integration owners and adds no evidence about page 27.
+    monkeypatch.setattr(client._session._access, 'min_interval', 0)
     result = client.get_library_playlists(limit=None)
     assert [p['playlistId'] for p in result] == [
         *(str(page) for page in range(1, 27)), *(f'LATE{i}' for i in range(50)), 'FINAL',

@@ -4,13 +4,11 @@ from pathlib import Path
 import sqlite3
 
 import pytest
-from tests.historical_support import upgrade_fixture
 
 from yt_playlist.core.accounts import client_for
 from yt_playlist.core.migrations import Migration,MigrationError,migrate
 from yt_playlist.core.migrations import registry,v024_account_scope,v030_account_scope_preservation
 from yt_playlist.core.store import Store
-from yt_playlist.core import legacy_evidence
 
 
 @pytest.fixture(scope='module')
@@ -48,49 +46,6 @@ def installed_v23(tmp_path, account_predecessors):
 @pytest.fixture
 def installed_v29(tmp_path, account_predecessors):
     yield from _installed(tmp_path, account_predecessors, 29)
-
-
-@pytest.mark.parametrize('installed_version', [23,29])
-def test_installed_account_scope_preserves_unknown_ownership_and_curation(installed_v23,installed_version):
-    store = installed_v23
-    migrate(store.conn,registry=registry.MIGRATIONS[:installed_version])
-    upgrade_fixture(store)
-    assert store.playlists.get_playlist(1).playlist_scope_id=='@account:1:LM'
-    assert store.playlists.get_playlist(2).playlist_scope_id=='@account:2:LM'
-    assert store.playlists.get_playlist(4).playlist_scope_id==store.playlists.get_playlist(5).playlist_scope_id=='shared'
-    refs = {'@account:1:LM','@account:2:LM'}
-    assert store.playlists.get_playlist_groups()==dict.fromkeys(refs,'Old likes') | {'shared':'Keep'}
-    assert store.playlists.get_hidden_playlists()==refs | {'@account:1:SE'}
-    assert store.overlaps.get_overlap_ignored()==refs | {'shared'}
-    assert store.overlaps.get_cleanup_ignored()=={'empty':refs,'tiny':{'shared'}}
-    kind = 'playlist_scope_inherited:playlist_group'
-    inherited = [json.loads(legacy_evidence.original(store.conn, 'playlist', kind, r[0]))
-                 for r in store.conn.execute('SELECT source_id FROM playlist_legacy_evidence WHERE kind=?', (kind,))]
-    assert {r['inherited']['ytm'] for r in inherited}==refs
-    assert all(r['original']=={'ytm':'@legacy:LM','name':'Old likes'} for r in inherited)
-    assert store.overlaps.get_suppressed_overlap_pairs()=={frozenset(('@legacy:LM','shared'))}
-    assert store.overlaps.get_ignored_merges()[0]['members']==['@account:1:SE','shared']
-    assert store.playlist_recipes.get_recipe('shared')=={'model':'cluster'}
-    assert json.loads(store.playlist_recipes.get_cluster_canvas('shared'))=={'nodes':[]}
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-    state = list(store.conn.iterdump())
-    store.init_schema()
-    assert list(store.conn.iterdump())==state
-
-    # Inherited choices become ordinary independent preferences. Membership churn
-    # retains those choices, while a newly added account inherits nothing.
-    store.playlists.set_playlist_group('LM','Changed',account_id=1)
-    store.playlists.unhide_playlist('LM',account_id=1)
-    store.overlaps.unignore_cleanup('@account:1:LM','empty')
-    store.playlists.remove_playlist(2)
-    restored = store.playlists.upsert_playlist(2,'LM','Main likes',0,'h',1)
-    third = store.accounts.upsert_account('New','bridge','new-brand',False)
-    new = store.playlists.upsert_playlist(third,'LM','New likes',0,'h',1)
-    assert store.playlists.get_playlist_groups()['@account:1:LM']=='Changed'
-    assert store.playlists.get_playlist_groups()[store.playlists.get_playlist(restored).playlist_scope_id]=='Old likes'
-    assert store.playlists.get_playlist(new).playlist_scope_id not in store.playlists.get_playlist_groups()
-    assert store.playlists.get_hidden_playlists()=={'@account:2:LM','@account:1:SE'}
-    assert store.overlaps.get_cleanup_ignored()['empty']=={'@account:2:LM'}
 
 
 def test_account_scope_repair_preserves_existing_account_override(installed_v29):

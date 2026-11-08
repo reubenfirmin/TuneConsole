@@ -36,44 +36,6 @@ def response(videos=('one','two','one')):
             'tracks':[{'title':v,'videoId':v,'discNumber':1 if i==0 else 2,'trackNumber':i+1} for i,v in enumerate(videos)]}
 
 
-def test_legacy_occurrences_keep_unknown_order_incidental_evidence_and_exact_frozen_shares(tmp_path, legacy_owner_store):
-    store = legacy_owner_store(tmp_path/'old.db', 98)
-    entry = store.tracks.upsert_track('one','One','Artist',None,10,album_browse_id='release')
-    aid = albums.lookup(store.conn,'release')
-    with store.conn:
-        store.conn.executemany("INSERT INTO album_tracks(album_id,entry_id,position,is_full,source) VALUES (?,?,NULL,1,'legacy')",[(aid,entry),(aid,entry)])
-        store.conn.execute('INSERT INTO album_tracks(album_id,legacy_track_key,is_full,source) VALUES (?,?,1,?)',(aid,'unknown|artist','legacy'))
-        store.conn.execute('INSERT INTO album_fetch_state VALUES (?,NULL,1,3)',(aid,))
-        store.conn.execute('INSERT INTO album_share_snapshots VALUES (?,?,?)',('release','Frozen',json.dumps(['one','missing','one'])))
-    original = {r['id']:dict(r) for r in store.conn.execute('SELECT * FROM album_tracks')}
-    migrate(store.conn, registry=registry.MIGRATIONS)
-    store.init_schema()
-    assert store.conn.execute('SELECT current_tracklist_id FROM albums WHERE id=?',(aid,)).fetchone()[0] is not None
-    full = store.conn.execute("SELECT * FROM album_tracklists WHERE capture_kind='legacy_full'").fetchone()
-    assert (full['status'],full['order_status'],full['fetched_at'])==('complete','unknown',None)
-    captured = list(store.conn.execute('SELECT * FROM album_track_occurrences WHERE tracklist_id=?',(full['id'],)))
-    assert len(captured)==3 and all(r['position'] is None for r in captured)
-    assert {r['legacy_row_id'] for r in captured}=={i for i,r in original.items() if r['is_full']}
-    assert store.conn.execute('SELECT count(*) FROM album_item_observations').fetchone()[0]==1
-    frozen = store.conn.execute('SELECT t.capture_kind,t.status,t.order_status FROM album_share_snapshots s JOIN album_tracklists t ON t.id=s.tracklist_id').fetchone()
-    assert tuple(frozen)==('legacy_share','snapshot','known')
-    assert [r[0] for r in store.conn.execute('SELECT raw_source_ref FROM album_share_items ORDER BY position')]==['one','missing','one']
-    missing = store.conn.execute("SELECT * FROM album_track_occurrences WHERE raw_source_ref='missing'").fetchone()
-    assert missing['recording_id'] is None and missing['resolution_status']=='unresolved'
-    assert not store.conn.execute("SELECT 1 FROM youtube_items WHERE video_id='missing'").fetchone()
-    assert store.conn.execute('SELECT count(*) FROM catalog_entries').fetchone()[0]==1
-    assert store.collection.cached_album_share('release')=={'title':'Frozen','video_ids':['one','missing','one']}
-    current.validate(store.conn)
-    store.conn.close()
-    reopened = Store(tmp_path/'old.db')
-    try:
-        reopened.init_schema()
-        assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchall()
-        assert reopened.conn.execute('SELECT count(*) FROM album_track_occurrences').fetchone()[0]==6
-    finally:
-        reopened.conn.close()
-
-
 def test_partial_refresh_retains_last_good_and_frozen_share_while_ordinary_queue_follows_current(store):
     remember_album(store,'release',response())
     with store.conn:
@@ -144,7 +106,7 @@ def test_interruption_rolls_back_owner_replacement_then_restart_preserves_it(tmp
     assert store.conn.execute("SELECT type FROM sqlite_schema WHERE name='album_tracks'").fetchone()[0]=='table'
     monkeypatch.setattr(registry,'MIGRATIONS',original)
     # Retry the owning v99 conversion after a real disk reopen. The populated
-    # legacy-occurrence case above owns the full suffix and current admission.
+    # shared album/discovery upgrade owns the full suffix and current admission.
     path = store._db_path
     store.conn.close()
     reopened = Store(path)

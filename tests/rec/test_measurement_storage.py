@@ -1,10 +1,20 @@
 """Foreground action lookup and reusable, bounded experiment policy snapshots."""
+from contextlib import nullcontext
 import json
 
 import pytest
 
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.rec import measurement, scorecard
 from yt_playlist.repos.discovery import DiscoveryRepo
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # These cases own membership lookup and policy storage, independently of
+    # the genre catalog. Keep private SQL, file policies and real snapshots.
+    with bounded_consumer_schema(()) as schema:
+        yield schema
 
 
 @pytest.mark.parametrize("membership", ["library", "discovery", "cached", "unknown"])
@@ -56,9 +66,17 @@ def test_discovery_video_lookup_uses_membership_primary_key(store):
     assert any("SEARCH d USING" in row and ("PRIMARY KEY" in row or "INDEX" in row) for row in plan), plan
 
 
-def test_experiment_policy_reuses_definition_and_retains_opportunity_linkage(store):
-    for i in range(30):
-        _offer(store, f"opportunity-{i}")
+def test_experiment_policy_reuses_definition_and_retains_opportunity_linkage(store, monkeypatch):
+    # Policy calculation has independent owners in test_serving_policy. Keep
+    # policy packing, deduplication and trace reads real. The capture lifetime
+    # has separate owners in test_measurement_isolation; these identical inputs
+    # can share one completed snapshot below the storage boundary.
+    monkeypatch.setattr(measurement, 'serving_policy', lambda *args, **kwargs:
+                        ('completed', {'ranker': 'lane', 'weights': {'genre:rock': 1.4}}))
+    with store.read_snapshot() as snapshot, monkeypatch.context() as patch:
+        patch.setattr(store, 'read_snapshot', lambda: nullcontext(snapshot))
+        for i in range(30):
+            _offer(store, f"opportunity-{i}")
     assert store.conn.execute("SELECT COUNT(*) FROM recommendation_policies").fetchone()[0] == 1
     rows = store.conn.execute("SELECT id FROM rec_served_impressions ORDER BY id").fetchall()
     assert len(rows) == 30

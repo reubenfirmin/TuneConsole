@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.independent_schema_support import independent_regular_ddl
 from tests.publication_timing_support import publication_costs
 from yt_playlist.core import group_evidence, recommendation_outputs as files
@@ -55,7 +55,17 @@ def root_rows(conn):
 
 @pytest.fixture
 def home_inputs(installed, staged_custody):
-    return staged_custody(installed, 'home-output-inputs', seed)
+    return staged_custody(installed, 'home-output-inputs', seed, admit=False)
+
+
+@pytest.mark.parametrize('installed', [79, 90], indirect=True)
+def test_home_preparation_input_keeps_multibyte_displays_and_existing_roots(installed, home_inputs):
+    store, version = installed
+    assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
+    assert len(home_inputs['adaptive_group_preview'].encode()) > 128 * 1024
+    assert {row[0] for row in store.conn.execute('SELECT surface FROM rec_proposals')} == set(home_inputs)
+    assert sum(map(len, root_rows(store.conn).values())) == 4
+    assert not store.conn.execute("SELECT 1 FROM sqlite_schema WHERE name=?", (preparation.HEAD,)).fetchone()
 
 
 @pytest.mark.parametrize('installed', [79, 90], indirect=True)

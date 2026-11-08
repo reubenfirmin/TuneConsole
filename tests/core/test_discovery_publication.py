@@ -1,6 +1,8 @@
 """Canonical visits, source folds and retained offer precision share one selection."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import json
+from pathlib import Path
 import sqlite3
 import threading
 
@@ -11,10 +13,21 @@ from tests.core.test_predecessor_writes import consumer_installed as unadmitted_
 from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_discovery_owner_preparation import seed
 from tests.core.test_discovery_artist_publication import ready as artist_ready
-from yt_playlist.core import schema_inspection, artists, collection_recovery
+from tests.genre_catalog_support import bound_catalog
+from tests.prepared_fixture_support import assert_upgrade_phase, custody_predecessor
+from tests.store_fixture_support import publication_consumer_reads, reuse_reporting_reader
+from yt_playlist.core import schema_inspection, artists, collection_recovery, preparation_files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import discovery_publication as publication, discovery_subjects as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Publication owners do not construct an HTTP application."""
 
 
 def prepare(conn):
@@ -25,6 +38,12 @@ def prepare(conn):
         owner = publication.owner(conn)
         artifact, stage = artist_ready(conn)
         artifact.publish(conn, stage=stage)
+        return prepare_subjects(conn)
+
+
+def prepare_subjects(conn):
+    with schema_inspection.reuse_tables(conn):
+        owner = publication.owner(conn)
         for job in owner.jobs:
             job.install(conn)
             for _ in range(500):
@@ -36,7 +55,12 @@ def prepare(conn):
 
 
 def ready(conn, size=16):
-    owner = prepare(conn)
+    prepare(conn)
+    return stage_discovery(conn, size=size)
+
+
+def stage_discovery(conn, size=16):
+    owner = publication.owner(conn)
     for _ in range(500):
         stage = owner.step(conn, batch_size=size)
         if stage.complete:
@@ -44,14 +68,175 @@ def ready(conn, size=16):
     pytest.fail('Discovery subject fixture did not stage')
 
 
+def retained_discovery_rows(conn, table):
+    return [{name: Path(value).read_bytes() if name.endswith('filename') and value is not None else value
+             for name, value in dict(row).items()} for row in conn.execute('SELECT * FROM ' + table)]
+
+
+def prepare_selected_discovery(store):
+    with pytest.MonkeyPatch.context() as patch, reuse_reporting_reader(store, patch), schema_inspection.reuse_tables(store.conn):
+        owner = publication.owner(store.conn)
+        staged = owner.latest(store.conn)
+        assert staged.complete
+        stage = staged.id
+        owner.publish(store.conn, stage=stage)
+        captured = {owner.table('input_' + kind): retained_discovery_rows(store.conn, owner.table('input_' + kind))
+                    for kind in owner.kinds}
+        return stage, store.discovery.get_discovered_artists(), owner.table('stages'), captured
+
+
+@pytest.fixture(scope='module')
+def discovery_prepared_inputs(staged_custody_templates, _bounded_installed_schema):
+    def artists(store):
+        owner, stage = artist_ready(store.conn)
+        owner.publish(store.conn, stage=stage)
+
+    def subjects(store):
+        prepare_subjects(store.conn)
+
+    def staged(store):
+        with schema_inspection.reuse_tables(store.conn):
+            return stage_discovery(store.conn)[1]
+
+    builders = {'artists': artists, 'subjects': subjects, 'staged': staged}
+    inputs = {}
+
+    def get(version, phase='staged'):
+        completed = staged_custody_templates(version, 'discovery-subject-seeds', seed, admit=False,
+                                            completed=_bounded_installed_schema(version))
+        for name, build in builders.items():
+            completed = staged_custody_templates(version, 'discovery-prepared:' + name, build,
+                                                admit=False, completed=completed)
+            inputs[version, name] = completed
+            if name == phase:
+                return completed
+        raise ValueError(phase)
+
+    def release(version):
+        for key, template in inputs.items():
+            if key[0] == version:
+                assert not template.source.conn.in_transaction
+                template.source._fixture_released = True
+                template.source.conn.close()
+
+    get.release = release
+    return get
+
+
+@pytest.mark.parametrize('version', [79, 93])
+@pytest.mark.parametrize('phase', ['artists', 'subjects', 'staged'])
+def test_discovery_prepared_input_keeps_real_files_and_cold_phase(discovery_prepared_inputs, version, phase):
+    template = discovery_prepared_inputs(version, phase)
+    assert_upgrade_phase(template, version)
+    if phase == 'staged':
+        owner = publication.owner(template.source.conn)
+        assert owner.latest(template.source.conn).complete
+        assert owner.selected(template.source.conn) is None
+    assert template.source.discovery.get_discovered_artists()[0]['offered_count'] == 9
+    assert all(path.is_file() for path in preparation_files.references(template.source.conn))
+
+
+@pytest.fixture(scope='module')
+def discovery_upgrade_inputs(upgraded_custody_inputs, discovery_prepared_inputs):
+    def get(version, target, **options):
+        return upgraded_custody_inputs(version, target, 'selected-discovery-upgrade',
+            prepare_selected_discovery, prepared=discovery_prepared_inputs(version), **options)
+
+    get.release = lambda version: upgraded_custody_inputs.release(version, 'selected-discovery-upgrade')
+    return get
+
+
+def assert_retained_discovery(template):
+    stage, _, stages, captured = template.result
+    assert template.source.conn.execute('SELECT copied FROM ' + stages + ' WHERE id=?',
+                                       (stage,)).fetchone()[0] > 0
+    for table, expected in captured.items():
+        assert retained_discovery_rows(template.source.conn, table) == expected
+
+
+@pytest.mark.parametrize('version', [79, 93])
+def test_selected_discovery_upgrade_input_keeps_published_values_and_originals(discovery_upgrade_inputs, version):
+    template = discovery_upgrade_inputs(version, version)
+    assert_upgrade_phase(template, version)
+    assert_retained_discovery(template)
+    assert template.source.discovery.get_discovered_artists() == template.result[1]
+
+
+@pytest.mark.parametrize('version,target,phase', [
+    (version, target, phase)
+    for version, targets in ((79, (81, 86, 88, 93, 94, 97, 98, 99, 100)), (93, (94, 97, 98, 99, 100)))
+    for target in targets for phase in ('input', 'converted')])
+def test_selected_discovery_upgrade_phase_keeps_originals(discovery_upgrade_inputs, version, target, phase):
+    template = discovery_upgrade_inputs(version, target, phase=phase)
+    assert_upgrade_phase(template, target if phase == 'converted' else custody_predecessor(version, target))
+    assert_retained_discovery(template)
+
+
 def read(conn, owner, stage, name):
     return [dict(row) for row in conn.execute('SELECT * FROM '+owner.table(name)+' WHERE stage=?', (stage,))]
 
 
-@pytest.mark.parametrize('installed', [79, 85, 86, 100], indirect=True)
-def test_views_deduplicate_canonical_visits_and_preserve_legacy_residue_and_origins(installed):
+@pytest.mark.parametrize('installed', [79, 85, 86, 93, 94, 100], indirect=True)
+def test_discovery_schema_input_keeps_history_and_real_private_guards(installed):
     store, version = installed
-    account, aid, rid, album = seed(store)
+    template = store._fixture_installed_template
+    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
+    assert store._snapshot_revisions.conn is store.conn
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.fixture
+def discovery_seed_template(request, staged_custody_templates):
+    name = 'installed' if 'installed' in request.fixturenames else 'unadmitted_installed'
+    store, version = request.getfixturevalue(name)
+    return staged_custody_templates(version, 'discovery-subject-seeds', seed, admit=False,
+                                   completed=store._fixture_installed_template)
+
+
+@pytest.fixture
+def seeded_discovery(request, discovery_seed_template, staged_custody):
+    name = 'installed' if 'installed' in request.fixturenames else 'unadmitted_installed'
+    return staged_custody(request.getfixturevalue(name), 'discovery-subject-seeds', seed, admit=False)
+
+
+@pytest.mark.parametrize('installed', [79, 85, 86, 93, 94, 100], indirect=True)
+def test_discovery_seed_input_keeps_exact_catalog_owners_and_legacy_visits(installed, discovery_seed_template):
+    source = discovery_seed_template.source
+    account, aid, rid, album = discovery_seed_template.result
+    assert account and aid and rid and album
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source.conn.execute('SELECT count(*) FROM main.discovery_visible_impressions').fetchone()[0] == 5
+    assert source.conn.execute('SELECT offered_count FROM main.discovered_artists').fetchone()[0] == 9
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def rejection_inputs(store):
+    aid, = store.conn.execute('SELECT artist_id FROM main.discovered_artists').fetchone()
+    with store.conn:
+        store.conn.execute("INSERT INTO main.genre_classification_legacy(artist_id,raw_label,resolution_reason) VALUES (?,'Captured','unknown_genre')", (aid,))
+    prepare(store.conn)
+
+
+@pytest.fixture
+def rejection_store(tmp_path, version, _bounded_installed_schema, staged_custody_templates, monkeypatch):
+    bound_catalog(monkeypatch)
+    seeded = staged_custody_templates(version, 'discovery-subject-seeds', seed, admit=False,
+                                     completed=_bounded_installed_schema(version))
+    template = staged_custody_templates(version, 'discovery-subject-rejection', rejection_inputs,
+                                       admit=False, completed=seeded)
+    with template.open(tmp_path / 'discovery-rejection.db') as store:
+        with reuse_reporting_reader(store, monkeypatch), schema_inspection.reuse_tables(store.conn):
+            yield store
+        with closing(sqlite3.connect(store._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
+            reader.row_factory = sqlite3.Row
+            runner.validate_version(reader, version)
+
+
+@pytest.mark.parametrize('installed', [79, 85, 86, 100], indirect=True)
+def test_views_deduplicate_canonical_visits_and_preserve_legacy_residue_and_origins(installed, seeded_discovery):
+    store, version = installed
+    account, aid, rid, album = seeded_discovery
     with store.conn:
         # Two retained spellings of one visible artist visit count once. Keep
         # the earliest observation even when its captured spelling sorts later.
@@ -61,7 +246,7 @@ def test_views_deduplicate_canonical_visits_and_preserve_legacy_residue_and_orig
         store.conn.execute('UPDATE main.album_discovery_memberships SET offered_count=5,first_shown=0,last_shown=1')
     original = {table: list(map(tuple, store.conn.execute('SELECT * FROM main.'+table))) for table in
         (*preparation.KEYS, 'discovered_artists', 'schema_migrations')}
-    owner, stage = ready(store.conn, size=1)
+    owner, stage = ready(store.conn)
     owner.publish(store.conn, stage=stage)
     visits = read(store.conn, owner, stage, 'discovery_impressions')
     assert sorted(((r['view_id'], r['recording_id'], r['artist_id'], r['shown_at']) for r in visits),
@@ -249,13 +434,27 @@ def test_canonical_artist_collision_preserves_first_metadata_last_explanation_an
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
+def test_rejection_input_keeps_completed_subjects_and_captured_classification(installed, staged_custody_templates, discovery_seed_template):
+    _, version = installed
+    template = staged_custody_templates(version, 'discovery-subject-rejection', rejection_inputs,
+                                       admit=False, completed=discovery_seed_template)
+    store = template.source
+    assert store.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert store.conn.execute('SELECT count(*) FROM '+preparation.IMPRESSIONS).fetchone()[0] > 0
+    assert store.conn.execute('SELECT raw_label FROM '+preparation.CLASSIFICATIONS).fetchone()[0] == 'Captured'
+    assert publication.owner(store.conn).selected(store.conn) is None
+    assert store.discovery.get_discovered_artists()[0]['offered_count'] == 9
+
+
+@pytest.mark.parametrize('version', [93])
 @pytest.mark.parametrize('damage', ['clock', 'identity', 'original', 'missing', 'classification'])
-def test_independent_publication_check_rejects_damaged_preparation(installed, damage, independent_regular_ddl):
-    store, _ = installed
-    _, aid, _, _ = seed(store)
-    with store.conn:
-        store.conn.execute("INSERT INTO main.genre_classification_legacy(artist_id,raw_label,resolution_reason) VALUES (?,'Captured','unknown_genre')", (aid,))
-    owner = prepare(store.conn)
+def test_independent_publication_check_rejects_damaged_preparation(
+        rejection_store, damage, independent_regular_ddl):
+    store = rejection_store
+    # Completed artist documents and subject rows are inputs to this independent
+    # publication verifier. Each case damages its own restored SQL/files, then
+    # runs the real map writer, verifier, selection and regular DDL.
+    owner = publication.owner(store.conn)
     with store.conn:
         if damage == 'clock':
             store.conn.execute('UPDATE '+preparation.SOURCES+' SET first_found_at=999')
@@ -333,10 +532,11 @@ def test_interrupted_stage_and_head_resume_without_partial_selection_or_stale_pu
         reopened.conn.close()
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_slow_verification_leaves_real_writes_and_regular_migrations_available(installed, monkeypatch, independent_regular_ddl):
-    store, _ = installed
-    _, aid, _, _ = seed(store)
+@pytest.mark.parametrize('version', [93])
+def test_slow_verification_leaves_real_writes_and_regular_migrations_available(
+        rejection_store, monkeypatch, independent_regular_ddl):
+    store = rejection_store
+    aid, = store.conn.execute('SELECT artist_id FROM main.discovered_artists').fetchone()
     owner, stage = ready(store.conn)
     entered, release = threading.Event(), threading.Event()
     original = collection_recovery.read
@@ -421,38 +621,30 @@ def test_frozen_native_upgrade_keeps_retained_inputs_and_prefers_native_readers(
         native.conn.close()
 
 
-@pytest.mark.parametrize('installed', [79], indirect=True)
 @pytest.mark.parametrize('version', [86, 100])
-def test_partly_upgraded_genre_layout_admits_earlier_retained_publication(installed, version, tmp_path, independent_regular_ddl):
-    store, _ = installed
-    seed(store)
-    owner, stage = ready(store.conn)
-    owner.publish(store.conn, stage=stage)
+def test_partly_upgraded_genre_layout_admits_earlier_retained_publication(discovery_upgrade_inputs, version, tmp_path, independent_regular_ddl):
+    prepared = discovery_upgrade_inputs(79, version)
+    stage, _, stages, _ = prepared.result
     partial = Store(tmp_path/'partial-discovery.db')
     try:
-        store.conn.backup(partial.conn)
-        runner.migrate(partial.conn, registry=registry.MIGRATIONS[:version])
+        prepared.restore(partial)
         partial.init_schema(defer_metadata=True)
         regular.migrate(partial.conn)
         assert publication.read_owners(partial.conn).revision is None
         assert partial.discovery.get_discovered_artists()[0]['offered_count'] == 9
-        assert partial.conn.execute('SELECT copied FROM '+owner.table('stages')+' WHERE id=?', (stage,)).fetchone()[0] > 0
+        assert partial.conn.execute('SELECT copied FROM '+stages+' WHERE id=?', (stage,)).fetchone()[0] > 0
         assert partial.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
     finally:
         partial.conn.close()
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_listening_upgrade_preserves_selected_discovery_views_until_native_takeover(installed, tmp_path, independent_regular_ddl):
-    store, _ = installed
-    seed(store)
-    owner, stage = ready(store.conn)
-    owner.publish(store.conn, stage=stage)
-    expected = store.discovery.get_discovered_artists()
+@pytest.mark.parametrize('version', [93])
+def test_listening_upgrade_preserves_selected_discovery_views_until_native_takeover(discovery_upgrade_inputs, version, tmp_path, independent_regular_ddl):
+    prepared = discovery_upgrade_inputs(version, 100)
+    stage, expected, _, _ = prepared.result
     partial = Store(tmp_path/'listening-upgrade.db')
     try:
-        store.conn.backup(partial.conn)
-        runner.migrate(partial.conn, registry=registry.MIGRATIONS[:100])
+        prepared.restore(partial)
         partial.init_schema(defer_metadata=True)
         regular.migrate(partial.conn)
         assert publication.read_owners(partial.conn).revision == stage
@@ -461,3 +653,13 @@ def test_listening_upgrade_preserves_selected_discovery_views_until_native_takeo
         assert partial.discovery.get_discovered_tracks()[0]['offered_count'] == 1
     finally:
         partial.conn.close()
+
+
+@pytest.mark.parametrize('version', [79, 93])
+def test_selected_discovery_upgrade_inputs_release_each_predecessor(discovery_upgrade_inputs, discovery_prepared_inputs, version):
+    sources = discovery_upgrade_inputs.release(version)
+    assert sources
+    for source in sources:
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            source.conn.execute('SELECT 1')
+    discovery_prepared_inputs.release(version)

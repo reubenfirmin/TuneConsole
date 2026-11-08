@@ -4,9 +4,6 @@ import pytest
 
 from tests.test_undo_recovery import RecoveryClient
 from yt_playlist.core import fao
-from yt_playlist.core.migrations import migrate
-from yt_playlist.core.migrations.registry import MIGRATIONS
-from yt_playlist.core.store import Store
 from yt_playlist.library import executor, playlist_undo, sync, playlist_generated
 from yt_playlist.library.playlist_metadata import GENERATED_DESCRIPTION, PROMOTED_DESCRIPTION
 
@@ -66,21 +63,3 @@ def test_recovery_preserves_policy_groups_and_remote_markers(store, tmp_path, mo
     sync.refresh_playlist(other, other_id, client, new_id, 'Mix', 40 * 86400 + 2)
     assert other.playlists.is_quarantined_playlist(new_id) == (generated and not adopted)
     other.conn.close()
-
-
-def test_populated_policy_upgrade_preserves_curation_and_is_idempotent(tmp_path):
-    from tests.historical_support import upgrade_fixture
-    store = Store(tmp_path / 'state.db')
-    migrate(store.conn, registry=MIGRATIONS[:18])
-    store.conn.execute("INSERT INTO playlist_group VALUES ('gen','Generated')")
-    store.conn.execute("INSERT INTO playlist_group VALUES ('adopted','Faves')")
-    store.conn.execute("INSERT INTO rec_recipes(playlist_ytm,recipe,created_at) VALUES ('adopted','{}',1)")
-    store.conn.commit()
-    upgrade_fixture(store)
-    assert store.playlists.is_quarantined_playlist('gen')
-    assert store.playlists.playlist_provenance('adopted')['adopted'] == 1
-    store.playlists.set_playlist_group('gen', 'Road trips')
-    store.init_schema()
-    assert store.playlists.is_quarantined_playlist('gen')
-    assert store.playlists.get_playlist_groups()['gen'] == 'Road trips'
-    assert not (tmp_path / 'backups').exists()

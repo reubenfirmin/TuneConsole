@@ -80,6 +80,7 @@ def consumer_installed(request, tmp_path, monkeypatch, _bounded_installed_schema
     try:
         template = _bounded_installed_schema(version)
         template.restore(store)
+        store._fixture_installed_template = template
         for name in ('_schema_compatibility', '_rebuild_source_version', '_schema_recovery_pending'):
             setattr(store, name, getattr(template.source, name))
         store._bind_repositories()

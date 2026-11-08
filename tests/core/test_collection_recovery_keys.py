@@ -7,23 +7,43 @@ import sqlite3
 import pytest
 
 from tests.core.test_action_work_migration import backup
+from tests.genre_catalog_support import bound_catalog
 from tests.prepared_fixture_support import historical_template
+from tests.store_fixture_support import install_numbered_input
 from yt_playlist.core import action_backup_files, collection_recovery as recovery
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.migrations import regular
 from yt_playlist.core.store import Store
 
 
-@pytest.fixture(scope='module')
-def before_key_guards(tmp_path_factory, _pristine_installed_schema):
-    def prepare(source):
-        regular.migrate(source.conn, changes=regular.CHANGES[:27])
-        assert regular.validate(source.conn) == 27
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These collector checks do not construct an HTTP application."""
 
+
+@pytest.fixture(scope='module')
+def before_key_guards(tmp_path_factory):
+    # Recovery owns the interrupted scan, not replay of the preceding empty
+    # schema. Preserve the exact pre-key-trigger SQL and regular history.
     root = tmp_path_factory.mktemp('before-recovery-key-guards')
-    with historical_template(_pristine_installed_schema(107), prepare,
-                             database=root / 'source.db') as template:
-        yield template
+    with closing(sqlite3.connect(':memory:')) as source, pytest.MonkeyPatch.context() as patch:
+        bound_catalog(patch)
+        install_numbered_input(source, 107, regular_owners=regular.CHANGES[:27])
+        with historical_template(source, lambda store: None,
+                                 database=root / 'source.db') as template:
+            yield template
+
+
+def test_pending_key_guard_input_keeps_real_owners_and_regular_prefix(before_key_guards):
+    conn = before_key_guards.source.conn
+    assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 107
+    assert regular.validate(conn) == 27
+    assert conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert [row[1] for row in conn.execute('PRAGMA table_info(action_backups)') if row[5]] == [
+        'action_id', 'position']
+    assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='collection_recovery_epoch'").fetchone()
+    assert not conn.execute(
+        "SELECT 1 FROM sqlite_schema WHERE name='collection_recovery_changed_action_backups_key'").fetchone()
 
 
 @pytest.mark.parametrize('key_guards', [False, True], ids=['pending-ddl', 'current'])

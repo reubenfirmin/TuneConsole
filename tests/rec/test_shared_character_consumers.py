@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.conftest import seed_catalog_track
+from tests.home_fixture_support import publish_menu
 from tests.musical_support import prepare_profiles
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles
@@ -374,8 +375,12 @@ def test_clicked_library_fallback_prepares_the_shared_pools(store, monkeypatch):
     assert calls == [(store, 1000)]
 
 
-def test_prepared_set_from_another_vibe_is_served_with_a_preference_notice(store, opportunities):
-    payload = home_prepared.prepare(store, 1000)
+def test_prepared_set_from_another_vibe_is_served_with_a_preference_notice(store):
+    # The consumer receives a completed worker menu. Profile inference and
+    # ranking are independent of retaining that menu after a preference change.
+    with mix_tuning.adjusting_vibe(store, 1000):
+        store.settings.set_setting(home_vibe.SETTING, 'relax')
+    payload = publish_menu(store, vibe='relax', tracks_per_card=1)
     assert payload and payload['menus']
     service = home_cards.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__), genre_options=[])
     assert home_prepared.cards(store, payload, 1000, service, record=False).protos
@@ -385,7 +390,7 @@ def test_prepared_set_from_another_vibe_is_served_with_a_preference_notice(store
     fallback = home_prepared.cards(store, payload, 1000, service, lambda: scheduled.append(True), record=False)
     assert fallback.protos and fallback.preparing
     assert fallback.preference_notice == "Heads up - we're unable to create energize mix tapes right now."
-    assert all(p['recipe'].get('vibe') != 'energize' for p in fallback.protos)
+    assert all(p['recipe']['vibe'] == 'relax' for p in fallback.protos)
     assert scheduled  # Partial menus and stale tuning can each request the same coalesced preparation.
     with mix_tuning.adjusting_vibe(store, 1000):
         store.settings.delete_setting(home_vibe.SETTING)

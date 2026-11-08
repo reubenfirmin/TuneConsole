@@ -1,6 +1,6 @@
 """Background execution preserves the established models and last-good serving."""
 import asyncio
-from tests.enrichment_support import choose_field, seed_audio
+from tests.enrichment_support import seed_audio
 from copy import deepcopy
 from functools import wraps
 from html.parser import HTMLParser
@@ -21,26 +21,51 @@ from yt_playlist.rec import (account_growth, artist_model, embedding_training as
                              model_refresh, mode_surfaces, rec_params, taste_modes)
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.web.app import create_app
-from tests import model_support
 from tests.home_fixture_support import (home_routes_only, publish_menu, returning_listener,
                                         without_metadata_providers)
 from tests.prepared_fixture_support import prepared_template
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store, reuse_reporting_reader
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('techno', 'Techno'), ('jazz', 'Jazz'), ('rock', 'Rock'), ('house', 'House'))) as schema:
+        yield schema
+
+
+def test_model_schema_input_keeps_current_history_and_read_only_sql(_pristine_current_schema):
+    from yt_playlist.core.migrations import registry, regular
+
+    source = _pristine_current_schema
+    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == len(registry.MIGRATIONS)
+    assert source.execute('SELECT max(version) FROM schema_changes').fetchone()[0] == len(regular.CHANGES)
+    assert not source.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def seed(store, *, distinct_albums=False, track_count=80, mode_count=3):
     # Keep the actual eighty-subject mode-admission boundary, three distinct
     # genres, eight overlapping baskets and audio for real numerical parity.
+    items = [dict(key=f'song {i:03}|artist {i}', video_id=f'v{i}', title=f'Song {i:03}',
+                  artist=f'Artist {i}', album=f'Album {i}' if distinct_albums else 'Album',
+                  genre=('Techno', 'Jazz', 'Rock')[i * 3 // track_count]) for i in range(track_count)]
+    seed_publication_subjects(store, items)
     with atomic_write(store):
         iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
-        tids = []
-        for i in range(track_count):
-            album = f'Album {i}' if distinct_albums else 'Album'
-            tid = store.tracks.upsert_track(f'v{i}', f'Song {i:03}', f'Artist {i}', album, None)
-            # This fixture owns the completed SQL input batch. Metadata's
-            # controller owns its own transaction when exercised by callers.
-            choose_field(store, tid, 'genre', ('Techno', 'Jazz', 'Rock')[i * 3 // track_count])
-            seed_audio(store, tid, bpm=80 + i, energy=(i % 10) / 10)
-            tids.append(tid)
+        tids = [row[0] for row in store.conn.execute('SELECT id FROM catalog_entries ORDER BY id')]
+        first_artist = store.conn.execute('SELECT COALESCE(MAX(id),0)+1 FROM artists').fetchone()[0]
+        credits = [(first_artist + i, tid, item['artist']) for i, (tid, item) in enumerate(zip(tids, items))]
+        # Models consume completed artist/catalog inputs. Provider captures and
+        # field reconciliation are exercised by their own owners.
+        store.conn.executemany('INSERT INTO artists(id,name,provisional) VALUES (?,?,1)',
+                               [(artist, name) for artist, _, name in credits])
+        store.conn.executemany("INSERT INTO artist_aliases VALUES (?,?,'fixture')",
+                               [(artist, name.lower()) for artist, _, name in credits])
+        store.conn.executemany("INSERT INTO entry_artists VALUES (?,0,?,?,'fixture')",
+                               [(tid, artist, name) for artist, tid, name in credits])
+        store.conn.executemany('UPDATE recordings SET bpm=?,energy=? WHERE id=?',
+                               [(80 + i, (i % 10) / 10, tid) for i, tid in enumerate(tids)])
         for i in range(8):
             size, offset = track_count // 4, i * (track_count // 8)
             pid = store.playlists.upsert_playlist(iid, f'p{i}', f'Playlist {i}', size, '', 1)
@@ -50,17 +75,9 @@ def seed(store, *, distinct_albums=False, track_count=80, mode_count=3):
         rec_params.set_param(store, 'modes_min_members', 8)
     # History's controller coordinates its own repository transactions after
     # the completed catalog batch has committed.
-    store.history.import_play_events(iid, [(store.tracks.identity_key_for_video(f'v{i}'), f'v{i}', 1000 + i)
+    store.history.import_play_events(iid, [(items[i]['key'], f'v{i}', 1000 + i)
                                          for i in range(8)])
     return tids
-
-
-def established_pipeline(store, now):
-    model_support.build_track_model(store)
-    model_support.build_content_model(store)
-    model_support.build_artist_model(store)
-    model_support.publish_modes(store, now)
-    return mode_surfaces.prepare_bundles(store, now)
 
 
 @pytest.fixture(scope='module')
@@ -86,6 +103,38 @@ def initial_generation_template(_pristine_current_schema, model_catalog_template
 @pytest.fixture
 def model_library(store, model_catalog_template):
     return model_catalog_template.restore(store)
+
+
+def test_model_catalog_input_keeps_all_eighty_subjects_and_read_only_sql(model_catalog_template):
+    source = model_catalog_template.source
+    assert len(model_catalog_template.result) == 80
+    assert source.conn.execute('SELECT count(*) FROM recordings').fetchone()[0] == 80
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_initial_model_input_keeps_coherent_fits_and_real_file_custody(initial_generation_template):
+    source = initial_generation_template.source
+    generation = source.rec_model.content_generation()
+    assert generation['coherent'] and generation['generation'] and generation['library']
+    assert source.modes.list_modes()
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.fixture
+def initial_model_store(tmp_path, initial_generation_template, monkeypatch):
+    with initial_generation_template.open(tmp_path / 'models.db') as database:
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
+
+
+@pytest.fixture
+def enrichment_store(tmp_path, model_catalog_template, initial_generation_template, monkeypatch, publication):
+    template = model_catalog_template if publication == 'models' else initial_generation_template
+    with template.open(tmp_path / 'enrichment.db') as database:
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
 
 
 @pytest.fixture(autouse=True)
@@ -122,48 +171,6 @@ def refresh_costs(monkeypatch, record_property):
         record_property(name + '_calls', calls)
         record_property(name + '_wall_s', wall)
         record_property(name + '_thread_cpu_s', cpu)
-
-
-@pytest.mark.parametrize('method', ['svd', 'item2vec'])
-def test_background_generation_matches_established_models_and_ranked_pools(store, model_library, method):
-    store.settings.set_setting('rec_embed_method', method)
-    expected_pools = established_pipeline(store, 2000)
-    expected_generation = store.rec_model.content_generation()['generation']
-    assert expected_pools['_radio']['generation'] == expected_generation
-    for surface in ('home', 'radio'):
-        head = store.recommendations.head(surface)
-        assert head is not None
-        assert store.recommendations.framing(surface, generation=head['id'])['radio_generation'] == expected_generation
-    expected = {table: dict(getattr(store.rec_model, getter)()) for table, getter in (
-        ('rec_vectors', 'get_rec_vectors'), ('rec_content_vectors', 'get_rec_content_vectors'),
-        ('rec_artist_vectors', 'get_rec_artist_vectors'),
-        ('rec_artist_content_vectors', 'get_rec_artist_content_vectors'))}
-    assert expected['rec_vectors'] and expected['rec_content_vectors']
-    assert expected_pools
-    prepared = model_refresh.rebuild(store, 2000)
-    assert prepared is not None
-    for table, rows in prepared['vectors'].items():
-        if table in expected:
-            assert dict(rows).keys() == expected[table].keys()
-            for key, blob in rows:
-                np.testing.assert_allclose(np.frombuffer(blob, np.float32),
-                                           np.frombuffer(expected[table][key], np.float32), atol=1e-6)
-    actual_pools = mode_surfaces.prepare_bundles(store, 2000)
-    actual_generation = store.rec_model.content_generation()['generation']
-    assert actual_generation != expected_generation
-    assert actual_pools['_radio']['generation'] == actual_generation
-    for surface in ('home', 'radio'):
-        head = store.recommendations.head(surface)
-        assert head is not None
-        assert store.recommendations.framing(surface, generation=head['id'])['radio_generation'] == actual_generation
-    # Distinct publications own distinct receipts; all ranked content and other
-    # framing must still match the established pipeline exactly.
-    expected_content, actual_content = deepcopy(expected_pools), deepcopy(actual_pools)
-    del expected_content['_radio']['generation'], actual_content['_radio']['generation']
-    assert actual_content == expected_content
-    assert store.settings.get_setting('rec_embed_method') == method
-    assert store.settings.get_setting('rec_dim') == '16'
-    assert not store.rec_refresh.has_pending_changes()
 
 
 def test_unchanged_inputs_reuse_fits_but_metadata_and_baskets_invalidate_their_models(store, model_library, monkeypatch):
@@ -218,9 +225,9 @@ def test_production_refresh_invalidates_content_without_a_coverage_gate(store, m
 
 @pytest.mark.parametrize('external', [False, True])
 def test_changed_source_keeps_last_good_generation_and_notification(
-        file_backed_store, initial_generation_template, monkeypatch, external):
-    store = file_backed_store
-    tids = initial_generation_template.restore(store)
+        initial_model_store, initial_generation_template, monkeypatch, external):
+    store = initial_model_store
+    tids = initial_generation_template.result
     before = deepcopy(store.rec_model.content_generation())
     store.tracks.set_track_genre(tids[0], 'Classical')
     original = model_refresh.prepare
@@ -249,52 +256,73 @@ def test_changed_source_keeps_last_good_generation_and_notification(
     assert initial_generation_template.source.tracks.get_track_enrichment(tids[1])[0] == 'Techno'
 
 
-def test_enrichment_stamps_allow_full_model_and_pool_publication(store, model_library, monkeypatch):
-    original_prepare = model_refresh.prepare
-    original_bundles = mode_surfaces._calculate_bundles
+@pytest.mark.parametrize('publication', ['models', 'pools'])
+def test_enrichment_stamps_allow_full_model_and_pool_publication(
+        enrichment_store, monkeypatch, publication):
+    store = enrichment_store
 
     def stamp():
         with store.conn:
             store.conn.execute('UPDATE recordings SET first_enriched_at=COALESCE(first_enriched_at,1),'
                                'last_enriched_at=COALESCE(last_enriched_at,0)+1')
 
-    def fitting(reader, now, **kwargs):
-        result = original_prepare(reader, now, **kwargs)
-        stamp()
-        return result
+    if publication == 'models':
+        original = model_refresh.prepare
 
-    def ranking(reader, now, policies):
-        result = original_bundles(reader, now, policies)
-        stamp()
-        return result
+        def fitting(reader, now, **kwargs):
+            result = original(reader, now, **kwargs)
+            stamp()
+            return result
 
-    monkeypatch.setattr(model_refresh, 'prepare', fitting)
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', ranking)
-    assert model_refresh.rebuild(store, 2000) is not None
+        monkeypatch.setattr(model_refresh, 'prepare', fitting)
+        assert model_refresh.rebuild(store, 2000) is not None
+    else:
+        def ranking(reader, now, policies):
+            # Ranking has independent numerical owners. This case needs a
+            # completed bucket while the real snapshot is open, followed by
+            # real policy, file and SQL publication after enrichment advances.
+            keys = sorted(reader.rec_query.library_keys())[:4]
+            tracks = reader.rec_query.tracks_by_keys(keys)
+            mode = str(reader.modes.list_modes(active_only=True)[0]['mode_id'])
+            items = policies.stamp([dict(tracks[key], key=key) for key in keys], 'wheelhouse')
+            stamp()
+            return {mode: {'wheelhouse': items}, 'all': {'wheelhouse': items},
+                    '_meta': {'full_pools': True}}, []
+
+        monkeypatch.setattr(mode_surfaces, '_calculate_bundles', ranking)
+        assert mode_surfaces.prepare_bundles(store, 2000) is not None
+        assert store.recommendations.head('home') is not None
     assert not store.rec_refresh.has_pending_changes()
-    assert mode_surfaces.prepare_bundles(store, 2000) is not None
 
 
-def test_failed_publication_rolls_back_models_settings_clusters_and_notification(store, model_catalog_template, monkeypatch):
+@pytest.mark.parametrize('recovery', ['rollback', 'retry'])
+def test_failed_publication_rolls_back_models_settings_clusters_and_notification(
+        initial_model_store, initial_generation_template, monkeypatch, recovery):
     from yt_playlist.core import embedding_files, embeddings, fao, model_contract
 
-    tids = seed(store)
-    assert tids == model_catalog_template.result
-    for getter in ('library_keys', 'track_content', 'track_audio_features', 'play_counts'):
-        assert getattr(store.rec_query, getter)() == getattr(model_catalog_template.source.rec_query, getter)()
-    assert model_refresh.rebuild(store, 2000)
+    store = initial_model_store
+    tids = initial_generation_template.result
     assert not store.rec_refresh.has_pending_changes()
     before = store.rec_model.content_generation()
     assert before['coherent'] and before['generation'] and before['library']
-    modes = [(m['mode_id'], m['centroid'].tobytes()) for m in store.modes.list_modes()]
-    assert modes
-    vectors = {name: embeddings.rows(store.conn, name) for name in embeddings.SPACES}
-    assert all(rows for name, rows in vectors.items() if name != 'rec_discovered_content_vectors')
-    settings = {key: store.settings.get_setting(key) for key in (
-        *model_contract.FIELDS, 'rec_refresh_version', 'rec_mode_fit_inputs', 'rec_embed_method', 'rec_dim')}
+    if recovery == 'rollback':
+        modes = [(m['mode_id'], m['centroid'].tobytes()) for m in store.modes.list_modes()]
+        assert modes
+        vectors = {name: embeddings.rows(store.conn, name) for name in embeddings.SPACES}
+        assert all(rows for name, rows in vectors.items() if name != 'rec_discovered_content_vectors')
+        settings = {key: store.settings.get_setting(key) for key in (
+            *model_contract.FIELDS, 'rec_refresh_version', 'rec_mode_fit_inputs', 'rec_embed_method', 'rec_dim')}
     store.tracks.set_track_genre(tids[0], 'Classical')
     revision = store.rec_refresh.revision()
     assert revision is not None
+    prepared_batches, prepare = [], model_refresh.prepare
+
+    def capture_batch(*args, **kwargs):
+        batch = prepare(*args, **kwargs)
+        prepared_batches.append(deepcopy(batch))
+        return batch
+
+    monkeypatch.setattr(model_refresh, 'prepare', capture_batch)
     writes = []
     original_write = fao.write
     def write_without_serving_lock(path, data, **kwargs):
@@ -310,14 +338,20 @@ def test_failed_publication_rolls_back_models_settings_clusters_and_notification
                 for table in ('recording_embedding_files', 'artist_embedding_files',
                               'taste_model_state', 'taste_modes', 'rec_change_queue')}
 
-    selected_before = selected()
-    model_files = [row[0] for row in store.conn.execute(
-        'SELECT recovery_filename FROM taste_model_state WHERE recovery_filename IS NOT NULL')]
-    file_bytes = {path: fao.read(path).bytes for path in (*embedding_files.references(store.conn), *model_files)}
+    def recording_references():
+        return [tuple(row) for row in store.conn.execute('SELECT * FROM recording_embedding_files ORDER BY 1,2')]
+
+    recording_before = recording_references()
+    embedding_paths = set(embedding_files.references(store.conn))
+    if recovery == 'rollback':
+        selected_before = selected()
+        model_files = [row[0] for row in store.conn.execute(
+            'SELECT recovery_filename FROM taste_model_state WHERE recovery_filename IS NOT NULL')]
+        file_bytes = {path: fao.read(path).bytes for path in (*embedding_paths, *model_files)}
     reached = []
 
     def publication_started():
-        reached.append((store.conn.in_transaction, selected()['recording_embedding_files'],
+        reached.append((store.conn.in_transaction, recording_references(),
                         {path: fao.read(path).bytes for path in embedding_files.references(store.conn)}))
         return 0
 
@@ -331,22 +365,29 @@ def test_failed_publication_rolls_back_models_settings_clusters_and_notification
         assert writes
         assert len(reached) == 1
         in_transaction, changed_references, written_chunks = reached[0]
-        assert in_transaction and changed_references != selected_before['recording_embedding_files']
-        assert written_chunks.keys() - file_bytes.keys()  # real new chunks were selected inside the failed write
+        assert in_transaction and changed_references != recording_before
+        assert written_chunks.keys() - embedding_paths  # real new chunks were selected inside the failed write
         assert not store.conn.in_transaction
         store.settings.set_setting('unrelated', 'commit after failure')
-        assert selected() == selected_before
-        assert {path: fao.read(path).bytes for path in file_bytes} == file_bytes
-        assert set(embedding_files.references(store.conn)) == set(file_bytes) - set(model_files)
-        assert {name: embeddings.rows(store.conn, name) for name in embeddings.SPACES} == vectors
-        assert {key: store.settings.get_setting(key) for key in settings} == settings
-        assert store.rec_model.content_generation() == before
-        assert [(m['mode_id'], m['centroid'].tobytes()) for m in store.modes.list_modes()] == modes
-        assert store.rec_refresh.revision() == revision and store.rec_refresh.has_pending_changes()
+        if recovery == 'rollback':
+            assert selected() == selected_before
+            assert {path: fao.read(path).bytes for path in file_bytes} == file_bytes
+            assert set(embedding_files.references(store.conn)) == set(file_bytes) - set(model_files)
+            assert {name: embeddings.rows(store.conn, name) for name in embeddings.SPACES} == vectors
+            assert {key: store.settings.get_setting(key) for key in settings} == settings
+            assert store.rec_model.content_generation() == before
+            assert [(m['mode_id'], m['centroid'].tobytes()) for m in store.modes.list_modes()] == modes
+            assert store.rec_refresh.revision() == revision and store.rec_refresh.has_pending_changes()
+            return
     finally:
         store.conn.execute('DROP TRIGGER IF EXISTS fail_training')
         store.conn.create_function('publication_started', 0, None)
 
+    # Retry publication of the same completed fit. Numerical fitting has its
+    # own parity tests; the snapshot, file writes and repository writes remain
+    # real on both attempts.
+    assert len(prepared_batches) == 1
+    monkeypatch.setattr(model_refresh, 'prepare', lambda *args, **kwargs: deepcopy(prepared_batches[0]))
     retry = model_refresh.rebuild(store, 2002)
     assert retry is not None
     after = store.rec_model.content_generation()

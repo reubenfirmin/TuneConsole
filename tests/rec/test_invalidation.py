@@ -1,6 +1,6 @@
 """Completed track spaces can serve through a refresh; retired artist vocabularies cannot."""
 import pytest
-from tests.derived_rating_support import seed_dislike
+from tests.derived_rating_support import seed_dislike, seed_like
 from tests.historical_support import upgrade_fixture
 from tests.prepared_fixture_support import historical_template
 
@@ -11,6 +11,19 @@ from yt_playlist.rec import invalidation
 TRACK_SPACES = ('rec_vectors', 'rec_content_vectors', 'rec_discovered_content_vectors')
 ARTIST_SPACES = ('rec_artist_vectors', 'rec_artist_content_vectors')
 MODEL = '{"ncat":1,"cont":[]}'
+
+
+def test_invalidation_input_keeps_shipped_history_and_read_only_guards(_pristine_current_schema):
+    from yt_playlist.core.migrations import registry, regular
+
+    source = _pristine_current_schema
+    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert list(source.execute('SELECT version,name FROM schema_migrations ORDER BY version')) == [
+        (entry.version, entry.name) for entry in registry.MIGRATIONS]
+    assert list(source.execute('SELECT version,name FROM schema_changes ORDER BY version')) == [
+        (entry.version, entry.name) for entry in regular.CHANGES]
+    assert source.execute("SELECT 1 FROM sqlite_temp_schema WHERE name='snapshot_revisions'").fetchone()
+    assert not source.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def _identity_inputs(store, *, current):
@@ -54,10 +67,24 @@ def upgraded_identity_template(_pristine_installed_schema):
 
 @pytest.mark.parametrize('change', ['model', 'artist'])
 def test_refresh_retains_playable_menus_usage_and_tv_until_replacement(store, change):
-    from tests.test_tv import Videos, prepare_pool
+    from tests.onboarding_support import publish_personal_mix
+    from tests.test_tv_stream import video
     from yt_playlist.rec import home_prepared, onboarding, tv
 
-    previous_tv = prepare_pool(store, Videos(), now=1000)
+    # Invalidation consumes completed menus and TV output. The actual resolver
+    # and bounded producer/recovery loop have their owners in test_tv.
+    seeds = publish_personal_mix(store, now=1000)
+    for seed in seeds:
+        seed_like(store, seed['key'], 1000)
+    store.rec_proposals.put_proposals(tv.SURFACE, {
+        'schema': tv.SCHEMA, 'key': 'invalidation-input', 'at': 1000,
+        'attempted': [seed['key'] for seed in seeds],
+        'items': [{**video(index), 'source_key': seed['key'],
+                   'source_artist': seed['artist']} for index, seed in enumerate(seeds)],
+        'offset': 0, 'state': 'exhausted', 'retry_at': 1000 + tv.SEARCH_RETRY_S,
+    }, 1000)
+    previous_tv = tv.cached(store)
+    assert previous_tv and tv.queue(store, 1000)
     previous_mix = home_prepared.peek(store, 1000)
     serving = {surface: store.rec_proposals.get_proposals(surface)
                for surface in ('home_prepared', 'home_tuned')}

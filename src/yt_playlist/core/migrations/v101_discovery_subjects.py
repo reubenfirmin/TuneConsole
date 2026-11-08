@@ -125,13 +125,16 @@ def copy_offers(conn, kind, row):
 
 def apply(conn,context):
     from . import current
-    from ..preparation import choice_publication, conflict_publication, metadata_publication
+    from ..preparation import choice_publication, conflict_publication, genre_preference_publication, metadata_publication
     learning_head = conn.execute('SELECT 1 FROM sqlite_schema WHERE type=\'view\' AND name=?',
         (choice_publication.CURRENT,)).fetchone()
     conflict_view = conn.execute('SELECT 1 FROM sqlite_schema WHERE type=\'view\' AND name=?',
         (conflict_publication.VIEW,)).fetchone()
     metadata_views = [(name,sql) for name,sql in metadata_publication.views() if conn.execute(
         'SELECT 1 FROM sqlite_schema WHERE type=\'view\' AND name=?',(name,)).fetchone()]
+    preference_views = [(name, sql) for name, sql in genre_preference_publication.definitions()
+        if name == genre_preference_publication.table('preferences') and conn.execute(
+            "SELECT 1 FROM sqlite_schema WHERE type='view' AND name=?", (name,)).fetchone()]
     original = {table:[dict(r) for r in conn.execute('SELECT * FROM '+table+' ORDER BY rowid')]
                 for table in TABLES}
     memberships = {kind:[dict(r) for r in conn.execute('SELECT * FROM '+table)]
@@ -172,4 +175,6 @@ def apply(conn,context):
         conn.execute(next(sql for name,sql in conflict_publication.OWNER.definitions()
             if name==conflict_publication.VIEW))
     for _,sql in metadata_views:
+        conn.execute(sql)
+    for _, sql in preference_views:
         conn.execute(sql)

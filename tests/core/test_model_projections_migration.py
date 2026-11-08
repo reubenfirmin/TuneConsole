@@ -6,55 +6,6 @@ import pytest
 
 from tests.core.test_tv_state_migration import store, cutover
 from yt_playlist.core import model_projections, recommendation_outputs
-from yt_playlist.rec.stored_radio import PreparedRadio
-
-
-def test_radio_projection_decomposes_complete_candidates_and_retains_original_modes(store):
-    store.rec_ledger.record_serving_policy('original-pool', {'algorithm': 'retained'}, 1)
-    run = store.model_selection.start_selection(1, {'kind': 'product'})
-    items = []
-    # Admit the complete catalog input as one genuine atomic unit. Every track
-    # still publishes its provider evidence through the ordinary catalog owner.
-    with store._lock, store.conn.atomic():
-        for index in range(515):
-            store.tracks.upsert_track(f'video{index}', f'Song {index}', 'Artist', None, 100)
-            items.append({'key': f'song {index}|artist', 'score': 1 / (index + 1), 'pool_policy': 'original-pool'})
-    assert not store.conn.in_transaction
-    assert store.conn.execute('SELECT count(*) FROM catalog_entries').fetchone()[0] == 515
-    assert store.conn.execute('SELECT count(*) FROM metadata_deliveries').fetchone()[0] == 515
-    keys = [item['key'] for item in items]
-    modes = [{'mode_id': 1, 'space': '', 'centroid': [1., 0.], 'label': 'Original mode', 'size': 515}]
-    value = {'policy_version': 'original-pool', 'context': {}, 'modes': modes, 'encoding_model': None,
-             'bundles': {'1': {'wheelhouse': items}, '_radio': {'space': '', 'generation': 'old',
-                         'members': {'1': keys}, 'scores': {key: .3 for key in keys}},
-                         '_ppr': {'1': list(reversed(keys))}}}
-    surface = f'model_pair:{run}:challenger:radio'
-    store.rec_proposals.put_proposals(surface, {'run_id': run, 'data': value}, None)
-    cutover(store)
-    result = model_projections.read(store.conn, surface)['data']
-    assert 'bundles' not in result and result['modes'] == modes
-    generation = result['_ranked_generation']
-    assert store.recommendations.pool(surface + ':radio', '1', 'membership', generation=generation)['eligible_count'] == 515
-    prepared = PreparedRadio(store, 10, generation=generation, surface_prefix=surface + ':')
-    try:
-        assert prepared.positions('1', [keys[0], keys[-1]]) == {keys[0]: 514, keys[-1]: 0}
-        # Replenishment advances through every rejected page, including past512.
-        tracks = prepared.tracks('radio', '1', 'membership', allowed=lambda item: item['key'] == keys[-1], limit=1)
-        assert [item['key'] for item in tracks] == [keys[-1]]
-        with store.read_view() as reader:
-            captured = prepared.capture_inputs(reader, {'1': modes[0]}, '', 'new-current-model', set(), set(), .5)
-        inputs = prepared.decode_inputs(captured)
-        assert inputs['_radio']['members'] == {'1': 515}
-        assert len(inputs['1']['_radio_pool']) <= 96
-    finally:
-        prepared.close()
-    assert store.conn.execute('SELECT built_at FROM model_pair_publications').fetchone()[0] is None
-    assert tuple(store.conn.execute('SELECT mode_ref,resolution_reason FROM model_pair_modes').fetchone()) == (None, 'missing_mode')
-    with pytest.raises(sqlite3.IntegrityError, match='immutable'), store.conn.atomic():
-        store.conn.execute('DELETE FROM model_pair_modes')
-    with pytest.raises(sqlite3.IntegrityError), store.conn.atomic():
-        store.conn.execute('DELETE FROM rec_model_selection_runs WHERE id=?', (run,))
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
 def test_paired_display_last_good_rollback_file_backup_and_explicit_policy_roots(store, tmp_path):

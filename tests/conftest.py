@@ -5,6 +5,7 @@ import time
 from contextlib import ExitStack, closing
 
 import pytest
+from tests.compaction_fixture_support import compaction_inputs
 from tests.store_fixture_support import PristineSchema, initialize_consumer
 from yt_playlist.core.store import Store
 
@@ -103,13 +104,18 @@ def store(_pristine_current_schema, request):
 
 
 @pytest.fixture(scope='session')
-def vibe_menu_template(_pristine_current_schema):
+def vibe_menu_template(_pristine_current_schema, tmp_path_factory):
     from tests.prepared_fixture_support import prepared_template
+    from tests.store_fixture_support import reuse_reporting_reader
     from tests.test_growth_readiness import publish_vibe_menus
 
     # Register once here: importing a session fixture into several test modules
     # creates separate pytest owners and repeats the same profile preparation.
-    with prepared_template(_pristine_current_schema, publish_vibe_menus) as template:
+    def seed(source):
+        with pytest.MonkeyPatch.context() as patch, reuse_reporting_reader(source, patch):
+            return publish_vibe_menus(source)
+    path = tmp_path_factory.mktemp('vibe-menu-inputs') / 'source.db'
+    with prepared_template(_pristine_current_schema, seed, database=path) as template:
         yield template
 
 
@@ -535,57 +541,140 @@ def legacy_owner_store(legacy_owner_schema, record_property):
 
 
 @pytest.fixture(scope='session')
+def metadata_predecessor_schema():
+    """Completed v79 SQL shared by metadata conversion and publication owners."""
+    from tests.genre_catalog_support import bound_catalog
+    from tests.store_fixture_support import install_numbered_input
+
+    with closing(sqlite3.connect(':memory:')) as schema:
+        with pytest.MonkeyPatch.context() as patch:
+            bound_catalog(patch, entries=(('rock', 'Rock'), ('jazz', 'Jazz'), ('blues', 'Blues')))
+            install_numbered_input(schema, 79)
+        schema.execute('PRAGMA query_only=ON')
+        yield schema
+
+
+@pytest.fixture(scope='session')
 def staged_custody_templates(tmp_path_factory, _pristine_installed_schema):
-    from tests.prepared_fixture_support import historical_template
+    from tests.prepared_fixture_support import custody_templates
 
-    templates = {}
-    with ExitStack() as resources:
-        def get(version, owner, build, *, admit=True, logical_coordinates=()):
-            builder = getattr(build, 'func', build)
-            key = (version, owner, builder.__module__, builder.__qualname__, admit,
-                   tuple(logical_coordinates))
-            if key not in templates:
-                root = tmp_path_factory.mktemp('staged-custody')
-
-                def prepare(source):
-                    if admit:
-                        source.init_schema(defer_metadata=True)
-                    # historical_template binds before admission. An already
-                    # installed regular schema keeps its schema cookie, so
-                    # admission may not rebind its predecessor read views.
-                    source._bind_repositories()
-                    return build(source)
-
-                templates[key] = resources.enter_context(historical_template(
-                    _pristine_installed_schema(version), prepare, database=root / 'source.db',
-                    logical_coordinates=logical_coordinates))
-            return templates[key]
-
+    with custody_templates(tmp_path_factory, _pristine_installed_schema) as get:
         yield get
 
 
 @pytest.fixture
 def staged_custody(staged_custody_templates, record_property):
     import time
-    from yt_playlist.core.db_revisions import Revisions
 
-    def restore(installed, owner, build, **options):
+    def restore(installed, owner, build, *, completed=None, **options):
         store, version = installed
         began = time.perf_counter()
-        template = staged_custody_templates(version, owner, build, **options)
+        template = staged_custody_templates(version, owner, build,
+            completed=completed or getattr(store, '_fixture_installed_template', None), **options)
         record_property('staged_custody_builder_seconds', time.perf_counter() - began)
         began = time.perf_counter()
         result = template.restore(store)
-        # SQL backup excludes TEMP. Rebind the real historical readers and
-        # private revision guards after replacing this consumer's main schema.
+        # PreparedTemplate.restore installs the source's real private TEMP
+        # guards, including owners added while staging. Keep those guards;
+        # rebind historical repository views without rebuilding every trigger.
         store._bind_repositories()
         if hasattr(store, '_snapshot_revisions'):
-            Revisions.unbind(store.conn)
-            store._snapshot_revisions = Revisions(store.conn)
+            store._snapshot_revisions.refresh()
         record_property('staged_custody_restore_seconds', time.perf_counter() - began)
         return result
 
     return restore
+
+
+@pytest.fixture(scope='module')
+def upgraded_custody_inputs(tmp_path_factory, _pristine_installed_schema, _bounded_installed_schema):
+    """Run real historical upgrades in independently measured retained phases.
+
+    Each phase owns private SQL and file copies. Callers name cold preparation
+    and every upgrade phase before consuming the completed read-only input.
+    """
+    from yt_playlist.core.db_revisions import Revisions
+    from yt_playlist.core.migrations import registry, runner
+    from tests.prepared_fixture_support import (
+        CUSTODY_UPGRADE_PHASES, capture_template, custody_predecessor, custody_templates)
+    from types import SimpleNamespace
+
+    seeded, inputs, converted, captured = {}, {}, {}, {}
+    attempts = {}
+
+    def get(version, target, owner, build, *, phase='captured', external_files=None, prepared=None):
+        if target == version:
+            seeded[version, owner] = staged_custody_templates(version, owner, build, admit=False,
+                completed=prepared or _bounded_installed_schema(version))
+            return seeded[version, owner]
+        key = (version, target, owner)
+        if phase == 'input':
+            if key not in inputs or key in converted:
+                completed = get(version, custody_predecessor(version, target), owner, build,
+                    external_files=external_files, prepared=prepared)
+
+                def bare_input(source):
+                    # Historical DDL starts with backed-up SQL and retained
+                    # files, without installed connection-local read adapters.
+                    Revisions.unbind(source.conn)
+                    source._snapshot_revisions = None
+                    adapters = source.conn.execute("SELECT type,name FROM sqlite_temp_schema "
+                        "WHERE type IN ('trigger','view') ORDER BY type").fetchall()
+                    for kind, name in adapters:
+                        quoted = '"' + name.replace('"', '""') + '"'
+                        source.conn.execute(f'DROP {kind.upper()} IF EXISTS temp.{quoted}')
+                    source.conn.execute('PRAGMA synchronous=NORMAL')
+                    return completed.result
+
+                # A repeated input inspection after conversion receives another
+                # private predecessor; it cannot observe the upgraded source.
+                attempts[key] = attempts.get(key, 0) + 1
+                inputs[key] = staged_custody_templates(version,
+                    f'{owner}:input:{target}:{attempts[key]}', bare_input,
+                    admit=False, completed=completed)
+            return inputs[key]
+        if key not in converted:
+            predecessor = get(version, target, owner, build, phase='input', external_files=external_files,
+                prepared=prepared)
+            source = predecessor.source
+            source.conn.execute('PRAGMA query_only=OFF')
+            try:
+                runner.migrate(source.conn, registry=registry.MIGRATIONS[:target])
+            finally:
+                source.conn.execute('PRAGMA query_only=ON')
+            converted[key] = SimpleNamespace(source=source, result=predecessor.result)
+        if phase == 'converted':
+            return converted[key]
+        if key not in captured:
+            source = converted[key].source
+            if target == CUSTODY_UPGRADE_PHASES[-1]:
+                source.conn.execute('PRAGMA query_only=OFF')
+                source._snapshot_revisions = Revisions(source.conn)
+            captured[key] = capture_template(source, converted[key].result,
+                external_files=external_files(source) if external_files is not None else ())
+        return captured[key]
+
+    def release(version, owner):
+        # Finish one independently built predecessor's handles at a time, so
+        # cleanup remains measured with the obligations that created them.
+        sources = {id(value.source): value.source for cache in (inputs, converted, captured)
+                   for key, value in cache.items() if key[0] == version and key[2] == owner}
+        initial = seeded.pop((version, owner))
+        sources[id(initial.source)] = initial.source
+        for cache in (inputs, converted, captured):
+            for key in tuple(cache):
+                if key[0] == version and key[2] == owner:
+                    del cache[key]
+        for source in sources.values():
+            assert not source.conn.in_transaction
+            assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+            source._fixture_released = True
+            source.conn.close()
+        return tuple(sources.values())
+
+    get.release = release
+    with custody_templates(tmp_path_factory, _pristine_installed_schema) as staged_custody_templates:
+        yield get
 
 
 @pytest.fixture(scope='session')

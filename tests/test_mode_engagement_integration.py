@@ -8,15 +8,23 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
+from tests.home_fixture_support import home_page_bytecode, home_routes_only, without_metadata_providers
 from tests.playlist_fixture_support import remote_catalog
-from tests.recommendation_support import publish_bundles, seed_bundle_subjects
-from tests.test_mode_cards_route import prepare_home
-from yt_playlist.library import live_plays, player_events
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+from yt_playlist.library import live_plays, player_events, playlist_generated
 from yt_playlist.library.listen_derive import classify_exit
-from yt_playlist.rec import mode_eval
+from yt_playlist.rec import home_cache, home_cards, home_prepared, mode_eval
 from yt_playlist.web.app import create_app
 
-pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'home_routes_only',
+                                    'without_metadata_providers')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('house', 'House'), ('techno', 'Techno'))) as schema:
+        yield schema
 
 
 class _Cards(HTMLParser):
@@ -45,7 +53,7 @@ class _Cards(HTMLParser):
 
 
 @pytest.fixture
-def engagement(store):
+def engagement(store, monkeypatch, home_page_bytecode):
     iid = store.accounts.upsert_account("main", "cred", None, True)
     store.modes.replace_modes([
         {"mode_id": mid, "label": genre, "families": [[genre, 1]],
@@ -59,14 +67,52 @@ def engagement(store):
              "title": f"Song {mid} {i}", "artist": f"Artist {mid} {i}", "album": "",
              "thumbnail": None, "plays": 0, "reason": "", "lane": lane, "genre": genre}
             for i in range(20)]}
-    seed_bundle_subjects(store, payload)
-    publish_bundles(store, payload, 1)
     clock = [1_700_000_000.0]
-    prepare_home(store, clock[0])
+    # Provenance begins with completed offers. Keep both real mode populations,
+    # then publish their selected cards without running unrelated ranking.
+    seed_publication_subjects(store, [track for mid in (1, 2)
+        for tracks in payload[str(mid)].values() for track in tracks])
+    completed_tracks = {row['video_id']: dict(row) for row in store.conn.execute(
+        'SELECT id,video_id,identity_key,title,artist FROM tracks')}
+
+    def existing_track(video_id, title, artist, *args, **kwargs):
+        track = completed_tracks[video_id]
+        assert (title, artist) == (track['title'], track['artist'])
+        return track['id']
+
+    def observed_track(video_id, title, artist, **kwargs):
+        existing_track(video_id, title, artist, **kwargs)
+        return completed_tracks[video_id]['identity_key']
+
+    # Provider copying and metadata ingestion are completed lower inputs. The
+    # HTTP handler still associates each returned real playlist with its mode.
+    def materialize(owner, title, tracks, client, now, account_id, *, recipe):
+        remote_id = f'saved-mode-{recipe["mode_id"]}'
+        pid = owner.playlists.upsert_playlist(account_id, remote_id, title, len(tracks),
+                                             'completed-copy', now)
+        owner.playlists.set_playlist_tracks(pid, [existing_track(
+            track['video_id'], track['title'], track['artist']) for track in tracks])
+        return {'new_ytm': remote_id, 'pid': pid, 'added': len(tracks)}
+
+    monkeypatch.setattr(playlist_generated, 'create_generated_playlist', materialize)
+    monkeypatch.setattr(store.tracks, 'observe_track', observed_track)
+    protos = []
+    for mid in (1, 2):
+        lane, tracks = next(iter(payload[str(mid)].items()))
+        # Two distinct heard songs and remaining unplayed songs are sufficient
+        # for these provenance cases; candidate ranking owns selection size.
+        proto = home_cards._proto(store, lane, f'Mode {mid}', tracks[:4], clock[0])
+        proto.update(mode_id=mid, recipe={'model': 'mode', 'mode_id': mid, 'lane': lane})
+        protos.append(proto)
+    result = home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],
+                                   None, None, [], [], home_cards._epoch(store, 'cards'), None)
+    home_prepared.remember(store, None, result, clock[0])
+    home_cache.put(store, 'home_prepared', home_cache.read(store, 'home_tuned'), clock[0])
     fake = FakeClient(catalog=remote_catalog(
         track for mid in (1, 2) for tracks in payload[str(mid)].values() for track in tracks))
-    client = TestClient(create_app(store, lambda: {iid: fake}, now_fn=lambda: clock[0]),
-                        base_url="http://127.0.0.1")
+    app = create_app(store, lambda: {iid: fake}, now_fn=lambda: clock[0])
+    app.state.ctx.templates.env.bytecode_cache = home_page_bytecode
+    client = TestClient(app, base_url="http://127.0.0.1")
     response = client.get("/home/cards")
     assert response.status_code == 200
     cards = {card["recipe"]["mode_id"]: card for card in _Cards(response.text).cards

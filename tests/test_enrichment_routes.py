@@ -1,4 +1,5 @@
 """Enrichment jobs, page reconnection and provider fallbacks."""
+from contextlib import closing
 import urllib.error
 
 import pytest
@@ -6,8 +7,30 @@ from fastapi.testclient import TestClient
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 from tests.web_support import _client
+from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
+from yt_playlist.core.store import Store
 
 pytestmark = pytest.mark.usefixtures('canonical_genre_matcher')
+
+
+@pytest.fixture
+def discogs_store(monkeypatch):
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import playlists
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [playlists.build(ctx)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    entries = (('techno', 'Techno'), ('drum and bass', 'Drum and Bass'),
+               ('electronic', 'Electronic'), ('classical', 'Classical'))
+    with bounded_consumer_schema(entries) as schema:
+        database = Store(':memory:')
+        with closing(database.conn):
+            initialize_consumer(database, schema)
+            bound_catalog(monkeypatch, entries=entries)
+            yield database
+
 
 def test_enrich_playlist_via_musicbrainz(store, monkeypatch):
     import json as _json
@@ -89,9 +112,10 @@ def test_page_rejoins_active_enrichment(store):
     assert f"enrichPanel({a}, 0, '', null, 0)" in c.get(f"/playlist/{a}").text   # finished -> no rejoin
 
 
-def test_discogs_fills_genre_and_year(store, monkeypatch):
+def test_discogs_fills_genre_and_year(discogs_store, monkeypatch):
     import json as _json
     import yt_playlist.providers.discogs as dc
+    store = discogs_store
     store.settings.set_setting('discogs_token', 'fixture-token')
     # Styles map to the whitelist; the earliest year among matching releases wins.
     monkeypatch.setattr(dc, "_search", lambda q, tok: [

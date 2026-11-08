@@ -4,8 +4,24 @@ import json
 import pytest
 
 from tests.conftest import FakeClient, _track
+from tests.store_fixture_support import bounded_consumer_schema, reuse_reporting_reader
 from yt_playlist.core.store import Store
 from yt_playlist.library import executor, playlist_positions, sync
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def placement_vocabulary(monkeypatch):
+    from tests.genre_catalog_support import bound_catalog
+
+    # Placement and populated reopen keep their real SQL and validators; genre
+    # curation is a completed lower input unrelated to remote playlist order.
+    bound_catalog(monkeypatch, entries=())
 
 
 class LaggingClient(FakeClient):
@@ -65,36 +81,42 @@ def test_add_positions_multiple_alternates_despite_lag(store, return_handles):
     assert client.added == [("PL", ["alt1", "alt2"])]
 
 
-def test_pending_move_survives_restart_and_sync_without_adding_again(tmp_path):
+def test_pending_move_survives_restart_and_sync_without_adding_again(tmp_path, consumer_store, monkeypatch):
+    retry = playlist_positions.with_retry
+    monkeypatch.setattr(playlist_positions, 'with_retry',
+                        lambda fn, **kwargs: retry(fn, **kwargs, sleep=lambda delay: None))
     path = str(tmp_path / "library.db")
-    store = Store(path)
-    store.init_schema()
-    iid, pid, client, chosen = seed(store)
-    client.return_handles = False
-    client.hidden_reads = 100
-    result = executor.add_tracks_to_playlist(store, pid, chosen, client, 100, after_video_id="anchor")
-    assert result["position_pending"] == 1
-    assert local(store, pid) == ["anchor", "alt1", "alt2", "next"]
-    assert remote(client) == ["anchor", "next", "alt1", "alt2"]
-    action = store.actions.get_actions()[0]
-    assert action.status == "pending"
-    assert json.loads(action.plan_json)["after_video_id"] == "anchor"
+    store = consumer_store(path)
+    with reuse_reporting_reader(store, monkeypatch):
+        iid, pid, client, chosen = seed(store)
+        client.return_handles = False
+        client.hidden_reads = 100
+        result = executor.add_tracks_to_playlist(store, pid, chosen, client, 100, after_video_id="anchor")
+        assert result["position_pending"] == 1
+        assert local(store, pid) == ["anchor", "alt1", "alt2", "next"]
+        assert remote(client) == ["anchor", "next", "alt1", "alt2"]
+        action = store.actions.get_actions()[0]
+        assert action.status == "pending"
+        assert json.loads(action.plan_json)["after_video_id"] == "anchor"
     store.conn.close()
 
     store = Store(path)
     store.init_schema()
-    # A sync during the lag must preserve the requested tracks and their pending move.
-    sync.sync_identity(store, iid, client, 101)
-    assert local(store, pid) == ["anchor", "alt1", "alt2", "next"]
-    assert store.actions.get_action(action.id).status == "pending"
-    client.hidden_reads = 0
-    sync.sync_identity(store, iid, client, 102)
-    assert local(store, pid) == remote(client) == ["anchor", "alt1", "alt2", "next"]
-    assert store.actions.get_action(action.id).status == "executed"
-    sync.refresh_playlist(store, iid, client, "PL", "Mix", 103)
-    assert local(store, pid) == remote(client)
-    assert client.added == [("PL", ["alt1", "alt2"])]
-    store.conn.close()
+    try:
+        with reuse_reporting_reader(store, monkeypatch):
+            # A sync during the lag must preserve the requested tracks and their pending move.
+            sync.sync_identity(store, iid, client, 101)
+            assert local(store, pid) == ["anchor", "alt1", "alt2", "next"]
+            assert store.actions.get_action(action.id).status == "pending"
+            client.hidden_reads = 0
+            sync.sync_identity(store, iid, client, 102)
+            assert local(store, pid) == remote(client) == ["anchor", "alt1", "alt2", "next"]
+            assert store.actions.get_action(action.id).status == "executed"
+            sync.refresh_playlist(store, iid, client, "PL", "Mix", 103)
+            assert local(store, pid) == remote(client)
+            assert client.added == [("PL", ["alt1", "alt2"])]
+    finally:
+        store.conn.close()
 
 
 def test_failed_move_remains_pending_until_targeted_refresh(store):

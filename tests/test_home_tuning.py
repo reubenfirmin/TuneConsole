@@ -1,4 +1,4 @@
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack
 import re
 
 import pytest
@@ -8,6 +8,7 @@ from tests.conftest import FakeClient
 from tests.home_fixture_support import home_routes_only, publish_menu, without_metadata_providers
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from tests.test_home_other_genres import (
     genre_bundles, genre_http_inputs, genre_routes,
     template_bytecode,
@@ -20,9 +21,12 @@ pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'genre_routes', '
 
 
 
-@pytest.fixture
-def store(file_backed_store):
-    return file_backed_store
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('house', 'House'), ('jazz', 'Jazz'),
+                                  ('techno', 'Techno'), ('trance', 'Trance'),
+                                  ('ambient', 'Ambient'), ('gqom', 'Gqom'))) as schema:
+        yield schema
 
 
 def prepare_tuning_home(store, now):
@@ -37,21 +41,9 @@ def client_at(store, clock):
 
 
 @pytest.fixture
-def home_clients(store, monkeypatch):
+def home_clients(store):
     with ExitStack() as resources:
-        reader = None
-        if store._db_path is not None:
-            reader = store._make_reader()
-            resources.callback(reader.conn.close)
-
         def open_client(clock):
-            # Route controls consume synchronous reads; connection lifetime
-            # has separate owners in core/test_reporting_reads. Worker
-            # read_snapshot and its isolation remain real.
-            # Memory readers need a current SQL snapshot before binding; their
-            # normal read_view owns that copy. A bare _make_reader is empty.
-            if reader is not None:
-                monkeypatch.setattr(store, 'read_view', lambda **kwargs: nullcontext(reader))
             client = client_at(store, clock)
             # TestClient's context closes the app lifespan; close the HTTP
             # client too, including if startup or the test fails.
@@ -67,7 +59,9 @@ def tuning_template(_pristine_current_schema):
         # Expiry consumes completed output; the reset case below retains real
         # genre-filtered selection, and preparation has its own worker owners.
         source.accounts.upsert_account('main', 'cred', None, True)
-        publish_menu(source, 1000.0, genre_options=[
+        # One playable card is enough to exercise persisted control deadlines.
+        # Reset below independently verifies all four filled card slots.
+        publish_menu(source, 1000.0, count=1, genre_options=[
             {'family': 'jazz', 'label': 'Jazz'}, {'family': 'techno', 'label': 'Techno'}])
 
     with prepared_template(_pristine_current_schema, build) as template:

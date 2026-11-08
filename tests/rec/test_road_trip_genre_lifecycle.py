@@ -3,15 +3,16 @@ import json
 
 import pytest
 
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import file_consumer_store as store
 from yt_playlist.core.store import Store
 from yt_playlist.rec import road_trip
 
 
 def _song(store, video, genre):
-    entry = store.tracks.upsert_track(video,'Song '+video,'Artist '+video,None,300,
-                                     available=True,video_type='MUSIC_VIDEO_TYPE_ATV')
-    store.tracks.set_track_genre(entry,genre)
-    store.tracks.set_track_year(entry,2000)
+    seed_publication_subjects(store, [{'key': f'song {video}|artist {video}', 'video_id': video,
+        'title': 'Song ' + video, 'artist': 'Artist ' + video, 'duration_s': 300,
+        'genre': genre, 'year': 2000}])
 
 
 def _assert_blend(state, order, banned):
@@ -34,7 +35,6 @@ def test_current_family_survives_finalize_reload_and_single_slot_reroll(tmp_path
     store = consumer_store(path)
     try:
         store.accounts.upsert_account('Main','unused.json',None,True)
-        store.genres.configure_catalog()
         for video in ('a','b','c'):
             _song(store,video,genre)
         if genre=='Synth Pop':

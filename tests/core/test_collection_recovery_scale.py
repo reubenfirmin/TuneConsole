@@ -1,93 +1,113 @@
 """Cleanup progresses through history larger than one SQL deadline."""
 from pathlib import Path
-from tempfile import TemporaryDirectory
 import time
 
 import pytest
 
-from yt_playlist.core import collection_recovery as recovery, policy_documents
+from yt_playlist.core import collection_recovery as recovery, collection_recovery_epoch
+from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.store import Store
-from tests.store_fixture_support import initialize_consumer
+from tests.genre_catalog_support import bound_catalog
 
 
-def seed_owner_history(store):
-    # SQL-only scale history, using real current constraints. These coordinates
-    # deliberately do not claim to be readable recovery documents.
-    store.conn.execute('''WITH RECURSIVE n(x) AS (
-        VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<400000)
-        INSERT INTO actions(id,kind,status,revision,idempotency_key,intent_digest,
-                            recovery_filename,recovery_digest,recovery_bytes)
-        SELECT x,'scale','executed',?,printf('scale-%d',x),?,
-               ?||printf('/ab/%064d.json',x),?,128 FROM n''',
-        ('0' * 32, '0' * 64, str(recovery.directory(store.conn)), '0' * 64))
-    store.conn.commit()
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These collector owners do not construct an HTTP lifespan."""
+
+
+@pytest.fixture(scope='module', autouse=True)
+def isolated_app_home(tmp_path_factory):
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('collection-scale-home')))
+        patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+        patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+        patch.delenv('DEEPSEEK_API_KEY', raising=False)
+        bound_catalog(patch)
+        yield
+
+
 
 
 @pytest.fixture(scope='module')
-def owner_history_template(tmp_path_factory, _pristine_current_schema):
-    # Keep the large immutable prefix on disk rather than retaining another
-    # complete Python filename inventory or an in-memory SQL database.
-    with TemporaryDirectory(prefix='collection-owner-history-', dir=tmp_path_factory.getbasetemp()) as directory:
-        root = Path(directory)
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setenv('YT_PLAYLIST_HOME', str(root / 'app-home'))
-            source = Store(root / 'source.db')
-            try:
-                initialize_consumer(source, _pristine_current_schema)
-                started = time.perf_counter()
-                seed_owner_history(source)
-                build_seconds = time.perf_counter() - started
-                # The prefix owns no readable native files. Actual orphans are
-                # created independently after each private restore.
-                assert not any(recovery.directory(source.conn).rglob('*.json'))
-                source.conn.execute('PRAGMA query_only=ON')
-            except BaseException:
-                source.conn.close()
-                raise
-        try:
-            yield source, build_seconds
-        finally:
-            source.conn.close()
+def owner_schema(_pristine_current_schema):
+    return _pristine_current_schema
 
 
-@pytest.fixture
-def owner_history(file_backed_store, owner_history_template, record_property):
+def test_scale_schema_has_real_current_action_constraints_and_recovery_epoch(owner_schema):
+    assert owner_schema.execute("SELECT 1 FROM sqlite_schema WHERE name='action_identity'").fetchone()
+    assert owner_schema.execute("SELECT 1 FROM schema_changes WHERE name='collection_recovery_scan_keys'").fetchone()
+
+
+@pytest.fixture(scope='module')
+def owner_history(owner_schema, tmp_path_factory):
+    # The collector reads only the owner's primary key and filename. Keep all
+    # 400,000 physical SQLite rows and its real unindexed query, without building
+    # unrelated action execution bodies, constraints and indexes for that read.
+    # Native writer/admission and ownership invalidation have full-schema owners.
+    store = Store(tmp_path_factory.mktemp('collection-owner-history') / 'installed.db')
+    try:
+        owner_schema.backup(store.conn)
+        store.conn.execute('PRAGMA journal_mode=WAL')
+        store.conn.execute('PRAGMA synchronous=OFF')
+        with store.conn:
+            store.conn.execute('DROP TABLE actions')
+            store.conn.execute('CREATE TABLE actions(id INTEGER PRIMARY KEY,recovery_filename TEXT NOT NULL)')
+            store.conn.execute('''WITH d(x) AS (VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)),
+                high(x) AS (VALUES(0),(1),(2),(3)),
+                n(x) AS (SELECT 1+a.x*100000+b.x*10000+c.x*1000+d.x*100+e.x*10+f.x
+                    FROM high a CROSS JOIN d b CROSS JOIN d c CROSS JOIN d CROSS JOIN d e CROSS JOIN d f)
+                INSERT INTO actions SELECT x,?||printf('/ab/%064d.json',x) FROM n''',
+                (str(recovery.directory(store.conn)),))
+            # Restore the exact production ownership and key-change triggers on
+            # the projected owner; unrelated external commits must not restart it.
+            collection_recovery_epoch.install(store.conn)
+            collection_recovery_epoch.install_keys(store.conn)
+        store._bind_repositories()
+        store._snapshot_revisions = Revisions(store.conn)
+        yield store
+    finally:
+        recovery.close(store)
+        store.conn.close()
+
+
+def test_completed_scale_input_has_all_400000_private_unindexed_owners(owner_history):
+    conn = owner_history.conn
+    assert tuple(conn.execute('SELECT count(*),min(id),max(id) FROM actions').fetchone()) == (400000, 1, 400000)
+    assert not conn.execute('SELECT 1 FROM actions WHERE recovery_filename<>?||printf(\'/ab/%064d.json\',id) LIMIT 1',
+                            (str(recovery.directory(conn)),)).fetchone()
+    assert not conn.execute('PRAGMA index_list(actions)').fetchone()
+    assert not any(recovery.directory(conn).rglob('*.json'))
+    collection_recovery_epoch.validate(conn)
+    collection_recovery_epoch.validate_keys(conn)
+
+
+def test_native_collector_admission_preserves_the_real_current_owner_epoch(file_backed_store):
     store = file_backed_store
-    source, build_seconds = owner_history_template
-    started = time.perf_counter()
-    source.conn.backup(store.conn)
-    record_property('history_backup_seconds', time.perf_counter() - started)
-    started = time.perf_counter()
-    # These are deliberately unreadable fixture coordinates, not retained
-    # documents to export. Preserve every exact suffix with one set operation.
-    store.conn.execute('BEGIN')
-    with store.conn, policy_documents.coordinate_updates(store.conn, ('actions',)):
-        changed = store.conn.execute('UPDATE actions SET recovery_filename=?||substr(recovery_filename,?)',
-            (str(recovery.directory(store.conn)), len(str(recovery.directory(source.conn))) + 1))
-        assert changed.rowcount == 400000
-    record_property('history_relocation_seconds', time.perf_counter() - started)
-    record_property('history_cold_build_seconds', build_seconds)
-    record_property('history_template_id', str(source._db_path))
-    assert store.conn.execute('SELECT COUNT(*) FROM actions').fetchone()[0] == 400000
-    assert not store.conn.execute('SELECT 1 FROM actions WHERE recovery_filename<>?||printf(\'/ab/%064d.json\',id) LIMIT 1',
-                                  (str(recovery.directory(store.conn)),)).fetchone()
-    return store
+    revision = store.conn.execute('SELECT revision FROM collection_recovery_epoch').fetchone()[0]
+    writer = Store(store._db_path)
+    try:
+        writer.init_schema()
+        writer.settings.set_setting('accepted after fresh admission', 'keep')
+        assert store.settings.get_setting('accepted after fresh admission') == 'keep'
+        assert writer.conn.execute('SELECT revision FROM collection_recovery_epoch').fetchone()[0] == revision
+        collection_recovery_epoch.validate(writer.conn)
+        collection_recovery_epoch.validate_keys(writer.conn)
+    finally:
+        writer.conn.close()
 
 
 @pytest.mark.parametrize('external', [False, True])
 def test_large_unindexed_owner_history_makes_progress(owner_history, record_property, external):
     store = owner_history
     started = time.perf_counter()
-    orphan = Path(recovery.publish(store.conn, 'action', 'unowned', {'orphan': True})[0])
+    orphan = Path(recovery.publish(store.conn, 'action', f'unowned-{external}', {'orphan': True})[0])
     record_property('orphan_publication_seconds', time.perf_counter() - started)
     turns = []
     writer = Store(store._db_path) if external else store
     try:
         if external:
-            started = time.perf_counter()
-            writer.init_schema()
-            record_property('independent_admission_seconds', time.perf_counter() - started)
+            writer._bind_repositories()
         for turn in range(12):
             started = time.monotonic()
             recovery.maintain(store)

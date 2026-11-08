@@ -5,12 +5,44 @@ import zipfile
 import pytest
 
 from tests.conftest import FakeClient, _track
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.core.store import Store
+from yt_playlist.util.matching import identity_key
 from yt_playlist.library.spotify_library import (SpotifyLibraryFormatError,
                                                   find_album_candidates,
                                                   import_spotify_library,
                                                   load_spotify_library,
                                                   prepare_spotify_library)
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # Playlist transfer does not depend on the shipped genre taxonomy.
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture
+def observed_catalog(store, monkeypatch):
+    # These transfer owners check SQL publication after catalog observation,
+    # including observations preceding a failed batch. Metadata ingestion and
+    # provenance have real owners in test_catalog_ingestion_storage and the
+    # tracks controller tests. Materialize each completed observation on demand
+    # so an unpublished suffix still has no library/playlist membership.
+    entries = {}
+
+    def observe(video, title, artist, album=None, duration_s=None, *, library=True, **fields):
+        assert not library
+        if video not in entries:
+            key = identity_key(title, artist)
+            seed_publication_subjects(store, [{'key': key, 'video_id': video, 'title': title,
+                'artist': artist, 'album': album, 'duration_s': duration_s}], unowned=[key])
+            entries[video] = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?',
+                                               (video,)).fetchone()[0]
+        return entries[video]
+
+    monkeypatch.setattr(store.tracks, 'upsert_track', observe)
 
 
 def _zip(files):
@@ -292,7 +324,7 @@ def test_resume_reconciles_lost_batch_response_after_restart(file_backed_store):
         store.conn.close()
 
 
-def test_large_import_publishes_each_confirmed_suffix_once(store, monkeypatch):
+def test_large_import_publishes_each_confirmed_suffix_once(store, monkeypatch, observed_catalog):
     iid = store.accounts.upsert_account('Main', 'bridge', None, True)
     client = SongClient()
     titles = [f'Song {i:03}' for i in range(250)]
@@ -332,7 +364,7 @@ def test_large_import_publishes_each_confirmed_suffix_once(store, monkeypatch):
             'yt-' + title for title in titles]
 
 
-def test_failed_second_batch_rolls_back_locally_and_resumes_same_remote_destination(store, monkeypatch):
+def test_failed_second_batch_rolls_back_locally_and_resumes_same_remote_destination(store, monkeypatch, observed_catalog):
     iid = store.accounts.upsert_account('Main', 'bridge', None, True)
     client = SongClient()
     titles = [f'Song {i:03}' for i in range(250)]

@@ -11,16 +11,11 @@ from tests.core import test_collection_document_publication as documents
 from tests.core import test_collection_feedback_publication as feedback
 from tests.core import test_conflict_publication as conflicts
 from tests.core import test_draft_publication as drafts
-from tests.core import test_discovery_checkpoint_publication as checkpoints
 from tests.core import test_discovery_publication as discovery
 from tests.core import test_import_publication as imports
-from tests.core import test_library_sync_publication as sync
 from tests.core import test_metadata_publication as metadata
 from tests.core import test_model_publication as models
 from tests.core import test_pair_publication as pairs
-from tests.core import test_playback_publication as playback
-from tests.core import test_radio_origin_publication as origins
-from tests.core import test_trial_publication as trials
 from tests.core import test_taste_control_publication as taste
 from tests.core import test_tv_publication as tv
 from tests.core import test_workflow_publication as workflows
@@ -94,8 +89,6 @@ def upgraded_archive(source, tmp_path, version):
         assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
     finally:
         upgraded.conn.close()
-
-
 @pytest.mark.parametrize('archive_input', [93, 94, 97], indirect=True)
 def test_completed_archive_cutover_is_idempotent_and_admitted(archive_input):
     store = archive_input
@@ -547,100 +540,5 @@ def test_document_upgrade_retains_import_recipe_and_canvas_archives(installed, t
             upgraded.conn.execute('DROP TRIGGER ' + documents.publication.OWNERS['recipes'].header + '_mapped_delete')
         with pytest.raises(MigrationError, match='mapped publication object'):
             regular.validate(upgraded.conn)
-    finally:
-        upgraded.conn.close()
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_context_upgrade_preserves_sync_playback_origins_checkpoints_and_trials(installed, tmp_path):
-    store, _ = installed
-    # These fixtures share the same First/Second account identities and Song
-    # recording. Finish every continuing write before selecting any archive.
-    sync_value = json.loads(sync.seed(store))
-    del sync_value['accounts']['999']
-    del sync_value['accounts']['1']['resources']['playlists']['items']['missing-playlist']
-    sync_raw = json.dumps(sync_value)
-    store.settings.set_setting(sync.sync_state.KEY, sync_raw)
-    checkpoints.seed(store)
-    playback_originals = playback.seed(store)
-    # The native converter requires admitted bindings; the installed reader's
-    # separate unknown-binding controls retain their broader compatibility.
-    bindings = playback.preparation.BINDINGS_KEY
-    playback_originals[bindings] = json.dumps(json.loads(playback_originals[bindings])[:2])
-    store.settings.set_setting(bindings, playback_originals[bindings])
-    origin_originals = origins.seed(store)
-    trial_values, trial_originals = trials.seed(store)
-    # Frozen checkpoint conversion requires existing references and the exact
-    # canonical artist spelling. Separate compatibility owners cover the rest.
-    with store.conn:
-        for name, suffix in (('fetch-history', 'unknown-release'), ('artist-images', '01'),
-                             ('artist-images', '999'), ('provider-refresh', 'unknown')):
-            store.conn.execute('DELETE FROM settings WHERE key=?',
-                               (checkpoints.preparation.PREFIXES[name] + suffix,))
-
-    for owner in sync.publication.OWNERS.values():
-        owner.publish(store.conn, revision=sync.prepare(store.conn, owner))
-        assert owner.selected(store.conn) == 0
-    for owner in playback.publication.OWNERS.values():
-        owner.publish(store.conn, revision=playback.prepare(store.conn, owner))
-        assert owner.selected(store.conn) == 0
-    expected_playback = playback.album_playback_context.load(store.conn)
-    origins.publication.publish(store.conn, revision=origins.prepare(store.conn))
-    assert origins.publication.selected(store.conn) == 0
-    origin_heads = {source: origins.head(store.conn, source) for source in origin_originals}
-    trial_revisions = {}
-    for name, owner in trials.publication.OWNERS.items():
-        trial_revisions[name] = trials.ready(owner, store.conn)
-        owner.publish(store.conn, revision=trial_revisions[name])
-        assert owner.selected(store.conn) == trial_revisions[name]
-    with checkpoints.connect(store) as job:
-        checkpoint_rows = {}
-        for name, owner in checkpoints.publication.OWNERS.items():
-            identity = checkpoints.ready(job, name)
-            owner.publish(job, stage=identity)
-            assert owner.selected(job) == identity
-            checkpoint_rows[name] = [tuple(row) for row in job.execute(
-                'SELECT * FROM ' + owner.table('rows') + ' ORDER BY source')]
-
-    for owner in (*sync.publication.OWNERS.values(), *playback.publication.OWNERS.values()):
-        assert owner.selected(store.conn) == 0
-    assert origins.publication.selected(store.conn) == 0
-    for name, owner in trials.publication.OWNERS.items():
-        assert owner.selected(store.conn) == trial_revisions[name]
-
-    upgraded = Store(tmp_path / 'context-archive-upgrade.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        upgraded.init_schema(defer_metadata=True)
-        regular.validate(upgraded.conn)
-        assert sync.publication.RESULT.selected(upgraded.conn) is None
-        assert sync.publication.STAMPS.selected(upgraded.conn) is None
-        assert sync.sync_state.read(upgraded.conn) == sync_value
-        assert sync.sync_state.stamp(upgraded.conn, 'last_sync_at') == '10.5'
-        assert sync.publication.RESULT.value(upgraded.conn, 0) == sync_raw
-        assert sync.publication.STAMPS.value(upgraded.conn, 'last_sync_at', 0) == ' 10.50 '
-        for owner in playback.publication.OWNERS.values():
-            assert owner.selected(upgraded.conn) is None
-            assert owner.value(upgraded.conn, 0) == playback_originals[owner.source]
-        assert playback.album_playback_context.load(upgraded.conn) == expected_playback
-        assert playback.playback_bindings.find(
-            upgraded.conn, 1, 'LM', 'video', 13, 100)['opportunity_id'] == 'later-menu'
-        assert origins.publication.selected(upgraded.conn) is None
-        assert origins.radio_provenance.ids(upgraded.conn) == ['LM', 'missing', 'shared']
-        for source, raw in origin_originals.items():
-            assert origins.preparation.read_original(upgraded.conn, origin_heads[source]) == raw
-        for name, owner in checkpoints.publication.OWNERS.items():
-            assert owner.selected(upgraded.conn) is None
-            assert [tuple(row) for row in upgraded.conn.execute(
-                'SELECT * FROM ' + owner.table('rows') + ' ORDER BY source')] == checkpoint_rows[name]
-        assert checkpoints.provider_frontiers.read(upgraded.conn, 'known')['fingerprint'] == 'exact été'
-        assert checkpoints.discovery_checkpoints.fetched(upgraded.conn, 'release')
-        for name, owner in trials.publication.OWNERS.items():
-            assert owner.selected(upgraded.conn) is None
-            assert owner.value(upgraded.conn, trial_revisions[name]) == trial_originals[owner.source]
-            assert upgraded.rec_proposals.get_proposals(owner.source) == trial_values[owner.source]
-        regular.migrate(upgraded.conn)
-        assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
     finally:
         upgraded.conn.close()

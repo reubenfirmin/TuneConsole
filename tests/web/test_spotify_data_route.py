@@ -11,8 +11,36 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient, _track
+from tests.home_fixture_support import home_page_bytecode, without_metadata_providers
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.rec import mode_surfaces, rec_params, transient
 from yt_playlist.web.app import create_app
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # Upload/matching/report consumers use Techno history and the House menu
+    # supplied by their dashboard fixture. Taxonomy/admission have other owners.
+    with bounded_consumer_schema((('techno', 'Techno'), ('house', 'House'))) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def spotify_routes(monkeypatch, home_page_bytecode, without_metadata_providers):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, home, setup
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+        for module in (app_update, audio_preview, home, setup)])
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
+    templates = webapp.Jinja2Templates
+
+    def compiled_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        result.env.bytecode_cache = home_page_bytecode
+        return result
+
+    monkeypatch.setattr(webapp, 'Jinja2Templates', compiled_templates)
 
 
 def _payload():
@@ -302,7 +330,7 @@ def test_account_data_requires_selection_preview_and_confirmation_before_writes(
     assert 'class="dash-nav"' not in dashboard.text
     from tests.home_fixture_support import returning_listener
     from tests.onboarding_support import publish_personal_mix
-    publish_personal_mix(store, now=1000)
+    publish_personal_mix(store, now=1000, tracks_per_card=1)
     returning_listener(store, 'mixes', now=1000)
     dashboard = web.get("/")
     assert "Spotify import complete" in dashboard.text

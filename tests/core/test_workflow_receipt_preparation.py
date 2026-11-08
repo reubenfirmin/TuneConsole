@@ -6,11 +6,26 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.prepared_fixture_support import assert_upgrade_phase, custody_predecessor, custody_upgrade_cases
+from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads
 from yt_playlist.core import collection_recovery, policy_documents, recommendation_outputs as files, workflow_settings
-from yt_playlist.core.migrations import MigrationError, registry, regular, runner
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import workflow_receipts as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture
+def disable_periodic_library_sync():
+    pass
+
+
+@pytest.mark.parametrize('installed', [79, 93, 97], indirect=True)
+def test_workflow_input_keeps_admitted_history_and_private_guards(installed):
+    assert_installed_consumer_input(*installed)
 
 
 def finish(job, conn, size=128):
@@ -83,34 +98,84 @@ def test_exact_sources_gc_targets_receipt_order_and_null_slots(installed):
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
-@pytest.mark.parametrize('installed', [79, 97], indirect=True)
-def test_frozen_upgrade_agrees_and_keeps_exact_preparation_evidence(installed, tmp_path):
-    store, _ = installed
+def prepare_native_comparison(store):
     values, originals, account, playlist_key = seed(store)
     for job in preparation.JOBS.values():
         job.install(store.conn)
         finish(job, store.conn)
-    upgraded = Store(tmp_path / 'workflow-upgrade.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        assert next(iter(workflow_settings.gc_values(upgraded.conn).values())) == next(value for key, value in values.items() if key.startswith(workflow_settings.GC))
-        native = upgraded.conn.execute("SELECT * FROM spotify_transfer_receipts WHERE source_kind='playlist' AND captured_account_id=? AND fingerprint=?",
-            (account, 'fingerprint:東京')).fetchone()
-        staged = rows(store.conn, 'playlists', playlist_key, 'receipts')[0]
-        fields = ('source_kind', 'captured_account_id', 'account_id', 'fingerprint', 'creation_phase', 'marker',
-                  'playlist_scope_id', 'provider_playlist_id_snapshot', 'complete', 'order_verified', 'updated_at', 'last_run_added')
-        assert tuple(native[field] for field in fields) == tuple(staged[field] for field in fields)
-        assert [row[0] for row in upgraded.conn.execute('SELECT video_id_snapshot FROM spotify_transfer_items WHERE receipt_id=? ORDER BY position',
-            (native['id'],))] == [row['video_id_snapshot'] for row in rows(store.conn, 'playlists', playlist_key, 'items')]
+    return values, originals, account, playlist_key
+
+
+@pytest.fixture(scope='module')
+def native_inputs(upgraded_custody_inputs):
+    def get(version, target, **options):
+        return upgraded_custody_inputs(version, target, 'workflow-native-agreement', prepare_native_comparison, **options)
+
+    get.release = lambda version: upgraded_custody_inputs.release(version, 'workflow-native-agreement')
+    return get
+
+
+@pytest.mark.parametrize('version', [79, 97])
+def test_native_comparison_input_keeps_exact_preparation(native_inputs, version):
+    template = native_inputs(version, version)
+    assert_upgrade_phase(template, version)
+    _, originals, _, _ = template.result
+    for name in preparation.JOBS:
+        for source, raw in originals.items():
+            if source.startswith(preparation.PREFIXES[name]):
+                assert preparation.read_original(template.source.conn, name,
+                    preparation.head(template.source.conn, name, source)) == raw
+
+
+@pytest.mark.parametrize('version,target,phase', custody_upgrade_cases((79, 97)))
+def test_native_upgrade_phase_keeps_exact_preparation(native_inputs, version, target, phase):
+    template = native_inputs(version, target, phase=phase)
+    assert_upgrade_phase(template, target if phase == 'converted' else custody_predecessor(version, target))
+    _, originals, _, _ = template.result
+    for name in preparation.JOBS:
+        for source, raw in originals.items():
+            if source.startswith(preparation.PREFIXES[name]):
+                assert preparation.read_original(template.source.conn, name,
+                    preparation.head(template.source.conn, name, source)) == raw
+
+
+@pytest.mark.parametrize('version', [79, 97])
+def test_native_serving_input_keeps_private_read_guards(native_inputs, version):
+    template = native_inputs(version, 107)
+    assert_upgrade_phase(template, 107)
+    assert template.source._snapshot_revisions.conn is template.source.conn
+
+
+@pytest.mark.parametrize('version', [79, 97])
+def test_frozen_upgrade_agrees_and_keeps_exact_preparation_evidence(native_inputs, version):
+    prepared = native_inputs(version, version)
+    store = prepared.source
+    values, originals, account, playlist_key = prepared.result
+    upgraded = native_inputs(version, 107).source
+    assert next(iter(workflow_settings.gc_values(upgraded.conn).values())) == next(value for key, value in values.items() if key.startswith(workflow_settings.GC))
+    native = upgraded.conn.execute("SELECT * FROM spotify_transfer_receipts WHERE source_kind='playlist' AND captured_account_id=? AND fingerprint=?",
+        (account, 'fingerprint:東京')).fetchone()
+    staged = rows(store.conn, 'playlists', playlist_key, 'receipts')[0]
+    fields = ('source_kind', 'captured_account_id', 'account_id', 'fingerprint', 'creation_phase', 'marker',
+              'playlist_scope_id', 'provider_playlist_id_snapshot', 'complete', 'order_verified', 'updated_at', 'last_run_added')
+    assert tuple(native[field] for field in fields) == tuple(staged[field] for field in fields)
+    assert [row[0] for row in upgraded.conn.execute('SELECT video_id_snapshot FROM spotify_transfer_items WHERE receipt_id=? ORDER BY position',
+        (native['id'],))] == [row['video_id_snapshot'] for row in rows(store.conn, 'playlists', playlist_key, 'items')]
+    assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.mark.parametrize('version', [79, 97])
+def test_native_upgrade_keeps_exact_preparation_after_file_collection(native_inputs, version, tmp_path):
+    _, originals, _, _ = native_inputs(version, version).result
+    with native_inputs(version, 107).open(tmp_path / 'workflow-upgrade.db') as upgraded:
+        assert upgraded.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal'
+        upgraded.conn.execute('PRAGMA wal_autocheckpoint=0')
         collection_recovery.collect_orphans(upgraded.conn)
         for name in preparation.JOBS:
             for source, raw in originals.items():
                 if source.startswith(preparation.PREFIXES[name]):
                     assert preparation.read_original(upgraded.conn, name, preparation.head(upgraded.conn, name, source)) == raw
         assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        upgraded.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -232,3 +297,10 @@ def test_reference_write_during_planning_interrupt_and_missing_file_rebuild(inst
     job.step(store.conn, retry=True)
     finish(job, store.conn)
     assert preparation.read_original(store.conn, 'playlists', preparation.head(store.conn, 'playlists', source)) == originals[source]
+
+
+@pytest.mark.parametrize('version', [79, 97])
+def test_native_sources_finish_with_committed_read_only_inputs(native_inputs, version):
+    for source in native_inputs.release(version):
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            source.conn.execute('SELECT 1')

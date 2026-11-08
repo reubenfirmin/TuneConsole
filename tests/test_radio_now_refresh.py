@@ -1,5 +1,5 @@
 """Current-listening policy is maintained without a visible/polling Radio page."""
-from contextlib import nullcontext
+from copy import deepcopy
 import json
 import time
 
@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 
 from tests.radio_session_support import controlled_radio_checkpoints, poc, play
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
-from yt_playlist.core.store import Store
+from tests.prepared_fixture_support import prepared_template
+from tests.store_fixture_support import bounded_consumer_schema, reuse_reporting_reader
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from yt_playlist.rec import embedding_vectors as embed, measurement, radio_tuning, rec_params
 from yt_playlist.rec.radio_candidates import RadioCandidates
@@ -23,22 +23,20 @@ def now_schema():
         yield schema
 
 
-@pytest.fixture
-def store(now_schema, tmp_path):
-    source = Store(tmp_path / 'now.db')
-    try:
-        initialize_consumer(source, now_schema)
-        source._fixture_radio_pool = []
-        yield source
-    finally:
-        source.conn.close()
+def test_now_schema_keeps_both_style_inputs_and_real_snapshot_guards(now_schema):
+    from yt_playlist.core.migrations import current, regular
+
+    assert now_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert now_schema.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == current.VERSION
+    assert regular.validate(now_schema) == len(regular.CHANGES)
+    assert now_schema.execute('SELECT count(*) FROM recordings').fetchone()[0] == 0
+    assert 'CREATE TEMP TRIGGER' in now_schema._revision_script
 
 
-@pytest.fixture
-def prepared(store, monkeypatch):
+def prepare_now_candidates(store):
     # NOW consumes clustered candidates and the captured vectors below. Musical
     # profile preparation/intensity have independent owners in test_radio_tuning.
-    # Keep this additive: poc already owns its account and ordinary queue pool.
+    # Controller consumers add their own account and listening evidence later.
     modes, bundles, tracks = [], {}, []
     for mode, genre in enumerate(('Ambient', 'Techno'), 1):
         modes.append({'mode_id': mode, 'label': genre.lower(), 'families': [[genre.lower(), 1]],
@@ -52,23 +50,50 @@ def prepared(store, monkeypatch):
     store.modes.replace_modes(modes, retired_ids=[], now=1)
     # Policy hashing is a lower-layer input to these NOW refresh cases. The
     # real NOW policy (including the concurrent gain change) remains live.
-    with monkeypatch.context() as patch:
+    with pytest.MonkeyPatch.context() as patch:
         patch.setattr(measurement, 'serving_policy', lambda *args, **kwargs:
                       ('now-fixture', {'schema': 4, 'algorithm': 'now-fixture'}))
         publish_bundles(store, bundles)
     return tracks
 
 
+@pytest.fixture(scope='module')
+def now_template(now_schema):
+    with prepared_template(now_schema, prepare_now_candidates) as template:
+        yield template
+
+
+def test_now_candidate_input_keeps_both_native_pools_and_all_twelve_recordings(now_template):
+    source = now_template.source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source.conn.execute('SELECT count(*) FROM recordings').fetchone()[0] == 12
+    assert len(now_template.result) == 12
+    assert {track['genre'] for track in now_template.result} == {'Ambient', 'Techno'}
+    assert {str(mode['mode_id']) for mode in source.modes.list_modes()} == {'1', '2'}
+    assert source.recommendations.head('home')
+
+
 @pytest.fixture
-def active(controlled_radio_checkpoints, poc, prepared, monkeypatch, request):
+def store(now_template, tmp_path, monkeypatch):
+    with now_template.open(tmp_path / 'now.db') as source:
+        source.conn.execute('PRAGMA wal_autocheckpoint=0')
+        source._fixture_radio_pool = []
+        with reuse_reporting_reader(source, monkeypatch):
+            yield source
+
+
+@pytest.fixture
+def prepared(now_template):
+    return deepcopy(now_template.result)
+
+
+@pytest.fixture
+def active(controlled_radio_checkpoints, poc, prepared, monkeypatch):
     controller, remote, _, workers, _ = poc
     store = controller.ctx.store
     # Ordinary reads are lower-layer inputs; the refresh worker retains its
     # real isolated read_snapshot and revision fencing. Reader lifetime has
     # separate coverage in core/test_reporting_reads.
-    reader = store._make_reader()
-    request.addfinalizer(reader.conn.close)
-    monkeypatch.setattr(store, 'read_view', lambda **kwargs: nullcontext(reader))
     clock = [100_000.]
     controller.ctx.now_fn = lambda: clock[0]
     monkeypatch.setattr(radio_session, "RadioCandidates", RadioCandidates)
@@ -86,8 +111,8 @@ def active(controlled_radio_checkpoints, poc, prepared, monkeypatch, request):
 
     monkeypatch.setattr(embed, "load_content_vectors", vectors)
     iid = store.accounts.get_master_account().id
-    for i, track in enumerate(preferred):
-        store.history.record_play_event(iid, track["key"], track["video_id"], clock[0] - i * 60)
+    store.history.import_play_events(iid, [(track['key'], track['video_id'], clock[0] - i * 60)
+                                         for i, track in enumerate(preferred)])
     assert controller.start(prepared[0]["video_id"])["ok"]
     play(controller, remote.ids[0])
     assert controller.session.candidates.now_posterior

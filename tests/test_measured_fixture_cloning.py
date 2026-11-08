@@ -89,6 +89,26 @@ def measured_publications(measured_profiles):
         yield capture_template(source, None)
 
 
+def publish_home(source, now):
+    # Cloning consumes a completed four-card calculation. The Home writer still
+    # publishes its actual typed display files and SQL coordinates.
+    with source.read_view() as reader:
+        protos = []
+        for lane in mode_surfaces.CARD_SURFACES:
+            proto = home_cards._proto(reader, lane, lane.title(),
+                deepcopy(source._fixture_bundle_payload['all'][lane][:4]), now)
+            proto['recipe'] = {'lane': lane}
+            protos.append(proto)
+    result = home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],
+                                   None, None, [], [], 0, None)
+    home_prepared.remember(source, None, result, now)
+    home = home_cache.read(source, 'home_tuned')
+    assert home_prepared._valid(home)
+    home_cache.put(source, home_prepared.SURFACE, home, now)
+    home_cache.put(source, 'home_tuned', {}, now)
+    home_cache.put(source, 'home_choice', {}, now)
+
+
 def test_measured_clone_publications_keep_every_preset_and_complete_input(measured_publications):
     bundle = measured_publications.bundles
     assert set(bundle['_vibes']['pools']) == set(home_vibe.PRESETS)
@@ -116,23 +136,7 @@ def measured_browser(measured_publications):
         for item in favorites:
             for day in range(10):
                 source.history.record_history_plays(account, 1 - day * 86400, [item['key']], source_timezone='UTC')
-        # The clone consumer receives a completed four-card calculation. The
-        # actual Home writer retains its typed display files and SQL coordinates.
-        with source.read_view() as reader:
-            protos = []
-            for lane in mode_surfaces.CARD_SURFACES:
-                proto = home_cards._proto(reader, lane, lane.title(),
-                    deepcopy(source._fixture_bundle_payload['all'][lane][:4]), 1)
-                proto['recipe'] = {'lane': lane}
-                protos.append(proto)
-        result = home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],
-                                       None, None, [], [], 0, None)
-        home_prepared.remember(source, None, result, 1)
-        home = home_cache.read(source, 'home_tuned')
-        assert home_prepared._valid(home)
-        home_cache.put(source, home_prepared.SURFACE, home, 1)
-        home_cache.put(source, 'home_tuned', {}, 1)
-        home_cache.put(source, 'home_choice', {}, 1)
+        publish_home(source, 1)
         yield capture_template(source, None)
 
 
@@ -194,11 +198,10 @@ def test_measured_clone_decodes_all_480_profiles_and_keeps_typed_heads(
     assert owner.recommendations.heads() == measured_browser.source.recommendations.heads()
 
 
-def test_measured_clones_copy_every_retained_file_with_distinct_inodes(
-        measured_browser, measured_memory_clone, measured_disk_clone):
-    destinations = [roots(owner.conn) for owner in (measured_memory_clone, measured_disk_clone)]
+def assert_private_files(template, first, second):
+    destinations = [roots(owner.conn) for owner in (first, second)]
     copied = 0
-    for name, directory in measured_browser.files.items():
+    for name, directory in template.files.items():
         for source in directory.rglob('*'):
             if not source.is_file():
                 continue
@@ -209,16 +212,107 @@ def test_measured_clones_copy_every_retained_file_with_distinct_inodes(
     assert copied
 
 
-def test_measured_clones_keep_profile_corruption_and_sql_nested_mutations_private(
+def test_measured_clones_copy_every_retained_file_with_distinct_inodes(
         measured_browser, measured_memory_clone, measured_disk_clone):
-    first, second = measured_memory_clone, measured_disk_clone
+    assert_private_files(measured_browser, measured_memory_clone, measured_disk_clone)
+
+
+def assert_private_mutations(template, first, second):
     publication = first.conn.execute('SELECT publication FROM recording_profile_files LIMIT 1').fetchone()[0]
     relative = profile_files.relative('recording', publication)
     original = (profile_files.directory(second.conn) / relative).read_bytes()
     (profile_files.directory(first.conn) / relative).write_bytes(b'Private corrupted profile')
     first.settings.set_setting('private_sound_fixture', 'first consumer')
     first._fixture_bundle_payload['_vibes']['pools']['relax']['fresh'][0]['musical']['dimensions']['intensity']['value'] = -1
-    for target in (measured_browser.source, second):
+    for target in (template.source, second):
         assert (profile_files.directory(target.conn) / relative).read_bytes() == original
         assert target.settings.get_setting('private_sound_fixture') is None
-        assert target._fixture_bundle_payload == measured_browser.bundles
+        assert target._fixture_bundle_payload == template.bundles
+
+
+def test_measured_clones_keep_profile_corruption_and_sql_nested_mutations_private(
+        measured_browser, measured_memory_clone, measured_disk_clone):
+    assert_private_mutations(measured_browser, measured_memory_clone, measured_disk_clone)
+
+
+@pytest.fixture(scope='module', params=['inputs', 'backend'])
+def measured_input_template(request, measured_publications):
+    if request.param == 'inputs':
+        yield request.param, measured_publications
+    else:
+        with measured_publications.open(':memory:') as source:
+            source.accounts.upsert_account('main', 'cred', None, True)
+            publish_home(source, 1000)
+            yield request.param, capture_template(source, None)
+
+
+def assert_input(owner, variant, template):
+    assert owner.conn.execute('SELECT COUNT(*) FROM recordings').fetchone()[0] == 480
+    assert len(owner.rec_query.library_keys()) == 360
+    keys = {item['key'] for items in template.bundles['all'].values() for item in items}
+    assert len(keys) == 480
+    assert len(owner.discovery.discovered_tracks_by_keys(keys)) == 120
+    assert len(owner.accounts.get_accounts()) == (0 if variant == 'inputs' else 1)
+    home = owner.rec_proposals.get_proposals(home_prepared.SURFACE)
+    if variant == 'inputs':
+        assert home is None
+    else:
+        assert home == template.source.rec_proposals.get_proposals(home_prepared.SURFACE)
+        assert home_prepared._valid(home) and len(home['menus'][0]['protos']) == 4
+    assert owner.recommendations.heads() == template.source.recommendations.heads()
+    assert owner._fixture_bundle_payload == template.bundles
+    assert owner.settings.get_setting(home_vibe.SETTING) is None
+    assert owner.settings.get_setting(mix_tuning.UPDATED_AT_SETTING) is None
+    assert owner.rec_model.get_leans() == {}
+    assert not owner.conn.execute('PRAGMA foreign_key_check').fetchall()
+
+
+def test_measured_input_keeps_exact_subjects_home_and_defaults(measured_input_template):
+    variant, template = measured_input_template
+    assert_input(template.source, variant, template)
+    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    with pytest.raises(sqlite3.OperationalError, match='readonly'), template.source.conn.atomic():
+        template.source.settings.set_setting('private_sound_fixture', 'forbidden')
+
+
+@pytest.fixture(scope='module')
+def measured_input_memory(measured_input_template):
+    with measured_input_template[1].open(':memory:') as consumer:
+        yield consumer
+
+
+def test_measured_input_memory_keeps_complete_state(measured_input_template, measured_input_memory):
+    assert_input(measured_input_memory, *measured_input_template)
+
+
+@pytest.fixture(scope='module')
+def measured_input_disk(measured_input_template, tmp_path_factory):
+    with measured_input_template[1].open(tmp_path_factory.mktemp('measured-input') / 'consumer.db') as consumer:
+        yield consumer
+
+
+def test_measured_input_disk_keeps_complete_state(measured_input_template, measured_input_disk):
+    assert_input(measured_input_disk, *measured_input_template)
+    assert measured_input_disk.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
+
+
+def test_measured_inputs_decode_every_profile_and_keep_typed_heads(
+        measured_input_template, measured_input_memory, measured_input_disk):
+    _variant, template = measured_input_template
+    keys = {item['key'] for items in template.bundles['all'].values() for item in items}
+    expected = template.source.musical_profiles.by_keys(keys)
+    assert len(expected) == 480
+    for owner in (measured_input_memory, measured_input_disk):
+        assert owner.musical_profiles.by_keys(keys) == expected
+
+
+def test_measured_inputs_copy_all_retained_files_with_distinct_inodes(
+        measured_input_template, measured_input_memory, measured_input_disk):
+    _variant, template = measured_input_template
+    assert_private_files(template, measured_input_memory, measured_input_disk)
+
+
+def test_measured_inputs_keep_corruption_and_sql_nested_mutations_private(
+        measured_input_template, measured_input_memory, measured_input_disk):
+    _variant, template = measured_input_template
+    assert_private_mutations(template, measured_input_memory, measured_input_disk)

@@ -6,17 +6,27 @@ import pytest
 
 from tests.rec.test_vibe_prediction import drain, fits, track
 from tests.test_audio_vibe_cruise import samples
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.core import features
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release, audio_vibe_relax as relax
 from yt_playlist.rec import audio_vibe_uplift as uplift, audio_vibe_energize as energize, audio_vibe_focus as focus
 from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_prediction as predictor
-from yt_playlist.rec import home_vibe, musical_character, vibe_preparation
+from yt_playlist.rec import home_vibe, musical_character, vibe_preparation, vibe_joint_preparation
 
 SPECIALISTS = (cruise, release, relax, uplift, energize, focus)
 
 
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('psybient', 'Psybient'),)) as schema:
+        yield schema
+
+
 @pytest.fixture(autouse=True)
 def production_models(isolated_app_home, monkeypatch, tmp_path):
+    # This specialist's refresh owns measured scores and cohort propagation.
+    # The separate joint-model lifecycle owner fits and publishes posteriors.
+    monkeypatch.setattr(vibe_joint_preparation, 'qualified', lambda: False)
     monkeypatch.setattr(features, 'LOCAL_ENV', tmp_path / '.env.local')
     for module in (shared, *SPECIALISTS):
         monkeypatch.setenv(module.ENVIRONMENT_KEY, str(module.DEFAULT_PATH))
@@ -152,7 +162,8 @@ def test_default_active_local_override_and_identity(monkeypatch):
     assert focus.configured_path() is None and vibe_preparation.version() != active
 
 
-def test_refresh_partial_captures_propagation_continuing_updates_and_rollback(store, tmp_path, monkeypatch):
+def test_refresh_partial_captures_propagation_continuing_updates_and_rollback(
+        store, tmp_path, monkeypatch):
     _tid, own = track(store, 'observed_song')
     _tid, neighbour = track(store, 'neighbour')
     rows = samples()

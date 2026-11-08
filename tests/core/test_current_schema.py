@@ -26,6 +26,12 @@ FOREIGN_KEY_VERSIONS = (66, 76, 77, 78, 79, 85, 93, 103, 106)
 # plus the original first/middle/late real disk sessions. Every other installed
 # start still gets its own populated admission below, without a repeated suffix.
 FULL_REPLAY_VERSIONS = (1, 8, 24, 33, 72)
+EMPTY_PREDECESSOR_VERSIONS = tuple(sorted(set(PREDECESSOR_VERSIONS + FOREIGN_KEY_VERSIONS + (64, 98, 100, 101))))
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Schema and migration checks do not construct an HTTP application."""
 
 
 def connect(path=':memory:'):
@@ -60,26 +66,40 @@ def replay(conn):
 
 @pytest.fixture(scope='module')
 def predecessor_templates(tmp_path_factory):
-    """Build each genuine empty SQL predecessor once, in historical order.
+    """Build exact SQL prefixes through the actual registered migration chain.
 
-    SQLite backup pins a complete database, including any WAL contents. Every
-    case still owns its database, inserts its historical evidence and executes
-    all of the upgrades after its own predecessor.
+    Named cold owners below account for each completed prefix, instead of
+    charging construction of every version to the first unrelated consumer.
+    Populated consumers keep their own private SQL and real upgrade edges.
     """
     root = tmp_path_factory.mktemp('schema-predecessors')
-    paths = {}
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setenv('YT_PLAYLIST_HOME', str(root / 'app-home'))
-        with closing(connect(root / 'chain.db')) as chain:
-            for version in sorted(set(PREDECESSOR_VERSIONS + FOREIGN_KEY_VERSIONS + (64,))):
+
+    class Prefixes(dict):
+        def __missing__(self, version):
+            assert version in EMPTY_PREDECESSOR_VERSIONS
+            path = root / f'v{version}.db'
+            with pytest.MonkeyPatch.context() as patch, closing(connect(path)) as chain:
+                patch.setenv('YT_PLAYLIST_HOME', str(root / 'app-home'))
+                previous = max((old for old in self if old < version), default=None)
+                if previous is not None:
+                    with closing(sqlite3.connect(self[previous].resolve().as_uri() + '?mode=ro', uri=True)) as source:
+                        source.backup(chain)
                 migrate(chain, registry=registry.MIGRATIONS[:version])
                 from tests.prepared_fixture_support import coordinates
                 assert not coordinates(chain), 'Empty predecessor retains external files'
-                path = root / f'v{version}.db'
-                with closing(connect(path)) as snapshot:
-                    chain.backup(snapshot)
-                paths[version] = path
-    return paths
+            self[version] = path
+            return path
+
+    return Prefixes()
+
+
+@pytest.mark.parametrize('version', EMPTY_PREDECESSOR_VERSIONS)
+def test_empty_predecessor_input_keeps_registered_history_and_foreign_keys(version, predecessor_templates):
+    path = predecessor_templates[version]
+    with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as source:
+        assert list(source.execute('SELECT version,name FROM schema_migrations ORDER BY version')) == [
+            (migration.version, migration.name) for migration in registry.MIGRATIONS[:version]]
+        assert not source.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.fixture(scope='module')
@@ -111,6 +131,41 @@ def current_template(numbered_template, tmp_path_factory):
         assert list(template.iterdump()) == before
 
 
+def test_numbered_bootstrap_input_keeps_current_history_and_read_only_sql(numbered_template):
+    assert numbered_template.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert [tuple(row)[:2] for row in numbered_template.execute('SELECT * FROM schema_migrations ORDER BY version')] == [
+        (migration.version, migration.name) for migration in registry.MIGRATIONS]
+    assert not numbered_template.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_admitted_current_input_keeps_regular_history_and_read_only_sql(current_template):
+    assert current_template.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert regular.validate(current_template) == len(regular.CHANGES)
+    assert not current_template.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.fixture(scope='module')
+def runtime_template(tmp_path_factory):
+    """Real shipped startup, below restart validation of a completed database."""
+    with closing(connect()) as template:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('runtime-template')))
+            migrate(template)
+        template.execute('PRAGMA query_only=ON')
+        before = list(template.iterdump())
+        yield template
+        assert list(template.iterdump()) == before
+
+
+def test_runtime_input_keeps_shipped_history_and_read_only_sql(runtime_template):
+    from yt_playlist.core.migrations.runner import history
+
+    assert runtime_template.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert history(runtime_template, registry.MIGRATIONS) == LATEST_VERSION
+    assert regular.validate(runtime_template) == len(regular.CHANGES)
+    assert not runtime_template.execute('PRAGMA foreign_key_check').fetchone()
+
+
 @pytest.fixture(scope='module')
 def current_contract(current_template):
     return objects(current_template)
@@ -122,9 +177,9 @@ def numbered_contract(numbered_template):
 
 
 @pytest.fixture
-def current_database(current_template):
+def current_database(runtime_template):
     with closing(connect()) as conn:
-        current_template.backup(conn)
+        runtime_template.backup(conn)
         yield conn
 
 
@@ -547,6 +602,11 @@ def test_historical_replay_rechecks_foreign_key_reservation_gap(
     from yt_playlist.core import schema_definition
     from yt_playlist.core.migrations import runner
 
+    # The race belongs to v94's FK reservation and v95's next write. Retain
+    # their real callbacks and entry/end validation in a bounded registry;
+    # full historical suffixes have separate populated replay owners above.
+    monkeypatch.setattr(registry, 'MIGRATIONS', registry.MIGRATIONS[:95])
+
     class RebuildConnection(sqlite3.Connection):
         before_rebuild = None
 
@@ -613,7 +673,7 @@ def test_historical_replay_rechecks_foreign_key_reservation_gap(
             assert validations[:2] == [93, 94 if change == 'advance' else 93]
             assert inspections.count('identities') == 2
             assert conn.execute("SELECT value FROM settings WHERE key='concurrent-setting'").fetchone()[0] == 'committed'
-            assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == LATEST_VERSION
+            assert conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 95
             assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
         assert conn.before_rebuild is None
         assert changed

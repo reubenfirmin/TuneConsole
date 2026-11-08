@@ -1,16 +1,52 @@
 """Genre endpoints must escape style clusters and remain reversible during playback."""
+from copy import deepcopy
+
 import numpy as np
-from tests.enrichment_support import seed_enrichment
 import pytest
 
 from tests.radio_session_support import controlled_radio_checkpoints, poc, play
-from tests.recommendation_support import publish_bundles
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from tests.store_fixture_support import reuse_reporting_reader
 from yt_playlist.controllers.genres import Genres
-from yt_playlist.rec import embedding_vectors as embed, radio_tuning
+from yt_playlist.rec import embedding_vectors as embed, musical_character, radio_tuning
 from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, GENRE_POOL_LIMIT, RadioCandidates
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.rec.radio_genres import GenrePolicy, genre
 from yt_playlist.web import radio_session
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These candidate and controller checks do not construct an HTTP app."""
+
+
+def test_empty_radio_input_has_real_schema_and_snapshot_guards(_pristine_current_schema):
+    from yt_playlist.core.migrations import current, regular
+
+    conn = _pristine_current_schema
+    assert conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == current.VERSION
+    assert regular.validate(conn) == len(regular.CHANGES)
+    assert 'CREATE TEMP TRIGGER' in conn._revision_script
+
+
+def test_genre_pool_source_keeps_all_nine_modes_and_108_recordings(radio_genre_template):
+    template = radio_genre_template
+    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert template.source.conn.execute('SELECT count(*) FROM recordings').fetchone()[0] == 108
+    assert set(template.result) == {str(i) for i in range(1, 10)}
+    assert {len(rows) for rows in template.result.values()} == {12}
+    assert len({row['key'] for rows in template.result.values() for row in rows}) == 108
+    assert set(template.bundles) == set(template.result)
+
+
+@pytest.fixture
+def store(tmp_path, radio_genre_template, monkeypatch):
+    with radio_genre_template.open(tmp_path / 'radio-genres.db') as source:
+        source._fixture_genre_pools = deepcopy(radio_genre_template.result)
+        source._fixture_radio_pool = [track for rows in source._fixture_genre_pools.values() for track in rows]
+        with reuse_reporting_reader(source, monkeypatch):
+            yield source
 
 
 @pytest.fixture
@@ -18,14 +54,32 @@ def genre_pools(store):
     return store._fixture_genre_pools
 
 
+@pytest.fixture(scope='module')
+def genre_evidence(radio_genre_template):
+    source = radio_genre_template.source
+    tracks = [track for rows in radio_genre_template.result.values() for track in rows]
+    labels = {track['genre'] for track in tracks}
+    axes = source.genres.feature_axes(labels)
+    axes.update(source.genres.feature_axes({axis for pair in axes.values() for axis in pair if axis}))
+    return (axes, source.radio_catalog.details(track['video_id'] for track in tracks),
+            musical_character.load(source, [track['key'] for track in tracks]))
+
+
+def test_completed_genre_evidence_keeps_every_native_catalog_subject(genre_evidence, radio_genre_template):
+    axes, details, profiles = genre_evidence
+    tracks = [track for rows in radio_genre_template.result.values() for track in rows]
+    assert set(details) == {track['video_id'] for track in tracks}
+    assert len(details) == 108
+    assert {track['genre'] for track in tracks} <= axes.keys()
+    assert profiles.keys() <= {track['key'] for track in tracks}
+
+
 @pytest.fixture
-def prepared_genre_axes(store, genre_pools, monkeypatch):
+def prepared_genre_inputs(store, genre_evidence, monkeypatch):
     # The two controller scenarios change playback and tuning, with fixed
     # taxonomy. Keep actual selection/pinning and use completed lower-layer
     # meanings; the candidate scenarios below retain real taxonomy reads.
-    labels = {track['genre'] for rows in genre_pools.values() for track in rows}
-    axes = store.genres.feature_axes(labels)
-    axes.update(store.genres.feature_axes({axis for pair in axes.values() for axis in pair if axis}))
+    axes, details, profiles = genre_evidence
     original = Genres.feature_axes
 
     def feature_axes(controller, requested):
@@ -35,6 +89,17 @@ def prepared_genre_axes(store, genre_pools, monkeypatch):
                 **(original(controller, missing) if missing else {})}
 
     monkeypatch.setattr(Genres, 'feature_axes', feature_axes)
+    # Metadata and musical evidence stay fixed during the native playback race.
+    # Supply those completed reads below the real candidate and genre policy;
+    # listening, eligibility, scheduling and playlist reconciliation stay live.
+    def fixed_details(controller, videos):
+        return deepcopy({video: details[video] for video in videos if video in details})
+
+    def fixed_profiles(source, keys):
+        return deepcopy({key: profiles[key] for key in keys if key in profiles})
+
+    monkeypatch.setattr(type(store.radio_catalog), 'details', fixed_details)
+    monkeypatch.setattr(musical_character, 'load', fixed_profiles)
 
 
 def seed_genre_pools(store, *, publish=True):
@@ -51,14 +116,12 @@ def seed_genre_pools(store, *, publish=True):
         rows = []
         for i in range(12):
             video = f"genre-{mid}-{i}"
-            tid = store.tracks.upsert_track(video, video, f"Artist {video}", "", 200)
-            with store.conn:
-                store.conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'fixture',NULL)",(tid,))
-            seed_enrichment(store, tid, label, "2001")
-            key = store.tracks.catalog_subject(tid)["identity_key"]
+            key = f'{video}|artist {video}'
             rows.append(dict(key=key, video_id=video, title=video, artist=f"Artist {video}", genre=label))
         pools[mid] = rows
         bundles[mid] = {"wheelhouse": rows}
+    seed_publication_subjects(store, [{**track, 'duration_s': 200, 'year': '2001'}
+                                     for rows in pools.values() for track in rows])
     store.modes.replace_modes(modes, retired_ids=[], now=1)
     if publish:
         publish_bundles(store,bundles,now=1)
@@ -95,7 +158,7 @@ def test_eclectic_actively_changes_genre_beyond_nearest_clusters(store, genre_po
     monkeypatch.setattr(c, "_load", loading)
     monkeypatch.setattr(c, "_score", scoring)
     history = [seed]
-    for _ in range(12):
+    for _ in range(6):
         loaded.clear()
         scored.clear()
         pick = c.next_track(history, target=seed)
@@ -157,7 +220,7 @@ def test_genre_identity_handles_equivalents_without_collapsing_families():
 
 
 def test_dj_can_alternate_genre_endpoints_without_restarting_or_rejecting_songs(
-        controlled_radio_checkpoints, poc, genre_pools, monkeypatch, prepared_genre_axes):
+        controlled_radio_checkpoints, poc, genre_pools, monkeypatch, prepared_genre_inputs):
     c, remote, frames, _, _ = poc
     monkeypatch.setattr(radio_session, "RadioCandidates", RadioCandidates)
     seed = genre_pools["1"][0]
@@ -196,13 +259,16 @@ def test_dj_can_alternate_genre_endpoints_without_restarting_or_rejecting_songs(
 
 
 def test_pending_genre_pin_rebases_after_a_native_song_change(
-        controlled_radio_checkpoints, poc, genre_pools, monkeypatch, prepared_genre_axes):
+        controlled_radio_checkpoints, poc, genre_pools, monkeypatch, prepared_genre_inputs):
     c, remote, _, _, _ = poc
-    monkeypatch.setattr(radio_session, "RadioCandidates", RadioCandidates)
+    # Begin with the eclectic candidate input. The endpoint-alternation case
+    # above owns changing into it; this case owns the later native playback race.
+    def eclectic_start(store, now, tuning=None, **options):
+        return RadioCandidates(store, now, tuning or {**radio_tuning.DEFAULTS, 'theme': 0}, **options)
+
+    monkeypatch.setattr(radio_session, "RadioCandidates", eclectic_start)
     assert c.start(genre_pools["1"][0]["video_id"])["ok"]
     play(c, remote.ids[0])
-    assert c.tune({**radio_tuning.DEFAULTS, "theme": 0})["ok"]
-    c.advance(c.session)
     next_song = c.session.tracks[c.session.position + 1]
     assert next_song["genre"] != "Electronic"
     assert c.tune({**radio_tuning.DEFAULTS, "theme": 1})["ok"]

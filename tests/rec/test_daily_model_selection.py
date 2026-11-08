@@ -1,11 +1,16 @@
 """Chronology, shared comparisons, daily admission and atomic serving changes."""
 from contextlib import contextmanager
+from copy import deepcopy
 import sqlite3
 
 import numpy as np
 import pytest
 
 from tests.prepared_fixture_support import prepared_template, roots
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import (
+    bounded_consumer_schema, file_consumer_store as store, reuse_reporting_reader,
+)
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core import embedding_files
 from yt_playlist.core.db_writes import atomic_write
@@ -14,15 +19,32 @@ from yt_playlist.rec import daily_model_selection as daily, model_selection, mod
 from yt_playlist.util.matching import identity_key
 
 
-@pytest.fixture
-def library(store, monkeypatch, daily_library_template):
-    return _library(store, monkeypatch, daily_library_template)
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    # Model-selection cases do not create an app or a sync worker.
+    # Avoid importing the entire web application for an unused global fixture.
+    pass
 
 
 @pytest.fixture(scope='module')
-def daily_library_template(_pristine_current_schema, daily_catalog_template):
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture
+def library(tmp_path, monkeypatch, daily_library_template):
+    directory = tmp_path / 'library'
+    directory.mkdir()
+    with daily_library_template.open(directory / 'state.db') as database:
+        with reuse_reporting_reader(database, monkeypatch):
+            yield _library(database, monkeypatch, deepcopy(daily_library_template.result))
+
+
+@pytest.fixture(scope='module')
+def daily_library_template(_pristine_current_schema):
     def seed(source):
-        return _seed_library(source, daily_catalog_template.restore(source))
+        return _seed_library(source, _seed_catalog(source))
 
     with prepared_template(_pristine_current_schema, seed) as template:
         yield template
@@ -38,9 +60,11 @@ def _seed_catalog(store):
     now = 200 * daily.DAY
     with atomic_write(store):
         account = store.accounts.upsert_account('main', 'cred', None, True)
-        entries = [store.tracks.upsert_track(str(i), f'Song{i:03d}', 'Artist', None, None,
-                   created_at=-200 * daily.DAY) for i in range(160)]
-        keys = [store.tracks.identity_key_for_video(str(i)) for i in range(160)]
+        keys = [identity_key(f'Song{i:03d}', 'Artist') for i in range(160)]
+        seed_publication_subjects(store, [dict(key=key, video_id=str(i),
+            title=f'Song{i:03d}', artist='Artist', created_at=-200 * daily.DAY)
+            for i, key in enumerate(keys)])
+        entries = [row[0] for row in store.conn.execute('SELECT id FROM catalog_entries ORDER BY id')]
         videos = {key: str(i) for i, key in enumerate(keys)}
         for offset in (0, 80):
             playlist = store.playlists.upsert_playlist(account, f'PL{offset}', 'Old curation', 80, 'old', -100 * daily.DAY)
@@ -63,8 +87,7 @@ def _seed_library(store, value):
     return dict(now=now, account=account, keys=keys, videos=videos, original=original)
 
 
-def _library(store, monkeypatch, template):
-    value = template.restore(store)
+def _library(store, monkeypatch, value):
     keys = value['keys']
     monkeypatch.setattr(model_setup, 'CONFIGS', [('svd', 2), ('svd', 3)])
     calls = []
@@ -92,47 +115,50 @@ def complete(library, *, start=None):
     pytest.fail(f'Comparison did not finish: {result}')
 
 
-def test_all_prior_history_single_holdout_shared_inputs_and_full_refit(
-        library, daily_library_template, daily_catalog_template, file_backed_store, monkeypatch):
-    store, now = library['store'], library['now']
-    # The library adds held-out plays and vectors to a private copy of the
-    # common catalog. Admission cases still receive its original empty state.
-    catalog = daily_catalog_template.source
-    assert list(map(tuple, catalog.conn.execute(
-        'SELECT identity_key,video_id,played_at FROM play_event_subjects ORDER BY id'))) == [
-            (key, daily_catalog_template.result['videos'][key], -100 * daily.DAY)
-            for key in daily_catalog_template.result['keys'][:20]]
-    assert catalog.rec_model.get_rec_vectors() == []
-    assert catalog.settings.get_setting('rec_dim') is None
-    assert catalog.model_selection.latest_daily_selection() is None
-    # Compare the real seed and both restore modes before any selection work.
-    with monkeypatch.context() as patch:
-        sibling = _library(file_backed_store, patch, daily_library_template)
-        for current in (daily_library_template.source, store, file_backed_store):
-            assert current.conn.execute('SELECT count(*) FROM tracks').fetchone()[0] == 160
-            for offset in (0, 80):
-                playlist = current.playlists.get_playlist_for_account(library['account'], f'PL{offset}')
-                assert len(current.playlists.get_playlist_track_ids(playlist.id)) == 80
-                assert current.playlists.get_playlist_track_keys(playlist.id) == set(library['keys'][offset:offset + 80])
-            assert list(map(tuple, current.conn.execute('SELECT account_id,video_id,played_at '
-                'FROM play_event_subjects ORDER BY id'))) == [
-                    (library['account'], str(i), -100 * daily.DAY) for i in range(20)] + [
-                    (library['account'], str(i), now - 30 * daily.DAY + ((i - 20) // 2) * daily.DAY + 100)
-                    for i in range(20, 80)]
-            assert current.rec_model.get_rec_vectors() == library['original']
-            assert current.settings.get_setting('rec_dim') == '2'
-            assert not current.settings.get_setting('rec_fit_inputs')
-            assert current.model_selection.latest_daily_selection() is None
+def assert_daily_inputs(current, library):
+    now = library['now']
+    assert current.conn.execute('SELECT count(*) FROM tracks').fetchone()[0] == 160
+    for offset in (0, 80):
+        playlist = current.playlists.get_playlist_for_account(library['account'], f'PL{offset}')
+        assert len(current.playlists.get_playlist_track_ids(playlist.id)) == 80
+        assert current.playlists.get_playlist_track_keys(playlist.id) == set(library['keys'][offset:offset + 80])
+    assert list(map(tuple, current.conn.execute('SELECT account_id,video_id,played_at '
+        'FROM play_event_subjects ORDER BY id'))) == [
+            (library['account'], str(i), -100 * daily.DAY) for i in range(20)] + [
+            (library['account'], str(i), now - 30 * daily.DAY + ((i - 20) // 2) * daily.DAY + 100)
+            for i in range(20, 80)]
+    assert current.rec_model.get_rec_vectors() == library['original']
+    assert current.settings.get_setting('rec_dim') == '2'
+    assert not current.settings.get_setting('rec_fit_inputs')
+    assert current.model_selection.latest_daily_selection() is None
+
+
+def test_prepared_daily_sql_retains_complete_catalog_playlists_and_history(daily_library_template):
+    # Charge cold construction to its SQL owner. The isolation owner below
+    # verifies both restore modes against these same complete inputs.
+    assert_daily_inputs(daily_library_template.source, daily_library_template.result)
+
+
+def test_prepared_daily_catalog_and_library_copies_are_private(
+        library, daily_library_template, monkeypatch):
+    store = library['store']
+    # Compare both restore modes before any selection work.
+    assert_daily_inputs(store, library)
+    with (monkeypatch.context() as patch,
+          daily_library_template.open(':memory:') as sibling_store):
+        sibling = _library(sibling_store, patch, deepcopy(daily_library_template.result))
+        assert_daily_inputs(sibling_store, library)
+        destinations = [roots(target.conn) for target in (store, sibling_store)]
         for name, source in roots(daily_library_template.source.conn).items():
-            destinations = [roots(target.conn)[name] for target in (store, file_backed_store)]
-            assert len(set([source, *destinations])) == 3
+            directories = [owned[name] for owned in destinations]
+            assert len(set([source, *directories])) == 3
             for path in source.rglob('*'):
                 if path.is_file():
-                    for destination in destinations:
+                    for destination in directories:
                         copied = destination / path.relative_to(source)
                         assert copied.read_bytes() == path.read_bytes()
                         assert not copied.samefile(path)
-        assert len(list(embedding_files.references(file_backed_store.conn))) == 2
+        assert len(list(embedding_files.references(sibling_store.conn))) == 2
         weights = {library['keys'][0]: 1.4}
         vocabulary, first = daily.training.build_vectors_from_baskets([sibling['keys']], 2, 'svd', weights)
         _, second = daily.training.build_vectors_from_baskets([sibling['keys']], 2, 'svd', {})
@@ -143,13 +169,17 @@ def test_all_prior_history_single_holdout_shared_inputs_and_full_refit(
         sibling['videos'].clear()
         sibling['original'].clear()
         sibling['calls'].clear()
-        file_backed_store.settings.set_setting('private', 'sibling')
+        sibling_store.settings.set_setting('private', 'sibling')
     assert library['calls'] == []
     assert len(library['keys']) == len(library['videos']) == len(library['original']) == 160
     assert len(daily_library_template.result['keys']) == len(daily_library_template.result['videos']) == 160
     assert len(daily_library_template.result['original']) == 160
     assert store.settings.get_setting('private') is None
     assert daily_library_template.source.settings.get_setting('private') is None
+
+
+def test_daily_model_uses_all_history_shared_holdout_and_full_refit(library):
+    store, now = library['store'], library['now']
     store.rec_model.set_weight('genre:jazz', 1.4, now=now - 1)
     with store.read_view() as reader:
         captured, _ = daily._capture(reader, now)
@@ -210,7 +240,7 @@ def test_initial_insufficient_attempt_does_not_require_another_30_plays(
     value = daily_catalog_template.restore(store)
     now, account, keys, videos = (value[name] for name in ('now', 'account', 'keys', 'videos'))
     # Catalog/history and template isolation belong to
-    # test_all_prior_history_single_holdout_shared_inputs_and_full_refit.
+    # test_prepared_daily_catalog_and_library_copies_are_private.
     # This case exercises admission using the same unchanged 160-track catalog.
     active_days = 6 if initial_targets == 26 else 8
     store.history.import_listening_events(account, [
@@ -344,7 +374,7 @@ def test_changed_historical_inputs_discard_mixed_candidate_results(library):
 def test_file_database_reopen_resumes_completed_candidate(file_backed_store, monkeypatch, daily_library_template):
     # Reopen the real installed database together with its external vectors.
     # A SQL-only backup of the memory fixture leaves those files behind.
-    library = _library(file_backed_store, monkeypatch, daily_library_template)
+    library = _library(file_backed_store, monkeypatch, daily_library_template.restore(file_backed_store))
     path = file_backed_store._db_path
     file_backed_store.conn.close()
     first = Store(path)

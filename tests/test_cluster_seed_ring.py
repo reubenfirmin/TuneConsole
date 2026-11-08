@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
+from tests.recommendation_support import seed_publication_subjects
 from yt_playlist.rec import embed, rec_params
 from yt_playlist.core import embeddings
 from yt_playlist.util.matching import identity_key
@@ -13,16 +14,21 @@ from yt_playlist.web.app import create_app
 
 
 def _track(store, title, artist, angle=0, album="", genre=""):
-    tid = store.tracks.upsert_track(title, title, artist, album, 180, thumbnail="/static/nag/intro.png")
-    key = identity_key(title, artist)
-    if genre:
-        store.tracks.set_track_genre(tid, genre)
+    return _tracks(store, [title], artist, angle, album, genre)[0]
+
+
+def _tracks(store, titles, artist, angle=0, album="", genre=""):
+    items = [dict(key=identity_key(title, artist), video_id=title, title=title,
+                  artist=artist, album=album, genre=genre or None, duration_s=180)
+             for title in titles]
+    seed_publication_subjects(store, items)
     v = np.array([math.cos(math.radians(angle)), math.sin(math.radians(angle))], dtype=np.float32)
     with store.conn:
-        store.conn.execute('UPDATE settings SET value=value WHERE 0')
-        embeddings.publish(store.conn, 'rec_vectors', [(key, v.tobytes())],
+        store.conn.executemany('UPDATE youtube_items SET thumbnail=? WHERE video_id=?',
+                               [('/static/nag/intro.png', item['video_id']) for item in items])
+        embeddings.publish(store.conn, 'rec_vectors', [(item['key'], v.tobytes()) for item in items],
                            model_version='test-ring')
-    return key
+    return [item['key'] for item in items]
 
 
 def _client(store):
@@ -56,8 +62,8 @@ def test_artist_songs_are_preferred_and_sampled_repeatably(store):
 
 
 def test_multiple_artists_get_equal_room_despite_different_catalog_sizes(store):
-    a = [_track(store, f"A {i}", "A", 0) for i in range(24)]
-    b = [_track(store, f"B {i}", "B", 90) for i in range(6)]
+    a = _tracks(store, [f"A {i}" for i in range(24)], "A", 0)
+    b = _tracks(store, [f"B {i}" for i in range(6)], "B", 90)
     c = _client(store)
     ring = c.post("/clusters/expand", json=_body(
         {"kind": "artist", "label": "A", "keys": a},

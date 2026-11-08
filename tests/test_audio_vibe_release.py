@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from tests.rec.test_vibe_prediction import drain, fits, track
+from tests.rec.test_vibe_prediction import drain, fits, individual_model_rollout, track
 from tests.test_audio_vibe_cruise import samples
 from yt_playlist.core import catalog, features
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release
@@ -139,7 +139,8 @@ def test_default_active_local_rollback_and_identity(monkeypatch):
     assert vibe_preparation.version() != active
 
 
-def test_bounded_rollout_propagation_intensity_new_captures_and_rollback(store, tmp_path, monkeypatch):
+def test_bounded_rollout_propagation_intensity_new_captures_and_rollback(
+        store, tmp_path, monkeypatch, individual_model_rollout):
     _tid, own = track(store, 'observed_song')
     _tid, neighbour = track(store, 'neighbour')
     rows = samples()

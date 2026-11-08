@@ -5,16 +5,35 @@ import sqlite3
 import pytest
 
 from yt_playlist.core import schema_admission
-from yt_playlist.core.migrations import migrate
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.schema_contract import MigrationError
 
 
+@pytest.fixture
+def disable_periodic_library_sync():
+    # These readers never construct an HTTP application.
+    pass
+
+
+HISTORICAL_INPUTS = (79, 93, 99, 102, 103, 104, 107)
+
+
+@pytest.mark.parametrize('version', HISTORICAL_INPUTS)
+def test_historical_admission_input_keeps_real_replay_and_exact_history(
+        version, _pristine_installed_schema):
+    source = _pristine_installed_schema(version)
+    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert [tuple(row) for row in source.execute(
+        'SELECT version,name FROM schema_migrations ORDER BY version')] == [
+            (migration.version, migration.name) for migration in MIGRATIONS[:version]]
+    assert not source.execute('PRAGMA foreign_key_check').fetchone()
+
+
 @pytest.mark.parametrize('version', [79, 80, 81, 82, 83, 84, 85, 86, 88, 91, 92, 93, 99, 104, 107])
-def test_preparation_admits_frozen_installed_schemas_without_writing(version):
+def test_preparation_admits_frozen_installed_schemas_without_writing(version, _pristine_installed_schema):
     with closing(sqlite3.connect(':memory:')) as conn, conn:
         conn.row_factory = sqlite3.Row
-        migrate(conn, registry=MIGRATIONS[:version])
+        _pristine_installed_schema(version).backup(conn)
         conn.execute('PRAGMA query_only=ON')
         changes = conn.total_changes
         assert schema_admission.history(conn) == version
@@ -23,10 +42,10 @@ def test_preparation_admits_frozen_installed_schemas_without_writing(version):
 
 
 @pytest.mark.parametrize('damage', ['history_name', 'history_gap', 'future', 'column', 'trigger'])
-def test_preparation_rejects_changed_history_and_owner_definitions(damage):
+def test_preparation_rejects_changed_history_and_owner_definitions(damage, _pristine_installed_schema):
     with closing(sqlite3.connect(':memory:')) as conn, conn:
         conn.row_factory = sqlite3.Row
-        migrate(conn, registry=MIGRATIONS[:79])
+        _pristine_installed_schema(79).backup(conn)
         if damage == 'history_name':
             conn.execute("UPDATE schema_migrations SET name='unrecognized' WHERE version=1")
         elif damage == 'history_gap':

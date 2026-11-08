@@ -12,7 +12,8 @@ import time
 import pytest
 from tests.metadata_provenance_support import metadata_provenance
 
-from tests.db_rebuild_support import production64
+from tests.db_rebuild_support import (completed_destination_schema, completed_destination_sql,
+                                      production64)
 from yt_playlist.core.db_rebuild import build, destination, source
 from yt_playlist.core import vibe_versions
 from yt_playlist.core.migrations import registry, runner
@@ -34,7 +35,7 @@ def development93(development93_template, tmp_path, record_property):
 
 
 @pytest.fixture(autouse=True)
-def destination_phase_costs(monkeypatch, record_property):
+def destination_phase_costs(monkeypatch, record_property, completed_destination_schema):
     """Keep actual conversions and verifiers; report inclusive phase costs."""
     costs = {}
 
@@ -110,19 +111,16 @@ def test_rebuild_verifies_legacy_progress_in_an_empty_additive_owner(request,sou
         conn.commit()
     original = path.read_bytes()
     contract = destination.for_source(path)
-    if not progress:
-        # The populated case keeps a complete rebuild for each admitted format.
-        # Absent/empty progress needs the real registered settings converter,
-        # destination DDL and verifier, without every unrelated domain import
-        # and the final whole-database compaction.
-        settings = tuple(stage for stage in contract.stages if stage.name == 'settings')
-        assert len(settings) == 1
-        contract = replace(contract, stages=settings, verify=verification._group_progress, compact=False)
+    # All three progress states own the registered settings conversion and its
+    # verifier. Whole catalog imports and compaction have independent owners;
+    # repeating them adds no progress-state behavior here.
+    settings = tuple(stage for stage in contract.stages if stage.name == 'settings')
+    assert len(settings) == 1
+    contract = replace(contract, stages=settings, verify=verification._group_progress, compact=False)
     output = tmp_path/'progress.db'
     report = build.construct(path,output,contract)
     assert path.read_bytes() == original
-    if not progress:
-        assert set(report['rows']) == {'settings'}
+    assert set(report['rows']) == {'settings'}
     with closing(sqlite3.connect(path)) as reader, closing(sqlite3.connect(output)) as target:
         actual = list(target.execute('SELECT singleton,phase,reported_at,reason FROM group_preparation_progress'))
         expected = [] if progress is None else [(1,progress.get('phase'),progress.get('at'),progress.get('reason'))]

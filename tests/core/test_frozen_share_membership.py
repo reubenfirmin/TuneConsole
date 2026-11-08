@@ -1,27 +1,47 @@
 """Current and installed frozen captures reject appends, replacements and reordering."""
+from contextlib import closing
 import sqlite3
 
 import pytest
 
-from yt_playlist.core import albums, album_tracklists, genre_identity
-from yt_playlist.core.migrations import current, migrate, registry, Migration, MigrationError
+from yt_playlist.core import albums, album_tracklists
+from yt_playlist.core.migrations import current, migrate, registry, regular, Migration, MigrationError
 from yt_playlist.core.migrations import v105_frozen_share_membership as membership
 from yt_playlist.core.store import Store
 from tests.historical_support import upgrade_fixture
+from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import install_numbered_input
 
 
-def installed(path):
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Frozen SQL ownership does not construct an HTTP application."""
+
+
+@pytest.fixture(scope='module')
+def membership_predecessor():
+    # The real v105 runner owns membership conversion. Earlier empty SQL and
+    # unrelated regular owners are completed inputs, shared read-only here.
+    with closing(sqlite3.connect(':memory:')) as conn, pytest.MonkeyPatch.context() as patch:
+        bound_catalog(patch)
+        install_numbered_input(conn, 104, regular_owners=regular.CHANGES)
+        conn.execute('PRAGMA query_only=ON')
+        yield conn
+
+
+def test_membership_predecessor_keeps_real_capture_owners_and_completed_regular_sql(membership_predecessor):
+    conn = membership_predecessor
+    assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 104
+    assert regular.validate(conn) == len(regular.CHANGES)
+    assert conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert not conn.execute('SELECT 1 FROM album_share_snapshots').fetchone()
+    assert [row[1] for row in conn.execute('PRAGMA table_info(album_share_items)') if row[5]] == [
+        'snapshot_id', 'position']
+
+
+def installed(path, predecessor):
     store = Store(path)
-    for sql in current.statements(version=104):
-        store.conn.execute(sql)
-    genre_identity.seed_catalog(store.conn)
-    store.conn.executemany('INSERT INTO settings VALUES (?,?)',current.SEED_SETTINGS.items())
-    for sql in ('INSERT INTO rec_preparation VALUES (1,0,0)', 'INSERT INTO rec_group_clock VALUES (1,0)',
-                'INSERT INTO group_retention_state VALUES (1,0)'):
-        store.conn.execute(sql)
-    store.conn.executemany('INSERT INTO schema_migrations VALUES (?,?,1)',
-                          [(m.version,m.name) for m in registry.MIGRATIONS[:104]])
-    store.conn.commit()
+    predecessor.backup(store.conn)
     return store
 
 
@@ -51,13 +71,27 @@ def assert_frozen(conn, snapshot):
     assert not conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
+def test_fresh_share_constructor_and_rollback_leave_no_mutable_prefix(store):
+    _,snapshot,_ = capture(store.conn)
+    assert_frozen(store.conn,snapshot)
+    before = store.conn.execute('SELECT count(*) FROM album_share_snapshots').fetchone()[0]
+    with pytest.raises(RuntimeError):
+        with store.conn:
+            album_tracklists.freeze(store.conn,albums.lookup(store.conn,'release'),'release','Rollback',['a','a'],now=12)
+            raise RuntimeError('abort capture')
+    assert store.conn.execute('SELECT count(*) FROM album_share_snapshots').fetchone()[0]==before
+
+
 @pytest.mark.parametrize('legacy',[False,True])
-def test_installed_shares_keep_exact_membership_across_upgrade_alias_and_restart(tmp_path,legacy):
+def test_installed_shares_keep_exact_membership_across_upgrade_alias_and_restart(
+        tmp_path, membership_predecessor, legacy):
     path = tmp_path/'shares.db'
-    store = installed(path)
+    store = installed(path, membership_predecessor)
     aid,snapshot,empty = capture(store.conn,legacy=legacy)
     before = list(map(tuple,store.conn.execute('SELECT * FROM album_share_items ORDER BY snapshot_id,position')))
-    upgrade_fixture(store)
+    # This boundary owns conversion; the fresh Store below owns admission.
+    # The intervening alias operation uses these same real SQL owners directly.
+    migrate(store.conn, registry=registry.MIGRATIONS)
     assert list(map(tuple,store.conn.execute('SELECT * FROM album_share_items ORDER BY snapshot_id,position')))==before
     assert_frozen(store.conn,snapshot)
     with store.conn:
@@ -79,19 +113,8 @@ def test_installed_shares_keep_exact_membership_across_upgrade_alias_and_restart
         reopened.conn.close()
 
 
-def test_fresh_share_constructor_and_rollback_leave_no_mutable_prefix(store):
-    _,snapshot,_ = capture(store.conn)
-    assert_frozen(store.conn,snapshot)
-    before = store.conn.execute('SELECT count(*) FROM album_share_snapshots').fetchone()[0]
-    with pytest.raises(RuntimeError):
-        with store.conn:
-            album_tracklists.freeze(store.conn,albums.lookup(store.conn,'release'),'release','Rollback',['a','a'],now=12)
-            raise RuntimeError('abort capture')
-    assert store.conn.execute('SELECT count(*) FROM album_share_snapshots').fetchone()[0]==before
-
-
-def test_interrupted_guard_install_rolls_back_then_restarts(tmp_path):
-    store = installed(tmp_path/'restart.db')
+def test_interrupted_guard_install_rolls_back_then_restarts(tmp_path, membership_predecessor):
+    store = installed(tmp_path/'restart.db', membership_predecessor)
     _,snapshot,_ = capture(store.conn)
     before = list(store.conn.iterdump())
     def interrupted(conn,context):
@@ -105,8 +128,8 @@ def test_interrupted_guard_install_rolls_back_then_restarts(tmp_path):
     store.conn.close()
 
 
-def test_preexisting_appended_share_stops_without_changing_original_rows(tmp_path):
-    store = installed(tmp_path/'invalid.db')
+def test_preexisting_appended_share_stops_without_changing_original_rows(tmp_path, membership_predecessor):
+    store = installed(tmp_path/'invalid.db', membership_predecessor)
     _,snapshot,_ = capture(store.conn)
     with store.conn:
         store.conn.execute('INSERT INTO album_share_items SELECT snapshot_id,3,tracklist_id,occurrence_id,entry_id,raw_source_ref '

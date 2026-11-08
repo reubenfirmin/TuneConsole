@@ -1,16 +1,30 @@
 """Festival availability follows real serving outputs, including partial preparation."""
 import json
+from contextlib import closing
 from tests.enrichment_support import complete_entries, complete_discovered
 from tests.derived_rating_support import seed_dislike
 
 import pytest
 
 from tests.conftest import seed_catalog_track
+from tests.home_fixture_support import home_pages_only, home_page_bytecode, without_metadata_providers
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
-from tests.onboarding_support import publish_personal_mix
+from tests.store_fixture_support import file_consumer_store as store
+from tests.onboarding_support import publish_personal_album, publish_personal_mix
 from tests.test_tv_stream import video
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import account_growth, choice_evidence, home_prepared, into_recently, onboarding, tv
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema(vibe_journey_schema):
+    return vibe_journey_schema
+
+
+def test_growth_destination_input_keeps_empty_current_owners_and_snapshot_guards(vibe_journey_schema):
+    assert vibe_journey_schema.execute('SELECT count(*) FROM recordings').fetchone()[0] == 0
+    assert vibe_journey_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert vibe_journey_schema._revision_script
 
 
 def publish_destinations(store, now=1000):
@@ -88,15 +102,27 @@ def publish_full_journey(store, now=1000):
     finish_full_journey(store, now=now)
 
 
-@pytest.mark.parametrize('count', [1, 3, 4])
-def test_four_eligible_mixes_are_required_everywhere(store, count):
+@pytest.fixture
+def growth_web(store, home_pages_only, without_metadata_providers):
     from tests.test_onboarding_routes import _client
 
     _, client = _client(store)
-    from tests.test_growth_journey import early_journey
-    early_journey(store)
+    with closing(client):
+        yield client
+
+
+@pytest.mark.parametrize('count', [1, 3, 4])
+def test_four_eligible_mixes_are_required_everywhere(
+        store, count, growth_web, monkeypatch, home_pages_only, without_metadata_providers):
+    client = growth_web
+    # Foundation and the preceding discovery interlude have their real input
+    # owners in growth_readiness and growth_journey. This consumer varies only
+    # the published mix count across the three Home reads.
+    monkeypatch.setattr(account_growth.growth_readiness, 'foundation', lambda *args: True)
+    monkeypatch.setattr(account_growth.growth_readiness, 'discover', lambda *args: True)
+    publish_personal_album(store, count=2)
     store.settings.set_setting('last_sync_at', '1')
-    publish_personal_mix(store, count=count)
+    publish_personal_mix(store, count=count, tracks_per_card=1)
     expected = count == 4
     for _ in range(2):
         home = client.get('/')

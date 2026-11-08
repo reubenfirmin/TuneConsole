@@ -6,12 +6,36 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
-from tests.store_fixture_support import reuse_reporting_reader
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.prepared_fixture_support import assert_upgrade_phase, custody_predecessor, custody_upgrade_cases
+from tests.store_fixture_support import publication_consumer_reads, reuse_reporting_reader
 from yt_playlist.core import collection_recovery, discovery_provenance as provenance, policy_documents
-from yt_playlist.core.migrations import MigrationError, registry, regular, runner
+from yt_playlist.core.migrations import MigrationError, regular, runner
 from yt_playlist.core.preparation import discovery_artists as documents, discovery_subjects as rows
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Discovery preparation checks do not construct an HTTP application."""
+
+
+@pytest.mark.parametrize('version', [79, 93, 100])
+def test_discovery_input_keeps_each_installed_contract_and_snapshot_guards(_bounded_installed_schema, version):
+    from contextlib import closing
+
+    template = _bounded_installed_schema(version)
+    source = template.source
+    with closing(sqlite3.connect(source._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
+        reader.row_factory = sqlite3.Row
+        runner.validate_version(reader, version)
+        regular.validate(reader)
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert not source.conn.execute('SELECT 1 FROM main.discovered_artists').fetchone()
+    assert template.revision_guards
 
 
 def finish(job, conn, size=128):
@@ -84,18 +108,68 @@ def test_exact_sources_origins_counters_and_explanations(installed):
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
-@pytest.mark.parametrize('installed',[79,100],indirect=True)
-def test_frozen_upgrade_agrees_without_stamping_history(installed,tmp_path):
-    store, version = installed
+def prepare_native_comparison(store, version):
     _, aid, _, _ = seed(store)
     job = artist_job(version)
     for candidate in (rows.JOB,job):
         candidate.install(store.conn)
         finish(candidate,store.conn)
-    native = Store(tmp_path/'discovery-upgrade.db')
-    try:
-        store.conn.backup(native.conn)
-        runner.migrate(native.conn,registry=registry.MIGRATIONS)
+    name = 'artists_legacy' if version < 86 else 'artists_classified'
+    source = artist_source(store.conn)
+    original_rows = {(owner, row['source_key']): rows.original(store.conn, owner, row['source_key'], row['source_digest'])
+        for owner, target in rows.TARGETS.items()
+        for row in store.conn.execute(f'SELECT * FROM {target} WHERE source_owner=?', (owner,))}
+    return aid, name, source, original_rows, documents.read_original(store.conn, name, documents.head(store.conn, name, source))
+
+
+@pytest.fixture(scope='module')
+def native_inputs(upgraded_custody_inputs):
+    from functools import partial
+
+    def get(version, target, **options):
+        return upgraded_custody_inputs(version, target, 'discovery-native-agreement',
+            partial(prepare_native_comparison, version=version), **options)
+
+    get.release = lambda version: upgraded_custody_inputs.release(version, 'discovery-native-agreement')
+    return get
+
+
+def assert_native_originals(template):
+    _, name, source, originals, document = template.result
+    conn = template.source.conn
+    for owner, target in rows.TARGETS.items():
+        for row in conn.execute(f'SELECT * FROM {target} WHERE source_owner=?', (owner,)):
+            assert rows.original(conn, owner, row['source_key'], row['source_digest']) == originals[owner, row['source_key']]
+    assert documents.read_original(conn, name, documents.head(conn, name, source)) == document
+
+
+@pytest.mark.parametrize('version', [79, 100])
+def test_native_comparison_input_keeps_exact_preparation(native_inputs, version):
+    template = native_inputs(version, version)
+    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert_native_originals(template)
+
+
+@pytest.mark.parametrize('version,target,phase', custody_upgrade_cases((79, 100)))
+def test_native_upgrade_phase_keeps_exact_preparation(native_inputs, version, target, phase):
+    template = native_inputs(version, target, phase=phase)
+    assert_upgrade_phase(template, target if phase == 'converted' else custody_predecessor(version, target))
+    assert_native_originals(template)
+
+
+@pytest.mark.parametrize('version', [79, 100])
+def test_native_serving_input_keeps_private_read_guards(native_inputs, version):
+    template = native_inputs(version, 107)
+    assert_upgrade_phase(template, 107)
+    assert template.source._snapshot_revisions.conn is template.source.conn
+
+
+@pytest.mark.parametrize('version', [79, 100])
+def test_frozen_upgrade_agrees_without_stamping_history(native_inputs, version, tmp_path):
+    prepared = native_inputs(version, version)
+    store = prepared.source
+    aid = prepared.result[0]
+    with native_inputs(version, 107).open(tmp_path / 'discovery-upgrade.db') as native:
         staged = store.conn.execute('SELECT * FROM prepared_discovery_source_rows').fetchone()
         actual = native.conn.execute('SELECT s.*,o.* FROM discovery_sources s JOIN discovery_origins o ON o.id=s.origin_id').fetchone()
         for field in ('recording_id','input_video_id','first_found_at','last_found_at','kind','seed_video_id','resolution_status'):
@@ -107,8 +181,6 @@ def test_frozen_upgrade_agrees_without_stamping_history(installed,tmp_path):
         assert (candidate['offered_count'],candidate['legacy_offered_count']) == (2,14)
         assert provenance.explanation(native.conn,candidate) == {'because':['Anchor','Anchor'],'fits':['Playlist']}
         assert not native.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        native.conn.close()
 
 
 @pytest.mark.parametrize('installed',[93],indirect=True)
@@ -118,7 +190,8 @@ def test_bounded_rows_continuing_writes_missing_owners_and_ambiguity(installed):
     other = store.tracks.upsert_track('other','Other','Other',None,10)
     other_rid = store.tracks.catalog_subject(other)['recording_id']
     with store.conn:
-        store.conn.executemany('INSERT INTO main.discovery_visible_impressions VALUES (?,\'track\',\'song|artist\',1)', [('visit-'+str(i),) for i in range(1040)])
+        # Two complete 16-row pages and a tail preserve bounded continuation.
+        store.conn.executemany('INSERT INTO main.discovery_visible_impressions VALUES (?,\'track\',\'song|artist\',1)', [('visit-'+str(i),) for i in range(33)])
         store.conn.executemany("INSERT INTO main.recording_aliases VALUES ('ambiguous', ?, 'captured')", [(rid,),(other_rid,)])
         store.conn.execute("INSERT INTO main.discovery_visible_impressions VALUES ('ambiguous','track','ambiguous',2)")
         store.conn.execute("INSERT INTO main.artist_scans VALUES ('unresolved',NULL,NULL)")
@@ -288,3 +361,10 @@ def test_nonfinite_output_and_oversized_source_keep_last_good_custody(installed)
     with store.conn:
         store.conn.execute("UPDATE main.discovery_sources SET source_token='radio:song'")
         store.conn.execute("UPDATE main.discovered_artists SET because='[]'")
+
+
+@pytest.mark.parametrize('version', [79, 100])
+def test_native_sources_finish_with_committed_read_only_inputs(native_inputs, version):
+    for source in native_inputs.release(version):
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            source.conn.execute('SELECT 1')

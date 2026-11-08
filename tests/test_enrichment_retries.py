@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema, reuse_reporting_reader
 from yt_playlist.core.store import Store
 from yt_playlist.enrich.enrich_worker import EnrichWorker
 from yt_playlist.integrations.musicbrainz import MusicBrainzIAO
@@ -14,6 +16,22 @@ from yt_playlist.providers import musicbrainz
 from yt_playlist.providers.base import EnrichmentResult
 from yt_playlist.providers.waterfall import run_waterfall
 from yt_playlist.util import net
+from yt_playlist.util.matching import identity_key
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('techno', 'Techno'),)) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def retry_vocabulary(monkeypatch):
+    from tests.genre_catalog_support import bound_catalog
+
+    # Keep the provider's real metadata writes and populated admission, with
+    # only the genre used by these retry cases in the lower vocabulary input.
+    bound_catalog(monkeypatch, entries=(('techno', 'Techno'),))
 
 
 class Provider:
@@ -39,41 +57,48 @@ def worker(store, clock, providers):
 
 def tracks(store, count):
     store.settings.set_setting("enrich_caught_up_at", "100")
-    return [store.tracks.upsert_track(f"v{i}", f"Song {i}", "Artist", None, 200,
-                               created_at=10-i) for i in range(count)]
+    seed_publication_subjects(store, [dict(key=identity_key(f'Song {i}', 'Artist'),
+        video_id=f'v{i}', title=f'Song {i}', artist='Artist', duration_s=200,
+        created_at=10-i) for i in range(count)])
+    return [row[0] for row in store.conn.execute('SELECT id FROM catalog_entries ORDER BY id')]
 
 
-def test_more_failures_than_one_batch_do_not_starve_healthy_tracks_and_recovery_reuses_success(tmp_path):
+def test_more_failures_than_one_batch_do_not_starve_healthy_tracks_and_recovery_reuses_success(
+        tmp_path, consumer_store, monkeypatch):
     path = tmp_path / "retries.db"
-    store = Store(path); store.init_schema()
-    ids = tracks(store, 7)
+    store = consumer_store(path)
     clock = [1000.0]
     def fail(track):
         if track["title"] in {f"Song {i}" for i in range(5)}:
             raise ValueError("malformed response")
     broken, healthy = Provider("musicbrainz", fail), Provider("deezer")
-    w = worker(store, clock, [broken, healthy])
-    for _ in range(4):
-        w.drain_once(limit=2)
-        clock[0] += 31
-    assert {t["id"] for t in store.enrichment_reports.enriched_tracks()} == set(ids[5:])
-    assert healthy.calls == [f"Song {i}" for i in range(7)]
-    assert store.enrichment_reports.queue_remaining() == 5
-    assert "malformed response" in w.activity["warning"]
-    key = store.tracks.catalog_subject(ids[0])["identity_key"]
-    assert store.enrichment_state.enrichment_attempts(key)["deezer"]["fields"] == {"genre": "techno"}
+    with reuse_reporting_reader(store, monkeypatch):
+        ids = tracks(store, 7)
+        w = worker(store, clock, [broken, healthy])
+        for _ in range(4):
+            w.drain_once(limit=2)
+            clock[0] += 31
+        assert {t["id"] for t in store.enrichment_reports.enriched_tracks()} == set(ids[5:])
+        assert healthy.calls == [f"Song {i}" for i in range(7)]
+        assert store.enrichment_reports.queue_remaining() == 5
+        assert "malformed response" in w.activity["warning"]
+        key = store.tracks.catalog_subject(ids[0])["identity_key"]
+        assert store.enrichment_state.enrichment_attempts(key)["deezer"]["fields"] == {"genre": "techno"}
     # A new process uses saved deadlines and successful provider evidence.
     store.conn.close()
     store = Store(path); store.init_schema()
-    broken.fail = None
-    w = worker(store, clock, [broken, healthy])
-    clock[0] += 3600
-    for _ in range(3):
-        w.drain_once(limit=2)
-    assert store.enrichment_reports.queue_remaining() == 0
-    assert len(healthy.calls) == 7
-    assert len(store.enrichment_reports.enriched_tracks()) == 7
-    store.conn.close()
+    try:
+        with reuse_reporting_reader(store, monkeypatch):
+            broken.fail = None
+            w = worker(store, clock, [broken, healthy])
+            clock[0] += 3600
+            for _ in range(3):
+                w.drain_once(limit=2)
+            assert store.enrichment_reports.queue_remaining() == 0
+            assert len(healthy.calls) == 7
+            assert len(store.enrichment_reports.enriched_tracks()) == 7
+    finally:
+        store.conn.close()
 
 
 @pytest.mark.parametrize("retry_after", ["120", "Thu, 01 Jan 1970 00:18:40 GMT"])

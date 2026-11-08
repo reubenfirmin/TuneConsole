@@ -16,6 +16,61 @@ from yt_playlist.core.store import Store
 from tests.store_fixture_support import PristineSchema, initialize_consumer, revision_definitions
 
 
+CUSTODY_UPGRADE_PHASES = (81, 88, 93, 94, 97, 98, 99, 100, 101, 102, 103, 104, 107)
+
+
+def custody_predecessor(version, target):
+    return max((version, *(step for step in CUSTODY_UPGRADE_PHASES if version < step < target)))
+
+
+def custody_upgrade_cases(versions):
+    return [(version, target, phase) for version in versions
+            for target in CUSTODY_UPGRADE_PHASES if target > version
+            for phase in ('input', 'converted')]
+
+
+def assert_upgrade_phase(template, version):
+    from yt_playlist.core.migrations import registry
+
+    conn = template.source.conn
+    assert conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert [tuple(row) for row in conn.execute(
+        'SELECT version,name FROM schema_migrations ORDER BY version')] == [
+        (item.version, item.name) for item in registry.MIGRATIONS[:version]]
+    revisions = getattr(template.source, '_snapshot_revisions', None)
+    if revisions is not None:
+        assert revisions.conn is conn
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@contextmanager
+def custody_templates(tmp_path_factory, pristine):
+    templates = {}
+    with ExitStack() as resources:
+        def get(version, owner, build, *, admit=True, logical_coordinates=(), completed=None):
+            builder = getattr(build, 'func', build)
+            key = (version, owner, builder.__module__, builder.__qualname__, admit,
+                   tuple(logical_coordinates), id(completed))
+            if key in templates and getattr(templates[key].source, '_fixture_released', False):
+                del templates[key]
+            if key not in templates:
+                root = tmp_path_factory.mktemp('staged-custody')
+
+                def prepare(source):
+                    if admit:
+                        source.init_schema(defer_metadata=True)
+                    source._bind_repositories()
+                    return build(source)
+
+                templates[key] = resources.enter_context(historical_template(
+                    completed.source.conn if completed is not None else pristine(version),
+                    prepare, database=root / 'source.db',
+                    logical_coordinates=logical_coordinates, completed=completed))
+            return templates[key]
+
+        yield get
+
+
 def roots(conn):
     """The current finite file-owner inventory, also for memory fixtures."""
     disk = bool(conn.execute('PRAGMA database_list').fetchone()[2])
@@ -72,6 +127,7 @@ class PreparedTemplate:
     revision_guards: tuple = ()
     revision_tables: frozenset = frozenset()
     revision_views: frozenset = frozenset()
+    external_files: tuple = ()
 
     @contextmanager
     def open(self, database):
@@ -91,6 +147,7 @@ class PreparedTemplate:
             target.conn.close()
 
     def restore(self, target, *, ignore=None, external_files=()):
+        external_files = (*self.external_files, *external_files)
         assert not target.conn.in_transaction
         self.source.conn.backup(target.conn)
         # A backup replaces inputs even if SQLite gives the two copies the same
@@ -132,6 +189,11 @@ class PreparedTemplate:
         relocations = {}
         copied = set()
         for name, source in self.files.items():
+            if name not in destinations:
+                # Disk-only owners with no payload need no memory namespace.
+                assert not any(path.is_file() and path.name != '.readers.lock'
+                               for path in source.rglob('*')), name
+                continue
             destination = destinations[name]
             relocations[source] = destination
             assert source != destination, name
@@ -201,7 +263,7 @@ class PreparedTemplate:
         return deepcopy(self.result)
 
 
-def capture_template(source, result, *, logical_coordinates=()):
+def capture_template(source, result, *, logical_coordinates=(), external_files=()):
     """Freeze a genuinely built Store whose connection/files the caller owns.
 
     Historical and recovery fixtures build through their own transitions rather
@@ -252,11 +314,11 @@ def capture_template(source, result, *, logical_coordinates=()):
     source.conn.execute('PRAGMA query_only=ON')
     return PreparedTemplate(source, roots(source.conn), ordinary,
         deepcopy(getattr(source, '_fixture_bundle_payload', {})), deepcopy(result), manifest,
-        guards, tables, views)
+        guards, tables, views, tuple(external_files))
 
 
 @contextmanager
-def historical_template(pristine, seed, *, database, logical_coordinates=(), schema_replay=False):
+def historical_template(pristine, seed, *, database, logical_coordinates=(), schema_replay=False, completed=None):
     """Freeze a real installed prefix without advancing its historical owners."""
     with ExitStack() as resources:
         home = resources.enter_context(TemporaryDirectory(prefix='tuneconsole-historical-home-'))
@@ -267,10 +329,17 @@ def historical_template(pristine, seed, *, database, logical_coordinates=(), sch
             patch.delenv('DEEPSEEK_API_KEY', raising=False)
             source = Store(database)
             resources.callback(source.conn.close)
-            pristine.backup(source.conn)
-            source._bind_repositories()
-            if not schema_replay:
-                source._snapshot_revisions = Revisions(source.conn)
+            if completed is None:
+                pristine.backup(source.conn)
+                source._bind_repositories()
+                if not schema_replay:
+                    source._snapshot_revisions = Revisions(source.conn)
+            else:
+                assert not schema_replay, 'Historical replay must precede current snapshot guards'
+                completed.restore(source)
+                for name in ('_schema_compatibility', '_rebuild_source_version', '_schema_recovery_pending'):
+                    setattr(source, name, getattr(completed.source, name))
+                source._bind_repositories()
             result = seed(source)
             # Explicit migration replay must precede current TEMP guards, which
             # could otherwise retain columns retired by historical DDL. Ordinary

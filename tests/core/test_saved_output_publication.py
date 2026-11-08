@@ -6,13 +6,27 @@ import sqlite3
 import pytest
 
 from tests.core.test_collection_control_preparation import finish
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_saved_output_preparation import head, seed
+from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads
 from yt_playlist.core import recommendation_setting_outputs as outputs
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import saved_output_publication as publication, saved_outputs as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture
+def disable_periodic_library_sync():
+    pass
+
+
+@pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
+def test_saved_publication_input_keeps_admitted_history_and_private_guards(installed):
+    assert_installed_consumer_input(*installed)
 
 
 def prepare(conn,name):

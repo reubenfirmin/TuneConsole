@@ -5,7 +5,27 @@ from pathlib import Path
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed, installed
+
+
+@pytest.mark.parametrize('consumer_installed', [93], indirect=True)
+def test_bounded_custody_keeps_exact_installed_history_and_publishes_valid_report(
+        consumer_installed, staged_custody):
+    from tests.core import test_import_publication as cases
+
+    store, _ = consumer_installed
+    history = list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
+    raw, revision = staged_custody(consumer_installed, 'spotify-import', cases.rejection_inputs)
+    assert list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version'))) == history
+    with store.read_snapshot() as snapshot:
+        assert snapshot.store.settings.get_setting('private-after-custody-restore') is None
+        store.settings.set_setting('private-after-custody-restore', 'changed')
+        assert not snapshot.publish(lambda: pytest.fail('Published changed restored input'))
+    owner = cases.publication.OWNER
+    assert owner.selected(store.conn) is None
+    owner.publish(store.conn, revision=revision)
+    assert owner.value(store.conn, revision) == raw
+    assert cases.spotify_import.load_job(store) == cases.entity_names.account_document(json.loads(raw))
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

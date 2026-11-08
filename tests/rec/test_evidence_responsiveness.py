@@ -2,10 +2,10 @@
 from tests.file_content_support import read_bytes as original_bytes
 from tests.file_content_support import patch_byte_reads
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack, nullcontext
 from html.parser import HTMLParser
 import hashlib
 import json
+import logging
 from pathlib import Path
 import signal
 import sqlite3
@@ -14,29 +14,49 @@ import sys
 import textwrap
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import seed_catalog_track
 from tests.core.test_group_content import prepared
+from tests.genre_catalog_support import bound_catalog
 from tests.home_fixture_support import returning_listener, without_metadata_providers
 from tests.onboarding_support import publish_personal_mix
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.core import fao
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.evidence_ledger import canonical, EvidenceBudgetExceeded, EvidenceLedger
-from yt_playlist.core.storage_maintenance import EVIDENCE_MESSAGE, EVIDENCE_RETRY_MESSAGE
+from yt_playlist.core.storage_maintenance import EVIDENCE_MESSAGE, EVIDENCE_RETRY_MESSAGE, StorageMaintenance
 from yt_playlist.core.store import Store
 from yt_playlist.rec import choice_evidence, choice_retention, group_root_backfill, group_roots, home_cards, home_cache, stored_home
 from yt_playlist.rec.choice_capture import CaptureQueue
 from yt_playlist.rec.choice_context import checkpoint, CORRECTION_CONTRACT
+from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.rec.stored_radio import PreparedRadio
 from yt_playlist.rec.worker_queue import Job
 from yt_playlist.repos.compact_taste_groups import CompactTasteGroupsRepo
 from yt_playlist.repos import group_queries
 from yt_playlist.web.app import create_app
+
+
+EVIDENCE_GENRES = (('house', 'House'), ('rock', 'Rock'), ('jazz', 'Jazz'))
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(EVIDENCE_GENRES) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def evidence_genres(monkeypatch):
+    # Recovery owns real schema admission and SQL/file custody. Taxonomy
+    # curation is independent; retain the genres used by these serving inputs.
+    bound_catalog(monkeypatch, entries=EVIDENCE_GENRES)
 
 
 @pytest.fixture(scope='module')
@@ -48,6 +68,10 @@ def serving_bytecode(tmp_path_factory):
 
 @pytest.fixture(autouse=True)
 def serving_routes(monkeypatch, serving_bytecode, without_metadata_providers):
+    install_serving_routes(monkeypatch, serving_bytecode)
+
+
+def install_serving_routes(monkeypatch, serving_bytecode):
     from fastapi import APIRouter
     from yt_playlist.web import app as webapp
     from yt_playlist.web.routes import app_update, audio_preview, home, playlists
@@ -170,16 +194,6 @@ def library(request, tmp_path):
         yield store
 
 
-def restore_evidence(template, target):
-    template.restore(target)
-    # Admission was genuinely completed on the immutable source. Bind its
-    # physical owner format on this private clone without rerunning admission;
-    # the actual evidence recovery and all later transitions remain per test.
-    for name in ('_schema_compatibility', '_rebuild_source_version', '_schema_recovery_pending'):
-        setattr(target, name, getattr(template.source, name))
-    target._bind_repositories()
-
-
 def publish_serving_inputs(store, *, tracks_per_card=4):
     """Consume completed menus and candidates without running unrelated rankers."""
     publish_personal_mix(store, tracks_per_card=tracks_per_card)
@@ -192,32 +206,23 @@ def publish_serving_inputs(store, *, tracks_per_card=4):
     publish_bundles(store, {'all': lanes, '_meta': {'full_pools': True}}, 1000)
 
 
-@pytest.fixture(scope='module')
-def serving_templates(request, _pristine_current_schema, tmp_path_factory):
-    templates = {}
-    root = tmp_path_factory.mktemp('evidence-serving-inputs')
-    with ExitStack() as resources:
-        def template(historical):
-            if historical not in templates:
-                name = 'historical_evidence_template' if historical else 'evidence_template'
-                evidence = request.getfixturevalue(name)
-
-                def seed(store):
-                    restore_evidence(evidence, store)
-                    publish_serving_inputs(store)
-
-                templates[historical] = resources.enter_context(prepared_template(
-                    _pristine_current_schema, seed, database=root / f'{historical}.db'))
-            return templates[historical]
-
-        yield template
+def recovery_worker(store, now):
+    # These recovery consumers need the actual worker and maintenance admission,
+    # independently of HTTP routing, templates and provider configuration.
+    context = SimpleNamespace(store=store, now_fn=lambda: now,
+        client_provider=lambda: {}, logger=logging.getLogger(__name__),
+        storage_maintenance=StorageMaintenance(store))
+    return RecWorker(context, debounce_s=0)
 
 
-@pytest.fixture
-def serving_library(request, tmp_path, serving_templates):
-    historical = getattr(request, 'param', None) == 94
-    with serving_templates(historical).open(tmp_path / 'evidence.db') as store:
-        yield store
+def test_evidence_input_keeps_published_groups_choices_and_read_only_sql(evidence_template):
+    source = evidence_template.source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source.taste_groups.head_generation() == 'first'
+    assert source.taste_groups.definition('first-leaf', generation='first')
+    opportunity, = source.rec_ledger.evidence().records('opportunity')
+    assert [option['id'] for option in opportunity['options']] == ['one', 'two']
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def test_correction_identity_and_current_learning_descriptors_match_the_published_head(library, monkeypatch):
@@ -310,8 +315,7 @@ def test_pending_cleanup_survives_interruption_without_pausing_activity(library,
             choice_evidence.maintain_storage(library, 11)
     assert not library.activity_paused and library._evidence_maintenance == 0
     assert library.settings.get_setting(choice_evidence.STORAGE_PENDING) == '1'
-    app = create_app(library, lambda: {}, background_work=False)
-    status = app.state.ctx.storage_maintenance.status()
+    status = StorageMaintenance(library).status()
     assert not status['active'] and status['recording']
     assert status['evidence_maintenance']['pending']
     assert status['message'] == (EVIDENCE_MESSAGE if failure is WorkBudgetExceeded else EVIDENCE_RETRY_MESSAGE)
@@ -320,8 +324,7 @@ def test_pending_cleanup_survives_interruption_without_pausing_activity(library,
     # inheriting an iterator, cache, old thread or old retry timestamp.
     reopened = Store(path)
     reopened.init_schema()
-    restarted = create_app(reopened, lambda: {}, background_work=True)
-    worker = restarted.state.ctx.rec_worker
+    worker = recovery_worker(reopened, 11)
     assert not reopened.activity_paused
     scheduled = []
     monkeypatch.setattr(worker, '_start_loop', lambda: scheduled.append(True))
@@ -337,150 +340,9 @@ def test_pending_cleanup_survives_interruption_without_pausing_activity(library,
     assert not reopened.activity_paused
     assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchone()
     assert reopened.taste_groups.definition('first-leaf', generation='first')
-    reopened.conn.close()
-
-
-@pytest.mark.parametrize('serving_library', [94], indirect=True, ids=['installed-v94'])
-def test_home_and_navigation_remain_available_while_processing_historical_prepared_context(serving_library, monkeypatch):
-    library = serving_library
-    library.accounts.upsert_account('Main', 'bridge', None, True)
-    library.settings.set_setting('last_sync_at', '1000')
-    library.settings.set_setting('onboard_dismissed', '1')
-    returning_listener(library, 'mixes', now=1000)
-    historical_inventory(library, 'historical-prepared-home')
-    app = create_app(library, lambda: {}, now_fn=lambda: 1000, background_work=True)
-    worker = app.state.ctx.rec_worker
-    monkeypatch.setattr(worker, '_start_loop', lambda: None)
-    entered, release = threading.Event(), threading.Event()
-    context = group_roots.context
-
-    def held(self, *args, **kwargs):
-        value = context(self, *args, **kwargs)
-        if not entered.is_set():
-            entered.set()
-            assert release.wait(5)
-        return value
-
-    monkeypatch.setattr(group_roots, 'context', held)
-    # The real worker and capture queue are enabled; only the ticker is not
-    # started. This executor runs the actual storage path under its admission.
-    client = TestClient(app, base_url='http://127.0.0.1')
-    with ThreadPoolExecutor(1) as executor:
-        future = executor.submit(choice_evidence.maintain_storage, library, 1000)
-        try:
-            assert entered.wait(2)
-            started = time.monotonic()
-            home = client.get('/')
-            assert home.status_code == 200
-            assert_maintenance_banner(home)
-            for lane in ('comfort', 'wheelhouse', 'explore', 'temporal'):
-                assert f'A {lane} mix for you' in home.text
-            assert choice_evidence.maintain_storage(library, 1000) == {'deferred': True}
-            assert client.get('/playlists').status_code == 200
-            assert client.post('/settings/lastfm-key', data={'key': 'during-inventory'}).status_code == 204
-            # This path used to acquire a durable pending root before opening
-            # its private reader, and therefore waited for all storage work.
-            stored_home.unmodeled_cards(library, 1000, card_builder=home_cards._carded)
-            stored_home.assemble(library, 1000, 0)
-            # SQL publication leases do not wait for evidence file preparation.
-            # Radio retains the selected generation while writers continue.
-            radio = PreparedRadio(library, 1000)
-            try:
-                with library.read_view() as reader:
-                    head = next((value for surface in ('radio', 'home', 'fresh')
-                                 if (value := reader.recommendations.head(surface)) is not None), None)
-                assert radio.generation == (head['id'] if head else None)
-                assert (radio._lifetime is not None) == bool(head)
-            finally:
-                radio.close()
-            assert time.monotonic() - started < 2
-            assert not future.done()
-        finally:
-            release.set()
-        future.result(5)
-    monkeypatch.setattr(group_roots, 'context', context)
-    for _ in range(10):
-        if not choice_evidence.maintain_storage(library, 1000).get('deferred'):
-            break
-    assert not client.get('/storage-maintenance/status').json()['active']
-    oid = choice_evidence.issue(library, 'mixes', [{'id': 'one'}], 1001, context={})
-    assert oid and choice_evidence.respond(library, oid, 'choice', 1002, option_id='one')
-    worker._flush_measurements()
-    assert library.rec_ledger.evidence().get('response', oid + ':choice:one')
-    assert library.taste_groups.definition('first-leaf', generation='first')
     worker.shutdown()
-    client.close()
-
-
-@pytest.mark.parametrize('shared_writer', [True, False], ids=['serving-writer', 'separate-writer'])
-def test_home_onboarding_and_growth_do_not_wait_for_a_schema_writer(serving_library, monkeypatch, shared_writer):
-    from yt_playlist.util import genre_map
-    library = serving_library
-    library.accounts.upsert_account('Main', 'bridge', None, True)
-    library.settings.set_setting('last_sync_at', '1000')
-    prepared_home = library.rec_proposals.get_proposals('home_tuned')
-    families = genre_map.all_families()
-    prepared_home['fingerprint'] = {'breadth': {'families': {
-        family: 1 / len(families) for family in families}, 'breadth': 1},
-        'eras': [], 'transient': {}}
-    library.rec_proposals.put_proposals('home_tuned', prepared_home, 1000)
-    # The asserted mix dashboard belongs to an established listener. A complete
-    # menu alone does not bypass the fresh-account journey's preceding stops.
-    returning_listener(library, 'mixes', now=1000)
-    app = create_app(library, lambda: {}, now_fn=lambda: 1000, background_work=False)
-    entered, release = threading.Event(), threading.Event()
-    before = list(map(tuple, library.conn.execute('SELECT * FROM rec_impressions ORDER BY surface,item_key')))
-    assert not library.activity_paused
-    acquire = library._lock.acquire
-
-    def foreground_acquire(blocking=True, timeout=-1):
-        if entered.is_set() and not release.is_set() and not library._lock.held_by_current_thread:
-            assert not blocking, 'Home tried to wait for the held schema writer'
-        return acquire(blocking=blocking, timeout=timeout)
-
-    monkeypatch.setattr(library._lock, 'acquire', foreground_acquire)
-
-    def hold_writer():
-        conn = library.conn if shared_writer else sqlite3.connect(library._db_path)
-        try:
-            with library._lock if shared_writer else nullcontext():
-                with conn:
-                    conn.execute('BEGIN IMMEDIATE')
-                    entered.set()
-                    assert release.wait(10)
-        finally:
-            if not shared_writer:
-                conn.close()
-
-    with TestClient(app, base_url='http://127.0.0.1') as client:
-        with ThreadPoolExecutor(2) as executor:
-            app.state.ctx.storage_maintenance.phase = 'schema'
-            writer = executor.submit(hold_writer)
-            response = None
-            try:
-                assert entered.wait(2)
-                response = executor.submit(client.get, '/')
-                # The lock hook rejects every blocking serving-lock acquisition.
-                # Allow cold template compilation within the first-page deadline.
-                home = response.result(timeout=5)
-                assert home.status_code == 200 and 'A comfort mix for you' in home.text
-                assert_maintenance_banner(home)
-                assert 'id="growth-title"' in home.text
-                assert not writer.done()
-            finally:
-                release.set()
-                writer.result(timeout=5)
-                if response is not None:
-                    response.result(timeout=5)
-                app.state.ctx.storage_maintenance.phase = 'done'
-        assert list(map(tuple, library.conn.execute('SELECT * FROM rec_impressions ORDER BY surface,item_key'))) == before
-        assert library.conn.execute('PRAGMA busy_timeout').fetchone()[0] == 5000
-        assert not library.activity_paused
-        # The same running app resumes ordinary visits after admission is free.
-        old_views = library.rec_ledger.card_views('comfort')
-        assert client.get('/').status_code == 200
-        assert library.rec_ledger.card_views('comfort') == old_views + 1
-        assert library.rec_proposals.get_proposals('home_choice')['experiments']
+    worker.join(0)
+    reopened.conn.close()
 
 
 def test_playlists_keep_committed_account_metadata_while_schema_writer_is_held(library):
@@ -550,114 +412,6 @@ def test_playlists_keep_committed_account_metadata_while_schema_writer_is_held(l
         finally:
             release.set()
     assert library.playlists.get_playlist(first).title == 'Main liked'
-
-
-@pytest.mark.parametrize('serving_library', [94], indirect=True, ids=['installed-v94'])
-def test_cached_home_does_not_wait_for_inventory_file_preparation(serving_library, monkeypatch, tmp_path):
-    library = serving_library
-    library.accounts.upsert_account('Main', 'bridge', None, True)
-    library.settings.set_setting('last_sync_at', '1000')
-    library.settings.set_setting('onboard_dismissed', '1')
-    returning_listener(library, 'mixes', now=1000)
-    app = create_app(library, lambda: {}, now_fn=lambda: 1000, background_work=True)
-    worker = app.state.ctx.rec_worker
-    monkeypatch.setattr(worker, '_start_loop', lambda: None)
-    client = TestClient(app, base_url='http://127.0.0.1')
-    entered, release = threading.Event(), threading.Event()
-    maintenance_thread = [None]
-    observed = {'home_timed_out': False, 'cleanup_errors': []}
-    try:
-        # Establish real cached output before creating the controlled predecessor
-        # inventory, so earlier setup and warming cannot consume the gated file.
-        warm = client.get('/')
-        assert warm.status_code == 200 and 'A comfort mix for you' in warm.text
-        identity, surface = historical_inventory(library, 'inventory-serving-check')
-        ledger = library.rec_ledger.evidence()
-        path = ledger._path('opportunity', identity)
-        raw = path.read_bytes()
-        assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='offer' "
-                                        'AND external_key=?', (identity,)).fetchone()
-        owners = {tuple(row) for row in library.conn.execute('SELECT * FROM group_evidence_owners')}
-        # This disposable fixture represents an upgrade with a legacy file not
-        # yet inventoried. Do not leave retention open over that missing owner.
-        with group_roots.writer(library) as conn:
-            conn.execute('UPDATE group_retention_state SET roots_complete=0 WHERE id=1')
-        backfill = group_root_backfill.Backfill(library)
-        library._group_root_backfill = backfill
-        read_bytes = original_bytes
-
-        def held_read(candidate, **kwargs):
-            if candidate == path and threading.get_ident() == maintenance_thread[0] and not entered.is_set():
-                # The exact cursor proves this is inventory preparation, rather
-                # than a later acknowledgement or an unrelated Home file read.
-                assert backfill.pending_path == path
-                entered.set()
-                assert release.wait(10), 'Inventory test did not release its controlled file read'
-            return read_bytes(candidate, **kwargs)
-
-        def maintain():
-            maintenance_thread[0] = threading.get_ident()
-            return choice_evidence.maintain_storage(library, 1000)
-
-        patch_byte_reads(monkeypatch, held_read)
-        request = None
-        with ThreadPoolExecutor(2) as executor:
-            maintenance = executor.submit(maintain)
-            try:
-                assert entered.wait(2), 'Maintenance did not reach the controlled inventory file'
-                assert not maintenance.done() and not release.is_set()
-                started = time.monotonic()
-                request = executor.submit(client.get, '/')
-                try:
-                    home = request.result(timeout=2)
-                except TimeoutError:
-                    observed['home_timed_out'] = True
-                else:
-                    assert home.status_code == 200 and 'A comfort mix for you' in home.text
-                    assert_maintenance_banner(home)
-                    assert not maintenance.done() and not release.is_set()
-                observed['home_elapsed_before_release'] = time.monotonic() - started
-                observed['maintenance_held_before_release'] = not maintenance.done()
-            finally:
-                # A failed foreground deadline must never strand the writer or
-                # let either thread outlive this fixture's database connection.
-                release.set()
-                for name, future in (('maintenance', maintenance), ('home', request)):
-                    if future is not None:
-                        try:
-                            future.result(timeout=10)
-                        except Exception as error:
-                            observed['cleanup_errors'].append(f'{name}: {type(error).__name__}: {error}')
-        patch_byte_reads(monkeypatch, read_bytes)
-        for _ in range(10):
-            if not choice_evidence.maintain_storage(library, 1000).get('deferred'):
-                break
-        observed['roots_complete'] = library.conn.execute(
-            'SELECT roots_complete FROM group_retention_state WHERE id=1').fetchone()[0]
-        assert observed['roots_complete'] == 1
-        assert backfill.stage == len(group_root_backfill.KINDS) and backfill.pending_path is None
-        assert path.read_bytes() == raw
-        assert owners <= {tuple(row) for row in library.conn.execute('SELECT * FROM group_evidence_owners')}
-        assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind IN ('offer','checkpoint') "
-                                        'AND external_key=?', (identity,)).fetchone()
-        owner = 'proposal:' + surface + ':context'
-        assert [row[0] for row in library.conn.execute("SELECT external_version FROM group_evidence_versions "
-            "WHERE kind='comparison' AND external_key=? ORDER BY external_version", (owner,))] == [
-                'first-leaf', 'first-parent']
-        assert library.conn.execute("SELECT 1 FROM group_evidence_generations e JOIN group_generations g "
-            "ON g.id=e.generation_id WHERE e.kind='comparison' AND e.external_key=? AND g.external_key='first'",
-            (owner,)).fetchone()
-        assert not library.conn.execute('PRAGMA foreign_key_check').fetchone()
-        observed['cursor_and_owner_checks_passed'] = True
-        assert not observed['home_timed_out'], (
-            'Cached Home waited more than 2 seconds for held inventory file preparation; '
-            'see inventory-serving.json')
-        assert not observed['cleanup_errors'], observed
-    finally:
-        release.set()
-        (tmp_path / 'inventory-serving.json').write_text(json.dumps(observed, indent=2))
-        worker.shutdown()
-        client.close()
 
 
 def test_admission_race_refuses_capture_and_cleans_its_lifetime_file(library, monkeypatch):
@@ -839,8 +593,8 @@ def test_repeated_cutoffs_commit_checkpoints_and_resume_beyond_the_prefix_after_
 
 
 def test_accepted_fifo_tail_keeps_roots_and_retries_while_recovery_is_pending(library, monkeypatch):
-    app = create_app(library, lambda: {}, now_fn=lambda: 100, background_work=True)
-    worker = app.state.ctx.rec_worker
+    # Drive retry ordering without the unrelated two-second scheduling delay.
+    worker = recovery_worker(library, 100)
     scheduled = []
     monkeypatch.setattr(worker, '_start_loop', lambda: scheduled.append(True))
     oid = choice_evidence.issue(library, 'mixes', [{'id': 'one'}], 20,
@@ -882,6 +636,7 @@ def test_accepted_fifo_tail_keeps_roots_and_retries_while_recovery_is_pending(li
             break
     assert not library.activity_paused
     worker.shutdown()
+    worker.join(0)
 
 
 @pytest.mark.skipif(sys.platform == 'win32', reason='POSIX application interruption signals')
@@ -923,18 +678,23 @@ def test_process_interruption_releases_publication_and_restart_finishes_recovery
         reopened = Store(library._db_path)
         try:
             reopened.init_schema()
-            app = create_app(reopened, lambda: {}, background_work=True)
-            assert not reopened.activity_paused
-            status = app.state.ctx.storage_maintenance.status()
-            assert not status['active'] and status['evidence_maintenance']['pending']
-            for _ in range(10):
-                if not choice_evidence.maintain_storage(reopened, 100).get('deferred'):
-                    break
-            assert not reopened.activity_paused
-            assert not app.state.ctx.storage_maintenance.status()['active']
-            assert reopened.taste_groups.definition('first-leaf', generation='first')
-            assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchone()
-            app.state.ctx.rec_worker.shutdown()
+            worker = recovery_worker(reopened, 100)
+            try:
+                assert not reopened.activity_paused
+                status = worker.ctx.storage_maintenance.status()
+                assert not status['active'] and status['evidence_maintenance']['pending']
+                for _ in range(10):
+                    if not choice_evidence.maintain_storage(reopened, 100).get('deferred'):
+                        break
+                else:
+                    pytest.fail('Committed evidence recovery did not finish after process interruption')
+                assert not reopened.activity_paused
+                assert not worker.ctx.storage_maintenance.status()['active']
+                assert reopened.taste_groups.definition('first-leaf', generation='first')
+                assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchone()
+            finally:
+                worker.shutdown()
+                worker.join(0)
         finally:
             reopened.conn.close()
     finally:

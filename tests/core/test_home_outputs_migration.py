@@ -43,16 +43,44 @@ def upgrade(store):
     store._snapshot_revisions = Revisions(store.conn)
 
 
-def test_registered_cutover_preserves_large_display_unknown_time_and_explicit_roots(predecessor):
+@pytest.fixture(scope='module')
+def large_display_input(home_predecessor_schema, tmp_path_factory):
     from yt_playlist.core import group_evidence
+    store = Store(tmp_path_factory.mktemp('large-home-display') / 'installed.db')
+    home_predecessor_schema.backup(store.conn)
+    store.conn.execute('PRAGMA journal_mode=WAL')
+    store._bind_repositories()
+    store._snapshot_revisions = Revisions(store.conn)
     value = {'schema': 2, 'generation': 'original-generation', 'context': {'artifact': 'missing-artifact'},
              'menus': {'wheelhouse': [{'title': 'été' * (files.MAX_BYTES // 13 + 1)}], 'explore': []}}
     raw = json.dumps(value)
-    with predecessor.conn.atomic():
-        predecessor.conn.execute('INSERT INTO rec_proposals VALUES (?,?,?)', ('adaptive_group_preview', raw, None))
-        group_evidence.retain_unknown_context(predecessor.conn, 'prepared',
+    with store.conn.atomic():
+        store.conn.execute('INSERT INTO rec_proposals VALUES (?,?,?)', ('adaptive_group_preview', raw, None))
+        group_evidence.retain_unknown_context(store.conn, 'prepared',
             'proposal:adaptive_group_preview:context', 'missing-artifact', 'missing_context', 123)
+    try:
+        yield store, value, raw
+    finally:
+        store.conn.close()
+
+
+def test_large_display_source_keeps_original_bytes_and_unknown_context(large_display_input):
+    store, value, raw = large_display_input
+    assert store.conn.execute('SELECT payload FROM rec_proposals').fetchone()[0] == raw
+    assert store.rec_proposals.get_proposals('adaptive_group_preview') == value
+    assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 90
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
+
+
+@pytest.fixture(scope='module')
+def large_display_cutover(large_display_input):
+    predecessor, value, _raw = large_display_input
     upgrade(predecessor)
+    return predecessor, value
+
+
+def test_registered_cutover_preserves_large_display_unknown_time_and_explicit_roots(large_display_cutover):
+    predecessor, value = large_display_cutover
     assert predecessor.rec_proposals.get_proposals('adaptive_group_preview') == value
     assert predecessor.rec_proposals.group_checkpoint() == {'schema': 2, 'generation': 'original-generation', 'mix_regions': 1}
     assert predecessor.conn.execute('SELECT built_at FROM home_display_publications').fetchone()[0] is None
@@ -62,6 +90,10 @@ def test_registered_cutover_preserves_large_display_unknown_time_and_explicit_ro
     assert tuple(unknown) == ('home-output:1:context', 'missing-artifact', 'missing_context')
     assert not predecessor.conn.execute("SELECT 1 FROM group_evidence_owners WHERE external_key LIKE 'proposal:%'").fetchone()
     assert not predecessor.conn.execute('PRAGMA foreign_key_check').fetchall()
+
+
+def test_fresh_home_display_reopen_retains_the_exact_large_value(large_display_cutover):
+    predecessor, value = large_display_cutover
     reopened = Store(predecessor._db_path)
     try:
         reopened.init_schema(defer_metadata=True)

@@ -1,14 +1,27 @@
 import numpy as np
+import pytest
 from tests.derived_rating_support import seed_dislike
 from yt_playlist.rec import embedding_vectors as embed, home_vibe, surfaces, mode_surfaces as ms
 from yt_playlist.rec.vibe_pool_contract import GENRE_RESERVE, POOL_LIMIT
-from tests.conftest import seed_catalog_track
-from tests.recommendation_support import publish_bundles
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    # Pool preparation does not create the web app or its sync worker.
+    pass
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('house', 'House'), ('techno', 'Techno'))) as schema:
+        yield schema
 
 
 def seed_items(store, keys):
-    for key in keys:
-        seed_catalog_track(store, key, 'T' + key, 'A', video_id='v' + key, genre='House', mb_year='2000')
+    seed_publication_subjects(store, [dict(key=key, title='T' + key, artist='A',
+        video_id='v' + key, genre='House', year='2000') for key in keys])
 
 
 class _Item:
@@ -108,7 +121,8 @@ def test_fresh_refresh_discards_pools_without_live_models_or_candidates(store):
     assert store.recommendations.candidate_page('fresh', 'all', 'fresh')['tracks'] == []
 
 
-def test_prepare_reaches_genres_below_the_old_global_pool_cutoff(monkeypatch, store):
+@pytest.fixture
+def large_ranked_catalog(monkeypatch, store):
     store.modes.replace_modes([
         {"mode_id": m, "label": f"m{m}", "families": [["house", 1]],
          "centroid": np.eye(2, dtype=np.float32)[m - 1], "size": 50, "rep_keys": []}
@@ -123,6 +137,14 @@ def test_prepare_reaches_genres_below_the_old_global_pool_cutoff(monkeypatch, st
     for fn in ("for_you", "explore_for_you", "comfort_listening"):
         monkeypatch.setattr(surfaces, fn, lambda s, n, limit: pool[:limit])
     monkeypatch.setattr(surfaces, "cold_candidates", lambda s, n, limit=None: [])
+    return pool
+
+
+def test_prepare_reaches_genres_below_the_old_global_pool_cutoff(
+        monkeypatch, store, large_ranked_catalog):
+    # Vibe reservation consumes these completed ranks in the next owner. Keep
+    # real full-library bucketing, temporal hydration and typed publication here.
+    monkeypatch.setattr(ms.vibe_pools, 'prepare', lambda *args, **kwargs: None)
 
     payload = ms.prepare_bundles(store, now=10.0)
 
@@ -131,6 +153,23 @@ def test_prepare_reaches_genres_below_the_old_global_pool_cutoff(monkeypatch, st
     assert len(payload["all"]["temporal"]) == 500
     assert {item['genre'] for item in payload['all']['wheelhouse']} == {'house'}
     assert {item['genre'] for item in payload['all']['temporal']} == {'House'}
+
+
+def test_vibe_genre_reserves_publish_from_the_complete_large_ranked_pool(
+        monkeypatch, store, large_ranked_catalog):
+    # These imported songs have no prepared musical profiles. Profile loading
+    # is a completed lower input; genre reservation and publication stay real.
+    monkeypatch.setattr(ms.vibe_pools.musical_character, 'load', lambda reader, keys: {})
+    ranked = [ms._item_dict(item) for item in large_ranked_catalog]
+    payload = {'all': {lane: [dict(item) for item in ranked]
+                       for lane in ('wheelhouse', 'explore', 'comfort')},
+               '_meta': {'comfort_pool': 500, 'year_cuts': [2000, 2000], 'full_pools': True}}
+    payload['all']['temporal'] = [{**item, 'genre': 'House', 'year': 2000} for item in ranked]
+    with store.read_view() as reader:
+        ms.vibe_pools.prepare(reader, payload, 10, ms.measurement.PoolPolicies(reader, 10))
+    # The cutoff owner already publishes every ordinary 500-track pool. This
+    # owner publishes the actual Vibe reserves produced from that full input.
+    publish_bundles(store, {'_vibes': payload['_vibes'], '_meta': payload['_meta']}, 10)
     for preset in home_vibe.PRESETS:
         for lane, label in (('wheelhouse', 'house'), ('explore', 'house'),
                             ('comfort', 'house'), ('temporal:0', 'House')):

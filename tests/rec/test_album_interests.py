@@ -3,8 +3,27 @@ from tests.enrichment_support import seed_enrichment
 import pytest
 
 from tests import model_support
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.rec import album_choices, choice_evidence, embedding_vectors, rec_params, scoring, taste_viz
 from yt_playlist.rec.taste_context import PlaylistTaste
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Album evidence and scoring checks do not construct the web application."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('techno', 'Techno'), ('folk', 'Folk'), ('jazz', 'Jazz'))) as source:
+        yield source
+
+
+def test_album_interest_input_has_real_empty_owners_and_snapshot_guards(_pristine_current_schema):
+    source = _pristine_current_schema
+    assert source.execute('SELECT count(*) FROM recordings').fetchone()[0] == 0
+    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source._revision_script
 
 
 def album(store, browse, title, genre, size, year='2020'):
@@ -173,21 +192,37 @@ def test_album_reason_excludes_unheard_records_and_other_editions_of_itself():
     assert album_choices._rationale(album, taste, np.array([1., .9, 0.]), 'content:test') is None
 
 
-def test_album_returns_scale_from_one_favorite_to_several_to_the_whole_record_in_both_spaces(store):
+def test_album_returns_scale_from_one_favorite_to_several_to_the_whole_record_in_both_spaces(store, monkeypatch):
+    from tests.recommendation_support import seed_publication_subjects
+    from yt_playlist.core import listening
+
     iid = store.accounts.upsert_account('main', 'cred', None, True)
     cases = [('one', 12, 1), ('five', 12, 5), ('whole', 12, 12), ('short', 6, 6), ('long', 24, 24)]
-    vectors = []
-    for browse, size, played in cases:
-        keys = album(store, browse, browse.title(), 'Techno', size)
-        store.collection.cache_album_tracklist(browse, browse.title(), browse.title(), None, keys)
-        vectors.extend((key, np.array([1., 0.], dtype=np.float32).tobytes()) for key in keys)
-        store.history.import_listening_events(iid, [
-            (key, None, 1_700_000_000 + day * 86400) for day in range(3) for key in keys[:played]],
-            source_timezone='UTC')
-    anchor = album(store, 'anchor', 'Anchor', 'Folk', 2)
-    vectors.extend((key, np.array([0., 1.], dtype=np.float32).tobytes()) for key in anchor)
-    store.rec_model.replace_rec_vectors(vectors)
-    model_support.build_content_model(store)
+    keys, vectors, observations = [], [], []
+    with store.conn:
+        listening.calendar(store.conn, iid, 'UTC')
+    for browse, size, played in [*cases, ('anchor', 2, 0)]:
+        rows = [{'key': f'{browse}-{index}', 'video_id': f'{browse}-{index}',
+                 'title': f'Track {index}', 'artist': browse.title(), 'album': browse.title()}
+                for index in range(size)]
+        seed_publication_subjects(store, rows)
+        album_keys = [row['key'] for row in rows]
+        store.collection.add_saved_album({'browse': browse, 'title': browse.title(), 'artist': browse.title()})
+        store.collection.cache_album_tracklist(browse, browse.title(), browse.title(), None, album_keys)
+        keys.extend(album_keys)
+        vectors.extend([[0., 1.] if browse == 'anchor' else [1., 0.]] * size)
+        subjects = {row['identity_key']: row['id'] for row in store.conn.execute(
+            'SELECT id,identity_key FROM recordings WHERE identity_key IN (' + ','.join('?' for _ in rows) + ')', album_keys)}
+        observations.extend((key, key, subjects[key], day, day, 'takeout')
+            for day in ('2023-11-14', '2023-11-15', '2023-11-16') for key in album_keys[:played])
+    # Weighting consumes completed day projections and vectors. Provider
+    # ingestion and model fitting have independent owners; SQL day aggregation,
+    # both scoring spaces and correction of that evidence remain real here.
+    store.history.repository.record_days(iid, 1_700_300_000, observations, 'UTC')
+    matrix = np.asarray(vectors, dtype=np.float32)
+    completed = keys, matrix, {key: index for index, key in enumerate(keys)}
+    monkeypatch.setattr(embedding_vectors, 'load_vectors', lambda *_args, **_kwargs: completed)
+    monkeypatch.setattr(embedding_vectors, 'load_content_vectors', lambda *_args, **_kwargs: completed)
     for taste in (scoring.playlist_taste(store), scoring.content_taste(store)):
         weights = {source['browse']: weight for source, weight in zip(taste.sources, taste.weights)}
         boosts = {browse: weights[browse] / weights['anchor'] - 1 for browse, _, _ in cases}

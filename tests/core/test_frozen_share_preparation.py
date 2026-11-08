@@ -5,12 +5,26 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads
 from yt_playlist.core import albums, album_tracklists
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import frozen_shares as audit
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture
+def disable_periodic_library_sync():
+    pass
+
+
+@pytest.mark.parametrize('installed', [99, 104, 107], indirect=True)
+def test_frozen_share_input_keeps_admitted_history_and_private_guards(installed):
+    assert_installed_consumer_input(*installed)
 
 
 def finish(conn):
@@ -104,7 +118,10 @@ def test_bad_history_stays_explicit_without_blocking_guard_or_regular_ddl(instal
 @pytest.mark.parametrize('installed',[104],indirect=True)
 def test_bounded_batches_failure_interruption_and_reopened_retry_keep_counts_exact(installed,monkeypatch, independent_regular_ddl):
     store, _ = installed
-    capture(store.conn,tuple('video-'+str(index) for index in range(1040)))
+    # Three full 32-member batches and a partial final batch exercise the
+    # checkpoint/rollback/retry boundaries without repeating another 30 batches.
+    member_count = 3*32 + 1
+    capture(store.conn,tuple('video-'+str(index) for index in range(member_count)))
     before = sources(store.conn)
     audit.JOB.install(store.conn)
     progress = audit.JOB.step(store.conn,batch_size=512)
@@ -137,7 +154,7 @@ def test_bounded_batches_failure_interruption_and_reopened_retry_keep_counts_exa
         audit.verify(reopened.conn)
         assert_originals(reopened.conn)
         assert sources(reopened.conn) == before
-        assert reopened.conn.execute('SELECT member_count FROM '+audit.SUMMARIES).fetchone()[0] == 1040
+        assert reopened.conn.execute('SELECT member_count FROM '+audit.SUMMARIES).fetchone()[0] == member_count
         capture(reopened.conn,('new','new'),title='Later')
         with pytest.raises(MigrationError,match='reconciled preparation'):
             audit.verify(reopened.conn)
@@ -149,7 +166,7 @@ def test_bounded_batches_failure_interruption_and_reopened_retry_keep_counts_exa
             reopened.conn.execute('UPDATE main.album_track_occurrences SET recording_id=recording_id')
         finish(reopened.conn)
         audit.verify(reopened.conn)
-        assert reopened.conn.execute('SELECT sum(member_count) FROM '+audit.SUMMARIES).fetchone()[0] == 1042
+        assert reopened.conn.execute('SELECT sum(member_count) FROM '+audit.SUMMARIES).fetchone()[0] == member_count + 2
     finally:
         reopened.conn.close()
 

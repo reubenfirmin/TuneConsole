@@ -7,7 +7,7 @@ import zlib
 
 import pytest
 
-from tests.rec.test_vibe_prediction import drain, fits, track
+from tests.rec.test_vibe_prediction import drain, fits, individual_model_rollout, track
 from tests.test_audio_vibe_embeddings import with_embedding
 from tests.test_audio_vibe_model import excerpts
 from yt_playlist.core import audio_embedding, features
@@ -163,7 +163,8 @@ def test_default_configuration_and_local_rollback(monkeypatch):
     assert cruise.identity() != active
 
 
-def test_background_rollout_replaces_one_vote_updates_consumers_and_rolls_back(store, tmp_path, monkeypatch):
+def test_background_rollout_replaces_one_vote_updates_consumers_and_rolls_back(
+        store, tmp_path, monkeypatch, individual_model_rollout):
     _tid, own = track(store, 'observed_song')
     _tid, neighbour = track(store, 'neighbour')
     rows = samples()

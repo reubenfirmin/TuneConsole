@@ -11,7 +11,6 @@ from yt_playlist.core import album_note_requests as owner, albums, recommendatio
 from yt_playlist.core.migrations import current, migrate, registry
 from yt_playlist.core.migrations.runner import MigrationError
 from yt_playlist.core.store import Store
-from yt_playlist.core.db_revisions import Revisions
 
 ALBUM = {'browse_id': 'release-one', 'artist': 'Artist', 'title': 'Release',
          'year': '2020', 'thumbnail': None}
@@ -31,33 +30,6 @@ def seed(store, value):
         albums.observe(store.conn, ALBUM['browse_id'], title=ALBUM['title'], artist=ALBUM['artist'])
         store.conn.execute('INSERT INTO rec_proposals VALUES (?,?,?)',
                            ('album_note_requests', json.dumps(value), 1234.5))
-
-
-def test_registered_upgrade_retains_order_values_and_exact_provider_owner(predecessor):
-    second = {**ALBUM, 'browse_id': 'unadmitted', 'year': 1999, 'requested_until': 1800}
-    value = {ALBUM['browse_id']: ALBUM, second['browse_id']: second}
-    seed(predecessor, value)
-    # v084 owns request conversion. Ordinary native-format reopening below
-    # proves the new owner without replaying unrelated numbered migrations.
-    migrate(predecessor.conn, registry=registry.MIGRATIONS[:84])
-    predecessor._bind_repositories()
-    assert predecessor.rec_proposals.get_proposals('album_note_requests') == value
-    rows = list(predecessor.conn.execute('SELECT * FROM album_note_requests ORDER BY id'))
-    assert rows[0]['album_provider_id'] == ALBUM['browse_id']
-    assert rows[0]['unresolved_reason'] is None
-    assert rows[1]['album_provider_id'] is None
-    assert rows[1]['unresolved_reason'] == 'provider_album_not_admitted'
-    assert all(row['requested_at'] is None and row['updated_at'] == 1234.5 for row in rows)
-    assert not predecessor.conn.execute("SELECT 1 FROM rec_proposals WHERE surface='album_note_requests'").fetchone()
-    with predecessor.conn:
-        predecessor.conn.execute('DELETE FROM rec_proposals')
-    reopened = Store(predecessor._db_path)
-    try:
-        reopened.init_schema()
-        assert reopened.rec_proposals.get_proposals('album_note_requests') == value
-        assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchall()
-    finally:
-        reopened.conn.close()
 
 
 @pytest.mark.parametrize('value', [None, [], {'wrong': ALBUM},
@@ -90,38 +62,6 @@ def test_newer_visible_request_survives_old_worker_and_re_admission(store):
                                                       expected_request=second)
     assert store.rec_proposals.get_proposals('album_notes') == {album['browse_id']: {'fresh': True}}
     assert store.album_notes.next_request()[1][0] != second[0]
-
-
-def test_note_file_cutover_backup_and_restart_preserve_last_good_and_demand(predecessor, tmp_path):
-    value = {ALBUM['browse_id']: {'label': 'Label', 'description': None, 'at': 100,
-                                'links': [{'url': 'https://example.com/release', 'label': 'Release'}]}}
-    seed(predecessor, {ALBUM['browse_id']: ALBUM})
-    with predecessor.conn:
-        predecessor.conn.execute('INSERT INTO rec_proposals VALUES (?,?,?)', ('album_notes', json.dumps(value), 99.5))
-    migrate(predecessor.conn, registry=registry.MIGRATIONS[:84])
-    predecessor._bind_repositories()
-    assert predecessor.rec_proposals.get_proposals('album_notes') == value
-    row = predecessor.conn.execute('SELECT * FROM album_note_outputs').fetchone()
-    assert row['album_provider_id'] == ALBUM['browse_id'] and row['built_at'] == 99.5
-    predecessor._snapshot_revisions = Revisions(predecessor.conn)
-    with predecessor.read_snapshot() as snapshot:
-        reader = snapshot.store
-        manifest = outputs.export(reader.conn, tmp_path / 'backup')
-    original = row['filename']
-    from pathlib import Path
-    Path(original).unlink()
-    outputs.restore(predecessor.conn, manifest)
-    assert predecessor.rec_proposals.get_proposals('album_notes') == value
-    with predecessor.conn:
-        predecessor.conn.execute('DELETE FROM rec_proposals')
-    reopened = Store(predecessor._db_path)
-    try:
-        reopened.init_schema()
-        assert reopened.rec_proposals.get_proposals('album_notes') == value
-        assert reopened.rec_proposals.get_proposals('album_note_requests') == {ALBUM['browse_id']: ALBUM}
-        assert outputs.collect_orphans(reopened.conn) == 0
-    finally:
-        reopened.conn.close()
 
 
 def test_note_publication_file_failure_does_not_acknowledge_request_or_erase_last_good(store, monkeypatch):

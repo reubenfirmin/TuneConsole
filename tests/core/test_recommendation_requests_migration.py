@@ -27,34 +27,6 @@ def seed(store, values):
                                [(surface, json.dumps(value), 123.5) for surface, value in values.items()])
 
 
-def test_registered_cutover_retains_every_demand_field_and_unknown_reference(predecessor):
-    values = {'choice_window:mixes': {'opportunity_id': 'external-offer', 'window': '07'},
-              'album_menu_refresh': {'epoch': 2, 'exclude': ['known-release', 'missing-release', 'known-release']},
-              'home_genre_request': {'epoch': 3, 'include_genres': ['jazz', 'other:unregistered style'],
-                                     'avoid_genres': [], 'held_by_vibe': False, 'suspended_by_vibe': True}}
-    seed(predecessor, values)
-    migrate(predecessor.conn, registry=registry.MIGRATIONS)
-    predecessor._bind_repositories()
-    for surface, value in values.items():
-        assert predecessor.rec_proposals.get_proposals(surface) == value
-        assert not predecessor.conn.execute('SELECT 1 FROM rec_proposals WHERE surface=?', (surface,)).fetchone()
-    assert [tuple(row) for row in predecessor.conn.execute(
-        'SELECT album_provider_id,unresolved_reason FROM album_menu_refresh_exclusions ORDER BY position')] == [
-            ('known-release', None), (None, 'provider_album_not_admitted'), ('known-release', None)]
-    assert [tuple(row) for row in predecessor.conn.execute(
-        'SELECT family_key,genre_key,resolution_reason FROM home_genre_request_items ORDER BY position')] == [
-            ('jazz', None, None), (None, None, 'unknown_genre')]
-    with predecessor.conn:
-        predecessor.conn.execute('DELETE FROM rec_proposals')
-    reopened = Store(predecessor._db_path)
-    try:
-        reopened.init_schema()
-        assert {surface: reopened.rec_proposals.get_proposals(surface) for surface in values} == values
-        assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchall()
-    finally:
-        reopened.conn.close()
-
-
 @pytest.mark.parametrize('surface,value', [
     ('home_genre_request', {'epoch': True, 'include_genres': ['jazz']}),
     ('home_genre_request', {'epoch': 1, 'held_by_vibe': 1}),

@@ -44,13 +44,16 @@ def captured(conn):
 
 
 def admit_regular_schema(store, *, clock=1234):
+    return admit_regular_connection(store.conn, clock=clock)
+
+
+def admit_regular_connection(conn, *, clock=1234):
     """Preserve every original owner, allowing only named DDL and seed rows.
 
     Read the domain declarations, not the runner's apply callbacks. Unknown
     registry entries, tables, changed programs, data or histories fail here.
     These fixtures have no unfinished preparation capture to retire.
     """
-    conn = store.conn
     before = captured(conn)
     assert 'schema_changes' not in before
     assert tuple(change.name for change in regular.CHANGES) == CHANGE_NAMES

@@ -6,12 +6,27 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.independent_schema_support import independent_regular_ddl
+from tests.prepared_fixture_support import assert_upgrade_phase, coordinates, custody_predecessor, custody_upgrade_cases
+from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads
 from yt_playlist.core import action_backup_files, collection_recovery, fao, policy_documents, recommendation_outputs as files
-from yt_playlist.core.migrations import MigrationError, registry, regular, runner
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import action_ledger as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture
+def disable_periodic_library_sync():
+    pass
+
+
+@pytest.mark.parametrize('installed', [79, 93, 97], indirect=True)
+def test_action_ledger_input_keeps_admitted_history_and_private_guards(installed):
+    assert_installed_consumer_input(*installed)
 
 
 def finish(conn, size=128):
@@ -86,16 +101,63 @@ def test_exact_documents_unknown_outcomes_order_links_and_backups(installed):
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
-@pytest.mark.parametrize('installed', [79, 97], indirect=True)
-def test_frozen_upgrade_agrees_and_preparation_survives_file_collection(installed, tmp_path):
-    store, _ = installed
-    _, _, identities = seed(store)
+def prepare_native_comparison(store):
+    root = collection_recovery.directory(store.conn)
+    root.mkdir(parents=True, exist_ok=True)
+    _, _, identities = seed(store, backup_path=root / 'installed-backup.json')
     preparation.JOB.install(store.conn)
     finish(store.conn)
-    upgraded = Store(tmp_path / 'action-upgrade.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
+    return {identity: preparation.read_original(store.conn, preparation.head(store.conn, identity))
+            for identity in identities}
+
+
+@pytest.fixture(scope='module')
+def native_inputs(upgraded_custody_inputs):
+    def external_backups(source):
+        root = collection_recovery.directory(source.conn)
+        paths = {Path(filename) for _table, _column, filename in coordinates(source.conn)
+                 if Path(filename).name == 'installed-backup.json'}
+        return [(str(path), 'collection_recovery', Path('installed-backups') / path.name)
+                for path in paths if not path.is_relative_to(root)]
+
+    def get(version, target, **options):
+        return upgraded_custody_inputs(version, target, 'action-native-agreement',
+            prepare_native_comparison, external_files=external_backups, **options)
+
+    get.release = lambda version: upgraded_custody_inputs.release(version, 'action-native-agreement')
+    return get
+
+
+@pytest.mark.parametrize('version', [79, 97])
+def test_native_comparison_input_keeps_exact_preparation(native_inputs, version):
+    template = native_inputs(version, version)
+    assert_upgrade_phase(template, version)
+    for identity, original in template.result.items():
+        assert preparation.read_original(template.source.conn,
+            preparation.head(template.source.conn, identity)) == original
+
+
+@pytest.mark.parametrize('version,target,phase', custody_upgrade_cases((79, 97)))
+def test_native_upgrade_phase_keeps_exact_preparation(native_inputs, version, target, phase):
+    template = native_inputs(version, target, phase=phase)
+    assert_upgrade_phase(template, target if phase == 'converted' else custody_predecessor(version, target))
+    for identity, original in template.result.items():
+        assert preparation.read_original(template.source.conn,
+            preparation.head(template.source.conn, identity)) == original
+
+
+@pytest.mark.parametrize('version', [79, 97])
+def test_native_serving_input_keeps_private_read_guards(native_inputs, version):
+    template = native_inputs(version, 107)
+    assert_upgrade_phase(template, 107)
+    assert template.source._snapshot_revisions.conn is template.source.conn
+
+
+@pytest.mark.parametrize('version', [79, 97])
+def test_frozen_upgrade_agrees_and_preparation_survives_file_collection(native_inputs, version, tmp_path):
+    prepared = native_inputs(version, version)
+    store, identities = prepared.source, tuple(prepared.result)
+    with native_inputs(version, 107).open(tmp_path / 'action-upgrade.db') as upgraded:
         for identity in identities:
             native = upgraded.conn.execute('SELECT * FROM actions WHERE id=?', (identity,)).fetchone()
             staged = preparation.head(store.conn, identity)
@@ -116,8 +178,6 @@ def test_frozen_upgrade_agrees_and_preparation_survives_file_collection(installe
             assert preparation.read_original(upgraded.conn, preparation.head(upgraded.conn, identity))['id'] == identity
         backup = rows(upgraded.conn, identities[0], 'backups', 'position')[0]
         action_backup_files.verified(backup['retained_filename'], backup['backup_digest'], backup['backup_bytes'])
-    finally:
-        upgraded.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -255,3 +315,10 @@ def test_captured_remote_mismatch_never_adopts_reused_membership_and_late_undo_l
     finish(store.conn)
     assert preparation.head(store.conn, 100)['undo_of_action_id'] == 999
     assert preparation.head(store.conn, 100)['unresolved_undo_id'] is None
+
+
+@pytest.mark.parametrize('version', [79, 97])
+def test_native_sources_finish_with_committed_read_only_inputs(native_inputs, version):
+    for source in native_inputs.release(version):
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            source.conn.execute('SELECT 1')

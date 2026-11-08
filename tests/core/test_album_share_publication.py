@@ -7,12 +7,16 @@ import sqlite3
 import pytest
 
 from tests.core.test_album_owner_preparation import finish, seed
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.store_fixture_support import publication_consumer_reads
 from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import album_tracklists
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import album_shares as preparation, album_share_publication as publication
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 
 
 def complete_source(store, count=3):

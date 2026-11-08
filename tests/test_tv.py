@@ -506,87 +506,121 @@ def test_refill_continues_across_menu_changes_and_keeps_prepared_videos(store, m
                for query, _ in client.searches[tv.MAX_SEEDS * len(tv.SEARCHES):])
 
 
-def test_precalculated_serving_parameters_generation_and_sidebar_launch(
-        store, caplog, prepared_tv_predecessors, completed_video_catalog):
-    from collections import Counter
+@pytest.fixture
+def tv_launch_web(store, prepared_tv_predecessors, completed_video_catalog):
     from tests.test_tv_stream import video
 
     iid = store.accounts.upsert_account('main', 'cred', None, True)
     store.settings.set_setting('last_sync_at', '1')
     prepared_tv_predecessors()
     seeds = prepare_tv_formats(store)
-    client = Videos([row(i, title=f'Prepared {i} Visualizer') for i in range(4)])
-    prepare_pool(store, client, seeds=seeds)
-    pool = tv.cached(store)
-    # Keep the resolver's four same-artist videos, then supply three other
-    # prepared artists so the three-per-artist cap still fills a real TV queue.
+    # HTTP serving consumes completed resolution. Resolver and bounded worker
+    # publication remain real in test_preparation_publishes_in_bounded_slices_and_recovers_after_failure.
+    client = Videos([])
+    items = [{**video(i), 'artist': 'Artist', 'source_artist': 'Artist',
+              'source_key': seed['key']} for i, seed in enumerate(seeds)]
+    pool = {'schema': tv.SCHEMA, 'key': 'completed-tv-http', 'at': 1,
+            'attempted': [seed['key'] for seed in seeds], 'items': items,
+            'offset': 0, 'state': 'exhausted', 'retry_at': 1 + tv.SEARCH_RETRY_S}
+    # Four same-artist videos and three other prepared artists exercise the
+    # three-per-artist cap while still filling a real TV queue.
     extras = [{**video(10 + i), 'artist': f'Other artist {i // 3}',
                'source_artist': f'Other artist {i // 3}'} for i in range(9)]
     store.rec_proposals.put_proposals(tv.SURFACE, {**pool, 'items': [*pool['items'], *extras]}, 1)
     client._catalog.update({item['video_id']: {
         'videoId': item['video_id'], 'title': item['title'], 'artists': [{'name': item['artist']}],
-        'duration_seconds': item['duration']} for item in extras})
+        'duration_seconds': item['duration']} for item in [*items, *extras]})
     completed_video_catalog([*pool['items'], *extras])
     assert account_growth.view(store, 1)['ready_areas']['tv']
-    searches = len(client.searches)
     app = create_app(store, lambda: {iid: client}, now_fn=lambda: 1)
     with TestClient(app, base_url='http://127.0.0.1') as web:
-        assert web.get('/home/tv').json() == {'ready': True, 'max_minutes': 15}
-        assert not client.created
-        assert not web.post('/home/tv', data={'max_minutes': '2'}).json()['ready']
-        assert web.post('/home/tv', data={'max_minutes': '15'}).json()['ready']
-        result = web.post('/home/tv/play')
-        assert result.status_code == 200, result.text
-        result = result.json()
-        assert len(result['items']) == tv.QUEUE_SIZE
-        assert Counter(item['source_artist'] for item in result['items']) == {
-            'Artist': 3, 'Other artist 0': 3, 'Other artist 1': 3, 'Other artist 2': 3}
-        playlist = store.playlists.get_playlist(result['playlist_id'])
-        assert store.playlists.is_quarantined_playlist(playlist.playlist_scope_id)
-        assert store.playlists.get_playlist_groups()[playlist.playlist_scope_id] == 'Generated'
-        assert store.playlist_recipes.get_recipe(playlist.playlist_scope_id)['media'] == 'video'
-        assert web.get(f'/home/tv/playlist/{playlist.id}').json()['items'] == result['items']
-        markup = web.get('/playlists').text
-        assert '"is_video": true' in markup
-        assert 'Play on TV' in web.get(f'/playlist/{playlist.id}').text
-        assert web.post('/play', json={'url': f'https://music.youtube.com/playlist?list={playlist.provider_playlist_id}'}).json() == {
-            'ok': True, 'tv_url': f'/?tv_playlist={playlist.id}#tv'}
-        event_url = f'/home/tv/playlist/{playlist.id}/event'
-        video = result['items'][0]['video_id']
-        assert web.post(event_url, data={'kind': 'player_error', 'video_id': video,
-                                        'state': '5', 'position': '3.15'}).json() == {'ok': True}
-        assert f'TV player error: playlist={playlist.id} video={video} code=5 position=3.150' in caplog.text
-        assert store.history.play_events_since(0) == []
-        assert all(at is None for tracks in store.charts.get_playlist_track_recency(include_generated=True).values()
-                   for at in tracks)
-        assert web.post(event_url, data={'kind': 'player_error', 'video_id': video,
-                                        'state': 'bogus'}).status_code == 400
-        assert web.post(event_url, data={'kind': 'player_error', 'video_id': 'not-in-playlist',
-                                        'state': '5'}).status_code == 400
-        assert web.post(event_url, data={'kind': 'play', 'video_id': video}).json() == {'ok': True}
-        assert web.post(event_url, data={'kind': 'play', 'video_id': video}).json() == {'ok': True}
-        plays = store.history.play_events_since(0)
-        assert len(plays) == 1 and plays[0]['playlist_ytm_id'] == playlist.provider_playlist_id
-        assert 1 in store.charts.get_playlist_track_recency(include_generated=True)[playlist.id]
-        assert all(at is None for at in store.charts.get_playlist_track_recency()[playlist.id])
-        assert web.get('/home/tv').json()['ready']  # saving does not exhaust the pool
-        assert web.post(event_url, data={'kind': 'ended', 'video_id': video, 'position': '200'}).status_code == 200
-        assert web.post(event_url, data={'kind': 'play', 'video_id': 'not-in-playlist'}).status_code == 400
-        assert web.post(event_url, data={'kind': 'play', 'video_id': video, 'position': 'nan'}).status_code == 400
-        assert len(client.searches) == searches
-        for artist in {item['source_artist'] for item in result['items']}:
-            store.rec_model.record_feedback('for_you', 'artist:' + artist, 'mute', now=1)
-        assert not web.get('/home/tv').json()['ready']
-        pending = web.post('/home/tv/play')
-        # Earned access survives a temporarily empty eligible pool. Playback
-        # requests preparation without creating a playlist from muted videos.
-        assert pending.status_code == 202
-        assert pending.json()['preparing']
-        assert len(client.created) == 1
-        assert 'current TV choices' in web.get('/home/tv').json()['message']
-        assert web.post('/home/tv', data={'max_minutes': '0'}).status_code == 400
-        assert web.post('/home/tv', data={'max_minutes': 'nan'}).status_code == 400
-        assert web.get('/home/tv/playlist/999999').status_code == 404
+        yield web, client
+
+
+@pytest.fixture
+def saved_tv(store, tv_launch_web):
+    web, client = tv_launch_web
+    response = web.post('/home/tv/play')
+    assert response.status_code == 200, response.text
+    result = response.json()
+    playlist = store.playlists.get_playlist(result['playlist_id'])
+    return web, client, playlist, result['items']
+
+
+def test_precalculated_tv_parameters_validate_length_without_creating_playlists(tv_launch_web):
+    web, client = tv_launch_web
+    assert web.get('/home/tv').json() == {'ready': True, 'max_minutes': 15}
+    assert not client.created
+    assert not web.post('/home/tv', data={'max_minutes': '2'}).json()['ready']
+    assert web.post('/home/tv', data={'max_minutes': '15'}).json()['ready']
+    assert web.post('/home/tv', data={'max_minutes': '0'}).status_code == 400
+    assert web.post('/home/tv', data={'max_minutes': 'nan'}).status_code == 400
+    assert not client.created
+
+
+def test_tv_launch_preserves_artist_cap_quarantine_and_recipe(store, saved_tv):
+    from collections import Counter
+
+    web, client, playlist, items = saved_tv
+    assert len(items) == tv.QUEUE_SIZE
+    assert Counter(item['source_artist'] for item in items) == {
+        'Artist': 3, 'Other artist 0': 3, 'Other artist 1': 3, 'Other artist 2': 3}
+    assert store.playlists.is_quarantined_playlist(playlist.playlist_scope_id)
+    assert store.playlists.get_playlist_groups()[playlist.playlist_scope_id] == 'Generated'
+    assert store.playlist_recipes.get_recipe(playlist.playlist_scope_id)['media'] == 'video'
+    assert web.get(f'/home/tv/playlist/{playlist.id}').json()['items'] == items
+    assert web.get('/home/tv').json()['ready']  # saving does not exhaust the pool
+    assert web.get('/home/tv/playlist/999999').status_code == 404
+
+
+def test_saved_tv_sidebar_launch_uses_the_video_player(saved_tv):
+    web, client, playlist, _ = saved_tv
+    searches = len(client.searches)
+    assert '"is_video": true' in web.get('/playlists').text
+    assert 'Play on TV' in web.get(f'/playlist/{playlist.id}').text
+    assert web.post('/play', json={'url': f'https://music.youtube.com/playlist?list={playlist.provider_playlist_id}'}).json() == {
+        'ok': True, 'tv_url': f'/?tv_playlist={playlist.id}#tv'}
+    assert len(client.searches) == searches
+
+
+def test_tv_events_validate_errors_and_deduplicate_real_play_history(store, saved_tv, caplog):
+    web, client, playlist, items = saved_tv
+    searches = len(client.searches)
+    event_url = f'/home/tv/playlist/{playlist.id}/event'
+    video = items[0]['video_id']
+    assert web.post(event_url, data={'kind': 'player_error', 'video_id': video,
+                                    'state': '5', 'position': '3.15'}).json() == {'ok': True}
+    assert f'TV player error: playlist={playlist.id} video={video} code=5 position=3.150' in caplog.text
+    assert store.history.play_events_since(0) == []
+    assert all(at is None for tracks in store.charts.get_playlist_track_recency(include_generated=True).values()
+               for at in tracks)
+    assert web.post(event_url, data={'kind': 'player_error', 'video_id': video,
+                                    'state': 'bogus'}).status_code == 400
+    assert web.post(event_url, data={'kind': 'player_error', 'video_id': 'not-in-playlist',
+                                    'state': '5'}).status_code == 400
+    assert web.post(event_url, data={'kind': 'play', 'video_id': video}).json() == {'ok': True}
+    assert web.post(event_url, data={'kind': 'play', 'video_id': video}).json() == {'ok': True}
+    plays = store.history.play_events_since(0)
+    assert len(plays) == 1 and plays[0]['playlist_ytm_id'] == playlist.provider_playlist_id
+    assert 1 in store.charts.get_playlist_track_recency(include_generated=True)[playlist.id]
+    assert all(at is None for at in store.charts.get_playlist_track_recency()[playlist.id])
+    assert web.post(event_url, data={'kind': 'ended', 'video_id': video, 'position': '200'}).status_code == 200
+    assert web.post(event_url, data={'kind': 'play', 'video_id': 'not-in-playlist'}).status_code == 400
+    assert web.post(event_url, data={'kind': 'play', 'video_id': video, 'position': 'nan'}).status_code == 400
+    assert len(client.searches) == searches
+
+
+def test_muted_tv_pool_requests_preparation_without_creating_another_playlist(store, saved_tv):
+    web, client, _, items = saved_tv
+    for artist in {item['source_artist'] for item in items}:
+        store.rec_model.record_feedback('for_you', 'artist:' + artist, 'mute', now=1)
+    assert not web.get('/home/tv').json()['ready']
+    pending = web.post('/home/tv/play')
+    # Earned access survives a temporarily empty eligible pool.
+    assert pending.status_code == 202
+    assert pending.json()['preparing']
+    assert len(client.created) == 1
+    assert 'current TV choices' in web.get('/home/tv').json()['message']
 
 
 def test_missing_pool_requests_background_preparation_and_keeps_playback_locked(store, monkeypatch):

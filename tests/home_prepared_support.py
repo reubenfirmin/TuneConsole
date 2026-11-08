@@ -78,16 +78,15 @@ def seed(store, *, tracks_per_lane=8, publish=True):
             for i in range(tracks_per_lane):
                 title, artist, video = f"{lane} {mid} {i}", f"Artist {mid} {i}", f"v-{lane}-{mid}-{i}"
                 key = identity_key(title, artist)
-                if lane == "fresh":
-                    store.discovery.upsert_discovered_track(key, video, title, artist, "", None, genre,
-                                                            None, None, 1)
-                else:
-                    tid = store.tracks.upsert_track(video, title, artist, "", None)
-                    store.tracks.set_track_genre(tid, genre)
                 items.append({"key": key, "title": title, "artist": artist, "album": "", "video_id": video,
                               "thumbnail": None, "genre": genre, "plays": 0, "reason": "", "lane": lane})
             bundles[str(mid)][lane] = items
             bundles["all"].setdefault(lane, []).extend(items)
+    # Home consumes completed catalog inputs. Provider ingestion, artist
+    # inference and per-field delivery files have their own behavioral owners.
+    # Preserve every subject, membership and genre before real preparation.
+    seed_publication_subjects(store, [item for items in bundles['all'].values() for item in items],
+                              discoveries=[item['key'] for item in bundles['all']['fresh']])
     store.modes.replace_modes(modes, [], 1)
     prepare_profiles(store)
     if publish:

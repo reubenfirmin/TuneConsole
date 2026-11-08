@@ -4,11 +4,26 @@ import json
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads
 from yt_playlist.core import radio_provenance, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import radio_origins as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture
+def disable_periodic_library_sync():
+    pass
+
+
+@pytest.mark.parametrize('installed', [79, 93], indirect=True)
+def test_radio_origin_input_keeps_admitted_history_and_private_guards(installed):
+    assert_installed_consumer_input(*installed)
 
 
 def finish(conn, size=16):
@@ -46,7 +61,7 @@ def seed(store):
 
 
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
-def test_original_list_scalar_null_blank_and_repeated_origins_remain_exact(installed):
+def test_original_list_scalar_null_blank_and_repeated_origins_remain_exact(installed, independent_regular_ddl):
     store, _ = installed
     conn = store.conn
     original = seed(store)

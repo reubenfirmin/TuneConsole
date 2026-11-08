@@ -5,11 +5,31 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.conftest import seed_catalog_track
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.core import db_space, policy_config, radio_storage
 from yt_playlist.core.store import Store
 from yt_playlist.rec import candidate_refresh, measurement, mode_surfaces, scorecard
 from yt_playlist.repos import policy_storage
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Policy SQL/file contracts do not construct the web application."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('rock', 'Rock'),)) as source:
+        yield source
+
+
+def test_policy_storage_input_has_real_current_schema_and_snapshot_guards(_pristine_current_schema):
+    source = _pristine_current_schema
+    assert source.execute('SELECT count(*) FROM recordings').fetchone()[0] == 0
+    assert source.execute('SELECT count(*) FROM recommendation_policies').fetchone()[0] == 0
+    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source._revision_script
 
 
 def _publish(store, now=1, rankers=('first', 'second'), body=None):
@@ -71,7 +91,8 @@ def check_preparation_retention(store, monkeypatch, *, generations, variants, ev
     monkeypatch.setattr(measurement, 'serving_policy', lambda reader, now: ('base', {
         'ranker': 'lane', 'weights': {'decayed': 1 + 1 / now}, 'evidence': 'x' * evidence_bytes}))
     monkeypatch.setattr(candidate_refresh, 'prepared_settings', lambda *args: {})
-    seed_catalog_track(store, 'song', 'Song', 'Artist', video_id='song')
+    seed_publication_subjects(store, [
+        {'key': 'song', 'title': 'Song', 'artist': 'Artist', 'video_id': 'song'}])
     def calculate(reader, now, policies):
         # Calculate several variants, but publish only the last one. Unused
         # calculated variants must not become retained policy identities.
@@ -118,7 +139,9 @@ def check_preparation_retention(store, monkeypatch, *, generations, variants, ev
 
 def test_repeated_advancing_time_preparation_without_serving_has_bounded_bytes(store, monkeypatch):
     monkeypatch.setattr(policy_config, 'GRACE_SECONDS', 240)
-    check_preparation_retention(store, monkeypatch, generations=8, variants=4,
+    # Five cycles reach the full three-generation grace window, then collect
+    # expired revalidations while retaining the original pool's policy roots.
+    check_preparation_retention(store, monkeypatch, generations=5, variants=4,
         evidence_bytes=256, maximum_generations=3, byte_bound=16000)
 
 

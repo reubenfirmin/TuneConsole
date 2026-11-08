@@ -12,9 +12,9 @@ from tests.test_mode_cards_route import _client as current_client
 from tests.home_fixture_support import home_routes_only, prepared_client as _prepared_client, returning_listener
 from tests.home_fixture_support import publish_menu, without_metadata_providers
 from tests.rec.test_home_prepared import one_menu_per_attempt
-from tests.recommendation_support import publish_bundles, seed_bundle_subjects
+from tests.recommendation_support import publish_bundles, seed_bundle_subjects, seed_publication_subjects
 from tests.prepared_fixture_support import capture_template, prepared_template
-from tests.store_fixture_support import bounded_consumer_schema
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import embedding_vectors as embed, fresh_pool, mode_surfaces, road_trip_candidates, surfaces
@@ -22,12 +22,22 @@ from yt_playlist.util.matching import identity_key
 
 
 @pytest.fixture(autouse=True)
-def fresh_routes(monkeypatch, home_routes_only, one_menu_per_attempt):
+def fresh_routes(monkeypatch, home_routes_only, one_menu_per_attempt,
+                 without_metadata_providers, fresh_template_bytecode):
     from yt_playlist.rec import home_cards
+    from yt_playlist.web import app as webapp
 
     # Fresh selection, jobs and publication stay real. Audit history has its
     # own contract checks and is independent of these discovery workflows.
     monkeypatch.setattr(home_cards.HomeCards, 'audit', lambda *args, **kwargs: None)
+    templates = webapp.Jinja2Templates
+
+    def compiled_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        result.env.bytecode_cache = fresh_template_bytecode
+        return result
+
+    monkeypatch.setattr(webapp, 'Jinja2Templates', compiled_templates)
 
 
 def _client(store, now=1000.0):
@@ -43,7 +53,9 @@ def prepared_client(store):
 
 def test_fresh_card_waits_for_metadata_then_renders_discoveries(store):
     keys = []
-    for i in range(12):
+    # Four enriched discoveries satisfy the card's admission boundary. The
+    # requested-mix workflow below retains its full twelve-track requirement.
+    for i in range(4):
         title, artist = f"Unenriched {i}", f"Unknown artist {i}"
         key = identity_key(title, artist)
         store.discovery.upsert_discovered_track(key, f"new{i}", title, artist,
@@ -577,8 +589,8 @@ def test_completed_search_with_insufficient_tracks_is_retryable(store, monkeypat
     assert 'hx-trigger="every 2s"' not in response.text
 
 
-def test_board_refresh_checks_completed_search_before_declaring_old_slot_empty(store, monkeypatch, prepared_fresh_home):
-    client = prepared_client(store)
+def test_board_refresh_checks_completed_search_before_declaring_old_slot_empty(fresh_workflow_home, monkeypatch):
+    store, client = fresh_workflow_home
     response = client.post('/home/mix-genres', data={'genres': ['jazz', 'techno']})
     assert 'Discover a fresh mix' in response.text
     parameters = {'include_genres': ['jazz', 'techno'], 'avoid_genres': []}
@@ -588,10 +600,9 @@ def test_board_refresh_checks_completed_search_before_declaring_old_slot_empty(s
     for index in range(12):
         title, artist = f'Newly published {index}', f'New artist {index}'
         key = identity_key(title, artist)
-        store.discovery.upsert_discovered_track(key, f'new{index}', title, artist,
-            '', None, 'Jazz' if index % 2 else 'Techno', None, 'genre:fixture', 1000)
         tracks.append({'key': key, 'title': title, 'artist': artist, 'video_id': f'new{index}',
                        'genre': 'Jazz' if index % 2 else 'Techno'})
+    seed_publication_subjects(store, tracks, discoveries=[track['key'] for track in tracks], now=1000)
 
     def ranked(reader, now, policies):
         fresh = policies.stamp(tracks, 'fresh')

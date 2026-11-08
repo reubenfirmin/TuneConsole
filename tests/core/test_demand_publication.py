@@ -5,13 +5,13 @@ from contextlib import closing, ExitStack
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_demand_preparation import VALUES, seed, finish
 from tests.catalog_migration_support import catalog_reader
 from tests.genre_catalog_support import bound_catalog
 from tests.prepared_fixture_support import prepared_template
-from tests.store_fixture_support import install_numbered_input
+from tests.store_fixture_support import install_numbered_input, publication_consumer_reads
 from yt_playlist.core import recommendation_requests
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import recommendation_demand as preparation, demand_publication as publication
@@ -52,6 +52,17 @@ def test_demand_input_admission_keeps_numbered_history_and_real_guards(demand_in
     assert source.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
     assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
     assert template.revision_guards
+
+
+def test_demand_consumer_input_keeps_pending_ddl_and_real_guards(_bounded_installed_schema):
+    template = _bounded_installed_schema(86)
+    source = template.source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert list(map(tuple, source.conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
+        (entry.version, entry.name) for entry in registry.MIGRATIONS[:86]]
+    assert regular.validate(source.conn) == 0
+    assert template.revision_guards
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.fixture
@@ -317,17 +328,30 @@ def test_interruption_resume_and_publication_fence_keep_atomic_selection(install
             store.conn.execute('DELETE FROM '+publication.table('prepared_demand_originals')+' WHERE stage=?',(final,))
 
 
+def finite_requests(store, now):
+    value = {'epoch':99,'include_genres':['known-genre']*100,'avoid_genres':['Missing']*100,'held_by_vibe':False}
+    store.rec_proposals.put_proposals('home_genre_request',value,now)
+    store.rec_proposals.put_proposals('album_menu_refresh',{'epoch':98,'exclude':['release']*100},now)
+    return value
+
+
 @pytest.mark.parametrize('installed',[86],indirect=True)
-def test_full_finite_demand_uses_bounded_staging_and_failed_preparation_leaves_regular_changes_usable(installed, independent_regular_ddl):
+def test_full_finite_demand_uses_bounded_staging(installed, publication_consumer_reads):
     store,_ = installed
     seed(store)
-    value = {'epoch':99,'include_genres':['known-genre']*100,'avoid_genres':['Missing']*100,'held_by_vibe':False}
-    store.rec_proposals.put_proposals('home_genre_request',value,300)
-    store.rec_proposals.put_proposals('album_menu_refresh',{'epoch':98,'exclude':['release']*100},300)
+    value = finite_requests(store, 300)
     identity = ready(store.conn,size=16)
     assert publication.stage(store.conn,identity).copied==309
     publication.publish(store.conn,identity=identity)
     assert store.rec_proposals.get_proposals('home_genre_request')==value
+
+
+@pytest.mark.parametrize('installed',[86],indirect=True)
+def test_failed_demand_keeps_regular_changes_and_large_retry_usable(
+        installed, independent_regular_ddl, publication_consumer_reads):
+    store,_ = installed
+    seed(store)
+    publication.publish(store.conn,identity=ready(store.conn,size=16))
     with store.conn:
         store.conn.execute("UPDATE rec_proposals SET payload='{bad' WHERE surface='home_genre_request'")
     with pytest.raises(ValueError):
@@ -335,9 +359,10 @@ def test_full_finite_demand_uses_bounded_staging_and_failed_preparation_leaves_r
     assert preparation.JOB.progress(store.conn).status=='failed'
     assert publication.selected(store.conn) is None
     regular.migrate(store.conn)
-    store.rec_proposals.put_proposals('home_genre_request',value,301)
+    value = finite_requests(store, 301)
     preparation.JOB.step(store.conn,retry=True)
     final = ready(store.conn,size=16)
+    assert publication.stage(store.conn,final).copied==309
     publication.publish(store.conn,identity=final)
     assert store.rec_proposals.get_proposals('home_genre_request')==value
 

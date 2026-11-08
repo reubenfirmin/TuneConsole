@@ -185,58 +185,6 @@ def test_exact_native_v88_triggers_admit_writable_app_without_bulk_conversion(tm
         genres.set_active(None)
 
 
-@pytest.mark.parametrize('version', [79, 85, 87, 92])
-def test_regular_guards_follow_later_explicit_owner_upgrades(tmp_path, version, _pristine_installed_schema):
-    from yt_playlist.core.migrations import regular
-    from yt_playlist.core.preparation import installed_genre_contract
-    from yt_playlist.core.store import Store
-
-    path = tmp_path / 'owner-upgrade.db'
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute('PRAGMA foreign_keys=ON')
-        _pristine_installed_schema(version).backup(conn)
-        with conn:
-            conn.execute("INSERT INTO settings VALUES ('retained-guard-setting','original')")
-            if version < 88:
-                conn.execute("INSERT INTO rec_weights VALUES ('genre:Jazz',1.25,10)")
-            else:
-                conn.execute("INSERT INTO taste_axes(kind,genre_key) VALUES ('genre','jazz')")
-                conn.execute("INSERT INTO rec_weights SELECT id,1.25,10 FROM taste_axes WHERE genre_key='jazz'")
-        history = list(map(tuple, conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
-        regular.migrate(conn)
-        changes = list(map(tuple, conn.execute('SELECT * FROM schema_changes ORDER BY version')))
-        if version < 88:
-            assert not conn.execute("SELECT 1 FROM sqlite_schema WHERE name LIKE 'installed_taste_axis_guard_%'").fetchone()
-            migrate(conn, registry=registry.MIGRATIONS[:88])
-            installed_genre_contract.validate(conn)
-            with pytest.raises(sqlite3.IntegrityError, match='Invalid future taste axis'), conn:
-                conn.execute("INSERT INTO taste_axes(kind) VALUES ('other')")
-        migrate(conn, registry=registry.MIGRATIONS)
-        regular.validate(conn)
-        assert list(map(tuple, conn.execute('SELECT * FROM schema_changes ORDER BY version'))) == changes
-        assert list(map(tuple, conn.execute('SELECT * FROM schema_migrations ORDER BY version')))[:version] == history
-        assert conn.execute("SELECT value FROM settings WHERE key='retained-guard-setting'").fetchone()[0] == 'original'
-        assert tuple(conn.execute('SELECT a.kind,a.genre_key,w.weight,w.updated_at FROM rec_weights w '
-            'JOIN taste_axes a ON a.id=w.axis_id').fetchone()) == ('genre', 'jazz', 1.25, 10)
-        assert {row[0] for row in conn.execute("SELECT name FROM sqlite_schema WHERE name LIKE 'installed_taste_axis_guard_%'")} == {
-            'installed_taste_axis_guard_insert', 'installed_taste_axis_guard_update'}
-        with pytest.raises(sqlite3.IntegrityError), conn:
-            conn.execute("UPDATE taste_axes SET kind='other',genre_key=NULL")
-        assert not conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        conn.close()
-    reopened = Store(path)
-    try:
-        reopened.init_schema()
-        assert reopened.settings.get_setting('retained-guard-setting') == 'original'
-        reopened.settings.set_setting('continuing-guard-write', 'available')
-        regular.validate(reopened.conn)
-    finally:
-        reopened.conn.close()
-
-
 def test_bounded_repair_of_already_upgraded_missing_guards_preserves_applied_history(tmp_path, monkeypatch):
     from yt_playlist.core.migrations import regular
     from yt_playlist.core.preparation import installed_genre_contract

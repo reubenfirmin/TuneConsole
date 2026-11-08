@@ -5,17 +5,31 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_radio_origin_preparation import finish, head, seed
+from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads
 from yt_playlist.core import radio_provenance
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import radio_origin_publication as publication, radio_origins as preparation
 from yt_playlist.core.store import Store
 
 
-def prepare(conn):
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture
+def disable_periodic_library_sync():
+    pass
+
+
+@pytest.mark.parametrize('installed', [79, 93], indirect=True)
+def test_radio_origin_publication_input_keeps_admitted_history_and_private_guards(installed):
+    assert_installed_consumer_input(*installed)
+
+
+def prepare(conn, *, size=128):
     preparation.JOB.install(conn)
-    return finish(conn,size=128).prepared_revision
+    return finish(conn,size=size).prepared_revision
 
 
 @pytest.mark.parametrize('installed',[79,93],indirect=True)
@@ -215,13 +229,19 @@ def test_missing_original_files_are_recovered_explicitly_without_replacing_membe
 @pytest.mark.parametrize('installed',[93],indirect=True)
 def test_long_repeated_lists_and_absent_sources_preserve_runtime_order(installed):
     store,_ = installed
-    raw = json.dumps(['first','missing','first']*2700,indent=2)
+    first, missing = 'first-' + 'a'*160, 'missing-' + 'b'*160
+    origins = [first,missing,first]*200
+    raw = json.dumps(origins,indent=2)
+    # Cross both the 512-member batch limit and the original-file part limit,
+    # without thousands of redundant copies of the same two missing scopes.
+    assert len(origins) > 512 and len(raw) > preparation.PART_CHARACTERS
     store.settings.set_setting(preparation.KEYS[0],raw)
-    publication.publish(store.conn,revision=prepare(store.conn))
-    assert radio_provenance.ids(store.conn) == ['first','missing']
+    publication.publish(store.conn,revision=prepare(store.conn,size=512))
+    assert radio_provenance.ids(store.conn) == [first,missing]
     assert store.settings.get_setting(preparation.KEYS[0]) == raw
     assert store.settings.get_setting(preparation.KEYS[1],'absent') == 'absent'
-    assert store.conn.execute('SELECT count(*) FROM '+preparation.ORIGINS).fetchone()[0] == 8100
+    assert store.conn.execute('SELECT count(*) FROM '+preparation.ORIGINS).fetchone()[0] == len(origins)
+    assert head(store.conn)['part_count'] >= 2
     store.settings.delete_setting(preparation.KEYS[0])
     publication.publish(store.conn,revision=prepare(store.conn))
     assert radio_provenance.ids(store.conn) == []

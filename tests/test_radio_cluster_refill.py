@@ -133,9 +133,12 @@ def test_correcting_feedback_readmits_a_recording_in_the_same_session(store, see
     assert c.next_track([seed])['key'] == track['key']
 
 
-def test_themed_streams_pin_the_playing_genre_inside_mixed_clusters(store, seed):
+def test_themed_streams_pin_the_playing_genre_inside_mixed_clusters(refill_library):
     from yt_playlist.rec.radio_directions import RadioDirections
-    indexed(store, seed, 110, mixed=True)
+    store, seed, tracks = refill_library
+    for index, track in enumerate(tracks):
+        if index % 2:
+            track['genre'] = 'Indie Rock'
     c = RadioCandidates(store, 1000, {**radio_tuning.DEFAULTS, 'theme': 1})
     directions = RadioDirections(c, seed)
     directions.update([seed], [], 0)

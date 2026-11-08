@@ -3,8 +3,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient, seed_catalog_track
+from tests.home_fixture_support import without_metadata_providers
+from tests.store_fixture_support import file_consumer_store as store
 from yt_playlist.rec import artist_start
 from yt_playlist.web.app import create_app
+
+
+pytestmark = pytest.mark.usefixtures('without_metadata_providers')
 
 
 def page(name, index, related=()):
@@ -95,9 +100,20 @@ def test_partial_import_is_not_owned_music_and_saved_albums_can_start_normally(s
     assert not artist_start.required(store)
 
 
+@pytest.fixture
+def immediate_sync_retries(monkeypatch):
+    from functools import partial
+    from yt_playlist.library import sync
+
+    # Keep real attempts, failure classification and persisted retry times.
+    # These setup checks do not own wall-clock backoff between provider reads.
+    monkeypatch.setattr(sync, 'with_retry', partial(sync.with_retry, sleep=lambda seconds: None))
+
+
 @pytest.mark.parametrize('likes_readable,albums_readable', [(False, False), (False, True), (True, True)])
 @pytest.mark.parametrize('live_plays', [0, 1, 5])
-def test_empty_owned_library_with_incidental_history_reaches_artist_setup(store, likes_readable, albums_readable, live_plays):
+def test_empty_owned_library_with_incidental_history_reaches_artist_setup(
+        store, likes_readable, albums_readable, live_plays, immediate_sync_retries):
     from types import SimpleNamespace
     from yt_playlist.core import sync_state
     from yt_playlist.library import live_plays as live_ingestion
@@ -136,9 +152,9 @@ def test_empty_owned_library_with_incidental_history_reaches_artist_setup(store,
 
 
 def test_artist_setup_requires_picks_and_live_play_from_the_generated_first_set(store):
-    from yt_playlist.library.playlist_generated import create_generated_playlist
-
     fake = Catalog()
+    for page in fake._artists.values():
+        page['songs']['results'] = page['songs']['results'][:1]
     client = client_for(store, fake)
     store.settings.set_setting('last_sync_at', '999')
     service = artist_start.ArtistCatalog(lambda: {1: fake})
@@ -149,13 +165,19 @@ def test_artist_setup_requires_picks_and_live_play_from_the_generated_first_set(
     # Even a selected song played elsewhere must not skip the first-set handoff.
     store.history.record_play_event(1, first['key'], first['video_id'], 1001.)
     assert artist_start.required(store)
-    generated = create_generated_playlist(store, 'My first set', tracks, fake, 1002., 1)
+    # Completed generated output is the input to this readiness check. Playlist
+    # creation owns remote confirmation, quarantine and item materialization.
+    playlist_ytm = 'first-set'
+    store.playlists.mark_generated_playlist(playlist_ytm)
+    playlist = store.playlists.upsert_playlist(1, playlist_ytm, 'My first set', len(tracks), 'first', 1002.)
+    ids = store.tracks.track_ids_for_videos([track['video_id'] for track in tracks])
+    store.playlists.set_playlist_tracks(playlist, [ids[track['video_id']] for track in tracks])
     assert artist_start.required(store)  # creation alone is not listening
     store.history.record_play_event(1, 'unrelated|artist', 'unrelated', 1003.,
-                                    playlist_ytm_id=generated['new_ytm'])
+                                    playlist_ytm_id=playlist_ytm)
     assert artist_start.required(store)
     store.history.record_play_event(1, first['key'], first['video_id'], 1004.,
-                                    playlist_ytm_id=generated['new_ytm'])
+                                    playlist_ytm_id=playlist_ytm)
     assert not artist_start.required(store)
     assert client.get('/home/onboard/artists/state').json()['complete'] is True
     assert 'Pick 3 artists you love.' not in client.get('/home/onboard/start').text
@@ -174,7 +196,8 @@ def test_imported_exact_history_is_not_a_live_first_listen(store, source):
 
 
 @pytest.mark.parametrize('unavailable', ['playlist_listing', 'saved_albums'])
-def test_artist_setup_waits_for_a_connected_listing_but_not_unavailable_albums(store, unavailable):
+def test_artist_setup_waits_for_a_connected_listing_but_not_unavailable_albums(
+        store, unavailable, immediate_sync_retries):
     from yt_playlist.core.bridge import BridgeError
     from yt_playlist.library.sync import sync_all
 

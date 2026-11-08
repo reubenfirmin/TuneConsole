@@ -1,10 +1,53 @@
 """Album page: renders the track table, and creates a playlist from the album."""
+from contextlib import ExitStack
+import sys
+
 import pytest
 from fastapi.testclient import TestClient
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.home_fixture_support import home_page_bytecode, without_metadata_providers
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.rec import choice_evidence
+
+
+pytestmark = pytest.mark.usefixtures('without_metadata_providers')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # Album controls read the two actual genres represented by this catalog.
+    with bounded_consumer_schema((('jazz', 'Jazz'), ('techno', 'Techno'))) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def album_routes(store, monkeypatch, home_page_bytecode):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import album, app_update, audio_preview, home, taste
+
+    # Retain the real bridge: album playback and the shared clock use it below.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+        for module in (album, app_update, audio_preview, home, taste)])
+    templates = webapp.Jinja2Templates
+
+    def compiled_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        result.env.bytecode_cache = home_page_bytecode
+        return result
+
+    monkeypatch.setattr(webapp, 'Jinja2Templates', compiled_templates)
+    # A single owned portal serves each client's requests. Shutdown drains app
+    # work before its Store fixture closes, including on assertion failures.
+    make_client = _client
+    with ExitStack() as clients:
+        def managed_client(database):
+            client, remote, identity = make_client(database)
+            return clients.enter_context(client), remote, identity
+
+        monkeypatch.setattr(sys.modules[__name__], '_client', managed_client)
+        yield
 
 
 @pytest.fixture
@@ -273,7 +316,9 @@ def _album(browse="MPREb_x"):
 
 def _client(store):
     iid = store.accounts.upsert_account("main", "cred", None, True)
-    fc = FakeClient(albums=_album())
+    albums = _album()
+    fc = FakeClient(albums=albums, catalog={track['videoId']: track
+                    for album in albums.values() for track in album['tracks']})
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), fc, iid
 

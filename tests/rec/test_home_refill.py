@@ -8,8 +8,8 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 import pytest
 
-from tests.rec.test_home_prepared import prepared, service, store
-from tests.home_fixture_support import publish_menu, returning_listener
+from tests.rec.test_home_prepared import cached_menu, cached_menu_schema, catalog_import, prepared, service, store
+from tests.home_fixture_support import home_page_bytecode, home_pages_only, publish_menu, returning_listener, without_metadata_providers
 from tests.home_prepared_support import publication_inputs
 from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.recommendation_support import publish_bundles
@@ -70,7 +70,17 @@ def test_preferences_keep_prepared_mixes_and_explain_pending_update(store, prepa
 
 
 @pytest.mark.usefixtures('returning_vibe_listener')
-def test_tuned_set_survives_learning_refresh_but_expiry_prefers_baseline(store, prepared):
+def test_tuned_set_survives_learning_refresh_but_expiry_prefers_baseline(store, cached_menu, monkeypatch):
+    from yt_playlist.rec import vibe_pools
+
+    prepared = cached_menu
+    # Cache lifetime starts after candidate selection. Keep actual card assembly,
+    # tuning, publication and expiry, using completed candidates for each lane.
+    candidates = {proto['lane']: proto['tracks'] for proto in prepared['menus'][0]['protos']}
+    monkeypatch.setattr(vibe_pools, 'pick',
+                        lambda reader, now, preset, lane, exclude_keys=(), **filters:
+                            deepcopy([track for track in candidates.get(lane, [])
+                                      if track['key'] not in exclude_keys]))
     with mix_tuning.adjusting_vibe(store, 1001):
         store.settings.set_setting(home_vibe.SETTING, 'energize')
     tuned_result = service(store).cards(home_cards.CardsRequest(1001, record=False))
@@ -86,7 +96,9 @@ def test_tuned_set_survives_learning_refresh_but_expiry_prefers_baseline(store, 
 
 
 @pytest.mark.usefixtures('returning_vibe_listener')
-def test_updated_set_replaces_fallback_in_same_window_and_clears_notice(store, prepared):
+def test_updated_set_replaces_fallback_in_same_window_and_clears_notice(
+        store, cached_menu, home_pages_only, without_metadata_providers):
+    prepared = cached_menu
     with mix_tuning.adjusting_vibe(store, 1001):
         store.settings.set_setting(home_vibe.SETTING, 'energize')
     fallback = home_prepared.cards(store, prepared, 1002, service(store))
@@ -393,8 +405,18 @@ def test_typed_adaptive_pools_survive_deferred_setup_and_follow_replacement(
     assert replacement['generation'] != payload['generation']
 
 
-@pytest.mark.usefixtures('refill_inputs')
-def test_context_and_mix_preparation_share_signals_across_retries_and_expire(store, monkeypatch):
+def test_context_and_mix_preparation_share_signals_across_retries_and_expire(catalog_import, monkeypatch):
+    store = catalog_import
+    tracks = store.conn.execute('SELECT id FROM tracks ORDER BY id').fetchall()
+    # Signal sharing needs two distinct metadata-bearing subjects, rather than
+    # fitting every mode and all four candidate lanes before interrupting.
+    for track, genre in zip(tracks, ('Jazz', 'Techno', 'Classical', 'Ambient')):
+        store.tracks.set_track_genre(track['id'], genre)
+    selected = [{'key': key, **track} for key, track in
+                store.rec_query.tracks_by_keys(store.rec_query.library_keys()).items()]
+    publish_bundles(store, {'all': {'wheelhouse': selected, 'explore': [], 'comfort': [], 'fresh': []}}, 1000)
+    monkeypatch.setattr(mode_surfaces, 'assemble_cards', lambda *args, **kwargs: [
+        {'lane': 'wheelhouse', 'mode_id': None, 'tracks': selected}])
     track = store.conn.execute('SELECT identity_key FROM tracks LIMIT 1').fetchone()[0]
     seed_dislike(store, track, until=None, now=900)
     calculate, capture = transient.facet_leans, transient.prepared_facet_leans

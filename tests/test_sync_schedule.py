@@ -375,7 +375,9 @@ def test_slow_update_check_cannot_delay_an_extension_connection(store, monkeypat
     from types import SimpleNamespace
 
     from fastapi.testclient import TestClient
+    from yt_playlist.providers import genres
     from yt_playlist.web import app as web_app
+    from yt_playlist.web.routes import app_update
     from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
 
     iid = store.accounts.upsert_account("Main", "bridge", None, True)
@@ -391,6 +393,10 @@ def test_slow_update_check_cannot_delay_an_extension_connection(store, monkeypat
     monkeypatch.setattr(web_app, "_background_update_loop",
                         lambda ctx, stop: original_updates(ctx, stop, poll_s=.01))
     monkeypatch.setattr(web_app, "_background_sync_loop", _background_sync_loop)
+    # Keep actual startup, bridge dispatch and independent worker threads.
+    # Genre matching and unrelated page registration are completed inputs.
+    monkeypatch.setattr(genres, 'configure', Mock())
+    monkeypatch.setattr(web_app, 'build_all', lambda ctx: [app_update.build(ctx)])
     app = web_app.create_app(store, lambda: {iid: client}, now_fn=lambda: 100, background_work=True)
     ctx = app.state.ctx
     worker = SimpleNamespace(start_ticker=lambda: None, trigger_mode_refresh=lambda: None,

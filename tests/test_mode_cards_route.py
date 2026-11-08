@@ -5,14 +5,21 @@ from html import unescape
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
-from yt_playlist.rec import home_prepared, journeys, mode_surfaces
+from yt_playlist.rec import home_cards, home_prepared, journeys, mode_surfaces
 from yt_playlist.web.app import create_app
-from tests.conftest import FakeClient, seed_catalog_track
-from tests.home_fixture_support import home_routes_only, prepared_client, publish_menu
+from tests.conftest import FakeClient
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+from tests.home_fixture_support import home_routes_only, prepared_client, publish_cards, publish_menu, without_metadata_providers
 from tests.mode_fixtures import seed_modes
-from tests.recommendation_support import publish_bundles, seed_bundle_subjects
+from tests.recommendation_support import publish_bundles, seed_bundle_subjects, seed_publication_subjects
 
-pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'home_routes_only')
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'home_routes_only', 'without_metadata_providers')
+
+
+@pytest.fixture(scope='session')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('house', 'House'), ('techno', 'Techno'))) as schema:
+        yield schema
 
 
 def _client(store, now=1000.0):
@@ -117,10 +124,11 @@ def test_mix_choice_capture_failure_keeps_playable_cards_and_logs(
     assert not store.conn.execute('SELECT 1 FROM rec_served_impressions').fetchone()
 
 
-def test_mix_regeneration_submits_and_closes_the_requesting_views_offer(store, mode_cards_home_template):
+def test_mix_regeneration_submits_and_closes_the_requesting_views_offer(store):
     from html import unescape
     from yt_playlist.rec import choice_evidence
-    mode_cards_home_template.restore(store)
+    seed_modes(store, 1, 2)
+    publish_menu(store, count=2, mode_ids=(1, 2))
     with prepared_client(store, background_work=False) as client:
         first = client.get('/home/cards')
         match = re.search(r'hx-vals=\'([^\']*opportunity_id[^\']*)\'', first.text)
@@ -156,13 +164,21 @@ def test_mode_card_recipe_carries_a_journey(store, mode_cards_home_template):
         assert rec.get("journey") in journeys.JOURNEYS
 
 
-def test_fresh_mode_card_recipe_retains_lane(store, mode_cards_inputs_template):
-    bundles = mode_cards_inputs_template.restore(store)
-    publish_bundles(store, {
-        **{mid: {"fresh": bucket["fresh"]} for mid, bucket in bundles.items() if not mid.startswith('_')},
-        "_meta": {"full_pools": True},
-    }, 1)
-    with _client(store) as client:
+def test_fresh_mode_card_recipe_retains_lane(store):
+    seed_modes(store, 1)
+    tracks = [{'key': f'fresh {i}|artist {i}', 'video_id': f'fresh-{i}', 'title': f'Fresh {i}',
+               'artist': f'Artist {i}', 'genre': 'house'} for i in range(6)]
+    seed_publication_subjects(store, tracks)
+    publish_bundles(store, {'1': {'fresh': tracks}, '_meta': {'full_pools': True}}, 1)
+    # Preserve real mode selection, recipe completion and HTTP serialization.
+    # Preparing every Home menu is a separate worker obligation.
+    cards = mode_surfaces.assemble_cards(store, 1, 0)
+    assert len(cards) == 1 and cards[0]['lane'] == 'fresh'
+    proto = home_cards._complete_card(store, cards[0], 1, 0, None, None)
+    result = home_cards.CardsResult([proto], [{'proto': proto, 'pool': None}],
+                                   None, None, [], [], 0, None)
+    publish_cards(store, result, 1)
+    with prepared_client(store, now=1, background_work=False) as client:
         response = client.get("/home/cards")
     assert response.status_code == 200
     recipe = json.loads(re.search(r"data-recipe='([^']*)'", response.text)[1])
@@ -185,8 +201,8 @@ def test_explicit_tuning_with_object_tracks_is_cached_without_request_fallback(s
              "tracks": [ForYouItem(f"Song {i}", f"Artist {i}", "", f"v{i}", None, 0, "reason", key=f"k{i}")
                         for i in range(4)],
              "feedback_surface": None}
-    for i in range(4):
-        seed_catalog_track(store, f"k{i}", f"Song {i}", f"Artist {i}", video_id=f"v{i}")
+    seed_publication_subjects(store, [dict(key=f'k{i}', title=f'Song {i}', artist=f'Artist {i}',
+                                          video_id=f'v{i}') for i in range(4)])
     calls = []
 
     def candidates(store, now, **kwargs):
@@ -194,8 +210,10 @@ def test_explicit_tuning_with_object_tracks_is_cached_without_request_fallback(s
         return [proto]
 
     monkeypatch.setattr(stored_home, "unmodeled_cards", candidates)
-    with _client(store) as client:
-        calls.clear()  # Background preparation may read the existing Fresh pool.
+    context = choice_evidence.freeze_context(store, choice_evidence.model_context(store, 1000))
+    empty = home_cards.CardsResult([], [], None, None, [], [], 0, None, choice_context=context)
+    publish_cards(store, empty, 1000)
+    with prepared_client(store, background_work=False) as client:
         assert client.get("/home/cards").status_code == 200
         assert calls == []
         r = client.post("/home/breadth", data={"breadth_bias": "0.5"})

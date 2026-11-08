@@ -1,13 +1,36 @@
 """Production access inventory and restartable mixed-format preparation."""
 from pathlib import Path
-from experiments.retained_copy.fao_audit import audit, inventory, boundary
+import pytest
+
+from experiments.retained_copy.fao_audit import ROOT, audit, inventory, boundary
 from yt_playlist.core import fao
 from yt_playlist.core.preparation.file_bodies import Conversion, managed_roots
 from yt_playlist.core.store import Store
 
 
-def test_production_file_body_operations_have_an_explicit_boundary(tmp_path):
-    assert not [row for row in audit() if row['boundary'] is None]
+def test_inventory_finds_file_calls_inside_unrelated_calls_and_nested_receivers(tmp_path):
+    source = tmp_path / 'nested.py'
+    source.write_text(
+        'def read(factory):\n'
+        '    consume(factory().read_bytes())\n'
+        '    return json.load(factory().open("rb"))\n')
+    (tmp_path / 'unicode.py').write_text('def obtain(path):\n    return 𝚘𝚙𝚎𝚗(path)\n')
+    assert [(row['owner'], row['operation']) for row in inventory(tmp_path)] == [
+        ('read', 'factory().read_bytes'), ('read', 'json.load'), ('read', 'factory().open'),
+        ('obtain', 'open')]
+
+
+@pytest.mark.parametrize('area', sorted({
+    path.relative_to(ROOT).parts[0] for path in ROOT.rglob('*.py')}))
+def test_production_file_body_operations_have_an_explicit_boundary(area):
+    # Each production package owns its complete inventory. New modules and new
+    # top-level packages are included automatically, with root-relative owners.
+    source = ROOT / area
+    paths = [source] if source.is_file() else source.rglob('*.py')
+    assert not [row for row in audit(paths=paths) if row['boundary'] is None]
+
+
+def test_unowned_file_body_operations_require_a_new_boundary(tmp_path):
     source = tmp_path/'new_owner.py'
     source.write_text("from pathlib import Path\ndef read(path):\n    return Path(path).read_text()\n")
     assert boundary(inventory(tmp_path)[0]) is None

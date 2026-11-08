@@ -569,19 +569,21 @@ def migrate(conn, *, changes=None, clock=time.time):
 def _migrate(conn, changes, clock, inspections):
     from .registry import MIGRATIONS
 
+    pending = False
     while True:
         try:
-            conn.execute('BEGIN')
-            inspections.refresh()
-            version = history(conn, MIGRATIONS)
-            if version < 79:
-                raise MigrationError('Regular schema changes require a supported installed layout (79+)')
-            validate_version(conn, version, foreign_keys=False, data=False)
-            applied = _applied(conn, changes)
-            if applied == len(changes):
+            if not pending:
+                conn.execute('BEGIN')
+                inspections.refresh()
+                version = history(conn, MIGRATIONS)
+                if version < 79:
+                    raise MigrationError('Regular schema changes require a supported installed layout (79+)')
+                validate_version(conn, version, foreign_keys=False, data=False)
+                applied = _applied(conn, changes)
+                if applied == len(changes):
+                    conn.rollback()
+                    return
                 conn.rollback()
-                return
-            conn.rollback()
             conn.execute('BEGIN IMMEDIATE')
             inspections.refresh()
             # Another startup may have advanced either ledger after the read
@@ -605,6 +607,10 @@ def _migrate(conn, changes, clock, inspections):
             conn.execute('INSERT INTO schema_changes VALUES (?,?,?)',
                          (change.version, change.name, clock()))
             conn.commit()
+            # Our completed change already establishes that another is due.
+            # Recheck the live schema and both ledgers under the next write
+            # reservation; a second read plan would repeat that same work.
+            pending = applied + 1 < len(changes)
         except BaseException:
             conn.rollback()
             raise

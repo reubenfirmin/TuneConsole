@@ -6,7 +6,7 @@ from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import measurement, mode_surfaces
 
 
-def seed_publication_subjects(store, items, *, discoveries=(), now=1):
+def seed_publication_subjects(store, items, *, discoveries=(), unowned=(), now=1):
     """Batch completed catalog inputs for publication/read coordination tests.
 
     These owners require real catalog membership, identities and metadata,
@@ -14,7 +14,9 @@ def seed_publication_subjects(store, items, *, discoveries=(), now=1):
     """
     items = {item['key']: item for item in items}
     discovered = set(discoveries)
-    assert discovered <= items.keys()
+    unowned = set(unowned)
+    assert discovered <= items.keys() and unowned <= items.keys()
+    assert not discovered & unowned
     genres = {item.get('genre') for item in items.values()}
     resolved = {label: store.genres.resolve(label) for label in genres}
     assert all(reason is None for _key, reason in resolved.values()), resolved
@@ -23,11 +25,11 @@ def seed_publication_subjects(store, items, *, discoveries=(), now=1):
     # Empty genre input also serves installed-v79 publication fixtures, before
     # the keyed-genre column existed. Do not add a genre dependency to it.
     genre_input = any(item.get('genre') is not None for item in items.values())
-    columns = 'id,identity_key,title,artist' + (',genre_key' if genre_input else '')
+    columns = 'id,identity_key,title,artist,created_at' + (',genre_key' if genre_input else '')
     with atomic_write(store):
         store.conn.executemany('INSERT INTO recordings(' + columns + ') VALUES (' +
             ','.join('?' for _ in columns.split(',')) + ')',
-            [(rid, item['key'], item['title'], item['artist']) +
+            [(rid, item['key'], item['title'], item['artist'], item.get('created_at')) +
              ((resolved[item.get('genre')][0],) if genre_input else ())
              for rid, item in subjects])
         store.conn.executemany('INSERT INTO youtube_items(video_id,recording_id,title,artist,orig_title,orig_artist,'
@@ -39,7 +41,7 @@ def seed_publication_subjects(store, items, *, discoveries=(), now=1):
         store.conn.executemany("INSERT INTO recording_aliases VALUES (?,?,'fixture')",
                                [(item['key'], rid) for rid, item in subjects])
         store.conn.executemany("INSERT INTO library_memberships VALUES (?,'fixture',NULL)",
-                               [(rid,) for rid, item in subjects if item['key'] not in discovered])
+                               [(rid,) for rid, item in subjects if item['key'] not in discovered | unowned])
         store.conn.executemany('INSERT INTO discovery_memberships(recording_id,entry_id,found_at) VALUES (?,?,?)',
                                [(rid, rid, now) for rid, item in subjects if item['key'] in discovered])
 

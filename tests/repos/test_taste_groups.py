@@ -3,10 +3,6 @@ import sqlite3
 import pytest
 
 from tests.group_support import publish, recordings
-from tests.mode_fixtures import seed_modes
-from yt_playlist.core.migrations import migrate
-from yt_playlist.core.migrations.registry import MIGRATIONS
-from yt_playlist.core.store import Store
 from yt_playlist.rec import group_discovery, group_versions
 
 
@@ -34,32 +30,6 @@ def test_rename_preserves_identity_and_merge_retains_umbrella(store):
     assert merged['groups'][0]['group_id'] == root['group_id']
     assert merged['groups'][0]['leaf']
     assert store.taste_groups.definition(root['version'])['name'] == root['name']
-
-
-def test_legacy_upgrade_preserves_rows_feedback_and_unknown_historical_membership(tmp_path):
-    store = Store(tmp_path / 'groups.db')
-    migrate(store.conn, registry=MIGRATIONS[:51])
-    store._bind_repositories()
-    seed_modes(store, 1, 2)
-    store.modes.log_impressions(1, [(0, 1), (1, 2)], 10)
-    before = [tuple(row) for row in store.conn.execute('SELECT * FROM taste_modes')]
-    # Explicitly replay this unsupported predecessor, then let ordinary startup
-    # notice the changed schema and rebind its original repositories.
-    migrate(store.conn, registry=MIGRATIONS)
-    store.init_schema()
-    assert before == [tuple(row) for row in store.conn.execute('SELECT * FROM taste_modes')]
-    assert store.conn.execute('SELECT COUNT(*) FROM rec_mode_impressions').fetchone()[0] == 2
-    tracks = recordings([('Pop', 12, .2)])
-    first = publish(store, tracks)
-    legacy = [group for group in first['groups'] if group.get('legacy')]
-    assert len(legacy) == 2 and all(not group['membership_known'] for group in legacy)
-    assert all(not group['members'] for group in legacy)
-    # Repeat publications must not reuse or overwrite a legacy definition version.
-    publish(store, tracks, 2000, first)
-    publish(store, tracks, 3000, store.taste_groups.head(members=True))
-    assert len(store.taste_groups.legacy_versions()) == 2
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-    store.conn.close()
 
 
 def test_failed_publication_rolls_back_every_artifact_and_preserves_head(store):

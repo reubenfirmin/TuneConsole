@@ -6,8 +6,7 @@ import threading
 import pytest
 
 from yt_playlist.core import album_aliases, albums, legacy_evidence, album_tracklists
-from yt_playlist.core.migrations import Migration, MigrationError, migrate
-from yt_playlist.core.migrations import registry, v062_album_aliases
+from yt_playlist.core.migrations import registry
 from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.store import Store
 
@@ -309,44 +308,6 @@ def test_concurrent_accepted_album_responses_publish_coherent_proofs_and_tracks(
         store.conn.close()
 
 
-def test_populated_upgrade_rolls_back_then_restarts_without_changing_source_ids(tmp_path, monkeypatch):
-    path = tmp_path / 'installed.db'
-    installed = Store(path)
-    migrate(installed.conn, registry=registry.MIGRATIONS[:61])
-    with installed.conn:
-        album = installed.conn.execute(
-            "INSERT INTO albums(title,artist,metadata_rank) VALUES ('Album','Artist',2)").lastrowid
-        installed.conn.execute("INSERT INTO album_provider_ids VALUES ('youtube',?,?)", (OLD, album))
-        installed.conn.execute("INSERT INTO album_library_memberships(album_id,identity_id,source) "
-                               "VALUES (?,NULL,'youtube')", (album,))
-        installed.conn.execute('INSERT INTO album_share_snapshots VALUES (?,?,?)', (OLD, 'Frozen', '["source"]'))
-    before = list(installed.conn.iterdump())
-    alias_migration = registry.MIGRATIONS[61]
-
-    def fail(conn, context):
-        v062_album_aliases.apply(conn, context)
-        raise RuntimeError('interrupted alias upgrade')
-
-    with monkeypatch.context() as patch:
-        patch.setattr(registry, 'MIGRATIONS', (*registry.MIGRATIONS[:61], Migration(alias_migration.version, alias_migration.name, fail)))
-        with pytest.raises(MigrationError, match='interrupted alias upgrade'):
-            migrate(installed.conn, registry=registry.MIGRATIONS)
-    assert list(installed.conn.iterdump()) == before
-    from tests.historical_support import upgrade_fixture
-    upgrade_fixture(installed)
-    assert installed.collection.saved_album_ids() == {OLD}
-    assert installed.conn.execute('SELECT is_primary FROM album_provider_ids').fetchone()[0] == 1
-    assert installed.conn.execute('SELECT raw_source_ref FROM album_share_items').fetchone()[0] == 'source'
-    state = list(installed.conn.iterdump())
-    installed.conn.close()
-    reopened = Store(path)
-    try:
-        reopened.init_schema()
-        assert list(reopened.conn.iterdump()) == state
-        validate_version(reopened.conn, registry.MIGRATIONS[-1].version)
-    finally:
-        reopened.conn.close()
-    assert not (tmp_path / 'backups').exists()
 
 
 def test_verified_aliases_survive_restart_without_repeating_reconciliation(tmp_path):

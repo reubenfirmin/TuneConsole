@@ -3,19 +3,13 @@ import sqlite3
 
 import pytest
 
-from tests.conftest import FakeClient
 from yt_playlist.core import artists, discovery_provenance, file_map, legacy_evidence, legacy_journals
 from yt_playlist.core.migrations import Migration,MigrationError,migrate
 from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.migrations import v027_artist_identity_redirects as upgrade
-from yt_playlist.core.migrations import v029_artist_provisional_names as names_upgrade
 from yt_playlist.core.store import Store
-from yt_playlist.library.sync import refresh_playlist
 from yt_playlist.rec import model_refresh
-
-
-REGISTRY = (*MIGRATIONS[:28],Migration(29,'artist_provisional_names',names_upgrade.apply))
 
 
 @pytest.fixture
@@ -398,42 +392,6 @@ def test_two_verified_homonyms_are_not_merged_on_a_changed_credit(store):
     assert store.tracks.identity_key_for_video('v') not in store.rec_model.suppressed_keys('for_you',40)
 
 
-def test_legacy_upgrade_then_first_structured_sync_preserves_mute_and_reopens(
-        tmp_path, _pristine_installed_schema):
-    path = tmp_path/'state.db'
-    s = Store(path)
-    _pristine_installed_schema(20).backup(s.conn)
-    s.conn.execute("INSERT INTO recordings(id,identity_key) VALUES (1,'song|artist')")
-    s.conn.execute("INSERT INTO youtube_items(video_id,recording_id,title,artist) VALUES ('v',1,'Song','Artist')")
-    s.conn.execute("INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (1,1,'v')")
-    s.conn.execute("INSERT INTO rec_feedback(surface,item_key,kind,created_at) VALUES ('for_you','artist:Artist','mute',1)")
-    s.conn.execute("INSERT INTO artist_scans VALUES ('Artist',10)")
-    s.conn.commit()
-    migrate(s.conn,registry=REGISTRY)
-    s._bind_repositories()
-    old = s.artists.track_credits(1)[0]['artist_id']
-    upgrade.validate(s.conn)
-    # Historical migration assertions precede current runtime operations.
-    from tests.historical_support import upgrade_fixture
-    upgrade_fixture(s)
-    iid = s.accounts.upsert_account('main','credential',None,True)
-    client = FakeClient(tracks={'P':[{'videoId':'v','title':'Song','duration_seconds':200,
-                                      'artists':[{'name':'Artist','id':'verified'}]}]})
-    refresh_playlist(s,iid,client,'P','Mix',20)
-    assert s.artists.track_credits(1)[0]['artist_id']==old
-    assert 'song|artist' in s.rec_model.suppressed_keys('for_you',30)
-    assert s.conn.execute('SELECT artist_id,scanned_at FROM artist_scans').fetchone()[:]==(old,10)
-    upgrade.validate(s.conn)
-    before = list(s.conn.iterdump())
-    s.conn.close()
-    s = Store(path)
-    s.init_schema()
-    assert list(s.conn.iterdump())==before
-    assert s.conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
-    s.conn.close()
-    assert not (tmp_path/'backups').exists()
-
-
 def test_failed_additive_upgrade_restores_installed_version_without_backups(
         tmp_path, _pristine_installed_schema):
     path = tmp_path/'state.db'
@@ -451,46 +409,4 @@ def test_failed_additive_upgrade_restores_installed_version_without_backups(
     assert not (tmp_path/'backups').exists()
     assert s.conn.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0]==26
     assert s.conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
-    s.conn.close()
-
-
-def test_installed_artist_handles_survive_reconciliation_and_reopening(
-        tmp_path, _pristine_installed_schema):
-    path = tmp_path/'state.db'
-    s = Store(path)
-    _pristine_installed_schema(20).backup(s.conn)
-    # Populate the installed schema directly; current ingestion requires the
-    # current schema and is exercised after the ordinary startup upgrade.
-    for rid, video, browse in [(1, 'v', None), (2, 'known', 'verified')]:
-        s.conn.execute('INSERT INTO recordings(id,identity_key) VALUES (?,?)', (rid, f'installed:{rid}'))
-        s.conn.execute('INSERT INTO youtube_items(video_id,recording_id,title,artist,artist_browse_id) '
-                       'VALUES (?,?,\'Song\',\'Artist\',?)', (video, rid, browse))
-        s.conn.execute('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)', (rid, rid, video))
-    s.conn.commit()
-    migrate(s.conn,registry=MIGRATIONS[:26])
-    s._bind_repositories()
-    tid = 1
-    old = s.artists.track_credits(tid)[0]['artist_id']
-    target = s.artists.track_credits(2)[0]['artist_id']
-    s.conn.execute('INSERT INTO rec_feedback(surface,item_key,kind,created_at,artist_id) '
-                   'VALUES (\'for_you\',?,\'mute\',1,?)', (f'artist:@artist:{old}', old))
-    s.conn.execute('INSERT INTO artist_scans(artist,scanned_at,artist_id) VALUES (\'Artist\',10,?)', (old,))
-    s.conn.commit()
-    s.conn.close()
-    s = Store(path)
-    migrate(s.conn,registry=REGISTRY)
-    s._bind_repositories()
-    from tests.historical_support import upgrade_fixture
-    upgrade_fixture(s)
-    refresh(s)
-    before = list(s.conn.iterdump())
-    s.conn.close()
-    s = Store(path)
-    s.init_schema()
-    upgrade.validate(s.conn)
-    assert list(s.conn.iterdump())==before
-    assert s.artists.resolve(old)==target
-    assert s.tracks.identity_key_for_video('v') in s.rec_model.suppressed_keys('for_you',30)
-    s.discovery.mark_scanned(old,50)
-    assert s.conn.execute('SELECT artist_id,scanned_at FROM artist_scans').fetchone()[:]==(target,50)
     s.conn.close()

@@ -128,7 +128,8 @@ def test_regular_session_inspects_each_unchanged_table_once(
                           'table_inspections': sum(inspections.values()),
                           'distinct_table_inspections': len(inspections),
                           'max_repeated_inspection': max(inspections.values())}))
-        assert len(validations) == 2 * len(regular.CHANGES) + 1
+        # Initial read plan, every reserved change, and final read admission.
+        assert len(validations) == len(regular.CHANGES) + 2
         assert max(inspections.values()) == 1
 
 
@@ -204,7 +205,7 @@ def test_later_incompatible_regular_owner_is_rejected(installed):
 
     def install(connection, context):
         first.apply(connection, context)
-        # The first change commits before the next read plan and reservation.
+        # The first change commits before the next independent reservation.
         conn.before_reservation = damage
 
     with pytest.raises(MigrationError, match='playback_feedback_receipts'):

@@ -7,6 +7,7 @@ import pytest
 from tests.core.test_compact_groups_migration import predecessor
 from tests.repos.test_compact_group_publication import database
 from tests.repos.test_group_retention import drain, enable
+from tests.store_fixture_support import reuse_reporting_reader
 from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
 from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded
 from yt_playlist.core.db_revisions import Revisions
@@ -15,9 +16,23 @@ from yt_playlist.core.migrations.runner import Context
 from yt_playlist.repos import group_retention, recommendation_publication as publication
 
 
+def test_recommendation_input_keeps_compact_groups_and_read_only_custody(compact_group_template):
+    source = compact_group_template.source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source.taste_groups.head_generation() == 'second'
+    assert source.taste_groups.head(members=True)['groups'][1]['members'] == {'one': (.9, .8)}
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
 @pytest.fixture
 def recommendations(database):
     store, _ = database
+    initialize_recommendations(store)
+    return store
+
+
+def initialize_recommendations(store):
+    """Build the real publication owners above the completed compact groups."""
     with store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
         migration.apply(store.conn, Context(4))
@@ -28,7 +43,14 @@ def recommendations(database):
     store._schema_compatibility = True
     store._bind_repositories()
     store._snapshot_revisions = Revisions(store.conn)
-    return store
+
+
+@pytest.fixture
+def recommendation_reads(recommendations, monkeypatch):
+    # Keep actual SQL publication and its snapshots; reporting consumes one
+    # ordinary private reader rather than rebuilding repositories for each read.
+    with reuse_reporting_reader(recommendations, monkeypatch):
+        yield recommendations
 
 
 def plan(store, key='one', *, candidates=None, fingerprint='a' * 64, group=1):
@@ -56,8 +78,8 @@ def collect(store):
         pytest.fail('Bounded recommendation cleanup did not finish')
 
 
-def test_partial_rows_are_hidden_until_one_atomic_head_switch(recommendations):
-    store = recommendations
+def test_partial_rows_are_hidden_until_one_atomic_head_switch(recommendation_reads):
+    store = recommendation_reads
     prepared = plan(store)
     prepared = replace(prepared, slots=prepared.slots + tuple(
         replace(prepared.slots[0], mode_key=f'genre-{i}') for i in range(18)))

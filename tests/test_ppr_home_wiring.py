@@ -7,7 +7,7 @@ from fastapi import APIRouter
 from fastapi.testclient import TestClient
 
 from tests.rec.test_home_prepared import (
-    one_menu_per_attempt, publication_inputs, publication_prepared, store,
+    cached_menu_schema, one_menu_per_attempt, publication_inputs, publication_prepared, store,
 )
 
 

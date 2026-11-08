@@ -6,14 +6,18 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_collection_document_preparation import finish, seed
+from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import entity_names, spotify_job_state
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import collection_documents as preparation, import_publication as publication
 from yt_playlist.core.store import Store
 from yt_playlist.web import spotify_import
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 
 
 def prepare(conn):

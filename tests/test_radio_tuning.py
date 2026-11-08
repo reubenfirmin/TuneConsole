@@ -5,13 +5,16 @@ from tests.enrichment_support import seed_enrichment
 import numpy as np
 import pytest
 
+from tests.conftest import store as memory_store
 from yt_playlist.rec import embedding_vectors as embed, radio_tuning, rec_params
 from yt_playlist.rec.radio_candidates import RadioCandidates, CLUSTER_POOL_LIMIT
 from yt_playlist.rec.radio_directions import RadioDirections
 from tests.musical_support import prepare_profiles
-from yt_playlist.core import catalog, radio_provenance
-from tests.recommendation_support import publish_bundles, seed_bundle_subjects
+from yt_playlist.core import artists, catalog, radio_provenance
+from yt_playlist.core.db_writes import atomic_write
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.prepared_fixture_support import prepared_template, roots
+from tests.store_fixture_support import file_consumer_store as store
 
 
 def prepare_tuning(store):
@@ -23,15 +26,15 @@ def prepare_tuning(store):
         familiar, fresh = [], []
         for i in range(12):
             vid = f"m{mid}-{i}"
-            tid = store.tracks.upsert_track(vid, vid, f"Artist {vid}", "", 200)
-            seed_enrichment(store, tid, genre, "2001")
-            with store.conn:
-                catalog.choose_field(store.conn, tid, 'energy', .02 if mid == 1 else .98)
-            key = store.tracks.catalog_subject(tid)["identity_key"]
+            key = f'{vid}|artist {vid}'
             track = dict(key=key, video_id=vid, title=vid, artist=f"Artist {vid}", genre=label, year="2001")
             (fresh if i >= 6 else familiar).append(track)
             tracks.append(track)
         bundles[str(mid)] = dict(wheelhouse=familiar, fresh=fresh)
+    seed_publication_subjects(store, [{**track, 'duration_s': 200, 'year': '2001'} for track in tracks])
+    with atomic_write(store):
+        for tid, track in enumerate(tracks, 1):
+            catalog.choose_field(store.conn, tid, 'energy', .02 if track['genre'] == 'Ambient' else .98)
     store.modes.replace_modes(modes, retired_ids=[], now=1)
     publish_bundles(store, bundles)
     prepare_profiles(store)
@@ -50,7 +53,8 @@ def prepared(store, radio_tuning_template):
 
 
 def test_prepared_tuning_copies_keep_owned_files_and_mutations_private(
-        store, file_backed_store, radio_tuning_template):
+        memory_store, file_backed_store, radio_tuning_template):
+    store = memory_store
     template = radio_tuning_template
     first, second = template.restore(store), template.restore(file_backed_store)
     assert len(first) == 24 and first == second == template.result
@@ -137,40 +141,42 @@ def test_enrichment_updates_visible_metadata_without_rejecting_a_weak_genre_prio
     assert not c.refresh_metadata([track])
 
 
-@pytest.mark.parametrize('rejection', ['feedback', 'artist', 'genre', 'overlong'])
-def test_cold_start_keeps_library_and_discovery_bounded(store, monkeypatch, rejection):
-    from fastapi.testclient import TestClient
-    from tests.conftest import FakeClient, _track
-    from tests.derived_rating_support import seed_dislike
-    from yt_playlist.core.activity import WorkClosing, cancellable_work
-    from yt_playlist.web.app import create_app
-
+@pytest.fixture(params=['feedback', 'artist', 'genre', 'overlong'])
+def cold_start_catalog(store, request):
+    rejection = request.param
     account = store.accounts.upsert_account('main', 'cred', None, True)
-    playlist = store.playlists.upsert_playlist(account, 'LIBRARY', 'Library', 0, '', 1)
-    entries, expected = [], set()
     rec_params.set_param(store, 'max_track_minutes', 5)
-    with store._lock:
-        for index in range(3 * CLUSTER_POOL_LIMIT + 7):
-            prefix = index < 2 * CLUSTER_POOL_LIMIT
-            video, artist = f'cold-{index}', f'Artist {index}'
-            entry = store.tracks.upsert_track(video, video, artist, '',
-                                              9000 if prefix and rejection == 'overlong' else 180)
-            entries.append(entry)
-            key = store.tracks.identity_key_for_video(video)
-            if prefix:
-                if rejection == 'feedback':
-                    seed_dislike(store, key, until=None, now=1000)
-                elif rejection == 'artist':
-                    store.rec_model.record_feedback('for_you', 'artist:' + artist, 'mute', now=1000)
-                elif rejection == 'genre':
-                    seed_enrichment(store, entry, 'Jazz', '2001')
-            else:
-                expected.add(video)
-        store.playlists.set_playlist_tracks(playlist, entries)
-        if rejection == 'genre':
-            family = store.genres.feature_axes(['Jazz'])['Jazz'][0]
-            store.rec_model.set_weight('genre:' + family, 0, lo=0, now=1000)
+    tracks = [dict(key=f'cold-{index}|artist {index}', video_id=f'cold-{index}',
+                   title=f'cold-{index}', artist=f'Artist {index}',
+                   duration_s=9000 if index < 2 * CLUSTER_POOL_LIMIT and rejection == 'overlong' else 180,
+                   genre='Jazz' if index < 2 * CLUSTER_POOL_LIMIT and rejection == 'genre' else None)
+              for index in range(3 * CLUSTER_POOL_LIMIT + 7)]
+    # Pagination consumes completed library membership, not provider ingestion.
+    # Keep all three full pages and the short tail in actual SQL.
+    seed_publication_subjects(store, tracks)
+    if rejection == 'feedback':
+        with store.conn:
+            store.conn.executemany(
+                'INSERT INTO rec_feedback(surface,item_key,kind,scope,created_at) VALUES (?,?,?,\'\',1000)',
+                [('sync', track['key'], 'dislike')
+                 for track in tracks[:2 * CLUSTER_POOL_LIMIT]])
+    elif rejection == 'artist':
+        with atomic_write(store):
+            for track in tracks[:2 * CLUSTER_POOL_LIMIT]:
+                artist_id = artists.state_id(store.conn, track['artist'])
+                store.conn.execute(
+                    'INSERT INTO rec_feedback(surface,item_key,kind,scope,created_at,artist_id,target_type) '
+                    "VALUES ('for_you',?,'mute','',1000,?,'artist')",
+                    ('artist:' + track['artist'], artist_id))
+    elif rejection == 'genre':
+        family = store.genres.feature_axes(['Jazz'])['Jazz'][0]
+        store.rec_model.set_weight('genre:' + family, 0, lo=0, now=1000)
     assert store.settings.get_setting('rec_content_model') is None
+    expected = {track['video_id'] for track in tracks[2 * CLUSTER_POOL_LIMIT:]}
+    return SimpleNamespace(account=account, expected=expected, tracks=tracks, rejection=rejection)
+
+
+def test_cold_start_pages_past_ineligible_prefix_without_overfilling(store, monkeypatch, cold_start_catalog):
     pages, read = [], store.radio_catalog.fallback_tracks
 
     def paged(limit, *, after=0):
@@ -182,11 +188,20 @@ def test_cold_start_keeps_library_and_discovery_bounded(store, monkeypatch, reje
     monkeypatch.setattr(store.radio_catalog, 'fallback_tracks', paged)
     c = candidate(store)
     assert len(c.pools['local']) == CLUSTER_POOL_LIMIT
-    assert {t['video_id'] for t in c.pools['local']} <= expected
+    assert {t['video_id'] for t in c.pools['local']} <= cold_start_catalog.expected
     assert len({t['key'] for t in c.pools['local']}) == CLUSTER_POOL_LIMIT
     assert len(pages) == 3 and all(len(ids) == CLUSTER_POOL_LIMIT for _, ids in pages)
     assert [cursor for cursor, _ in pages] == [0, pages[0][1][-1], pages[1][1][-1]]
     c.close()
+
+
+def test_cold_start_routes_offer_eligible_tracks_and_launch_without_prepared_output(
+        store, monkeypatch, cold_start_catalog):
+    from fastapi.testclient import TestClient
+    from tests.conftest import FakeClient, _track
+    from yt_playlist.web.app import create_app
+
+    expected, account = cold_start_catalog.expected, cold_start_catalog.account
     # Exercise real seed/start routes without prepared output or a supplied pool.
     provider = FakeClient(catalog={v: _track(v, v, f'Artist {v.split("-")[-1]}') for v in expected})
     app = create_app(store, lambda: {account: provider}, now_fn=lambda: 100_000)
@@ -200,7 +215,7 @@ def test_cold_start_keeps_library_and_discovery_bounded(store, monkeypatch, reje
             offer = client.get('/radio/seeds').json()
             assert len(offer['tracks']) == 16
             assert {t['video_id'] for t in offer['tracks']} <= expected
-            if rejection == 'overlong':
+            if cold_start_catalog.rejection == 'overlong':
                 started = client.post('/radio/start', json={
                     'video_id': offer['tracks'][0]['video_id'], 'menu_id': offer['menu_id'],
                     'launch_id': 'cold-prefix'}).json()
@@ -211,29 +226,54 @@ def test_cold_start_keeps_library_and_discovery_bounded(store, monkeypatch, reje
     finally:
         ctx.radio.suspend()
         ctx.radio.work.stop_executor()
+
+
+def test_cold_start_exhausts_the_short_tail_without_choices(store, monkeypatch, cold_start_catalog):
     # Exhaustion walks every remaining page, then terminates with no choices.
-    for video in expected:
-        seed_dislike(store, store.tracks.identity_key_for_video(video), until=None, now=1000)
-    pages.clear()
+    with store.conn:
+        store.conn.executemany(
+            "INSERT INTO rec_feedback(surface,item_key,kind,scope,created_at) VALUES ('sync',?,'dislike','',1000)",
+            [(track['key'],) for track in cold_start_catalog.tracks[2 * CLUSTER_POOL_LIMIT:]])
+    pages, read = [], store.radio_catalog.fallback_tracks
+
+    def paged(limit, *, after=0):
+        rows = read(limit, after=after)
+        pages.append(rows)
+        assert limit == CLUSTER_POOL_LIMIT and len(rows) <= limit
+        return rows
+
+    monkeypatch.setattr(store.radio_catalog, 'fallback_tracks', paged)
     c = candidate(store)
     assert not c.pools['local'] and not c.seed_offer()
-    assert len(pages) == 4 and len(pages[-1][1]) == 7
+    assert len(pages) == 4 and len(pages[-1]) == 7
     c.close()
+
+
+def test_cold_start_cancels_after_one_rejected_page(store, monkeypatch, cold_start_catalog):
+    from yt_playlist.core.activity import WorkClosing, cancellable_work
+
     # Cancel after one rejected page, before admitting another page.
-    pages.clear()
+    pages, read = [], store.radio_catalog.fallback_tracks
+
+    def paged(limit, *, after=0):
+        rows = read(limit, after=after)
+        pages.append(rows)
+        return rows
+
+    monkeypatch.setattr(store.radio_catalog, 'fallback_tracks', paged)
     with pytest.raises(WorkClosing), cancellable_work(lambda: bool(pages)):
         candidate(store)
     assert len(pages) == 1
 
-    # Retain the existing comfort/discovery mix and lookahead coverage.
-    if rejection != 'overlong':
-        return
-    for i in range(110):
-        store.tracks.upsert_track(f"v{i}", f"Song {i}", f"Artist {i}", "", 200)
-    fresh = [dict(key=f"fresh{i}", video_id=f"f{i}", title=f"Fresh {i}", artist=f"New Artist {i}")
-             for i in range(110)]
-    seed_bundle_subjects(store, {}, fresh=fresh)
-    publish_bundles(store, {}, fresh=fresh)
+
+def test_cold_start_combines_library_and_discovery_with_bounded_lookahead(store):
+    familiar = [dict(key=f'song {i}|artist {i}', video_id=f'v{i}', title=f'Song {i}',
+                     artist=f'Artist {i}', duration_s=200) for i in range(CLUSTER_POOL_LIMIT + 1)]
+    fresh = [dict(key=f'fresh{i}', video_id=f'f{i}', title=f'Fresh {i}', artist=f'New Artist {i}',
+                  duration_s=200) for i in range(CLUSTER_POOL_LIMIT + 1)]
+    seed_publication_subjects(store, familiar + fresh, discoveries=[track['key'] for track in fresh])
+    publish_bundles(store, {}, fresh=[{key: value for key, value in track.items() if key != 'duration_s'}
+                                     for track in fresh])
     c = candidate(store, comfort=0)
     assert len(c.pools["local"]) == CLUSTER_POOL_LIMIT
     assert any(not t.get("_radio_fresh") for t in c.pools["local"])

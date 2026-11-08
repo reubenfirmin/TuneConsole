@@ -6,12 +6,27 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.independent_schema_support import independent_regular_ddl
+from tests.prepared_fixture_support import assert_upgrade_phase, custody_predecessor, custody_upgrade_cases
+from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads
 from yt_playlist.core import albums, policy_documents
-from yt_playlist.core.migrations import MigrationError, registry, regular, runner
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import album_occurrences as rows, album_shares as shares
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture
+def disable_periodic_library_sync():
+    pass
+
+
+@pytest.mark.parametrize('installed', [79, 93, 98], indirect=True)
+def test_album_input_keeps_admitted_history_and_private_guards(installed):
+    assert_installed_consumer_input(*installed)
 
 
 def finish(job, conn, size=128):
@@ -59,17 +74,62 @@ def test_exact_rows_precision_missing_sources_and_frozen_order(installed):
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
-@pytest.mark.parametrize('installed', [79, 98], indirect=True)
-def test_frozen_upgrade_agrees_without_losing_originals(installed, tmp_path):
-    store, _ = installed
+def prepare_native_comparison(store):
     seed(store)
     for job in (rows.JOB, shares.JOB):
         job.install(store.conn)
         finish(job, store.conn)
-    upgraded = Store(tmp_path / 'album-upgrade.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
+    original_rows = {row['row_id']: rows.original(store.conn, 'album_tracks', row['row_id'], row['source_digest'])
+        for row in store.conn.execute('SELECT * FROM prepared_album_track_rows')}
+    return original_rows, shares.read_original(store.conn, shares.head(store.conn, 'release'))
+
+
+@pytest.fixture(scope='module')
+def native_inputs(upgraded_custody_inputs):
+    def get(version, target, **options):
+        return upgraded_custody_inputs(version, target, 'album-native-agreement',
+            prepare_native_comparison, **options)
+
+    get.release = lambda version: upgraded_custody_inputs.release(version, 'album-native-agreement')
+    return get
+
+
+def assert_native_originals(template):
+    original_rows, original_share = template.result
+    conn = template.source.conn
+    for row in conn.execute('SELECT * FROM prepared_album_track_rows'):
+        assert rows.original(conn, 'album_tracks', row['row_id'], row['source_digest']) == original_rows[row['row_id']]
+    assert shares.read_original(conn, shares.head(conn, 'release')) == original_share
+
+
+@pytest.mark.parametrize('version', [79, 98])
+def test_native_comparison_input_keeps_exact_preparation(native_inputs, version):
+    template = native_inputs(version, version)
+    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert_native_originals(template)
+
+
+@pytest.mark.parametrize('version,target,phase', custody_upgrade_cases((79, 98)))
+def test_native_upgrade_phase_keeps_exact_preparation(native_inputs, version, target, phase):
+    template = native_inputs(version, target, phase=phase)
+    assert_upgrade_phase(template, target if phase == 'converted' else custody_predecessor(version, target))
+    assert_native_originals(template)
+
+
+@pytest.mark.parametrize('version', [79, 98])
+def test_native_serving_input_keeps_private_read_guards(native_inputs, version):
+    template = native_inputs(version, 107)
+    assert_upgrade_phase(template, 107)
+    assert template.source._snapshot_revisions.conn is template.source.conn
+
+
+@pytest.mark.parametrize('version', [79, 98])
+def test_frozen_upgrade_agrees_without_losing_originals(native_inputs, version, tmp_path):
+    prepared = native_inputs(version, version)
+    store = prepared.source
+    with native_inputs(version, 107).open(tmp_path / 'album-upgrade.db') as upgraded:
+        assert upgraded.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal'
+        upgraded.conn.execute('PRAGMA wal_autocheckpoint=0')
         for staged in store.conn.execute('SELECT * FROM prepared_album_track_rows WHERE is_full=1'):
             native = upgraded.conn.execute('SELECT * FROM album_track_occurrences WHERE legacy_row_id=?', (staged['row_id'],)).fetchone()
             for field in ('recording_id','captured_title','captured_credit','raw_identity_key','raw_source_ref','position','disc_number','track_number','captured_source','resolution_status'):
@@ -81,8 +141,6 @@ def test_frozen_upgrade_agrees_without_losing_originals(installed, tmp_path):
             tuple(row) for row in store.conn.execute('SELECT position,raw_source_ref,entry_id FROM prepared_album_share_items ORDER BY position')]
         assert shares.read_original(upgraded.conn, shares.head(upgraded.conn, 'release'))['title'] == 'Frozen 東京'
         assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        upgraded.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -196,3 +254,10 @@ def test_oversized_row_and_invalid_share_do_not_replace_last_good(installed):
     with pytest.raises(ValueError, match='byte budget'):
         rows.JOB.step(store.conn)
     assert store.conn.execute('SELECT source_digest FROM prepared_album_track_rows WHERE row_id=?', (row,)).fetchone()[0] == previous
+
+
+@pytest.mark.parametrize('version', [79, 98])
+def test_native_sources_finish_with_committed_read_only_inputs(native_inputs, version):
+    for source in native_inputs.release(version):
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            source.conn.execute('SELECT 1')

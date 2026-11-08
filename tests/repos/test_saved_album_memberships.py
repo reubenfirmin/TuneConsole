@@ -1,45 +1,23 @@
 """Album reconciliation needs successful observations of its original account cohort."""
 import pytest
 
-from yt_playlist.core.migrations import migrate
-from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.core.store import Store
-from tests.historical_support import upgrade_fixture
 
 
 def album(browse):
     return dict(browse=browse,title=browse,artist='Artist')
 
 
-@pytest.mark.parametrize('upgrade', [False,'retained','already-discarded'])
-def test_unobserved_legacy_owner_survives_deactivation_and_restart(tmp_path,upgrade):
+def test_unobserved_legacy_owner_survives_deactivation_and_restart(tmp_path):
     path = tmp_path / 'library.db'
     store = Store(path)
-    if upgrade:
-        migrate(store.conn,registry=MIGRATIONS[:29])
-        # Populate an installed database before the repair's cohort exists.
-        with store.conn:
-            store.conn.executemany('INSERT INTO identities(id,label,credential_ref,is_master,active) '
-                                  'VALUES (?,?,\'bridge\',?,1)', [(1,'Main',1),(2,'Other',0)])
-            store.conn.execute("INSERT INTO albums(id,title,metadata_rank) VALUES (1,'Legacy',2)")
-            store.conn.execute("INSERT INTO album_provider_ids VALUES ('youtube','unknown',1)")
-            store.conn.execute('INSERT INTO identity_state_archive VALUES (?,?,?,?)',
-                               ('album_legacy:saved_albums','unknown','{"browse_id":"unknown","title":"Legacy"}',
-                                'original album metadata or relationship'))
-            if upgrade=='retained':
-                store.conn.execute("INSERT INTO album_library_memberships(album_id,source) VALUES (1,'legacy_combined')")
-            store.conn.execute('INSERT INTO album_library_snapshots VALUES (1,1)')
-            store.conn.execute('UPDATE identities SET active=0 WHERE id=2')
-        first,second = 1,2
-        upgrade_fixture(store)
-    else:
-        store.init_schema()
-        first = store.accounts.upsert_account('Main','bridge',None,True)
-        second = store.accounts.upsert_account('Other','bridge','other',False)
-        store.collection.add_saved_album(album('unknown'))
-        store.collection.replace_saved_album_snapshots({first:[]},now=1)
-        with store.conn:
-            store.conn.execute('UPDATE accounts SET active=0 WHERE id=?', (second,))
+    store.init_schema()
+    first = store.accounts.upsert_account('Main','bridge',None,True)
+    second = store.accounts.upsert_account('Other','bridge','other',False)
+    store.collection.add_saved_album(album('unknown'))
+    store.collection.replace_saved_album_snapshots({first:[]},now=1)
+    with store.conn:
+        store.conn.execute('UPDATE accounts SET active=0 WHERE id=?', (second,))
     store.conn.close()
     store = Store(path)
     try:

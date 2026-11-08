@@ -11,10 +11,32 @@ from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_predecessor_writes import consumer_installed as unadmitted_installed
 from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_discovery_owner_preparation import seed
+from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import schema_inspection, collection_recovery, policy_documents
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import discovery_artists as preparation, discovery_artist_publication as publication
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Publication owners do not construct an HTTP application."""
+
+
+@pytest.mark.parametrize('version', [79, 85, 86, 93, 94, 100])
+def test_empty_publication_predecessor_keeps_pending_ddl_and_revision_guards(
+        _bounded_installed_schema, version):
+    template = _bounded_installed_schema(version)
+    conn = template.source.conn
+    assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
+    assert conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert regular.validate(conn) == 0
+    assert template.revision_guards
+    assert template.source._snapshot_revisions.conn is conn
+    assert not conn.execute('SELECT 1 FROM main.discovered_artists').fetchone()
 
 
 def prepare(conn):

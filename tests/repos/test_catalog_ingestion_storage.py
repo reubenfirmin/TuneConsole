@@ -1,10 +1,12 @@
 """Controller-led catalog admission keeps native and installed SQL owners writable."""
 import pytest
 
+from yt_playlist.core.migrations import regular
 from yt_playlist.core.store import Store
 
 
 def ingest(store):
+    applied = regular.validate(store.conn)
     first = store.tracks.upsert_track('one', 'Song', 'Artist', 'Album', 180, created_at=10)
     store.tracks.set_track_title(first, 'My title')
     second = store.tracks.upsert_track('two', 'Song', 'Artist', 'Album', 181, created_at=20)
@@ -22,6 +24,11 @@ def ingest(store):
     assert key == 'captured|artist'
     assert store.conn.execute('SELECT COUNT(*) FROM library_memberships').fetchone()[0] == 2
     assert len(store.discovery.get_discovered_tracks()) == 1
+    # Ordinary ingestion works while bounded DDL is pending. The explicit
+    # association workflow starts after the real maintenance runner installs it.
+    assert regular.validate(store.conn) == applied
+    regular.migrate(store.conn)
+    assert regular.validate(store.conn) == len(regular.CHANGES)
     recording = store.tracks.catalog_subject(first)['recording_id']
     store.tracks.associate_youtube_item('candidate', recording, source='review',
         evidence={'verified': True}, now=50, same_recording=True)
@@ -65,7 +72,11 @@ def test_installed_catalog_ingestion(tmp_path, _admitted_installed_schema, versi
     try:
         template.restore(store)
         store._bind_repositories()
+        assert regular.validate(store.conn) < len(regular.CHANGES)
+        assert not store.conn.execute(
+            "SELECT 1 FROM sqlite_schema WHERE name='recording_association_work'").fetchone()
         ingest(store)
+        assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
         with store.read_view() as reopened:
             assert reopened.tracks.catalog_subject(1)['title'] == 'My title'
             assert len(reopened.discovery.get_discovered_tracks()) == 1

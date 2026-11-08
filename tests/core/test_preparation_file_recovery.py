@@ -6,11 +6,22 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import publication_consumer_reads, reuse_reporting_reader
 from tests import file_custody_support as fixture_files
 from yt_playlist.core import fao, preparation_files as recovery
 from yt_playlist.core.preparation import document_plan
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture
+def disable_periodic_library_sync():
+    # File recovery does not construct the web app or run scheduled sync.
+    pass
 
 
 def selected_owner(store, kind):
@@ -71,6 +82,12 @@ def hashes(root):
             for path in root.rglob('*.json')}
 
 
+def database_dump(path):
+    # Observe source immutability independently of Store's serving wrappers.
+    with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as reader:
+        return list(reader.iterdump())
+
+
 def sql_custody(conn):
     tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_schema WHERE type='table' "
         "AND (name LIKE 'prepared_%' OR name LIKE 'published_%' OR name LIKE 'prepare_%') ORDER BY name")]
@@ -86,6 +103,55 @@ def sql_custody(conn):
 def assert_sql_custody(conn, expected, *, original):
     # Both fixture images retain the exact installed schema and domain rows.
     assert sql_custody(conn) == expected
+
+
+SELECTED_KINDS = ('home', 'listening', 'documents', 'models', 'reports')
+
+
+@pytest.fixture(scope='module')
+def selected_inputs(tmp_path_factory, _bounded_installed_schema):
+    """Real selected files below each independent export/recovery path."""
+    path = tmp_path_factory.mktemp('selected-recovery-inputs') / 'library.db'
+    with _bounded_installed_schema(79).open(path) as producer:
+        owners = {}
+
+        def require(kind):
+            if kind not in owners:
+                with pytest.MonkeyPatch.context() as patch:
+                    bound_catalog(patch)
+                    owners[kind] = selected_owner(producer, kind)
+                    producer._snapshot_revisions.refresh()
+            return owners[kind]
+
+        yield producer, owners, require
+
+
+def test_selected_recovery_input_keeps_installed_history_and_guards(selected_inputs):
+    producer, _, _ = selected_inputs
+    assert producer.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 79
+    assert producer._snapshot_revisions.conn is producer.conn
+    assert not producer.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.mark.parametrize('kind', SELECTED_KINDS)
+def test_selected_recovery_input_keeps_real_published_files(selected_inputs, kind):
+    producer, _, require = selected_inputs
+    directory, read, selected = require(kind)
+    assert directory.is_dir() and read(producer)
+    assert selected(producer.conn)
+    assert not producer.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.fixture
+def selected_reads(selected_inputs, monkeypatch):
+    producer, owners, require = selected_inputs
+    for kind in SELECTED_KINDS:
+        require(kind)
+    producer.conn.execute('PRAGMA query_only=ON')
+    # Source reconstruction is below export/recovery. Keep actual selected
+    # SQL/file reads without rebuilding its legacy reader for each field.
+    with reuse_reporting_reader(producer, monkeypatch):
+        yield producer, owners
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
@@ -132,15 +198,12 @@ def test_preparation_relocation_preserves_file_age(installed, tmp_path, compress
         hidden.rename(root)
 
 
-@pytest.mark.parametrize('installed', [79], indirect=True)
 @pytest.mark.parametrize('restore_kind', ['restored', 'snapshot', 'template'])
-def test_selected_files_read_exactly_without_producer(installed, tmp_path, restore_kind):
-    producer, _ = installed
+def test_selected_files_read_exactly_without_producer(selected_reads, tmp_path, restore_kind, monkeypatch):
+    producer, owners = selected_reads
     original = restore_kind == 'snapshot'
     # One real recovery must carry every compatible file owner together. Only
     # the generic export/copy/admission repeats for each distinct restore path.
-    owners = {kind: selected_owner(producer, kind)
-              for kind in ('home', 'listening', 'documents', 'models', 'reports')}
     roots = {directory.parent for directory, _read, _selected in owners.values()}
     assert len(roots) == 1
     root = roots.pop()
@@ -148,7 +211,7 @@ def test_selected_files_read_exactly_without_producer(installed, tmp_path, resto
     selection = {kind: selected(producer.conn) for kind, (_root, _read, selected) in owners.items()}
     assert all(selection.values())
     assert all(selection['documents'].values())
-    before, before_files, custody = list(producer.conn.iterdump()), hashes(root), sql_custody(producer.conn)
+    before, before_files, custody = database_dump(producer._db_path), hashes(root), sql_custody(producer.conn)
     if restore_kind == 'template':
         from tests.prepared_fixture_support import capture_template
         template = capture_template(producer, None)
@@ -164,7 +227,6 @@ def test_selected_files_read_exactly_without_producer(installed, tmp_path, resto
             if original:
                 with closing(sqlite3.connect(path)) as destination:
                     backup.backup(destination)
-    assert list(producer.conn.iterdump()) == before and hashes(root) == before_files
     candidate = Store(path)
     hidden = root.with_name(root.name + '-unavailable')
     try:
@@ -184,7 +246,8 @@ def test_selected_files_read_exactly_without_producer(installed, tmp_path, resto
         if original:
             fixture_files.restore_files(candidate.conn, report['manifests'])
         candidate.init_schema(defer_metadata=True)
-        assert {kind: read(candidate) for kind, (_root, read, _selected) in owners.items()} == expected
+        with reuse_reporting_reader(candidate, monkeypatch):
+            assert {kind: read(candidate) for kind, (_root, read, _selected) in owners.items()} == expected
         assert {kind: selected(candidate.conn) for kind, (_root, _read, selected) in owners.items()} == selection
         assert_sql_custody(candidate.conn, custody, original=original)
         assert not candidate.conn.execute('PRAGMA foreign_key_check').fetchone()
@@ -209,7 +272,7 @@ def test_selected_files_read_exactly_without_producer(installed, tmp_path, resto
         candidate.conn.close()
         if hidden.exists():
             hidden.rename(root)
-    assert list(producer.conn.iterdump()) == before and hashes(root) == before_files
+    assert database_dump(producer._db_path) == before and hashes(root) == before_files
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)

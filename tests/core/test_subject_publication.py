@@ -8,6 +8,7 @@ import pytest
 from tests.core.test_listening_preparation import connect, finish, populated
 from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import entity_names
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import listening_subjects as preparation, subject_publication as publication
@@ -86,7 +87,7 @@ def test_preopened_and_new_readers_match_native_precision_and_subjects(installed
 
 
 @pytest.mark.parametrize('installed', [79, 99], indirect=True)
-def test_continuing_capture_and_source_removal_withdraw_and_reconcile(installed):
+def test_continuing_capture_and_source_removal_withdraw_and_reconcile(installed, publication_consumer_reads):
     store, _ = installed
     account = populated(store)
     with connect(store) as job:

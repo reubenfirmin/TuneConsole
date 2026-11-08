@@ -6,13 +6,33 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_ranked_state_preparation import seed
+from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import library_pool_state, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import clicked_publication as publication, ranked_state as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    pass
+
+
+def test_clicked_input_keeps_installed_history_and_snapshot_guards(_bounded_installed_schema):
+    from yt_playlist.core.migrations import registry
+
+    source = _bounded_installed_schema(93).source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert list(map(tuple, source.conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
+        (entry.version, entry.name) for entry in registry.MIGRATIONS[:93]]
+    assert source._snapshot_revisions.conn is source.conn
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def ready(conn, size=128, *, worker_size=128):
@@ -39,6 +59,18 @@ def rejection_inputs(store):
             assert owner.selected(store.conn) is None
             return
     pytest.fail('Clicked preparation did not finish bounded rejection prefix')
+
+
+@pytest.mark.parametrize('installed', [93], indirect=True)
+def test_clicked_rejection_input_keeps_ranked_fields_and_original_files(installed, staged_custody):
+    store, _ = installed
+    staged_custody(installed, 'clicked-pools', rejection_inputs)
+    for surface in library_pool_state.SURFACES:
+        header = preparation.head(store.conn, surface)
+        original = preparation.read_original(store.conn, header)
+        assert original == store.rec_proposals._proposal_json(surface)
+    assert publication.OWNER.selected(store.conn) is None
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
@@ -181,21 +213,29 @@ def test_source_race_and_interrupted_cutover_leave_no_partial_publication(instal
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_missing_original_or_output_and_failed_preparation_do_not_block_ddl(installed, independent_regular_ddl):
+@pytest.mark.parametrize('suffix', ['parts', 'outputs'])
+def test_missing_original_or_output_is_repaired_without_blocking_ddl(installed, independent_regular_ddl, suffix):
     store, _ = installed
     seed(store)
     owner, surface = publication.OWNER, 'home_pool:wheelhouse'
     stage = ready(store.conn)
     owner.publish(store.conn, stage=stage)
-    for suffix in ('parts', 'outputs'):
-        filename = store.conn.execute('SELECT filename FROM prepared_clicked_pools_'+suffix+' WHERE surface=? LIMIT 1', (surface,)).fetchone()[0]
-        Path(filename).unlink()
-        with pytest.raises(OSError):
-            owner.publish(store.conn, stage=stage)
-        store.init_schema(defer_metadata=True)
-        regular.migrate(store.conn)
-        publication.repair(store.conn, surface)
+    filename = store.conn.execute('SELECT filename FROM prepared_clicked_pools_'+suffix+' WHERE surface=? LIMIT 1', (surface,)).fetchone()[0]
+    Path(filename).unlink()
+    with pytest.raises(OSError):
         owner.publish(store.conn, stage=stage)
+    store.init_schema(defer_metadata=True)
+    regular.migrate(store.conn)
+    publication.repair(store.conn, surface)
+    owner.publish(store.conn, stage=stage)
+
+
+@pytest.mark.parametrize('installed', [93], indirect=True)
+def test_failed_ranked_preparation_keeps_ddl_and_explicit_retry_usable(installed, independent_regular_ddl):
+    store, _ = installed
+    seed(store)
+    owner, surface = publication.OWNER, 'home_pool:wheelhouse'
+    owner.publish(store.conn, stage=ready(store.conn))
     with store.conn:
         store.conn.execute('UPDATE rec_proposals SET built_at=17 WHERE surface=?', (surface,))
     def fail(*args, **kwargs):

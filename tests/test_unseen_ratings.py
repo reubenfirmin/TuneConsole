@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
+from tests.store_fixture_support import file_consumer_store as store
 from yt_playlist.core.store import Store
 from yt_playlist.library import player_events, ratings, sync
 from yt_playlist.rec import rec_worker
@@ -127,6 +128,11 @@ def test_both_heart_routes_schedule_unknown_subjects_after_confirming_rating(sto
     worker.enabled, worker.debounce_s = True, 0
     queued = []
     monkeypatch.setattr(worker, "_start_loop", lambda: queued.append(worker._loop))
+    # Keep rating reconciliation and scheduling real. Model/profile fitting is
+    # a downstream consumer of the confirmed feedback, with separate owners.
+    refreshes = []
+    monkeypatch.setattr(worker, '_prepare_content', lambda: False)
+    monkeypatch.setattr(worker, '_do_rebuild', lambda: refreshes.append('refresh'))
     client = TestClient(app, base_url="http://127.0.0.1")
     response = (client.post(endpoint, data={"video_id": "unseen", "on": "1"})
                 if endpoint == "/track/like" else
@@ -140,6 +146,8 @@ def test_both_heart_routes_schedule_unknown_subjects_after_confirming_rating(sto
     queued.pop()()
     assert reads == ["unseen"]
     assert store.rec_model.recent_liked_with_ts() == [("unseen song|artist", 100)]
+    assert refreshes == ['refresh']
+    assert store.rec_refresh.revision() is not None
 
 
 def test_later_catalog_observation_resolves_pending_rating_without_network(store):
@@ -160,6 +168,7 @@ def test_rating_worker_coalesces_and_resolves_before_background_refresh(store, m
     queued = []
     monkeypatch.setattr(worker, "_start_loop", lambda: queued.append(worker._loop))
     monkeypatch.setattr(worker, '_do_rebuild', lambda: calls.append('refresh'))
+    monkeypatch.setattr(worker, '_prepare_content', lambda: False)
     worker.trigger_rating_update()
     worker.trigger_rating_update()
     assert len(queued) == 1

@@ -239,6 +239,32 @@ def prepared_trial(store, home_prepared_template):
 
 
 @pytest.fixture(scope='module')
+def comparison_menu_schema():
+    from tests.store_fixture_support import bounded_consumer_schema
+
+    with bounded_consumer_schema((('house', 'House'),)) as schema:
+        yield schema
+
+
+@pytest.fixture
+def menu_trial(tmp_path, comparison_menu_schema, monkeypatch):
+    from tests.home_fixture_support import publish_menu
+    from tests.store_fixture_support import initialize_consumer, reuse_reporting_reader
+    from yt_playlist.core.store import Store
+
+    # Attribution consumes completed worker output. Ranking and preparation
+    # have independent owners; four tracks retain observable replacement order.
+    store = Store(tmp_path / 'comparison.db')
+    try:
+        initialize_consumer(store, comparison_menu_schema)
+        with reuse_reporting_reader(store, monkeypatch):
+            normal = publish_menu(store, modeled=True)
+            yield store, _trial(store), normal
+    finally:
+        store.conn.close()
+
+
+@pytest.fixture(scope='module')
 def comparison_template(_pristine_current_schema, tmp_path_factory):
     from tests.prepared_fixture_support import prepared_template
 
@@ -489,12 +515,12 @@ def test_paired_mix_and_album_menus_serve_the_assigned_model_and_keep_the_window
 
 
 @pytest.mark.parametrize('rebuild', ['pool', 'live'])
-def test_rebuilt_home_menu_captures_new_opportunity_without_old_comparison(store, prepared_trial, monkeypatch, rebuild):
+def test_rebuilt_home_menu_captures_new_opportunity_without_old_comparison(menu_trial, monkeypatch, rebuild):
     from starlette.requests import Request
     from yt_playlist.rec import home_prepared
     from yt_playlist.web.routes.home_views import HomeViews
 
-    trial, normal = prepared_trial
+    store, trial, normal = menu_trial
     for arm in ('incumbent', 'challenger'):
         store.rec_proposals.put_proposals(product.pair_surface(trial['run_id'], arm, 'mixes'),
             {'run_id': trial['run_id'], 'data': {'menus': deepcopy(normal['menus']),

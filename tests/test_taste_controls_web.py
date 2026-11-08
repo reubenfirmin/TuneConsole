@@ -7,8 +7,29 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.rec import rec_params
 from yt_playlist.web.app import create_app
-from tests.conftest import FakeClient
+from tests.conftest import FakeClient, _track
 from tests.taste_support import _client
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
+
+
+@pytest.fixture
+def duration_store(monkeypatch):
+    """Track-length controls need settings and playlist SQL, not a vocabulary import."""
+    from fastapi import APIRouter
+    from yt_playlist.core.store import Store
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import taste
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [taste.build(ctx)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+
+    with bounded_consumer_schema(()) as schema:
+        database = Store(':memory:')
+        try:
+            initialize_consumer(database, schema)
+            yield database
+        finally:
+            database.conn.close()
 
 def test_retired_source_weight_cannot_be_saved_or_learned(store):
     client = _client(store)
@@ -60,9 +81,10 @@ def test_taste_page_separates_semantic_controls_from_topic_settings(store):
         assert html.count(f'id="param-{name}"') == 1
 
 
-def test_maximum_track_length_setting_controls_generated_playlists(store):
+def test_maximum_track_length_setting_controls_generated_playlists(duration_store):
     from yt_playlist.library.playlist_generated import create_generated_playlist
 
+    store = duration_store
     client = _client(store)
     html = client.get("/taste/panels/recommendations").text
     panel = html.split('id="taste-feature-home"', 1)[1].split('</section>', 1)[0]
@@ -71,7 +93,8 @@ def test_maximum_track_length_setting_controls_generated_playlists(store):
     assert 'Default 20' in panel
     assert client.post("/taste/param", data={"name": "max_track_minutes", "value": "120"}).status_code == 200
 
-    remote = FakeClient(song_durations={"concert": 7200})
+    remote = FakeClient(catalog={'concert': _track('concert', 'Concert', 'Artist')},
+                        song_durations={"concert": 7200})
     result = create_generated_playlist(store, "Gen", [{"video_id": "concert"}], remote, 1)
     assert result["added"] == 1
     assert client.post("/taste/reset-param", data={"name": "max_track_minutes"}).status_code == 200

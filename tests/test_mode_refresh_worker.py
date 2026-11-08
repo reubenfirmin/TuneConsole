@@ -8,33 +8,59 @@ import pytest
 
 from yt_playlist.rec import (content_model, embedding_training as training, embedding_vectors as embed,
                              model_refresh, mode_surfaces, rec_params, rec_worker, taste_modes)
-from tests.model_support import build_content_model, publish_modes
 from tests.prepared_fixture_support import prepared_template
-from tests.recommendation_support import publish_bundles
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from yt_playlist.core.store import Store
 
 
-def _seed_library(store, *, per_genre=27):
+def _seed_library(store, *, per_genre=4):
     iid = store.accounts.upsert_account("main", "cred", None, True)
-    tracks = []
-    for genre in ("Techno", "Jazz", "Rock"):
-        for i in range(per_genre):
-            title = f"{genre} {i}"
-            video = f"{genre}-{i}"
-            tid = store.tracks.upsert_track(video, title, "Artist", None, None)
-            store.tracks.set_track_genre(tid, genre)
-            tracks.append(tid)
+    # These workers consume already saved clusters. Clustering discovery and
+    # its corpus threshold belong to test_taste_modes_discover; model refresh,
+    # saved-vector reads and publication remain real here.
+    seed_publication_subjects(store, [
+        {'key': f'{genre.lower()} {i}|artist', 'video_id': f'{genre}-{i}',
+         'title': f'{genre} {i}', 'artist': 'Artist', 'genre': genre}
+        for genre in ('Techno', 'Jazz', 'Rock') for i in range(per_genre)])
+    tracks = [row[0] for row in store.conn.execute('SELECT id FROM recordings ORDER BY id')]
     rec_params.set_param(store, "modes_k", 3)
     rec_params.set_param(store, "modes_min_members", 20)
-    assert build_content_model(store)
-    assert publish_modes(store, 1000.0) == 3
     store.history.import_play_events(iid, [(f"techno {i}|artist", f"Techno-{i}", 2000.0)
                                    for i in range(4)])
+    assert model_refresh.rebuild(store, 1000.0) is not None
+    _, vectors, index = embed.load_content_vectors(store)
+    store.modes.replace_modes([
+        {'mode_id': mid, 'label': genre, 'families': [[genre.lower(), 1]],
+         'centroid': vectors[index[f'{genre.lower()} 0|artist']].copy(),
+         'space': embed.content_space_id(store), 'size': per_genre,
+         'rep_keys': [f'{genre.lower()} 0|artist']}
+        for mid, genre in enumerate(('Techno', 'Jazz', 'Rock'), 1)], [], 1000.)
+    assert len(store.modes.list_modes(active_only=True)) == 3
     return tracks
 
 
-@pytest.fixture(scope="session")
-def mode_refresh_library_template(_pristine_current_schema):
-    with prepared_template(_pristine_current_schema, _seed_library) as template:
+@pytest.fixture(scope='module')
+def worker_schema():
+    with bounded_consumer_schema(entries=(('techno', 'Techno'), ('jazz', 'Jazz'), ('rock', 'Rock'))) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(tmp_path, worker_schema, monkeypatch):
+    database = Store(tmp_path / 'worker.db')
+    try:
+        initialize_consumer(database, worker_schema)
+        database.conn.execute('PRAGMA wal_autocheckpoint=0')
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
+    finally:
+        database.conn.close()
+
+
+@pytest.fixture(scope='module')
+def mode_refresh_library_template(worker_schema):
+    with prepared_template(worker_schema, _seed_library) as template:
         yield template
 
 
@@ -120,26 +146,39 @@ def test_deferred_model_fit_still_prepares_candidates(store, monkeypatch):
     assert prepared == [True]
 
 
-def test_content_update_refreshes_original_models_and_places_track(store, library, monkeypatch):
-    mode_surfaces.prepare_bundles(store, 1000.0)
+def test_content_update_refreshes_saved_models_without_changing_space(store, library):
     space = embed.content_space_id(store)
     tid = store.tracks.upsert_track("extra", "Zz extra", "Artist", None, None)
     store.tracks.set_track_genre(tid, "Techno")
     key = store.tracks.identity_key_for_video("extra")
 
     _settle(store)
-    assert mode_surfaces.prepare_bundles(store, 2000) is not None
     assert embed.content_space_id(store) == space
     assert {m['mode_id'] for m in taste_modes.live_modes(store)} == {
         m['mode_id'] for m in store.modes.list_modes(active_only=True)}
     assert key in store.rec_model.content_vectors_by_keys([key])
+
+
+def test_refreshed_model_places_new_track_in_temporal_pool(store, library):
+    key = 'zz extra|artist'
+    seed_publication_subjects(store, [{'key': key, 'video_id': 'extra',
+        'title': 'Zz extra', 'artist': 'Artist', 'genre': 'Techno'}])
+    _settle(store)
+    assert mode_surfaces.prepare_bundles(store, 2000) is not None
     assert key in _pool_keys(store, 'temporal')
 
 
 @pytest.mark.parametrize("prepared", [False, True], ids=["missing-bundles", "saved-bundles"])
 def test_current_groups_are_not_recomputed_at_every_startup(store, library, monkeypatch, prepared):
-    # Adopt this pre-ledger fixture before guarding an unchanged restart.
+    # Verify the completed input is settled before guarding an unchanged restart.
     _settle(store)
+    # Startup consumes completed ranking inputs; candidate placement has its
+    # own real-ranking owner above. Keep publication and model reuse live.
+    items = [{'key': f'techno {i}|artist', 'video_id': f'Techno-{i}',
+              'title': f'Techno {i}', 'artist': 'Artist'} for i in range(4)]
+    def ranked(reader, now, policies):
+        return {'all': {'temporal': policies.stamp(items, 'temporal')}}, []
+    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', ranked)
     saved = None
     if prepared:
         mode_surfaces.prepare_bundles(store, 1000.0)
@@ -167,10 +206,12 @@ def test_current_groups_are_not_recomputed_at_every_startup(store, library, monk
 @pytest.mark.parametrize("cached", [None, []], ids=["absent", "empty"])
 def test_startup_repairs_absent_discovery_songs_while_reusing_saved_groups(store, library, monkeypatch, cached):
     from yt_playlist.rec import fresh_pool
-    mode_surfaces.prepare_bundles(store, 1000)
-    for i in range(12):
-        store.discovery.upsert_discovered_track(f"new {i}|new artist {i}", f"v{i}", f"New {i}",
-            f"New artist {i}", None, None, "Jazz", "2020", "radio:seed", 1001)
+    publish_bundles(store, {}, 1000)
+    discoveries = [{'key': f'new {i}|new artist {i}', 'video_id': f'v{i}',
+        'title': f'New {i}', 'artist': f'New artist {i}', 'genre': 'Jazz', 'year': '2020'}
+        for i in range(12)]
+    seed_publication_subjects(store, discoveries,
+        discoveries=[track['key'] for track in discoveries], now=1001)
     if cached is None:
         with store.conn:
             store.conn.execute("DELETE FROM recommendation_heads WHERE surface='fresh'")
@@ -183,7 +224,7 @@ def test_startup_repairs_absent_discovery_songs_while_reusing_saved_groups(store
     def forbidden(*args, **kwargs):
         raise AssertionError("Discovery repair must reuse the saved groups and model")
 
-    # Adopt this fixture's saved spaces into the production fit ledger first.
+    # Complete discovery encoding before guarding reuse of the saved groups.
     _settle(store)
     monkeypatch.setattr(taste_modes, "prepare_modes", forbidden)
     monkeypatch.setattr(training, "build_vectors_from_baskets", forbidden)
@@ -338,7 +379,6 @@ def test_bundle_retry_repairs_a_model_invalidated_during_preparation(store, libr
 
     monkeypatch.setattr(mode_surfaces, "prepare_bundles", invalidate_once)
     monkeypatch.setattr(worker, "_start_loop", lambda: None)
-    _settle(store)
     with monkeypatch.context() as request_guard:
         request_guard.setattr(training, "build_vectors_from_baskets", forbidden)
         with caplog.at_level(logging.INFO):
@@ -355,7 +395,8 @@ def test_bundle_retry_repairs_a_model_invalidated_during_preparation(store, libr
         assert len(failures) == 1 and failures[0].exc_info[0] is RuntimeError
     # The worker settles invalidated model inputs before retrying candidate pools.
     # Pool preparation must only read the model lifecycle's published result.
-    _settle(store)
+    if failure == 'model-invalidated':
+        _settle(store)
     if failure == 'policy-capacity':
         clock[0] = worker.jobs.retry['bundles'].retry_at - .001
         worker._refresh_bundles()

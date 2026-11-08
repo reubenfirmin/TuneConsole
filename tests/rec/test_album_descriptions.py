@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.home_fixture_support import returning_listener, without_metadata_providers
+from tests.store_fixture_support import file_consumer_store as album_worker_store
 from yt_playlist.core.store import Store
 from yt_playlist.integrations.deepseek import DeepSeekIAO
 from yt_playlist.providers import deepseek
@@ -226,15 +228,18 @@ def test_usage_and_generated_records_do_not_contain_credentials(store, generated
     assert not store.conn.execute("SELECT 1 FROM rec_proposals WHERE surface LIKE 'album_description%'").fetchone()
 
 
-def test_worker_prepares_refreshed_menu_instead_of_buying_copy_for_previous_menu(store, monkeypatch):
+def test_worker_prepares_refreshed_menu_instead_of_buying_copy_for_previous_menu(
+        album_worker_store, monkeypatch, without_metadata_providers):
     from types import SimpleNamespace
     from fastapi.testclient import TestClient
     from yt_playlist.web import app as webapp
     from yt_playlist.web.routes import app_update, audio_preview, home
     from yt_playlist.rec import album_choices, album_notes, home_prepared
     from yt_playlist.rec.worker_tasks import ServingTasks
-    from tests.test_growth_journey import early_journey
-    early_journey(store)
+    store = album_worker_store
+    # This worker consumes an earned Albums destination. Foundation preparation
+    # and progression retain their own journey tests.
+    returning_listener(store, 'albums', now=1000)
     # Keep the real Home routes, template globals and shutdown ownership.
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx) for module in
                                                         (home, app_update, audio_preview)])

@@ -5,8 +5,37 @@ from tests.derived_rating_support import seed_dislike
 import pytest
 
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import album_feedback, growth_readiness, home_prepared, measurement, musical_character, vibe_preparation
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # These consumers use Jazz candidates. Full taxonomy/bootstrap validation
+    # belongs to its independent schema and genre owners.
+    with bounded_consumer_schema((('jazz', 'Jazz'),)) as schema:
+        yield schema
+
+
+def test_readiness_schema_keeps_empty_current_owners_and_snapshot_guards(_pristine_current_schema):
+    assert _pristine_current_schema.execute('SELECT count(*) FROM recordings').fetchone()[0] == 0
+    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert _pristine_current_schema._revision_script
+
+
+@pytest.fixture(scope='module')
+def vibe_menu_template(_pristine_current_schema, tmp_path_factory):
+    from tests.prepared_fixture_support import prepared_template
+    from tests.store_fixture_support import reuse_reporting_reader
+
+    def seed(source):
+        with pytest.MonkeyPatch.context() as patch, reuse_reporting_reader(source, patch):
+            return publish_vibe_menus(source)
+
+    path = tmp_path_factory.mktemp('readiness-menu-inputs') / 'source.db'
+    with prepared_template(_pristine_current_schema, seed, database=path) as template:
+        yield template
 
 
 @pytest.fixture(autouse=True)
@@ -111,55 +140,89 @@ def test_vibe_input_must_be_compatible_supported_prediction_or_measurement():
     assert not growth_readiness._supported(track, 'relax')
 
 
-def test_compatible_vibe_evidence_survives_model_replacement_and_still_rechecks_feedback(store, monkeypatch, vibe_menus):
-    lanes = vibe_menus
+def test_compatible_vibe_evidence_survives_model_replacement_and_still_rechecks_feedback(
+        store, monkeypatch, completed_vibe_menus):
+    lanes = completed_vibe_menus
     assert growth_readiness.vibes(store, 1000)
     monkeypatch.setattr(vibe_preparation.audio_vibe_model, 'identity', lambda: 'replacement-model')
     assert vibe_preparation.due(store)
     assert growth_readiness.vibes(store, 1001)
-    for track in lanes['fresh'][3:]:
-        seed_dislike(store, track['key'], until=None, now=1002)
+    with atomic_write(store):
+        for track in lanes['fresh'][3:]:
+            seed_dislike(store, track['key'], until=None, now=1002)
     assert not growth_readiness.vibes(store, 1002)
 
 
-def publish_vibe_menus(store):
-    from tests.conftest import seed_catalog_track
-    from tests.musical_support import prepare_profiles
-    from yt_playlist.rec import home_vibe, vibe_pools
-
-    # Controlled music with contrasting measured attributes, processed by the
-    # ordinary profile worker and selected by the real Vibe assembler.
+def vibe_menu_inputs(store, *, lane_count=8, fresh_count=48, comfort_count=36):
     lanes = {}
-    # One existing input batch, rather than a commit for every recording and
-    # metadata field. Real evidence, files and normal profile workers remain.
+    audio_inputs = {}
+    for lane in ('wheelhouse', 'explore', 'fresh', 'comfort'):
+        tracks = []
+        # The journey producer keeps its actual Fresh and Comfort capacities.
+        for index in range(fresh_count if lane == 'fresh' else comfort_count if lane == 'comfort' else lane_count):
+            key = f'{lane} {index}|{lane} artist {index}'
+            soft = index % 2 == 0
+            audio_inputs[key] = {'energy': .1 if soft else .9, 'mood_relaxed': .9 if soft else .1,
+                                 'mood_happy': .8 if soft else .2}
+            tracks.append({'key': key, 'video_id': key, 'title': f'{lane} {index}',
+                           'artist': f'{lane} artist {index}', 'genre': 'Jazz', 'score': .8})
+        lanes[lane] = tracks
+    seed_publication_subjects(store, [track for tracks in lanes.values() for track in tracks],
+                              discoveries=[track['key'] for track in lanes['fresh']])
+    return lanes, audio_inputs
+
+
+def publish_vibe_menus(store):
+    from tests.musical_support import prepare_profiles
+    from yt_playlist.core import artists, metadata
+
+    # Worker-update and full serving agreement owners retain actual measured
+    # metadata, ordinary profile preparation, and all 116 catalog subjects.
+    lanes, audio_inputs = vibe_menu_inputs(store, lane_count=16)
+    entries = dict(store.conn.execute('SELECT r.identity_key,e.id FROM catalog_entries e '
+                                     'JOIN recordings r ON r.id=e.recording_id'))
     with atomic_write(store):
-        for lane in ('wheelhouse', 'explore', 'fresh', 'comfort'):
-            tracks = []
-            # Keep the journey's real Fresh and Comfort capacity gates. Four
-            # contrasting pairs suffice for the other preset lanes.
-            for index in range(48 if lane == 'fresh' else 36 if lane == 'comfort' else 8):
-                key = f'{lane} {index}|{lane} artist {index}'
-                soft = index % 2 == 0
-                audio = {'energy': .1 if soft else .9, 'mood_relaxed': .9 if soft else .1,
-                         'mood_happy': .8 if soft else .2}
-                track = {'key': key, 'video_id': key, 'title': f'{lane} {index}',
-                         'artist': f'{lane} artist {index}', 'genre': 'Jazz', 'score': .8}
-                if lane == 'fresh':
-                    store.discovery.upsert_discovered_track(key, key, track['title'], track['artist'],
-                        '', None, 'Jazz', None, None, 1, audio=audio)
-                else:
-                    entry = seed_catalog_track(store, key, track['title'], track['artist'],
-                                               video_id=key, genre='Jazz')
-                    from yt_playlist.core import metadata
-                    with store.conn:
-                        for field, value in audio.items():
-                            metadata.select(store.conn, entry, field, value, 'fixture')
-                tracks.append(track)
-            lanes[lane] = tracks
+        for key, audio in audio_inputs.items():
+            artists.observe(store.conn, entries[key], key.split('|', 1)[1], now=1000)
+            for field, value in audio.items():
+                metadata.select(store.conn, entries[key], field, value, 'fixture')
     prepare_profiles(store)
     bundle = {'all': lanes, '_meta': {'comfort_pool': 36}}
     publish_bundles(store, bundle, vibes=True)
     return lanes
+
+
+@pytest.fixture
+def completed_vibe_inputs(store, monkeypatch):
+    from yt_playlist.rec import home_vibe, musical_profiles, rec_params
+
+    # These consumers inspect completed menus, policy compatibility and live
+    # feedback. The real worker/update owners below cover profile production.
+    # Eight candidates per lane preserve four full cards and contrasting
+    # presets. Default inventory thresholds retain their real producer owner.
+    lanes, audio_inputs = vibe_menu_inputs(store, fresh_count=8, comfort_count=8)
+    rec_params.set_param(store, 'comfort_min_pool', 8)
+    profiles = {}
+    for soft in (True, False):
+        attributes = {'energy': .1 if soft else .9, 'mood_relaxed': .9 if soft else .1,
+                      'mood_happy': .8 if soft else .2}
+        profile = musical_profiles.resolve([], selected=attributes)
+        profile['vibes'] = {'inputs_version': vibe_preparation.version(), 'fits': {
+            preset: {'score': home_vibe.heuristic_affinity(profile, preset),
+                     'support': .8, 'source': 'provider_measurement'}
+            for preset in home_vibe.PRESETS}}
+        profiles[soft] = musical_character.compact(profile)
+    by_key = {key: profiles[attributes['energy'] < .5] for key, attributes in audio_inputs.items()}
+    monkeypatch.setattr(musical_character, 'load',
+                        lambda _reader, keys: {key: deepcopy(by_key[key]) for key in keys})
+    store.settings.set_setting('rec_vibe_version', vibe_preparation.version())
+    return {'all': lanes, '_meta': {'comfort_pool': 8}}
+
+
+@pytest.fixture
+def completed_vibe_menus(store, completed_vibe_inputs):
+    publish_bundles(store, completed_vibe_inputs, vibes=True)
+    return completed_vibe_inputs['all']
 
 
 def test_vibe_gate_checks_real_menus_for_every_preset_and_current_exclusions(store, vibe_menus):
@@ -168,8 +231,9 @@ def test_vibe_gate_checks_real_menus_for_every_preset_and_current_exclusions(sto
     lanes = vibe_menus
     assert all(len(vibe_pools.assemble(store, 1000, preset)) == 4 for preset in home_vibe.PRESETS)
     assert growth_readiness.vibes(store, 1000)
-    for track in lanes['fresh'][3:]:
-        seed_dislike(store, track['key'], until=None, now=1001)
+    with atomic_write(store):
+        for track in lanes['fresh'][3:]:
+            seed_dislike(store, track['key'], until=None, now=1001)
     assert not growth_readiness.vibes(store, 1001)
 
 
@@ -273,13 +337,14 @@ def test_readiness_follows_normal_worker_updates_between_menu_publications(
     check(True)
 
 
-def test_missing_readiness_waits_for_worker_without_reading_profiles_or_ranked_pools(store, monkeypatch, vibe_menus):
+def test_missing_readiness_waits_for_worker_without_reading_profiles_or_ranked_pools(
+        store, monkeypatch, completed_vibe_inputs):
     from yt_playlist.core import profile_files
     from yt_playlist.rec import vibe_pools
     from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
 
-    lanes = vibe_menus
-    bundle = deepcopy(store._fixture_bundle_payload)
+    bundle = vibe_pools.prepare(store, deepcopy(completed_vibe_inputs), 1000,
+                                measurement.PoolPolicies(store, 1000))
     bundle['_meta'].pop('vibe_readiness')
     publish_bundles(store, bundle)
 
@@ -293,37 +358,48 @@ def test_missing_readiness_waits_for_worker_without_reading_profiles_or_ranked_p
         guards.setattr(profile_files, 'read', unexpected)
         guards.setattr(RecommendationPublicationsRepo, 'candidate_rows', unexpected)
         assert not growth_readiness.vibes(store, 1000)
-    publish_bundles(store, bundle, vibes=True)
-    assert growth_readiness.vibes(store, 1001)
-    for track in lanes['fresh'][3:]:
-        seed_dislike(store, track['key'], until=None, now=1001)
-    assert not growth_readiness.vibes(store, 1001)
+    # Compatible publication and current feedback have their distinct owner in
+    # test_compatible_vibe_evidence_survives_model_replacement_and_still_rechecks_feedback.
 
 
-def test_oversized_optional_index_does_not_block_useful_menu_publication(store, monkeypatch, vibe_menus):
+def test_oversized_optional_index_does_not_block_useful_menu_publication(
+        store, monkeypatch, completed_vibe_inputs):
     from yt_playlist.rec import home_vibe, vibe_pools, vibe_readiness_index
 
+    publish_bundles(store, {'all': {}, '_meta': {}})
     previous = store.recommendations.head('home')['id']
     monkeypatch.setattr(vibe_readiness_index, 'MAX_INDEX_BYTES', 1)
-    publish_bundles(store, deepcopy(store._fixture_bundle_payload), vibes=True)
+    publish_bundles(store, deepcopy(completed_vibe_inputs), vibes=True)
     assert store.recommendations.head('home')['id'] != previous
     assert all(len(vibe_pools.assemble(store, 1000, preset)) == 4 for preset in home_vibe.PRESETS)
     assert not growth_readiness.vibes(store, 1000)
 
 
-def test_summary_does_not_hide_a_changed_preset_or_incompatible_fit_policy(store, monkeypatch, vibe_menus):
-    original = store.recommendations.head('home')['id']
-    bundle = deepcopy(store._fixture_bundle_payload)
-    bundle['_meta']['comfort_pool'] = 0
-    publish_bundles(store, bundle)
+def test_summary_does_not_hide_a_changed_preset_or_incompatible_fit_policy(
+        store, monkeypatch, completed_vibe_menus):
+    original = store.recommendations.head('home')
+    vibes = store._fixture_bundle_payload['_vibes']
+    # Publish only the changed preset. The unchanged presets retain their
+    # actual original generation rather than being rebuilt and then rewound.
+    policy = store.recommendations.pool('vibe:relax', '', 'fresh')['policy_version']
+    bundle = {'_meta': {'comfort_pool': 0}, '_vibes': {**vibes,
+        'pools': {'relax': {lane: [{**track, 'pool_policy': policy} for track in tracks]
+                            for lane, tracks in vibes['pools']['relax'].items()}},
+        'genres': {}}}
+    plan = store.recommendations.prepare_bundle(bundle, None,
+        external_key='readiness-relax-replacement', policy_version=original['policy_version'],
+        input_revision=None, created_at=1001)
+    build = store.recommendations.claim(plan)
+    assert store.recommendations.stage(plan, build)
+    store.recommendations.publish(build, 1001)
     # Only this preset has moved on. Its new framing offers three lanes, while
     # Home still owns the earlier four-lane summary.
     with store.conn:
         store.conn.execute("UPDATE recommendation_heads SET generation_id=? WHERE surface!='vibe:relax'",
-                           (original,))
+                           (original['id'],))
     assert not growth_readiness.vibes(store, 1000)
     with store.conn:
-        store.conn.execute('UPDATE recommendation_heads SET generation_id=?', (original,))
+        store.conn.execute('UPDATE recommendation_heads SET generation_id=?', (original['id'],))
     assert growth_readiness.vibes(store, 1000)
     monkeypatch.setattr(vibe_preparation, 'serving_prefix', lambda: 'incompatible-fit-policy/')
     assert not growth_readiness.vibes(store, 1000)

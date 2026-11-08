@@ -10,9 +10,32 @@ import pytest
 from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_collection_document_preparation import seed
+from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import collection_documents as preparation, collection_document_publication as publication
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Saved-document publication checks do not construct an HTTP application."""
+
+
+@pytest.mark.parametrize('version', [79, 85, 88, 93, 96])
+def test_document_input_keeps_each_installed_contract_and_snapshot_guards(_bounded_installed_schema, version):
+    from contextlib import closing
+
+    template = _bounded_installed_schema(version)
+    source = template.source
+    with closing(sqlite3.connect(source._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
+        reader.row_factory = sqlite3.Row
+        runner.validate_version(reader, version)
+        regular.validate(reader)
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert template.revision_guards
 
 
 def prepare(owner, conn):
@@ -133,29 +156,86 @@ def test_mapping_is_bounded_resumable_and_restarts_after_intervening_source_writ
     assert owner.value(store.conn, first.id, 'canvas-0000') == 'state 0'
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_canvas_default_mapping_batch_stops_at_128_real_prepared_documents(installed, record_property):
-    store, _ = installed
-    began = perf_counter()
-    for index in range(129):
-        store.playlist_recipes.set_cluster_canvas(f'boundary-{index:04d}', 'state '+str(index), index)
-    record_property('canvas_boundary_source_seconds', perf_counter() - began)
+@pytest.fixture(scope='module')
+def canvas_mapping_inputs(_bounded_installed_schema, tmp_path_factory):
+    """One private producer, with measured durable continuation checkpoints."""
+    from contextlib import ExitStack, closing
+    from yt_playlist.core import playlist_scopes
+
+    checkpoints = (64, 128, 129)
+    root = tmp_path_factory.mktemp('canvas-mapping-inputs')
+    owner = publication.OWNERS['canvases']
+    with _bounded_installed_schema(93).open(root / 'library.db') as store, ExitStack() as snapshots:
+        completed = 0
+        captured = {}
+        def get(count, *, writable=False):
+            nonlocal completed
+            assert count in checkpoints
+            if count > completed:
+                store.conn.execute('PRAGMA query_only=OFF')
+                if completed == 0:
+                    # All 129 real source rows, with one lower-input commit.
+                    with store.conn.atomic():
+                        for position in range(129):
+                            playlist_scopes.ensure(store.conn, f'boundary-{position:04d}')
+                        store.conn.executemany('INSERT INTO main.cluster_canvas(playlist_ytm,state,created_at) VALUES (?,?,?)',
+                            [(f'boundary-{position:04d}', 'state '+str(position), position) for position in range(129)])
+                    owner.worker.install(store.conn)
+                for checkpoint in checkpoints:
+                    if not completed < checkpoint <= count:
+                        continue
+                    for _ in range(checkpoint - completed):
+                        owner.worker.step(store.conn)
+                    assert store.conn.execute('SELECT count(*) FROM '+owner.current).fetchone()[0] == checkpoint
+                    if checkpoint == 129:
+                        prepare(owner, store.conn)
+                    # These snapshots only read immutable prepared originals.
+                    # Their source files remain owned by the producer's lifetime.
+                    snapshot = snapshots.enter_context(closing(sqlite3.connect(':memory:')))
+                    snapshot.row_factory = sqlite3.Row
+                    store.conn.backup(snapshot)
+                    snapshot.execute('PRAGMA query_only=ON')
+                    captured[checkpoint] = snapshot
+                    completed = checkpoint
+                store.conn.execute('PRAGMA query_only=ON')
+            if writable:
+                assert count == 129
+                store.conn.execute('PRAGMA query_only=OFF')
+                return store.conn
+            return captured[count]
+
+        yield get
+
+
+@pytest.mark.parametrize('count', [64, 128, 129])
+def test_canvas_mapping_input_keeps_real_originals_and_durable_continuation(canvas_mapping_inputs, count):
+    conn = canvas_mapping_inputs(count)
+    owner = publication.OWNERS['canvases']
+    assert conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert conn.execute('SELECT count(*) FROM main.cluster_canvas').fetchone()[0] == 129
+    assert conn.execute('SELECT count(*) FROM '+owner.current).fetchone()[0] == count
+    for position in (0, count - 1):
+        head = preparation.head(conn, 'canvases', f'boundary-{position:04d}')
+        assert preparation.read_original(conn, 'canvases', head) == 'state '+str(position)
+    assert (owner.worker.progress(conn).status == 'prepared') == (count == 129)
+    assert owner.selected(conn) is None
+
+
+def test_canvas_default_mapping_batch_stops_at_128_real_prepared_documents(canvas_mapping_inputs, record_property):
+    conn = canvas_mapping_inputs(129, writable=True)
     owner = publication.OWNERS['canvases']
     began = perf_counter()
-    prepare(owner, store.conn)
-    record_property('canvas_boundary_preparation_seconds', perf_counter() - began)
-    began = perf_counter()
-    first = owner.step(store.conn)  # Use the production default, not a supplied size.
+    first = owner.step(conn)  # Use the production default, not a supplied size.
     assert first.copied == 128 and not first.complete
-    links = list(store.conn.execute('SELECT source FROM '+owner.table('map')+' WHERE stage=? ORDER BY source', (first.id,)))
+    links = list(conn.execute('SELECT source FROM '+owner.table('map')+' WHERE stage=? ORDER BY source', (first.id,)))
     assert [row[0] for row in links] == [f'boundary-{index:04d}' for index in range(128)]
     with pytest.raises(ValueError, match='1 to 128'):
-        owner.step(store.conn, batch_size=129)
-    assert owner.stage(store.conn, first.id) == first
-    completed = owner.step(store.conn)
+        owner.step(conn, batch_size=129)
+    assert owner.stage(conn, first.id) == first
+    completed = owner.step(conn)
     assert completed.id == first.id and completed.copied == 129 and completed.complete
-    assert owner.value(store.conn, completed.id, 'boundary-0128') == 'state 128'
-    assert owner.selected(store.conn) is None
+    assert owner.value(conn, completed.id, 'boundary-0128') == 'state 128'
+    assert owner.selected(conn) is None
     record_property('canvas_boundary_mapping_seconds', perf_counter() - began)
 
 
@@ -313,15 +393,24 @@ def test_new_optional_axis_owner_withdraws_selection_without_blocking_regular_dd
         assert owner.selected(upgraded.conn) is None
         regular.migrate(upgraded.conn)
         owner.publish(upgraded.conn, stage=stage(owner, upgraded.conn))
-        from yt_playlist.core import taste_axes
-        with upgraded.conn:
-            axis = taste_axes.identity(upgraded.conn, 'genre:Unknown original', create=True)
-        assert owner.selected(upgraded.conn) is None
-        owner.publish(upgraded.conn, stage=stage(owner, upgraded.conn))
-        assert upgraded.conn.execute('SELECT axis_ref FROM '+preparation.table('recipes', 'facets')+
-            " WHERE source='PLAYLIST' AND kind='genre' ORDER BY preparation_revision DESC LIMIT 1").fetchone()[0] == axis
     finally:
         upgraded.conn.close()
+
+
+@pytest.mark.parametrize('installed', [88], indirect=True)
+def test_new_axis_withdraws_recipe_selection_and_republication_captures_its_identity(installed):
+    from yt_playlist.core import taste_axes
+
+    store, _ = installed
+    seed(store)
+    owner = publication.OWNERS['recipes']
+    owner.publish(store.conn, stage=stage(owner, store.conn))
+    with store.conn:
+        axis = taste_axes.identity(store.conn, 'genre:Unknown original', create=True)
+    assert owner.selected(store.conn) is None
+    owner.publish(store.conn, stage=stage(owner, store.conn))
+    assert store.conn.execute('SELECT axis_ref FROM '+preparation.table('recipes', 'facets')+
+        " WHERE source='PLAYLIST' AND kind='genre' ORDER BY preparation_revision DESC LIMIT 1").fetchone()[0] == axis
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

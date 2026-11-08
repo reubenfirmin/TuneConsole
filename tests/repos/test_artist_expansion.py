@@ -1,4 +1,19 @@
-from tests.conftest import seed_catalog_track
+from tests.recommendation_support import seed_publication_subjects
+from yt_playlist.core.artists import ensure
+
+
+def _catalog(store, prefix, title, artist, count):
+    # This query owns the real library size and credit index. Provider credit
+    # ingestion is a completed lower input, with one shared artist identity.
+    seed_publication_subjects(store, [
+        {'key': f'{prefix}-{i}', 'title': title, 'artist': artist, 'video_id': f'{prefix}-{i}'}
+        for i in range(count)])
+    with store.conn:
+        subject = ensure(store.conn, artist)
+        store.conn.execute("INSERT INTO entry_artists(entry_id,position,artist_id,credit,source) "
+            "SELECT e.id,0,?,?,'fixture' FROM catalog_entries e JOIN recordings r ON r.id=e.recording_id "
+            'WHERE r.artist=?', (subject, artist, artist))
+    return subject
 
 
 def _legacy(store, wanted):
@@ -50,12 +65,9 @@ def _measured(store, artist):
 
 
 def test_artist_expansion_work_is_bounded_by_requested_catalog(store):
-    for i in range(8):
-        seed_catalog_track(store, f"wanted-{i}", "Wanted", "Artist", video_id=f"wanted-{i}")
-    artist = store.artists.resolve("Artist")
+    artist = _catalog(store, 'wanted', 'Wanted', 'Artist', 8)
     before, small, _ = _measured(store, artist)
-    for i in range(1500):
-        seed_catalog_track(store, f"other-{i}", "Other", "Unrelated", video_id=f"other-{i}")
+    _catalog(store, 'other', 'Other', 'Unrelated', 1500)
     after, large, plan = _measured(store, artist)
     assert after == before
     assert large <= small * 2 + 500

@@ -103,7 +103,8 @@ def prepared_client(store, now=1000, *, background_work=True, backend_options=No
 
 
 def publish_menu(store, now=1000, *, prefix='prepared', count=4, tracks_per_card=4,
-                 surface='home_prepared', modeled=False, mode_ids=(), genre_options=(), genre='house'):
+                 surface='home_prepared', modeled=False, mode_ids=(), genre_options=(), genre='house',
+                 labels=(), vibe=None):
     """Publish real subjects through the cache writer without running ranking.
 
     Different prefixes own disjoint tracks. Preparation, readiness and ranking
@@ -127,8 +128,11 @@ def publish_menu(store, now=1000, *, prefix='prepared', count=4, tracks_per_card
                 recording = store.conn.execute('SELECT id FROM recordings WHERE identity_key=?',
                                                (track['key'],)).fetchone()[0]
                 artists.observe(store.conn, recording, track['artist'])
-            proto = home_cards._proto(store, lane, f'A {lane} mix for you', tracks, now)
+            label = labels[index] if index < len(labels) else f'A {lane} mix for you'
+            proto = home_cards._proto(store, lane, label, tracks, now, vibe=vibe)
             proto['recipe'] = {'lane': lane}
+            if vibe is not None:
+                proto['recipe']['vibe'] = vibe
             if index < len(mode_ids):
                 proto['mode_id'] = mode_ids[index]
                 proto['recipe'].update(model='mode', mode_id=mode_ids[index])
@@ -136,7 +140,12 @@ def publish_menu(store, now=1000, *, prefix='prepared', count=4, tracks_per_card
                 proto['mode_id'] = None
             protos.append(proto)
     result = home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],
-                                   None, None, list(genre_options), [], home_cards._epoch(store, 'cards'), None)
+                                   None, None, list(genre_options), [], home_cards._epoch(store, 'cards'), vibe)
+    return publish_cards(store, result, now, surface=surface)
+
+
+def publish_cards(store, result, now, *, surface='home_prepared'):
+    """Persist completed cards below consumers without running the whole worker."""
     previous = home_cache.read(store, 'home_prepared') if surface == 'home_tuned' else None
     home_prepared.remember(store, previous, result, now)
     payload = home_cache.read(store, 'home_tuned')

@@ -8,10 +8,26 @@ import pytest
 from tests.core.test_model_trial_preparation import head, seed
 from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.independent_schema_support import independent_regular_ddl
-from tests.publication_timing_support import publication_costs
-from yt_playlist.core.migrations import MigrationError, regular
+from tests.store_fixture_support import publication_consumer_reads
+from yt_playlist.core.migrations import MigrationError, registry, regular
 from yt_playlist.core.preparation import model_trials as preparation, trial_publication as publication
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture
+def disable_periodic_library_sync():
+    pass
+
+
+@pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
+def test_trial_schema_input_keeps_read_only_history_and_private_guards(installed):
+    store, version = installed
+    source = store._fixture_installed_template.source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert list(map(tuple, store.conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
+        (entry.version, entry.name) for entry in registry.MIGRATIONS[:version]]
+    assert store._snapshot_revisions.conn is store.conn
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def ready(owner, conn):
@@ -24,31 +40,34 @@ def ready(owner, conn):
 
 
 @pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
-def test_preopened_and_reopened_readers_preserve_exact_trial_decisions(installed, publication_costs):
+@pytest.mark.parametrize('name', ['listening-monitor', 'live-trial', 'album-assignment'])
+@pytest.mark.parametrize('reader_state', ['preopened', 'reopened'])
+def test_preopened_and_reopened_readers_preserve_exact_trial_decisions(
+        installed, publication_consumer_reads, name, reader_state):
     store, _ = installed
     values, originals = seed(store)
-    other = Store(store._db_path)
+    owner = publication.OWNERS[name]
+    other = None
     try:
-        other.init_schema(defer_metadata=True)
-        for owner in publication.OWNERS.values():
-            revision = ready(owner, store.conn)
-            owner.publish(store.conn, revision=revision)
-            assert owner.selected(other.conn) == revision
-            assert owner.value(other.conn, revision) == originals[owner.source]
-            assert other.rec_proposals.get_proposals(owner.source) == values[owner.source]
-            assert other.rec_proposals.has_proposals(owner.source)
-            captured = owner.capture(other.conn)
-            assert captured['built_at'] is None
-            assert captured['run_ref'] == (1 if owner.source == 'model_live_comparison' else None)
+        if reader_state == 'preopened':
+            other = Store(store._db_path)
+            other.init_schema(defer_metadata=True)
+        revision = ready(owner, store.conn)
+        owner.publish(store.conn, revision=revision)
+        if reader_state == 'reopened':
+            other = Store(store._db_path)
+            other.init_schema(defer_metadata=True)
+        assert owner.selected(other.conn) == revision
+        assert owner.value(other.conn, revision) == originals[owner.source]
+        assert other.rec_proposals.get_proposals(owner.source) == values[owner.source]
+        assert other.rec_proposals.has_proposals(owner.source)
+        captured = owner.capture(other.conn)
+        assert captured['built_at'] is None
+        assert captured['run_ref'] == (1 if name == 'live-trial' else None)
         regular.validate(other.conn)
     finally:
-        other.conn.close()
-    reopened = Store(store._db_path)
-    try:
-        reopened.init_schema(defer_metadata=True)
-        assert reopened.rec_proposals.get_proposals('model_album_assignment') == values['model_album_assignment']
-    finally:
-        reopened.conn.close()
+        if other is not None:
+            other.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

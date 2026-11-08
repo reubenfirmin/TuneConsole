@@ -100,9 +100,9 @@ def test_reports_reads_selected_owner_and_supported_write_withdraws_it(predecess
     "UPDATE prepared_metadata_conflict_compatibility SET field='genre'",
     'DELETE FROM prepared_metadata_conflict_heads',
 ])
-def test_damaged_preparation_blocks_selection_without_blocking_regular_schema(predecessor, staged_custody, damage, independent_regular_ddl):
+def test_damaged_preparation_blocks_selection_without_blocking_regular_schema(predecessor, damage, independent_regular_ddl):
     conn = predecessor.conn
-    staged_custody((predecessor, 79), 'metadata-conflicts', rejection_inputs, admit=False)
+    rejection_inputs(predecessor)
     with conn:
         conn.execute(damage)
     with pytest.raises(MigrationError, match='differ|omits'):

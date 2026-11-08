@@ -6,12 +6,37 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.prepared_fixture_support import assert_upgrade_phase, custody_predecessor, custody_upgrade_cases
+from tests.store_fixture_support import publication_consumer_reads
 from tests.core.test_taste_controls_migration import decision
 from yt_playlist.core import collection_recovery, policy_documents, recommendation_outputs as files, taste_control_state
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import taste_controls as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Taste preparation checks do not construct an HTTP application."""
+
+
+@pytest.mark.parametrize('version', [79, 93, 95])
+def test_taste_input_keeps_each_installed_contract_and_snapshot_guards(_bounded_installed_schema, version):
+    from contextlib import closing
+
+    template = _bounded_installed_schema(version)
+    source = template.source
+    with closing(sqlite3.connect(source._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
+        reader.row_factory = sqlite3.Row
+        runner.validate_version(reader, version)
+        regular.validate(reader)
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert not source.conn.execute('SELECT 1 FROM main.recordings').fetchone()
+    assert template.revision_guards
 
 
 def finish(job, conn, size=128):
@@ -83,32 +108,79 @@ def test_three_jobs_keep_exact_settings_ordered_evidence_and_unadmitted_referenc
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
-@pytest.mark.parametrize('installed', [79, 95], indirect=True)
-def test_frozen_v96_and_full_upgrade_match_prepared_fields_and_keep_archives(installed, tmp_path):
-    store, _ = installed
+def prepare_native_comparison(store):
     values, originals = seed(store)
     for job in preparation.JOBS.values():
         job.install(store.conn)
         finish(job, store.conn)
-    upgraded = Store(tmp_path / 'taste-upgrade.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS[:96])
-        for source in (preparation.CHECKPOINT, preparation.BASELINE):
-            assert json.loads(taste_control_state.get(upgraded.conn, source)) == values[source]
-        native = list(map(tuple, upgraded.conn.execute('SELECT position,recording_id,unresolved_key,captured_key,rank,score,lane,lane_weight '
-                                                       'FROM taste_comparison_entries ORDER BY position')))
-        assert native == list(map(tuple, members(store.conn, preparation.BASELINE, 'entries',
-            'position,recording_id,unresolved_key,captured_key,rank,score,lane,lane_weight')))
-        from yt_playlist.core import experiment_decision_state
-        assert experiment_decision_state.records(upgraded.conn) == values[preparation.DECISIONS]
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
+    return values, originals
+
+
+@pytest.fixture(scope='module')
+def native_inputs(upgraded_custody_inputs):
+    def get(version, target, **options):
+        return upgraded_custody_inputs(version, target, 'taste-native-agreement',
+            prepare_native_comparison, **options)
+
+    get.release = lambda version: upgraded_custody_inputs.release(version, 'taste-native-agreement')
+    return get
+
+
+def assert_native_originals(template):
+    for source, raw in template.result[1].items():
+        assert preparation.read_original(template.source.conn, preparation.head(template.source.conn, source)) == raw
+
+
+@pytest.mark.parametrize('version', [79, 95])
+def test_native_comparison_input_keeps_exact_preparation(native_inputs, version):
+    template = native_inputs(version, version)
+    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert_native_originals(template)
+
+
+@pytest.mark.parametrize('version,target,phase', sorted(
+    custody_upgrade_cases((79, 95)) + [(version, 96, phase) for version in (79, 95) for phase in ('input', 'converted')],
+    key=lambda case: (case[0], case[1], case[2] == 'converted')))
+def test_native_upgrade_phase_keeps_exact_preparation(native_inputs, version, target, phase):
+    template = native_inputs(version, target, phase=phase)
+    assert_upgrade_phase(template, target if phase == 'converted' else custody_predecessor(version, target))
+    assert_native_originals(template)
+
+
+@pytest.mark.parametrize('version', [79, 95])
+def test_native_serving_input_keeps_private_read_guards(native_inputs, version):
+    template = native_inputs(version, 107)
+    assert_upgrade_phase(template, 107)
+    assert template.source._snapshot_revisions.conn is template.source.conn
+
+
+@pytest.mark.parametrize('version', [79, 95])
+def test_frozen_v96_and_full_upgrade_match_prepared_fields_and_keep_archives(native_inputs, version):
+    prepared = native_inputs(version, version)
+    store = prepared.source
+    values, _ = prepared.result
+    upgraded = native_inputs(version, 96).source
+    for source in (preparation.CHECKPOINT, preparation.BASELINE):
+        assert json.loads(taste_control_state.get(upgraded.conn, source)) == values[source]
+    native = list(map(tuple, upgraded.conn.execute('SELECT position,recording_id,unresolved_key,captured_key,rank,score,lane,lane_weight '
+                                                   'FROM taste_comparison_entries ORDER BY position')))
+    assert native == list(map(tuple, members(store.conn, preparation.BASELINE, 'entries',
+        'position,recording_id,unresolved_key,captured_key,rank,score,lane,lane_weight')))
+    from yt_playlist.core import experiment_decision_state
+    assert experiment_decision_state.records(upgraded.conn) == values[preparation.DECISIONS]
+    assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.mark.parametrize('version', [79, 95])
+def test_native_upgrade_keeps_exact_preparation_after_file_collection(native_inputs, version, tmp_path):
+    _, originals = native_inputs(version, version).result
+    with native_inputs(version, 107).open(tmp_path / 'taste-upgrade.db') as upgraded:
+        assert upgraded.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal'
+        upgraded.conn.execute('PRAGMA wal_autocheckpoint=0')
         collection_recovery.collect_orphans(upgraded.conn)
         for source, raw in originals.items():
             assert preparation.read_original(upgraded.conn, preparation.head(upgraded.conn, source)) == raw
         assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        upgraded.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -297,6 +369,13 @@ def test_invalid_and_conflicting_controls_fail_without_selecting_a_new_generatio
             store.conn.execute('UPDATE settings SET value=? WHERE key=?', (originals[source], source))
         job.step(store.conn, retry=True)
         finish(job, store.conn)
+
+
+@pytest.mark.parametrize('version', [79, 95])
+def test_native_sources_finish_with_committed_read_only_inputs(native_inputs, version):
+    for source in native_inputs.release(version):
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            source.conn.execute('SELECT 1')
 
 
 @pytest.mark.parametrize('installed', [85], indirect=True)

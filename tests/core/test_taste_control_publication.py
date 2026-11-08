@@ -5,13 +5,17 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_taste_control_preparation import finish, members, seed
+from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import collection_recovery, experiment_decision_state, recommendation_outputs as files, taste_control_state
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import taste_controls as preparation, taste_control_publication as publication
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 
 
 def prepare(conn, owner):

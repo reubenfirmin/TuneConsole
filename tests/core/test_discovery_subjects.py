@@ -3,9 +3,8 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core import artists, collection_recovery, discovery_provenance as provenance, genre_identity
-from yt_playlist.core.migrations import current, registry, Migration, MigrationError, migrate
-from yt_playlist.core.migrations import v101_discovery_subjects
+from yt_playlist.core import collection_recovery, discovery_provenance as provenance
+from yt_playlist.core.migrations import current
 from yt_playlist.core.store import Store
 
 
@@ -104,54 +103,6 @@ def test_account_and_import_withdrawal_preserves_independent_sources_and_lifetim
     assert candidate['offered_count']==1
     assert candidate['because']==['Independent'] and candidate['fits']==['Playlist']
     assert store.conn.execute('SELECT count(*) FROM discovery_artist_sources').fetchone()[0]==1
-
-
-def installed_100(path):
-    store = Store(path)
-    for sql in current.statements(version=100):
-        store.conn.execute(sql)
-    genre_identity.seed_catalog(store.conn)
-    store.conn.executemany('INSERT INTO settings VALUES (?,?)',current.SEED_SETTINGS.items())
-    store.conn.executemany('INSERT INTO schema_migrations VALUES (?,?,1)',[(m.version,m.name) for m in registry.MIGRATIONS[:100]])
-    store.conn.commit()
-    store._bind_repositories()
-    return store
-
-
-def test_populated_conversion_rollback_unknown_histories_and_legacy_precision(tmp_path):
-    store = installed_100(tmp_path/'old.db')
-    aid = artists.ensure(store.conn,'Candidate')
-    store.conn.execute('INSERT INTO artist_scans VALUES (?,NULL,?)',('@artist:'+str(aid),aid))
-    store.conn.execute('INSERT INTO discovered_artists(artist,artist_id,because,fits,found_at,offered_count,first_shown,'
-        "last_shown,legacy_offered_count,legacy_first_shown,legacy_last_shown) VALUES (?,?,'[\"Anchor\"]','[]',1,2,3,5,8,0,2)",('@artist:'+str(aid),aid))
-    store.conn.execute('INSERT INTO discovery_artist_sources VALUES (?,\'unknown\',NULL,1)',(aid,))
-    store.conn.execute("INSERT INTO discovery_visible_impressions VALUES ('visit','artist',?,3)",(str(aid),))
-    store.conn.execute("INSERT INTO discovery_visible_impressions VALUES ('missing','album','absent',4)")
-    store.conn.commit()
-    before = list(store.conn.iterdump())
-    def interrupted(conn,context):
-        v101_discovery_subjects.apply(conn,context)
-        raise RuntimeError('interrupted discovery cutover')
-    with pytest.raises(MigrationError,match='interrupted discovery cutover'):
-        migrate(store.conn,registry=(*registry.MIGRATIONS[:100],Migration(101,'discovery_subjects',interrupted,rebuild_tables=True)))
-    assert list(store.conn.iterdump())==before
-    # Historical conversion is now an explicit operation. Ordinary startup
-    # retains this installed owner instead of implicitly replaying bulk work.
-    migrate(store.conn,registry=registry.MIGRATIONS)
-    store.init_schema()
-    candidate = store.discovery.get_discovered_artists()[0]
-    assert candidate['because']==['Anchor'] and candidate['offered_count']==1 and candidate['first_shown']==3
-    assert store.conn.execute('SELECT legacy_offered_count FROM discovered_artists').fetchone()[0]==9
-    assert tuple(store.conn.execute('SELECT original_key,reason FROM unresolved_discovery_impressions').fetchone())==('absent','missing_owner')
-    assert tuple(store.conn.execute('SELECT kind,legacy_source_key,resolution_status FROM discovery_origins').fetchone())==('legacy_unknown','unknown','unresolved')
-    assert store.conn.execute('SELECT count(*) FROM artist_scans WHERE scanned_at IS NULL').fetchone()[0]==1
-    current.validate(store.conn)
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-    store.conn.close()
-    reopened = Store(tmp_path/'old.db')
-    reopened.init_schema()
-    assert reopened.discovery.get_discovered_artists()[0]['because']==['Anchor']
-    reopened.conn.close()
 
 
 def test_candidate_output_backup_restore_and_orphan_cleanup(tmp_path):

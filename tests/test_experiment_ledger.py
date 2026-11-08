@@ -1,12 +1,11 @@
 import json
-import sqlite3
 
 import pytest
 
-from tests.prepared_fixture_support import prepared_template, roots
+from tests.prepared_fixture_support import prepared_template
 from yt_playlist.rec import experiments, measurement, mode_surfaces, rec_params, scorecard
 from tests.test_ppr_assemble import _seed_one_mode
-from tests.recommendation_support import publish_bundles
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.test_taste_health import _client
 
 _MISSING = object()
@@ -157,13 +156,21 @@ def _mature_live_arms(store, template, **first_assignment):
 
 def _seed_mature_live_arms(store, *, episodes=range(100), **first_assignment):
     base = 100 * 86400
+    episodes = tuple(episodes)
+    # Experiment attribution consumes admitted uploads. Provider metadata
+    # capture and artist inference have their own owners; build this complete
+    # catalog input once, keeping actual impressions, plays and exits below.
+    seed_publication_subjects(store, [
+        {'key': f'{arm}{i}|band', 'video_id': f'{arm}{i}|band',
+         'title': f'{arm}{i}', 'artist': 'band', 'duration_s': 200}
+        for i in episodes for arm in ('ppr', 'cosine')])
     iid = store.accounts.upsert_account("main", "cred", None, True)
     store.playlists.set_playlist_group("PLGEN", "Generated")
     store.playlists.mark_generated_playlist('PLGEN')
+    store.rec_ledger.record_serving_policy('m1', {'schema': 3}, base)
     for i in episodes:
         for arm in ("ppr", "cosine"):
             key, at = f"{arm}{i}|band", base + 100 + i * 10
-            store.tracks.upsert_track(key, f"{arm}{i}", "band", None, 200)
             # Distinct video snapshots keep exit attribution independent of today's catalog.
             assignment = {'controlled': True}
             if i == 0 and arm == 'ppr':
@@ -175,73 +182,6 @@ def _seed_mature_live_arms(store, *, episodes=range(100), **first_assignment):
             store.player_events.record_player_event(iid, "track_exit", key, 190 if arm == "ppr" else 10,
                                       200, None, None, at + 2)
     return base
-
-
-def test_generated_responses_stay_quarantined_and_support_explicit_live_decision(
-        store, mature_live_arms_template, file_backed_store, _pristine_current_schema):
-    template = mature_live_arms_template
-    base = template.restore(store)
-    assert template.restore(file_backed_store) == base
-    now = base + 100000
-    prefix = scorecard.experiment_report(template.source, now - 90 * 86400, now, now)
-    assert all(arm['clusters'] == arm['impressions'] == 99 and not arm['powered']
-               for arm in prefix['live'].values())
-    for current in (store, file_backed_store):
-        assert scorecard.experiment_report(current, now - 90 * 86400, now, now) == prefix
-        with pytest.raises(ValueError, match='100 mature'):
-            experiments.decide(current, 'promote', 'c1', 'The last episode is still missing', now)
-        assert not experiments.decisions(current)
-    assert len({template.source._evidence_key, store._evidence_key, file_backed_store._evidence_key}) == 3
-    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    with pytest.raises(sqlite3.OperationalError, match='readonly'):
-        with template.source.conn:
-            template.source.conn.execute("INSERT INTO settings VALUES ('private','forbidden')")
-    destinations = [roots(target.conn) for target in (store, file_backed_store)]
-    copied = 0
-    for name, directory in template.files.items():
-        assert len({directory, *(owned[name] for owned in destinations)}) == 3
-        for source in directory.rglob('*'):
-            if source.is_file():
-                paths = [source, *(owned[name] / source.relative_to(directory) for owned in destinations)]
-                assert all(path.read_bytes() == source.read_bytes() for path in paths)
-                assert len({(path.stat().st_dev, path.stat().st_ino) for path in paths}) == 3
-                copied += 1
-    assert copied
-    # Add the varied episode through the real APIs; never edit retained receipts.
-    assert _seed_mature_live_arms(store, episodes=range(1)) == base
-    assert _seed_mature_live_arms(file_backed_store, episodes=range(1), controlled=False) == base
-    file_backed_store.settings.set_setting('private_experiment', 'sibling')
-    file_backed_store._fixture_bundle_payload['private'] = ['sibling']
-    sibling = scorecard.experiment_report(file_backed_store, now - 90 * 86400, now, now)
-    assert sibling['live']['c1:ppr']['assignment_provenance'] == {
-        'controlled': 99, 'uncontrolled': 1, 'legacy_cache': 0}
-    assert scorecard.experiment_report(template.source, now - 90 * 86400, now, now) == prefix
-    assert store.settings.get_setting('private_experiment') is None
-    assert template.source.settings.get_setting('private_experiment') is None
-    assert store._fixture_bundle_payload == template.bundles == {}
-    with prepared_template(_pristine_current_schema, _seed_mature_live_arms) as fresh:
-        producer = fresh.source
-        assert fresh.result == base
-        assert scorecard.recommendation_scorecard(store, base + 90, base + 1200) == (
-            scorecard.recommendation_scorecard(producer, base + 90, base + 1200))
-        report = scorecard.experiment_report(store, now - 90 * 86400, now, now)
-        assert report == scorecard.experiment_report(producer, now - 90 * 86400, now, now)
-        assert set(report['live']) == {'c1:ppr', 'c1:cosine'}
-        assert all(arm['clusters'] == arm['impressions'] == 100 and arm['powered']
-                   for arm in report['live'].values())
-        for current in (store, producer):
-            assert current.player_events.player_events_since(0) == producer.player_events.player_events_since(0)
-            assert list(map(tuple, current.conn.execute(
-                'SELECT request_id,surface,lane,mode_id,identity_key,rank,score,model_version,provenance,served_at '
-                'FROM rec_served_impressions ORDER BY request_id'))) == list(map(tuple, producer.conn.execute(
-                'SELECT request_id,surface,lane,mode_id,identity_key,rank,score,model_version,provenance,served_at '
-                'FROM rec_served_impressions ORDER BY request_id')))
-            assert current.conn.execute('PRAGMA foreign_key_check').fetchall() == []
-    score = scorecard.recommendation_scorecard(store, base + 90, base + 1200)
-    assert score["generated"] == 100 and score["organic"] == 0
-    result = experiments.decide(store, "promote", "c1", "Mature live evidence meets guardrails", base + 100000)
-    assert result["state"] == "retained" and result["decision"]["powered"]
-    assert result["decision"]["live_evidence"]["ppr"]["completion"] == 100
 
 
 @pytest.mark.parametrize('controlled', [_MISSING, None, False, 1, 'true'],

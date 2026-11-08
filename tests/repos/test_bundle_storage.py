@@ -6,9 +6,10 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_compact_groups_migration import predecessor
-from tests.repos.test_compact_group_publication import database
-from tests.repos.test_typed_recommendation_publication import recommendations as historical_recommendations, publish, collect
+from tests.prepared_fixture_support import capture_template
+from tests.repos.test_compact_group_publication import restored_groups
+from tests.repos.test_typed_recommendation_publication import initialize_recommendations, publish, collect
+from tests.store_fixture_support import reuse_reporting_reader
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.core import bundle_plan, policy_config, recommendation_plan, recommendation_revalidations as revalidations
 from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
@@ -19,12 +20,54 @@ from yt_playlist.controllers import recommendation_import
 from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
 
 
+@pytest.fixture(scope='module')
+def bundle_template(tmp_path_factory, compact_group_template):
+    root = tmp_path_factory.mktemp('bundle-publication-input')
+    with restored_groups(compact_group_template, root / 'source.db') as (source, _):
+        initialize_recommendations(source)
+        source._rebuild_source_version = None
+        source._schema_recovery_pending = False
+        with source.conn:
+            revalidations.install(source.conn)
+        source._bind_repositories()
+        yield capture_template(source, None)
+
+
 @pytest.fixture
-def recommendations(historical_recommendations):
-    with historical_recommendations.conn:
-        revalidations.install(historical_recommendations.conn)
-    historical_recommendations._bind_repositories()
-    return historical_recommendations
+def recommendations(tmp_path, bundle_template):
+    with bundle_template.open(tmp_path / 'bundle.db') as store:
+        yield store
+
+
+def test_bundle_historical_input_keeps_genuine_numbered_prefix(_pristine_installed_schema):
+    source = _pristine_installed_schema(69)
+    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert [row[0] for row in source.execute('SELECT version FROM schema_migrations ORDER BY version')] == list(range(1, 70))
+    assert not source.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_bundle_input_keeps_real_groups_ranked_members_and_read_only_custody(compact_group_template):
+    source = compact_group_template.source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source.taste_groups.head_generation() == 'second'
+    assert source.taste_groups.head(members=True)['groups'][1]['members'] == {'one': (.9, .8)}
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_bundle_publication_input_keeps_empty_heads_and_real_revalidation_owners(bundle_template):
+    source = bundle_template.source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source.conn.execute('SELECT count(*) FROM recommendation_heads').fetchone()[0] == 0
+    assert source.conn.execute('SELECT count(*) FROM recommendation_pool_revalidations').fetchone()[0] == 0
+    assert source.taste_groups.head_generation() == 'second'
+    assert bundle_template.revision_guards
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.fixture
+def recommendation_reads(recommendations, monkeypatch):
+    with reuse_reporting_reader(recommendations, monkeypatch):
+        yield recommendations
 
 
 def bundle(store):
@@ -222,8 +265,8 @@ def test_atomic_import_preserves_source_until_caller_retires_it_and_reuses_compl
 
 
 @pytest.mark.parametrize('published', [True, False])
-def test_revalidated_publication_reuses_published_or_staged_pools_with_original_policy(recommendations, monkeypatch, published):
-    store = recommendations
+def test_revalidated_publication_reuses_published_or_staged_pools_with_original_policy(recommendation_reads, monkeypatch, published):
+    store = recommendation_reads
     value = bundle(store)
     prepared = prepare(store, value, reuse_existing=True)
     with store.conn:

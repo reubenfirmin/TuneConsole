@@ -141,33 +141,58 @@ def test_failed_card_does_not_drop_remaining_response_measurements(store, monkey
     assert store.conn.execute("SELECT COUNT(*) FROM rec_served_impressions").fetchone()[0] == 7
 
 
-def test_batched_queue_preserves_offer_bound_and_offer_time_attribution(tmp_path, monkeypatch, consumer_store):
+@pytest.fixture
+def measurement_worker(tmp_path, monkeypatch, consumer_store):
     store = consumer_store(tmp_path / "state.db")
     seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='video')
     worker = RecWorker(SimpleNamespace(store=store, work=Activity(), logger=logging.getLogger(__name__),
                                        now_fn=lambda: 100))
     monkeypatch.setattr(worker, "_start_loop", lambda: None)
     try:
-        for _ in range(9):
-            _record_visible_tracks(store, 100)
-        assert len(worker.jobs.measurements) == 8
-        assert sum(offer.work_units for offer in worker.jobs.measurements) == 64
-        readers = [offer.snapshot.store.conn for offer in worker.jobs.measurements]
-        rec_params.set_param(store, "axis_weight_cap", 2)
-        store.rec_model.replace_rec_vectors([("song|artist", np.asarray([1., 0.], dtype=np.float32).tobytes())])
-        worker._flush_measurements()
-        assert store.conn.execute("SELECT COUNT(*) FROM rec_served_impressions").fetchone()[0] == 8
-        assert sum(offer.work_units for offer in worker.jobs.measurements) == 56
-        while worker.jobs.measurements:
-            worker._flush_measurements()
-        assert store.conn.execute("SELECT COUNT(*) FROM rec_served_impressions").fetchone()[0] == 64
-        for row in store.conn.execute("SELECT id FROM rec_served_impressions"):
-            config = scorecard.served_recommendation(store, row[0])["configuration"]
-            assert config["params"]["axis_weight_cap"] == 1.4
-            assert config["models"]["collaborative"] == measurement._vector_identity([])
-        for reader in readers:
-            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
-                reader.execute("SELECT 1")
+        yield store, worker
     finally:
         worker.shutdown()
         store.conn.close()
+
+
+def test_batched_queue_preserves_offer_bound_and_closes_every_reader(measurement_worker, monkeypatch):
+    store, worker = measurement_worker
+    completed = []
+    # The worker owns admission, draining and reader lifetime. The separate
+    # attribution case below runs real instrumentation and ledger writes.
+    monkeypatch.setattr(measurement.CapturedOffer, 'run', lambda offer: completed.append(offer))
+    for _ in range(9):
+        _record_visible_tracks(store, 100)
+    queued = list(worker.jobs.measurements)
+    assert len(queued) == 8
+    assert sum(offer.work_units for offer in queued) == 64
+    readers = [offer.snapshot.store.conn for offer in queued]
+    worker._flush_measurements()
+    assert completed == queued[:1]
+    assert sum(offer.work_units for offer in worker.jobs.measurements) == 56
+    while worker.jobs.measurements:
+        worker._flush_measurements()
+    assert completed == queued and sum(offer.work_units for offer in completed) == 64
+    for reader in readers:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            reader.execute("SELECT 1")
+
+
+def test_deferred_measurement_keeps_offer_time_attribution(measurement_worker):
+    store, worker = measurement_worker
+    _record_visible_tracks(store, 100)
+    reader = worker.jobs.measurements[0].snapshot.store.conn
+    rec_params.set_param(store, "axis_weight_cap", 2)
+    store.rec_model.replace_rec_vectors([("song|artist", np.asarray([1., 0.], dtype=np.float32).tobytes())])
+    worker._flush_measurements()
+    assert not worker.jobs.measurements
+    assert store.conn.execute("SELECT COUNT(*) FROM rec_served_impressions").fetchone()[0] == 8
+    # Every impression refers to an immutable policy. Check every distinct
+    # policy once instead of rebuilding the same scorecard for all eight rows.
+    for row in store.conn.execute(
+            "SELECT min(id) FROM rec_served_impressions GROUP BY model_version"):
+        config = scorecard.served_recommendation(store, row[0])["configuration"]
+        assert config["params"]["axis_weight_cap"] == 1.4
+        assert config["models"]["collaborative"] == measurement._vector_identity([])
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        reader.execute("SELECT 1")

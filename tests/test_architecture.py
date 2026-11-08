@@ -213,6 +213,31 @@ def test_repository_guard_resolves_long_alias_chains_and_cycles(reverse):
         ast.parse(source), {'pending'})] == ['alias256.pending']
 
 
+def _import_packages():
+    return sorted({path.relative_to(SOURCE / 'yt_playlist').parts[0]
+                   if path.parent != SOURCE / 'yt_playlist' else 'root'
+                   for path in (SOURCE / 'yt_playlist').rglob('*.py')})
+
+
+@cache
+def _package_imports(package):
+    modules = _modules()
+    return {name: frozenset(_imports(modules[name], name)) for name in modules
+            if (name.split('.')[1] if len(name.split('.')) > 2 else 'root') == package}
+
+
+@pytest.mark.parametrize('package', _import_packages())
+def test_application_import_index_covers_every_package_module(package):
+    indexed = _package_imports(package)
+    expected = {'.'.join(path.relative_to(SOURCE).with_suffix('').parts)
+                for path in (SOURCE / 'yt_playlist').rglob('*.py')
+                if (path.relative_to(SOURCE / 'yt_playlist').parts[0]
+                    if path.parent != SOURCE / 'yt_playlist' else 'root') == package}
+    assert set(indexed) == expected
+    assert all(isinstance(dependency, str) and dependency
+               for imports in indexed.values() for dependency in imports)
+
+
 def test_application_import_graph_is_acyclic_including_local_imports():
     modules = _modules()
     # Frozen upgrades import the runner's error type; the runner lazily loads
@@ -224,13 +249,13 @@ def test_application_import_graph_is_acyclic_including_local_imports():
         return migration_package if name.startswith(migration_package + '.') else name
 
     graph = {}
-    for name, tree in modules.items():
-        owner = component(name)
-        dependencies = {component(dependency) for dependency in _imports(tree, name)
-                        if dependency in modules}
-        if owner == migration_package:
-            dependencies.discard(owner)
-        graph.setdefault(owner, set()).update(dependencies)
+    for package in _import_packages():
+        for name, imports in _package_imports(package).items():
+            owner = component(name)
+            dependencies = {component(dependency) for dependency in imports if dependency in modules}
+            if owner == migration_package:
+                dependencies.discard(owner)
+            graph.setdefault(owner, set()).update(dependencies)
     finished, path = set(), []
 
     def visit(name):

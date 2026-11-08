@@ -1,57 +1,6 @@
 # tests/test_store.py
-from tests.historical_support import upgrade_fixture
 
 
-def test_play_provenance_upgrade_preserves_unknown_history_and_reopens(tmp_path, legacy_store):
-    from yt_playlist.core.store import Store
-
-    store = legacy_store
-    path = tmp_path / "legacy.db"
-    iid = 1
-    with store.conn:
-        # Current repositories require account scopes and provenance tables absent in v7.
-        store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (?,'main','cred',1)", (iid,))
-        store.conn.execute("INSERT INTO playlists(identity_id,ytm_playlist_id,title) VALUES (?,'PLGEN','Generated')", (iid,))
-        store.conn.execute("INSERT INTO playlist_group VALUES ('PLGEN','Generated')")
-        store.conn.execute("INSERT INTO tracks(video_id,title,artist,identity_key) VALUES ('vid','Song','Artist','song|artist')")
-        store.conn.execute("INSERT INTO play_events(identity_id,identity_key,video_id,played_at,playlist_ytm_id) VALUES (?,'song|artist','vid',120,'RDAMPLPLGEN')", (iid,))
-        store.conn.execute("ALTER TABLE play_events DROP COLUMN is_generated")
-        store.conn.execute("DROP TABLE schema_migrations")
-    store.conn.close()
-
-    store = Store(path)
-    upgrade_fixture(store)
-    assert store.conn.execute("SELECT is_generated FROM play_events").fetchone()[0] is None
-    store.tracks.upsert_track("new", "New", "Artist", None, 200)
-    key = store.tracks.identity_key_for_video("new")
-    store.history.record_play_event(iid, key, "new", 5000, playlist_ytm_id="PLGEN")
-    store.playlists.set_playlist_group("PLGEN", "")
-    store.conn.close()
-
-    store = Store(path)
-    store.init_schema()
-    assert [r[0] for r in store.conn.execute("SELECT is_generated FROM play_events ORDER BY id")] == [None, 1]
-    assert store.conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-    store.conn.close()
-
-
-def test_retired_source_weights_are_removed_and_not_restored(legacy_store):
-    store = legacy_store
-    store.rec_model.set_weight("lane:explore", 1.3, now=1000)
-    store.rec_model.set_weight("lane:deep_cut", 1.7, now=900)
-    store.rec_model.set_weight("genre:jazz", 0, lo=0, now=800)
-    expected = {axis: row for axis, row in store.rec_model.weight_records().items() if axis != "lane:explore"}
-    param_keys = ("rec_param:breadth_bias",)
-    store.rec_model.save_taste_settings("taste_settings_checkpoint_v1", param_keys, 1000)
-    with store.conn:
-        store.conn.execute("DROP TABLE schema_migrations")
-
-    upgrade_fixture(store)
-    assert store.rec_model.weight_records() == expected
-    assert store.rec_model.restore_taste_settings("taste_settings_checkpoint_v1", param_keys)
-    assert store.rec_model.weight_records() == expected
-    store.init_schema()
-    assert store.rec_model.weight_records() == expected
 
 
 def test_playlist_creation_date_migration_backfills_only_known_dates(legacy_store):

@@ -4,19 +4,46 @@ import sqlite3
 
 import pytest
 
+from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import install_numbered_input, install_regular_input
 from yt_playlist.core.migrations import current, regular, runner
+
+
+@pytest.fixture(scope='module')
+def installed_inputs():
+    # Repeated admission owns real validation of private, mutable SQL. The
+    # historical migration chain and genre catalog population are lower inputs.
+    with ExitStack() as resources:
+        templates = {}
+
+        def template(version, *, completed_regular=False):
+            key = version, completed_regular
+            if key not in templates:
+                conn = resources.enter_context(closing(sqlite3.connect(':memory:')))
+                with pytest.MonkeyPatch.context() as patch:
+                    bound_catalog(patch)
+                    install_numbered_input(conn, version)
+                    if completed_regular:
+                        with conn:
+                            conn.execute('BEGIN')
+                            install_regular_input(conn, regular.CHANGES)
+                conn.execute('PRAGMA query_only=ON')
+                templates[key] = conn
+            return templates[key]
+
+        yield template
 
 
 @pytest.mark.parametrize('version', [85, 93, 103, 106])
 def test_repeated_validation_rejects_later_damage_and_separate_damaged_database(
-        _pristine_installed_schema, version):
+        installed_inputs, version):
     with ExitStack() as resources:
         connections = []
         for _ in range(2):
             conn = resources.enter_context(closing(sqlite3.connect(':memory:')))
             conn.row_factory = sqlite3.Row
             conn.execute('PRAGMA foreign_keys=ON')
-            _pristine_installed_schema(version).backup(conn)
+            installed_inputs(version).backup(conn)
             connections.append(conn)
 
         runner.validate_version(connections[0], version)
@@ -39,11 +66,10 @@ def test_repeated_validation_rejects_later_damage_and_separate_damaged_database(
 
 @pytest.mark.parametrize('version', [79, current.VERSION])
 def test_completed_regular_history_is_admitted_once_without_writing(
-        _pristine_installed_schema, monkeypatch, version):
+        installed_inputs, monkeypatch, version):
     with closing(sqlite3.connect(':memory:')) as conn:
         conn.row_factory = sqlite3.Row
-        _pristine_installed_schema(version).backup(conn)
-        regular.migrate(conn)
+        installed_inputs(version, completed_regular=True).backup(conn)
         before = list(conn.iterdump())
         changes = conn.total_changes
         conn.execute('PRAGMA query_only=ON')
@@ -69,11 +95,10 @@ def test_completed_regular_history_is_admitted_once_without_writing(
 @pytest.mark.parametrize('version', [79, current.VERSION])
 @pytest.mark.parametrize('damage', ['installed_owner', 'regular_owner', 'regular_history'])
 def test_completed_regular_admission_rechecks_damage(
-        _pristine_installed_schema, version, damage):
+        installed_inputs, version, damage):
     with closing(sqlite3.connect(':memory:')) as conn:
         conn.row_factory = sqlite3.Row
-        _pristine_installed_schema(version).backup(conn)
-        regular.migrate(conn)
+        installed_inputs(version, completed_regular=True).backup(conn)
         runner.migrate(conn)
         with conn:
             if damage == 'installed_owner':

@@ -8,25 +8,76 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
-from tests.home_fixture_support import returning_listener
-from tests.prepared_fixture_support import prepared_template
+from tests.home_fixture_support import home_page_bytecode, publish_cards, returning_listener, without_metadata_providers
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.core.recommendation_invalidation import clear_model_display
-from yt_playlist.rec import discover, fresh_pool, home_prepared, home_vibe, surfaces
+from yt_playlist.rec import discover, fresh_pool, home_cards, home_prepared, home_vibe, surfaces
 from yt_playlist.web.app import create_app
 
 
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('jazz', 'Jazz'), ('house', 'House'))) as schema:
+        yield schema
+
+
+def test_discovery_schema_keeps_empty_current_owners_and_snapshot_guards(_pristine_current_schema):
+    from yt_playlist.core.migrations import current, regular
+
+    schema = _pristine_current_schema
+    assert schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert schema.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == current.VERSION
+    assert regular.validate(schema) == len(regular.CHANGES)
+    assert schema.execute('SELECT count(*) FROM recordings').fetchone()[0] == 0
+    assert 'CREATE TEMP TRIGGER' in schema._revision_script
+
+
+@pytest.fixture(autouse=True)
+def discovery_routes(monkeypatch, home_page_bytecode, without_metadata_providers):
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, discovery, home
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+        for module in (app_update, audio_preview, discovery, home)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
+    templates = webapp.Jinja2Templates
+
+    def compiled_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        result.env.bytecode_cache = home_page_bytecode
+        return result
+
+    monkeypatch.setattr(webapp, 'Jinja2Templates', compiled_templates)
+
+
 def seed_songs(store, count=40):
-    for i in range(count):
-        store.discovery.upsert_discovered_track(f"song {i}|artist {i}", f"v{i}", f"Song {i}",
-            f"Artist {i}", None, None, "Jazz", "2020", "radio:seed", 1)
-    fresh_pool.prepare(store, 2)
+    # Discovery reads consume ranked output. The Fresh producer has its own
+    # worker owners; retain all forty subjects and real typed pool publication.
+    tracks = [{'key': f'song {i}|artist {i}', 'video_id': f'v{i}', 'title': f'Song {i}',
+               'artist': f'Artist {i}', 'genre': 'Jazz', 'year': '2020'} for i in range(count)]
+    seed_publication_subjects(store, tracks, discoveries=[track['key'] for track in tracks])
+    publish_bundles(store, {'all': {'fresh': tracks}}, 2, fresh=tracks)
 
 
 def prepare_client_state(store):
     store.settings.set_setting("last_sync_at", "1")
     store.settings.set_setting("onboard_dismissed", "1")
     iid = store.accounts.upsert_account("main", "cred", None, True)
-    assert home_prepared.prepare(store, 3) is not None
+    assert home_prepared.prepare_discovery(store, 3) is not None
+    # The page consumes the completed Fresh mix alongside the independent
+    # discovery pool. Keep that real offer without preparing unrelated lanes.
+    # Discovery still retains all forty ranked subjects. Its companion needs
+    # only the four playable tracks required for a real saved-mix offer.
+    fresh = fresh_pool.pick(store, 3, size=4)
+    protos = [home_cards._proto(store, 'fresh', 'Fresh songs', fresh, 3)] if fresh else []
+    for proto in protos:
+        proto['recipe'] = {'model': 'fresh', 'lane': 'fresh'}
+    result = home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],
+                                   None, None, [], [], home_cards._epoch(store, 'cards'), None)
+    publish_cards(store, result, 3)
     returning_listener(store, 'mixes', now=3)
     return iid
 
@@ -39,44 +90,14 @@ def client_for(store, busy="idle", *, prepare=True):
     return TestClient(app, base_url="http://127.0.0.1")
 
 
-@pytest.fixture(scope='module')
-def songs_template(_pristine_current_schema):
-    def build(source):
-        started = time.perf_counter()
-        seed_songs(source)
-        return time.perf_counter() - started
-
-    with prepared_template(_pristine_current_schema, build) as template:
-        yield template
-
-
-@pytest.fixture(scope='module')
-def empty_home_template(_pristine_current_schema):
-    def build(source):
-        started = time.perf_counter()
-        assert prepare_client_state(source) == 1
-        return time.perf_counter() - started
-
-    with prepared_template(_pristine_current_schema, build) as template:
-        yield template
-
-
-def restore_prefix(store, template, record_property, name):
-    started = time.perf_counter()
-    build_seconds = template.restore(store)
-    record_property(name + '_clone_seconds', time.perf_counter() - started)
-    record_property(name + '_source_seconds', build_seconds)
-    record_property(name + '_source_identity', str(template.source.conn._policy_memory_key))
+@pytest.fixture
+def discovery_songs(store):
+    seed_songs(store)
 
 
 @pytest.fixture
-def discovery_songs(store, songs_template, record_property):
-    restore_prefix(store, songs_template, record_property, 'songs')
-
-
-@pytest.fixture
-def empty_discovery_home(store, empty_home_template, record_property):
-    restore_prefix(store, empty_home_template, record_property, 'empty_home')
+def empty_discovery_home(store):
+    assert prepare_client_state(store) == 1
 
 
 @pytest.fixture(autouse=True)
@@ -134,7 +155,9 @@ def test_persisted_recommendations_are_in_initial_home_and_survive_refresh(store
         assert 'fitting the playlists' not in fragment
         counts = {row["identity_key"]: row["offered_count"] for row in store.discovery.get_discovered_tracks()}
         if mix_offers is None:
-            mix_offers = counts  # The inline Fresh mix is an actual offer; tiles wait for visibility.
+            # Initial Home is a display-only read. Visible tiles report their
+            # impressions separately through /discovery/impressions below.
+            mix_offers = counts
         else:
             assert counts == mix_offers
     assert store.discovery.get_discovered_albums()[0]["offered_count"] == 0

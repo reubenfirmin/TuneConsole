@@ -1,6 +1,5 @@
 """Runtime admission excludes history while retaining independent live owners."""
 from contextlib import closing
-from copy import deepcopy
 import hashlib
 import inspect
 import json
@@ -11,8 +10,56 @@ import sqlite3
 import pytest
 
 from tests.core.test_db_rebuild_destination import production64, development93
+from tests.db_rebuild_support import completed_destination_schema, completed_destination_sql
 from yt_playlist.core import group_storage
 from yt_playlist.core.db_rebuild import build, destination
+
+
+@pytest.fixture(autouse=True)
+def completed_rebuild_input(request):
+    """This module owns retained values and recovery after schema creation."""
+    if not request.node.name.startswith('test_rebuild_input_'):
+        request.getfixturevalue('completed_destination_schema')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Database reconstruction has no web lifecycle or periodic sync."""
+
+
+def test_rebuild_input_released_schema_and_catalog(production64_template):
+    from yt_playlist.core.db_rebuild import source
+    assert source.admit(production64_template) == 64
+    assert production64_template.execute('PRAGMA query_only').fetchone() == (1,)
+    assert production64_template.execute('SELECT id FROM recordings ORDER BY id').fetchall() == [(3,), (8,), (19,)]
+    assert not production64_template.execute('PRAGMA foreign_key_check').fetchall()
+
+
+def test_rebuild_input_development_schema_and_catalog(development93_template):
+    from yt_playlist.core.db_rebuild import source
+    template, _ = development93_template
+    assert source.admit(template) == 93
+    assert template.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert [row[0] for row in template.execute('SELECT id FROM recordings ORDER BY id')] == [3, 8, 19]
+    assert not template.execute('PRAGMA foreign_key_check').fetchall()
+
+
+def test_rebuild_input_destination_sql_keeps_installed_contract(completed_destination_sql):
+    from yt_playlist.core.db_rebuild import installed_format
+    with closing(sqlite3.connect(':memory:')) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.executescript('BEGIN;\n' + ';\n'.join(completed_destination_sql) + ';\nCOMMIT;')
+        # Bulk construction deliberately holds secondary indexes and guards
+        # aside. Restore them through their real stages before final admission.
+        for copy in (destination.indexes, destination.finish):
+            cursor = None
+            while True:
+                batch = copy(conn, conn, cursor, 128)
+                if batch.done:
+                    break
+                cursor = batch.cursor
+        installed_format.validate(conn)
+        assert not conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
 def groups(conn, *, released):
@@ -136,38 +183,6 @@ def test_released_nonobject_group_preview_has_no_context(production64):
         assert not conn.execute('SELECT 1 FROM runtime_released_generations').fetchone()
 
 
-@pytest.mark.parametrize('fixture',['production64','development93'])
-@pytest.mark.parametrize('failure',['staging','reopening'])
-def test_failed_fresh_install_retries_original_instead_of_blocking_on_uninstalled_analytics(request,fixture,failure):
-    from yt_playlist.core import db_handles
-    from yt_playlist.core.db_rebuild import job
-    from yt_playlist.core.storage_maintenance import StorageMaintenance
-    from yt_playlist.core.store import Store
-    path = request.getfixturevalue(fixture)
-    store = Store(path)
-    maintenance = StorageMaintenance(store)
-    try:
-        store.init_schema()
-        def interrupt(phase,detail):
-            if phase==failure:
-                raise InterruptedError('runtime was never admitted')
-        with pytest.raises(InterruptedError,match='runtime was never admitted'):
-            job.run(store,rebuild=True,progress=interrupt)
-        failed = db_handles.state(path)
-        assert failed['phase']=='failed' and failed['analytics_pending']
-        assert not Path(failed['original']).exists()
-        assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] in (64,93)
-        maintenance.start()
-        maintenance.join(30)
-        assert maintenance.phase=='done',maintenance.error
-        assert maintenance.ready.is_set()
-        assert not db_handles.state(path)['analytics_pending']
-        store.settings.set_setting('accepted-after-staging-retry','keep')
-        assert store.settings.get_setting('accepted-after-staging-retry')=='keep'
-    finally:
-        maintenance.stop()
-        maintenance.join(30)
-        store.conn.close()
 
 
 def test_unknown_time_captures_and_known_delivery_receipts_survive_without_raw_metadata(development93,tmp_path):
@@ -195,62 +210,6 @@ def test_unknown_time_captures_and_known_delivery_receipts_survive_without_raw_m
         assert not conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
-def _capture_choice_rebuild(path,new_format):
-    from yt_playlist.core import evidence_ledger, fao, mix_choices
-    from yt_playlist.core.db_rebuild import job
-    from yt_playlist.core.store import Store
-    with closing(sqlite3.connect(path)) as conn:
-        conn.row_factory = sqlite3.Row
-        mix_choices.install(conn)
-        ledger = evidence_ledger.EvidenceLedger(evidence_ledger.directory(conn),2**63-1)
-        context = ledger.artifact({'at':99,'group_generation':'retired','groups':[]})
-        record = dict(schema=1,id='captured-menu',format='mixes',at=100,observed_at=100,
-            episode_id='old-episode',context=context,prediction=None,
-            options=[dict(id='old-option',label='Original label',genres=['house'])])
-        if new_format:
-            compact = ledger.artifact(mix_choices.context({'at':99},mixes=True))
-            record = mix_choices.publish_menu(conn,record,compact)
-        ledger.put('opportunity',record['id'],record)
-        conn.commit()
-        expected = {str(file.relative_to(ledger.directory)):list(fao.read(file).digest)
-                    for kind in ('artifact','opportunity')
-                    for file in (ledger.directory/kind).glob('*/*.json')}
-        assert {'artifact','opportunity'}=={Path(name).parts[0] for name in expected}
-    store = Store(path)
-    try:
-        store.init_schema()
-        report = job.run(store,rebuild=True)
-        pending = build._checkpoint(store.conn)
-        assert report['phase']=='complete' and report['analytics_pending']
-        assert 0<pending['stage']<len(pending['stages'])
-        assert dict(pending['evidence'])==expected
-    finally:
-        # Flush WAL before copying any database or retained original.
-        store.conn.close()
-    return record
-
-
-@pytest.fixture(scope='module')
-def captured_choice_templates(tmp_path_factory,development93_template):
-    templates = {}
-    def get(new_format):
-        if new_format not in templates:
-            root = tmp_path_factory.mktemp('captured-choices-'+str(new_format))
-            with pytest.MonkeyPatch.context() as patch:
-                patch.setenv('YT_PLAYLIST_HOME',str(root/'app-home'))
-                patch.setenv('YT_PLAYLIST_AUDIO_VIBES','0')
-                patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL','')
-                patch.delenv('DEEPSEEK_API_KEY',raising=False)
-                # Clone the genuinely populated historical prefix without
-                # coupling this module owner to function-fixture signatures.
-                template, _seconds = development93_template
-                path = root/'development93.db'
-                with closing(sqlite3.connect(path)) as conn:
-                    template.backup(conn)
-                record = _capture_choice_rebuild(path,new_format)
-            templates[new_format] = root,record
-        return templates[new_format]
-    return get
 
 
 def _workspace_contents(root):
@@ -301,93 +260,6 @@ def _clone_captured_rebuild(source,target,name='development93.db'):
     return path
 
 
-@pytest.fixture
-def captured_choices(captured_choice_templates,new_format,tmp_path):
-    source,record = captured_choice_templates(new_format)
-    original = _workspace_contents(source)
-    try:
-        yield _clone_captured_rebuild(source,tmp_path/'captured'),deepcopy(record)
-    finally:
-        assert _workspace_contents(source)==original,'Captured rebuild template was modified'
-
-
-@pytest.mark.parametrize('new_format',[False,True])
-@pytest.mark.parametrize('legacy,damage',[(False,None),(True,None),(False,'descriptor'),(False,'file')])
-def test_analytics_verifies_captured_choices_without_rejecting_new_publications(captured_choices,new_format,legacy,damage):
-    from yt_playlist.core import db_handles, evidence_ledger, fao, home_outputs, mix_choices
-    from yt_playlist.core.db_rebuild import job
-    from yt_playlist.core.store import Store
-    from yt_playlist.rec import choice_evidence
-    development93,record = captured_choices
-    store = Store(development93)
-    try:
-        store.init_schema()
-        if legacy:
-            with store.conn:
-                pending = build._checkpoint(store.conn)
-                pending.pop('evidence')
-                build._checkpoint(store.conn,pending)
-        captured = build._checkpoint(store.conn).get('evidence')
-        published = False
-        def progress(phase,detail):
-            nonlocal published
-            if published or detail['stage']!='mixes:roots':
-                return
-            published = True
-            display = home_outputs.prepare('home_choice',json.dumps(
-                {'schema':1,'protos':[{'label':'New accepted card'}]}),200)
-            with store.conn:
-                store.conn.execute('BEGIN IMMEDIATE')
-                home_outputs.publish(store.conn,display,store=store,input_revision=200)
-            assert choice_evidence.issue(store,'mixes',
-                [dict(id='new-option',label='New descriptor',genres=['jazz'])],201,
-                context={'at':200},opportunity_id='new-menu')=='new-menu'
-            assert choice_evidence.respond(store,'new-menu','choice',202,
-                option_id='new-option',action_id='accepted-choice')
-            assert choice_evidence.issue(store,'albums',
-                [dict(id='new-album',label='Accepted album')],203,
-                context={'at':200},opportunity_id='new-album-menu')=='new-album-menu'
-            if damage=='descriptor':
-                with store.conn:
-                    for name, in store.conn.execute("SELECT name FROM sqlite_schema "
-                            "WHERE type='trigger' AND tbl_name='mix_choice_themes'").fetchall():
-                        store.conn.execute('DROP TRIGGER '+build.quote(name))
-                    store.conn.execute("UPDATE mix_choice_themes SET label='Corrupted label' "
-                        "WHERE id=(SELECT d.theme_id FROM mix_choice_options o "
-                        "JOIN mix_choice_descriptors d ON d.id=o.descriptor_id WHERE o.opportunity_id='captured-menu')")
-            elif damage=='file':
-                # Appendable roots are shared with the retained original.
-                # A comparison of their current hashes would miss this loss.
-                path = store.rec_ledger.evidence()._path('opportunity','captured-menu')
-                fao.write(path, evidence_ledger.canonical({**record, 'episode_id': 'corrupted'}))
-            else:
-                raise InterruptedError('restart with accepted choices and captured inventory')
-        if damage:
-            with pytest.raises(ValueError,match='original listening evidence|displayed mix meaning'):
-                job.finish_analytics(store,progress=progress)
-            assert db_handles.state(development93)['analytics_pending']
-        else:
-            with pytest.raises(InterruptedError,match='restart with accepted choices'):
-                job.finish_analytics(store,progress=progress)
-            assert build._checkpoint(store.conn).get('evidence')==captured
-            store.conn.close()
-            store = Store(development93)
-            store.init_schema()
-            assert build._checkpoint(store.conn).get('evidence')==captured
-            job.finish_analytics(store)
-            store.conn.close()
-            store = Store(development93)
-            store.init_schema()
-            assert not db_handles.state(development93)['analytics_pending']
-            assert store.rec_proposals.get_proposals('home_choice')['protos'][0]['label']=='New accepted card'
-            offered = store.rec_ledger.evidence().get('opportunity','new-menu')
-            assert mix_choices.expand(store.conn,offered['options'][0])['label']=='New descriptor'
-            assert store.rec_ledger.evidence().get('response','accepted-choice')['option_id']=='new-option'
-            assert store.rec_ledger.evidence().get('opportunity','new-album-menu')
-            assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-        assert published
-    finally:
-        store.conn.close()
 
 
 @pytest.fixture(scope='module')

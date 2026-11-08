@@ -17,14 +17,42 @@ from yt_playlist.providers.base import MetadataObservation
 
 
 @pytest.fixture
-def predecessor(tmp_path, _pristine_installed_schema):
+def predecessor(tmp_path, metadata_predecessor_schema, monkeypatch):
+    from tests.genre_catalog_support import bound_catalog
+    from tests.store_fixture_support import reuse_reporting_reader
+    from yt_playlist.core import schema_inspection
+
+    bound_catalog(monkeypatch, entries=(('rock', 'Rock'), ('jazz', 'Jazz'), ('blues', 'Blues')))
     store = Store(tmp_path / 'before-evidence.db')
     try:
-        _pristine_installed_schema(79).backup(store.conn)
+        metadata_predecessor_schema.backup(store.conn)
+        assert store.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal'
+        store.conn.execute('PRAGMA wal_autocheckpoint=0')
         store._bind_repositories()
-        yield store
+        with reuse_reporting_reader(store, monkeypatch), schema_inspection.reuse_tables(store.conn):
+            yield store
     finally:
         store.conn.close()
+
+
+@pytest.fixture
+def receipt_change(monkeypatch):
+    # Keep background coordination independent of unrelated additive owners.
+    # The registered full upgrade retains the complete installed history.
+    monkeypatch.setattr(regular, 'CHANGES', regular.CHANGES[:1])
+
+
+@pytest.fixture
+def regular_predecessor(predecessor, receipt_change):
+    # Background regular DDL coordinates a writable installed catalog. Full
+    # historical metadata shapes are owned by the conversion tests below.
+    entry = predecessor.tracks.upsert_track('video', 'Song', 'Artist', None, 200)
+    predecessor.enrichment.apply_provider_fields(entry, 'a', {'genre': 'Jazz'}, providers=('a',))
+    predecessor.enrichment_state.record_metadata_observations(entry, 'native', [MetadataObservation(
+        'tags', [{'name': 'Jazz', 'count': 4}], 'artist', 'artist', 'reported',
+        unit='provider_tag_count_or_order', match_evidence={'query_kind': 'artist'})],
+        run_id='native-original', now=11)
+    return predecessor, entry
 
 
 def seed(store):
@@ -79,7 +107,8 @@ def test_registered_upgrade_and_restart_preserve_the_catalog_and_evidence(predec
         reopened.conn.close()
 
 
-def test_startup_retains_metadata_owners_and_binds_installed_revision_triggers(predecessor, monkeypatch):
+def test_startup_retains_metadata_owners_and_binds_installed_revision_triggers(
+        predecessor, receipt_change, monkeypatch):
     store = predecessor
     entry, _, _ = seed(store)
     before = dict(store.conn.execute('SELECT * FROM catalog_tracks WHERE id=?', (entry,)).fetchone())
@@ -110,7 +139,9 @@ def test_startup_retains_metadata_owners_and_binds_installed_revision_triggers(p
 def test_null_blank_and_withdrawal_remain_distinct_from_display_formatting(predecessor):
     store = predecessor
     entry, _, _ = seed(store)
-    migrate(store.conn, registry=registry.MIGRATIONS)
+    # Formatting/withdrawal owns this actual metadata conversion edge; the
+    # registered upgrade test owns continuing through later schema versions.
+    convert(store)
     for at, value in ((20, None), (21, '')):
         with store.conn:
             store.conn.execute('BEGIN IMMEDIATE')
@@ -123,9 +154,8 @@ def test_null_blank_and_withdrawal_remain_distinct_from_display_formatting(prede
     assert store.conn.execute('SELECT genre FROM catalog_tracks WHERE id=?', (entry,)).fetchone()[0] == 'Jazz'
 
 
-def test_deferred_startup_installs_receipts_without_advancing_committed_metadata_history(predecessor):
-    store = predecessor
-    seed(store)
+def test_deferred_startup_installs_receipts_without_advancing_committed_metadata_history(regular_predecessor):
+    store, _entry = regular_predecessor
     migrate(store.conn, registry=registry.MIGRATIONS[:80])
     reopened = Store(store._db_path)
     maintenance = StorageMaintenance(reopened)
@@ -145,10 +175,9 @@ def test_deferred_startup_installs_receipts_without_advancing_committed_metadata
         reopened.conn.close()
 
 
-def test_suspended_regular_ddl_keeps_predecessor_writable(predecessor, monkeypatch):
+def test_suspended_regular_ddl_keeps_predecessor_writable(regular_predecessor, monkeypatch):
     from yt_playlist.core.migrations import regular
-    store = predecessor
-    entry, _, _ = seed(store)
+    store, entry = regular_predecessor
     before = dict(store.conn.execute('SELECT * FROM catalog_tracks WHERE id=?', (entry,)).fetchone())
     entered, release = threading.Event(), threading.Event()
     apply = regular.CHANGES[0].apply
@@ -193,10 +222,9 @@ def test_suspended_regular_ddl_keeps_predecessor_writable(predecessor, monkeypat
         reopened.conn.close()
 
 
-def test_failed_regular_ddl_does_not_pause_or_automatically_retry(predecessor, monkeypatch):
+def test_failed_regular_ddl_does_not_pause_or_automatically_retry(regular_predecessor, monkeypatch):
     from yt_playlist.core.migrations import regular
-    store = predecessor
-    entry, _, _ = seed(store)
+    store, entry = regular_predecessor
     before = dict(store.conn.execute('SELECT * FROM catalog_tracks WHERE id=?', (entry,)).fetchone())
     reopened = Store(store._db_path)
     reopened.init_schema(defer_metadata=True)
@@ -241,8 +269,8 @@ def test_failed_regular_ddl_does_not_pause_or_automatically_retry(predecessor, m
         resumed.conn.close()
 
 
-def test_pre_cutover_snapshot_cannot_publish_after_background_commit(predecessor):
-    seed(predecessor)
+def test_pre_cutover_snapshot_cannot_publish_after_background_commit(regular_predecessor):
+    predecessor, _entry = regular_predecessor
     reopened = Store(predecessor._db_path)
     reopened.init_schema(defer_metadata=True)
     maintenance = StorageMaintenance(reopened)

@@ -11,12 +11,21 @@ import numpy as np
 import pytest
 
 from tests.conftest import FakeClient, _track
+from tests.test_spotify_library_import import observed_catalog
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.library.spotify_library import import_spotify_library
 from yt_playlist.library.executor import add_tracks_to_playlist
 from yt_playlist.library.playlist_generated import create_generated_playlist
 from yt_playlist.rec import discover, graduation, scorecard, scoring, surfaces
 
 DAY = 86400
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('jazz', 'Jazz'), ('techno', 'Techno'),
+                                  ('ambient', 'Ambient'))) as schema:
+        yield schema
 
 
 @pytest.fixture
@@ -58,7 +67,7 @@ def test_22_unrelated_same_name_in_other_account_does_not_block_import(db):
     assert report["playlists_imported"] == 1, report["details"]["playlists"]
 
 
-def test_22_retry_resumes_playlist_after_second_batch_failure(db):
+def test_22_retry_resumes_playlist_after_second_batch_failure(db, observed_catalog):
     class FailSecondBatch(SearchClient):
         calls = 0
 
@@ -152,7 +161,9 @@ def test_44_cold_discovery_long_mix_is_excluded_before_saving(db):
                                    "Techno", None, "source", 100)
     candidates = surfaces.cold_candidates(db, 100)
     tracks = [{"video_id": t.video_id, "title": t.title, "artist": t.artist} for t in candidates]
-    client = FakeClient(song_durations={"one": 200, "mix": 7200, "two": 200})
+    client = FakeClient(catalog={row['video_id']: _track(row['video_id'], row['title'], row['artist'])
+                                 for row in tracks},
+                        song_durations={"one": 200, "mix": 7200, "two": 200})
     create_generated_playlist(db, "Fresh songs", tracks, client, 100, account_id=1)
     assert "mix" not in [video for _, batch in client.added for video in batch]
 

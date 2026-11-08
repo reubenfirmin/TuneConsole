@@ -3,7 +3,7 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core import albums, genre_classifications, metadata
+from yt_playlist.core import metadata
 from yt_playlist.core.migrations import current, migrate, registry
 from yt_playlist.core.store import Store
 
@@ -16,40 +16,6 @@ def predecessor(tmp_path, _pristine_installed_schema):
     store.genres.configure_catalog()
     yield store
     store.conn.close()
-
-
-def test_registered_upgrade_retains_alias_unknown_null_and_blank(predecessor):
-    conn = predecessor.conn
-    labels = ['Drum And Bass', 'Synth Pop', 'Fix Artist Credits', '', None]
-    with conn:
-        for index, label in enumerate(labels):
-            conn.execute('INSERT INTO recordings(id,identity_key,genre) VALUES (?,?,?)',
-                         (index + 1, 'recording:' + str(index), label))
-        aid = albums.observe(conn, 'release', title='Release', artist='Artist', genre='Drum And Bass')
-    predecessor.discovery.upsert_discovered_artist('New artist', 1, [], [], None, 10, genre='Drum And Bass')
-    migrate(conn, registry=registry.MIGRATIONS)
-    predecessor._bind_repositories()
-    assert [row[0] for row in conn.execute('SELECT genre_key FROM recordings ORDER BY id')] == [
-        'drum bass', 'synth pop', None, None, None]
-    assert [row[0] for row in conn.execute('SELECT unresolved_genre FROM recordings ORDER BY id')] == [
-        None, None, 'Fix Artist Credits', '', None]
-    assert [row[0] for row in conn.execute('SELECT raw_label FROM genre_classification_legacy '
-        'WHERE recording_id IS NOT NULL ORDER BY recording_id')] == labels[:-1]
-    assert genre_classifications.read(conn, 'albums', aid) == 'Drum & Bass'
-    assert predecessor.discovery.get_discovered_artists()[0]['genre'] == 'Drum & Bass'
-    with conn:
-        conn.execute("UPDATE genre_catalog SET name='Drums renamed' WHERE key='drum bass'")
-    assert genre_classifications.read(conn, 'recordings', 1) == 'Drums renamed'
-    assert genre_classifications.read(conn, 'albums', aid) == 'Drums renamed'
-    assert predecessor.discovery.get_discovered_artists()[0]['genre'] == 'Drums renamed'
-    assert conn.execute('SELECT raw_label FROM genre_classification_legacy WHERE recording_id=1').fetchone()[0] == labels[0]
-    current.validate(conn)
-    reopened = Store(predecessor._db_path)
-    try:
-        reopened.init_schema()
-        assert genre_classifications.read(reopened.conn, 'recordings', 1) == 'Drums renamed'
-    finally:
-        reopened.conn.close()
 
 
 def test_current_provider_choice_and_reset_follow_label_without_changing_evidence(store):

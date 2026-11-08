@@ -1,6 +1,6 @@
 """Live receipts and real per-test coverage survive an interrupted test call."""
 import importlib.util
-from contextlib import closing
+from contextlib import ExitStack, closing
 import errno
 import json
 import os
@@ -10,10 +10,17 @@ import sqlite3
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 from xml.etree import ElementTree
 
 from coverage import Coverage, CoverageData
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    # These plugin/process checks do not construct the web application.
+    pass
 
 
 def overlap_module():
@@ -269,9 +276,18 @@ def prepared():
 def cleanup(request, tmp_path):
     yield
     Path(request.node.name + '.cleaned').touch()
+    monitor = request.config.pluginmanager.getplugin('test-session-time-limit')
+    if monitor is not None and monitor.interruption:
+        Path(request.node.name + '.stop').write_text(monitor.interruption)
 def block():
     subject.choose(True)
     Path('entered').touch()
+    if os.environ.get('PROBE_DEADLINE') == '1':
+        # Let the parent inspect the live blocked phase, then deliver the real
+        # alarm without spending two seconds on an intentionally idle child.
+        while not Path('expire').exists():
+            time.sleep(.005)
+        signal.setitimer(signal.ITIMER_REAL, .01)
     if os.environ.get('PROBE_COVERAGE_LOCK') == '1':
         from coverage import Coverage
         collector = Coverage.current()._collector
@@ -310,8 +326,9 @@ def test_unstarted():
 ''')
     command = [sys.executable, "-m", "pytest", "-p", "pytest_coverage_guard", "-p", "pytest_progress", "-p", "pytest_time_limit", "-p", "pytest_cov.plugin",
                "-p", "xdist.plugin", "-n", str(workers), "--dist=" + ("loadfile" if workers else "no"),
-               "-q", "--test-progress=" + str(progress), "--cov=subject", "--cov-context=test",
-               "--cov-report=", "--cov-config=" + str(tmp_path / "coverage.ini")]
+               "-q", "--tb=no", "--test-progress=" + str(progress), "--cov=subject", "--cov-context=test",
+               "--cov-report=", "--cov-config=" + str(tmp_path / "coverage.ini"),
+               "--fixture-root=" + str(tmp_path / "fixtures")]
     if interruption.startswith("deadline"):
         command.append("--test-time-limit=2")
     elif interruption.startswith("pace"):
@@ -320,6 +337,7 @@ def test_unstarted():
         child = subprocess.Popen(command, cwd=tmp_path, stdout=stream, stderr=subprocess.STDOUT, start_new_session=True,
             env={**os.environ, "PYTHONPATH": str(repo), "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
                  "PYTEST_ADDOPTS": "", "PROBE_BLOCKED_PHASE": blocked_phase,
+                 "PROBE_DEADLINE": str(int(interruption == 'deadline')),
                  "PROBE_SQLITE": str(int(interruption == 'pace-sqlite')),
                  "PROBE_COVERAGE_LOCK": str(int(interruption.endswith('coverage-lock')))})
         try:
@@ -335,6 +353,8 @@ def test_unstarted():
             assert live[-1]["nodeid"].endswith("test_block")
             if interruption == "signal":
                 os.killpg(child.pid, signal.SIGINT)
+            elif interruption == 'deadline':
+                (tmp_path / 'expire').touch()
             child.wait(timeout=15)
         finally:
             if child.poll() is None:
@@ -344,7 +364,7 @@ def test_unstarted():
     assert (tmp_path / "test_block.cleaned").exists(), output.read_text()
     assert not (tmp_path / "test_unstarted.cleaned").exists()
     if interruption.startswith("deadline"):
-        assert "--test-time-limit=2s expired" in output.read_text()
+        assert '--test-time-limit=2s expired' in (tmp_path / 'test_block.stop').read_text()
     elif interruption.startswith("pace"):
         assert "behind the target line" in output.read_text()
     # Match the child's isolated config: the project's source filter excludes
@@ -377,13 +397,14 @@ def test_unstarted():
         assert active['phase'] == blocked_phase
         assert any(row['nodeid'].endswith('test_failure') for row in stopped['slowest'])
 
-    # Each interrupt path must release ownership as well as save coverage.
-    rerun = subprocess.run(
-        [sys.executable, "-m", "pytest", "-p", "pytest_coverage_guard", "-p", "pytest_cov.plugin",
-         "--cov=subject", "--cov-report=", "--cov-config=" + str(tmp_path / "coverage.ini"),
-         "test_probe.py::test_choice", "-q"], cwd=tmp_path, capture_output=True, text=True, timeout=10,
-        env={**os.environ, "PYTHONPATH": str(repo), "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTEST_ADDOPTS": ""})
-    assert rerun.returncode == 0, rerun.stdout + rerun.stderr
+    # Claim the actual destination after all child processes have exited. This
+    # exercises both real ownership locks without starting an unrelated suite.
+    from pytest_coverage_guard import _reserve
+
+    with ExitStack() as owner:
+        config = SimpleNamespace(add_cleanup=owner.callback)
+        assert _reserve(config, (tmp_path / '.coverage').resolve()) is False
+        assert config._tuneconsole_coverage_owner['pid'] == os.getpid()
 
 
 @pytest.mark.parametrize('monitor', ['pace', 'deadline'])
@@ -437,27 +458,35 @@ def test_runtime_monitor_defers_while_progress_writer_is_busy(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize('workers', [0, 2])
-def test_runtime_target_advances_as_tests_complete(tmp_path, workers):
-    repo = Path(__file__).resolve().parents[1]
-    progress = tmp_path / 'progress.jsonl'
-    (tmp_path / 'pytest.ini').write_text('[pytest]\n')
-    (tmp_path / 'test_progressing.py').write_text(
-        'import time\nimport pytest\n'
-        '@pytest.mark.parametrize("case", range(4))\n'
-        'def test_progress(case):\n    time.sleep(.9)\n')
-    result = subprocess.run(
-        [sys.executable, '-m', 'pytest', '-p', 'pytest_time_limit', '-p', 'pytest_progress',
-         '-p', 'xdist.plugin', '-n', str(workers), '--dist=loadfile' if workers else '--dist=no',
-         '--test-runtime-target=3', '--test-runtime-slack=3', '--test-progress=' + str(progress), '-q'],
-        cwd=tmp_path, capture_output=True, text=True, timeout=15,
-        env={**os.environ, 'PYTHONPATH': str(repo), 'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1',
-             'PYTEST_ADDOPTS': ''})
-    assert result.returncode == 0, result.stdout + result.stderr
-    receipts = [json.loads(line) for line in progress.read_text().splitlines()]
-    assert len([row for row in receipts if row['event'] == 'end']) == 4
-    assert receipts[-1]['event'] == 'finish' and receipts[-1]['exitstatus'] == 0
-    assert receipts[-1]['elapsed_seconds'] > 3
-    assert not any(row['event'] == 'pace_stop' for row in receipts)
+def test_runtime_target_advances_as_tests_complete(tmp_path_factory, monkeypatch, workers):
+    from types import SimpleNamespace
+    from pytest_time_limit import RuntimeTarget
+
+    clock, timers = [100.], []
+    config = SimpleNamespace(pluginmanager=SimpleNamespace(getplugin=lambda name: None),
+        _tmp_path_factory=tmp_path_factory, getoption=lambda name, **kwargs: workers)
+    monitor = RuntimeTarget(config, .8, .5)
+    monkeypatch.setattr('pytest_time_limit._monotonic', lambda: clock[0])
+    monkeypatch.setattr(monitor, 'start_timer', lambda *args: timers.append(args))
+    monkeypatch.setattr(monitor, 'interrupt', lambda: pytest.fail('Completed tests must advance the target'))
+    monitor.pytest_sessionstart(None)
+    ids = [f'test_progressing.py::test_progress[{i}]' for i in range(4)]
+    monitor.pytest_collection_finish(SimpleNamespace(items=ids))
+    if workers:
+        assert monitor.selected is None
+        monitor.pytest_xdist_node_collection_finished(None, ids)
+        monitor.pytest_xdist_node_collection_finished(None, ids)
+    assert monitor.selected == 4 and timers == [(1, 1)]
+    for nodeid in ids:
+        monitor.pytest_runtest_logstart(nodeid, None)
+        clock[0] += .3
+        monitor.pytest_runtest_logreport(SimpleNamespace(nodeid=nodeid, when='call', duration=.3))
+        monitor.pytest_runtest_logfinish(nodeid, None)
+        monitor.expired(signal.SIGALRM, None)
+    assert clock[0] - monitor.started > monitor.target
+    assert monitor.completed == set(ids) and not monitor.active
+    assert monitor.interruption is None
+    assert json.loads(monitor.state_path.read_text()) == {'stop': False}
 
 
 def test_runtime_stop_storage_failure_interrupts_coordinator_and_workers(tmp_path, monkeypatch):

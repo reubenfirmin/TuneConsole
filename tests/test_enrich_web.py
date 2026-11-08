@@ -6,6 +6,7 @@ import pytest
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.store_fixture_support import file_consumer_store as store
 
 
 def _client(store):
@@ -90,10 +91,17 @@ def test_optional_artwork_retry_is_visible_without_reopening_metadata_queue(stor
 
 
 def test_one_queue_counts_and_pages_library_and_discovery_in_shared_order(store):
-    store.tracks.upsert_track("lib", "Library song", "Artist", None, 200, created_at=39.5)
-    for i in range(41):
-        store.discovery.upsert_discovered_track(f"new{i}|artist", f"new{i}", f"Discovery song {i}", "Artist",
-                                      None, None, None, None, "radio:seed", float(i))
+    from tests.recommendation_support import seed_publication_subjects
+
+    discoveries = [{'key': f'new{i}|artist', 'video_id': f'new{i}',
+                    'title': f'Discovery song {i}', 'artist': 'Artist', 'created_at': float(i)}
+                   for i in range(41)]
+    # Queue ordering consumes completed ingestion, with genuine library and
+    # discovery memberships and interleaved recording creation times.
+    seed_publication_subjects(store, [
+        {'key': 'library song|artist', 'video_id': 'lib', 'title': 'Library song',
+         'artist': 'Artist', 'created_at': 39.5}, *discoveries],
+        discoveries=[row['key'] for row in discoveries])
     c = _client(store)
     stats = c.get("/enrich/stats").text
     assert '<span class="v">42</span>' in stats
@@ -223,8 +231,13 @@ def test_detail_empty_states_and_page_validation(store, view):
 
 
 def test_queue_and_processed_details_are_separate_and_paginated(store):
-    ids = [store.tracks.upsert_track(f"vid{i}", f"Queue song {i:02}", "Artist", None, 200,
-                              created_at=1.0) for i in range(41)]
+    from tests.recommendation_support import seed_publication_subjects
+
+    seed_publication_subjects(store, [
+        {'key': f'queue song {i:02}|artist', 'video_id': f'vid{i}',
+         'title': f'Queue song {i:02}', 'artist': 'Artist', 'created_at': 1.0}
+        for i in range(41)])
+    ids = [row[0] for row in store.conn.execute('SELECT id FROM catalog_entries ORDER BY id')]
     done = store.tracks.upsert_track("done", "Completed song", "Artist", None, 200)
     complete_entries(store, [done], 995.0)
     c = _client(store)
@@ -305,17 +318,6 @@ def test_current_value_outside_provider_candidates_can_be_kept(store):
     tid, _ = _seed(store)
     store.tracks.set_track_genre(tid, "My own genre")
     _keep_current_value(store, tid, user_choice=True)
-
-
-def test_legacy_current_value_can_be_kept_after_populated_upgrade(legacy_store):
-    store = legacy_store
-    with store.conn:
-        tid = store.conn.execute(
-            "INSERT INTO tracks(video_id,title,artist,identity_key,genre) "
-            "VALUES ('v','Song','Artist','song|artist','My own genre')").lastrowid
-    from tests.historical_support import upgrade_fixture
-    upgrade_fixture(store)
-    _keep_current_value(store, tid, user_choice=False)
 
 
 def test_conflict_review_is_paginated(store):

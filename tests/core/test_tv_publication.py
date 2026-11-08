@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_tv_state_preparation import aliases, finish, seed
 from tests.test_tv_stream import video
 from tests.tv_publication_timing_support import tv_publication_costs

@@ -1,7 +1,10 @@
 """Saved Radio offers and requested starts follow current upload eligibility."""
 from copy import deepcopy
+from contextlib import closing
 from tests.enrichment_support import complete_entries
 from tests.derived_rating_support import seed_dislike
+from tests.home_fixture_support import home_routes_only, without_metadata_providers
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
 from datetime import date
 import json
 import threading
@@ -11,9 +14,31 @@ import pytest
 from tests.conftest import seed_catalog_track
 from tests.test_onboarding_routes import _client
 from yt_playlist.core import catalog
+from yt_playlist.core.store import Store
 from yt_playlist.rec import account_growth, rec_params
 from yt_playlist.rec.radio_candidates import RadioCandidates, eligible_seeds
 from yt_playlist.web.radio_launch import RadioLaunch
+
+
+pytestmark = pytest.mark.usefixtures('home_routes_only', 'without_metadata_providers')
+
+
+@pytest.fixture(scope='module')
+def eligibility_schema():
+    # Eligibility consumes current catalog rows; schema and vocabulary curation
+    # have independent admission/upgrade owners.
+    with bounded_consumer_schema((('jazz', 'Jazz'), ('rock', 'Rock'))) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(tmp_path, eligibility_schema, monkeypatch):
+    database = Store(tmp_path / 'radio-eligibility.db')
+    with closing(database.conn):
+        initialize_consumer(database, eligibility_schema)
+        database.conn.execute('PRAGMA wal_autocheckpoint=0')
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
 
 
 def seeds(store):

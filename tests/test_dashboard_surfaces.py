@@ -4,10 +4,18 @@ import pytest
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.home_fixture_support import home_routes_only, prepared_client, publish_cards, without_metadata_providers
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from tests.test_mode_cards_route import prepare_home
-from tests.recommendation_support import publish_bundles, seed_bundle_subjects
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
 
-pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'home_routes_only', 'without_metadata_providers')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('house', 'House'),)) as schema:
+        yield schema
 
 
 def _client(store):
@@ -18,8 +26,8 @@ def _client(store):
 
 def test_fresh_renders_as_saveable_proto(store):
     import numpy as np
+    from yt_playlist.rec import home_cards
     from yt_playlist.rec import mode_surfaces as ms
-    _iid, c = _client(store)
     # Seed mode_bundles with a fresh-surface item; /home/cards is now the card-row endpoint
     store.modes.replace_modes([
         {"mode_id": 1, "label": "a", "families": [["house", 1]],
@@ -33,10 +41,16 @@ def test_fresh_renders_as_saveable_proto(store):
               for i in range(5)]                    # enough to clear the _MIN_CARD floor
     # only the fresh surface has material, so it wins the mode
     payload = {"1": {surf: (fresh if surf == "fresh" else []) for surf in ms.CARD_SURFACES}}
-    seed_bundle_subjects(store, payload, fresh=fresh)
+    seed_publication_subjects(store, fresh, discoveries=[track['key'] for track in fresh])
     publish_bundles(store, payload, 1.0, fresh=fresh)
-    prepare_home(store, 1.0)
-    html = c.get("/home/cards").text
+    cards = ms.assemble_cards(store, 1, 0)
+    assert len(cards) == 1 and cards[0]['lane'] == 'fresh'
+    proto = home_cards._complete_card(store, cards[0], 1, 0, None, None)
+    result = home_cards.CardsResult([proto], [{'proto': proto, 'pool': None}],
+                                   None, None, [], [], 0, None)
+    publish_cards(store, result, 1)
+    with prepared_client(store, now=1, background_work=False) as client:
+        html = client.get("/home/cards").text
     assert 'id="gen-fresh"' in html                 # rendered as a proto-playlist card
     assert "Fresh songs -" in html                  # dated name
     assert "Play this mix" in html                   # same save flow as the other lanes

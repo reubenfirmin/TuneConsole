@@ -95,3 +95,35 @@ def build_development93(conn, released):
                          released.execute('SELECT ' + ','.join(fields) + ' FROM ' + table))
     conn.commit()
     runner.validate_version(conn, 93)
+
+
+@pytest.fixture(scope='module')
+def completed_destination_sql():
+    """An actual empty destination below tests of converters and recovery.
+
+    Keep the real initializer and its validation in this measured fixture.
+    Consumers copy its completed SQL rather than bootstrap and validate an
+    unrelated empty database for every source-selection and construction step.
+    """
+    from yt_playlist.core.db_rebuild import destination
+
+    with closing(sqlite3.connect(':memory:')) as template:
+        build._configure(template)
+        template.execute('BEGIN')
+        destination.initialize(template)
+        template.commit()
+        statements = tuple(template.iterdump())
+    assert statements[0] == 'BEGIN TRANSACTION;' and statements[-1] == 'COMMIT;'
+    return statements[1:-1]
+
+
+@pytest.fixture
+def completed_destination_schema(completed_destination_sql, monkeypatch):
+    from yt_playlist.core.db_rebuild import destination
+
+    def initialize(conn):
+        assert conn.in_transaction
+        for sql in completed_destination_sql:
+            conn.execute(sql)
+
+    monkeypatch.setattr(destination, 'initialize', initialize)

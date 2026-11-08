@@ -3,9 +3,26 @@ import sqlite3
 
 import pytest
 
+from yt_playlist.core import genre_identity
 from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These SQL migration checks do not construct an HTTP application."""
+
+
+@pytest.mark.parametrize('version', [79, 87])
+def test_taste_axis_input_keeps_genuine_history_and_read_only_sql(_pristine_installed_schema, version):
+    source = _pristine_installed_schema(version)
+    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert [row[0] for row in source.execute('SELECT version FROM schema_migrations ORDER BY version')] == list(range(1, version + 1))
+    if version == 87:
+        assert source.execute("SELECT key FROM genre_catalog WHERE key='synth pop'").fetchone()
+        assert genre_identity.resolve(source, 'Drum And Bass') == ('drum bass', None)
+    assert not source.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def test_upgrade_preserves_typed_axes_and_original_events(tmp_path, _pristine_installed_schema):
@@ -13,7 +30,6 @@ def test_upgrade_preserves_typed_axes_and_original_events(tmp_path, _pristine_in
     try:
         _pristine_installed_schema(87).backup(old.conn)
         old._bind_repositories()
-        old.genres.configure_catalog()
         old.rec_model.set_lean('genre:Drum And Bass', 1.4, 10)
         old.rec_model.hide_facet('genre:jazz')
         old.rec_signals.bump_theme('genre:Drum And Bass', 2, 10)
@@ -63,12 +79,11 @@ def test_new_axes_constraints_and_unknown_evidence(store):
                 store.conn.execute(sql)
 
 
-def test_alias_collision_in_current_axes_rolls_back_losslessly(tmp_path):
+def test_alias_collision_in_current_axes_rolls_back_losslessly(tmp_path, _pristine_installed_schema):
     old = Store(tmp_path / 'collision.db')
     try:
-        migrate(old.conn, registry=registry.MIGRATIONS[:87])
+        _pristine_installed_schema(87).backup(old.conn)
         old._bind_repositories()
-        old.genres.configure_catalog()
         old.rec_model.set_lean('genre:Synth Pop', 1.3, 10)
         old.rec_model.set_lean('genre:synth pop', 1.4, 10)
         with pytest.raises(Exception, match='multiple legacy axes'):

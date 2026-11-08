@@ -6,12 +6,17 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.repos.test_foreign_calendar_batches import stamp
 from yt_playlist.core import destination_schema, listening, listening_calendar
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import calendar_indexes as indexes
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Calendar preparation checks do not construct an HTTP application."""
 
 
 @pytest.fixture
@@ -52,6 +57,19 @@ def assert_lookup_rows(conn):
 def observed(conn,account):
     affected = {('song-0','2026-10-21','UTC'),('song-1','2026-10-21','UTC')}
     return list(map(tuple,listening_calendar._foreign_rows(conn,account,affected,None)))
+
+
+@pytest.mark.parametrize('version', [100, 103, 105, 107])
+def test_calendar_input_keeps_each_installed_contract_and_snapshot_guards(_bounded_installed_schema, version):
+    template = _bounded_installed_schema(version)
+    source = template.source
+    with closing(sqlite3.connect(source._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
+        reader.row_factory = sqlite3.Row
+        runner.validate_version(reader, version)
+        regular.validate(reader)
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source.conn.execute('SELECT count(*) FROM main.play_events').fetchone()[0] == 0
+    assert template.revision_guards
 
 
 @pytest.mark.parametrize('installed',[100,103,105,107],indirect=True)

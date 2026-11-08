@@ -3,7 +3,7 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core.migrations import current, migrate, registry
+from yt_playlist.core.migrations import current, migrate, registry, regular
 from yt_playlist.core.migrations import v082_recommendation_work as migration
 from yt_playlist.core.migrations.runner import Migration, MigrationError
 from yt_playlist.core.store import Store
@@ -11,12 +11,36 @@ from yt_playlist.rec import daily_model_selection
 
 
 @pytest.fixture
+def disable_periodic_library_sync():
+    pass
+
+
+def test_work_input_keeps_installed_owners_and_completed_regular_history(compaction_inputs):
+    source = compaction_inputs(81).source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert list(map(tuple, source.conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
+        (entry.version, entry.name) for entry in registry.MIGRATIONS[:81]]
+    assert list(map(tuple, source.conn.execute('SELECT version,name FROM schema_changes ORDER BY version'))) == [
+        (entry.version, entry.name) for entry in regular.CHANGES]
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.fixture
+def admitted_predecessor(tmp_path, compaction_inputs):
+    # Restart consumes completed independent DDL below the real v81-to-v82 edge.
+    with compaction_inputs(81).open(tmp_path / 'work.db') as store:
+        yield store
+
+
+@pytest.fixture
 def predecessor(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path / 'work.db')
-    _pristine_installed_schema(81).backup(store.conn)
-    store._bind_repositories()
-    yield store
-    store.conn.close()
+    try:
+        _pristine_installed_schema(81).backup(store.conn)
+        store._bind_repositories()
+        yield store
+    finally:
+        store.conn.close()
 
 
 def seed(store):
@@ -34,8 +58,8 @@ def upgrade(store):
     store._bind_repositories()
 
 
-def test_upgrade_restart_and_cache_eviction_preserve_work_state(predecessor):
-    store = predecessor
+def test_upgrade_restart_and_cache_eviction_preserve_work_state(admitted_predecessor):
+    store = admitted_predecessor
     seed(store)
     upgrade(store)
     assert store.model_selection.next_daily_at() == 1234.5
@@ -96,20 +120,31 @@ def test_interruption_after_relocation_rolls_back_then_retries(predecessor):
     assert store.tv_preparation.state() == {'failed': False, 'at': 999.5}
 
 
-def test_fresh_and_upgraded_work_owners_have_the_same_contract(predecessor):
-    upgrade(predecessor)
-    migrate(predecessor.conn, registry=registry.MIGRATIONS)
-    fresh = Store(':memory:')
-    try:
-        fresh.init_schema()
-        for name in migration.OBJECTS:
-            old = predecessor.conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()[0]
-            new = fresh.conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()[0]
-            assert current._tokens(old) == current._tokens(new)
-        current.validate(predecessor.conn)
-        current.validate(fresh.conn)
-    finally:
-        fresh.conn.close()
+@pytest.mark.parametrize('version', [64, 73, 79, 81, 82, 88, 93, 99, 102, 103, 107])
+def test_work_contract_upgrade_input_keeps_genuine_history(_pristine_installed_schema, version):
+    source = _pristine_installed_schema(version)
+    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert list(map(tuple, source.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
+        (entry.version, entry.name) for entry in registry.MIGRATIONS[:version]]
+    assert not source.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_fresh_work_contract_input_is_admitted_and_read_only(_pristine_current_schema):
+    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    current.validate(_pristine_current_schema)
+
+
+def test_fresh_and_upgraded_work_owners_have_the_same_contract(_pristine_installed_schema, _pristine_current_schema):
+    # The named historical inputs above run the genuine registry incrementally.
+    # This contract comparison consumes its completed empty upgrade, while the
+    # populated work cutover, rollback and continuing writers have their owners.
+    upgraded = _pristine_installed_schema(len(registry.MIGRATIONS))
+    for name in migration.OBJECTS:
+        old = upgraded.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()[0]
+        new = _pristine_current_schema.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()[0]
+        assert current._tokens(old) == current._tokens(new)
+    current.validate(upgraded)
+    current.validate(_pristine_current_schema)
 
 
 def test_predecessor_still_rejects_a_superseded_metadata_owner(predecessor):

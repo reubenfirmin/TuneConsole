@@ -1,14 +1,15 @@
 import numpy as np
+from copy import deepcopy
 from time import perf_counter
 from types import SimpleNamespace
 from tests.derived_rating_support import seed_dislike
 from tests.retained_rating_support import apply_model_ratings
 import pytest
 from tests.conftest import seed_catalog_track
-from tests.prepared_fixture_support import prepared_template
-from tests.recommendation_support import publish_bundles, seed_bundle_subjects
+from tests.prepared_fixture_support import capture_template, prepared_template
+from tests.recommendation_support import publish_bundles, seed_bundle_subjects, seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.core import catalog
-from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import mode_selection, mode_surfaces as ms, stored_home
 
 
@@ -47,14 +48,14 @@ def _subject_keys(payload):
             for items in bucket.values() for item in items}
 
 
-def _mode_candidates(n_modes=4):
+def _mode_candidates(n_modes=4, *, candidates_per_pool=13):
     modes = [{"mode_id": m, "label": f"m{m}", "families": [["house", 1]],
               "centroid": _eye(m - 1), "size": 80 - m, "rep_keys": []}
              for m in range(1, n_modes + 1)]
     def items(prefix):
-        return [{"key": f"{prefix}{i}", "video_id": "v", "title": f"{prefix}{i}", "artist": f"{prefix}art{i}",
+        return [{"key": f"{prefix}{i}", "video_id": f"v{prefix}{i}", "title": f"{prefix}{i}", "artist": f"{prefix}art{i}",
                  "album": "", "thumbnail": None, "plays": 0, "reason": "", "lane": "", "genre": "house"}
-                for i in range(13)]
+                for i in range(candidates_per_pool)]
     payload = {str(m): {} for m in range(1, n_modes + 1)}
     for m in range(1, n_modes + 1):
         # The same owned tracks can be ranked in several framings. Keep fresh
@@ -67,12 +68,17 @@ def _mode_candidates(n_modes=4):
     return modes, payload
 
 
-def _seed(store, n_modes=4):
+def _seed(store, n_modes=4, *, candidates_per_pool=13):
     """Seed live modes and subjects; let each consumer publish its final payload."""
-    modes, payload = _mode_candidates(n_modes)
+    modes, payload = _mode_candidates(n_modes, candidates_per_pool=candidates_per_pool)
     store.modes.replace_modes(modes, retired_ids=[], now=1.0)
-    with atomic_write(store):
-        seed_bundle_subjects(store, payload)
+    subjects = {item['key']: item for mid in map(str, range(1, n_modes + 1))
+                for items in payload[mid].values() for item in items}
+    discovered = {item['key'] for mid in map(str, range(1, n_modes + 1))
+                  for item in payload[mid]['fresh']}
+    # Ingestion/artist inference is below assignment and live dislike scoring.
+    # Keep genuine identities, catalog membership and current keyed genres.
+    seed_publication_subjects(store, subjects.values(), discoveries=discovered)
     store._assembly_subject_keys = _subject_keys(payload)
     assert not store.recommendations.heads()
     return payload
@@ -280,28 +286,123 @@ def test_assemble_empty_without_bundles(store):
     assert ms.assemble_cards(store, now=10.0, epoch=0) == []
 
 
+@pytest.fixture(scope='module')
+def dislike_board_schema():
+    with bounded_consumer_schema((('house', 'House'),)) as source:
+        yield source
+
+
+def test_dislike_board_schema_keeps_real_empty_owners_and_snapshot_guards(dislike_board_schema):
+    assert dislike_board_schema.execute('SELECT count(*) FROM recordings').fetchone()[0] == 0
+    assert dislike_board_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert dislike_board_schema._revision_script
+
+
+@pytest.fixture(scope='module')
+def dislike_subject_template(dislike_board_schema):
+    def build(source):
+        # Both rankers consume the same completed catalog and vectors.
+        payload = _seed(source, candidates_per_pool=5)
+        seed_publication_subjects(source, [{'key': 'disliked-seed', 'title': 'Disliked seed',
+            'artist': 'Disliked artist', 'video_id': 'disliked-seed'}])
+        keys = sorted(_subject_keys(payload))
+        vectors = np.array([[1., 0.] if key.endswith('-0') else [0., 1.] for key in keys] + [[1., 0.]],
+                           dtype=np.float32)
+        source.rec_model.replace_rec_vectors([(key, vector.tobytes())
+            for key, vector in zip(keys + ['disliked-seed'], vectors)])
+        payload['_ppr'] = {str(mid): list(dict.fromkeys(item['key'] for surf in ms.CARD_SURFACES
+            for item in payload[str(mid)][surf])) for mid in range(1, 5)}
+        return payload
+
+    with prepared_template(dislike_board_schema, build) as template:
+        yield template
+
+
+def test_dislike_subject_input_keeps_catalog_vectors_and_both_rankers(dislike_subject_template):
+    source, payload = dislike_subject_template.source, dislike_subject_template.result
+    assert len(source.modes.list_modes()) == 4
+    assert len(_subject_keys(payload)) == 40
+    assert source.conn.execute('SELECT count(*) FROM recordings').fetchone()[0] == 41
+    assert source.rec_model.rec_vectors_count() == 41
+    assert set(payload['_ppr']) == {'1', '2', '3', '4'}
+    assert not source.recommendations.heads()
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+
+
+@pytest.fixture(scope='module')
+def dislike_board_template(dislike_subject_template, tmp_path_factory):
+    from tests.store_fixture_support import reuse_reporting_reader
+    from yt_playlist.rec import measurement
+
+    path = tmp_path_factory.mktemp('dislike-board-inputs') / 'source.db'
+    with dislike_subject_template.open(path) as source:
+        payload = deepcopy(dislike_subject_template.result)
+        # Lane competition has independent assignment owners above. This
+        # consumer needs four full themes whose ranking can change in place.
+        for mid, lane in enumerate(ms.CARD_SURFACES, 1):
+            payload[str(mid)] = {lane: payload[str(mid)][lane]}
+        source._assembly_subject_keys = _subject_keys(payload)
+        with pytest.MonkeyPatch.context() as patch, reuse_reporting_reader(source, patch):
+            # Policy fingerprint production is below live dislike scoring.
+            # Retain real policy documents, candidate publication and files.
+            patch.setattr(measurement, 'serving_policy', lambda *args, **kwargs:
+                          ('dislike-input', {'ranker': 'dislike-input'}))
+            _publish(source, payload, subjects_ready=True)
+        yield capture_template(source, payload)
+
+
+def test_dislike_board_input_keeps_all_modes_candidates_vectors_and_both_rankers(dislike_board_template):
+    source, payload = dislike_board_template.source, dislike_board_template.result
+    assert len(source.modes.list_modes()) == 4
+    assert len(_subject_keys(payload)) == 20
+    assert {lane for mid in map(str, range(1, 5)) for lane in payload[mid]} == set(ms.CARD_SURFACES)
+    assert source.conn.execute('SELECT count(*) FROM recordings').fetchone()[0] == 41
+    assert set(payload['_ppr']) == {'1', '2', '3', '4'}
+    assert source.recommendations.head('home')
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+
+
+@pytest.fixture
+def dislike_board_store(dislike_board_template, tmp_path, monkeypatch):
+    from tests.store_fixture_support import reuse_reporting_reader
+
+    with dislike_board_template.open(tmp_path / 'dislike.db') as source:
+        with reuse_reporting_reader(source, monkeypatch):
+            yield source
+
+
 @pytest.mark.parametrize("ppr_share", [0, 1])
 def test_cached_cards_respond_to_durable_dislikes_and_clear_without_rebuild(
-        store, monkeypatch, ppr_share, assembly_subjects):
+        dislike_board_store, monkeypatch, ppr_share):
+    from yt_playlist.controllers.genres import Genres
     from yt_playlist.rec import rec_params
 
-    payload = assembly_subjects
+    store = dislike_board_store
+    # Retain all four themes and both published rankers. Five candidates per
+    # pool leave a playable card after the closest recording is suppressed;
+    # complete twelve-track assignment is owned by ranked_cards above.
     rec_params.set_param(store, "ppr_ab_share", ppr_share)
     monkeypatch.setattr(mode_selection, "select_modes", lambda *args, **kwargs: [1, 2, 3, 4])
-    seed_catalog_track(store, 'disliked-seed', 'Disliked seed', 'Disliked artist', video_id='disliked-seed')
-    keys = sorted(_subject_keys(payload))
-    vectors = np.array([[1., 0.] if key.endswith("-0") else [0., 1.] for key in keys] + [[1., 0.]],
-                       dtype=np.float32)
-    store.rec_model.replace_rec_vectors([(key, vector.tobytes())
-                                        for key, vector in zip(keys + ["disliked-seed"], vectors)])
-    payload["_ppr"] = {str(mid): list(dict.fromkeys(item["key"] for surf in ms.CARD_SURFACES
-                                for item in payload[str(mid)][surf])) for mid in range(1, 5)}
-    _publish(store, payload, subjects_ready=True)
+    # The selected themes are controlled inputs; their bandit/history producers
+    # have separate owners. Keep current vectors and durable dislike scoring real.
+    monkeypatch.setattr(stored_home.mode_eval, "mode_bandit_stats", lambda *args, **kwargs: {})
+    monkeypatch.setattr(stored_home.layers, "now_mode_posterior", lambda *args, **kwargs: {})
+    monkeypatch.setattr(stored_home.transient, "facet_leans", lambda *args, **kwargs: {})
+    # Taxonomy is fixed while the recording ratings change. Current-genre and
+    # family-filter cases below retain the actual taxonomy reads.
+    axes = store.genres.feature_axes({'house', 'House'})
+
+    def feature_axes(_controller, labels):
+        return {label: axes[label] for label in labels}
+
+    monkeypatch.setattr(Genres, 'feature_axes', feature_axes)
     publication = _publication(store)
     before = ms.assemble_cards(store, now=100, epoch=0)
+    assert len(before) == 4
     apply_model_ratings(store, {"disliked-seed": "DISLIKE"}, now=1)
     # Outlive the 365-day ban and every transient layer. The prepared payload stays unchanged.
     after = ms.assemble_cards(store, now=1000 * 86400, epoch=0)
+    assert len(after) == 4
     assert all(card["tracks"][0]["key"].endswith("-0") for card in before)
     assert all(not card["tracks"][0]["key"].endswith("-0") for card in after)
     apply_model_ratings(store, {"disliked-seed": "INDIFFERENT"}, now=1000 * 86400)

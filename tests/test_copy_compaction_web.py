@@ -1,5 +1,5 @@
 """Real retained copying through the serving app and durable feedback inbox."""
-from contextlib import closing
+from contextlib import ExitStack, closing
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 import asyncio
 import sqlite3
@@ -10,12 +10,161 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
-from tests.core.test_predecessor_writes import installed
-from tests.test_deferred_playback_feedback import library,playing
+from tests.compaction_fixture_support import unfiltered_copy
+from tests.home_fixture_support import without_metadata_providers
+from tests.genre_catalog_support import bound_catalog
+from tests.prepared_fixture_support import historical_template, schema_definitions
+from tests.test_deferred_playback_feedback import playing
 from yt_playlist.core import db_handles, playback_feedback
 from yt_playlist.core.db_rebuild import build, job
 from yt_playlist.library import live_plays, player_events
 from yt_playlist.web.app import create_app
+
+
+pytestmark = pytest.mark.usefixtures('unfiltered_copy')
+
+
+@pytest.mark.parametrize('version', [79, 93, 107])
+def test_compaction_schema_input_keeps_installed_history_and_read_only_sql(compaction_inputs, version):
+    from yt_playlist.core.migrations import registry, regular
+
+    schema = compaction_inputs.schema(version)
+    assert [tuple(row) for row in schema.execute(
+        'SELECT version,name FROM schema_migrations ORDER BY version')] == [
+        (entry.version, entry.name) for entry in registry.MIGRATIONS[:version]]
+    assert regular.validate(schema) == len(regular.CHANGES)
+    assert schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert not schema.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.mark.parametrize('version', [79, 93, 107])
+def test_compaction_admitted_input_keeps_private_snapshot_guards(compaction_inputs, version, tmp_path):
+    template = compaction_inputs(version)
+    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert template.source._snapshot_revisions.conn is template.source.conn
+    assert template.revision_guards
+    before = template.source._snapshot_revisions.capture()
+    with template.open(tmp_path / 'library.db') as private:
+        assert schema_definitions(private.conn) == schema_definitions(template.source.conn)
+        private.settings.set_setting('private guard check', 'written')
+        assert private._snapshot_revisions.capture()
+    assert template.source._snapshot_revisions.capture() == before
+
+
+@pytest.fixture(scope='module')
+def copy_library_input(compaction_inputs, tmp_path_factory):
+    completed = compaction_inputs(107)
+
+    def seed(source):
+        main = source.accounts.upsert_account('Main', 'bridge', None, True)
+        other = source.accounts.upsert_account('Other', 'bridge', 'other', False)
+        entry = source.tracks.upsert_track('known', 'Song', 'Artist', None, 180)
+        playlist = source.playlists.upsert_playlist(main, 'LM', 'Liked Music', 0, '', 1)
+        return main, other, entry, playlist
+
+    database = tmp_path_factory.mktemp('copy-playback-input') / 'library.db'
+    with pytest.MonkeyPatch.context() as patch:
+        bound_catalog(patch)
+        with historical_template(completed.source.conn, seed, database=database, completed=completed) as template:
+            yield template
+
+
+def test_copy_playback_input_keeps_accounts_catalog_and_private_guards(copy_library_input):
+    source = copy_library_input.source
+    main, other, entry, playlist = copy_library_input.result
+    assert main != other and entry and playlist
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source._snapshot_revisions.conn is source.conn
+    assert source.conn.execute('SELECT count(*) FROM main.catalog_entries').fetchone()[0] == 1
+
+
+@pytest.fixture
+def library(tmp_path, copy_library_input, monkeypatch):
+    bound_catalog(monkeypatch)
+    with copy_library_input.open(tmp_path / 'library.db') as store:
+        yield store, *copy_library_input.result
+
+
+@pytest.fixture(scope='module')
+def browsing_inputs(compaction_inputs, tmp_path_factory):
+    templates = {}
+    with ExitStack() as resources:
+        def get(version):
+            if version not in templates:
+                completed = compaction_inputs(version)
+                database = tmp_path_factory.mktemp('copy-browsing-input') / 'library.db'
+
+                def seed(source):
+                    account = source.accounts.upsert_account('Main', 'main.json', None, True)
+                    source.tracks.upsert_track('known', 'Title', 'Artist', None, 180)
+                    return account
+
+                with pytest.MonkeyPatch.context() as patch:
+                    bound_catalog(patch)
+                    templates[version] = resources.enter_context(historical_template(
+                        completed.source.conn, seed, database=database, completed=completed))
+            return templates[version]
+
+        yield get
+
+
+@pytest.mark.parametrize('version', [79, 93, 107])
+def test_browsing_input_keeps_private_account_and_known_track(browsing_inputs, version):
+    template = browsing_inputs(version)
+    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert template.source.accounts.get_master_account().id == template.result
+    assert template.source.tracks.metadata_for_video('known')['title'] == 'Title'
+    assert template.source._snapshot_revisions.conn is template.source.conn
+
+
+@pytest.fixture
+def browsing_input(request, browsing_inputs, tmp_path, monkeypatch):
+    bound_catalog(monkeypatch)
+    template = browsing_inputs(request.param)
+    with template.open(tmp_path / 'library.db') as store:
+        yield store, template.result
+
+
+@pytest.fixture(autouse=True)
+def copy_routes(monkeypatch, without_metadata_providers):
+    from fastapi.responses import HTMLResponse
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import (app_update, audio_preview, home, likes,
+                                       playlists, radio_session, sync, track)
+
+    # Retain the real serving, playback, maintenance and feedback routes used
+    # across replacement, along with their normal middleware and lifecycle.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx) for module in
+                        (app_update, audio_preview, home, likes, playlists, radio_session, sync, track)])
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
+    templates = webapp.Jinja2Templates
+
+    def route_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        # These assertions exercise route/database availability during real
+        # replacement. Template rendering has separate page/browser owners.
+        monkeypatch.setattr(result, 'TemplateResponse',
+                            lambda request, name, context: HTMLResponse(name))
+        return result
+
+    monkeypatch.setattr(webapp, 'Jinja2Templates', route_templates)
+
+
+@pytest.fixture
+def browsing_routes(copy_routes, monkeypatch):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, home, playlists, radio_session
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx) for module in
+                        (app_update, home, playlists, radio_session)])
+
+
+@pytest.fixture
+def radio_routes(copy_routes, monkeypatch):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, radio_session
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [app_update.build(ctx), radio_session.build(ctx)])
 
 
 def _acceptance_stage(acceptance, stage, timeout, description):
@@ -47,20 +196,10 @@ def test_browsing_playback_feedback_and_resumed_writes_across_replacement(librar
         try:
             assert client.post('/storage-maintenance/compact').status_code==202
             assert held.wait(20)
-            status = client.get('/storage-maintenance/status').json()
-            assert status['active'] and status['banner_message']==(
-                'Optimizing app storage; some recommendations are temporarily unavailable.')
-            for path in ('/','/playlists','/track/known','/radio/status','/storage-maintenance/status'):
-                assert client.get(path).status_code==200,path
             playlist_url = 'https://music.youtube.com/playlist?list=LM'
             response = client.post('/play',json={'url':playlist_url})
             assert response.status_code==200 and response.json()=={'ok':True}
             assert {'type':'navigate','url':playlist_url} in commands
-            assert client.post('/sync').status_code==503
-            with closing(sqlite3.connect(store._db_path,timeout=0)) as writer:
-                import pytest
-                with pytest.raises(sqlite3.OperationalError,match='locked'):
-                    writer.execute('BEGIN IMMEDIATE')
             response = client.post('/track/like',data={'video_id':'known','on':'1'})
             assert response.status_code==200
             assert remote.rated==[('known','LIKE')]
@@ -81,8 +220,40 @@ def test_browsing_playback_feedback_and_resumed_writes_across_replacement(librar
         assert db_handles.state(store._db_path)['phase']=='complete'
 
 
+def test_copy_browsing_stays_available_while_writers_are_fenced(library, monkeypatch):
+    store, main, other, _, _ = library
+    app = create_app(store, lambda: {main: FakeClient(), other: FakeClient()}, background_work=False)
+    held, release = threading.Event(), threading.Event()
+    original = build.build
+
+    def copy(*args, **kwargs):
+        held.set()
+        assert release.wait(30)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(build, 'build', copy)
+    with TestClient(app, base_url='http://127.0.0.1') as client:
+        try:
+            assert client.post('/storage-maintenance/compact').status_code == 202
+            assert held.wait(20)
+            status = client.get('/storage-maintenance/status').json()
+            assert status['active'] and status['banner_message'] == (
+                'Optimizing app storage; some recommendations are temporarily unavailable.')
+            for path in ('/', '/playlists', '/track/known', '/radio/status', '/storage-maintenance/status'):
+                assert client.get(path).status_code == 200, path
+            assert client.post('/sync').status_code == 503
+            with closing(sqlite3.connect(store._db_path, timeout=0)) as writer:
+                with pytest.raises(sqlite3.OperationalError, match='locked'):
+                    writer.execute('BEGIN IMMEDIATE')
+        finally:
+            release.set()
+            app.state.ctx.storage_maintenance.join(30)
+        assert app.state.ctx.storage_maintenance.phase == 'done'
+
+
+@pytest.mark.parametrize('browsing_input', [107], indirect=True)
 @pytest.mark.parametrize('failure', [False, True])
-def test_compaction_acceptance_drains_slow_radio_before_returning(library, monkeypatch, failure):
+def test_compaction_acceptance_drains_slow_radio_before_returning(browsing_input, radio_routes, monkeypatch, failure):
     scheduled, entered, draining = Future(), Future(), Future()
     release = threading.Event()
     contexts = []
@@ -129,14 +300,26 @@ def test_compaction_acceptance_drains_slow_radio_before_returning(library, monke
             monkeypatch.setattr(ctx.storage_maintenance, 'join', fail_after_compaction)
         return app
 
-    monkeypatch.setattr(f'{__name__}.create_app', observed_app)
+    def copy_and_close():
+        store, main = browsing_input
+        app = observed_app(store, lambda: {main: FakeClient()},
+                           now_fn=lambda: 1000, background_work=False)
+        ctx = app.state.ctx
+        with TestClient(app, base_url='http://127.0.0.1') as client:
+            assert client.post('/storage-maintenance/compact').status_code == 202
+            ctx.storage_maintenance.join(30)
+            assert ctx.storage_maintenance.phase == 'done'
+            assert client.get('/radio/status').status_code == 200
+            entered.result(timeout=5)
+            # The failure happens after actual Radio entry. Context exit must
+            # drain its managed thread before returning either result.
+            ctx.storage_maintenance.join(30)
+
     with ThreadPoolExecutor(max_workers=1) as executor:
-        acceptance = executor.submit(
-            test_browsing_playback_feedback_and_resumed_writes_across_replacement, library, monkeypatch)
+        acceptance = executor.submit(copy_and_close)
         try:
             # Radio is scheduled by the post-copy status request. Its dispatch
-            # deadline starts after actual scheduling, not before the copy,
-            # browsing, feedback replay and resumed-write assertions.
+            # deadline starts after actual scheduling, not before the copy.
             radio_thread = _acceptance_stage(acceptance, scheduled, 30, 'Radio scheduling after compaction')
             assert _acceptance_stage(acceptance, entered, 5, 'scheduled Radio entry') is radio_thread
             _acceptance_stage(acceptance, draining, 30, 'application shutdown drain')
@@ -151,48 +334,47 @@ def test_compaction_acceptance_drains_slow_radio_before_returning(library, monke
             acceptance.result(timeout=30)
     assert not contexts[0].work.active
     # The caller still owns an open, usable database after the app has drained.
-    library[0].settings.set_setting('after app shutdown', 'accepted')
-    assert library[0].settings.get_setting('after app shutdown') == 'accepted'
+    browsing_input[0].settings.set_setting('after app shutdown', 'accepted')
+    assert browsing_input[0].settings.get_setting('after app shutdown') == 'accepted'
 
 
-def test_compaction_drain_probe_reports_original_failure_before_radio(library, monkeypatch):
-    post = TestClient.post
-
-    def fail_before_compaction(client, path, *args, **kwargs):
-        if path == '/storage-maintenance/compact':
-            raise RuntimeError('Controlled failure before Radio scheduling')
-        return post(client, path, *args, **kwargs)
-
-    monkeypatch.setattr(TestClient, 'post', fail_before_compaction)
+def test_compaction_drain_probe_reports_original_failure_before_radio():
+    acceptance, scheduled = Future(), Future()
+    acceptance.set_exception(RuntimeError('Controlled failure before Radio scheduling'))
     with pytest.raises(RuntimeError, match='Controlled failure before Radio scheduling'):
-        test_compaction_acceptance_drains_slow_radio_before_returning(library, monkeypatch, False)
+        _acceptance_stage(acceptance, scheduled, 0, 'Radio scheduling after compaction')
 
 
-def test_compaction_drain_probe_rejects_return_without_radio(library, monkeypatch):
-    original_app = create_app
-
-    def app_without_radio(*args, **kwargs):
-        app = original_app(*args, **kwargs)
-        # Controlled omission must fail the probe even if real compaction and
-        # every ordinary acceptance assertion finish successfully.
-        monkeypatch.setattr(app.state.ctx.radio, 'prepare', lambda: None)
-        return app
-
-    monkeypatch.setattr(f'{__name__}.create_app', app_without_radio)
+def test_compaction_drain_probe_rejects_return_without_radio():
+    # Challenge the probe independently of the real copy/Radio workflow above:
+    # ordinary completion cannot substitute for the required scheduling stage.
+    acceptance, scheduled = Future(), Future()
+    acceptance.set_result(None)
     with pytest.raises(AssertionError, match='Acceptance returned before Radio scheduling'):
-        test_compaction_acceptance_drains_slow_radio_before_returning(library, monkeypatch, False)
+        _acceptance_stage(acceptance, scheduled, 0, 'Radio scheduling after compaction')
 
 
-@pytest.mark.parametrize('installed', [79, 93, 107], indirect=True)
+def replace(store, rollback, progress=lambda phase, detail: None):
+    def observed(phase, detail):
+        progress(phase, detail)
+        if rollback and phase == 'reopening':
+            raise RuntimeError('controlled rollback')
+
+    if rollback:
+        with pytest.raises(RuntimeError, match='controlled rollback'):
+            job.run(store, progress=observed)
+    else:
+        job.run(store, progress=observed)
+
+
+@pytest.mark.parametrize('browsing_input', [79, 93, 107], indirect=True)
 @pytest.mark.parametrize('rollback', [False, True])
-def test_preconstructed_app_browses_legacy_readers_and_radio_after_reopen(installed, rollback):
-    store, _ = installed
-    account = store.accounts.upsert_account('Main', 'main.json', None, True)
-    store.tracks.upsert_track('known', 'Title', 'Artist', None, 180)
-    settings, tracks, playlists = store.settings, store.tracks, store.playlists
+def test_preconstructed_app_browses_legacy_readers_during_copy(browsing_input, browsing_routes, rollback):
+    store, account = browsing_input
     app = create_app(store, lambda: {account: FakeClient()}, background_work=False)
     with TestClient(app, base_url='http://127.0.0.1') as client:
         browsed_during_copy = False
+
         def progress(phase, detail):
             nonlocal browsed_during_copy
             if phase == 'copy' and not browsed_during_copy:
@@ -200,13 +382,18 @@ def test_preconstructed_app_browses_legacy_readers_and_radio_after_reopen(instal
                 for path in ('/', '/playlists', '/radio/status'):
                     response = client.get(path)
                     assert response.status_code == 200, (path, response.text[:200])
-            if rollback and phase == 'reopening':
-                raise RuntimeError('controlled rollback')
-        if rollback:
-            with pytest.raises(RuntimeError, match='controlled rollback'):
-                job.run(store, progress=progress)
-        else:
-            job.run(store, progress=progress)
+        replace(store, rollback, progress)
+        assert browsed_during_copy
+
+
+@pytest.mark.parametrize('browsing_input', [79, 93, 107], indirect=True)
+@pytest.mark.parametrize('rollback', [False, True])
+def test_preconstructed_app_browses_legacy_readers_and_radio_after_reopen(browsing_input, browsing_routes, rollback):
+    store, account = browsing_input
+    settings, tracks, playlists = store.settings, store.tracks, store.playlists
+    app = create_app(store, lambda: {account: FakeClient()}, background_work=False)
+    with TestClient(app, base_url='http://127.0.0.1') as client:
+        replace(store, rollback)
         # These are the actual repository objects retained by app services.
         settings.set_setting('retained consumer', 'resumed')
         assert settings.get_setting('retained consumer') == 'resumed'

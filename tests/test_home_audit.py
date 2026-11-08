@@ -8,9 +8,17 @@ from yt_playlist.core import logsetup
 from yt_playlist.rec import home_audit
 from yt_playlist.rec.surfaces import ForYouItem
 from yt_playlist.rec import home_cards as home
-from tests.home_fixture_support import home_routes_only, without_metadata_providers
+from tests.home_fixture_support import home_routes_only, prepared_client, publish_menu, without_metadata_providers
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 
 pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('jazz', 'Jazz'), ('britpop', 'Britpop'), ('techno', 'Techno'),
+                                  ('house', 'House'))) as schema:
+        yield schema
 
 
 @pytest.fixture
@@ -111,27 +119,22 @@ def test_routes_audit_mode_offers_previews_and_refreshes(
         assert all(c["genres"] for c in cards.values())
 
 
-def test_single_card_refresh_is_audited_and_audit_failure_does_not_break_home(store, audit_path, monkeypatch):
-    from tests.test_mode_cards_route import _client
-    from tests.conftest import seed_catalog_track
-    tracks = [{"key": f"a{i}|b", "title": f"A{i}", "artist": "B", "genre": "Jazz",
-               "video_id": f"a{i}|b"} for i in range(4)]
-    for t in tracks:
-        seed_catalog_track(store, t["key"], t["title"], t["artist"], video_id=t["key"], genre=t["genre"])
-    proto = home._proto(store, "wheelhouse", "More in your wheelhouse",
-                        tracks, 1000)
-    monkeypatch.setattr(home, "_one_card", lambda *_, **kw: proto)
-    client = _client(store)
-    assert client.post("/home/refresh-card/wheelhouse").status_code == 200
-    row = _rows(audit_path)[0]
-    assert row["source"] == "/home/refresh-card/wheelhouse"
-    assert row["cards"][0]["epoch"] == 1
+def test_single_card_refresh_is_audited_and_audit_failure_does_not_break_home(
+        store, audit_path, monkeypatch, home_routes_only, without_metadata_providers):
+    payload = publish_menu(store, count=2, labels=('An easy mix', 'More in your wheelhouse'), genre='jazz')
+    assert payload['menus'][0]['protos'][1]['lane'] == 'wheelhouse'
+    with prepared_client(store, background_work=False) as client:
+        assert client.post("/home/refresh-card/wheelhouse").status_code == 200
+        row = _rows(audit_path)[0]
+        assert row["source"] == "/home/refresh-card/wheelhouse"
+        assert row["cards"][0]["framing"] == 'wheelhouse'
+        assert row["cards"][0]["epoch"] == 1
 
-    def fail(*args, **kwargs):
-        raise OSError("audit unavailable")
-    monkeypatch.setattr(home_audit, "record", fail)
-    response = client.get("/home/cards")
-    assert response.status_code == 200 and "More in your wheelhouse" in response.text
+        def fail(*args, **kwargs):
+            raise OSError("audit unavailable")
+        monkeypatch.setattr(home_audit, "record", fail)
+        response = client.get("/home/cards")
+        assert response.status_code == 200 and "More in your wheelhouse" in response.text
 
 
 def test_audit_appends_across_reconfigure_and_rotates_separately(store, audit_path):

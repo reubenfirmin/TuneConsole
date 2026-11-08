@@ -1,8 +1,10 @@
 import numpy as np
 import pytest
+from unittest.mock import Mock
 from fastapi.testclient import TestClient
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.store_fixture_support import file_consumer_store as store
 from tests.home_fixture_support import home_routes_only, publish_menu, without_metadata_providers
 
 pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'home_routes_only', 'without_metadata_providers')
@@ -48,19 +50,34 @@ def test_cards_render_logs_impressions(store):
     assert store.modes.impression_counts() == impressions
 
 
-def test_generate_logs_pick(store):
+@pytest.fixture
+def completed_generated_playlist(store, monkeypatch):
+    from yt_playlist.library import playlist_generated
+
+    # The route owns mode-pick logging. Remote creation, item ingestion and
+    # quarantine have their own generated-playlist owners.
+    account = store.accounts.upsert_account('main', 'cred', None, True)
+    playlist = store.playlists.upsert_playlist(account, 'created-mix', 'My Mix', 1, 'hash', 1000)
+    create = Mock(return_value={'new_ytm': 'created-mix', 'pid': playlist, 'added': 1})
+    monkeypatch.setattr(playlist_generated, 'create_generated_playlist', create)
+    return create
+
+
+def test_generate_logs_pick(store, completed_generated_playlist):
     _seed_modes(store)
     r = _client(store).post("/home/generate", data={
         "name": "My Mix",
         "tracks": '[{"video_id": "vX", "title": "T", "artist": "A"}]',
         "recipe": '{"model": "mode", "mode_id": 2}'})
     assert r.status_code == 200
+    assert completed_generated_playlist.call_args.kwargs['recipe'] == {'model': 'mode', 'mode_id': 2}
     assert store.modes.pick_counts() == {2: 1}
 
 
-def test_generate_no_pick_without_mode(store):
+def test_generate_no_pick_without_mode(store, completed_generated_playlist):
     _seed_modes(store)
     _client(store).post("/home/generate", data={
         "name": "M", "tracks": '[{"video_id": "vX", "title": "T", "artist": "A"}]',
         "recipe": 'null'})
+    assert completed_generated_playlist.call_args.kwargs['recipe'] is None
     assert store.modes.pick_counts() == {}

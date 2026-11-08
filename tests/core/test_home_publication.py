@@ -12,10 +12,25 @@ import pytest
 from tests.core.test_home_output_preparation import seed, root_rows
 from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import group_evidence, recommendation_custody
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import home_outputs as preparation, home_publication as publication
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    pass
+
+
+def test_home_publication_input_keeps_installed_history_and_guards(_bounded_installed_schema):
+    source = _bounded_installed_schema(90).source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert list(map(tuple, source.conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
+        (entry.version, entry.name) for entry in registry.MIGRATIONS[:90]]
+    assert source._snapshot_revisions.conn is source.conn
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def prepare(conn):
@@ -181,7 +196,8 @@ def test_interrupted_publication_and_source_race_cannot_select_partial_state(ins
 
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
-def test_missing_file_repair_and_failed_roots_leave_regular_schema_independent(installed, independent_regular_ddl):
+def test_missing_file_repair_leaves_regular_schema_independent(
+        installed, independent_regular_ddl, publication_consumer_reads):
     store, _ = installed
     originals = seed(store)
     owner = publication.OWNER
@@ -196,6 +212,15 @@ def test_missing_file_repair_and_failed_roots_leave_regular_schema_independent(i
     publication.repair(store.conn, 'home_prepared')
     assert store.rec_proposals._proposal_json('home_prepared') == originals['home_prepared']
     owner.publish(store.conn, stage=stage)
+
+
+@pytest.mark.parametrize('installed', [90], indirect=True)
+def test_failed_roots_keep_independent_ddl_and_restart_retry_usable(
+        installed, independent_regular_ddl, publication_consumer_reads):
+    store, _ = installed
+    seed(store)
+    owner = publication.OWNER
+    owner.publish(store.conn, stage=ready(store.conn))
     with store.conn.atomic():
         group_evidence.release(store.conn, 'prepared', 'proposal:home_prepared:choice_context')
     def failed(*args):

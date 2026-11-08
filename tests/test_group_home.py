@@ -9,15 +9,58 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient, seed_catalog_track
 from tests.group_support import publish, recordings
-from tests.home_fixture_support import returning_listener
+from tests.home_fixture_support import home_page_bytecode, returning_listener, without_metadata_providers
 from tests.playlist_fixture_support import library_catalog
 from tests.prepared_fixture_support import prepared_template
 from tests.rec.test_home_prepared import one_menu_per_attempt
-from tests.recommendation_support import publish_bundles
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.core import mix_choices
 from yt_playlist.rec import (choice_evidence, group_home, group_serving, group_viz,
                              home_cache, home_cards, home_prepared, taste_viz)
 from yt_playlist.web.app import create_app
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('house', 'House'), ('jazz', 'Jazz'))) as schema:
+        yield schema
+
+
+def test_adaptive_schema_input_keeps_current_history_and_read_only_sql(_pristine_current_schema):
+    from yt_playlist.core.migrations import registry, regular
+
+    source = _pristine_current_schema
+    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == len(registry.MIGRATIONS)
+    assert source.execute('SELECT max(version) FROM schema_changes').fetchone()[0] == len(regular.CHANGES)
+    assert not source.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.fixture(scope='module')
+def adaptive_library_template(_pristine_current_schema):
+    with prepared_template(_pristine_current_schema, library) as template:
+        yield template
+
+
+@pytest.fixture
+def group_pages(monkeypatch, home_page_bytecode, without_metadata_providers):
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, home, taste
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+        for module in (app_update, audio_preview, home, taste)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
+    templates = webapp.Jinja2Templates
+
+    def compiled_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        result.env.bytecode_cache = home_page_bytecode
+        return result
+
+    monkeypatch.setattr(webapp, 'Jinja2Templates', compiled_templates)
 
 
 def library(store):
@@ -25,14 +68,31 @@ def library(store):
     pool = []
     for i, track in enumerate(tracks):
         title, artist, album = f'Song {i}', f'Artist {i // 2}', f'Album {i // 2}'
-        seed_catalog_track(store, track.key, title, artist, video_id=f'v{i}', genre=track.genre, album=album)
         pool.append({'key': track.key, 'title': title, 'artist': artist, 'album': album,
                      'video_id': f'v{i}', 'thumbnail': '', 'genre': track.genre, 'year': 2000})
+    # Graph selection consumes a completed catalog. Retain all 64 subjects,
+    # their genre/album fields and actual artist identities in one input batch.
+    from yt_playlist.core import artists
+    from yt_playlist.core.db_writes import atomic_write
+
+    seed_publication_subjects(store, [{**track, 'year': None} for track in pool])
+    with atomic_write(store):
+        for row in store.conn.execute('SELECT id,artist FROM recordings'):
+            artists.observe(store.conn, row['id'], row['artist'])
     head = publish(store, tracks)
     publish_bundles(store, {'all': {'wheelhouse': pool, 'explore': pool,
         'comfort': pool, 'fresh': []}, '_meta': {'full_pools': True, 'comfort_pool': 64}}, 1050)
     assert group_serving.prepare(store, 1100)
     return tracks, head
+
+
+def test_adaptive_library_input_keeps_exact_graph_and_read_only_custody(adaptive_library_template):
+    source = adaptive_library_template.source
+    tracks, head = adaptive_library_template.result
+    assert len(tracks) == 64
+    assert source.taste_groups.head_generation() == head['generation']
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.fixture
@@ -60,6 +120,14 @@ def adaptive_menu_template(_pristine_current_schema, adaptive_library_template):
 @pytest.fixture
 def adaptive_menu(store, adaptive_menu_template):
     return adaptive_menu_template.restore(store)
+
+
+def test_adaptive_menu_input_keeps_graph_context_and_complete_selections(adaptive_menu_template):
+    _tracks, head, result = adaptive_menu_template.result
+    assert result.choice_context['group_generation'] == head['generation']
+    assert len(result.protos) >= 2
+    assert all(len(proto['tracks']) == 12 for proto in result.protos)
+    assert adaptive_menu_template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
 
 
 @pytest.fixture(scope='module')
@@ -100,6 +168,14 @@ def adaptive_batch(adaptive_batch_template):
         yield store, deepcopy(adaptive_batch_template.result)
 
 
+def test_adaptive_batch_input_keeps_usable_checkpoint_and_original_graph(adaptive_batch_template):
+    head, _result, payload = adaptive_batch_template.result
+    assert home_prepared._valid(payload)
+    assert payload['choice_context']['group_generation'] == head['generation']
+    assert len(payload['menus']) == 1
+    assert adaptive_batch_template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+
+
 def test_default_home_offers_use_exact_graph_definitions_without_legacy_ids(adaptive_batch):
     store, (head, result, payload) = adaptive_batch
     # Own both the real initial graph selection and its first usable worker
@@ -129,9 +205,8 @@ def test_default_home_offers_use_exact_graph_definitions_without_legacy_ids(adap
     assert not list(store.rec_ledger.evidence().records('opportunity'))
 
 
-def test_cached_group_headings_are_served_without_rewriting_the_prepared_set(store, adaptive_library):
-    _tracks, head = adaptive_library
-    payload = home_prepared.prepare(store, 1200)
+def test_cached_group_headings_are_served_without_rewriting_the_prepared_set(adaptive_batch):
+    store, (head, _result, payload) = adaptive_batch
     names = {group['version']: group['name'] for group in head['groups']}
     for menu in payload['menus']:
         for proto in menu['protos']:
@@ -190,9 +265,10 @@ def test_small_initial_groups_remain_visible_without_replacing_usable_startup_mi
     assert prepared and any(m['protos'] for m in prepared['menus'])
 
 
-def test_prepared_home_and_real_menu_capture_preserve_group_context(store, adaptive_library):
-    _tracks, head = adaptive_library
-    payload = home_prepared.prepare(store, 1200)
+def test_prepared_home_and_real_menu_capture_preserve_group_context(store, adaptive_menu, group_pages):
+    _tracks, head, assembled = adaptive_menu
+    assert home_prepared.remember(store, None, assembled, 1200)
+    payload = home_cache.read(store, 'home_tuned')
     assert payload and payload['group_policy'] == 'adaptive'
     assert home_prepared._valid(payload)
     assert payload['choice_context']['group_generation'] == head['generation']
@@ -386,6 +462,9 @@ def test_active_preparation_freezes_graph_inputs_and_does_not_capture_legacy_mod
         raise AssertionError('Graph offers must not capture the unused legacy selection model')
     monkeypatch.setattr(RecommendationProposals, 'get_proposals', read)
     monkeypatch.setattr(choice_evidence, 'model_context', legacy_capture)
+    # Two real selections prove the graph/context is captured once across
+    # attempts. Full cursor/capacity boundaries have their own owners above.
+    monkeypatch.setattr(home_prepared, 'MAX_MENUS', 2)
     prepared = home_prepared.prepare(store, 1200)
     assert prepared and prepared['choice_context']['group_generation'] == head['generation']
     assert len(prepared['menus']) > 1
@@ -395,9 +474,9 @@ def test_active_preparation_freezes_graph_inputs_and_does_not_capture_legacy_mod
     assert context['musical_groups'] and all('choice_context' not in m for m in prepared['menus'])
 
 
-def test_rollback_rejects_cached_adaptive_menus_but_keeps_definitions(store, adaptive_library):
-    _tracks, head = adaptive_library
-    assert home_prepared.prepare(store, 1200)
+def test_rollback_rejects_cached_adaptive_menus_but_keeps_definitions(adaptive_batch):
+    store, (head, _result, payload) = adaptive_batch
+    assert home_prepared._valid(payload)
     store.settings.set_setting('rec_group_serving', 'legacy')
     scheduled = []
     assert home_prepared.load(store, 1300, lambda: scheduled.append(True)) is None
@@ -443,7 +522,7 @@ def test_definitions_survive_regrouping_and_held_offers_keep_their_context(
     assert store.taste_groups.definition(original.protos[0]['group_version'])
 
 
-def test_taste_main_views_show_served_graph_and_hide_fixed_count_controls(store, adaptive_library):
+def test_taste_main_views_show_served_graph_and_hide_fixed_count_controls(store, adaptive_library, group_pages):
     _tracks, head = adaptive_library
     view = group_viz.mode_layers(store, 1200, group_viz.prepared(store))
     assert view['adaptive']

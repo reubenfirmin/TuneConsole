@@ -2,7 +2,8 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import FakeClient
+from tests.conftest import FakeClient, _track
+from tests.store_fixture_support import file_consumer_store as store
 from tests.metadata_provenance_support import metadata_provenance
 from yt_playlist.web.app import create_app
 
@@ -22,7 +23,8 @@ def seed_song_actions(store):
     offline = store.playlists.upsert_playlist(offline_id, "OFFLINE", "Offline mix", 0, "", 1)
     track = store.tracks.upsert_track("owned-song", "Owned Song", "Artist & Friends", "Album", 180)
     store.playlists.set_playlist_tracks(source, [track])
-    main = FakeClient(albums={"MPRE_new": {
+    main = FakeClient(catalog={SONG['video_id']: _track(SONG['video_id'], SONG['title'], SONG['artist'], 225)},
+                      albums={"MPRE_new": {
         "title": "New Album", "artists": [{"name": "Artist & Friends"}],
         "tracks": [{"videoId": SONG["video_id"], "title": SONG["title"], "duration": "3:45"}],
     }})
@@ -121,7 +123,7 @@ def test_new_song_playlist_seeds_before_first_readable_page(songs, monkeypatch, 
     import json
     from tests.core.test_playlist_page_accounting import first
     from tests.test_saved_album_snapshot import _production_client
-    from yt_playlist.library import executor, undo_capture
+    from yt_playlist.library import executor, playlist_writes, undo_capture
     from yt_playlist.util.action_kinds import COPY_PLAYLIST
 
     # Representative of the reported first-page shape: a message inside the playlist shelf,
@@ -151,6 +153,9 @@ def test_new_song_playlist_seeds_before_first_readable_page(songs, monkeypatch, 
     capture = undo_capture.capture_post
     monkeypatch.setattr(undo_capture, 'capture_post',
                         lambda *a, **kw: capture(*a, **kw, sleep=lambda _: None))
+    retry = playlist_writes.with_retry
+    monkeypatch.setattr(playlist_writes, 'with_retry',
+                        lambda fn: retry(fn, sleep=lambda _: None))
     result = songs['http'].post('/songs/create-playlist', json={'name': 'Mix', 'song': SONG})
     assert result.status_code == 200
     data = result.json()

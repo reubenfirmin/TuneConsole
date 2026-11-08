@@ -1,6 +1,7 @@
 """Normal worker maintenance owns recap and cleanup freshness, including retries."""
 from datetime import datetime, timezone
 import logging
+from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
 
@@ -8,11 +9,25 @@ from fastapi.testclient import TestClient
 import pytest
 
 from tests.conftest import seed_catalog_track
+from tests.home_fixture_support import without_metadata_providers
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store
 from yt_playlist.core.store import Store
 from yt_playlist.library import analysis
 from yt_playlist.rec import actions, maintenance, trend_rollups
 from yt_playlist.rec.rec_worker import RecWorker
-from yt_playlist.web.app import create_app
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('techno', 'Techno'),)) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def summary_vocabulary(monkeypatch):
+    from tests.genre_catalog_support import bound_catalog
+
+    bound_catalog(monkeypatch, entries=(('techno', 'Techno'),))
 
 
 def timestamp(month):
@@ -39,12 +54,34 @@ def seed(store):
     return iid
 
 
-def test_cold_jobs_coalesce_with_learning_and_publish_recap_route_and_cleanup(store, monkeypatch):
+def test_summary_schema_input_keeps_installed_sql_and_generated_guards(_pristine_current_schema):
+    assert _pristine_current_schema.execute('SELECT count(*) FROM schema_migrations').fetchone()[0] > 0
+    assert _pristine_current_schema._revision_script
+    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_summary_input_keeps_admitted_schema_and_real_guards(file_consumer_store):
+    from yt_playlist.core.migrations import current, regular
+
+    current.validate(file_consumer_store.conn)
+    regular.validate(file_consumer_store.conn)
+    assert file_consumer_store._snapshot_revisions.conn is file_consumer_store.conn
+    assert not file_consumer_store.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_cold_jobs_coalesce_with_learning_and_publish_recap_route_and_cleanup(
+        file_consumer_store, monkeypatch, without_metadata_providers):
+    from fastapi import FastAPI
+    from fastapi.templating import Jinja2Templates
+    from yt_playlist.web.routes import trends
+
+    store = file_consumer_store
     iid = seed(store)
     store.playlists.upsert_playlist(iid, 'empty', 'Empty playlist', 0, '', 0)
     now = [timestamp('2026-10')]
     worker = worker_for(store, monkeypatch, now)
     rebuilds = []
+    monkeypatch.setattr(worker, '_prepare_content', lambda: False)
     monkeypatch.setattr(worker, '_do_rebuild', lambda: rebuilds.append(True))
     worker.trigger()
     worker.projections.poll()
@@ -55,7 +92,12 @@ def test_cold_jobs_coalesce_with_learning_and_publish_recap_route_and_cleanup(st
     assert store.rec_proposals.get_proposals('trend_rollups')['story']['month'] == '2026-09'
     card = next(c for c in actions.take_action(store, now[0], {}) if c.kind == 'cleanup')
     assert card.badge == '1'
-    app = create_app(store, lambda: {}, now_fn=lambda: now[0])
+    # Exercise the published output through its actual route and template.
+    # Application startup and its other workers have separate integration owners.
+    templates = Jinja2Templates(directory=str(Path(trends.__file__).resolve().parents[1] / 'templates'))
+    templates.env.globals.update(asset_v='test', exit_on_idle=False)
+    app = FastAPI()
+    app.include_router(trends.build(SimpleNamespace(store=store, templates=templates, rec_worker=worker)))
     with TestClient(app) as client:
         response = client.get('/trends/story/2026-09')
         assert response.status_code == 200

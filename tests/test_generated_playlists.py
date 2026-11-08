@@ -18,7 +18,7 @@ from yt_playlist.web.app import create_app
 from yt_playlist.library import playlist_generated
 from tests.conftest import FakeClient
 from tests.playlist_fixture_support import remote_catalog
-from tests.test_mode_cards_route import prepare_home
+from tests.home_fixture_support import home_routes_only, publish_menu, without_metadata_providers
 
 
 def _client(store, provider):
@@ -268,34 +268,22 @@ def test_generate_endpoint_rejects_empty(store):
     assert r.status_code == 200 and "Couldn't save" in r.text
 
 
-def test_home_renders_generated_cards(store, unlocked_home_controls):
+def test_home_renders_generated_cards(
+        store, unlocked_home_controls, home_routes_only, without_metadata_providers):
     # Cards are lazy-loaded via /home/cards; assert against that endpoint instead of /.
     import numpy as np
-    from yt_playlist.rec import mode_surfaces as ms
-    from tests.recommendation_support import publish_bundles, seed_bundle_subjects
     iid = store.accounts.upsert_account("main", "cred", None, True)
-    t = store.tracks.upsert_track("v1", "Song", "Artist", "Alb", None, 1)
-    pl = store.playlists.upsert_playlist(iid, "PL", "P", 1, "h", 1.0)
-    store.playlists.set_playlist_tracks(pl, [t])
-    store.history.record_history_plays(iid, 1.0, [identity_key("Song", "Artist")], source_timezone="UTC")
     store.settings.set_setting("last_sync_at", "1.0")        # synced -> the rec feed (generated cards) renders
     store.modes.replace_modes([
         {"mode_id": 1, "label": "a", "families": [["house", 1]],
          "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 80, "rep_keys": []},
     ], retired_ids=[], now=1.0)
-    payload = {"1": {}}
-    for surf in ms.CARD_SURFACES:
-        payload["1"][surf] = [{"key": f"{surf}{i}", "video_id": f"{surf}{i}", "title": f"Song {surf} {i}",
-                               "artist": f"Art {i}", "album": "", "thumbnail": None,
-                               "plays": 0, "reason": "", "lane": "", "genre": ""} for i in range(4)]
-    seed_bundle_subjects(store, payload)
-    publish_bundles(store, payload, 1.0)
-    prepare_home(store, 1.0)
-    c = _client(store, lambda: {iid: FakeClient()})
-
-    r = c.get("/home/cards")
-    assert r.status_code == 200
-    assert "More in your wheelhouse" in r.text and "Play this mix" in r.text
+    publish_menu(store, 1, count=2, mode_ids=(1, 1),
+                 labels=('Comfort listening', 'More in your wheelhouse'))
+    with _client(store, lambda: {iid: FakeClient()}) as c:
+        r = c.get("/home/cards")
+        assert r.status_code == 200
+        assert "More in your wheelhouse" in r.text and "Play this mix" in r.text
 
 
 def test_comfort_proto_card_dj_ordered_with_genre(store, monkeypatch):

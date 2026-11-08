@@ -13,7 +13,7 @@ from tests.test_home_other_genres import genre_bundles, offered
 from tests.test_home_tuning import home_clients, prepare_tuning_home
 from tests.musical_support import prepare_profiles, prepare_vibes
 from tests.prepared_fixture_support import prepared_template
-from tests.recommendation_support import publish_bundles
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
 from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import home_vibe, mix_tuning, mode_surfaces, musical_character, musical_profiles, rec_params
@@ -339,27 +339,26 @@ def test_vibe_changes_offered_styles_as_well_as_track_order(monkeypatch):
 
 
 def seed_sounds(store, *, by_mode=False):
-    # Both sound patterns ingest final uploads and audio before their first
-    # publication. The by-mode consumer still has six genres, four lanes and
-    # twenty tracks per lane, without a discarded ordinary generation or
-    # unused first Fresh recordings.
+    # These prepared consumers use completed catalog/audio inputs. Provider
+    # ingestion and measured-source attribution have independent owners in
+    # test_musical_preparation and test_vibe_prediction. Keep all six genres,
+    # four lanes and twenty tracks, plus actual profile/file publication.
     bundles = genre_bundles(store)
+    audio_rows = []
     for mid in range(6):
         for lane, items in bundles[str(mid)].items():
             for i, item in enumerate(items):
                 # Put the soft tracks beyond a full card, so a post-selection reordering fails.
                 energy = mid / 5 if by_mode else .1 if i >= 12 else .9
                 item['video_id'] = item['key']
-                audio = {'energy': energy, 'bpm': 70 if i >= 12 else 160, 'mood_relaxed': 1 - energy}
-                if lane == 'fresh':
-                    # A new upload can resolve to a different canonical recording key.
-                    item['key'] = store.discovery.upsert_discovered_track(item['key'], item['video_id'], item['title'], item['artist'],
-                        '', None, item['genre'], None, None, 1, audio=audio)
-                else:
-                    seed_catalog_track(store, item['key'], item['title'], item['artist'],
-                        video_id=item['video_id'], album='', genre=item['genre'], **audio)
+                audio_rows.append((energy, 70 if i >= 12 else 160, 1 - energy, item['key']))
     bundles['all'] = {lane: [item for mid in range(6) for item in bundles[str(mid)][lane]]
                       for lane in mode_surfaces.CARD_SURFACES}
+    seed_publication_subjects(store, [item for items in bundles['all'].values() for item in items],
+                              discoveries=[item['key'] for item in bundles['all']['fresh']])
+    with store.conn:
+        store.conn.executemany('UPDATE recordings SET energy=?,bpm=?,mood_relaxed=? WHERE identity_key=?',
+                               audio_rows)
     prepare_profiles(store)
     # Ordinary Fresh reads have a separate owner from Vibes' candidate pools.
     publish_bundles(store, bundles, 1, fresh=bundles['all']['fresh'], vibes=True)

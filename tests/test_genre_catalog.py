@@ -6,11 +6,42 @@ import pytest
 
 from yt_playlist.providers import genres, musicbrainz
 from yt_playlist.util import genre_catalog as catalog, genre_map
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
 
 
 @pytest.fixture(autouse=True)
 def isolated_matcher(monkeypatch):
     monkeypatch.setattr(genres, "_active", None)
+
+
+@pytest.fixture
+def upgrade_store(monkeypatch):
+    """Real preference upgrades over the catalog identities they reconcile.
+
+    The full snapshot and all sourced joins have their own owner below. Keep
+    the shipped alias and legacy relationships for these upgrade decisions.
+    """
+    from yt_playlist.core.store import Store
+
+    records, labels = catalog.catalog()
+    names = ('Rock', 'Electronic', 'Electro', 'Electronica', 'Phonk', 'Hip Hop', 'Jazz')
+    selected = {catalog.normalize(name) for name in names}
+    records = {key: row for key, row in records.items() if key in selected}
+    labels = {label: value for label, value in labels.items() if value[0] in selected}
+    legacy = [(name, aliases) for name, aliases in catalog.legacy_entries()
+              if catalog.normalize(catalog.canonical_name(name)) in selected]
+    entries = tuple((key, row['name']) for key, row in records.items())
+    with bounded_consumer_schema(entries) as schema:
+        monkeypatch.setattr(catalog, 'catalog', lambda: (records, labels))
+        monkeypatch.setattr(catalog, 'builtin_names', lambda: list(names))
+        monkeypatch.setattr(catalog, 'legacy_names', lambda: [name for name, _ in legacy])
+        monkeypatch.setattr(catalog, 'legacy_entries', lambda: legacy)
+        database = Store(':memory:')
+        try:
+            initialize_consumer(database, schema)
+            yield database
+        finally:
+            database.conn.close()
 
 
 def test_equivalent_spellings_share_identity():
@@ -58,7 +89,8 @@ def test_full_musicbrainz_snapshot_and_sourced_database_joins(store):
     assert store.conn.execute("SELECT count(*) FROM genre_external_id").fetchone()[0] == 2216
 
 
-def test_legacy_upgrade_preserves_additions_removals_and_splits_disabled_aliases(store):
+def test_legacy_upgrade_preserves_additions_removals_and_splits_disabled_aliases(upgrade_store):
+    store = upgrade_store
     store.genres.set_genres([n for n in catalog.legacy_names() if n not in ("Rock", "Electronic")]
                      + ["Whack-a-doodle", "hip-hop"])
     store.settings.set_setting("genres_seeded", "1")
@@ -90,7 +122,8 @@ def test_explicitly_empty_legacy_list_stays_empty(store):
     assert genres.match_tag("rock") is None
 
 
-def test_later_snapshot_adds_only_new_defaults(store):
+def test_later_snapshot_adds_only_new_defaults(upgrade_store):
+    store = upgrade_store
     genres.configure(store)
     store.genres.remove_genre("Rock")
     # Simulate an older baseline that did not include Phonk, with a user who removed Jazz.

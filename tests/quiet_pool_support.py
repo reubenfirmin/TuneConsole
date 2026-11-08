@@ -8,7 +8,7 @@ import pytest
 
 from tests.home_fixture_support import prepared_client, publish_menu, returning_listener
 from tests.prepared_fixture_support import prepared_template
-from tests.store_fixture_support import bounded_consumer_schema
+from tests.store_fixture_support import bounded_consumer_schema, reuse_reporting_reader
 from yt_playlist.rec import (choice_evidence, fresh_pool, home_cache, home_cards,
                              measurement, mode_surfaces, road_trip_candidates)
 
@@ -17,9 +17,11 @@ DIAGNOSTIC = 'internal-diagnostic-879-fresh: invalid stored ranking document'
 
 
 @pytest.fixture
-def quiet_pool(quiet_home_template, monkeypatch, home_routes_only, without_metadata_providers):
-    with quiet_home_template.open(':memory:') as store:
-        yield from quiet_case(store, quiet_home_template.result, monkeypatch)
+def quiet_pool(quiet_home_template, tmp_path, monkeypatch, home_routes_only, without_metadata_providers):
+    with quiet_home_template.open(tmp_path / 'quiet.db') as store:
+        store.conn.execute('PRAGMA wal_autocheckpoint=0')
+        with reuse_reporting_reader(store, monkeypatch):
+            yield from quiet_case(store, quiet_home_template.result, monkeypatch)
 
 
 def quiet_case(store, selected, monkeypatch):

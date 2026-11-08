@@ -2,21 +2,33 @@ import json
 from contextlib import closing
 import sqlite3
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
 from yt_playlist.core.migrations import Migration,MigrationError,migrate
-from yt_playlist.core.migrations import registry,v025_relationships
+from yt_playlist.core.migrations import registry,regular,v025_relationships,v103_entity_names
 from yt_playlist.core.store import Store
 from yt_playlist.core import legacy_evidence
-from tests.prepared_fixture_support import historical_template
+from tests.core.test_catalog import complete_regular_input
+from tests.genre_catalog_support import bound_catalog
+from tests.prepared_fixture_support import capture_template
 
 
-def upgrade_relationship_fixture(store):
-    # These tests exercise a genuine v24 predecessor. Ordinary admission only
-    # accepts supported installed layouts; historical replay stays explicit.
-    migrate(store.conn, registry=registry.MIGRATIONS)
-    store.init_schema()
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These relationship owners do not construct an HTTP lifespan."""
+
+
+@pytest.fixture(scope='module', autouse=True)
+def isolated_app_home(tmp_path_factory):
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('relationship-home')))
+        patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+        patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+        patch.delenv('DEEPSEEK_API_KEY', raising=False)
+        bound_catalog(patch, entries=(('house', 'House'), ('rock', 'Rock'), ('jazz', 'Jazz')))
+        yield
 
 
 @pytest.fixture(scope='module')
@@ -44,19 +56,127 @@ def installed_v24(tmp_path, v24_template):
 
 
 @pytest.fixture(scope='module')
-def upgraded_relationship_template(v24_template):
-    # Build the actual populated upgrade once. Current repository behavior does
-    # not need to replay the same historical conversions for every assertion.
-    with closing(sqlite3.connect(v24_template)) as predecessor:
-        with historical_template(predecessor, upgrade_relationship_fixture,
-                                 database=':memory:', schema_replay=True) as template:
-            yield template
+def relationship_upgrade(v24_template, tmp_path_factory):
+    path = tmp_path_factory.mktemp('relationship-upgrade') / 'installed.db'
+    with closing(sqlite3.connect(path)) as conn:
+        with closing(sqlite3.connect(v24_template)) as predecessor:
+            predecessor.backup(conn)
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        conn.execute('PRAGMA journal_mode=WAL')
+        # The nonnumeric-position scenario is an independent membership in the
+        # same genuine installed database, so both inputs cross every edge once.
+        with conn:
+            conn.execute("INSERT INTO playlist_scopes VALUES ('NONNUMERIC','NONNUMERIC',NULL,'shared')")
+            conn.execute("INSERT INTO playlists(id,identity_id,ytm_playlist_id,title,track_count,content_hash,"
+                         "first_seen,last_seen,last_changed,scope_ref) "
+                         "VALUES (3,1,'NONNUMERIC','Nonnumeric',3,'h',1,1,1,'NONNUMERIC')")
+            conn.execute("INSERT INTO playlist_items VALUES (3,'a','unknown'),(3,'b',4)")
+            conn.execute('INSERT INTO unresolved_playlist_items VALUES (3,3,-1)')
+        yield {'conn': conn, 'path': path,
+               'history': tuple(map(tuple, conn.execute('SELECT * FROM schema_migrations ORDER BY version')))}
+
+
+def test_populated_v24_has_both_collision_and_nonnumeric_inputs(relationship_upgrade):
+    conn = relationship_upgrade['conn']
+    assert [tuple(r) for r in conn.execute('SELECT * FROM playlist_items WHERE playlist_id=1')] == [
+        (1, 'a', 4), (1, 'b', 4)]
+    assert conn.execute("SELECT position FROM playlist_items WHERE playlist_id=3 AND video_id='a'").fetchone()[0] == 'unknown'
+    assert len(relationship_upgrade['history']) == 24
+
+
+def assert_relationship_custody(state):
+    conn = state['conn']
+    assert tuple(map(tuple, conn.execute('SELECT * FROM schema_migrations ORDER BY version')))[:24] == state['history']
+    # Use the physical owners while v103 is between rename and view restoration.
+    query = ('SELECT c.id,p.position FROM playlist_items p JOIN catalog_entries c ON c.video_id=p.video_id '
+             'WHERE p.playlist_id=? UNION ALL '
+             'SELECT entry_id,position FROM unresolved_playlist_items WHERE playlist_id=? ORDER BY 2')
+    assert [tuple(row) for row in conn.execute(query, (1, 1))] == [(3, 0), (1, 1), (2, 2)]
+    assert [tuple(row) for row in conn.execute(query, (3, 3))] == [(3, 0), (2, 1), (1, 2)]
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.mark.parametrize('target', range(25, 103))
+def test_real_registered_edge_retains_reconciled_relationships(relationship_upgrade, target):
+    migrate(relationship_upgrade['conn'], registry=registry.MIGRATIONS[:target])
+    assert_relationship_custody(relationship_upgrade)
+
+
+@pytest.fixture(scope='module')
+def renamed_relationships(relationship_upgrade):
+    conn = relationship_upgrade['conn']
+    restore, guards = Mock(), Mock()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(v103_entity_names, 'restore_programs', restore)
+        patch.setattr(regular, 'after_owner_upgrade', guards)
+        migrate(conn, registry=registry.MIGRATIONS[:103])
+    restore.assert_called_once()
+    guards.assert_called_once_with(conn)
+    relationship_upgrade['programs'] = restore.call_args
+    return relationship_upgrade
+
+
+def test_real_account_rename_keeps_both_reconciled_memberships(renamed_relationships):
+    assert renamed_relationships['conn'].execute('SELECT 1 FROM accounts WHERE id=1').fetchone()
+    assert_relationship_custody(renamed_relationships)
+
+
+@pytest.fixture(scope='module')
+def restored_relationships(renamed_relationships):
+    conn, call = renamed_relationships['conn'], renamed_relationships['programs']
+    with conn:
+        conn.execute('BEGIN')
+        v103_entity_names.restore_programs(*call.args, **call.kwargs)
+        regular.after_owner_upgrade(conn)
+    return renamed_relationships
+
+
+def test_real_program_restoration_keeps_relationship_history(restored_relationships):
+    assert_relationship_custody(restored_relationships)
+
+
+@pytest.mark.parametrize('target', range(104, len(registry.MIGRATIONS) + 1))
+def test_later_registered_edges_keep_relationship_custody(restored_relationships, target):
+    migrate(restored_relationships['conn'], registry=registry.MIGRATIONS[:target])
+    assert_relationship_custody(restored_relationships)
+
+
+@pytest.fixture(scope='module')
+def admitted_relationships(restored_relationships):
+    complete_regular_input(restored_relationships['conn'])
+    return restored_relationships
+
+
+def test_current_admission_keeps_completed_relationship_history_and_rows(admitted_relationships):
+    conn = admitted_relationships['conn']
+    before = list(conn.iterdump())
+    assert migrate(conn, defer_validation=True) is False
+    assert list(conn.iterdump()) == before
+    assert_relationship_custody(admitted_relationships)
+
+
+@pytest.fixture(scope='module')
+def upgraded_relationship_template(admitted_relationships):
+    store = Store(admitted_relationships['path'])
+    try:
+        store.init_schema()
+        yield capture_template(store, None)
+    finally:
+        store.conn.close()
 
 
 @pytest.fixture
-def upgraded_relationships(store, upgraded_relationship_template):
-    upgraded_relationship_template.restore(store)
-    return store
+def upgraded_relationships(tmp_path, upgraded_relationship_template):
+    with upgraded_relationship_template.open(tmp_path / 'relationships.db') as store:
+        yield store
+
+
+def test_completed_relationship_source_has_frozen_private_file_custody(upgraded_relationship_template):
+    source = upgraded_relationship_template.source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert json.loads(legacy_evidence.original(
+        source.conn, 'playlist', 'constraint_legacy:playlist_items', '3:a'))['position'] == 'unknown'
 
 
 def test_populated_upgrade_reconciles_order_and_retains_unknown_evidence(upgraded_relationships):
@@ -104,14 +224,11 @@ def test_failed_upgrade_rolls_back_without_backups(installed_v24,tmp_path,monkey
     assert store.conn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
 
 
-def test_non_numeric_legacy_positions_are_preserved_and_reconciled(installed_v24):
-    store = installed_v24
-    store.conn.execute("UPDATE playlist_items SET position='unknown' WHERE playlist_id=1 AND video_id='a'")
-    store.conn.commit()
-    upgrade_relationship_fixture(store)
-    rows = store.conn.execute('SELECT track_id,position FROM playlist_tracks WHERE playlist_id=1 ORDER BY position').fetchall()
+def test_non_numeric_legacy_positions_are_preserved_and_reconciled(upgraded_relationships):
+    store = upgraded_relationships
+    rows = store.conn.execute('SELECT track_id,position FROM playlist_tracks WHERE playlist_id=3 ORDER BY position').fetchall()
     assert [(r['track_id'],r['position']) for r in rows]==[(3,0),(2,1),(1,2)]
-    archived = legacy_evidence.original(store.conn, 'playlist', 'constraint_legacy:playlist_items', '1:a')
+    archived = legacy_evidence.original(store.conn, 'playlist', 'constraint_legacy:playlist_items', '3:a')
     assert json.loads(archived)['position']=='unknown'
 
 

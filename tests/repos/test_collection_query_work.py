@@ -1,4 +1,5 @@
 """Bound SQLite work as the library grows; wall-clock limits hide quadratic joins."""
+import datetime as dt
 from yt_playlist.core.activity import interrupt_query
 from yt_playlist.core.albums import observe
 from yt_playlist.core.artists import ensure
@@ -187,9 +188,16 @@ def test_charts_and_candidates_index_computed_history_keys(store):
 def test_album_familiarity_does_not_scan_all_events_per_imported_day(store):
     account = store.accounts.upsert_account('main', 'cred', None, True)
     entry = store.tracks.upsert_track('v', 'Song', 'Artist', 'Release', 180, album_browse_id='B')
-    key = store.tracks.catalog_subject(entry)['identity_key']
-    for day in range(1, 601):
-        store.history.record_history_plays(account, day * 86400, [key], source_timezone='UTC')
+    subject = store.tracks.catalog_subject(entry)
+    key = subject['identity_key']
+    # The query consumes 600 completed calendar days. Parsing and recounting a
+    # separate controller import for every day is outside this SQL work bound.
+    days = [dt.datetime.fromtimestamp(day * 86400, dt.timezone.utc).date().isoformat()
+            for day in range(1, 601)]
+    with store.conn:
+        listening.calendar(store.conn, account, 'UTC')
+    store.history.repository.record_days(account, 600 * 86400,
+        [(key, key, subject['recording_id'], day, day, 'independent') for day in days], 'UTC')
     with store.conn:
         for i in range(600):
             # These unrelated exact events cannot erase the album's imports.

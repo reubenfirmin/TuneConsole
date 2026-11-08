@@ -11,12 +11,27 @@ from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.independent_schema_support import independent_regular_ddl
 from tests.comparison_support import legacy_projection
 from tests.recommendation_support import seed_publication_subjects
+from tests.prepared_fixture_support import assert_upgrade_phase, custody_predecessor, custody_upgrade_cases
+from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads
 from yt_playlist.core import fao, library_pool_state, model_projections, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import ranked_state as preparation
 from yt_playlist.core.store import Store
 from yt_playlist.rec import comparison_storage
 from yt_playlist.repos import recommendation_publication
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture
+def disable_periodic_library_sync():
+    pass
+
+
+@pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
+def test_ranked_input_keeps_admitted_history_and_private_guards(installed):
+    assert_installed_consumer_input(*installed)
 
 
 def finish(job, conn, size=128):
@@ -98,17 +113,53 @@ def test_all_six_projections_and_four_lanes_preserve_sources_and_unknown_clocks(
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
-@pytest.mark.parametrize('installed', [79, 94], indirect=True)
-def test_frozen_upgrade_matches_complete_ranked_slots_and_mode_bytes(installed, tmp_path):
-    store, _ = installed
+def prepare_native_comparison(store):
     originals, _ = seed(store)
     for job in preparation.JOBS.values():
         job.install(store.conn)
         finish(job, store.conn)
-    upgraded = Store(tmp_path / 'ranked-upgrade.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
+    return originals
+
+
+@pytest.fixture(scope='module')
+def native_inputs(upgraded_custody_inputs):
+    def get(version, target, **options):
+        return upgraded_custody_inputs(version, target, 'ranked-native-agreement', prepare_native_comparison, **options)
+
+    get.release = lambda version: upgraded_custody_inputs.release(version, 'ranked-native-agreement')
+    return get
+
+
+@pytest.mark.parametrize('version', [79, 94])
+def test_native_comparison_input_keeps_exact_preparation(native_inputs, version):
+    template = native_inputs(version, version)
+    assert_upgrade_phase(template, version)
+    for surface, raw in template.result.items():
+        assert preparation.read_original(template.source.conn,
+            preparation.head(template.source.conn, surface)) == raw
+
+
+@pytest.mark.parametrize('version,target,phase', custody_upgrade_cases((79, 94)))
+def test_native_upgrade_phase_keeps_exact_preparation(native_inputs, version, target, phase):
+    template = native_inputs(version, target, phase=phase)
+    assert_upgrade_phase(template, target if phase == 'converted' else custody_predecessor(version, target))
+    for surface, raw in template.result.items():
+        assert preparation.read_original(template.source.conn,
+            preparation.head(template.source.conn, surface)) == raw
+
+
+@pytest.mark.parametrize('version', [79, 94])
+def test_native_serving_input_keeps_private_read_guards(native_inputs, version):
+    template = native_inputs(version, 107)
+    assert_upgrade_phase(template, 107)
+    assert template.source._snapshot_revisions.conn is template.source.conn
+
+
+@pytest.mark.parametrize('version', [79, 94])
+def test_frozen_upgrade_matches_complete_ranked_slots_and_mode_bytes(native_inputs, version, tmp_path):
+    prepared = native_inputs(version, version)
+    store, originals = prepared.source, prepared.result
+    with native_inputs(version, 107).open(tmp_path / 'ranked-upgrade.db') as upgraded:
         for surface, raw in originals.items():
             assert preparation.read_original(upgraded.conn, preparation.head(upgraded.conn, surface)) == raw
             staged = preparation.head(store.conn, surface)
@@ -141,8 +192,6 @@ def test_frozen_upgrade_matches_complete_ranked_slots_and_mode_bytes(installed, 
                     'FROM unresolved_recommendation_candidates WHERE pool_id=? ORDER BY rank', (pool_id, pool_id))))
                 assert native == expected
         assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        upgraded.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -466,3 +515,10 @@ def test_resumed_batch_reads_neither_full_source_nor_whole_plan(installed):
         assert not denied
     finally:
         store.conn.set_authorizer(None)
+
+
+@pytest.mark.parametrize('version', [79, 94])
+def test_native_sources_finish_with_committed_read_only_inputs(native_inputs, version):
+    for source in native_inputs.release(version):
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            source.conn.execute('SELECT 1')
