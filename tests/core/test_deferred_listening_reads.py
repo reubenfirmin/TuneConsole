@@ -1,11 +1,14 @@
 """Current HTTP readers over genuine installed listening owners before v100."""
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, ExitStack
 import sqlite3
 
 from fastapi.testclient import TestClient
 import pytest
 
 from tests.conftest import seed_catalog_track
+from tests.genre_catalog_support import bound_catalog
+from tests.home_fixture_support import home_routes_only, without_metadata_providers
+from tests.store_fixture_support import install_numbered_input, reuse_reporting_reader
 from yt_playlist.core import albums, artists, discovery_sources
 from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.preparation import subject_publication
@@ -19,9 +22,47 @@ NOW = 1700000000
 SUBJECTS = ('play_event_subjects', 'listening_observation_subjects')
 
 
+pytestmark = pytest.mark.usefixtures('listening_catalog', 'home_routes_only', 'without_metadata_providers')
+
+
+@pytest.fixture(autouse=True)
+def listening_catalog(monkeypatch):
+    # These installed readers own listening and discovery custody, not genre
+    # catalogue curation. Keep their real historical SQL and admission checks.
+    bound_catalog(monkeypatch, entries=())
+
+
+@pytest.fixture(scope='module')
+def _pristine_installed_schema():
+    templates = {}
+    with ExitStack() as resources:
+        def get(version):
+            if version not in templates:
+                schema = resources.enter_context(closing(sqlite3.connect(':memory:')))
+                with pytest.MonkeyPatch.context() as patch:
+                    bound_catalog(patch, entries=())
+                    install_numbered_input(schema, version)
+                schema.execute('PRAGMA query_only=ON')
+                templates[version] = schema
+            return templates[version]
+
+        yield get
+
+
+@pytest.mark.parametrize('version', [79, 88, 99])
+def test_listening_input_keeps_numbered_history_and_absent_subjects(_pristine_installed_schema, version):
+    schema = _pristine_installed_schema(version)
+    assert schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert schema.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
+    assert not schema.execute('SELECT 1 FROM sqlite_schema WHERE name IN (?,?)', SUBJECTS).fetchone()
+    assert not schema.execute('PRAGMA foreign_key_check').fetchone()
+
+
 def installed(path, version, populated, schema):
     store = Store(path)
     try:
+        store.conn.execute('PRAGMA synchronous=NORMAL')
+        store.conn.execute('PRAGMA wal_autocheckpoint=0')
         schema.backup(store.conn)
         store.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (3,'Listener','credential',1)")
         store.conn.commit()
@@ -83,6 +124,8 @@ def deferred(path, version, populated, schema):
     setup.conn.close()
     store = Store(path)
     try:
+        store.conn.execute('PRAGMA synchronous=NORMAL')
+        store.conn.execute('PRAGMA wal_autocheckpoint=0')
         store.init_schema(defer_metadata=True)
         assert not store.activity_paused and not store._schema_recovery_pending
         assert persisted(store.conn) == before
@@ -91,17 +134,27 @@ def deferred(path, version, populated, schema):
         store.conn.close()
 
 
-def web(store):
-    return TestClient(create_app(store, lambda: {}, now_fn=lambda: NOW, background_work=False),
-                      base_url='http://127.0.0.1')
+@pytest.fixture
+def web():
+    with ExitStack() as clients:
+        def connect(store):
+            return clients.enter_context(TestClient(
+                create_app(store, lambda: {}, now_fn=lambda: NOW, background_work=False),
+                base_url='http://127.0.0.1'))
+
+        yield connect
 
 
-def read_startup(client):
-    response = client.get('/home/onboard/status')
-    assert response.status_code == 200 and isinstance(response.json()['setup'], dict)
-    response = client.get('/')
-    assert response.status_code == 200 and '<html' in response.text.lower()
-    assert client.get('/home/growth').status_code == 200
+def read_startup(client, store, monkeypatch):
+    # Each startup observation opens a real installed reader. Reuse it only
+    # beneath these reporting requests, then close it before publication or
+    # continuing writes; pinned and newly opened readers remain independent.
+    with reuse_reporting_reader(store, monkeypatch):
+        response = client.get('/home/onboard/status')
+        assert response.status_code == 200 and isinstance(response.json()['setup'], dict)
+        response = client.get('/')
+        assert response.status_code == 200 and '<html' in response.text.lower()
+        assert client.get('/home/growth').status_code == 200
 
 
 def listening_state(store):
@@ -111,12 +164,12 @@ def listening_state(store):
 
 @pytest.mark.parametrize('version', [79, 88, 99])
 @pytest.mark.parametrize('populated', [False, True], ids=['empty', 'populated'])
-def test_startup_reads_installed_listening_without_mutating_it(tmp_path, version, populated, _pristine_installed_schema):
+def test_startup_reads_installed_listening_without_mutating_it(tmp_path, version, populated, _pristine_installed_schema, web, monkeypatch):
     with deferred(tmp_path / 'installed.db', version, populated, _pristine_installed_schema(version)) as store:
         before = persisted(store.conn,home_visits=True)
         client = web(store)
-        read_startup(client)
-        read_startup(client)
+        read_startup(client, store, monkeypatch)
+        read_startup(client, store, monkeypatch)
         with store.read_view() as reader:
             state = listening_state(reader)
             assert len(state['play_event_subjects']) == (3 if populated else 0)
@@ -154,7 +207,7 @@ def test_startup_reads_installed_listening_without_mutating_it(tmp_path, version
 
 
 @pytest.mark.parametrize('version', [79, 99])
-def test_pinned_listening_reader_survives_explicit_publication_and_new_readers_select_it(tmp_path, version, _pristine_installed_schema):
+def test_pinned_listening_reader_survives_explicit_publication_and_new_readers_select_it(tmp_path, version, _pristine_installed_schema, web, monkeypatch):
     with deferred(tmp_path / 'cutover.db', version, True, _pristine_installed_schema(version)) as store:
         client = web(store)
         # Publication is explicit and leaves installed writers/history intact.
@@ -172,7 +225,7 @@ def test_pinned_listening_reader_survives_explicit_publication_and_new_readers_s
             assert listening_state(pinned) == before
             assert (pinned.discovery.starter_artists(), pinned.discovery.starter_tracks()) == starters
             assert pinned.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
-            read_startup(client)
+            read_startup(client, store, monkeypatch)
             with store.read_view() as reader:
                 assert subject_publication.selected(reader.conn) == identity
                 assert (reader.discovery.starter_artists(), reader.discovery.starter_tracks()) == starters

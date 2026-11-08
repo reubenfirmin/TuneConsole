@@ -8,13 +8,17 @@ import pytest
 
 from yt_playlist.rec import (content_model, embedding_training as training, embedding_vectors as embed,
                              model_refresh, mode_surfaces, rec_params, rec_worker, taste_modes)
-from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator
 from yt_playlist.core.store import Store
 
 
-def _seed_library(store, *, per_genre=4):
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These workers run directly without constructing the HTTP application."""
+
+
+def _seed_library(store, *, per_genre=27):
     iid = store.accounts.upsert_account("main", "cred", None, True)
     # These workers consume already saved clusters. Clustering discovery and
     # its corpus threshold belong to test_taste_modes_discover; model refresh,
@@ -42,7 +46,8 @@ def _seed_library(store, *, per_genre=4):
 
 @pytest.fixture(scope='module')
 def worker_schema():
-    with bounded_consumer_schema(entries=(('techno', 'Techno'), ('jazz', 'Jazz'), ('rock', 'Rock'))) as schema:
+    with bounded_consumer_schema(entries=(('techno', 'Techno'), ('jazz', 'Jazz'), ('rock', 'Rock')),
+                                 snapshot_guards=False) as schema:
         yield schema
 
 
@@ -50,24 +55,23 @@ def worker_schema():
 def store(tmp_path, worker_schema, monkeypatch):
     database = Store(tmp_path / 'worker.db')
     try:
-        initialize_consumer(database, worker_schema)
+        database.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(database, worker_schema, snapshot_guards=False)
         database.conn.execute('PRAGMA wal_autocheckpoint=0')
-        with reuse_reporting_reader(database, monkeypatch):
+        # These tests own worker scheduling and saved model/candidate repair.
+        # Concurrent snapshot validation has its own tests; model fitting,
+        # real SQL and typed publication remain live beneath this collaborator.
+        with mock_snapshot_coordinator(database, monkeypatch):
             yield database
     finally:
         database.conn.close()
 
 
-@pytest.fixture(scope='module')
-def mode_refresh_library_template(worker_schema):
-    with prepared_template(worker_schema, _seed_library) as template:
-        yield template
-
-
 @pytest.fixture
-def library(store, mode_refresh_library_template, record_property):
-    record_property('library_tracks', len(mode_refresh_library_template.result))
-    return mode_refresh_library_template.restore(store)
+def library(store, request, record_property):
+    tracks = _seed_library(store, per_genre=getattr(request, 'param', 27))
+    record_property('library_tracks', len(tracks))
+    return tracks
 
 
 @pytest.fixture(autouse=True)
@@ -146,25 +150,19 @@ def test_deferred_model_fit_still_prepares_candidates(store, monkeypatch):
     assert prepared == [True]
 
 
-def test_content_update_refreshes_saved_models_without_changing_space(store, library):
+def test_content_update_refreshes_original_models_and_places_track(store, library):
+    mode_surfaces.prepare_bundles(store, 1000.0)
     space = embed.content_space_id(store)
     tid = store.tracks.upsert_track("extra", "Zz extra", "Artist", None, None)
     store.tracks.set_track_genre(tid, "Techno")
     key = store.tracks.identity_key_for_video("extra")
 
     _settle(store)
+    assert mode_surfaces.prepare_bundles(store, 2000) is not None
     assert embed.content_space_id(store) == space
     assert {m['mode_id'] for m in taste_modes.live_modes(store)} == {
         m['mode_id'] for m in store.modes.list_modes(active_only=True)}
     assert key in store.rec_model.content_vectors_by_keys([key])
-
-
-def test_refreshed_model_places_new_track_in_temporal_pool(store, library):
-    key = 'zz extra|artist'
-    seed_publication_subjects(store, [{'key': key, 'video_id': 'extra',
-        'title': 'Zz extra', 'artist': 'Artist', 'genre': 'Techno'}])
-    _settle(store)
-    assert mode_surfaces.prepare_bundles(store, 2000) is not None
     assert key in _pool_keys(store, 'temporal')
 
 
@@ -206,7 +204,11 @@ def test_current_groups_are_not_recomputed_at_every_startup(store, library, monk
 @pytest.mark.parametrize("cached", [None, []], ids=["absent", "empty"])
 def test_startup_repairs_absent_discovery_songs_while_reusing_saved_groups(store, library, monkeypatch, cached):
     from yt_playlist.rec import fresh_pool
-    publish_bundles(store, {}, 1000)
+    # The initial publication supplies completed input for the startup repair.
+    # Discovery encoding and the subsequent worker's ranking remain real.
+    with monkeypatch.context() as initial:
+        initial.setattr(mode_surfaces, '_calculate_bundles', lambda *args: ({}, []))
+        mode_surfaces.prepare_bundles(store, 1000)
     discoveries = [{'key': f'new {i}|new artist {i}', 'video_id': f'v{i}',
         'title': f'New {i}', 'artist': f'New artist {i}', 'genre': 'Jazz', 'year': '2020'}
         for i in range(12)]
@@ -247,7 +249,12 @@ def scheduled(store, monkeypatch):
 
     monkeypatch.setattr(rec_worker, "threading", SimpleNamespace(
         Lock=threading.Lock, RLock=threading.RLock, Event=threading.Event, Thread=QueuedThread))
-    return _worker(store), targets
+    worker = _worker(store)
+    # The queue tests exercise ordering and retries. Downstream home/story
+    # preparation is a separate collaborator, just like the full rebuild below.
+    monkeypatch.setattr(worker.tasks, 'home', lambda: False)
+    monkeypatch.setattr(worker.tasks, 'stories', lambda: False)
+    return worker, targets
 
 
 def test_full_rebuild_absorbs_a_burst_of_pending_local_refreshes(scheduled, monkeypatch):
@@ -311,11 +318,15 @@ def test_failed_full_rebuild_does_not_lose_pending_local_repair(scheduled, monke
 
 @pytest.mark.parametrize("projection", ["trends", "bundles"])
 def test_stale_projection_retry_does_not_refit_models_or_repeat_other_stages(scheduled, monkeypatch, projection):
-    from yt_playlist.rec import trend_rollups
+    from yt_playlist.rec import maintenance, trend_rollups
 
     worker, targets = scheduled
     calls = []
     outcomes = iter([None, {"built_at": 2000}])
+    # Source fingerprint capture is below the retry scheduler being tested.
+    monkeypatch.setattr(maintenance, 'inputs', lambda *args: (1, False))
+    monkeypatch.setattr(maintenance, 'input_fingerprints',
+                        lambda *args: {'trends': (1, False)})
 
     def build(store, now):
         calls.append(projection)
@@ -379,6 +390,7 @@ def test_bundle_retry_repairs_a_model_invalidated_during_preparation(store, libr
 
     monkeypatch.setattr(mode_surfaces, "prepare_bundles", invalidate_once)
     monkeypatch.setattr(worker, "_start_loop", lambda: None)
+    _settle(store)
     with monkeypatch.context() as request_guard:
         request_guard.setattr(training, "build_vectors_from_baskets", forbidden)
         with caplog.at_level(logging.INFO):
@@ -395,8 +407,7 @@ def test_bundle_retry_repairs_a_model_invalidated_during_preparation(store, libr
         assert len(failures) == 1 and failures[0].exc_info[0] is RuntimeError
     # The worker settles invalidated model inputs before retrying candidate pools.
     # Pool preparation must only read the model lifecycle's published result.
-    if failure == 'model-invalidated':
-        _settle(store)
+    _settle(store)
     if failure == 'policy-capacity':
         clock[0] = worker.jobs.retry['bundles'].retry_at - .001
         worker._refresh_bundles()

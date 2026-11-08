@@ -7,7 +7,6 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
 from tests.prepared_fixture_support import assert_upgrade_phase, coordinates, custody_predecessor, custody_upgrade_cases
 from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads
 from yt_playlist.core import action_backup_files, collection_recovery, fao, policy_documents, recommendation_outputs as files
@@ -213,7 +212,7 @@ def test_large_placement_resumes_without_originals_and_reconciles_continuing_wri
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_failure_interrupt_retry_missing_manifest_and_retained_backup_rebuild(installed, monkeypatch, independent_regular_ddl):
+def test_failure_interrupt_retry_missing_manifest_and_retained_backup_rebuild(installed, monkeypatch):
     store, _ = installed
     _, path, identities = seed(store)
     job = preparation.JOB

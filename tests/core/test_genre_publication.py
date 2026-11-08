@@ -7,7 +7,6 @@ import threading
 import pytest
 
 from tests.core.test_predecessor_writes import installed
-from tests.independent_schema_support import independent_regular_ddl
 from tests.store_fixture_support import numbered_store
 from yt_playlist.core import albums, genre_classifications, genre_identity
 from yt_playlist.core.migrations import MigrationError, regular
@@ -244,7 +243,7 @@ def test_interrupted_batch_resume_and_final_fence_rejects_late_writer(installed,
 
 
 @pytest.mark.parametrize('installed', [85], indirect=True)
-def test_slow_verification_keeps_writes_and_regular_admission_available(installed, monkeypatch, independent_regular_ddl):
+def test_slow_verification_keeps_writes_and_regular_admission_available(installed, monkeypatch):
     store, _ = installed
     seed(store)
     stage = ready(store.conn)
@@ -276,7 +275,7 @@ def test_slow_verification_keeps_writes_and_regular_admission_available(installe
 
 
 @pytest.mark.parametrize('numbered_store', [79], indirect=True)
-def test_oversized_source_fails_durably_and_regular_schema_remains_independent(numbered_store, independent_regular_ddl):
+def test_oversized_source_fails_durably_and_regular_schema_remains_independent(numbered_store):
     store, _ = numbered_store
     seed(store)
     conn = store.conn

@@ -5,17 +5,23 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.store_fixture_support import numbered_store as installed
+from tests.store_fixture_support import guarded_numbered_store as guarded_installed
 from tests.core.test_playback_context_preparation import finish, head, seed
-from tests.store_fixture_support import publication_schema_inspections
+from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import album_playback_context, entity_names, playback_bindings
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import playback_context as preparation, playback_publication as publication
 from yt_playlist.core.store import Store
 
 
-pytestmark = pytest.mark.usefixtures('publication_schema_inspections')
 
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """This owner runs directly without the HTTP application."""
 
 def prepare(conn, owner):
     owner.worker.install(conn)
@@ -106,11 +112,12 @@ def test_incorrect_context_or_original_never_selects_a_runtime_owner(installed, 
         owner.publish(store.conn, revision=revision)
     assert owner.selected(store.conn) is None
     assert store.settings.get_setting(owner.source) == original[owner.source]
+    regular.migrate(store.conn)
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_compatible_bindings_and_pending_writes_reconcile_without_admitting_unknowns(installed):
-    store, _ = installed
+@pytest.mark.parametrize('guarded_installed', [93], indirect=True)
+def test_compatible_bindings_and_pending_writes_reconcile_without_admitting_unknowns(guarded_installed):
+    store, _ = guarded_installed
     original = seed(store)
     counts = {table:store.conn.execute('SELECT count(*) FROM main.'+table).fetchone()[0]
               for table in ('identities', 'playlist_scopes', 'catalog_entries', 'album_provider_ids')}

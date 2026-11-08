@@ -1,5 +1,6 @@
 """Sync job streams, failures and identity library reconciliation."""
 import json
+from functools import partial
 from fastapi.testclient import TestClient
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
@@ -42,11 +43,21 @@ def test_sync_events_unknown_job_404(store):
     c = TestClient(app, base_url="http://127.0.0.1")
     assert c.get("/sync/events/99999").status_code == 404
 
-def test_sync_reports_failure_in_stream(store):
+def test_sync_reports_failure_in_stream(store, monkeypatch):
+    from yt_playlist.library import sync
+
+    waits = []
+    monkeypatch.setattr(sync, 'with_retry', partial(sync.with_retry, sleep=waits.append))
     iid = store.accounts.upsert_account("main", "cred", None, True)
     class Boom(FakeClient):
-        def get_library_playlists(self, limit=None): raise RuntimeError("api down")
-    app = create_app(store, lambda: {iid: Boom()}, now_fn=lambda: 1.0)
+        attempts = 0
+
+        def get_library_playlists(self, limit=None):
+            self.attempts += 1
+            raise RuntimeError("api down")
+
+    provider = Boom()
+    app = create_app(store, lambda: {iid: provider}, now_fn=lambda: 1.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     jid = c.post("/sync").json()["job_id"]
     with c.stream("GET", f"/sync/events/{jid}") as s:
@@ -62,6 +73,7 @@ def test_sync_reports_failure_in_stream(store):
     assert "api down" in resources["playlist_listing"]["message"]
     assert resources["history"]["status"] == resources["saved_albums"]["status"] == "complete"
     assert store.settings.get_setting("last_sync_at") is None
+    assert provider.attempts == 3 and waits == [0.5, 1.0]
 
 
 def test_sync_keeps_playlists_when_library_comes_back_empty(store):

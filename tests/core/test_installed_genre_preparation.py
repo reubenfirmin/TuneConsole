@@ -10,11 +10,13 @@ from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import domain_contracts, installed_genre_contract as repair
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """SQL preparation runs without starting the HTTP application."""
+
+
 def test_regular_repair_never_reads_or_copies_axis_population_and_audit_is_separate(tmp_path, monkeypatch):
     bound_catalog(monkeypatch)
-    # Keep the real repair and guard adoption. Later unrelated regular owners
-    # have their own registry and continuing-write coverage.
-    monkeypatch.setattr(regular, 'CHANGES', regular.CHANGES[:8])
     conn = earlier_database(tmp_path/'earlier.db')
     try:
         with conn:

@@ -1,6 +1,6 @@
 """Chronology, shared comparisons, daily admission and atomic serving changes."""
 from contextlib import contextmanager
-from copy import deepcopy
+
 import sqlite3
 
 import numpy as np
@@ -8,9 +8,7 @@ import pytest
 
 from tests.prepared_fixture_support import prepared_template, roots
 from tests.recommendation_support import seed_publication_subjects
-from tests.store_fixture_support import (
-    bounded_consumer_schema, file_consumer_store as store, reuse_reporting_reader,
-)
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core import embedding_files
 from yt_playlist.core.db_writes import atomic_write
@@ -33,12 +31,8 @@ def _pristine_current_schema():
 
 
 @pytest.fixture
-def library(tmp_path, monkeypatch, daily_library_template):
-    directory = tmp_path / 'library'
-    directory.mkdir()
-    with daily_library_template.open(directory / 'state.db') as database:
-        with reuse_reporting_reader(database, monkeypatch):
-            yield _library(database, monkeypatch, deepcopy(daily_library_template.result))
+def library(store, monkeypatch, daily_library_template):
+    return _library(store, monkeypatch, daily_library_template)
 
 
 @pytest.fixture(scope='module')
@@ -87,7 +81,8 @@ def _seed_library(store, value):
     return dict(now=now, account=account, keys=keys, videos=videos, original=original)
 
 
-def _library(store, monkeypatch, value):
+def _library(store, monkeypatch, template):
+    value = template.restore(store)
     keys = value['keys']
     monkeypatch.setattr(model_setup, 'CONFIGS', [('svd', 2), ('svd', 3)])
     calls = []
@@ -115,50 +110,37 @@ def complete(library, *, start=None):
     pytest.fail(f'Comparison did not finish: {result}')
 
 
-def assert_daily_inputs(current, library):
-    now = library['now']
-    assert current.conn.execute('SELECT count(*) FROM tracks').fetchone()[0] == 160
-    for offset in (0, 80):
-        playlist = current.playlists.get_playlist_for_account(library['account'], f'PL{offset}')
-        assert len(current.playlists.get_playlist_track_ids(playlist.id)) == 80
-        assert current.playlists.get_playlist_track_keys(playlist.id) == set(library['keys'][offset:offset + 80])
-    assert list(map(tuple, current.conn.execute('SELECT account_id,video_id,played_at '
-        'FROM play_event_subjects ORDER BY id'))) == [
-            (library['account'], str(i), -100 * daily.DAY) for i in range(20)] + [
-            (library['account'], str(i), now - 30 * daily.DAY + ((i - 20) // 2) * daily.DAY + 100)
-            for i in range(20, 80)]
-    assert current.rec_model.get_rec_vectors() == library['original']
-    assert current.settings.get_setting('rec_dim') == '2'
-    assert not current.settings.get_setting('rec_fit_inputs')
-    assert current.model_selection.latest_daily_selection() is None
-
-
-def test_prepared_daily_sql_retains_complete_catalog_playlists_and_history(daily_library_template):
-    # Charge cold construction to its SQL owner. The isolation owner below
-    # verifies both restore modes against these same complete inputs.
-    assert_daily_inputs(daily_library_template.source, daily_library_template.result)
-
-
-def test_prepared_daily_catalog_and_library_copies_are_private(
-        library, daily_library_template, monkeypatch):
-    store = library['store']
-    # Compare both restore modes before any selection work.
-    assert_daily_inputs(store, library)
-    with (monkeypatch.context() as patch,
-          daily_library_template.open(':memory:') as sibling_store):
-        sibling = _library(sibling_store, patch, deepcopy(daily_library_template.result))
-        assert_daily_inputs(sibling_store, library)
-        destinations = [roots(target.conn) for target in (store, sibling_store)]
+def test_all_prior_history_single_holdout_shared_inputs_and_full_refit(
+        library, daily_library_template, file_backed_store, monkeypatch):
+    store, now = library['store'], library['now']
+    # Compare the real seed and both restore modes before any selection work.
+    with monkeypatch.context() as patch:
+        sibling = _library(file_backed_store, patch, daily_library_template)
+        for current in (daily_library_template.source, store, file_backed_store):
+            assert current.conn.execute('SELECT count(*) FROM tracks').fetchone()[0] == 160
+            for offset in (0, 80):
+                playlist = current.playlists.get_playlist_for_account(library['account'], f'PL{offset}')
+                assert len(current.playlists.get_playlist_track_ids(playlist.id)) == 80
+                assert current.playlists.get_playlist_track_keys(playlist.id) == set(library['keys'][offset:offset + 80])
+            assert list(map(tuple, current.conn.execute('SELECT account_id,video_id,played_at '
+                'FROM play_event_subjects ORDER BY id'))) == [
+                    (library['account'], str(i), -100 * daily.DAY) for i in range(20)] + [
+                    (library['account'], str(i), now - 30 * daily.DAY + ((i - 20) // 2) * daily.DAY + 100)
+                    for i in range(20, 80)]
+            assert current.rec_model.get_rec_vectors() == library['original']
+            assert current.settings.get_setting('rec_dim') == '2'
+            assert not current.settings.get_setting('rec_fit_inputs')
+            assert current.model_selection.latest_daily_selection() is None
         for name, source in roots(daily_library_template.source.conn).items():
-            directories = [owned[name] for owned in destinations]
-            assert len(set([source, *directories])) == 3
+            destinations = [roots(target.conn)[name] for target in (store, file_backed_store)]
+            assert len(set([source, *destinations])) == 3
             for path in source.rglob('*'):
                 if path.is_file():
-                    for destination in directories:
+                    for destination in destinations:
                         copied = destination / path.relative_to(source)
                         assert copied.read_bytes() == path.read_bytes()
                         assert not copied.samefile(path)
-        assert len(list(embedding_files.references(sibling_store.conn))) == 2
+        assert len(list(embedding_files.references(file_backed_store.conn))) == 2
         weights = {library['keys'][0]: 1.4}
         vocabulary, first = daily.training.build_vectors_from_baskets([sibling['keys']], 2, 'svd', weights)
         _, second = daily.training.build_vectors_from_baskets([sibling['keys']], 2, 'svd', {})
@@ -169,17 +151,13 @@ def test_prepared_daily_catalog_and_library_copies_are_private(
         sibling['videos'].clear()
         sibling['original'].clear()
         sibling['calls'].clear()
-        sibling_store.settings.set_setting('private', 'sibling')
+        file_backed_store.settings.set_setting('private', 'sibling')
     assert library['calls'] == []
     assert len(library['keys']) == len(library['videos']) == len(library['original']) == 160
     assert len(daily_library_template.result['keys']) == len(daily_library_template.result['videos']) == 160
     assert len(daily_library_template.result['original']) == 160
     assert store.settings.get_setting('private') is None
     assert daily_library_template.source.settings.get_setting('private') is None
-
-
-def test_daily_model_uses_all_history_shared_holdout_and_full_refit(library):
-    store, now = library['store'], library['now']
     store.rec_model.set_weight('genre:jazz', 1.4, now=now - 1)
     with store.read_view() as reader:
         captured, _ = daily._capture(reader, now)
@@ -236,33 +214,62 @@ def test_insufficient_activity_skips_all_fits(library):
 ])
 def test_initial_insufficient_attempt_does_not_require_another_30_plays(
         store, monkeypatch, initial_targets, new_targets, expected,
-        daily_catalog_template):
+        daily_catalog_template, file_backed_store, _pristine_current_schema):
     value = daily_catalog_template.restore(store)
     now, account, keys, videos = (value[name] for name in ('now', 'account', 'keys', 'videos'))
-    # Catalog/history and template isolation belong to
-    # test_prepared_daily_catalog_and_library_copies_are_private.
-    # This case exercises admission using the same unchanged 160-track catalog.
+    if (initial_targets, new_targets) == (26, 24):
+        sibling = daily_catalog_template.restore(file_backed_store)
+        with prepared_template(_pristine_current_schema, _seed_catalog) as fresh:
+            producer = fresh.source
+            assert fresh.result == value == sibling
+            for current in (daily_catalog_template.source, store, file_backed_store, producer):
+                assert list(map(tuple, current.conn.execute(
+                    'SELECT video_id,title,artist,created_at FROM tracks ORDER BY video_id'))) == list(map(tuple,
+                    producer.conn.execute('SELECT video_id,title,artist,created_at FROM tracks ORDER BY video_id')))
+                for offset in (0, 80):
+                    playlist = current.playlists.get_playlist_for_account(account, f'PL{offset}')
+                    assert len(current.playlists.get_playlist_track_ids(playlist.id)) == 80
+                    assert current.playlists.get_playlist_track_keys(playlist.id) == set(keys[offset:offset + 80])
+                assert list(map(tuple, current.conn.execute(
+                    'SELECT identity_key,video_id,played_at FROM play_event_subjects ORDER BY id'))) == [
+                        (key, videos[key], -100 * daily.DAY) for key in keys[:20]]
+                assert current.rec_model.get_rec_vectors() == []
+                assert current.model_selection.latest_daily_selection() is None
+                assert current.conn.execute('PRAGMA foreign_key_check').fetchall() == []
+        assert len({daily_catalog_template.source._evidence_key, store._evidence_key,
+                    file_backed_store._evidence_key}) == 3
+        for name, source in daily_catalog_template.files.items():
+            destinations = [roots(target.conn)[name] for target in (store, file_backed_store)]
+            assert len({source, *destinations}) == 3
+            for path in source.rglob('*'):
+                if path.is_file():
+                    paths = [path, *(directory / path.relative_to(source) for directory in destinations)]
+                    assert all(copied.read_bytes() == path.read_bytes() for copied in paths)
+                    assert len({(copied.stat().st_dev, copied.stat().st_ino) for copied in paths}) == 3
+        sibling['keys'].clear()
+        sibling['videos'].clear()
+        file_backed_store.settings.set_setting('private_catalog', 'sibling')
+        assert len(keys) == len(videos) == len(daily_catalog_template.result['keys']) == 160
+        assert len(daily_catalog_template.result['videos']) == 160
+        assert store.settings.get_setting('private_catalog') is None
+        assert daily_catalog_template.source.settings.get_setting('private_catalog') is None
     active_days = 6 if initial_targets == 26 else 8
-    store.history.import_listening_events(account, [
-        (key, videos[key], now - 15 * daily.DAY + (index % active_days) * daily.DAY + 100 + index)
-        for index, key in enumerate(keys[20:20 + initial_targets])], source='live')
+    for index, key in enumerate(keys[20:20 + initial_targets]):
+        store.history.record_play_event(account, key, videos[key],
+            now - 15 * daily.DAY + (index % active_days) * daily.DAY + 100 + index)
     setup = model_setup.current_setup(store)
     vector = np.zeros(setup['dim'], dtype=np.float32)
     vector[0] = 1.
     original = {key: vector.tobytes() for key in keys}
     store.rec_model.replace_rec_vectors(list(original.items()))
-    fits = []
+    real_fit, fits = daily.training.build_vectors_from_baskets, []
 
-    def counted_fit(baskets, *, method, dim, weights):
-        fits.append((method, dim))
-        vocabulary = sorted({key for basket in baskets for key in basket})
-        vectors = np.zeros((len(vocabulary), dim), dtype=np.float32)
-        vectors[:, 0] = 1.
-        return vocabulary, vectors
+    def counted_fit(*args, **kwargs):
+        fits.append((kwargs['method'], kwargs['dim']))
+        return real_fit(*args, **kwargs)
 
-    # Keep the default grid, thresholds, capture, ranking and publication.
-    # Numerical fitting is owned by test_sparse_models and test_item2vec;
-    # completed vectors keep this admission policy independent of fit cost.
+    # Keep the default grid, thresholds and numerical fitting. Only count fits;
+    # synthetic incumbent vectors establish the modeled-track prerequisite.
     monkeypatch.setattr(daily.training, 'build_vectors_from_baskets', counted_fit)
     result = daily.maintain(store, now)
     if initial_targets == 26:
@@ -281,9 +288,8 @@ def test_initial_insufficient_attempt_does_not_require_another_30_plays(
     assert daily.readiness(store, now + daily.DAY - 1)['reason'] == 'The next daily comparison is scheduled.'
     next_at = now + daily.DAY + 3600
     added = keys[20 + initial_targets:20 + initial_targets + new_targets]
-    store.history.import_listening_events(account, [
-        (key, videos[key], now + daily.DAY + 100 + index)
-        for index, key in enumerate(added)], source='live')
+    for index, key in enumerate(added):
+        store.history.record_play_event(account, key, videos[key], now + daily.DAY + 100 + index)
     with store.read_view() as reader:
         captured, _ = daily._capture(reader, next_at)
     assert len(captured['held']) == initial_targets + new_targets
@@ -374,7 +380,7 @@ def test_changed_historical_inputs_discard_mixed_candidate_results(library):
 def test_file_database_reopen_resumes_completed_candidate(file_backed_store, monkeypatch, daily_library_template):
     # Reopen the real installed database together with its external vectors.
     # A SQL-only backup of the memory fixture leaves those files behind.
-    library = _library(file_backed_store, monkeypatch, daily_library_template.restore(file_backed_store))
+    library = _library(file_backed_store, monkeypatch, daily_library_template)
     path = file_backed_store._db_path
     file_backed_store.conn.close()
     first = Store(path)

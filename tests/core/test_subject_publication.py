@@ -6,16 +6,20 @@ import sqlite3
 import pytest
 
 from tests.core.test_listening_preparation import connect, finish, populated
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
-from tests.store_fixture_support import publication_consumer_reads
+from tests.core.test_predecessor_writes import consumer_installed as guarded_installed
+from tests.store_fixture_support import numbered_store as installed, publication_consumer_reads
 from yt_playlist.core import entity_names
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import listening_subjects as preparation, subject_publication as publication
 from yt_playlist.core.store import Store
 
 
-def ready(conn, size=16):
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Publication checks do not construct the HTTP application."""
+
+
+def ready(conn, size=1):
     preparation.install(conn)
     finish(conn, batch_size=size)
     for _ in range(1000):
@@ -39,9 +43,9 @@ def projection(conn, relation=lambda name:name):
     return result
 
 
-@pytest.mark.parametrize('installed', [79, 99], indirect=True)
-def test_preopened_and_new_readers_match_native_precision_and_subjects(installed, tmp_path):
-    store, _ = installed
+@pytest.mark.parametrize('guarded_installed', [79, 99], indirect=True)
+def test_preopened_and_new_readers_match_native_precision_and_subjects(guarded_installed, tmp_path):
+    store, _ = guarded_installed
     populated(store)
     other = store.accounts.upsert_account('Other', 'other.json', None, False)
     store.history.record_history_plays(other, 1704672000, ['song 0|artist', 'outside|unknown'], source_timezone='UTC')
@@ -49,7 +53,7 @@ def test_preopened_and_new_readers_match_native_precision_and_subjects(installed
     try:
         preopened.init_schema(defer_metadata=True)
         store.conn.backup(native.conn)
-        runner.migrate(native.conn, registry=registry.MIGRATIONS[:100])
+        runner.migrate(native.conn, registry=registry.MIGRATIONS)
         native.init_schema(defer_metadata=True)
         native.trends.refresh_first_play()
         expected = projection(native.conn)
@@ -87,7 +91,8 @@ def test_preopened_and_new_readers_match_native_precision_and_subjects(installed
 
 
 @pytest.mark.parametrize('installed', [79, 99], indirect=True)
-def test_continuing_capture_and_source_removal_withdraw_and_reconcile(installed, publication_consumer_reads):
+def test_continuing_capture_and_source_removal_withdraw_and_reconcile(
+        installed, publication_consumer_reads):
     store, _ = installed
     account = populated(store)
     with connect(store) as job:
@@ -117,6 +122,7 @@ def test_continuing_capture_and_source_removal_withdraw_and_reconcile(installed,
         with pytest.raises(sqlite3.IntegrityError, match='future cleanup'):
             job.execute('DELETE FROM '+publication.table('events')+' WHERE stage=?', (identity,))
         job.rollback()
+        regular.migrate(job)
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
@@ -188,7 +194,7 @@ def test_independent_source_check_rejects_incomplete_or_wrong_preparation(instal
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
-def test_interrupted_batch_keeps_checkpoint_and_can_resume_after_reopen(installed, independent_regular_ddl):
+def test_interrupted_batch_keeps_checkpoint_and_can_resume_after_reopen(installed):
     store, _ = installed
     populated(store)
     with connect(store) as job:
@@ -213,7 +219,7 @@ def test_interrupted_batch_keeps_checkpoint_and_can_resume_after_reopen(installe
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
-def test_slow_verification_allows_real_capture_and_rejects_stale_selection(installed, monkeypatch, independent_regular_ddl):
+def test_slow_verification_allows_real_capture_and_rejects_stale_selection(installed, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     import threading
     store, _ = installed
@@ -247,7 +253,7 @@ def test_slow_verification_allows_real_capture_and_rejects_stale_selection(insta
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
-def test_oversized_source_fails_durably_without_blocking_regular_schema(installed, independent_regular_ddl):
+def test_oversized_source_fails_durably_without_blocking_regular_schema(installed):
     store, _ = installed
     populated(store)
     with connect(store) as job:
@@ -279,8 +285,10 @@ def test_isolated_native_upgrade_keeps_retained_custody_and_prefers_native(insta
         with closing(sqlite3.connect(tmp_path / 'upgraded.db')) as upgraded:
             upgraded.row_factory = sqlite3.Row
             upgraded.execute('PRAGMA foreign_keys=ON')
+            upgraded.execute('PRAGMA synchronous=OFF')
             job.backup(upgraded)
-            runner.migrate(upgraded, registry=registry.MIGRATIONS[:100])
+            runner.migrate(upgraded, registry=registry.MIGRATIONS)
+            regular.migrate(upgraded)
             publication.validate_installed(upgraded)
             assert publication.selected(upgraded) is None
             assert [tuple(row) for row in upgraded.execute('SELECT * FROM '+publication.table('events'))] == retained

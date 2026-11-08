@@ -122,10 +122,12 @@ def apply(conn, context):
 
 def validate(conn):
     from .current import _tokens
+    from ..schema_inspection import objects
+    definitions = {name: sql for name, (_kind, sql) in objects(conn).items()}
     for sql in statements():
         name = sql.split()[2]
-        row = conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone()
-        if row is None or _tokens(row[0]) != _tokens(sql):
+        actual = definitions.get(name)
+        if actual is None or _tokens(actual) != _tokens(sql):
             raise MigrationError(f'Incompatible prepared input structure: {name}')
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='rec_prepared_content'").fetchone():
+    if 'rec_prepared_content' in definitions:
         raise MigrationError('Superseded prepared input store remains')

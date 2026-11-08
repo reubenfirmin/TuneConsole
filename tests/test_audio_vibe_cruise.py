@@ -7,7 +7,8 @@ import zlib
 
 import pytest
 
-from tests.rec.test_vibe_prediction import drain, fits
+from tests.audio_vibe_fixture_support import disable_periodic_library_sync, specialist_store
+from tests.rec.test_vibe_prediction import drain, fits, track
 from tests.test_audio_vibe_embeddings import with_embedding
 from tests.test_audio_vibe_model import excerpts
 from yt_playlist.core import audio_embedding, features
@@ -19,7 +20,7 @@ from yt_playlist.rec import audio_vibe_uplift as uplift
 from yt_playlist.rec import audio_vibe_energize as energize
 from yt_playlist.rec import audio_vibe_focus as focus
 from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_prediction as predictor
-from yt_playlist.rec import vibe_preparation
+from yt_playlist.rec import home_vibe, musical_character, vibe_preparation
 
 
 @pytest.fixture(autouse=True)
@@ -172,3 +173,63 @@ def test_missing_metadata_does_not_block_audio_model_or_require_labels(store):
     expected = predictor.predict(samples('bare'))['suitability']['cruise']
     assert fits(store, key)['cruise']['score'] == expected
     assert fits(store, key)['cruise']['source'] == 'audio_measurement'
+
+
+def test_background_rollout_replaces_one_vote_updates_consumers_and_rolls_back(specialist_store, tmp_path, monkeypatch):
+    store = specialist_store
+    _tid, own = track(store, 'observed_song')
+    _tid, neighbour = track(store, 'neighbour')
+    rows = samples()
+    monkeypatch.setenv(cruise.MODE_KEY, 'off')
+    drain(store, batch=1).close()
+    assert fits(store, own)['cruise']['source'] == 'heuristic'
+    for now, row in enumerate(rows[:2], 1):
+        store.audio_vibes.save_sample(row, now)
+    drain(store, batch=1).close()
+    assert fits(store, own)['cruise']['source'] == 'heuristic'
+    store.audio_vibes.save_sample(rows[2], 3)
+    store.audio_vibes.save_feedback(rows[0]['run_id'], [], ['release'], predictor.TAXONOMY_VERSION, None, 4)
+    feedback = store.audio_vibes.feedback(rows[0]['run_id'])
+    drain(store, batch=1).close()
+    before, neighbour_before = fits(store, own), fits(store, neighbour)
+    stamp = vibe_preparation.version()
+    path = controlled(tmp_path, rows)
+    monkeypatch.setenv(cruise.ENVIRONMENT_KEY, str(path))
+    monkeypatch.setenv(cruise.MODE_KEY, 'active')
+    assert vibe_preparation.version() != stamp
+    statements = []
+    store.conn.set_trace_callback(statements.append)
+    drain(store, batch=1).close()
+    after, neighbour_after = fits(store, own), fits(store, neighbour)
+    assert after['cruise']['source'] == 'audio_measurement'
+    assert after['cruise']['score'] == pytest.approx(.9)
+    assert neighbour_after['cruise']['recordings'] == 1
+    assert neighbour_after['cruise']['score'] > neighbour_before['cruise']['score']
+    for vibe in shared.LABELS:
+        if vibe != 'cruise':
+            assert after[vibe] == before[vibe]
+            assert neighbour_after[vibe] == neighbour_before[vibe]
+    compact = musical_character.load(store, [own, neighbour])
+    assert home_vibe.affinity({'key': own}, 'cruise', compact) == after['cruise']['score']
+    # The independent Cruise head cannot alter radio's Energize/Release intensity.
+    assert musical_character.intensity_evidence({'musical': compact[own]}) == max(
+        ((before[v]['score'], before[v]['support']) for v in ('energize', 'release')), key=lambda v: v[0])
+    # A replaced artifact invalidates prepared measurements without a new capture.
+    active_stamp = vibe_preparation.version()
+    controlled(tmp_path, rows, valence=.2)
+    assert vibe_preparation.version() != active_stamp
+    drain(store, batch=1).close()
+    assert fits(store, own)['cruise']['score'] == pytest.approx(.6)
+    assert fits(store, neighbour)['cruise']['recordings'] == 1
+    # Continuing complete captures are still one recording in the cohort.
+    for now, row in enumerate(samples(), 10):
+        store.audio_vibes.save_sample(row, now)
+    drain(store, batch=1).close()
+    assert fits(store, neighbour)['cruise']['recordings'] == 1
+    monkeypatch.setenv(cruise.MODE_KEY, 'off')
+    drain(store, batch=1).close()
+    assert fits(store, own) == before
+    assert fits(store, neighbour) == neighbour_before
+    store.conn.set_trace_callback(None)
+    assert store.audio_vibes.feedback(rows[0]['run_id']) == feedback
+    assert not any('audio_annotation' in sql or 'audio_taxonom' in sql for sql in statements)

@@ -9,6 +9,7 @@ import pytest
 
 from tests.conftest import FakeClient, _track
 from tests.repository_mock_support import no_database, repository_store
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.controllers.sync import LibrarySync
 from yt_playlist.library import sync
 from yt_playlist.library.sync_outcomes import RETRY_BASE_S, sync_due
@@ -16,6 +17,12 @@ from yt_playlist.core import playlist_scopes, sync_state
 from yt_playlist.core.album_snapshot import PlaylistSnapshot
 from yt_playlist.core.store import Store
 from yt_playlist.web.app import _background_sync_loop
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
 
 
 class CountedClient(FakeClient):

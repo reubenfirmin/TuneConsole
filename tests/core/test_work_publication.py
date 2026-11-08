@@ -6,7 +6,6 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
 from tests.prepared_fixture_support import capture_template, coordinates
 from tests.store_fixture_support import publication_consumer_reads
 from tests.test_installed_fixture import state
@@ -124,7 +123,7 @@ def test_publication_preserves_originals_and_supports_existing_and_new_readers(i
 
 
 @pytest.mark.parametrize('installed', [79, 81], indirect=True)
-def test_real_independent_ddl_keeps_work_publication_and_original_history(installed, independent_regular_ddl):
+def test_real_independent_ddl_keeps_work_publication_and_original_history(installed):
     store, version = installed
     work_publication.publish(store.conn, revision=prepare(store))
     # The real runner must commit independent DDL over a published owner.

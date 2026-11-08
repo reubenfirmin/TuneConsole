@@ -7,10 +7,28 @@ route is converted.
 """
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient, _track
+from tests.store_fixture_support import bounded_consumer_schema
+
+
+@pytest.fixture(scope='session')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('jazz', 'Jazz'), ('rock', 'Rock'),
+                                  ('techno', 'Techno'), ('house', 'House'))) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def playlist_routes(monkeypatch):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import actions, app_update, audio_preview, playlists, setup
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (actions, app_update, audio_preview, playlists, setup)])
 
 
 def _client(store, provider):

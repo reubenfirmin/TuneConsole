@@ -7,7 +7,7 @@ from contextlib import ExitStack, closing
 import pytest
 from tests.compaction_fixture_support import compaction_inputs
 from tests.genre_catalog_support import use_shipped_catalog
-from tests.store_fixture_support import PristineSchema, initialize_consumer
+from tests.store_fixture_support import consumer_schema, initialize_consumer
 from yt_playlist.core.store import Store
 
 
@@ -49,35 +49,15 @@ def disable_periodic_library_sync(monkeypatch):
 
 
 @pytest.fixture(scope="session")
-def _pristine_current_schema(tmp_path_factory):
-    """Read-only SQL template built through real bootstrap and admission.
+def _pristine_current_schema():
+    """Read-only shipped SQL below tests of application consumers.
 
     Fresh-bootstrap and historical-upgrade tests construct their own Stores.
-    Every consumer still owns a new connection and file namespace. Admission
-    runs here; consumer copies bind their repositories and revision guards.
+    Every consumer still owns a new connection, file namespace and revision
+    guards. Startup admission belongs to tests that call it themselves.
     """
-    template = sqlite3.connect(":memory:", factory=PristineSchema)
-    try:
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setenv("YT_PLAYLIST_HOME", str(tmp_path_factory.mktemp("schema-template-home")))
-            patch.setenv("YT_PLAYLIST_AUDIO_VIBES", "0")
-            patch.setenv("YT_PLAYLIST_AUDIO_VIBE_MODEL", "")
-            patch.delenv("DEEPSEEK_API_KEY", raising=False)
-            from yt_playlist.core.db_revisions import Revisions
-            from yt_playlist.core.migrations import migrate
-
-            # This fixture owns SQL construction, not application request
-            # admission. Use one ordinary SQLite connection for the real
-            # migration runner and revision guards, avoiding a second Store,
-            # duplicate backup and per-statement diagnostic wrappers. Consumer
-            # fixtures still bind their own real repositories and guards.
-            template.execute('PRAGMA foreign_keys=ON')
-            migrate(template)
-            template.capture_revisions(Revisions(template))
-        template.execute("PRAGMA query_only=ON")
+    with consumer_schema() as template:
         yield template
-    finally:
-        template.close()
 
 
 @pytest.fixture
@@ -316,14 +296,12 @@ def genre_candidates_template(_pristine_current_schema, tmp_path_factory):
     from tests.prepared_fixture_support import prepared_template
     from tests.test_home_other_genres import seed_genres
 
-    # Eight candidates per lane retain general-pool backfill after a consumer
-    # trims a mode to four. Keep every genre/lane, without twelve extra copies
-    # of the same filtering scenario. Memory input owns private evidence under
-    # its own home, before any function-scoped application-home fixture runs.
+    # Keep the original six genres, four lanes and twenty songs per lane.
+    # Give memory input private evidence before function-scoped homes exist.
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('genre-candidates-home')))
         with prepared_template(_pristine_current_schema,
-                               lambda source: seed_genres(source, tracks_per_lane=8)) as template:
+                               seed_genres) as template:
             yield template
 
 
@@ -471,10 +449,12 @@ def _admitted_installed_schema(tmp_path_factory, _pristine_installed_schema):
 
 @pytest.fixture(scope='session')
 def _bounded_installed_schema(tmp_path_factory):
-    """Admit empty publication inputs once; keep private SQL and TEMP guards."""
+    """Build empty publication inputs below admission, with real TEMP guards."""
     from tests.genre_catalog_support import bound_catalog
-    from tests.prepared_fixture_support import prepared_template
-    from tests.store_fixture_support import install_numbered_input
+    from tests.prepared_fixture_support import capture_template
+    from tests.store_fixture_support import PristineSchema, install_numbered_input
+    from yt_playlist.core.db_revisions import Revisions
+    from yt_playlist.core.migrations import registry
 
     root = tmp_path_factory.mktemp('bounded-installed-schemas')
     templates = {}
@@ -483,12 +463,20 @@ def _bounded_installed_schema(tmp_path_factory):
             if version not in templates:
                 with pytest.MonkeyPatch.context() as patch:
                     bound_catalog(patch)
-                    source = resources.enter_context(closing(sqlite3.connect(':memory:')))
+                    patch.setenv('YT_PLAYLIST_HOME', str(root / f'{version}-home'))
+                    patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
+                    patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
+                    patch.delenv('DEEPSEEK_API_KEY', raising=False)
+                    source = resources.enter_context(closing(sqlite3.connect(
+                        ':memory:', factory=PristineSchema)))
                     install_numbered_input(source, version)
+                    source.capture_revisions(Revisions(source))
                     source.execute('PRAGMA query_only=ON')
-                    templates[version] = resources.enter_context(prepared_template(
-                        source, lambda store: None, database=root / f'{version}.db',
-                        defer_metadata=True))
+                    store = Store(root / f'{version}.db')
+                    resources.callback(store.conn.close)
+                    store.conn.execute('PRAGMA synchronous=NORMAL')
+                    initialize_consumer(store, source, compatibility=version < len(registry.MIGRATIONS))
+                    templates[version] = capture_template(store, None)
                     assert templates[version].source.conn.execute(
                         'SELECT max(version) FROM schema_migrations').fetchone()[0] == version
             return templates[version]

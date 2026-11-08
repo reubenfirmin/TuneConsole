@@ -139,12 +139,14 @@ def apply(conn, context):
 
 def validate(conn):
     from .current import _tokens
+    from ..schema_inspection import objects
+    definitions = {name: sql for name, (_kind, sql) in objects(conn).items()}
     for sql in statements():
         words = sql.split()
         name = words[3] if words[1] == 'UNIQUE' else words[2]
-        row = conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone()
-        if row is None or _tokens(row[0]) != _tokens(sql):
+        actual = definitions.get(name)
+        if actual is None or _tokens(actual) != _tokens(sql):
             raise MigrationError(f'Incompatible canonical embedding structure: {name}')
     for source in SOURCES:
-        if conn.execute('SELECT 1 FROM sqlite_master WHERE name=?', (source,)).fetchone():
+        if source in definitions:
             raise MigrationError(f'Superseded embedding store remains: {source}')

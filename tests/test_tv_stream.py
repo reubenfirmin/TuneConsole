@@ -6,11 +6,13 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
 from tests.home_fixture_support import home_routes_only, without_metadata_providers
+from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.library import tv_stream
 from yt_playlist.library.playlist_generated import create_generated_playlist
 from yt_playlist.rec import tv
 from yt_playlist.web.app import create_app
+from yt_playlist.util.matching import identity_key
 
 
 pytestmark = pytest.mark.usefixtures('home_routes_only', 'without_metadata_providers')
@@ -27,6 +29,27 @@ def test_tv_stream_input_keeps_empty_receipts_and_real_guards(_pristine_current_
     assert _pristine_current_schema._revision_script
     assert not _pristine_current_schema.execute('SELECT 1 FROM tv_continuation_receipts').fetchone()
     assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.fixture(autouse=True)
+def catalog_inputs(request, monkeypatch):
+    if 'store' not in request.fixturenames:
+        return
+    database = request.getfixturevalue('store')
+
+    def ingest(video_id, title, artist, album=None, duration_s=None, *, thumbnail=None, library=True):
+        existing = database.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?', (video_id,)).fetchone()
+        if existing:
+            return existing[0]
+        key = identity_key(title, artist)
+        item = dict(key=key, video_id=video_id, title=title, artist=artist, album=album, duration_s=duration_s)
+        seed_publication_subjects(database, [item], unowned=() if library else (key,))
+        return database.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?', (video_id,)).fetchone()[0]
+
+    # TV owns confirmed membership, ordering, receipts and replay safety. Keep
+    # those SQL/files real; supply completed catalog subjects below the separate
+    # provider-metadata capture and artist-inference boundary.
+    monkeypatch.setattr(database.tracks, 'upsert_track', ingest)
 
 
 def video(index, duration=200):

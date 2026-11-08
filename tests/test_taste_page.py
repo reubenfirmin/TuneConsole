@@ -8,6 +8,26 @@ from yt_playlist.rec import embedding_vectors as embed, rec_params, taste_viz
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 from tests.taste_support import _client
+from tests.store_fixture_support import bounded_consumer_schema
+
+
+@pytest.fixture(scope='session')
+def _pristine_current_schema():
+    # Page consumers use real SQL and guards with the genres present in their
+    # complete datasets. Catalog curation and schema admission have their own tests.
+    with bounded_consumer_schema((('jazz', 'Jazz'), ('techno', 'Techno'))) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def taste_routes(monkeypatch):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, taste
+
+    # Keep the actual Taste handlers and shared template dependencies. Building
+    # unrelated page routers is not part of these requests.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (app_update, audio_preview, taste)])
 
 
 def test_taste_page_renders_status_and_controls(store):

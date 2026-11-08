@@ -3,6 +3,54 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 _SESSION = ContextVar('schema_table_inspections', default=None)
+_OBJECTS = ContextVar('schema_validation_objects', default=None)
+
+
+def definitions(conn, names):
+    """Read named definitions from this connection's current main schema."""
+    return {name: sql for name, (_kind, sql) in objects(conn, names).items()}
+
+
+def objects(conn, names=None):
+    snapshot = _OBJECTS.get()
+    if snapshot is not None and snapshot[0] is conn:
+        catalog = snapshot[1]
+        if names is None:
+            return catalog.copy()
+        return {name: catalog[name] for name in names if name in catalog}
+    return _objects(conn, names)
+
+
+@contextmanager
+def reuse_objects(conn):
+    """Share catalog reads only during one read-only, pinned validation.
+
+    The caller must not change schema inside this scope. Discard observations
+    before any migration runs, commits or rolls back: SQLite can reuse a schema
+    version after rollback, so that counter cannot identify later transactions.
+    """
+    snapshot = _OBJECTS.get()
+    if not conn.in_transaction or snapshot is not None and snapshot[0] is conn:
+        yield
+        return
+    token = _OBJECTS.set((conn, _objects(conn)))
+    try:
+        yield
+    finally:
+        _OBJECTS.reset(token)
+
+
+def _objects(conn, names=None):
+    sql, parameters = 'SELECT name,type,sql FROM main.sqlite_schema', ()
+    if names is not None:
+        parameters = tuple(dict.fromkeys(names))
+        if not parameters:
+            return {}
+        sql += ' WHERE name IN (' + ','.join('?' for _ in parameters) + ')'
+    result = {}
+    for name, kind, definition in conn.execute(sql, parameters).fetchall():
+        result.setdefault(name, (kind, definition))
+    return result
 
 
 class TableInspections:

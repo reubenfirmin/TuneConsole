@@ -5,7 +5,6 @@ import json
 import pytest
 
 from tests.core.test_predecessor_writes import installed
-from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import albums, genre_identity
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation.genre_classifications import JOB
@@ -38,6 +37,7 @@ def test_labels_and_continuing_edits_remain_authoritative(installed):
     assert not conn.execute('SELECT 1 FROM prepared_genre_classifications').fetchone()
     first = JOB.step(conn, batch_size=2)
     assert first.processed == 2 and first.prepared_revision is None
+    regular.migrate(conn)
     finish(conn)
     assert [tuple(r) for r in conn.execute('SELECT id,identity_key,genre FROM recordings ORDER BY id')] == source
     rows = conn.execute("SELECT raw_label,genre_key,disposition FROM prepared_genre_classifications "
@@ -65,7 +65,7 @@ def test_labels_and_continuing_edits_remain_authoritative(installed):
 
 
 @pytest.mark.parametrize('installed', [85], indirect=True)
-def test_interrupt_and_failed_batch_keep_committed_prefix(installed, independent_regular_ddl):
+def test_interrupt_and_failed_batch_keep_committed_prefix(installed):
     store, _ = installed
     conn = store.conn
     with conn:

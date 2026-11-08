@@ -112,6 +112,7 @@ def pytest_addoption(parser):
     group.addoption("--ci-shard", metavar="INDEX/TOTAL", help="Serial whole-file shard on this isolated CI runner")
     group.addoption("--ci-suite", choices=("unit", "browser"), default="unit")
     group.addoption("--ci-shard-report", type=Path, help="Record coverage and setup/call/teardown timings as JSON")
+    group.addoption("--ci-source-report", type=Path, help="Record Python source hashes before and after the measured run")
     group.addoption("--ci-duration-baseline", type=Path, default=BASELINE)
 
 
@@ -137,12 +138,19 @@ def pytest_configure(config):
         durations = measured["files"]
     else:
         durations = json.loads(baseline_path.read_text()).get(suite, {})
-    config.pluginmanager.register(Shard(config, index, total, path, suite, durations), "isolated-ci-shard")
+    config.pluginmanager.register(Shard(config, index, total, path, suite, durations,
+                                      source_path=config.getoption('ci_source_report')), "isolated-ci-shard")
 
 
 class Shard:
-    def __init__(self, config, index, total, path, suite, durations):
+    def __init__(self, config, index, total, path, suite, durations, *, source_path=None):
         self.config, self.path, self.durations = config, path.resolve(), durations
+        self.source_path = source_path.resolve() if source_path is not None else None
+        if self.source_path is not None:
+            self.source_root = Path(config.rootpath).resolve()
+            self.source_report = {'arguments': list(config.invocation_params.args),
+                                  'sources': self.source_hashes()}
+            self.write_sources()
         self.started = time.monotonic()
         self.sequence = 0
         self.journal_failed = False
@@ -209,6 +217,22 @@ class Shard:
             return
         self.event('finish', exitstatus=int(exitstatus), elapsed_seconds=time.monotonic() - self.started)
         self.write()
+        if self.source_path is not None:
+            self.source_report['after_sources'] = self.source_hashes()
+            self.write_sources()
+
+    def source_hashes(self):
+        paths = [*self.source_root.glob('*.py'),
+                 *(self.source_root / 'src').rglob('*.py'),
+                 *(self.source_root / 'tests').rglob('*.py')]
+        return {str(path.relative_to(self.source_root)): hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in sorted(paths)}
+
+    def write_sources(self):
+        self.source_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.source_path.with_suffix('.json.tmp')
+        temporary.write_text(_journal_dumps(self.source_report, indent=2) + '\n')
+        temporary.replace(self.source_path)
 
     def event(self, kind, **values):
         if self.journal_failed:

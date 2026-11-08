@@ -4,13 +4,17 @@ import json
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
-from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import numbered_store as installed
 from yt_playlist.core import entity_names, recommendation_outputs as files, sync_state
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import library_sync as preparation
 from yt_playlist.core.store import Store
 from yt_playlist.library import sync_outcomes
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Sync-state preparation does not construct an HTTP app."""
 
 
 def finish(job, conn, size=16):
@@ -71,6 +75,7 @@ def test_exact_report_resources_stamps_and_unresolved_owners_remain_retained(ins
     assert not sync_state.available(conn)
     assert files.collect_orphans(conn) == 0
     assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -200,7 +205,7 @@ def test_file_work_allows_concurrent_source_update_and_rejects_stale_copy(instal
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 def test_interrupted_head_and_disk_failure_keep_independent_stamps_and_reopened_retry(
-        installed, monkeypatch, independent_regular_ddl):
+        installed, monkeypatch):
     store, _ = installed
     conn = store.conn
     raw = seed(store)
@@ -244,7 +249,8 @@ def test_interrupted_head_and_disk_failure_keep_independent_stamps_and_reopened_
     ('library_sync_state', '{"status":"failed","resources":{"album_tracks":{"status":"failed","failures":17}}}'),
     ('last_sync_at', 'Infinity'), ('last_sync_outcome', 'running'),
 ])
-def test_invalid_sync_input_fails_durably_and_retains_authoritative_source(installed, source, raw):
+def test_invalid_sync_input_fails_durably_and_retains_authoritative_source(
+        installed, source, raw):
     store, _ = installed
     store.settings.set_setting(source, raw)
     job = preparation.RESULT_JOB if source == 'library_sync_state' else preparation.STAMP_JOB
@@ -253,3 +259,4 @@ def test_invalid_sync_input_fails_durably_and_retains_authoritative_source(insta
         finish(job, store.conn)
     assert job.progress(store.conn).status == 'failed'
     assert store.settings.get_setting(source) == raw
+    regular.migrate(store.conn)

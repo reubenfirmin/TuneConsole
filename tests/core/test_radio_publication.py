@@ -6,7 +6,6 @@ import sqlite3
 import pytest
 
 from tests.core.test_radio_preparation import finish, header
-from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import catalog, radio_reads, radio_storage
 from yt_playlist.core.radio_files import RadioFiles
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -82,7 +81,7 @@ def test_preopened_readers_and_compatible_writer_keep_exact_checkpoint(tmp_path,
 
 @pytest.mark.parametrize('failure',['header','queue','corrupt-file','missing-file'])
 def test_invalid_preparation_does_not_replace_installed_checkpoint(
-        tmp_path, installed_radio, failure, independent_regular_ddl):
+        tmp_path, installed_radio, failure):
     store, state, raw = installed_radio(tmp_path / 'invalid.db')
     try:
         revision = prepare(store.conn)
@@ -178,7 +177,7 @@ def test_selected_custody_is_immutable_and_missing_file_has_explicit_recovery(tm
 
 
 def test_interrupted_publication_retains_previous_generation_and_retry_is_atomic(
-        tmp_path, installed_radio, independent_regular_ddl):
+        tmp_path, installed_radio):
     store, state, raw = installed_radio(tmp_path / 'interrupted.db')
     try:
         first = prepare(store.conn)

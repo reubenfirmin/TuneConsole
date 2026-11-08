@@ -7,7 +7,6 @@ import pytest
 
 from tests.core.test_album_note_preparation import NOTES, finish, header, seed
 from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
 from tests.store_fixture_support import publication_schema_inspections
 from yt_playlist.core import recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -16,6 +15,30 @@ from yt_playlist.core.store import Store
 
 
 pytestmark = pytest.mark.usefixtures('publication_schema_inspections')
+
+
+def test_frozen_native_upgrade_keeps_retained_files_and_guard_validation(tmp_path, _pristine_installed_schema):
+    store = Store(tmp_path/'upgrade.db')
+    try:
+        _pristine_installed_schema(83).backup(store.conn)
+        store.init_schema(defer_metadata=True)
+        seed(store)
+        publication.publish(store.conn, revision=prepared(store.conn))
+        original = header(store.conn)
+        store.conn.close()
+        store = Store(tmp_path/'upgrade.db')
+        runner.migrate(store.conn, registry=registry.MIGRATIONS)
+        store.init_schema(defer_metadata=True)
+        assert publication.selected(store.conn) is None
+        assert store.rec_proposals.get_proposals('album_notes') == NOTES
+        assert preparation.read_original(original) is not None
+        regular.validate(store.conn)
+        with store.conn:
+            store.conn.execute('DROP TRIGGER prepared_album_note_files_published_delete')
+        with pytest.raises(MigrationError, match='publication object'):
+            regular.validate(store.conn)
+    finally:
+        store.conn.close()
 
 
 def prepared(conn):
@@ -199,7 +222,7 @@ def test_continuing_sources_and_reference_races_reject_stale_publication(install
 
 
 @pytest.mark.parametrize('installed', [83], indirect=True)
-def test_interrupted_cutover_missing_files_recovery_and_failed_job_do_not_block_ddl(installed, monkeypatch, independent_regular_ddl):
+def test_interrupted_cutover_missing_files_recovery_and_failed_job_do_not_block_ddl(installed, monkeypatch):
     store, _ = installed
     raw = seed(store)
     revision = prepared(store.conn)
@@ -231,6 +254,11 @@ def test_interrupted_cutover_missing_files_recovery_and_failed_job_do_not_block_
     with pytest.raises(OSError, match='controlled note file failure'):
         preparation.JOB.step(store.conn)
     failed = preparation.JOB.progress(store.conn)
+    def install(conn, context):
+        conn.execute('CREATE TABLE independent_note_publication(value TEXT)')
+    def validate(conn):
+        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_note_publication'").fetchone()
+    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES,regular.Change(len(regular.CHANGES) + 1,'independent_note_publication',install,validate)))
     regular.migrate(store.conn)
     assert preparation.JOB.progress(store.conn) == failed
     with pytest.raises(MigrationError, match='retry explicitly'):

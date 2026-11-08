@@ -5,8 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
-from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import genre_preferences as preparation
 from yt_playlist.core.store import Store
@@ -14,6 +13,11 @@ from yt_playlist.util import genre_catalog
 
 
 BASELINE = ['Known', 'Unknown retained', '', 'Ambiguous', 'Known']
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Preference preparation does not construct an HTTP app."""
 
 
 def seed(conn):
@@ -37,7 +41,7 @@ def head(conn):
 
 
 @pytest.mark.parametrize('installed', [79, 84], indirect=True)
-def test_enabled_choices_keep_labels_custom_intent_and_case_only_renames(installed):
+def test_enabled_choices_keep_labels_custom_intent_and_case_only_renames(installed, preparation_ddl_connection):
     store, _ = installed
     conn = store.conn
     seed(conn)
@@ -47,6 +51,7 @@ def test_enabled_choices_keep_labels_custom_intent_and_case_only_renames(install
     choices.install(conn)
     first = choices.step(conn, batch_size=1)
     assert first.processed == 1 and first.prepared_revision is None
+    regular.migrate(preparation_ddl_connection)
     finish(choices, conn)
     assert [tuple(row) for row in conn.execute('SELECT raw_label,genre_key,proposed_key,disposition '
         'FROM prepared_genre_choices ORDER BY raw_label')] == [
@@ -77,7 +82,7 @@ def test_enabled_choices_keep_labels_custom_intent_and_case_only_renames(install
 
 
 @pytest.mark.parametrize('installed', [79, 84], indirect=True)
-def test_disabled_defaults_keep_exact_baseline_and_prior_generations(installed):
+def test_disabled_defaults_keep_exact_baseline_and_prior_generations(installed, preparation_ddl_connection):
     store, _ = installed
     conn = store.conn
     seed(conn)
@@ -87,6 +92,7 @@ def test_disabled_defaults_keep_exact_baseline_and_prior_generations(installed):
     preparation.DEFAULTS.install(conn)
     first = preparation.DEFAULTS.step(conn, batch_size=2)
     assert first.processed == 2 and first.status == 'copying'
+    regular.migrate(preparation_ddl_connection)
     finish(preparation.DEFAULTS, conn)
     original = head(conn)
     assert preparation.read_baseline(original) == raw
@@ -167,7 +173,7 @@ def test_file_work_releases_transaction_and_concurrent_source_edit_is_fenced(ins
 
 
 @pytest.mark.parametrize('installed', [84], indirect=True)
-def test_failure_interrupt_and_restart_keep_committed_batches(installed, monkeypatch, independent_regular_ddl):
+def test_failure_interrupt_and_restart_keep_committed_batches(installed, preparation_ddl_connection, monkeypatch):
     store, _ = installed
     conn = store.conn
     with conn:
@@ -190,7 +196,7 @@ def test_failure_interrupt_and_restart_keep_committed_batches(installed, monkeyp
         preparation.DEFAULTS.step(conn, batch_size=1)
     assert preparation.DEFAULTS.progress(conn).status == 'failed'
     assert conn.execute(f'SELECT count(*) FROM {preparation.ITEMS}').fetchone()[0] == 1
-    regular.migrate(conn)
+    regular.migrate(preparation_ddl_connection)
     monkeypatch.setattr(preparation, '_publish_encoded', publish)
     reopened = Store(store._db_path)
     try:
@@ -220,7 +226,7 @@ def test_invalid_defaults_fail_durably_without_replacing_original(installed, raw
 
 
 @pytest.mark.parametrize('installed', [84], indirect=True)
-def test_choice_failure_requires_explicit_retry_and_keeps_prior_batch(installed, independent_regular_ddl):
+def test_choice_failure_requires_explicit_retry_and_keeps_prior_batch(installed, preparation_ddl_connection):
     store, _ = installed
     with store.conn:
         store.conn.executemany('INSERT INTO genre_whitelist VALUES (?)', [('First',), ('Second',)])
@@ -234,7 +240,7 @@ def test_choice_failure_requires_explicit_retry_and_keeps_prior_batch(installed,
         replace(choices, copy=fail).step(store.conn, batch_size=1)
     assert choices.progress(store.conn).status == 'failed'
     assert store.conn.execute('SELECT count(*) FROM prepared_genre_choices').fetchone()[0] == 1
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     with pytest.raises(MigrationError, match='retry explicitly'):
         choices.step(store.conn)
     choices.step(store.conn, retry=True)

@@ -5,8 +5,7 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import guarded_numbered_store as guarded_installed, numbered_store as installed
 from yt_playlist.core import choice_learning_state as learning, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import choice_learning as preparation
@@ -16,14 +15,6 @@ from yt_playlist.core.store import Store
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     """Learning preparation owns SQL and files below the HTTP lifecycle."""
-
-
-@pytest.mark.parametrize('version', [79, 92])
-def test_choice_learning_input_keeps_real_history_and_snapshot_guards(_bounded_installed_schema, version):
-    source = _bounded_installed_schema(version).source
-    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
-    assert source._snapshot_revisions.conn is source.conn
-    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def finish(conn, size=16):
@@ -67,11 +58,11 @@ def originals():
 
 
 @pytest.mark.parametrize('installed', [92], indirect=True)
-def test_prepared_mix_descriptor_survives_installed_learning_projection(installed):
+def test_prepared_mix_descriptor_survives_installed_learning_projection(installed, monkeypatch):
     from yt_playlist.core import mix_choices
     store, _ = installed
+    regular.migrate(store.conn)
     with store.conn:
-        mix_choices.install(store.conn)
         descriptor = mix_choices.descriptor(store.conn, {'genres':['House'], 'label':'Stay close'})
         value = {'contexts':[{'format':'mixes','descriptor_id':descriptor,'keys':[],
                              'feature':None,'mode_id':None,'at':10,'days':1}]}
@@ -92,6 +83,7 @@ def test_exact_originals_and_typed_relations_preserve_installed_authority(instal
     preparation.JOB.install(conn)
     assert preparation.JOB.step(conn, batch_size=1).processed == 1
     assert head(conn, 'choice_bandit') is None
+    regular.migrate(conn)
     finish(conn)
     for surface, raw in original.items():
         assert preparation.read_original(conn, head(conn, surface)) == raw
@@ -120,6 +112,7 @@ def test_prepared_numerical_contract_matches_genuine_frozen_cutover_on_separate_
     finish(store.conn)
     upgraded = Store(tmp_path / 'frozen-upgrade.db')
     try:
+        upgraded.conn.execute('PRAGMA synchronous=OFF')
         store.conn.backup(upgraded.conn)
         runner.migrate(upgraded.conn, registry=registry.MIGRATIONS[:93])
         upgraded._bind_repositories()
@@ -185,12 +178,13 @@ def test_source_and_reference_changes_reconcile_without_pinning_mutable_owners(i
     finish(conn)
     assert head(conn) is None and head(conn, 'choice_bandit') is None
     assert preparation.read_original(conn, previous) == original['choice_interests']
+    regular.migrate(conn)
 
 
-@pytest.mark.parametrize('installed', [92], indirect=True)
-def test_published_group_aliases_are_observed_without_creating_retention_owners(installed):
+@pytest.mark.parametrize('guarded_installed', [92], indirect=True)
+def test_published_group_aliases_are_observed_without_creating_retention_owners(guarded_installed):
     from tests.group_support import publish, recordings
-    store, _ = installed
+    store, _ = guarded_installed
     groups = publish(store, recordings([('Jazz', 16, .2)]), now=10)
     group = groups['groups'][0]
     value = {'generation': groups['generation'], 'rows': [
@@ -231,7 +225,7 @@ def test_file_io_fences_a_concurrent_replacement_without_holding_a_transaction(i
 
 
 @pytest.mark.parametrize('installed', [92], indirect=True)
-def test_interrupted_members_and_disk_failure_preserve_the_committed_prefix(installed, monkeypatch, independent_regular_ddl):
+def test_interrupted_members_and_disk_failure_preserve_the_committed_prefix(installed, monkeypatch):
     store, _ = installed
     conn = store.conn
     store.rec_proposals.put_proposals('choice_interests', {'contexts': [{'feature': [.1] * 600}]}, 10)
@@ -301,6 +295,7 @@ def test_whitespace_in_original_counts_toward_the_byte_budget(installed):
     assert preparation.JOB.progress(store.conn).status == 'failed'
     assert not store.conn.execute(f'SELECT 1 FROM {preparation.PUBLICATIONS}').fetchone()
     assert store.conn.execute("SELECT length(payload) FROM rec_proposals WHERE surface='choice_bandit'").fetchone()[0] == len(raw)
+    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [92], indirect=True)
@@ -319,3 +314,4 @@ def test_invalid_numerical_or_ambiguous_relations_fail_without_changing_source(i
         finish(store.conn)
     assert preparation.JOB.progress(store.conn).status == 'failed'
     assert store.conn.execute('SELECT payload FROM rec_proposals WHERE surface=?', (surface,)).fetchone()[0] == raw
+    regular.migrate(store.conn)

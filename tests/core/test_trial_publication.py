@@ -7,7 +7,6 @@ import pytest
 
 from tests.core.test_model_trial_preparation import head, seed
 from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
 from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core.migrations import MigrationError, registry, regular
 from yt_playlist.core.preparation import model_trials as preparation, trial_publication as publication
@@ -149,7 +148,7 @@ def test_full_baseline_null_blank_and_missing_nested_inputs_remain_exact(install
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_source_race_interrupted_cutover_and_failed_preparation_do_not_block_ddl(installed, independent_regular_ddl):
+def test_source_race_interrupted_cutover_and_failed_preparation_do_not_block_ddl(installed):
     store, _ = installed
     seed(store)
     owner = publication.OWNERS['live-trial']

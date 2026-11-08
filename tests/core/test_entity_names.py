@@ -11,7 +11,6 @@ from yt_playlist.core.migrations.v103_entity_names import transform
 from yt_playlist.core.store import Store
 from tests.prepared_fixture_support import capture_template
 from tests.genre_catalog_support import bound_catalog
-from tests.independent_schema_support import independent_regular_ddl
 
 
 def rows(conn):
@@ -120,7 +119,7 @@ def test_name_predecessor_input_keeps_physical_ids_and_original_numbered_history
 
 
 def test_predecessor_keeps_read_projections_and_physical_writers_after_regular_ddl(
-        tmp_path, legacy_names, independent_regular_ddl):
+        tmp_path, legacy_names):
     from yt_playlist.core import entity_names
     from yt_playlist.core.storage_maintenance import StorageMaintenance
     setup = legacy_names(tmp_path/'deferred.db')

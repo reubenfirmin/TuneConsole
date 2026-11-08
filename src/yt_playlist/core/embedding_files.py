@@ -72,13 +72,15 @@ def install(conn, context=None):
 
 def validate(conn):
     from .schema_contract import tokens as _tokens
+    from .schema_inspection import definitions as read_definitions
     replacements = dict(legacy_order_guards()) if ordered_legacy(conn) else {}
     if bounded_basis(conn):
         replacements.update(bounded_basis_guards())
-    for name, sql in definitions():
+    expected = tuple(definitions())
+    actual = read_definitions(conn, (name for name, _ in expected))
+    for name, sql in expected:
         sql = replacements.get(name,sql)
-        row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
-        if row is None or _tokens(row[0]) != _tokens(sql):
+        if actual.get(name) is None or _tokens(actual[name]) != _tokens(sql):
             raise ValueError('Incompatible embedding file owner: ' + name)
 
 
@@ -116,9 +118,11 @@ def install_basis_guards(conn, context=None):
 
 def validate_basis_guards(conn):
     from .schema_contract import tokens
-    for name, sql in bounded_basis_guards():
-        row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
-        if row is None or tokens(row[0]) != tokens(sql):
+    from .schema_inspection import definitions as read_definitions
+    expected = tuple(bounded_basis_guards())
+    actual = read_definitions(conn, (name for name, _ in expected))
+    for name, sql in expected:
+        if actual.get(name) is None or tokens(actual[name]) != tokens(sql):
             raise ValueError('Incompatible bounded embedding basis guard: ' + name)
 
 
@@ -170,9 +174,11 @@ def install_legacy_order(conn, context=None):
 
 def validate_legacy_order(conn):
     from .schema_contract import tokens as _tokens
-    for name,sql in legacy_order_definitions():
-        row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?',(name,)).fetchone()
-        if row is None or _tokens(row[0])!=_tokens(sql):
+    from .schema_inspection import definitions as read_definitions
+    expected = tuple(legacy_order_definitions())
+    actual = read_definitions(conn, (name for name, _ in expected))
+    for name,sql in expected:
+        if actual.get(name) is None or _tokens(actual[name]) != _tokens(sql):
             raise ValueError('Incompatible installed embedding order: '+name)
 
 

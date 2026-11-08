@@ -1,5 +1,19 @@
+import pytest
+
 from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.core.artists import ensure
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('rock', 'Rock'),)) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Artist repository checks do not construct an HTTP application."""
 
 
 def _catalog(store, prefix, title, artist, count):

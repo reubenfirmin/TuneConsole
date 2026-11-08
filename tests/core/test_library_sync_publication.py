@@ -6,7 +6,6 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_library_sync_preparation import finish, head, seed
 from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import schema_inspection, sync_state
@@ -129,7 +128,7 @@ def test_continuing_result_stamp_and_reference_writes_withdraw_independently(ins
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('name', tuple(publication.OWNERS))
-def test_absent_sources_failed_work_and_regular_ddl_are_independent(installed, name, independent_regular_ddl):
+def test_absent_sources_failed_work_and_regular_ddl_are_independent(installed, name):
     store, _ = installed
     for owner in publication.OWNERS.values():
         owner.publish(store.conn, revision=prepare(store.conn, owner))

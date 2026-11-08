@@ -6,7 +6,6 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_taste_control_preparation import finish, members, seed
 from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import collection_recovery, experiment_decision_state, recommendation_outputs as files, taste_control_state
@@ -196,7 +195,7 @@ def test_independent_writes_withdraw_selection_and_preserve_pinned_snapshots(ins
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('file_kind', ['original', 'plan', 'recovery'])
-def test_missing_retained_files_require_explicit_retry_without_mutating_published_rows(installed, file_kind, independent_regular_ddl):
+def test_missing_retained_files_require_explicit_retry_without_mutating_published_rows(installed, file_kind):
     store, _ = installed
     _, originals = seed(store)
     owner = publication.OWNERS['baseline']
@@ -219,7 +218,7 @@ def test_missing_retained_files_require_explicit_retry_without_mutating_publishe
 
 
 @pytest.mark.parametrize('installed', [85], indirect=True)
-def test_new_optional_owners_withdraw_old_selection_without_blocking_regular_ddl(installed, tmp_path, independent_regular_ddl):
+def test_new_optional_owners_withdraw_old_selection_without_blocking_regular_ddl(installed, tmp_path):
     store, _ = installed
     _, originals = seed(store)
     owner = publication.OWNERS['checkpoint']

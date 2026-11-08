@@ -2,9 +2,20 @@ import sqlite3
 
 import pytest
 
-from tests.store_fixture_support import file_consumer_store as store
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.library.playlist_metadata import content_hash
 from yt_playlist.util.matching import identity_key
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Playlist repository checks do not construct an HTTP application."""
 
 
 def _track(i, **extra):
@@ -178,8 +189,6 @@ def test_late_membership_batch_failure_rolls_back_prior_batches(store, monkeypat
     pid = _playlist(store)
     store.playlists.publish_confirmed_tracks(pid, "Radio", [_track(0)], 2)
     before = store.playlists.get_playlist(pid)
-    retained = {table: list(map(tuple, store.conn.execute(f'SELECT * FROM {table} ORDER BY 1')))
-                for table in ('youtube_items', 'recordings', 'catalog_entries')}
     tracks = [_track(i) for i in range(131)]
     # Catalog observation is below this membership-batch boundary. The small
     # failure cases above retain real ingestion and its independent commits.
@@ -195,6 +204,8 @@ def test_late_membership_batch_failure_rolls_back_prior_batches(store, monkeypat
         store.conn.executemany('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
             [(i + 1, i + 1, track['video_id']) for i, track in enumerate(tracks[1:], 1)])
     entries = {track['video_id']: i + 1 for i, track in enumerate(tracks)}
+    retained = {table: list(map(tuple, store.conn.execute(f'SELECT * FROM {table} ORDER BY 1')))
+                for table in ('youtube_items', 'recordings', 'catalog_entries')}
     def observed(video, *args, library, **kwargs):
         assert not library
         return entries[video]
@@ -208,11 +219,8 @@ def test_late_membership_batch_failure_rolls_back_prior_batches(store, monkeypat
     assert not store.conn.in_transaction
     assert store.playlists.get_playlist(pid) == before
     assert _videos(store, pid) == ["v0"]
-    for table, original_rows in retained.items():
-        assert list(map(tuple, store.conn.execute(f'SELECT * FROM {table} WHERE '
-                                                f'{"video_id" if table == "youtube_items" else "id"}=?',
-                                                ('v0' if table == 'youtube_items' else 1,)))) == original_rows
-        assert store.conn.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == len(tracks)
+    assert {table: list(map(tuple, store.conn.execute(f'SELECT * FROM {table} ORDER BY 1')))
+            for table in retained} == retained
     store.settings.set_setting('unrelated', 'committed')
     assert _library_videos(store) == {'v0'}
     with store.conn:

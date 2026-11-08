@@ -5,7 +5,6 @@ import zipfile
 import pytest
 
 from tests.conftest import FakeClient, _track
-from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.core.store import Store
 from yt_playlist.util.matching import identity_key
@@ -23,6 +22,11 @@ def _pristine_current_schema():
         yield schema
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Library import checks do not construct an HTTP application."""
+
+
 @pytest.fixture
 def observed_catalog(store, monkeypatch):
     # These transfer owners check SQL publication after catalog observation,
@@ -36,10 +40,18 @@ def observed_catalog(store, monkeypatch):
         assert not library
         if video not in entries:
             key = identity_key(title, artist)
-            seed_publication_subjects(store, [{'key': key, 'video_id': video, 'title': title,
-                'artist': artist, 'album': album, 'duration_s': duration_s}], unowned=[key])
-            entries[video] = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?',
-                                               (video,)).fetchone()[0]
+            with store.conn:
+                recording = store.conn.execute(
+                    'INSERT INTO recordings(identity_key,title,artist,created_at) VALUES (?,?,?,NULL)',
+                    (key, title, artist)).lastrowid
+                store.conn.execute('INSERT INTO youtube_items(video_id,recording_id,title,artist,'
+                    'orig_title,orig_artist,album,duration_s) VALUES (?,?,?,?,?,?,?,?)',
+                    (video, recording, title, artist, title, artist, album, duration_s))
+                entry = store.conn.execute(
+                    'INSERT INTO catalog_entries(recording_id,video_id) VALUES (?,?)',
+                    (recording, video)).lastrowid
+                store.conn.execute("INSERT INTO recording_aliases VALUES (?,?,'fixture')", (key, recording))
+            entries[video] = entry
         return entries[video]
 
     monkeypatch.setattr(store.tracks, 'upsert_track', observe)

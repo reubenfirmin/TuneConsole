@@ -2,7 +2,6 @@
 import pytest
 
 from tests.core import test_genre_publication as genres
-from tests.independent_schema_support import independent_regular_ddl
 from tests.prepared_fixture_support import assert_upgrade_phase
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.migrations import registry, regular, runner
@@ -76,7 +75,7 @@ def test_native_genre_takeover_retires_selection_without_losing_original_rows(na
 
 
 def test_regular_admission_keeps_native_genre_precedence_and_retained_selection_inputs(
-        native_86, independent_regular_ddl):
+        native_86):
     # Registry ordering has real owners in test_independent_schema_changes.
     # This publication consumer needs a genuine independent DDL change.
     regular.migrate(native_86['conn'])

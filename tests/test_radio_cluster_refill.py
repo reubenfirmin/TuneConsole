@@ -16,6 +16,11 @@ from tests.radio_timing_support import radio_costs
 from yt_playlist.core.db_writes import atomic_write
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Radio candidate tests do not construct an HTTP application."""
+
+
 def indexed(store, seed, count=110, *, mixed=False, home=True):
     with atomic_write(store):
         tracks = [catalog_track(store, f'cluster-{i}', label='Indie Rock' if mixed and i % 2 else seed['genre'])[0]

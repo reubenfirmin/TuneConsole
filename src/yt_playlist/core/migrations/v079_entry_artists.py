@@ -34,22 +34,24 @@ def apply(conn, context):
 def validate(conn):
     from . import current
     from . import v058_predicted_vibes
-    if conn.execute("SELECT 1 FROM sqlite_schema WHERE name IN ('track_artists','ix_track_artist_subject')").fetchone():
+    from ..schema_inspection import objects
+    definitions = {name: sql for name, (_kind, sql) in objects(conn).items()}
+    if definitions.keys() & {'track_artists', 'ix_track_artist_subject'}:
         raise MigrationError('Retired artist projection name remains')
     expected = current._schema_contract((TABLE,))['entry_artists']
-    actual = conn.execute("SELECT sql FROM sqlite_schema WHERE name='entry_artists'").fetchone()
-    if actual is None or current._table(conn, 'entry_artists', actual[0]) != expected[1]:
+    actual = definitions.get('entry_artists')
+    if actual is None or current._table(conn, 'entry_artists', actual) != expected[1]:
         raise MigrationError('Incompatible ordered entry artist projection')
     for sql in statements():
         name = sql.split()[2]
-        actual = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
-        if actual is None or current._tokens(actual[0]) != current._tokens(sql):
+        actual = definitions.get(name)
+        if actual is None or current._tokens(actual) != current._tokens(sql):
             raise MigrationError('Incompatible entry artist projection dependency: ' + name)
     # ALTER TABLE also rewrites these retained triggers' credit references.
     for sql in v058_predicted_vibes.statements():
         if not sql.startswith('CREATE TRIGGER vibe_artists_'):
             continue
         name = sql.split()[2]
-        actual = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
-        if actual is None or current._tokens(actual[0]) != current._tokens(sql.replace('track_artists', 'entry_artists')):
+        actual = definitions.get(name)
+        if actual is None or current._tokens(actual) != current._tokens(sql.replace('track_artists', 'entry_artists')):
             raise MigrationError('Incompatible entry artist prediction dependency: ' + name)

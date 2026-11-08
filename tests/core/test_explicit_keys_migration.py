@@ -13,16 +13,6 @@ from yt_playlist.core.migrations import v066_explicit_keys as explicit_keys
 UPGRADE = Migration(66, 'explicit_logical_keys', explicit_keys.apply, rebuild_tables=True)
 
 
-def test_current_mood_input_keeps_current_history_and_read_only_sql(_pristine_current_schema):
-    from yt_playlist.core.migrations import regular
-
-    source = _pristine_current_schema
-    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert source.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == len(registry.MIGRATIONS)
-    assert source.execute('SELECT max(version) FROM schema_changes').fetchone()[0] == len(regular.CHANGES)
-    assert not source.execute('PRAGMA foreign_key_check').fetchone()
-
-
 def upgrade(conn, migration=UPGRADE):
     migrate(conn, registry=(*registry.MIGRATIONS[:65], migration))
 
@@ -189,10 +179,10 @@ def test_catalog_admission_resolves_pending_seeds_and_ambiguity_preserves_known_
                         (ambiguous,)).fetchone()[0] == 'ambiguous_alias'
 
 
-def test_catalog_retirement_resolves_all_transferred_aliases_and_keeps_event_ids(store):
-    # Current association owns these event/alias invariants. Historical v66
-    # replacement and its retained feedback rows have their own cases below.
-    conn = store.conn
+def test_catalog_retirement_resolves_all_transferred_aliases_and_keeps_event_ids(predecessor):
+    conn = predecessor
+    upgrade(conn)
+    migrate(conn, registry=registry.MIGRATIONS)
     old_entry = catalog.upsert(conn, 'old-upload', 'Old', 'Artist')
     new_entry = catalog.upsert(conn, 'new-upload', 'New', 'Artist')
     old, target = [conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (entry,)).fetchone()[0]
@@ -211,8 +201,10 @@ def test_catalog_retirement_resolves_all_transferred_aliases_and_keeps_event_ids
         (first, target, 0), (second, target, 0)]
 
 
-def test_partial_upload_reassociation_leaves_recording_mood_with_its_owner(store):
-    conn = store.conn
+def test_partial_upload_reassociation_leaves_recording_mood_with_its_owner(predecessor):
+    conn = predecessor
+    upgrade(conn)
+    migrate(conn, registry=registry.MIGRATIONS)
     entries = [catalog.upsert(conn, video, title, 'Artist') for video, title in (
         ('retained-upload', 'Retained'), ('moved-upload', 'Moved'), ('target-upload', 'Target'))]
     old, _, target = [conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (entry,)).fetchone()[0]

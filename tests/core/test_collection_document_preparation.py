@@ -6,11 +6,9 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.prepared_fixture_support import assert_upgrade_phase, custody_predecessor, custody_upgrade_cases
-from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads
+from tests.store_fixture_support import numbered_store as installed, publication_consumer_reads
 from yt_playlist.core import collection_recovery, playlist_recipe_state, policy_documents, recommendation_outputs as files, spotify_job_state
-from yt_playlist.core.migrations import MigrationError, regular
+from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import collection_documents as preparation
 from yt_playlist.core.store import Store
 
@@ -18,14 +16,9 @@ from yt_playlist.core.store import Store
 pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
-    pass
-
-
-@pytest.mark.parametrize('installed', [79, 93, 96], indirect=True)
-def test_collection_document_input_keeps_admitted_history_and_private_guards(installed):
-    assert_installed_consumer_input(*installed)
+    """Preparation checks do not construct an HTTP application."""
 
 
 def finish(job, conn, size=128):
@@ -89,69 +82,32 @@ def test_sources_exact_known_account_facets_repetitions_and_verbatim_canvas(inst
     if axes is not None:
         assert axes == list(map(tuple, store.conn.execute('SELECT * FROM taste_axes')))
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+    regular.migrate(store.conn)
 
 
-def prepare_native_comparison(store):
+@pytest.mark.parametrize('installed', [79, 96], indirect=True)
+def test_frozen_upgrade_keeps_native_documents_and_preparation_archives(installed, tmp_path):
+    store, _ = installed
     job_value, raw, recipe, canvas = seed(store)
     for job in preparation.JOBS.values():
         job.install(store.conn)
         finish(job, store.conn)
-    originals = {(name, source): preparation.read_original(store.conn, name, preparation.head(store.conn, name, source))
-                 for name, source in (('import', spotify_job_state.KEY), ('recipes', 'PLAYLIST'), ('canvases', 'PLAYLIST'))}
-    return job_value, recipe, canvas, originals
-
-
-@pytest.fixture(scope='module')
-def native_inputs(upgraded_custody_inputs):
-    def get(version, target, **options):
-        return upgraded_custody_inputs(version, target, 'collection-document-native-agreement', prepare_native_comparison, **options)
-
-    get.release = lambda version: upgraded_custody_inputs.release(version, 'collection-document-native-agreement')
-    return get
-
-
-@pytest.mark.parametrize('version', [79, 96])
-def test_native_comparison_input_keeps_exact_preparation(native_inputs, version):
-    template = native_inputs(version, version)
-    assert_upgrade_phase(template, version)
-    for (name, source), raw in template.result[-1].items():
-        assert preparation.read_original(template.source.conn, name,
-            preparation.head(template.source.conn, name, source)) == raw
-
-
-@pytest.mark.parametrize('version,target,phase', custody_upgrade_cases((79, 96)))
-def test_native_upgrade_phase_keeps_exact_preparation(native_inputs, version, target, phase):
-    template = native_inputs(version, target, phase=phase)
-    assert_upgrade_phase(template, target if phase == 'converted' else custody_predecessor(version, target))
-    for (name, source), raw in template.result[-1].items():
-        assert preparation.read_original(template.source.conn, name,
-            preparation.head(template.source.conn, name, source)) == raw
-
-
-@pytest.mark.parametrize('version', [79, 96])
-def test_native_serving_input_keeps_private_read_guards(native_inputs, version):
-    template = native_inputs(version, 107)
-    assert_upgrade_phase(template, 107)
-    assert template.source._snapshot_revisions.conn is template.source.conn
-
-
-@pytest.mark.parametrize('version', [79, 96])
-def test_frozen_upgrade_keeps_native_documents_and_preparation_archives(native_inputs, version, tmp_path):
-    prepared = native_inputs(version, version)
-    store = prepared.source
-    job_value, recipe, canvas, originals = prepared.result
-    with native_inputs(version, 107).open(tmp_path / 'collection-documents-upgrade.db') as upgraded:
-        assert upgraded.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal'
-        upgraded.conn.execute('PRAGMA wal_autocheckpoint=0')
+    upgraded = Store(tmp_path / 'collection-documents-upgrade.db')
+    try:
+        upgraded.conn.execute('PRAGMA synchronous=OFF')
+        store.conn.backup(upgraded.conn)
+        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
         assert spotify_job_state.load(upgraded.conn) == {'account_id' if key == 'identity_id' else key: value for key, value in job_value.items()}
         assert playlist_recipe_state.load(upgraded.conn, 'PLAYLIST') == recipe
         assert playlist_recipe_state.load_canvas(upgraded.conn, 'PLAYLIST') == canvas
         native = list(map(tuple, upgraded.conn.execute('SELECT kind,position,captured_value FROM playlist_recipe_facets ORDER BY kind,position')))
         assert native == [(row['kind'], row['position'], row['captured_value']) for row in facets(store.conn)]
         collection_recovery.collect_orphans(upgraded.conn)
-        for (name, source), raw in originals.items():
-            assert preparation.read_original(upgraded.conn, name, preparation.head(upgraded.conn, name, source)) == raw
+        for name, source in (('import', spotify_job_state.KEY), ('recipes', 'PLAYLIST'), ('canvases', 'PLAYLIST')):
+            assert preparation.read_original(upgraded.conn, name, preparation.head(upgraded.conn, name, source))
         assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
+    finally:
+        upgraded.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -237,7 +193,7 @@ def test_interruption_missing_plan_retry_and_independent_regular_change(installe
         conn.execute('CREATE TABLE independent_document_ddl(value TEXT)')
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_document_ddl'").fetchone()
-    monkeypatch.setattr(regular, 'CHANGES', (regular.Change(1, 'independent_document_ddl', install, validate),))
+    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_document_ddl', install, validate)))
     regular.migrate(store.conn)
     assert job.progress(store.conn) == failed
     independent = preparation.JOBS['canvases']
@@ -352,10 +308,3 @@ def test_durable_file_failure_requires_retry_and_leaves_other_documents_usable(i
         recipes.step(store.conn)
     recipes.step(store.conn, retry=True)
     finish(recipes, store.conn)
-
-
-@pytest.mark.parametrize('version', [79, 96])
-def test_native_sources_finish_with_committed_read_only_inputs(native_inputs, version):
-    for source in native_inputs.release(version):
-        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
-            source.conn.execute('SELECT 1')

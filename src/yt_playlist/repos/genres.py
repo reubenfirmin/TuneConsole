@@ -177,6 +177,7 @@ class GenreRepo(Repo):
 
     @synchronized
     def seed_catalog(self, records, labels, families):
+        redirects = self._redirects()
         self.conn.executemany(
             "INSERT INTO genre_family(key,name) VALUES (?,?) ON CONFLICT(key) DO NOTHING", list(families.items()))
         self.conn.executemany(
@@ -191,12 +192,17 @@ class GenreRepo(Repo):
         self.conn.execute("DELETE FROM genre_alias WHERE source != 'custom'")
         self.conn.executemany(
             "INSERT INTO genre_alias(label_key,label,genre_key,source) VALUES (?,?,?,?) ON CONFLICT(label_key) DO NOTHING",
-            [(key, label, genre_identity.current_key(self.conn, genre), source)
+            [(key, label, redirects.get(genre, genre), source)
              for key, (genre, label, source) in labels.items()])
         self.conn.execute("DELETE FROM genre_external_id WHERE provider='musicbrainz'")
         self.conn.executemany(
             "INSERT INTO genre_external_id(provider,external_id,genre_key) VALUES ('musicbrainz',?,?)",
-            [(r['mbid'], genre_identity.current_key(self.conn, r['key'])) for r in records.values() if r['mbid']])
+            [(r['mbid'], redirects.get(r['key'], r['key'])) for r in records.values() if r['mbid']])
+
+    def _redirects(self):
+        if not self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='genre_redirects'").fetchone():
+            return {}
+        return dict(self.conn.execute('SELECT retired_key,genre_key FROM genre_redirects'))
 
     @synchronized
     def insert_legacy_custom(self, key, name):
@@ -206,9 +212,10 @@ class GenreRepo(Repo):
 
     @synchronized
     def configure_preferences(self, enabled, default_keys):
+        redirects = self._redirects()
         self.conn.execute('UPDATE genre_preferences SET enabled=0')
         self.conn.executemany("INSERT OR IGNORE INTO genre_preferences VALUES (?,0,'default')",
-                              [(key,) for key in default_keys if genre_identity.current_key(self.conn, key) == key])
+                              [(key,) for key in default_keys if redirects.get(key, key) == key])
         self.conn.executemany('INSERT INTO genre_preferences VALUES (?,1,?) '
                               'ON CONFLICT(genre_key) DO UPDATE SET enabled=1', enabled)
 

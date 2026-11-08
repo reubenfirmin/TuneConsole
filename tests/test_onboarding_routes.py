@@ -15,6 +15,16 @@ from tests.conftest import FakeClient
 pytestmark = pytest.mark.usefixtures('home_pages_only', 'without_metadata_providers', 'readiness_policy')
 
 
+@pytest.fixture
+def onboarding_routes(monkeypatch, home_pages_only):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, home, playlists
+
+    # Keep actual onboarding, format selection and the generated playlist page.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+        for module in (app_update, audio_preview, home, playlists)])
+
+
 @pytest.fixture(scope='module')
 def onboarding_schema():
     with bounded_consumer_schema((('house', 'House'), ('jazz', 'Jazz'))) as schema:
@@ -26,6 +36,7 @@ def store(tmp_path, onboarding_schema, monkeypatch):
     database = Store(tmp_path / 'onboarding-routes.db')
     with closing(database.conn):
         initialize_consumer(database, onboarding_schema)
+        database.conn.execute('PRAGMA synchronous=OFF')
         database.conn.execute('PRAGMA wal_autocheckpoint=0')
         with reuse_reporting_reader(database, monkeypatch):
             yield database
@@ -66,7 +77,7 @@ def test_saved_album_starter_arrives_without_tracks_or_training(store):
     assert store.rec_model.rec_content_vectors_count() == 0
 
 
-def test_album_starter_can_use_familiar_artists_but_not_incomplete_imports(store):
+def test_album_starter_can_use_familiar_artists_but_not_incomplete_imports(store, onboarding_routes):
     from yt_playlist.core import albums
     from tests.conftest import seed_catalog_track
 
@@ -164,7 +175,8 @@ def test_generated_starter_hides_radio_until_setup_is_complete(store, monkeypatc
 
 
 @pytest.mark.parametrize('artist_set', [False, True])
-def test_overlong_starter_has_an_actionable_length_error_without_remote_writes(store, caplog, artist_set):
+def test_overlong_starter_has_an_actionable_length_error_without_remote_writes(
+        store, caplog, artist_set):
     fake, client = _client(store)
     fake._song_durations['mix'] = 9000
     response = client.post('/home/generate', data={
@@ -182,7 +194,7 @@ def test_overlong_starter_has_an_actionable_length_error_without_remote_writes(s
     assert store.rec_query.tracks_total() == 0
 
 
-def test_home_shows_onboarding_when_thin(store):
+def test_home_shows_onboarding_when_thin(store, onboarding_routes):
     _synced_thin(store)
     _, c = _client(store)
     html = c.get("/").text
@@ -229,7 +241,7 @@ def test_onboard_done_dismisses(store):
     assert store.settings.get_setting("onboard_dismissed") == "1"
 
 
-def test_first_mix_polls_until_verified_songs_arrive(store):
+def test_first_mix_polls_until_verified_songs_arrive(store, onboarding_routes):
     from yt_playlist.library.sync import sync_identity
     from tests.conftest import _track
 
@@ -334,11 +346,11 @@ def test_import_details_remain_available_after_restart(store):
 
 
 @pytest.mark.parametrize("outcome", ["partial", "skipped", "failed"])
-def test_established_home_keeps_retry_diagnostics_out_of_the_dashboard(store, outcome):
+def test_established_home_keeps_retry_diagnostics_out_of_the_dashboard(store, outcome, onboarding_routes):
     from tests.onboarding_support import publish_personal_mix
 
     _, client = _client(store)
-    publish_personal_mix(store, tracks_per_card=1)
+    publish_personal_mix(store)
     store.rec_proposals.put_proposals('listening_choices', {
         'home_format': {'episodes': {'mixes': 1}}}, 1000)
     store.settings.set_setting("last_sync_at", "1000")
@@ -387,7 +399,7 @@ def test_setup_banner_tracks_import_then_models_across_pages(store):
     from tests.onboarding_support import publish_personal_mix
     from tests.test_growth_journey import early_journey
     early_journey(store)
-    publish_personal_mix(store, tracks_per_card=1)
+    publish_personal_mix(store)
     assert client.get("/home/onboard/status").json()["setup"]["complete"]
     assert 'class="setup-banner"' not in client.get("/playlists").text
 
@@ -406,7 +418,7 @@ def test_partial_sync_with_playable_offers_finishes_setup_without_faking_sync_su
     assert 'id="onboarding-feed"' in client.get('/').text
 
     if format == 'mixes':
-        publish_personal_mix(store, tracks_per_card=1)
+        publish_personal_mix(store)
     else:
         publish_personal_album(store)
     # A downstream offer cannot skip prerequisite destinations. Their separate
@@ -439,7 +451,7 @@ def test_prepared_offer_readiness_agrees_between_home_and_setup_without_modes(st
     _, client = _client(store)
     store.settings.set_setting("last_sync_at", "1000")
     early_journey(store)
-    publish_personal_mix(store, tracks_per_card=1)
+    publish_personal_mix(store)
     assert store.modes.list_modes(active_only=True) == []
 
     # A sparse account already has a usable personal mix on a direct Home visit.
@@ -459,7 +471,7 @@ def test_prepared_offer_readiness_agrees_between_home_and_setup_without_modes(st
 
 @pytest.mark.parametrize('format', ['mixes', 'albums'])
 def test_completed_setup_survives_offer_loss_and_a_database_restart(
-        tmp_path, onboarding_schema, monkeypatch, format):
+        tmp_path, monkeypatch, format):
     from tests.genre_catalog_support import bound_catalog
     from tests.onboarding_support import publish_personal_mix
     from tests.test_growth_journey import early_journey
@@ -469,14 +481,14 @@ def test_completed_setup_survives_offer_loss_and_a_database_restart(
     path = tmp_path / 'library.db'
     bound_catalog(monkeypatch, entries=(('house', 'House'), ('jazz', 'Jazz')))
     first = Store(path)
-    # Begin below fresh-schema admission, then retain a genuine close/reopen.
-    initialize_consumer(first, onboarding_schema)
+    first.conn.execute('PRAGMA synchronous=OFF')
+    first.init_schema()
     first.conn.execute('PRAGMA wal_autocheckpoint=0')
     with closing(first.conn), reuse_reporting_reader(first, monkeypatch):
         first.settings.set_setting('last_sync_at', '1000')
         early_journey(first)
         if format == 'mixes':
-            publish_personal_mix(first, tracks_per_card=1)
+            publish_personal_mix(first)
         client = TestClient(create_app(first, lambda: {}, now_fn=lambda: 1000,
                                        background_work=False), base_url='http://127.0.0.1')
         assert client.get('/home/onboard/status').json()['setup']['complete']
@@ -550,7 +562,7 @@ def test_snapshot_readiness_does_not_write_setup_completion(store):
 
     store.settings.set_setting('last_sync_at', '1000')
     early_journey(store)
-    publish_personal_mix(store, tracks_per_card=1)
+    publish_personal_mix(store)
     with store.read_snapshot() as snapshot:
         assert not onboarding.initial_setup_pending(snapshot.store, 1000)
     assert store.settings.get_setting(onboarding.SETUP_COMPLETE) is None
@@ -593,7 +605,7 @@ def test_imported_likes_and_dismissal_cannot_open_an_empty_home(store):
 
 
 @pytest.mark.parametrize("with_mode", [False, True])
-def test_unusable_prepared_offers_do_not_end_setup(store, with_mode):
+def test_unusable_prepared_offers_do_not_end_setup(store, with_mode, onboarding_routes):
     import numpy as np
     from tests.home_fixture_support import publish_menu
     from yt_playlist.rec import home_cache, onboarding

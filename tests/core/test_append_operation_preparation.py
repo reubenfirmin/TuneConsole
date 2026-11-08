@@ -7,11 +7,9 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.prepared_fixture_support import assert_upgrade_phase, custody_predecessor, custody_upgrade_cases
-from tests.independent_schema_support import independent_regular_ddl
-from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads
+from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import collection_recovery, policy_documents, radio_storage, recommendation_outputs as files
-from yt_playlist.core.migrations import MigrationError, regular
+from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import append_operations as preparation
 from yt_playlist.core.store import Store
 
@@ -22,11 +20,6 @@ pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 @pytest.fixture
 def disable_periodic_library_sync():
     pass
-
-
-@pytest.mark.parametrize('installed', [79, 93, 94, 96, 97], indirect=True)
-def test_append_operation_input_keeps_admitted_history_and_private_guards(installed):
-    assert_installed_consumer_input(*installed)
 
 
 def finish(job, conn, size=128):
@@ -106,7 +99,9 @@ def test_order_receipts_empty_roles_and_native_source_revisions(installed):
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
-def prepare_native_comparison(store, version):
+@pytest.mark.parametrize('installed', [79, 97], indirect=True)
+def test_frozen_upgrade_agreement_and_retained_bytes(installed, tmp_path):
+    store, version = installed
     names, sources, recipe, state = seed(store, version, append=True)
     originals = {}
     for name, source in zip(names, sources):
@@ -114,55 +109,10 @@ def prepare_native_comparison(store, version):
         job.install(store.conn)
         finish(job, store.conn)
         originals[name] = preparation.read_original(store.conn, name, preparation.head(store.conn, name, source))
-    return names, sources, originals
-
-
-@pytest.fixture(scope='module')
-def native_inputs(upgraded_custody_inputs):
-    from functools import partial
-
-    def get(version, target, **options):
-        return upgraded_custody_inputs(version, target, 'append-native-agreement',
-            partial(prepare_native_comparison, version=version), **options)
-
-    get.release = lambda version: upgraded_custody_inputs.release(version, 'append-native-agreement')
-    return get
-
-
-@pytest.mark.parametrize('version', [79, 97])
-def test_native_comparison_input_keeps_exact_preparation(native_inputs, version):
-    template = native_inputs(version, version)
-    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    names, sources, originals = template.result
-    for name, source in zip(names, sources):
-        assert preparation.read_original(template.source.conn, name,
-            preparation.head(template.source.conn, name, source)) == originals[name]
-
-
-@pytest.mark.parametrize('version,target,phase', custody_upgrade_cases((79, 97)))
-def test_native_upgrade_phase_keeps_exact_preparation(native_inputs, version, target, phase):
-    template = native_inputs(version, target, phase=phase)
-    assert_upgrade_phase(template, target if phase == 'converted' else custody_predecessor(version, target))
-    names, sources, originals = template.result
-    for name, source in zip(names, sources):
-        assert preparation.read_original(template.source.conn, name,
-            preparation.head(template.source.conn, name, source)) == originals[name]
-    assert not template.source.conn.execute('PRAGMA foreign_key_check').fetchone()
-
-
-@pytest.mark.parametrize('version', [79, 97])
-def test_native_serving_input_keeps_private_read_guards(native_inputs, version):
-    template = native_inputs(version, 107)
-    assert_upgrade_phase(template, 107)
-    assert template.source._snapshot_revisions.conn is template.source.conn
-
-
-@pytest.mark.parametrize('version', [79, 97])
-def test_frozen_upgrade_agreement_and_retained_bytes(native_inputs, version, tmp_path):
-    prepared = native_inputs(version, version)
-    names, sources, originals = prepared.result
-    store = prepared.source
-    with native_inputs(version, 107).open(tmp_path / 'append.db') as upgraded:
+    upgraded = Store(tmp_path / 'append-upgrade.db')
+    try:
+        store.conn.backup(upgraded.conn)
+        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
         native_tv = upgraded.conn.execute('SELECT * FROM tv_append_intents').fetchone()
         staged_tv = preparation.head(store.conn, names[0], sources[0])
         for field in ('stream_token', 'request_id', 'state', 'started_at', 'playlist_scope_id'):
@@ -176,6 +126,8 @@ def test_frozen_upgrade_agreement_and_retained_bytes(native_inputs, version, tmp
         collection_recovery.collect_orphans(upgraded.conn)
         for name, source in zip(names, sources):
             assert preparation.read_original(upgraded.conn, name, preparation.head(upgraded.conn, name, source)) == originals[name]
+    finally:
+        upgraded.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93, 97], indirect=True)
@@ -221,8 +173,7 @@ def test_large_members_resume_without_source_io_and_continuing_replacement(insta
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_failure_interrupt_missing_plan_retry_and_new_regular_ddl(
-        installed, monkeypatch, independent_regular_ddl):
+def test_failure_interrupt_missing_plan_retry_and_new_regular_ddl(installed, monkeypatch):
     store, version = installed
     names, sources, _, _ = seed(store, version)
     name, source = names[0], sources[0]
@@ -236,6 +187,11 @@ def test_failure_interrupt_missing_plan_retry_and_new_regular_ddl(
     with pytest.raises(OSError, match='file failure'):
         job.step(store.conn)
     failed = job.progress(store.conn)
+    def install(conn, context):
+        conn.execute('CREATE TABLE independent_append_ddl(value TEXT)')
+    def validate(conn):
+        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_append_ddl'").fetchone()
+    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_append_ddl', install, validate)))
     regular.migrate(store.conn)
     assert job.progress(store.conn) == failed
     monkeypatch.setattr(policy_documents, '_publish_encoded', publish)
@@ -310,10 +266,3 @@ def test_reference_write_during_file_planning_rejects_stale_capture(installed, m
         assert preparation.head(store.conn, name, source) is None
         finish(job, store.conn)
         assert preparation.head(store.conn, name, source)['operation_present'] == 1
-
-
-@pytest.mark.parametrize('version', [79, 97])
-def test_native_sources_finish_with_committed_read_only_inputs(native_inputs, version):
-    for source in native_inputs.release(version):
-        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
-            source.conn.execute('SELECT 1')

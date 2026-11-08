@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.vibe_menu_support import disable_periodic_library_sync, vibe_selection
 from yt_playlist.rec import home_vibe, musical_character, vibe_pools, vibe_serving
 
 
@@ -113,14 +114,22 @@ def test_rediscovery_batches_cards_and_shadows_without_reusing_changed_history(
     assert len(calls) == 2
 
 
-def test_all_presets_match_full_profile_selection_and_only_open_selected_profiles(store, monkeypatch, vibe_menus):
+def test_all_presets_match_full_profile_selection_and_only_open_selected_profiles(vibe_selection, monkeypatch):
+    store = vibe_selection
     stored, load = vibe_pools._stored_pools, musical_character.load
+    signatures = set()
     for preset in home_vibe.PRESETS:
         with monkeypatch.context() as patch:
+            full_opened = []
             def full(reader, preset, lanes, include, avoid, **options):
                 return stored(reader, preset, lanes, include, avoid, ranking_only=False)
+            def full_profiles(reader, keys):
+                full_opened.extend(keys)
+                return load(reader, keys)
             patch.setattr(vibe_pools, '_stored_pools', full)
+            patch.setattr(musical_character, 'load', full_profiles)
             expected = vibe_pools.assemble(store, 1000, preset)
+        assert len(set(full_opened)) == 116
         opened = []
         with monkeypatch.context() as patch:
             def selected(reader, keys):
@@ -135,6 +144,8 @@ def test_all_presets_match_full_profile_selection_and_only_open_selected_profile
         assert len(opened) == len(selected_keys)
         assert all(track['musical']['digest'] == track['serving_context']['musical_digest']
                    and track['serving_context']['vibe'] == preset for card in actual for track in card['tracks'])
+        signatures.add(tuple(tuple(track['key'] for track in card['tracks']) for card in actual))
+    assert len(signatures) > 1
 
 
 def test_missing_relational_score_uses_existing_profile_fallback(store, monkeypatch, vibe_menus):

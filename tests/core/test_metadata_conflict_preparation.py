@@ -8,7 +8,6 @@ import time
 import pytest
 
 from tests.core.test_metadata_owner_cutover import predecessor
-from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import metadata_conflicts as preparation
 from yt_playlist.core.store import Store
@@ -190,7 +189,7 @@ def test_file_io_does_not_hold_transaction_and_rejects_a_stale_source(predecesso
         second.conn.close()
 
 
-def test_interruption_and_failure_preserve_committed_candidates_and_need_explicit_retry(predecessor, monkeypatch, phase, independent_regular_ddl):
+def test_interruption_and_failure_preserve_committed_candidates_and_need_explicit_retry(predecessor, monkeypatch, phase):
     conn = predecessor.conn
     with phase('source_insertion'):
         identity, _ = seed(predecessor, snapshot=False)

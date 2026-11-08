@@ -83,16 +83,19 @@ def install(conn, context=None):
 def validate(conn):
     from .schema_contract import tokens as _tokens
     from .schema_contract import MigrationError
-    for name, sql in definitions():
-        row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
-        if row is None or _tokens(row[0]) != _tokens(sql):
+    from .schema_inspection import definitions as read_definitions
+    expected = dict(definitions())
+    actual = read_definitions(conn, expected)
+    for name, sql in expected.items():
+        if name not in actual or _tokens(actual[name]) != _tokens(sql):
             raise MigrationError('Incompatible runtime metadata object: ' + name)
     if not conn.execute('SELECT 1 FROM metadata_runtime_state WHERE id=1').fetchone():
         raise MigrationError('Missing runtime metadata state')
     if active(conn):
-        for name, sql in views().items():
-            row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
-            if row is None or _tokens(row[0]) != _tokens(sql):
+        expected = views()
+        actual = read_definitions(conn, expected)
+        for name, sql in expected.items():
+            if name not in actual or _tokens(actual[name]) != _tokens(sql):
                 raise MigrationError('Incompatible runtime metadata view: ' + name)
 
 

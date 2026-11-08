@@ -5,15 +5,18 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
 from tests.recommendation_support import seed_publication_subjects
-from tests.store_fixture_support import reuse_reporting_reader
+from tests.store_fixture_support import numbered_store as installed, reuse_reporting_reader
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import listening_subjects as preparation
 
 
 pytestmark = pytest.mark.parametrize('installed', [79, 99], indirect=True)
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Listening preparation uses real SQL without constructing an HTTP app."""
 
 
 def populated(store):
@@ -37,10 +40,13 @@ def connect(store):
     conn = sqlite3.connect(store._db_path, timeout=.1)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys=ON')
+    # These private workers test SQL rollback, reopen and concurrent capture;
+    # they do not simulate loss of the machine's filesystem write cache.
+    conn.execute('PRAGMA synchronous=OFF')
     return closing(conn)
 
 
-def finish(conn, *, batch_size=16):
+def finish(conn, *, batch_size=1):
     for _ in range(100):
         result = preparation.step(conn, batch_size=batch_size)
         if result.status == 'prepared':
@@ -61,7 +67,7 @@ def assert_exact_sources(conn):
             assert staged['unresolved_subject_key'] == (row['identity_key'] if row['recording_id'] is None else None)
 
 
-def test_checkpoints_reconcile_changed_deleted_and_reused_ids_while_regular_ddl_advances(installed, independent_regular_ddl):
+def test_checkpoints_reconcile_changed_deleted_and_reused_ids_while_regular_ddl_advances(installed):
     store, _ = installed
     account = populated(store)
     with connect(store) as conn:
@@ -94,7 +100,7 @@ def test_checkpoints_reconcile_changed_deleted_and_reused_ids_while_regular_ddl_
     assert store.settings.get_setting('during-listening-preparation') == 'ordinary-write'
 
 
-def test_failed_batch_retains_prior_commit_and_requires_explicit_retry(installed, independent_regular_ddl):
+def test_failed_batch_retains_prior_commit_and_requires_explicit_retry(installed):
     store, _ = installed
     account = populated(store)
     with connect(store) as conn:

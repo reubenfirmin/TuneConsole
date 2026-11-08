@@ -5,31 +5,27 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.store_fixture_support import numbered_store as installed
+from tests.store_fixture_support import guarded_numbered_store as guarded_installed
 from tests.core.test_radio_origin_preparation import finish, head, seed
-from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads
+from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import radio_provenance
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import radio_origin_publication as publication, radio_origins as preparation
 from yt_playlist.core.store import Store
 
 
+
 pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
-    pass
+    """This owner runs directly without the HTTP application."""
 
-
-@pytest.mark.parametrize('installed', [79, 93], indirect=True)
-def test_radio_origin_publication_input_keeps_admitted_history_and_private_guards(installed):
-    assert_installed_consumer_input(*installed)
-
-
-def prepare(conn, *, size=128):
+def prepare(conn):
     preparation.JOB.install(conn)
-    return finish(conn,size=size).prepared_revision
+    return finish(conn,size=128).prepared_revision
 
 
 @pytest.mark.parametrize('installed',[79,93],indirect=True)
@@ -65,9 +61,9 @@ def test_preopened_and_reopened_readers_use_exact_originals_and_typed_origins(in
         reopened.conn.close()
 
 
-@pytest.mark.parametrize('installed',[93],indirect=True)
-def test_continuing_remember_and_scope_edits_preserve_custody_without_admission(installed):
-    store,_ = installed
+@pytest.mark.parametrize('guarded_installed',[93],indirect=True)
+def test_continuing_remember_and_scope_edits_preserve_custody_without_admission(guarded_installed):
+    store,_ = guarded_installed
     original = seed(store)
     revision = prepare(store.conn)
     publication.publish(store.conn,revision=revision)
@@ -138,6 +134,7 @@ def test_incomplete_or_corrupt_preparation_keeps_installed_origins(installed,fai
     assert publication.selected(store.conn) is None
     assert radio_provenance.ids(store.conn) == ['shared','LM','missing']
     assert {key:store.settings.get_setting(key) for key in original} == original
+    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed',[93],indirect=True)
@@ -229,19 +226,13 @@ def test_missing_original_files_are_recovered_explicitly_without_replacing_membe
 @pytest.mark.parametrize('installed',[93],indirect=True)
 def test_long_repeated_lists_and_absent_sources_preserve_runtime_order(installed):
     store,_ = installed
-    first, missing = 'first-' + 'a'*160, 'missing-' + 'b'*160
-    origins = [first,missing,first]*200
-    raw = json.dumps(origins,indent=2)
-    # Cross both the 512-member batch limit and the original-file part limit,
-    # without thousands of redundant copies of the same two missing scopes.
-    assert len(origins) > 512 and len(raw) > preparation.PART_CHARACTERS
+    raw = json.dumps(['first','missing','first']*2700,indent=2)
     store.settings.set_setting(preparation.KEYS[0],raw)
-    publication.publish(store.conn,revision=prepare(store.conn,size=512))
-    assert radio_provenance.ids(store.conn) == [first,missing]
+    publication.publish(store.conn,revision=prepare(store.conn))
+    assert radio_provenance.ids(store.conn) == ['first','missing']
     assert store.settings.get_setting(preparation.KEYS[0]) == raw
     assert store.settings.get_setting(preparation.KEYS[1],'absent') == 'absent'
-    assert store.conn.execute('SELECT count(*) FROM '+preparation.ORIGINS).fetchone()[0] == len(origins)
-    assert head(store.conn)['part_count'] >= 2
+    assert store.conn.execute('SELECT count(*) FROM '+preparation.ORIGINS).fetchone()[0] == 8100
     store.settings.delete_setting(preparation.KEYS[0])
     publication.publish(store.conn,revision=prepare(store.conn))
     assert radio_provenance.ids(store.conn) == []

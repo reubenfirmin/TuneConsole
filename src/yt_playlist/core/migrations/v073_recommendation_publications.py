@@ -348,14 +348,16 @@ def apply(conn, context):
 
 def validate(conn, *, replaced=frozenset()):
     from .current import _tokens
+    from ..schema_inspection import objects
+    definitions = {name: sql for name, (_kind, sql) in objects(conn).items()}
     for sql in statements():
         words = sql.split()
         name = words[3] if words[1] == 'UNIQUE' else words[2]
         if name in replaced:
             continue
-        actual = conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone()
-        if actual is None or _tokens(actual[0]) != _tokens(sql):
+        actual = definitions.get(name)
+        if actual is None or _tokens(actual) != _tokens(sql):
             raise MigrationError(f'Incompatible recommendation publication structure: {name}')
     for table in ('rec_proposal_cache_heads', 'rec_proposal_cache_chunks', 'rec_proposal_cache_builds'):
-        if conn.execute('SELECT 1 FROM sqlite_master WHERE name=?', (table,)).fetchone():
+        if table in definitions:
             raise MigrationError(f'Superseded candidate cache remains: {table}')

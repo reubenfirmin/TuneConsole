@@ -6,9 +6,8 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.prepared_fixture_support import assert_upgrade_phase, custody_predecessor, custody_upgrade_cases
-from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads
-from yt_playlist.core.migrations import MigrationError, regular
+from tests.store_fixture_support import assert_installed_consumer_input, numbered_store, publication_consumer_reads
+from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import domain_contracts as audit
 from yt_playlist.core.store import Store
 
@@ -81,7 +80,7 @@ def test_invalid_history_is_retained_and_blocks_verification_without_blocking_dd
         conn.execute('CREATE TABLE independent_contract_ddl(value TEXT)')
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_contract_ddl'").fetchone()
-    monkeypatch.setattr(regular,'CHANGES',(regular.Change(1,'independent_contract_ddl',install,validate),))
+    monkeypatch.setattr(regular,'CHANGES',(*regular.CHANGES,regular.Change(len(regular.CHANGES) + 1,'independent_contract_ddl',install,validate)))
     regular.migrate(store.conn)
     assert job.progress(store.conn) == progress
     with pytest.raises(sqlite3.IntegrityError,match='Invalid future discovered_artists.score'):
@@ -94,9 +93,9 @@ def test_invalid_history_is_retained_and_blocks_verification_without_blocking_dd
     assert audit.original(store.conn,job,captured['source_key'],captured['source_digest']) == original
 
 
-@pytest.mark.parametrize('installed',[93],indirect=True)
-def test_bounded_batches_continuing_sources_failure_and_reopened_retry(installed):
-    store, _ = installed
+@pytest.mark.parametrize('numbered_store',[93],indirect=True)
+def test_bounded_batches_continuing_sources_failure_and_reopened_retry(numbered_store):
+    store, _ = numbered_store
     # This subject audits stored availability values. Catalog ingestion has its
     # own owners; populate the minimum real rows the audit needs in one commit.
     with store.conn:
@@ -119,7 +118,11 @@ def test_bounded_batches_continuing_sources_failure_and_reopened_retry(installed
     with pytest.raises(sqlite3.IntegrityError,match='Invalid future'):
         with store.conn:
             store.conn.execute("UPDATE main.youtube_items SET available=2 WHERE video_id='video-0'")
-    store.tracks.upsert_track('z-later','Later','Artist',None,10)
+    # Add the continuing input below catalog ingestion, just like the initial
+    # 140 subjects. The actual audit journal must discover this new row.
+    with store.conn:
+        store.conn.execute('INSERT INTO youtube_items(video_id,recording_id,available) VALUES (?,?,1)',
+                           ('z-later', recording))
     reopened = Store(store._db_path)
     try:
         with pytest.raises(MigrationError,match='retry explicitly'):
@@ -132,93 +135,58 @@ def test_bounded_batches_continuing_sources_failure_and_reopened_retry(installed
         reopened.conn.close()
 
 
-def prepare_native_comparison(store):
+@pytest.mark.parametrize('installed',[79],indirect=True)
+def test_historical_conversion_preserves_guard_and_audit_custody(installed,tmp_path):
+    store, _ = installed
     store.tracks.upsert_track('one','One','Artist',None,10)
     job = audit.job(store.conn,'youtube_items')
     job.install(store.conn)
     finish(job,store.conn)
     captured = store.conn.execute('SELECT * FROM '+audit.table(job,'rows')).fetchone()
-    return captured['source_key'], captured['source_digest'], audit.original(store.conn, job, captured['source_key'], captured['source_digest'])
-
-
-@pytest.fixture(scope='module')
-def native_inputs(upgraded_custody_inputs):
-    def get(target, **options):
-        return upgraded_custody_inputs(79, target, 'contract-native-agreement', prepare_native_comparison, **options)
-
-    get.release = lambda: upgraded_custody_inputs.release(79, 'contract-native-agreement')
-    return get
-
-
-def assert_native_original(template):
-    key, digest, original = template.result
-    conn = template.source.conn
-    job = audit.job(conn, 'youtube_items')
-    assert audit.original(conn, job, key, digest) == original
-
-
-def test_native_comparison_input_keeps_exact_preparation(native_inputs):
-    template = native_inputs(79)
-    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert_native_original(template)
-
-
-@pytest.mark.parametrize('version,target,phase', custody_upgrade_cases((79,)))
-def test_native_upgrade_phase_keeps_exact_preparation(native_inputs, version, target, phase):
-    template = native_inputs(target, phase=phase)
-    assert_upgrade_phase(template, target if phase == 'converted' else custody_predecessor(version, target))
-    assert_native_original(template)
-
-
-def test_native_serving_input_keeps_private_read_guards(native_inputs):
-    template = native_inputs(107)
-    assert_upgrade_phase(template, 107)
-    assert template.source._snapshot_revisions.conn is template.source.conn
-
-
-@pytest.mark.parametrize('version', [79])
-def test_historical_conversion_preserves_guard_and_audit_custody(native_inputs, version, tmp_path):
-    with native_inputs(107).open(tmp_path / 'contract-upgrade.db') as upgraded:
-        job = audit.job(upgraded.conn, 'youtube_items')
+    upgraded = Store(tmp_path/'contract-upgrade.db')
+    try:
+        store.conn.backup(upgraded.conn)
+        runner.migrate(upgraded.conn,registry=registry.MIGRATIONS)
         job.validate(upgraded.conn)
         finish(job,upgraded.conn)
         audit.verify(upgraded.conn,job)
-        key, digest, original = native_inputs(version).result
-        assert audit.original(upgraded.conn, job, key, digest) == original
+        assert audit.original(upgraded.conn,job,captured['source_key'],captured['source_digest']) == audit.original(store.conn,job,captured['source_key'],captured['source_digest'])
         with pytest.raises(sqlite3.IntegrityError):
             with upgraded.conn:
                 upgraded.conn.execute("UPDATE main.youtube_items SET available=2 WHERE video_id='one'")
         assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
+    finally:
+        upgraded.conn.close()
 
 
 @pytest.mark.parametrize('installed',[103],indirect=True)
-@pytest.mark.parametrize('owner', audit.CONTRACTS)
-def test_future_field_guards_match_each_owner_on_real_predecessor(installed, owner):
+def test_all_future_field_guards_match_domain_boundaries_on_real_predecessor(installed):
     from tests.core.test_domain_contracts import seed
     store, _ = installed
     seed(store.conn)
-    selected = audit.job(store.conn,owner)
-    selected.install(store.conn)
-    finish(selected,store.conn)
-    audit.verify(store.conn,selected)
-    assert store.conn.execute('SELECT count(*) FROM main.' + owner).fetchone()[0] > 0
-    store.conn.execute('SAVEPOINT future_contract')
-    try:
-        for column,expression in audit.CONTRACTS[owner].items():
-            bad = float('inf') if 'abs(' in expression else 2 if ' IN (0,1)' in expression else 0 if '>=1' in expression else -1
-            with pytest.raises(sqlite3.IntegrityError):
-                store.conn.execute('UPDATE main.' + owner + ' SET ' + column + '=?',(bad,))
-            if 'integer' in expression and 'abs(' not in expression:
+    for owner,fields in audit.CONTRACTS.items():
+        selected = audit.job(store.conn,owner)
+        selected.install(store.conn)
+        finish(selected,store.conn)
+        audit.verify(store.conn,selected)
+        assert store.conn.execute('SELECT count(*) FROM main.' + owner).fetchone()[0] > 0
+        store.conn.execute('SAVEPOINT future_contract')
+        try:
+            for column,expression in fields.items():
+                bad = float('inf') if 'abs(' in expression else 2 if ' IN (0,1)' in expression else 0 if '>=1' in expression else -1
                 with pytest.raises(sqlite3.IntegrityError):
-                    store.conn.execute('UPDATE main.' + owner + ' SET ' + column + '=?',(1.5,))
-            value = -1 if 'abs(' in expression else 1 if '>=1' in expression else 0
-            store.conn.execute('UPDATE main.' + owner + ' SET ' + column + '=?',(value,))
-            if 'IS NULL OR' in expression:
-                store.conn.execute('UPDATE main.' + owner + ' SET ' + column + '=NULL')
-    finally:
-        store.conn.execute('ROLLBACK TO future_contract')
-        store.conn.execute('RELEASE future_contract')
-    audit.verify(store.conn,selected)
+                    store.conn.execute('UPDATE main.' + owner + ' SET ' + column + '=?',(bad,))
+                if 'integer' in expression and 'abs(' not in expression:
+                    with pytest.raises(sqlite3.IntegrityError):
+                        store.conn.execute('UPDATE main.' + owner + ' SET ' + column + '=?',(1.5,))
+                value = -1 if 'abs(' in expression else 1 if '>=1' in expression else 0
+                store.conn.execute('UPDATE main.' + owner + ' SET ' + column + '=?',(value,))
+                if 'IS NULL OR' in expression:
+                    store.conn.execute('UPDATE main.' + owner + ' SET ' + column + '=NULL')
+        finally:
+            store.conn.execute('ROLLBACK TO future_contract')
+            store.conn.execute('RELEASE future_contract')
+        audit.verify(store.conn,selected)
 
 
 @pytest.mark.parametrize('installed',[93],indirect=True)
@@ -233,9 +201,3 @@ def test_exact_float_values_are_not_rounded_by_json_formatting(installed):
     actual = store.conn.execute('SELECT score,found_at FROM main.discovered_artists').fetchone()
     assert captured['fields']['score']['value'] == actual['score']
     assert captured['fields']['found_at']['value'] == actual['found_at']
-
-
-def test_native_sources_finish_with_committed_read_only_inputs(native_inputs):
-    for source in native_inputs.release():
-        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
-            source.conn.execute('SELECT 1')

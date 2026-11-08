@@ -3,7 +3,9 @@ import threading
 
 import pytest
 
-from tests.web.test_road_trip_routes import _app, _recipe, _recipe_form, _stub_pools
+from tests.web.test_road_trip_routes import (
+    _app, _recipe, _recipe_form, _stub_pools, road_trip_schema, store,
+)
 from yt_playlist.rec import road_trip
 from yt_playlist.web.routes import road_trip as routes
 from tests.home_fixture_support import without_metadata_providers
@@ -21,12 +23,6 @@ def generation_routes(monkeypatch, without_metadata_providers):
         module.build(ctx) for module in (app_update, audio_preview, routes)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
     monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
-
-
-def test_generation_schema_input_keeps_current_sql_and_real_revision_guards(_pristine_current_schema):
-    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert _pristine_current_schema._revision_script
-    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.mark.parametrize('replacement', ['build', 'edit', 'balance', 'delete', 'delete-recipe'])

@@ -97,10 +97,12 @@ def apply(conn, context):
 
 def validate(conn, *, foreign_keys=True):
     from .current import _tokens
+    from ..schema_inspection import objects
+    definitions = {name: sql for name, (_kind, sql) in objects(conn).items()}
     for sql in statements():
         name = sql.split()[2]
-        actual = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
-        if actual is None or _tokens(actual[0]) != _tokens(sql):
+        actual = definitions.get(name)
+        if actual is None or _tokens(actual) != _tokens(sql):
             raise MigrationError(f'Incompatible retained evidence owner: {name}')
     if foreign_keys and conn.execute('PRAGMA foreign_key_check').fetchone():
         raise MigrationError('Invalid retained evidence reference')

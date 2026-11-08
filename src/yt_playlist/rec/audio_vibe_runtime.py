@@ -141,13 +141,11 @@ def predict(model, values):
         raise ValueError('Nonfinite audio-vibe normalized input')
     if model['kind'] == 'rff':
         width = model['features']
-        projected = [math.cos(offset + sum(row[i] * value for row, value in
-                     zip(model['frequencies'], normalized, strict=True))) * math.sqrt(2 / width)
-                     for i, offset in enumerate(model['offsets'])]
+        projected = [math.cos(offset + math.sumprod(column, normalized)) * math.sqrt(2 / width)
+                     for offset, column in zip(model['offsets'], zip(*model['frequencies'], strict=True), strict=True)]
         return predict({'kind': 'ridge', **model['linear']}, projected)
-    result = [intercept + sum(row[i] * value for row, value in
-                             zip(model['weights'], normalized, strict=True))
-              for i, intercept in enumerate(model['intercept'])]
+    result = [intercept + math.sumprod(column, normalized)
+              for intercept, column in zip(model['intercept'], zip(*model['weights'], strict=True), strict=True)]
     if not all(finite(v) for v in result):
         raise ValueError('Nonfinite audio-vibe native output')
     return [max(0., min(1., value)) for value in result]

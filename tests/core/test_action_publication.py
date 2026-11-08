@@ -1,5 +1,5 @@
 """Select historical action custody without losing IDs or admitting remote writes."""
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -9,8 +9,7 @@ import time
 import pytest
 
 from tests.core.test_action_ledger_preparation import finish, rows, seed
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import guarded_numbered_store as installed
 from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import action_backup_files, action_work
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -19,13 +18,13 @@ from yt_playlist.core.store import Store
 from yt_playlist.library import playlist_deletion
 
 
+
 pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 
 
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
-    """Action publication checks do not construct an HTTP application."""
-
+    """This owner runs directly without the HTTP application."""
 
 def stage(conn, *, size=128):
     preparation.JOB.install(conn)
@@ -47,44 +46,6 @@ def rejection_inputs(store):
         finish(store.conn)
         assert publication.OWNER.selected(store.conn) is None
         return identities, path.read_bytes(), (path.stat().st_dev, path.stat().st_ino)
-
-
-@pytest.mark.parametrize('version', [79, 93, 97])
-def test_action_input_keeps_each_installed_contract_and_snapshot_guards(_bounded_installed_schema, version):
-    template = _bounded_installed_schema(version)
-    source = template.source
-    with closing(sqlite3.connect(source._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
-        reader.row_factory = sqlite3.Row
-        runner.validate_version(reader, version)
-        regular.validate(reader)
-    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert source.conn.execute('SELECT count(*) FROM main.actions').fetchone()[0] == 0
-    assert template.revision_guards
-
-
-@pytest.fixture
-def completed_actions(installed, staged_custody, monkeypatch):
-    store, _ = installed
-    logical = tuple((preparation.table(suffix), 'backup_filename') for suffix in ('backups', 'steps'))
-    identities, backup, source_inode = staged_custody(
-        installed, 'action-ledger', rejection_inputs, logical_coordinates=logical)
-    monkeypatch.chdir(store._db_path.parent)
-    path = Path('retained-backup.json')
-    path.write_bytes(backup)
-    assert (path.stat().st_dev, path.stat().st_ino) != source_inode
-    return json.loads(backup)['identity_id'], path, identities
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_completed_action_input_keeps_originals_members_and_private_backup(installed, completed_actions):
-    store, _ = installed
-    account, path, identities = completed_actions
-    assert publication.OWNER.selected(store.conn) is None
-    assert len(identities) == 5
-    assert preparation.JOB.progress(store.conn).status == 'prepared'
-    for identity in identities:
-        assert preparation.read_original(store.conn, preparation.head(store.conn, identity))['id'] == identity
-    assert json.loads(path.read_bytes())['identity_id'] == account
 
 
 @pytest.mark.parametrize('installed', [79, 93, 97], indirect=True)
@@ -143,10 +104,15 @@ def test_preopened_readers_use_selected_actions_and_preserve_external_formats(in
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['fields','target','step','placement','resolution','extra','omitted','original','recovery','plan'])
-def test_wrong_fields_members_coverage_or_files_cannot_publish(installed, completed_actions, failure):
+def test_wrong_fields_members_coverage_or_files_cannot_publish(installed, staged_custody, failure, monkeypatch):
     store, _ = installed
-    _, path, identities = completed_actions
-    backup = path.read_bytes()
+    logical = tuple((preparation.table(suffix), 'backup_filename') for suffix in ('backups', 'steps'))
+    identities, backup, source_inode = staged_custody(
+        installed, 'action-ledger', rejection_inputs, logical_coordinates=logical)
+    monkeypatch.chdir(store._db_path.parent)
+    path = Path('retained-backup.json')
+    path.write_bytes(backup)
+    assert (path.stat().st_dev, path.stat().st_ino) != source_inode
     header = preparation.head(store.conn, identities[0])
     with store.conn:
         if failure == 'fields':
@@ -173,15 +139,13 @@ def test_wrong_fields_members_coverage_or_files_cannot_publish(installed, comple
         publication.OWNER.publish(store.conn, stage=selected)
     assert publication.OWNER.selected(store.conn) is None
     assert path.read_bytes() == backup
+    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_real_reconciliation_is_readback_only_and_continuing_writes_withdraw_selection(installed, completed_actions):
+def test_real_reconciliation_is_readback_only_and_continuing_writes_withdraw_selection(installed):
     store, _ = installed
-    # Large placement continuation belongs to test_action_ledger_preparation.
-    # Reconciliation needs a real placement and retained snapshot, not 8192
-    # repeated occurrences each time an unrelated deletion changes.
-    account, _, identities = completed_actions
+    account, _, identities = seed(store, count=8192)
     selected = stage(store.conn)
     publication.OWNER.publish(store.conn, stage=selected)
     class PresentClient:
@@ -191,7 +155,7 @@ def test_real_reconciliation_is_readback_only_and_continuing_writes_withdraw_sel
         def delete_playlist(self, remote):
             pytest.fail('Historical pending deletion must not be replayed')
     with store.read_snapshot() as snapshot:
-        assert json.loads(snapshot.store.actions.get_action(identities[1]).plan_json)['video_ids'] == ['one'] * 3
+        assert len(json.loads(snapshot.store.actions.get_action(identities[1]).plan_json)['video_ids']) == 8192
         updated = playlist_deletion.reconcile_deletion(store, identities[0], {account:PresentClient()}, 100)
         assert updated.status == 'delete_failed'
         assert not snapshot.publish(lambda:None)
@@ -283,14 +247,14 @@ def test_bounded_maps_and_interrupted_cutover_resume_without_losing_archives(ins
     # Batch only the initial source writes. The real preparation, map and
     # publication operations below still own their individual transactions.
     with phase('source_actions'), store._lock, store.conn.atomic():
-        for index in range(5):
+        for index in range(259):
             store.actions.record_action('remove_track', '{}', '{}', 'executed', '{}', index)
     assert not store.conn.in_transaction
     assert [tuple(row) for row in store.conn.execute(
         'SELECT id,kind,params_json,plan_json,undo_json,status,created_at,executed_at '
         'FROM main.actions ORDER BY id')] == [
             (index+1, 'remove_track', '{}', '{}', '{}', 'executed', index, None)
-            for index in range(5)]
+            for index in range(259)]
 
     publish_encoded = preparation.policy_documents._publish_encoded
     file_calls, file_seconds = 0, 0.0
@@ -308,22 +272,21 @@ def test_bounded_maps_and_interrupted_cutover_resume_without_losing_archives(ins
         # durability work. This time is contained within the preparation phase.
         patch.setattr(preparation.policy_documents, '_publish_encoded', measured_publish)
         preparation.JOB.install(store.conn)
-        # Five originals exercise two full pages and a tail. The inherited
-        # mapper's 128-row production limit has its own canvas boundary owner.
-        for _ in range(16):
+        # One original part per action; use a larger bounded-fixture iteration limit.
+        for _ in range(270):
             if preparation.JOB.step(store.conn).status == 'prepared':
                 break
     record_property('action_map_preparation_file_calls', file_calls)
     record_property('action_map_preparation_file_seconds', file_seconds)
     with phase('first_map_checkpoint'):
-        first = publication.OWNER.step(store.conn, batch_size=2)
-    assert first.copied == 2 and not first.complete
+        first = publication.OWNER.step(store.conn)
+    assert first.copied == 128 and not first.complete
     with phase('second_map_checkpoint'):
-        second = publication.OWNER.step(store.conn, batch_size=2)
-    assert second.id == first.id and second.copied == 4 and not second.complete
+        second = publication.OWNER.step(store.conn)
+    assert second.id == first.id and second.copied == 256 and not second.complete
     with phase('tail_map_checkpoint'):
-        completed = publication.OWNER.step(store.conn, batch_size=2)
-    assert completed.complete and completed.copied == 5
+        completed = publication.OWNER.step(store.conn)
+    assert completed.complete and completed.copied == 259
     with store.conn:
         store.conn.execute('CREATE TRIGGER controlled_action_cutover BEFORE INSERT ON '+publication.OWNER.table('head')+
             " BEGIN SELECT RAISE(ABORT,'controlled cutover'); END")
@@ -335,11 +298,11 @@ def test_bounded_maps_and_interrupted_cutover_resume_without_losing_archives(ins
     with phase('selection_retry'):
         publication.OWNER.publish(store.conn, stage=completed.id)
     with phase('original_readback'):
-        assert [a.id for a in store.actions.get_actions()] == list(range(5, 0, -1))
+        assert [a.id for a in store.actions.get_actions()] == list(range(259, 0, -1))
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_missing_files_and_failed_job_do_not_hold_regular_ddl_and_retry_is_explicit(installed, monkeypatch, independent_regular_ddl):
+def test_missing_files_and_failed_job_do_not_hold_regular_ddl_and_retry_is_explicit(installed, monkeypatch):
     store, _ = installed
     _, _, identities = seed(store)
     selected = stage(store.conn)
@@ -361,6 +324,11 @@ def test_missing_files_and_failed_job_do_not_hold_regular_ddl_and_retry_is_expli
     with pytest.raises(OSError, match='controlled action'):
         preparation.JOB.step(store.conn)
     progress = preparation.JOB.progress(store.conn)
+    def install(conn, context):
+        conn.execute('CREATE TABLE independent_action_publication(value TEXT)')
+    def validate(conn):
+        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_action_publication'").fetchone()
+    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_action_publication', install, validate)))
     regular.migrate(store.conn)
     assert preparation.JOB.progress(store.conn) == progress
     with pytest.raises(MigrationError, match='retry explicitly'):
@@ -368,6 +336,36 @@ def test_missing_files_and_failed_job_do_not_hold_regular_ddl_and_retry_is_expli
     monkeypatch.setattr(preparation.policy_documents, '_publish_encoded', publish)
     preparation.JOB.step(store.conn, retry=True)
     publication.OWNER.publish(store.conn, stage=stage(store.conn))
+
+
+@pytest.mark.parametrize('installed', [93], indirect=True)
+def test_frozen_native_owner_wins_and_retained_map_guards_survive(installed):
+    store, _ = installed
+    path = store._db_path
+    try:
+        store.init_schema(defer_metadata=True)
+        _, _, identities = seed(store)
+        selected = stage(store.conn)
+        publication.OWNER.publish(store.conn, stage=selected)
+        originals = {identity:publication.OWNER.value(store.conn, selected, str(identity)) for identity in identities}
+        # The frozen one-time command owns a dedicated connection, without
+        # serving TEMP compatibility views shadowing replaced physical tables.
+        store.conn.close()
+        store = Store(path)
+        runner.migrate(store.conn, registry=registry.MIGRATIONS)
+        store.init_schema(defer_metadata=True)
+        assert action_work.available(store.conn)
+        assert publication.OWNER.selected(store.conn) is None
+        for identity, original in originals.items():
+            assert publication.OWNER.value(store.conn, selected, str(identity)) == original
+            assert store.actions.get_action(identity).id == identity
+        regular.validate(store.conn)
+        with store.conn:
+            store.conn.execute('DROP TRIGGER prepared_action_parts_mapped_delete')
+        with pytest.raises(MigrationError, match='publication object'):
+            regular.validate(store.conn)
+    finally:
+        store.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

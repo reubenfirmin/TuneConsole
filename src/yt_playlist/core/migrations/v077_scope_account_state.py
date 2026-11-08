@@ -146,17 +146,18 @@ def apply(conn, context):
 
 def validate(conn, *, foreign_keys=True):
     from . import current
-    actual = conn.execute("SELECT sql FROM sqlite_schema WHERE name='playlist_scopes'").fetchone()
+    from ..schema_inspection import objects
+    definitions = {name: sql for name, (_kind, sql) in objects(conn).items()}
+    actual = definitions.get('playlist_scopes')
     expected = current._schema_contract((SCOPE_TABLE,))['playlist_scopes'][1]
-    if actual is None or current._table(conn, 'playlist_scopes', actual[0]) != expected:
+    if actual is None or current._table(conn, 'playlist_scopes', actual) != expected:
         raise MigrationError('Incompatible consolidated playlist scope constraints')
     for sql in statements():
         name = sql.split()[3 if sql.startswith('CREATE UNIQUE') else 2]
-        row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
-        if row is None or row[0] != sql:
+        if definitions.get(name) != sql:
             raise MigrationError(f'Incompatible consolidated scope/account state: {name}')
     expected = {column.split()[0] for column in SCOPE_COLUMNS}
-    if not expected <= {row[1] for row in conn.execute('PRAGMA table_info(playlist_scopes)')}:
+    if not expected <= {row[1] for row in conn.execute('PRAGMA table_info(playlist_scopes)').fetchall()}:
         raise MigrationError('Missing consolidated playlist scope attributes')
     if foreign_keys and conn.execute('PRAGMA foreign_key_check').fetchone():
         raise MigrationError('Invalid consolidated scope/account reference')

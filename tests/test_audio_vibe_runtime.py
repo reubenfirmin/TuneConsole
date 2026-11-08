@@ -2,6 +2,7 @@
 from copy import deepcopy
 import hashlib
 import json
+import math
 import os
 
 import pytest
@@ -16,6 +17,17 @@ from yt_playlist.rec import audio_vibe_model as shared, audio_vibe_prediction as
 
 SPECIALISTS = (cruise, release, relax, uplift, energize, focus)
 VIBES = ('cruise', 'release', 'relax', 'uplift', 'energize', 'concentrate')
+
+
+def test_native_coefficients_normalize_project_and_clip():
+    model = {'kind': 'ridge', 'mean': [1., -1.], 'scale': [2., .5],
+             'weights': [[.2, -.4], [.1, .8]], 'intercept': [.05, .2]}
+    assert runtime.predict(model, [3., 0.]) == pytest.approx([.45, 1.])
+    projected = {'kind': 'rff', 'mean': [1., -1.], 'scale': [2., .5], 'features': 2,
+                 'frequencies': [[math.pi / 2, 0.], [0., math.pi / 2]], 'offsets': [0., 0.],
+                 'linear': {'mean': [0., 0.], 'scale': [1., 1.],
+                            'weights': [[.3, .2], [.1, .2]], 'intercept': [.1, .5]}}
+    assert runtime.predict(projected, [3., 0.]) == pytest.approx([0., .3])
 
 
 @pytest.mark.parametrize('module', SPECIALISTS, ids=VIBES)

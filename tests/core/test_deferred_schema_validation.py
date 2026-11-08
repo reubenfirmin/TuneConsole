@@ -8,7 +8,6 @@ import pytest
 
 from tests.conftest import seed_catalog_track
 from tests.genre_catalog_support import bound_catalog
-from tests.independent_schema_support import independent_regular_ddl
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, install_numbered_input
 from yt_playlist.core import schema_definition as current
 from yt_playlist.core.migrations import registry, runner
@@ -300,10 +299,6 @@ def test_app_loads_saved_genres_without_writes_or_waiting_for_bulk_conversion(in
     from yt_playlist.web.app import create_app
 
     path = installed_library(version)
-    if version < current.VERSION:
-        # Keep real independent DDL while testing startup's saved vocabulary.
-        # Registry installation/ordering is owned by test_independent_schema_changes.
-        request.getfixturevalue('independent_regular_ddl')
     with closing(sqlite3.connect(path)) as setup, setup:
         setup.execute("INSERT OR REPLACE INTO settings VALUES ('genre_catalog_revision','previous')")
         if version < 85:
@@ -342,7 +337,7 @@ def test_app_loads_saved_genres_without_writes_or_waiting_for_bulk_conversion(in
 
 
 def test_installed_v84_regular_ddl_retains_writable_owners_and_snapshot_guards(
-        tmp_path, caplog, installed_library, independent_regular_ddl):
+        tmp_path, caplog, installed_library):
     """An independent schema writer never starts the frozen bulk conversions."""
     import hashlib
     import json

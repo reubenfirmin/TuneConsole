@@ -185,6 +185,22 @@ def _source_definitions(version):
         yield definition
 
 
+@lru_cache(maxsize=64)
+def _source_statements(definition, text):
+    # Adjacent installed versions share source files. Cache only the immutable
+    # split text, with file contents in the key so edits cannot reuse old SQL.
+    result = []
+    pending = ''
+    for line in text.splitlines(keepends=True):
+        pending += line
+        if sqlite3.complete_statement(pending):
+            result.append(pending)
+            pending = ''
+    if pending.strip():
+        raise MigrationError('Incomplete current schema definition: ' + definition.name)
+    return tuple(result)
+
+
 def _statements(version, *, definitions=None, baseline=None):
     from . import schema_transforms as transforms
     from .genre_contract import classified_definition
@@ -194,31 +210,24 @@ def _statements(version, *, definitions=None, baseline=None):
     if baseline is None:
         baseline = DEFINITION
     for definition, text in definitions:
-        pending = ''
-        for line in text.splitlines(keepends=True):
-            pending += line
-            if sqlite3.complete_statement(pending):
-                if definition.name=='schema_radio_policy_roots.sql' and re.match(
-                        r'CREATE (?:TABLE |INDEX ix_)radio_seed_policies\b',pending.lstrip(),re.I):
-                    pending = ''
-                    continue
-                sql = classified_definition(pending) if version >= 86 else pending
-                sql = transforms.taste_axes(sql) if version >= 88 else sql
-                sql = transforms.recipe_memberships(sql) if version >= 89 else sql
-                if definition == baseline:
-                    sql = transforms.collection_state(sql) if version >= 94 else sql
-                    sql = transforms.collection_documents(sql) if version >= 97 else sql
-                    sql = transforms.action_work(sql) if version >= 98 else sql
-                    sql = transforms.album_occurrences(sql) if version >= 99 else sql
-                    sql = transforms.listening_subjects(sql) if version >= 100 else sql
-                if version >= 101 and definition.name!='schema_discovery_subjects.sql':
-                    sql = transforms.discovery_subjects(sql)
-                if version >= 102:
-                    sql = transforms.catalog_writes(sql)
-                yield sql
-                pending = ''
-        if pending.strip():
-            raise MigrationError('Incomplete current schema definition: ' + definition.name)
+        for statement in _source_statements(definition, text):
+            if definition.name=='schema_radio_policy_roots.sql' and re.match(
+                    r'CREATE (?:TABLE |INDEX ix_)radio_seed_policies\b',statement.lstrip(),re.I):
+                continue
+            sql = classified_definition(statement) if version >= 86 else statement
+            sql = transforms.taste_axes(sql) if version >= 88 else sql
+            sql = transforms.recipe_memberships(sql) if version >= 89 else sql
+            if definition == baseline:
+                sql = transforms.collection_state(sql) if version >= 94 else sql
+                sql = transforms.collection_documents(sql) if version >= 97 else sql
+                sql = transforms.action_work(sql) if version >= 98 else sql
+                sql = transforms.album_occurrences(sql) if version >= 99 else sql
+                sql = transforms.listening_subjects(sql) if version >= 100 else sql
+            if version >= 101 and definition.name!='schema_discovery_subjects.sql':
+                sql = transforms.discovery_subjects(sql)
+            if version >= 102:
+                sql = transforms.catalog_writes(sql)
+            yield sql
     if version >= 93:
         yield from transforms.choice_fences()
     if version >= 94:
@@ -465,8 +474,10 @@ def _validate(conn, expected_contract, version, *, replaced=frozenset(), foreign
         expected_contract = {**expected_contract, **_normalized_vibe_contract()}
     replaced = replaced | legacy_journals.retired_relations(conn)
     runtime_views = metadata_runtime.views() if metadata_runtime.active(conn) else {}
-    objects = {r[0]: (r[1], r[2]) for r in conn.execute(
-        "SELECT name,type,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchall()}
+    # Preserve the full-contract check's last matching object, including a
+    # trigger that reuses a table name. Named legacy lookups use the first row.
+    objects = {name: (kind, sql) for name, kind, sql in conn.execute(
+        'SELECT name,type,sql FROM main.sqlite_schema').fetchall()}
     file_vibe_guards = {}
     from . import recommendation_revalidations
     if recommendation_revalidations.available(conn):
@@ -510,11 +521,13 @@ def _validate(conn, expected_contract, version, *, replaced=frozenset(), foreign
                 raise MigrationError(f'Incompatible current {kind}: {name}')
     if foreign_keys and conn.execute('PRAGMA foreign_key_check').fetchone():
         raise MigrationError('Invalid current foreign-key reference')
-    for key in SEED_SETTINGS:
-        if conn.execute('SELECT 1 FROM settings WHERE key=?', (key,)).fetchone() is None:
+    keys = tuple(SEED_SETTINGS)
+    slots = ','.join('?' for _ in keys)
+    initialized = dict(conn.execute('SELECT key,value FROM settings WHERE key IN (' + slots + ')', keys).fetchall())
+    for key in keys:
+        if key not in initialized:
             raise MigrationError(f'Missing initialized schema setting: {key}')
-    identity_version = conn.execute("SELECT value FROM settings WHERE key='catalog_identity_version'").fetchone()
-    if identity_version[0] != '2':
+    if initialized['catalog_identity_version'] != '2':
         raise MigrationError('Incompatible initialized catalog identity version')
     if data:
         _validate_data(conn,version)

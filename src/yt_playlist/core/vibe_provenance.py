@@ -73,9 +73,11 @@ def install_allocation(conn, context=None):
 
 def validate_allocation(conn):
     from .schema_contract import tokens as _tokens
-    for sql in allocation_sql():
-        row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (sql.split()[2],)).fetchone()
-        if row is None or _tokens(row[0]) != _tokens(sql):
+    from .schema_inspection import definitions
+    expected = {sql.split()[2]: sql for sql in allocation_sql()}
+    actual = definitions(conn, expected)
+    for name, sql in expected.items():
+        if name not in actual or _tokens(actual[name]) != _tokens(sql):
             raise ValueError('Incompatible calculation allocation')
 
 
@@ -97,8 +99,9 @@ def install(conn, context=None):
 
 def validate(conn):
     from .schema_contract import tokens as _tokens
-    row = conn.execute("SELECT sql FROM main.sqlite_schema WHERE name='prediction_provenance'").fetchone()
-    if row is None or _tokens(row[0]) != _tokens(SQL):
+    from .schema_inspection import definitions
+    actual = definitions(conn, ['prediction_provenance'])
+    if 'prediction_provenance' not in actual or _tokens(actual['prediction_provenance']) != _tokens(SQL):
         raise ValueError('Incompatible prediction provenance owner')
 
 
@@ -131,9 +134,11 @@ def install_guards(conn, context=None):
 
 def validate_guards(conn):
     from .schema_contract import tokens as _tokens
-    for name, sql in guards():
-        saved = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
-        if saved is None or _tokens(saved[0]) != _tokens(sql):
+    from .schema_inspection import definitions
+    expected = dict(guards())
+    actual = definitions(conn, expected)
+    for name, sql in expected.items():
+        if name not in actual or _tokens(actual[name]) != _tokens(sql):
             raise ValueError('Incompatible file-owned vibe guard: ' + name)
 
 
@@ -157,9 +162,11 @@ def install_lifecycle(conn, context=None):
 
 def validate_lifecycle(conn):
     from .schema_contract import tokens as _tokens
-    for name,sql in lifecycle_sql():
-        row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?',(name,)).fetchone()
-        if row is None or _tokens(row[0])!=_tokens(sql):
+    from .schema_inspection import definitions
+    expected = dict(lifecycle_sql())
+    actual = definitions(conn, expected)
+    for name, sql in expected.items():
+        if name not in actual or _tokens(actual[name]) != _tokens(sql):
             raise ValueError('Incompatible provenance lifecycle: '+name)
 
 

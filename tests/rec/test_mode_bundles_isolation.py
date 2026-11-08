@@ -2,7 +2,7 @@
 import asyncio
 from tests.derived_rating_support import seed_dislike
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import closing, nullcontext
 from copy import deepcopy
 import logging
 import sqlite3
@@ -12,11 +12,12 @@ from types import SimpleNamespace
 import pytest
 
 from yt_playlist.core.activity import Activity
+from yt_playlist.core.store import Store
 from yt_playlist.rec import candidate_refresh, embedding_vectors as embed, measurement, mode_surfaces, surfaces
 from tests import model_support
 from tests.prepared_fixture_support import prepared_template, roots
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, reuse_reporting_reader
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
 from yt_playlist.rec.rec_worker import RecWorker
 
 
@@ -30,20 +31,6 @@ def isolation_schema():
 def isolation_template(isolation_schema):
     with prepared_template(isolation_schema, _seed) as template:
         yield template
-
-
-def test_isolation_schema_input_has_read_only_sql_and_real_guards(isolation_schema):
-    assert isolation_schema.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert isolation_schema._revision_script
-    assert not isolation_schema.execute('PRAGMA foreign_key_check').fetchone()
-
-
-def test_isolation_template_retains_both_selected_surfaces_and_exact_model_inputs(isolation_template):
-    store = isolation_template.source
-    assert store.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert {head['surface'] for head in isolation_template.result} == {'home', 'fresh'}
-    _saved(store)
-    assert len(store.rec_model.get_rec_content_vectors()) == 1
 
 
 @pytest.fixture(params=["memory", "file"])
@@ -101,11 +88,11 @@ def ranking_inputs(monkeypatch):
 
 
 @pytest.fixture
-def _worker_store(tmp_path, isolation_template):
-    # Clone real model/candidate files below the worker cancellation boundary.
-    # The SQL interruption and concurrent foreground writes remain per case.
-    with isolation_template.open(tmp_path / "state.db") as store:
-        store._isolation_saved_heads = deepcopy(isolation_template.result)
+def _worker_store(tmp_path, isolation_schema):
+    store = Store(tmp_path / "state.db")
+    with closing(store.conn):
+        store.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(store, isolation_schema)
         yield store
 
 
@@ -146,6 +133,7 @@ def _saved(store):
 def test_ui_read_and_write_complete_while_bundle_scorer_is_still_running(
         _worker_store, isolation_template, monkeypatch):
     store = _worker_store
+    _seed(store)
     _assert_content_inputs(store, isolation_template.source)
     started = threading.Event()
     work = Activity()
@@ -204,11 +192,7 @@ def test_mutation_during_calculation_finishes_and_serving_applies_current_exclus
     assert result is not None and result['all']['temporal']
     assert store.recommendations.heads() != store._isolation_saved_heads
     assert not mode_surfaces.assemble_cards(store, 100, 0)
-
-
-def test_next_calculation_omits_tracks_excluded_after_the_saved_generation(database):
-    store = database
-    seed_dislike(store, 'song|artist', until=None, now=100)
+    monkeypatch.setattr(mode_surfaces, "_calculate_bundles", calculate)
     assert mode_surfaces.prepare_bundles(store, 100) is not None
     assert "song|artist" not in {item['key'] for item in store.recommendations.candidate_page(
         'home', 'all', 'temporal', limit=4)['tracks']}

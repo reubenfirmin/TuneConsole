@@ -43,6 +43,7 @@ def store(request, tmp_path, monkeypatch):
         if {'cached_menu', 'publication_inputs', 'catalog_import'} & set(request.fixturenames):
             store = Store(tmp_path / 'cached-home.db')
             resources.callback(store.conn.close)
+            store.conn.execute('PRAGMA synchronous=NORMAL')
             initialize_consumer(store, request.getfixturevalue('cached_menu_schema'))
             # Keep durable WAL commits; checkpoint scheduling has its own owners
             # in core/test_publication_checkpoint, below these Home boundaries.
@@ -60,9 +61,9 @@ def store(request, tmp_path, monkeypatch):
 
 @pytest.fixture
 def catalog_import(store):
-    """Four untagged, unmodelled songs for the real cold-start ranker."""
+    """The original 24 untagged, unmodelled songs for the cold-start ranker."""
     tracks = [{'video_id': f'import-{i}', 'title': f'Song {i}', 'artist': f'Artist {i}',
-               'key': f'song {i}|artist {i}'} for i in range(4)]
+               'key': f'song {i}|artist {i}'} for i in range(24)]
     seed_publication_subjects(store, tracks)
     return store
 
@@ -419,7 +420,11 @@ def test_served_whole_menu_probability_is_recorded_and_frozen(store, cached_menu
     assert store.conn.execute('SELECT count(*) FROM rec_served_impressions').fetchone()[0] == 0
 
 
-def test_missing_candidate_dependencies_keep_last_usable_home(store, prepared):
+def test_missing_candidate_dependencies_keep_last_usable_home(store, cached_menu):
+    prepared = cached_menu
+    tracks = prepared['menus'][0]['protos'][0]['tracks']
+    publish_bundles(store, {'all': {'explore': tracks}, '_meta': {'unmodeled': True}}, fresh=tracks)
+    assert {row['surface'] for row in store.recommendations.heads()} >= {'home', 'fresh'}
     with store.conn:
         store.conn.execute("DELETE FROM recommendation_heads WHERE surface IN ('home','fresh')")
     assert home_prepared.prepare(store, 1001) is None
@@ -427,7 +432,8 @@ def test_missing_candidate_dependencies_keep_last_usable_home(store, prepared):
     assert home_prepared.cards(store, prepared, 1001, service(store), record=False).protos
 
 
-def test_new_skip_keeps_the_prepared_menu_and_the_heart(store, prepared):
+def test_new_skip_keeps_the_prepared_menu_and_the_heart(store, cached_menu):
+    prepared = cached_menu
     first = home_prepared.cards(store, prepared, 1001, service(store), record=False)
     track = next(track for proto in first.protos for track in proto['tracks'])
     iid = store.accounts.upsert_account('Main', 'credential', None, True)
@@ -677,7 +683,8 @@ def test_saving_fresh_tracks_in_generated_playlists_does_not_truncate_worker_mix
     assert prepared == original
 
 
-def test_cached_playlist_uses_current_title_membership_and_eligibility(store, prepared):
+def test_cached_playlist_uses_current_title_membership_and_eligibility(store, cached_menu):
+    prepared = cached_menu
     iid = store.accounts.upsert_account('main', 'cred', None, True)
     pid = store.playlists.upsert_playlist(iid, 'old-list', 'Old title', 5, None, 1000)
     # The prepared teaser deliberately names tracks no longer in the playlist.
@@ -698,7 +705,8 @@ def test_cached_playlist_uses_current_title_membership_and_eligibility(store, pr
     assert home_prepared.collections(store, prepared, 1001)['rediscover'] == []
 
 
-def test_previews_and_repeated_fragments_do_not_inflate_exposure(store, prepared):
+def test_previews_and_repeated_fragments_do_not_inflate_exposure(store, cached_menu):
+    prepared = cached_menu
     home_prepared.cards(store, prepared, 1000, service(store), record=False)
     assert store.modes.impression_counts() == {}
     home_prepared.cards(store, prepared, 1000, service(store))
@@ -709,7 +717,10 @@ def test_previews_and_repeated_fragments_do_not_inflate_exposure(store, prepared
     assert store.conn.execute("SELECT COUNT(*) FROM rec_served_impressions").fetchone()[0] == impressions
 
 
-def test_hold_window_keeps_the_choice_through_refill_and_new_evidence(store, prepared):
+def test_hold_window_keeps_the_choice_through_refill_and_new_evidence(store, cached_menu):
+    prepared = deepcopy(cached_menu)
+    prepared['modes'] = [{key: mode[key] for key in ('mode_id', 'size')}
+                         for mode in store.modes.list_modes(active_only=True)]
     prepared['choice_context'] = {'at': 999, 'generation': 'original-context'}
     tuning = home_prepared.tuning_key(store, 1000)
     ranking = candidate_refresh.preferences(store, 1000)
@@ -811,7 +822,8 @@ def test_missing_or_corrupt_cache_queues_preparation_without_ranking(store, monk
     assert calls
 
 
-def test_malformed_menu_is_discarded_and_damaged_tuned_cache_keeps_baseline(store, prepared, monkeypatch):
+def test_malformed_menu_is_discarded_and_damaged_tuned_cache_keeps_baseline(store, cached_menu, monkeypatch):
+    prepared = cached_menu
     corrupt = deepcopy(prepared)
     corrupt["menus"][0]["protos"] = [None]
     assert not home_prepared._valid(corrupt)
@@ -824,7 +836,8 @@ def test_malformed_menu_is_discarded_and_damaged_tuned_cache_keeps_baseline(stor
     assert home_prepared.load(store, 1001) == prepared
 
 
-def test_feedback_and_removed_sources_do_not_rewrite_worker_mixes(store, prepared):
+def test_feedback_and_removed_sources_do_not_rewrite_worker_mixes(store, cached_menu):
+    prepared = cached_menu
     initial = home_prepared.cards(store, prepared, 1000, service(store), record=False)
     assert initial.protos
     key = initial.protos[0]["tracks"][0]["key"]

@@ -4,14 +4,15 @@ import json
 
 import pytest
 
-from tests.rec.test_vibe_prediction import drain, fits
+from tests.audio_vibe_fixture_support import disable_periodic_library_sync, specialist_store
+from tests.rec.test_vibe_prediction import drain, fits, track
 from tests.test_audio_vibe_cruise import samples
 from yt_playlist.core import features
 from yt_playlist.rec import audio_vibe_cruise as cruise, audio_vibe_release as release, audio_vibe_relax as relax
 from yt_playlist.rec import audio_vibe_uplift as uplift, audio_vibe_model as shared, audio_vibe_prediction as predictor
 from yt_playlist.rec import audio_vibe_energize as energize
 from yt_playlist.rec import audio_vibe_focus as focus
-from yt_playlist.rec import vibe_preparation
+from yt_playlist.rec import home_vibe, musical_character, vibe_preparation
 
 
 @pytest.fixture(autouse=True)
@@ -182,3 +183,59 @@ def test_missing_metadata_still_uses_uplift(store):
     drain(store, batch=1)
     assert fits(store, key)['uplift']['score'] == predictor.predict(samples('bare'))['suitability']['uplift']
     assert fits(store, key)['uplift']['source'] == 'audio_measurement'
+
+
+def test_bounded_rollout_updates_one_vote_preserves_history_feedback_and_rolls_back(specialist_store, tmp_path, monkeypatch):
+    store = specialist_store
+    _tid, own = track(store, 'observed_song')
+    _tid, neighbour = track(store, 'neighbour')
+    rows = samples()
+    monkeypatch.setenv(uplift.MODE_KEY, 'off')
+    drain(store, batch=1).close()
+    for now, row in enumerate(rows[:2], 1):
+        store.audio_vibes.save_sample(row, now)
+    drain(store, batch=1).close()
+    assert fits(store, own)['uplift']['source'] == 'heuristic'
+    store.audio_vibes.save_sample(rows[2], 3)
+    store.audio_vibes.save_feedback(rows[0]['run_id'], [], ['uplift'], predictor.TAXONOMY_VERSION, None, 4)
+    feedback = store.audio_vibes.feedback(rows[0]['run_id'])
+    drain(store, batch=1).close()
+    keys = [own, neighbour]
+    before = {key: fits(store, key) for key in keys}
+    old_profiles = musical_character.load(store, keys)
+    monkeypatch.setenv(uplift.ENVIRONMENT_KEY, str(controlled(tmp_path)))
+    monkeypatch.setenv(uplift.MODE_KEY, 'active')
+    statements = []
+    store.conn.set_trace_callback(statements.append)
+    drain(store, batch=1).close()
+    active = musical_character.load(store, keys)
+    assert fits(store, own)['uplift']['score'] == pytest.approx(.9)
+    assert fits(store, neighbour)['uplift']['recordings'] == 1
+    assert fits(store, neighbour)['uplift']['score'] > before[neighbour]['uplift']['score']
+    for key in keys:
+        after = fits(store, key)
+        for vibe in shared.LABELS:
+            if vibe != 'uplift':
+                assert after[vibe] == before[key][vibe]
+        assert musical_character.intensity_evidence({'musical': active[key]}) == musical_character.intensity_evidence(
+            {'musical': old_profiles[key]})
+        assert home_vibe.affinity({'key': key}, 'uplift', active) == after['uplift']['score']
+    active_stamp = vibe_preparation.version()
+    controlled(tmp_path, .3)
+    assert vibe_preparation.version() != active_stamp
+    drain(store, batch=1).close()
+    assert fits(store, own)['uplift']['score'] == pytest.approx(.3)
+    for now, row in enumerate(samples(), 10):
+        store.audio_vibes.save_sample(row, now)
+    drain(store, batch=1).close()
+    assert fits(store, neighbour)['uplift']['recordings'] == 1
+    history = {r[0] for r in store.conn.execute('SELECT id FROM measurements')}
+    monkeypatch.setenv(uplift.MODE_KEY, 'off')
+    drain(store, batch=1).close()
+    assert history <= {r[0] for r in store.conn.execute('SELECT id FROM measurements')}
+    for key in keys:
+        assert fits(store, key) == before[key]
+    store.conn.set_trace_callback(None)
+    assert store.audio_vibes.feedback(rows[0]['run_id']) == feedback
+    assert not any('audio_annotation' in sql or 'audio_taxonom' in sql for sql in statements)
+    assert not list(store.conn.execute('PRAGMA foreign_key_check'))

@@ -8,6 +8,23 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+from tests.store_fixture_support import bounded_consumer_schema
+
+
+@pytest.fixture(scope='session')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('electronic', 'Electronic'), ('art_pop', 'Art Pop'),
+                                  ('rock', 'Rock'))) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def conflict_routes(monkeypatch):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import album, app_update, audio_preview, playlists
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (album, app_update, audio_preview, playlists)])
 
 
 def _client(store):

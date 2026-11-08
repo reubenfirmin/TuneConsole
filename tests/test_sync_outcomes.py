@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient, _track
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.core.activity import Activity
 from yt_playlist.core.bridge import BridgeError
 from yt_playlist.core import sync_state
@@ -16,6 +17,14 @@ from yt_playlist.library.sync_outcomes import sync_due
 from yt_playlist.rec.actions import sync_status
 from yt_playlist.web.app import create_app, _background_sync_loop as automatic_sync
 from yt_playlist.web.jobs import SyncJobs
+
+
+@pytest.fixture(scope='session')
+def _pristine_current_schema():
+    # Sync outcome tests keep the complete provider responses and real writes;
+    # none of their tracks has a genre or needs the curated genre catalog.
+    with bounded_consumer_schema(()) as schema:
+        yield schema
 
 
 class Client(FakeClient):

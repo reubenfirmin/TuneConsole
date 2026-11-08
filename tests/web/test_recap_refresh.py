@@ -4,7 +4,10 @@ from copy import deepcopy
 import pytest
 
 from tests.test_mode_refresh_worker import _worker
-from tests.test_trends_recap_route import _client, _DETAIL_BEATS, _STORY
+from tests.home_fixture_support import home_page_bytecode
+from tests.test_trends_recap_route import (
+    _client, _DETAIL_BEATS, _STORY, _pristine_current_schema, recap_routes,
+)
 from yt_playlist.rec.recap_details import slides
 from yt_playlist.rec.rec_worker import Job
 

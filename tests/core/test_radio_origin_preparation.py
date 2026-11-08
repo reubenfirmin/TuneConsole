@@ -1,12 +1,12 @@
 """Radio provenance staging preserves originals and unresolved scope identity."""
 from dataclasses import replace
 import json
+import sqlite3
 
 import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
-from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads
+from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import radio_provenance, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import radio_origins as preparation
@@ -19,11 +19,6 @@ pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 @pytest.fixture
 def disable_periodic_library_sync():
     pass
-
-
-@pytest.mark.parametrize('installed', [79, 93], indirect=True)
-def test_radio_origin_input_keeps_admitted_history_and_private_guards(installed):
-    assert_installed_consumer_input(*installed)
 
 
 def finish(conn, size=16):
@@ -61,7 +56,7 @@ def seed(store):
 
 
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
-def test_original_list_scalar_null_blank_and_repeated_origins_remain_exact(installed, independent_regular_ddl):
+def test_original_list_scalar_null_blank_and_repeated_origins_remain_exact(installed):
     store, _ = installed
     conn = store.conn
     original = seed(store)
@@ -210,6 +205,37 @@ def test_interrupted_head_and_disk_failure_preserve_commits_for_reopened_retry(i
         finish(reopened.conn)
     finally:
         reopened.conn.close()
+
+
+@pytest.mark.parametrize('installed', [93], indirect=True)
+def test_member_batch_failure_rolls_back_every_insert_and_retries_from_checkpoint(installed):
+    store, _ = installed
+    conn = store.conn
+    original = seed(store)
+    preparation.JOB.install(conn)
+    checkpoint = start_list(conn)
+    prior_origins = list(map(tuple, conn.execute(f'SELECT * FROM {preparation.ORIGINS} ORDER BY source,generation,position')))
+    prior_parts = list(map(tuple, conn.execute(f'SELECT * FROM {preparation.PARTS} ORDER BY source,generation,position')))
+    conn.execute(f'''CREATE TRIGGER reject_second_origin BEFORE INSERT ON {preparation.ORIGINS}
+        WHEN NEW.position=1 BEGIN SELECT RAISE(ABORT,'controlled origin batch failure'); END''')
+    conn.commit()
+    with pytest.raises(sqlite3.IntegrityError, match='controlled origin batch failure'):
+        preparation.JOB.step(conn, batch_size=4)
+    failed = preparation.JOB.progress(conn)
+    assert failed.status == 'failed'
+    assert (failed.cursor, failed.processed) == (checkpoint.cursor, checkpoint.processed)
+    assert head(conn) is None
+    assert list(map(tuple, conn.execute(f'SELECT * FROM {preparation.ORIGINS} ORDER BY source,generation,position'))) == prior_origins
+    assert list(map(tuple, conn.execute(f'SELECT * FROM {preparation.PARTS} ORDER BY source,generation,position'))) == prior_parts
+    conn.execute('DROP TRIGGER reject_second_origin')
+    conn.commit()
+    preparation.JOB.step(conn, batch_size=4, retry=True)
+    finish(conn)
+    assert preparation.read_original(conn, head(conn)) == original[preparation.KEYS[0]]
+    assert [tuple(row) for row in conn.execute(f'SELECT position,provider_playlist_id,playlist_scope_id,unresolved_reason '
+        f'FROM {preparation.ORIGINS} WHERE source=? ORDER BY position', (preparation.KEYS[0],))] == [
+            (0, 'shared', 'shared', None), (1, 'shared', 'shared', None),
+            (2, 'LM', None, 'ambiguous_scope'), (3, 'missing', None, 'missing_scope')]
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

@@ -12,7 +12,10 @@ import pytest
 from tests.prepared_fixture_support import capture_template
 from tests.genre_catalog_support import bound_catalog
 from tests.rec.test_vibe_prediction import capture, drain, fits, track
-from tests.store_fixture_support import PristineSchema, initialize_consumer, install_numbered_input
+from tests.store_fixture_support import (
+    PristineSchema, bounded_consumer_schema, initialize_consumer,
+    install_numbered_input, mock_snapshot_coordinator,
+)
 from yt_playlist.core.db_revisions import Revisions
 from tests.test_audio_vibes import sample
 from yt_playlist.core import catalog, prepared_inputs, sample_files, profile_files, vibe_provenance, vibe_versions
@@ -24,6 +27,12 @@ from yt_playlist.core.store import Store
 from yt_playlist.rec import vibe_preparation
 from yt_playlist.rec import home_vibe
 from yt_playlist.rec.progressive import Preparation
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Repository checks have no web application or periodic sync lifecycle."""
+    yield
 
 
 def test_sample_json_is_external_immutable_and_durable_before_reference(store, monkeypatch):
@@ -349,8 +358,38 @@ def test_externalization_failure_rolls_back_database_and_can_resume(tmp_path, mo
     store.conn.close()
 
 
-def test_dense_cohort_finishes_one_recording_with_exact_inputs(store):
+@pytest.fixture
+def dense_cohort_store(tmp_path, monkeypatch):
+    # This owner measures real cohort SQL, inference and exact persisted
+    # lineage. Catalog curation and concurrent snapshot admission are below
+    # its boundary; retain the full 2,000 donors and all relational guards.
+    from yt_playlist.core.db_diagnostics import DiagnosticCursor
+    from yt_playlist.util import genre_catalog
+
+    # Keep native SQLite iteration beneath the repository; per-row diagnostic
+    # clocks and handle admission do not establish cohort or lineage behavior.
+    monkeypatch.setattr(DiagnosticCursor, '__next__', sqlite3.Cursor.__next__)
+    bound_catalog(monkeypatch, entries=(('psybient', 'Psybient'),))
+    stamp = vibe_preparation.serving_prefix() + 'completed-cohort-models'
+    monkeypatch.setattr(vibe_preparation, 'version', lambda: stamp)
+    with bounded_consumer_schema((('psybient', 'Psybient'),), snapshot_guards=False) as schema:
+        store = Store(tmp_path / 'dense-cohort.db')
+        try:
+            store.conn.execute('PRAGMA synchronous=OFF')
+            initialize_consumer(store, schema, snapshot_guards=False)
+            # The bounded vocabulary has no ancestry edges. Do not decode the
+            # unrelated shipped graph beneath the cohort calculation.
+            monkeypatch.setattr(genre_catalog, '_parents', lambda: {})
+            store.conn.execute('PRAGMA wal_autocheckpoint=0')
+            with mock_snapshot_coordinator(store, monkeypatch):
+                yield store
+        finally:
+            store.conn.close()
+
+
+def test_dense_cohort_finishes_one_recording_with_exact_inputs(dense_cohort_store):
     """A common cohort must not permanently exceed a per-page row ceiling."""
+    store = dense_cohort_store
     _tid, target = track(store, 'target')
     artist = store.vibe_predictions.inputs([target])[target]['artist']
     stamp = vibe_preparation.version()
@@ -400,6 +439,10 @@ def test_dense_cohort_finishes_one_recording_with_exact_inputs(store):
         store.conn.execute('DELETE FROM rec_vibe_pending')
         store.conn.execute('DELETE FROM rec_content_pending')
         store.conn.execute('INSERT INTO rec_content_pending(identity_key) VALUES (?)', (target,))
+    # This bulk fixture has a dense artist cohort. Let SQLite select its
+    # existing ordered index from the actual distribution, rather than sorting
+    # all 12,000 scores again for each 128-row page. Statistics cost is timed too.
+    store.conn.execute('ANALYZE recording_vibes')
     assert not store.prepared_content.missing_unqueued(1)
     started = time.monotonic()
     assert Preparation(store).capture(1000)

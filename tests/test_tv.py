@@ -40,6 +40,10 @@ def store(request, tmp_path, monkeypatch):
     with closing(database.conn):
         launch = 'tv_launch_web' in request.fixturenames
         schema = request.getfixturevalue('tv_launch_schema' if launch else 'tv_schema')
+        if launch:
+            # HTTP launch keeps actual playlist SQL and files; synchronous
+            # persistence across power loss is irrelevant to this fixture.
+            database.conn.execute('PRAGMA synchronous=OFF')
         initialize_consumer(database, schema, snapshot_guards=not launch)
         # These cases own TV serving and publication, independently of the
         # periodic WAL checkpoint policy covered by test_publication_checkpoint.

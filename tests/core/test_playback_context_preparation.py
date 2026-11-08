@@ -1,12 +1,12 @@
 """Playback staging preserves attribution without creating catalog ownership."""
+from contextlib import closing
 from dataclasses import replace
 import json
+import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
-from tests.independent_schema_support import independent_regular_ddl
-from tests.store_fixture_support import numbered_store
+from tests.store_fixture_support import numbered_store, numbered_store as installed
 from yt_playlist.core import album_playback_context, entity_names, playback_bindings, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import playback_context as preparation
@@ -81,6 +81,7 @@ def test_exact_sources_repeated_bindings_queue_and_unknown_owners_are_retained(n
     assert counts == {table: conn.execute(f'SELECT count(*) FROM main.{table}').fetchone()[0] for table in counts}
     assert not conn.execute('PRAGMA foreign_key_check').fetchone()
     assert files.collect_orphans(conn) == 0
+    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -94,6 +95,7 @@ def test_separate_frozen_upgrade_agrees_on_last_binding_and_pending_queue(instal
         finish(job, store.conn)
     upgraded = Store(tmp_path / 'playback-upgrade.db')
     try:
+        upgraded.conn.execute('PRAGMA synchronous=NORMAL')
         store.conn.backup(upgraded.conn)
         runner.migrate(upgraded.conn, registry=registry.MIGRATIONS[:94])
         native = upgraded.conn.execute('SELECT account_id,playlist_scope_id,video_id,opportunity_id,option_id,bound_at '
@@ -178,17 +180,23 @@ def test_large_contexts_checkpoint_individual_members(installed, job, source, ow
     else:
         value['videos'] = ['video'] * 1200
     store.settings.set_setting(source, json.dumps(value))
-    job.install(store.conn)
-    prior = 0
-    for _ in range(15):
-        progress = job.step(store.conn, batch_size=128)
-        assert 0 <= progress.processed - prior <= 128
-        prior = progress.processed
-        if progress.status == 'prepared':
-            break
-    else:
-        pytest.fail('Large playback context did not finish')
-    assert store.conn.execute(f'SELECT count(*) FROM {owner}').fetchone()[0] == 1200
+    # Preparation owns a SQLite connection, independently of Store's serving
+    # diagnostics. Keep the same populated WAL file and real bounded commits.
+    with closing(sqlite3.connect(store._db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        conn.execute('PRAGMA synchronous=NORMAL')
+        job.install(conn)
+        prior = 0
+        for _ in range(15):
+            progress = job.step(conn, batch_size=128)
+            assert 0 <= progress.processed - prior <= 128
+            prior = progress.processed
+            if progress.status == 'prepared':
+                break
+        else:
+            pytest.fail('Large playback context did not finish')
+        assert conn.execute(f'SELECT count(*) FROM {owner}').fetchone()[0] == 1200
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -224,7 +232,7 @@ def test_continuing_writer_reference_changes_and_cross_job_renames_reconcile(ins
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_independent_failure_does_not_block_regular_ddl_or_pending_updates(installed, independent_regular_ddl):
+def test_independent_failure_does_not_block_regular_ddl_or_pending_updates(installed):
     store, _ = installed
     seed(store)
     store.settings.set_setting(preparation.BINDINGS_KEY, '{')
@@ -327,3 +335,4 @@ def test_invalid_contexts_fail_durably_without_changing_authoritative_source(ins
         finish(job, store.conn)
     assert job.progress(store.conn).status == 'failed'
     assert store.settings.get_setting(source) == raw
+    regular.migrate(store.conn)

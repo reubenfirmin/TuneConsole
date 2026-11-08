@@ -281,17 +281,19 @@ def statements():
 
 def validate(conn):
     from .current import _tokens
+    from ..schema_inspection import objects
+    definitions = {name: sql for name, (_kind, sql) in objects(conn).items()}
     for sql in statements():
         name = sql.split()[3] if sql.startswith('CREATE UNIQUE') else sql.split()[2]
         if name == 'retained_group_publication_delete':
             from yt_playlist.core import group_retention_progress
             if group_retention_progress.available(conn):
                 sql = group_retention_progress.publication_guard()
-        actual = conn.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone()
-        if actual is None or _tokens(actual[0]) != _tokens(sql):
+        actual = definitions.get(name)
+        if actual is None or _tokens(actual) != _tokens(sql):
             raise MigrationError(f'Incompatible compact group structure: {name}')
     for table in OLD_TABLES:
-        if conn.execute('SELECT 1 FROM sqlite_master WHERE name=?', (table,)).fetchone():
+        if table in definitions:
             raise MigrationError(f'Superseded musical group owner remains: {table}')
 
 

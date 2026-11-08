@@ -7,11 +7,15 @@ import struct
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
 from tests.comparison_support import legacy_projection
 from tests.recommendation_support import seed_publication_subjects
-from tests.store_fixture_support import assert_installed_consumer_input, numbered_store, publication_consumer_reads
+from tests.store_fixture_support import (
+    guarded_numbered_store as guarded_installed,
+    numbered_store,
+    numbered_store as installed,
+    preparation_ddl_connection,
+    publication_consumer_reads,
+)
 from yt_playlist.core import fao, library_pool_state, model_projections, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import ranked_state as preparation
@@ -23,14 +27,9 @@ from yt_playlist.repos import recommendation_publication
 pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
-    pass
-
-
-@pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
-def test_ranked_input_keeps_admitted_history_and_private_guards(installed):
-    assert_installed_consumer_input(*installed)
+    """Ranked preparation exercises real SQL/files without HTTP startup."""
 
 
 def finish(job, conn, size=128):
@@ -85,7 +84,7 @@ def rows(conn, surface, suffix, fields='*'):
 
 
 @pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
-def test_all_six_projections_and_four_lanes_preserve_sources_and_unknown_clocks(installed):
+def test_all_six_projections_and_four_lanes_preserve_sources_and_unknown_clocks(installed, preparation_ddl_connection):
     store, _ = installed
     originals, run_id = seed(store)
     for job in preparation.JOBS.values():
@@ -110,6 +109,7 @@ def test_all_six_projections_and_four_lanes_preserve_sources_and_unknown_clocks(
             assert rows(store.conn, surface, 'genres', 'position,raw_key,family_key,genre_key,resolution_reason') == [
                 (0, 'rock', 'rock', None, None), (1, 'other:Unregistered style', None, None, 'unknown_genre')]
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+    regular.migrate(preparation_ddl_connection)
 
 
 def prepare_native_comparison(store):
@@ -246,7 +246,7 @@ def test_continuing_inputs_reject_stale_plan_and_reconcile_resolved_identities(i
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_interrupt_failure_retry_and_independent_regular_ddl(installed, monkeypatch):
+def test_interrupt_failure_retry_and_independent_regular_ddl(installed, preparation_ddl_connection, monkeypatch):
     store, _ = installed
     seed(store)
     pairs, clicked = preparation.JOBS.values()
@@ -277,8 +277,9 @@ def test_interrupt_failure_retry_and_independent_regular_ddl(installed, monkeypa
         conn.execute('CREATE TABLE independent_ranked_ddl(value TEXT)')
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_ranked_ddl'").fetchone()
-    monkeypatch.setattr(regular, 'CHANGES', (regular.Change(1, 'independent_ranked_ddl', install, validate),))
-    regular.migrate(store.conn)
+    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1,
+        'independent_ranked_ddl', install, validate)))
+    regular.migrate(preparation_ddl_connection)
     assert clicked.progress(store.conn) == failed
     assert store.conn.execute('SELECT max(version) FROM schema_changes').fetchone()[0] == len(regular.CHANGES)
     reopened = Store(store._db_path)
@@ -332,12 +333,12 @@ def test_observationless_capture_cannot_be_admitted_as_native_generation():
         recommendation_publication.validate(plan)
 
 
-@pytest.mark.parametrize('installed', [79], indirect=True)
-def test_roots_preserve_real_generations_versions_and_releases_in_bounded_batches(installed):
+@pytest.mark.parametrize('guarded_installed', [79], indirect=True)
+def test_roots_preserve_real_generations_versions_and_releases_in_bounded_batches(guarded_installed):
     from tests.group_support import publish as publish_groups, recordings
     from tests.repos.test_typed_recommendation_publication import plan, publish
     from yt_playlist.core import group_evidence, recommendation_custody
-    store, _ = installed
+    store, _ = guarded_installed
     _, run_id = seed(store)
     tracks = recordings([('House', 12, .3)])
     with store.conn:
@@ -379,7 +380,7 @@ def test_roots_preserve_real_generations_versions_and_releases_in_bounded_batche
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('kind', ['address', 'candidate', 'codec', 'policy', 'size'])
-def test_invalid_source_fails_closed_retains_authoritative_bytes_and_does_not_block_regular_ddl(installed, monkeypatch, kind, independent_regular_ddl):
+def test_invalid_source_fails_closed_retains_authoritative_bytes_and_does_not_block_regular_ddl(installed, preparation_ddl_connection, monkeypatch, kind):
     store, _ = installed
     originals, run_id = seed(store)
     surface = f'model_pair:{run_id}:incumbent:radio'
@@ -406,7 +407,7 @@ def test_invalid_source_fails_closed_retains_authoritative_bytes_and_does_not_bl
     assert job.progress(store.conn).status == 'failed'
     assert not store.conn.execute('SELECT 1 FROM prepared_model_pairs_heads').fetchone()
     assert store.conn.execute('SELECT payload FROM rec_proposals WHERE surface=?', (surface,)).fetchone()[0] == raw
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

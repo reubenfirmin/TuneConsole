@@ -30,11 +30,11 @@ def history(conn, registry):
     table = conn.execute("SELECT type FROM sqlite_master WHERE name='schema_migrations'").fetchone()
     if table is None:
         return 0
-    columns = list(conn.execute("PRAGMA table_info(schema_migrations)"))
+    columns = conn.execute("PRAGMA table_info(schema_migrations)").fetchall()
     if (table[0] != 'table' or [(r[1], r[2].upper(), r[3], r[5]) for r in columns] !=
             [('version', 'INTEGER', 0, 1), ('name', 'TEXT', 1, 0), ('applied_at', 'REAL', 1, 0)]):
         raise MigrationError("Incompatible schema_migrations layout")
-    rows = list(conn.execute("SELECT version,name,applied_at FROM schema_migrations ORDER BY version"))
+    rows = conn.execute("SELECT version,name,applied_at FROM schema_migrations ORDER BY version").fetchall()
     if len(rows) > len(registry):
         raise MigrationError("Database schema is newer than this application")
     for row, migration in zip(rows, registry):
@@ -147,6 +147,13 @@ def _installed_contract(version):
 
 
 def validate_version(conn, version, *, foreign_keys=True, data=True):
+    from ..schema_inspection import reuse_objects
+
+    with reuse_objects(conn):
+        return _validate_version(conn, version, foreign_keys=foreign_keys, data=data)
+
+
+def _validate_version(conn, version, *, foreign_keys=True, data=True):
     """Use the current contract at its floor; frozen validators serve older upgrades."""
     from . import current
     if (not foreign_keys or not data) and version < 79:

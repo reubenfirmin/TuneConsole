@@ -6,10 +6,31 @@ import sqlite3
 import pytest
 
 from tests.core.test_compact_groups_migration import predecessor
-from tests.repos.test_compact_group_publication import database, finish
+from tests.repos.test_compact_group_publication import (
+    bounded_compact_group_template as compact_group_template,
+    database,
+    finish,
+)
+from tests.store_fixture_support import reuse_reporting_reader
 from yt_playlist.core import group_evidence, group_storage
 from yt_playlist.core import group_reads as group_queries
 from yt_playlist.repos import compact_group_publication as compact, group_publication, group_retention
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Group retention owns SQL and file lifetimes without HTTP startup."""
+
+
+@pytest.fixture(autouse=True)
+def retention_io(database, monkeypatch):
+    store, _ = database
+    # Keep real WAL transactions, cleanup and explicit snapshot guards. These
+    # retention cases do not own power-loss durability or automatic checkpoints.
+    store.conn.execute('PRAGMA synchronous=NORMAL')
+    store.conn.execute('PRAGMA wal_autocheckpoint=0')
+    with reuse_reporting_reader(store, monkeypatch):
+        yield
 
 
 def context(generation='first', version='first-leaf'):

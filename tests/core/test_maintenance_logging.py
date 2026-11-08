@@ -16,6 +16,11 @@ from yt_playlist.rec.worker_tasks import ServingTasks
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Maintenance diagnostics do not construct an HTTP app."""
+
+
 @pytest.fixture
 def publication_store():
     """Real snapshot/publication diagnostics need only their settings input."""
@@ -25,6 +30,16 @@ def publication_store():
         source._bind_repositories()
         source._snapshot_revisions = Revisions(source.conn)
         yield source
+
+
+@pytest.fixture
+def budget_store(publication_store, monkeypatch):
+    # Budget accounting consumes an already saved output. Keep actual SQL and
+    # snapshot diagnostics without bootstrapping unrelated catalog/model owners.
+    publication_store.conn.execute(
+        'CREATE TABLE rec_proposals(surface TEXT PRIMARY KEY,payload TEXT NOT NULL,built_at REAL)')
+    monkeypatch.setattr(publication_store.rec_ledger, 'card_views', Mock(return_value=0))
+    return publication_store
 
 
 @pytest.mark.parametrize('publication_threshold', [0., float('inf')])
@@ -77,7 +92,8 @@ def test_publication_summaries_are_bounded_and_keep_phase_reason_and_progress_co
 
 @pytest.mark.parametrize('report_all_publications', [False, True], ids=['normal-publications', 'all-publications'])
 def test_home_budget_is_counted_once_and_keeps_last_good_collections(
-        store, monkeypatch, caplog, report_all_publications):
+        budget_store, monkeypatch, caplog, report_all_publications):
+    store = budget_store
     clock = [0.0]
     store.maintenance_diagnostics = work_diagnostics.MaintenanceDiagnostics(clock=lambda: clock[0])
     store.rec_proposals.put_proposals('home_prepared', {'last-good': True}, 0)

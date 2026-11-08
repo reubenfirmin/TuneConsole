@@ -5,8 +5,30 @@ from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.web.app import create_app
 from yt_playlist.web.context import Ctx
 from tests.conftest import FakeClient
+from tests.home_fixture_support import home_routes_only, without_metadata_providers
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema
+from tests.store_fixture_support import file_consumer_store as store
+from yt_playlist.core import discovery_sources
+from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import home_prepared
 from yt_playlist.rec.worker_queue import Job
+
+
+pytestmark = pytest.mark.usefixtures('home_routes_only', 'without_metadata_providers')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('jazz', 'Jazz'),)) as schema:
+        yield schema
+
+
+def test_discovery_input_keeps_empty_catalog_and_real_guards(_pristine_current_schema):
+    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert _pristine_current_schema._revision_script
+    assert not _pristine_current_schema.execute('SELECT 1 FROM discovered_albums').fetchone()
+    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
 
 
 class _ArtistClient(FakeClient):
@@ -95,9 +117,17 @@ def test_discovery_pass_publishes_new_songs_before_the_next_rebuild(store, monke
     monkeypatch.setattr(discover, "new_artists", lambda ctx: [])
 
     def populate(ctx, now):
-        for i in range(12):
-            store.discovery.upsert_discovered_track(f"new {i}|artist {i}", f"v{i}", f"New {i}",
-                f"Artist {i}", None, None, "Jazz", "2020", "radio:seed", now)
+        # Discovery's completed output is below the worker admission boundary.
+        # Keep all twelve real discoveries and their source; metadata capture
+        # and provider ingestion are independent of publishing the next pool.
+        tracks = [dict(key=f'new {i}|artist {i}', video_id=f'v{i}', title=f'New {i}',
+                       artist=f'Artist {i}', genre='Jazz', year='2020') for i in range(12)]
+        with atomic_write(store):
+            seed_publication_subjects(store, tracks, discoveries=[track['key'] for track in tracks], now=now)
+            for track in tracks:
+                subject = store.conn.execute('SELECT id FROM recordings WHERE identity_key=?',
+                                             (track['key'],)).fetchone()[0]
+                discovery_sources.retain(store.conn, subject, 'radio:seed', track['video_id'], now)
 
     monkeypatch.setattr(discover, "populate_discovered_tracks", populate)
     monkeypatch.setattr(discover, "populate_radio_tracks", lambda *a: None)

@@ -168,12 +168,16 @@ def verify(conn,revision):
         conn.execute('BEGIN')
         if proof(conn,revision) != captured:
             raise MigrationError('Radio origins changed during verification; reconcile before publication')
+        references = {}
         for header in headers:
             rows = conn.execute('SELECT position,provider_playlist_id,playlist_scope_id,unresolved_reason FROM '+preparation.ORIGINS+
                 ' WHERE source=? AND generation=? ORDER BY position',(header['source'],header['generation']))
             for position,provider in enumerate(decoded[header['source']]):
+                # All rows are checked against the same pinned scope snapshot.
+                if provider not in references:
+                    references[provider] = preparation.reference(conn,provider)
                 actual = rows.fetchone()
-                if actual is None or tuple(actual) != (position,provider,*preparation.reference(conn,provider)):
+                if actual is None or tuple(actual) != (position,provider,*references[provider]):
                     raise MigrationError('Prepared Radio origin members differ from their verified original')
             if rows.fetchone() is not None:
                 raise MigrationError('Prepared Radio origin contains extra members')

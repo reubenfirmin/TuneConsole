@@ -12,6 +12,12 @@ from yt_playlist.rec import measurement, rec_params, scorecard
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.controllers.rec_model import RecommendationModel
 from tests.conftest import seed_catalog_track
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Measurement workers and repository checks do not construct an HTTP app."""
 
 
 def _cards():
@@ -141,58 +147,59 @@ def test_failed_card_does_not_drop_remaining_response_measurements(store, monkey
     assert store.conn.execute("SELECT COUNT(*) FROM rec_served_impressions").fetchone()[0] == 7
 
 
+@pytest.fixture(scope='module')
+def measurement_schema():
+    with bounded_consumer_schema(entries=(('rock', 'Rock'),)) as schema:
+        yield schema
+
+
 @pytest.fixture
-def measurement_worker(tmp_path, monkeypatch, consumer_store):
-    store = consumer_store(tmp_path / "state.db")
+def measurement_worker(tmp_path, monkeypatch, measurement_schema):
+    store = Store(tmp_path / "state.db")
+    store.conn.execute('PRAGMA synchronous=OFF')
+    initialize_consumer(store, measurement_schema)
+    store.conn.execute('PRAGMA wal_autocheckpoint=0')
     seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='video')
     worker = RecWorker(SimpleNamespace(store=store, work=Activity(), logger=logging.getLogger(__name__),
                                        now_fn=lambda: 100))
     monkeypatch.setattr(worker, "_start_loop", lambda: None)
+    # Retention and candidate hydration are below queue ownership and policy
+    # attribution. Preserve actual snapshots, configuration capture and writes.
+    monkeypatch.setattr(store.rec_ledger, '_prune_policy_batch', lambda *args: None)
+    monkeypatch.setattr(store.rec_ledger, 'scorecard_inputs', lambda *args, **kwargs: None)
+    track = {'video_id': 'video', 'title': 'Song', 'artist': 'Artist'}
+    monkeypatch.setattr(type(store.rec_query), 'tracks_by_keys', lambda self, keys: {'song|artist': track})
+    monkeypatch.setattr(type(store.rec_query), 'content_inputs_by_keys', lambda self, keys: {'song|artist': track})
+    monkeypatch.setattr(type(store.discovery), 'discovered_tracks_by_keys', lambda self, keys: {})
     try:
-        yield store, worker
+        # Keep each queued offer's actual pinned reader. Report lookups below
+        # the attribution assertions can share an unpinned read-only connection.
+        with reuse_reporting_reader(store, monkeypatch):
+            yield store, worker
     finally:
         worker.shutdown()
         store.conn.close()
 
 
-def test_batched_queue_preserves_offer_bound_and_closes_every_reader(measurement_worker, monkeypatch):
+def test_batched_queue_preserves_offer_bound_and_offer_time_attribution(measurement_worker):
     store, worker = measurement_worker
-    completed = []
-    # The worker owns admission, draining and reader lifetime. The separate
-    # attribution case below runs real instrumentation and ledger writes.
-    monkeypatch.setattr(measurement.CapturedOffer, 'run', lambda offer: completed.append(offer))
     for _ in range(9):
         _record_visible_tracks(store, 100)
-    queued = list(worker.jobs.measurements)
-    assert len(queued) == 8
-    assert sum(offer.work_units for offer in queued) == 64
-    readers = [offer.snapshot.store.conn for offer in queued]
-    worker._flush_measurements()
-    assert completed == queued[:1]
-    assert sum(offer.work_units for offer in worker.jobs.measurements) == 56
-    while worker.jobs.measurements:
-        worker._flush_measurements()
-    assert completed == queued and sum(offer.work_units for offer in completed) == 64
-    for reader in readers:
-        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
-            reader.execute("SELECT 1")
-
-
-def test_deferred_measurement_keeps_offer_time_attribution(measurement_worker):
-    store, worker = measurement_worker
-    _record_visible_tracks(store, 100)
-    reader = worker.jobs.measurements[0].snapshot.store.conn
+    assert len(worker.jobs.measurements) == 8
+    assert sum(offer.work_units for offer in worker.jobs.measurements) == 64
+    readers = [offer.snapshot.store.conn for offer in worker.jobs.measurements]
     rec_params.set_param(store, "axis_weight_cap", 2)
     store.rec_model.replace_rec_vectors([("song|artist", np.asarray([1., 0.], dtype=np.float32).tobytes())])
     worker._flush_measurements()
-    assert not worker.jobs.measurements
     assert store.conn.execute("SELECT COUNT(*) FROM rec_served_impressions").fetchone()[0] == 8
-    # Every impression refers to an immutable policy. Check every distinct
-    # policy once instead of rebuilding the same scorecard for all eight rows.
-    for row in store.conn.execute(
-            "SELECT min(id) FROM rec_served_impressions GROUP BY model_version"):
+    assert sum(offer.work_units for offer in worker.jobs.measurements) == 56
+    while worker.jobs.measurements:
+        worker._flush_measurements()
+    assert store.conn.execute("SELECT COUNT(*) FROM rec_served_impressions").fetchone()[0] == 64
+    for row in store.conn.execute('SELECT id FROM rec_served_impressions'):
         config = scorecard.served_recommendation(store, row[0])["configuration"]
         assert config["params"]["axis_weight_cap"] == 1.4
         assert config["models"]["collaborative"] == measurement._vector_identity([])
-    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
-        reader.execute("SELECT 1")
+    for reader in readers:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            reader.execute("SELECT 1")

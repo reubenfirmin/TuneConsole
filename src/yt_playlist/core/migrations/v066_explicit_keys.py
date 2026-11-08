@@ -399,7 +399,7 @@ def apply(conn, context):
 def validate(conn, *, replaced=frozenset(), foreign_keys=True, data=True):
     """Validate this replacement when v66 becomes an installed predecessor."""
     from . import current
-    present = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    present = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     definitions = [sql for name, (_, _, sql) in TABLES.items()
                    if name not in replaced and (name != 'stale_dismissed' or name in present)]
     current._validate(conn, current._schema_contract((*definitions, *statements())), 66,

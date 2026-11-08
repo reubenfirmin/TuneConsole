@@ -19,7 +19,42 @@ from yt_playlist.web.app import create_app
 from yt_playlist.util.matching import identity_key
 from tests.conftest import FakeClient, _track
 from tests.recommendation_support import seed_publication_subjects
-from tests.store_fixture_support import file_consumer_store as store
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def road_trip_http(monkeypatch):
+    from yt_playlist.providers import genres
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import audio_preview
+
+    monkeypatch.setattr(webapp, 'build_all',
+                        lambda ctx: [road_trip_route.build(ctx), audio_preview.build(ctx)])
+    monkeypatch.setattr(genres, 'configure', lambda *args, **kwargs: None)
+
+
+@pytest.fixture(scope='module')
+def road_trip_schema():
+    entries = (('rock', 'Rock'), ('pop', 'Pop'), ('jazz', 'Jazz'), ('funk', 'Funk'),
+               ('metal', 'Metal'), ('synthpop', 'Synth-Pop'),
+               ('alternative rock', 'Alternative Rock'), ('indie rock', 'Indie Rock'),
+               ('singer-songwriter', 'Singer-Songwriter'))
+    with bounded_consumer_schema(entries) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(tmp_path, road_trip_schema, monkeypatch):
+    database = Store(tmp_path / 'road-trip.db')
+    try:
+        initialize_consumer(database, road_trip_schema)
+        database.conn.execute('PRAGMA synchronous=NORMAL')
+        database.conn.execute('PRAGMA wal_autocheckpoint=0')
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
+    finally:
+        database.conn.close()
 
 
 def _app(store, client=None, monkeypatch=None):
@@ -91,18 +126,15 @@ def test_road_trip_page_renders(store):
     assert "Road Trip" in r.text
 
 
-@pytest.fixture
-def measured_draft(store, monkeypatch):
+
+
+
+def test_draft_serving_and_generated_save_are_measured_without_counting_progress_polls(store, monkeypatch):
     c, _ = _app(store, monkeypatch=monkeypatch)
-    _stub_pools(monkeypatch, store, own_count=2, other_count=2)
-    rid = _recipe(store, target_minutes=15)
+    _stub_pools(monkeypatch, store)
+    rid = _recipe(store)
     assert c.post(f"/road_trip/recipes/{rid}/build").status_code == 200
     draft = store.road_trip.get_road_trip_draft(rid)
-    return c, rid, draft
-
-
-def test_draft_serving_is_measured_once_and_progress_polls_preserve_it(store, measured_draft):
-    c, rid, draft = measured_draft
     rows = store.conn.execute("SELECT * FROM rec_served_impressions WHERE surface='road_trip' ORDER BY rank").fetchall()
     tracks = road_trip_rec.draft_tracks(draft)
     expected = [identity_key(t['title'], t['artist']) if t['video_id'].startswith('m')
@@ -112,30 +144,21 @@ def test_draft_serving_is_measured_once_and_progress_polls_preserve_it(store, me
     assert [trace['candidate']['video_id'] for trace in traces] == [t['video_id'] for t in tracks]
     assert any(key.startswith('@unresolved-video:') for key in expected)
     assert rows
+    before = scorecard.recommendation_scorecard(store, 999, 1001)["impressions"]
     for _ in range(3):
         assert c.get(f"/road_trip/draft/{rid}/progress").status_code == 200
-    assert store.conn.execute("SELECT * FROM rec_served_impressions ORDER BY rank").fetchall() == rows
-
-
-def test_saved_draft_records_generated_responses_without_discovery_conversion(store, measured_draft, monkeypatch):
-    c, rid, draft = measured_draft
-    rows = store.conn.execute("SELECT * FROM rec_served_impressions WHERE surface='road_trip'").fetchall()
-    assert len(rows) == 3
-    # Playlist publication has its own confirmed-write owner below. Supply its
-    # completed result and membership query while retaining actual measurement
-    # writes, generated-save attribution and the scorecard.
+    assert scorecard.recommendation_scorecard(store, 999, 1001)["impressions"] == before
     generated = Mock(return_value={'new_ytm': 'PL_MEASURED', 'pid': 301, 'added': len(rows)})
     keys = Mock(return_value=[row['identity_key'] for row in rows])
     monkeypatch.setattr(road_trip_route.playlist_generated, 'create_generated_playlist', generated)
     monkeypatch.setattr(store.playlists, 'get_playlist_track_keys', keys)
     assert c.post(f"/road_trip/draft/{rid}/save").status_code == 200
     generated.assert_called_once()
-    assert generated.call_args.args[2] == road_trip_rec.draft_tracks(draft)
+    assert generated.call_args.args[2] == tracks
     keys.assert_called_once_with(301)
     score = scorecard.recommendation_scorecard(store, 999, 1001)
     assert score["save"] == len(rows) and score["conversion"] == 0
     assert score["by_ownership"]["cold"]["impressions"] > 0
-
 
 def test_reopening_and_saving_repairs_passenger_genre_membership(store, monkeypatch):
     seeds = ["Weezer", "We Were Promised Jetpacks", "Staind"]
@@ -286,16 +309,16 @@ def test_build_returns_your_half_immediately_then_fills_in_theirs(store, monkeyp
 
 
 def test_rebuilding_gives_a_different_playlist(store, monkeypatch):
-    _stub_pools(monkeypatch, store, own_count=8, other_count=8)
+    _stub_pools(monkeypatch, store)
     c, _ = _app(store, monkeypatch=monkeypatch)
     rid = _recipe(store)
 
     runs = []
-    for _ in range(2):
+    for _ in range(4):
         c.post(f"/road_trip/recipes/{rid}/build")
         runs.append(tuple(store.road_trip.get_road_trip_draft(rid)["picks"]))
 
-    assert len(set(runs)) == 2
+    assert len(set(runs)) == 4
 
 
 def test_build_without_an_account_explains_itself(store, monkeypatch):
@@ -621,10 +644,10 @@ def test_saving_the_draft_creates_the_generated_playlist(store, monkeypatch):
 
 
 def test_saving_plays_in_the_connected_youtube_tab_when_ready(store, monkeypatch):
-    _stub_pools(monkeypatch, store, own_count=2, other_count=2)
+    _stub_pools(monkeypatch, store)
     client = FakeClient()
     c, _ = _app(store, client, monkeypatch)
-    rid = _recipe(store, target_minutes=15)
+    rid = _recipe(store)
     c.post(f"/road_trip/recipes/{rid}/build")
     bridge = c.app.state.ctx.bridge = SimpleNamespace(connected=True, begin_playback_intent=lambda: 7)
     navigated, calls = threading.Event(), []

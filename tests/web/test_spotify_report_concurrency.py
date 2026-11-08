@@ -1,5 +1,6 @@
 """An in-flight album operation owns its report until its provider work settles."""
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 import json
 import threading
 import time
@@ -8,7 +9,12 @@ from fastapi.testclient import TestClient
 import pytest
 
 from tests.test_spotify_album_import import AlbumClient, album_zip
-from tests.web.test_spotify_data_route import _prepare_library, _select_library, _wait_for_library_job
+from tests.home_fixture_support import home_page_bytecode, without_metadata_providers
+from tests.store_fixture_support import file_consumer_store as store
+from tests.web.test_spotify_data_route import (
+    _prepare_library, _pristine_current_schema, _select_library, _wait_for_library_job,
+    spotify_routes,
+)
 from yt_playlist.library.spotify_library import import_spotify_library, SPOTIFY_REPORT_SCHEMA
 from yt_playlist.web.app import create_app
 from yt_playlist.web import spotify_import
@@ -104,7 +110,12 @@ def test_album_operation_rejects_overlapping_report_deletion_or_replacement(stor
 
 
 @pytest.mark.parametrize("operation", ["find-album-candidates", "resolve-album"])
-def test_failed_album_operation_releases_report_owner(store, operation):
+def test_failed_album_operation_releases_report_owner(store, monkeypatch, operation):
+    from yt_playlist.library import spotify_library
+
+    waits = []
+    monkeypatch.setattr(spotify_library, 'with_retry',
+                        partial(spotify_library.with_retry, sleep=waits.append))
     iid = store.accounts.upsert_account("First", "first", None, True)
     client = AlbumClient()
     client.results["One Artist"].append({**client.results["One Artist"][0], "browseId": "MPRE-alternate"})
@@ -113,6 +124,7 @@ def test_failed_album_operation_releases_report_owner(store, operation):
                      "report_schema": SPOTIFY_REPORT_SCHEMA, "report": report})
     client.failed_searches.add("One Artist")
     client.failed_saves.add("OLAK-One")
+    searches_before = len(client.searches)
     web = TestClient(create_app(store, lambda: {iid: client}, now_fn=lambda: 1000,
                                 background_work=False), base_url="http://127.0.0.1:8123")
     response = web.post("/import/spotify-library/" + operation,
@@ -122,6 +134,11 @@ def test_failed_album_operation_releases_report_owner(store, operation):
     assert json.loads(store.settings.get_setting(JOB_KEY))["report"]["albums_unmatched"] == 1
     assert web.post("/import/spotify-library/delete-report", follow_redirects=False).status_code == 303
     assert store.settings.get_setting(JOB_KEY) is None
+    if operation == 'find-album-candidates':
+        assert client.searches[searches_before:] == ['One Artist'] * 3
+        assert waits == [0.5, 1.0]
+    else:
+        assert waits == []
 
 
 @pytest.mark.parametrize("handoff", ["completed", "replacement", "deleted"])

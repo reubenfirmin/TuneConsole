@@ -29,16 +29,6 @@ def membership_predecessor():
         yield conn
 
 
-def test_membership_predecessor_keeps_real_capture_owners_and_completed_regular_sql(membership_predecessor):
-    conn = membership_predecessor
-    assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 104
-    assert regular.validate(conn) == len(regular.CHANGES)
-    assert conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert not conn.execute('SELECT 1 FROM album_share_snapshots').fetchone()
-    assert [row[1] for row in conn.execute('PRAGMA table_info(album_share_items)') if row[5]] == [
-        'snapshot_id', 'position']
-
-
 def installed(path, predecessor):
     store = Store(path)
     predecessor.backup(store.conn)
@@ -89,9 +79,7 @@ def test_installed_shares_keep_exact_membership_across_upgrade_alias_and_restart
     store = installed(path, membership_predecessor)
     aid,snapshot,empty = capture(store.conn,legacy=legacy)
     before = list(map(tuple,store.conn.execute('SELECT * FROM album_share_items ORDER BY snapshot_id,position')))
-    # This boundary owns conversion; the fresh Store below owns admission.
-    # The intervening alias operation uses these same real SQL owners directly.
-    migrate(store.conn, registry=registry.MIGRATIONS)
+    upgrade_fixture(store)
     assert list(map(tuple,store.conn.execute('SELECT * FROM album_share_items ORDER BY snapshot_id,position')))==before
     assert_frozen(store.conn,snapshot)
     with store.conn:

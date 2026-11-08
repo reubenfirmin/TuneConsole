@@ -1,5 +1,4 @@
 """Current-listening policy is maintained without a visible/polling Radio page."""
-from copy import deepcopy
 import json
 import time
 
@@ -7,12 +6,17 @@ import numpy as np
 import pytest
 
 from tests.radio_session_support import controlled_radio_checkpoints, poc, play
-from tests.prepared_fixture_support import prepared_template
-from tests.store_fixture_support import bounded_consumer_schema, reuse_reporting_reader
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from yt_playlist.core.store import Store
 from yt_playlist.rec import embedding_vectors as embed, measurement, radio_tuning, rec_params
 from yt_playlist.rec.radio_candidates import RadioCandidates
 from yt_playlist.web import radio_session
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These controller tests construct no HTTP application or sync service."""
 
 
 @pytest.fixture(scope='module')
@@ -22,15 +26,6 @@ def now_schema():
     with bounded_consumer_schema((('ambient', 'Ambient'), ('techno', 'Techno'))) as schema:
         yield schema
 
-
-def test_now_schema_keeps_both_style_inputs_and_real_snapshot_guards(now_schema):
-    from yt_playlist.core.migrations import current, regular
-
-    assert now_schema.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert now_schema.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == current.VERSION
-    assert regular.validate(now_schema) == len(regular.CHANGES)
-    assert now_schema.execute('SELECT count(*) FROM recordings').fetchone()[0] == 0
-    assert 'CREATE TEMP TRIGGER' in now_schema._revision_script
 
 
 def prepare_now_candidates(store):
@@ -57,34 +52,28 @@ def prepare_now_candidates(store):
     return tracks
 
 
-@pytest.fixture(scope='module')
-def now_template(now_schema):
-    with prepared_template(now_schema, prepare_now_candidates) as template:
-        yield template
-
-
-def test_now_candidate_input_keeps_both_native_pools_and_all_twelve_recordings(now_template):
-    source = now_template.source
-    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert source.conn.execute('SELECT count(*) FROM recordings').fetchone()[0] == 12
-    assert len(now_template.result) == 12
-    assert {track['genre'] for track in now_template.result} == {'Ambient', 'Techno'}
-    assert {str(mode['mode_id']) for mode in source.modes.list_modes()} == {'1', '2'}
-    assert source.recommendations.head('home')
-
-
 @pytest.fixture
-def store(now_template, tmp_path, monkeypatch):
-    with now_template.open(tmp_path / 'now.db') as source:
+def store(now_schema, tmp_path, monkeypatch):
+    source = Store(tmp_path / 'now.db')
+    try:
+        initialize_consumer(source, now_schema)
+        source.conn.execute('PRAGMA synchronous=NORMAL')
         source.conn.execute('PRAGMA wal_autocheckpoint=0')
         source._fixture_radio_pool = []
         with reuse_reporting_reader(source, monkeypatch):
             yield source
+    finally:
+        source.conn.close()
 
 
 @pytest.fixture
-def prepared(now_template):
-    return deepcopy(now_template.result)
+def prepared(store, monkeypatch):
+    tracks = prepare_now_candidates(store)
+    entries = store.tracks.track_ids_for_videos([track['video_id'] for track in tracks])
+    # Playlist confirmation consumes these already observed uploads. Preserve
+    # actual membership/publication SQL without repeating metadata ingestion.
+    monkeypatch.setattr(store.tracks, 'upsert_track', lambda video, *args, **kwargs: entries[video])
+    return tracks
 
 
 @pytest.fixture

@@ -7,10 +7,12 @@ import time
 import pytest
 
 from tests.core.test_listening_output_preparation import chunk, head, seed
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.prepared_fixture_support import assert_upgrade_phase
 from tests.publication_timing_support import publication_costs
-from tests.store_fixture_support import publication_schema_inspections
+from tests.store_fixture_support import (
+    guarded_numbered_store as installed,
+    preparation_ddl_connection,
+    publication_schema_inspections,
+)
 from yt_playlist.core import recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import listening_outputs as preparation, listening_publication as publication
@@ -23,11 +25,6 @@ pytestmark = pytest.mark.usefixtures('publication_schema_inspections')
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     """SQL and file publication does not construct an HTTP lifespan."""
-
-
-def test_listening_publication_input_keeps_installed_history_and_private_snapshot_guards(
-        _bounded_installed_schema):
-    assert_upgrade_phase(_bounded_installed_schema(89), 89)
 
 
 def prepared(conn, size=128):
@@ -54,6 +51,7 @@ def test_preopened_readers_use_exact_verified_files_and_match_native(installed, 
     preopened, native = Store(store._db_path), Store(tmp_path/'native.db')
     try:
         preopened.init_schema(defer_metadata=True)
+        native.conn.execute('PRAGMA synchronous=OFF')
         store.conn.backup(native.conn)
         runner.migrate(native.conn, registry=registry.MIGRATIONS[:90])
         native.init_schema(defer_metadata=True)
@@ -83,7 +81,8 @@ def test_preopened_readers_use_exact_verified_files_and_match_native(installed, 
 
 @pytest.mark.parametrize('installed', [89], indirect=True)
 @pytest.mark.parametrize('failure', ['field','time','reference','missing-reference','original','file','omitted'])
-def test_incorrect_headers_references_files_and_source_coverage_cannot_publish(installed, failure):
+def test_incorrect_headers_references_files_and_source_coverage_cannot_publish(
+        installed, failure, preparation_ddl_connection):
     store, _ = installed
     seed(store)
     prepared(store.conn)
@@ -106,6 +105,7 @@ def test_incorrect_headers_references_files_and_source_coverage_cannot_publish(i
     with pytest.raises((MigrationError, ValueError, OSError)):
         publication.OWNER.publish(store.conn, stage=stage.id)
     assert publication.OWNER.selected(store.conn) is None
+    regular.migrate(preparation_ddl_connection)
 
 
 @pytest.mark.parametrize('installed', [89], indirect=True)
@@ -133,10 +133,7 @@ def test_long_edition_bounded_resume_snapshot_continuing_writer_and_custody(inst
 
     store, _ = installed
     started = time.perf_counter()
-    # Five actual chunks plus both headers span three full two-row checkpoints
-    # and a tail. The shared canvas owners retain the production 128-link cap;
-    # repeating six hundred file bodies adds no new restart or custody state.
-    chunks = dict(chunk(number) for number in range(5))
+    chunks = dict(chunk(number) for number in range(600))
     refs = [{'key':key, 'from':'2026-01-01', 'until':'2026-01-02', 'bytes':len(raw.encode())} for key,raw in chunks.items()]
     documents = {'listening_analytics':json.dumps({'chunks':refs}), 'listening_edition':'{"text":"Old edition"}',
         **{'listening_chunk:'+key:raw for key,raw in chunks.items()}}
@@ -144,14 +141,14 @@ def test_long_edition_bounded_resume_snapshot_continuing_writer_and_custody(inst
         store.conn.executemany('INSERT INTO rec_proposals VALUES (?,?,100)', documents.items())
     record_property('source_documents_seconds', time.perf_counter() - started)
     measured('initial_preparation', prepared, store.conn)
-    first = measured('first_map_checkpoint', publication.OWNER.step, store.conn, batch_size=2)
-    assert first.copied == 2 and not first.complete
+    first = measured('first_map_checkpoint', publication.OWNER.step, store.conn, batch_size=128)
+    assert first.copied == 128 and not first.complete
     reopened = measured('reopen', Store, store._db_path)
     try:
-        resumed = measured('resumed_map_checkpoint', publication.OWNER.step, reopened.conn, batch_size=2)
-        assert resumed.id == first.id and resumed.copied == 4 and not resumed.complete
-        stage = measured('remaining_map_drain', mapped, reopened.conn, 2)
-        assert stage.copied == len(documents) == 7
+        resumed = measured('resumed_map_checkpoint', publication.OWNER.step, reopened.conn, batch_size=128)
+        assert resumed.id == first.id and resumed.copied == 256
+        stage = measured('remaining_map_drain', mapped, reopened.conn)
+        assert stage.copied == len(documents) == 602
         measured('first_publication', publication.OWNER.publish, reopened.conn, stage=stage.id)
     finally:
         reopened.conn.close()
@@ -266,7 +263,7 @@ def test_interruptions_missing_file_repair_and_failed_preparation_leave_ddl_inde
         conn.execute('CREATE TABLE independent_listening_publication(value TEXT)')
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_listening_publication'").fetchone()
-    monkeypatch.setattr(regular, 'CHANGES', (regular.Change(1,'independent_listening_publication',install,validate),))
+    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1,'independent_listening_publication',install,validate)))
     regular.migrate(store.conn)
     assert preparation.JOB.progress(store.conn) == failed
     with pytest.raises(MigrationError, match='retry explicitly'):
@@ -276,3 +273,29 @@ def test_interruptions_missing_file_repair_and_failed_preparation_leave_ddl_inde
     prepared(store.conn)
     publication.OWNER.publish(store.conn, stage=mapped(store.conn).id)
     assert store.rec_proposals.get_proposals('listening_edition') == {'text':'New'}
+
+
+@pytest.mark.parametrize('installed', [89], indirect=True)
+def test_native_upgrade_preserves_files_and_requires_retained_custody_guards(installed):
+    store, _ = installed
+    path = store._db_path
+    try:
+        store.init_schema(defer_metadata=True)
+        documents = seed(store)
+        prepared(store.conn)
+        publication.OWNER.publish(store.conn, stage=mapped(store.conn).id)
+        store.conn.close()
+        store = Store(path)
+        store.conn.execute('PRAGMA synchronous=OFF')
+        runner.migrate(store.conn, registry=registry.MIGRATIONS)
+        store.init_schema(defer_metadata=True)
+        assert publication.OWNER.selected(store.conn) is None
+        for surface, raw in documents.items():
+            assert store.rec_proposals._proposal_json(surface) == raw
+        regular.validate(store.conn)
+        with store.conn:
+            store.conn.execute('DROP TRIGGER '+preparation.HEAD+'_mapped_delete')
+        with pytest.raises(MigrationError, match='Incompatible mapped publication object'):
+            regular.validate(store.conn)
+    finally:
+        store.conn.close()

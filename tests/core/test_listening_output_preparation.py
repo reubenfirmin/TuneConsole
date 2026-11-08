@@ -6,12 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
-from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import numbered_store as installed
 from yt_playlist.core import recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import listening_outputs as preparation
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Preparation uses SQL and files without constructing an HTTP app."""
 
 
 def chunk(number):
@@ -54,6 +58,7 @@ def test_files_and_individually_verified_chunk_links_retain_exact_sources(instal
     preparation.JOB.install(conn)
     first = preparation.JOB.step(conn, batch_size=2)
     assert first.processed == 2 and head(conn) is None
+    regular.migrate(conn)
     finish(preparation.JOB, conn)
     for surface, raw in original.items():
         assert preparation.read_original(head(conn, surface)) == raw
@@ -101,6 +106,7 @@ def test_long_manifest_batches_individual_references_and_reports_missing_chunks(
     with pytest.raises(MigrationError, match='Missing selected listening chunk'):
         preparation.LINK_JOB.step(conn, batch_size=128)
     assert preparation.LINK_JOB.progress(conn).status == 'failed'
+    regular.migrate(conn)
     assert store.rec_proposals.get_proposals('listening_analytics') == {'chunks': refs}
 
 
@@ -154,7 +160,7 @@ def test_file_io_releases_snapshot_and_fences_concurrent_source_edit(installed, 
 
 
 @pytest.mark.parametrize('installed', [89], indirect=True)
-def test_interrupted_member_and_failed_file_work_keep_prior_checkpoint(installed, monkeypatch, independent_regular_ddl):
+def test_interrupted_member_and_failed_file_work_keep_prior_checkpoint(installed, monkeypatch):
     store, _ = installed
     conn = store.conn
     original = seed(store)
@@ -202,3 +208,4 @@ def test_invalid_original_is_retained_and_fails_durably(installed, surface, valu
         finish(preparation.JOB, store.conn)
     assert preparation.JOB.progress(store.conn).status == 'failed'
     assert store.rec_proposals.get_proposals(surface) == value
+    regular.migrate(store.conn)

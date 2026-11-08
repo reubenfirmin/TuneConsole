@@ -5,9 +5,7 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
-from tests.independent_schema_support import independent_regular_ddl
-from tests.store_fixture_support import numbered_store
+from tests.store_fixture_support import numbered_store, numbered_store as installed
 from yt_playlist.core import recommendation_outputs as files, recommendation_reports as reports
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import recommendation_reports as preparation
@@ -55,6 +53,7 @@ def test_exact_multi_part_report_and_usage_keep_source_authority(numbered_store)
     preparation.JOB.install(conn)
     first = preparation.JOB.step(conn, batch_size=1)
     assert first.processed == 1 and first.prepared_revision is None
+    regular.migrate(conn)
     finish(conn)
     captured = head(conn)
     assert captured['part_count'] > 1
@@ -107,7 +106,7 @@ def test_file_work_releases_snapshot_and_rejects_concurrent_replacement(installe
 
 
 @pytest.mark.parametrize('installed', [92], indirect=True)
-def test_disk_failure_interruption_and_restart_keep_committed_reports(installed, monkeypatch, independent_regular_ddl):
+def test_disk_failure_interruption_and_restart_keep_committed_reports(installed, monkeypatch):
     store, _ = installed
     raw = seed(store)
     conn = store.conn

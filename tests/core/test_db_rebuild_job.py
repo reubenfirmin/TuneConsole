@@ -243,6 +243,54 @@ def test_direct_destination_uses_readonly_original_and_shared_install(installed,
     assert store.settings.get_setting('after rebuild') == 'accepted'
 
 
+@pytest.mark.parametrize(('source_fixture', 'changed'), [
+    ('production64', False), ('development93', False), ('development93', True)])
+def test_startup_reuses_unchanged_source_and_restarts_after_accepted_edits(
+        request, source_fixture, changed, monkeypatch):
+    from yt_playlist.core.store import Store
+
+    path = request.getfixturevalue(source_fixture)
+    store = Store(path)
+    store.init_schema()
+    first = StorageMaintenance(store)
+    progress = first._progress
+
+    def interrupted(phase, detail):
+        progress(phase, detail)
+        if detail.get('stage') == 'copy:playlist_items':
+            raise InterruptedError('controlled background checkpoint')
+
+    monkeypatch.setattr(first, '_progress', interrupted)
+    try:
+        first.start()
+        first.join(30)
+        assert first.phase == 'deferred', first.error
+        state = db_handles.state(path)
+        assert state['phase'] == 'failed' and state['failed_phase'] == 'building'
+        if changed:
+            store.settings.set_setting('accepted-between-attempts', 'preserved')
+        second = StorageMaintenance(store)
+        second.start()
+        second.join(30)
+        assert second.phase == 'done', second.error
+        if changed:
+            assert second.report['id'] != state['id']
+            assert store.settings.get_setting('accepted-between-attempts') == 'preserved'
+        else:
+            assert second.report['id'] == state['id'] and second.report['resumed']
+        assert second.ready.is_set() and not store.activity_paused
+        assert store.conn.execute('SELECT max(version) FROM database_rebuild_source_history').fetchone()[0] == (
+            64 if source_fixture == 'production64' else 93)
+        store.settings.set_setting('after-automatic-resume', 'accepted')
+    finally:
+        first.stop()
+        first.join(30)
+        if 'second' in locals():
+            second.stop()
+            second.join(30)
+        store.conn.close()
+
+
 @pytest.mark.parametrize('installed', [107], indirect=True)
 @pytest.mark.parametrize('interrupt', [False, True])
 def test_background_destination_keeps_serving_and_can_resume_committed_copy(installed, interrupt):

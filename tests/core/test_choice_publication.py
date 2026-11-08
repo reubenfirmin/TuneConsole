@@ -6,14 +6,17 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_choice_learning_preparation import seed,finish,head,originals
 from tests.genre_catalog_support import bound_catalog
-from tests.store_fixture_support import install_numbered_input
+from tests.store_fixture_support import install_numbered_input, publication_consumer_reads
 from yt_playlist.core import group_evidence,choice_learning_state
 from yt_playlist.core.migrations import regular,registry,runner,MigrationError
 from yt_playlist.core.preparation import choice_learning as preparation,choice_publication as publication
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 
 
 @pytest.fixture(autouse=True)

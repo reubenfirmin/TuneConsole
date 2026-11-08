@@ -562,35 +562,100 @@ def test_runtime_monitor_defers_while_progress_writer_is_busy(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize('workers', [0, 2])
-def test_runtime_target_advances_as_tests_complete(tmp_path_factory, monkeypatch, workers):
-    from types import SimpleNamespace
-    from pytest_time_limit import RuntimeTarget
+def test_runtime_target_advances_as_tests_complete(tmp_path, tmp_path_factory, monkeypatch, workers):
+    import pytest_progress
+    import pytest_time_limit
 
-    clock, timers = [100.], []
-    config = SimpleNamespace(pluginmanager=SimpleNamespace(getplugin=lambda name: None),
-        _tmp_path_factory=tmp_path_factory, getoption=lambda name, **kwargs: workers)
-    monitor = RuntimeTarget(config, .8, .5)
-    monkeypatch.setattr('pytest_time_limit._monotonic', lambda: clock[0])
-    monkeypatch.setattr(monitor, 'start_timer', lambda *args: timers.append(args))
-    monkeypatch.setattr(monitor, 'interrupt', lambda: pytest.fail('Completed tests must advance the target'))
-    monitor.pytest_sessionstart(None)
-    ids = [f'test_progressing.py::test_progress[{i}]' for i in range(4)]
-    monitor.pytest_collection_finish(SimpleNamespace(items=ids))
-    if workers:
-        assert monitor.selected is None
-        monitor.pytest_xdist_node_collection_finished(None, ids)
-        monitor.pytest_xdist_node_collection_finished(None, ids)
-    assert monitor.selected == 4 and timers == [(1, 1)]
-    for nodeid in ids:
-        monitor.pytest_runtest_logstart(nodeid, None)
-        clock[0] += .3
-        monitor.pytest_runtest_logreport(SimpleNamespace(nodeid=nodeid, when='call', duration=.3))
-        monitor.pytest_runtest_logfinish(nodeid, None)
-        monitor.expired(signal.SIGALRM, None)
-    assert clock[0] - monitor.started > monitor.target
-    assert monitor.completed == set(ids) and not monitor.active
+    clock = [100.]
+    monkeypatch.setattr(pytest_time_limit, '_monotonic', lambda: clock[0])
+    monkeypatch.setattr(pytest_progress, '_monotonic', lambda: clock[0])
+    monkeypatch.setattr(pytest_time_limit, 'coverage_data_locked', lambda: False)
+    timers = []
+    monkeypatch.setattr(pytest_time_limit.SessionLimit, 'start_timer',
+                        lambda monitor, delay, interval=0: timers.append((delay, interval)))
+    options = dict(test_time_limit=0, test_runtime_target=3, test_runtime_slack=3,
+                   test_progress=tmp_path / 'progress.jsonl', numprocesses=workers)
+    plugins = pytest.PytestPluginManager()
+    with ExitStack() as cleanup:
+        config = SimpleNamespace(pluginmanager=plugins, getoption=lambda name, default=None: options.get(name, default),
+                                 add_cleanup=cleanup.callback, _tmp_path_factory=tmp_path_factory)
+        pytest_time_limit.pytest_configure(config)
+        pytest_progress.pytest_configure(config)
+        monitor = plugins.getplugin('test-session-time-limit')
+        ids = [f'test_progressing.py::test_progress[{case}]' for case in range(4)]
+        session = SimpleNamespace(config=config, items=[SimpleNamespace(nodeid=nodeid) for nodeid in ids])
+        plugins.hook.pytest_sessionstart(session=session)
+        plugins.hook.pytest_collection_finish(session=session)
+        worker_monitors = []
+        for _ in range(workers):
+            node = SimpleNamespace(workerinput={})
+            plugins.hook.pytest_configure_node(node=node)
+            plugins.hook.pytest_xdist_node_collection_finished(node=node, ids=ids)
+            worker_config = SimpleNamespace(pluginmanager=plugins, workerinput=node.workerinput)
+            worker = pytest_time_limit.RuntimeTarget(worker_config, 3, 3)
+            worker.pytest_sessionstart(None)
+            worker_monitors.append(worker)
+        assert monitor.selected == 4  # Each worker reports the same global collection.
+        assert timers == [(1, 1)] * (workers + 1)
+        for nodeid in ids:
+            plugins.hook.pytest_runtest_logstart(nodeid=nodeid, location=None)
+            for phase in ('setup', 'call', 'teardown'):
+                if phase == 'call':
+                    clock[0] += .9
+                report = SimpleNamespace(nodeid=nodeid, when=phase, failed=False, outcome='passed',
+                                         duration=.9 if phase == 'call' else 0,
+                                         worker_id='gw0' if workers else 'serial')
+                plugins.hook.pytest_runtest_logreport(report=report)
+                monitor.expired(signal.SIGALRM, None)
+                for worker in worker_monitors:
+                    worker.expired(signal.SIGALRM, None)
+            plugins.hook.pytest_runtest_logfinish(nodeid=nodeid, location=None)
+        assert monitor.completed == set(ids) and not monitor.active
+        assert monitor.interruption is None
+        assert all(worker.interruption is None for worker in worker_monitors)
+        assert json.loads(monitor.state_path.read_text()) == {'stop': False}
+        plugins.hook.pytest_sessionfinish(session=session, exitstatus=0)
+    receipts = [json.loads(line) for line in options['test_progress'].read_text().splitlines()]
+    assert len([row for row in receipts if row['event'] == 'collection']) == 1
+    assert len([row for row in receipts if row['event'] == 'end']) == 4
+    assert receipts[-1]['event'] == 'finish' and receipts[-1]['exitstatus'] == 0
+    assert receipts[-1]['elapsed_seconds'] == pytest.approx(3.6)
+    assert not any(row['event'] == 'pace_stop' for row in receipts)
+
+
+@pytest.mark.parametrize('completed', [0, 1, 4])
+def test_runtime_target_stops_just_beyond_earned_progress(tmp_path, monkeypatch, completed):
+    import pytest_time_limit
+
+    # Completed tests buy target/selected seconds each. Duplicate finish
+    # messages must not buy extra time, and the allowance includes its boundary.
+    clock = [100.]
+    monkeypatch.setattr(pytest_time_limit, '_monotonic', lambda: clock[0])
+    monkeypatch.setattr(pytest_time_limit, 'coverage_data_locked', lambda: False)
+    monkeypatch.setattr(signal, 'setitimer', lambda *args: None)
+    config = SimpleNamespace(pluginmanager=SimpleNamespace(getplugin=lambda name: None))
+    monitor = pytest_time_limit.RuntimeTarget(config, 3, 3)
+    monitor.started, monitor.selected = clock[0], 4
+    monitor.state_path = tmp_path / 'runtime-state.json'
+    monitor.state_path.write_text('{"stop":false}')
+    for case in range(completed):
+        for _ in range(2):
+            monitor.pytest_runtest_logfinish(f'test_progress[{case}]', None)
+    clock[0] += 3 + .75 * completed
+    monitor.expired(signal.SIGALRM, None)
     assert monitor.interruption is None
     assert json.loads(monitor.state_path.read_text()) == {'stop': False}
+    clock[0] += .001
+    with pytest.raises(KeyboardInterrupt, match='behind the target line'):
+        monitor.expired(signal.SIGALRM, None)
+    state = json.loads(monitor.state_path.read_text())
+    assert state == {'stop': True, 'message': monitor.interruption}
+    worker = pytest_time_limit.RuntimeTarget(
+        SimpleNamespace(workerinput={}, pluginmanager=config.pluginmanager), 3, 3)
+    worker.state_path = monitor.state_path
+    with pytest.raises(KeyboardInterrupt, match='behind the target line'):
+        worker.expired(signal.SIGALRM, None)
+    assert worker.interruption == monitor.interruption
 
 
 def test_runtime_stop_storage_failure_interrupts_coordinator_and_workers(tmp_path, monkeypatch):

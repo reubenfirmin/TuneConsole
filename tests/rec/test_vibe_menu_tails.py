@@ -3,12 +3,14 @@ from copy import deepcopy
 
 import pytest
 
+from tests.vibe_menu_support import disable_periodic_library_sync, vibe_selection
 from yt_playlist.core import json_cache
 from yt_playlist.rec import home_vibe, vibe_pools, vibe_readiness
 
 
 def test_filled_comfort_card_does_not_resolve_its_unused_temporal_fallback(
-        store, vibe_menus, monkeypatch):
+        vibe_selection, monkeypatch):
+    store = vibe_selection
     with store.read_view() as reader:
         value = json_cache.decode(vibe_readiness._source(reader))
         expected = [(preset, [(card.get('pool_lane', card['lane']), [item['key'] for item in card['tracks']])
@@ -39,7 +41,8 @@ def test_filled_comfort_card_does_not_resolve_its_unused_temporal_fallback(
 
 @pytest.mark.parametrize('late_members', ['none', 'all', 'comfort'])
 def test_unused_tails_preserve_full_selection_and_expand_when_needed(
-        store, vibe_menus, monkeypatch, late_members):
+        vibe_selection, monkeypatch, late_members):
+    store = vibe_selection
     with store.read_view() as reader:
         value = json_cache.decode(vibe_readiness._source(reader))
         assert value is not None
@@ -84,7 +87,8 @@ def test_unused_tails_preserve_full_selection_and_expand_when_needed(
 
 @pytest.mark.parametrize('epoch', range(3))
 @pytest.mark.parametrize('genre_filter', [False, True])
-def test_inactive_time_bands_are_never_resolved(store, vibe_menus, monkeypatch, epoch, genre_filter):
+def test_inactive_time_bands_are_never_resolved(vibe_selection, monkeypatch, epoch, genre_filter):
+    store = vibe_selection
     with store.read_view() as reader:
         family = reader.genres.feature_axes(['Jazz'])['Jazz'][0]
         include = (family,) if genre_filter else ()

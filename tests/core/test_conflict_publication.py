@@ -9,7 +9,6 @@ import pytest
 
 from tests.core.test_metadata_owner_cutover import predecessor
 from tests.core.test_metadata_conflict_preparation import seed, finish, head
-from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core.migrations import regular, MigrationError
 from yt_playlist.core.preparation import conflict_publication as publication, metadata_conflicts as preparation
 
@@ -105,7 +104,7 @@ def test_reports_reads_selected_owner_and_supported_write_withdraws_it(predecess
     "UPDATE prepared_metadata_conflict_compatibility SET field='genre'",
     'DELETE FROM prepared_metadata_conflict_heads',
 ])
-def test_damaged_preparation_blocks_selection_without_blocking_regular_schema(predecessor, damage, independent_regular_ddl):
+def test_damaged_preparation_blocks_selection_without_blocking_regular_schema(predecessor, damage):
     conn = predecessor.conn
     rejection_inputs(predecessor)
     with conn:

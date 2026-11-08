@@ -374,8 +374,8 @@ def prepared_template(pristine, seed, *, database=None, defer_metadata=False):
             if database is not None:
                 source.conn.execute('PRAGMA synchronous=NORMAL')
             if isinstance(pristine, PristineSchema) and not defer_metadata:
-                # The session builder already admitted this exact empty SQL
-                # schema. Bind the private consumer just like the store fixture
+                # The session builder supplies exact shipped empty SQL below
+                # startup admission. Bind this private consumer like store
                 # instead of revalidating hundreds of unchanged DDL objects for
                 # every independently prepared dataset. Historical/raw sources
                 # and explicit deferred-admission checks retain real admission.

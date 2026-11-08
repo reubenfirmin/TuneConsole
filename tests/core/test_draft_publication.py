@@ -1,5 +1,4 @@
 """Draft publication preserves decisions, revision ownership and latest selection."""
-from contextlib import closing
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -7,11 +6,9 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_road_trip_draft_preparation import recipe, seed
-from tests.store_fixture_support import publication_consumer_reads
-from yt_playlist.core.migrations import MigrationError, regular, runner
+from tests.store_fixture_support import guarded_numbered_store as installed, publication_consumer_reads
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import draft_publication as publication, road_trip_drafts as preparation
 from yt_playlist.core.store import Store
 
@@ -49,29 +46,6 @@ def rejection_inputs(store):
             assert owner.selected(store.conn) is None
             return identity, raw
     pytest.fail('Draft preparation did not finish bounded rejection prefix')
-
-
-@pytest.mark.parametrize('version', [79, 93])
-def test_draft_input_keeps_each_installed_contract_and_snapshot_guards(_bounded_installed_schema, version):
-    template = _bounded_installed_schema(version)
-    source = template.source
-    with closing(sqlite3.connect(source._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
-        reader.row_factory = sqlite3.Row
-        runner.validate_version(reader, version)
-        regular.validate(reader)
-    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert source.conn.execute('SELECT count(*) FROM main.recordings').fetchone()[0] == 0
-    assert template.revision_guards
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_draft_rejection_input_keeps_completed_members_and_exact_original(installed, staged_custody):
-    store, _ = installed
-    identity, raw = staged_custody(installed, 'road-trip-drafts', rejection_inputs, admit=False)
-    assert publication.OWNER.selected(store.conn) is None
-    assert store.road_trip.get_road_trip_draft(identity) == json.loads(raw)
-    assert store.conn.execute('SELECT count(*) FROM '+preparation.HEAD).fetchone()[0] == 1
-    assert store.conn.execute('SELECT count(*) FROM '+preparation.ITEMS).fetchone()[0] > 0
 
 
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
@@ -131,9 +105,9 @@ def test_empty_map_and_numeric_cursor_keep_latest_recipe_eligibility(installed):
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['time', 'revision', 'reference', 'missing', 'extra', 'original'])
-def test_incorrect_draft_fields_members_or_original_cannot_publish(installed, staged_custody, failure):
+def test_incorrect_draft_fields_members_or_original_cannot_publish(installed, failure):
     store, _ = installed
-    identity, raw = staged_custody(installed, 'road-trip-drafts', rejection_inputs, admit=False)
+    identity, raw = rejection_inputs(store)
     owner = publication.OWNER
     with store.conn:
         if failure == 'time':
@@ -154,6 +128,7 @@ def test_incorrect_draft_fields_members_or_original_cannot_publish(installed, st
         owner.publish(store.conn, stage=selected)
     assert owner.selected(store.conn) is None
     assert store.road_trip.get_road_trip_draft(identity) == json.loads(raw)
+    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -230,10 +205,36 @@ def test_unrecorded_revision_kinds_are_never_replaced(installed, revision):
     assert store.road_trip.get_road_trip_draft(identity) == value
 
 
+@pytest.mark.parametrize('installed', [93], indirect=True)
+def test_full_selection_budget_retains_order_and_repeated_uploads(installed):
+    store, _ = installed
+    identity = recipe(store)
+    value = {'revision':'large', 'picks':['repeated']*16384, 'banned':['repeated']*16384}
+    store.road_trip.save_road_trip_draft(identity, value, 9007199254740993)
+    original_source = tuple(publication.source_row(store.conn, identity))
+    owner = publication.OWNER
+    selected = stage(store.conn, worker_size=512)
+    owner.publish(store.conn, stage=selected)
+    header = owner.capture(store.conn, selected, identity)
+    assert header['item_count'] == 32768
+    for state in ('picked', 'excluded'):
+        members = list(map(tuple, store.conn.execute(
+            f'SELECT position,video_id FROM {preparation.ITEMS} '
+            'WHERE recipe_id=? AND generation=? AND selection_state=? ORDER BY position',
+            (identity, header['generation'], state))))
+        assert members == [(position, 'repeated') for position in range(16384)]
+    assert json.loads(owner.value(store.conn, selected, identity)) == value
+    assert store.road_trip.get_road_trip_draft(identity) == value
+    assert tuple(publication.source_row(store.conn, identity)) == original_source
+    assert header['updated_at'] == original_source[2]
+    assert not store.conn.in_transaction
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
+
+
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_missing_files_and_failed_preparation_do_not_block_regular_ddl(installed, independent_regular_ddl):
+def test_missing_files_and_failed_preparation_do_not_block_regular_ddl(installed):
     store, _ = installed
     identity, raw = seed(store)
     owner = publication.OWNER

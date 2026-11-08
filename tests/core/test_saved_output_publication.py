@@ -6,10 +6,9 @@ import sqlite3
 import pytest
 
 from tests.core.test_collection_control_preparation import finish
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import guarded_numbered_store as installed
 from tests.core.test_saved_output_preparation import head, seed
-from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads
+from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import recommendation_setting_outputs as outputs
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import saved_output_publication as publication, saved_outputs as preparation
@@ -19,14 +18,9 @@ from yt_playlist.core.store import Store
 pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     pass
-
-
-@pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
-def test_saved_publication_input_keeps_admitted_history_and_private_guards(installed):
-    assert_installed_consumer_input(*installed)
 
 
 def prepare(conn,name):
@@ -155,7 +149,7 @@ def test_verification_rejects_source_and_prepared_custody_races(installed,monkey
 
 @pytest.mark.parametrize('installed',[93],indirect=True)
 @pytest.mark.parametrize('failure',['file','missing-file','metadata','subject','policy'])
-def test_corrupt_custody_does_not_select_a_file_or_block_regular_ddl(installed,failure,independent_regular_ddl):
+def test_corrupt_custody_does_not_select_a_file_or_block_regular_ddl(installed,failure):
     store,_ = installed
     sources,_ = seed(store)
     source = 'radio_seed_offer'
@@ -245,7 +239,7 @@ def test_long_repeated_subjects_and_policies_publish_without_identity_admission(
 
 
 @pytest.mark.parametrize('installed',[93],indirect=True)
-def test_explicit_missing_file_recovery_preserves_selected_custody_and_failure_state(installed,monkeypatch,independent_regular_ddl):
+def test_explicit_missing_file_recovery_preserves_selected_custody_and_failure_state(installed,monkeypatch):
     store,_ = installed
     sources,_ = seed(store)
     source = 'radio_seed_offer'
@@ -274,3 +268,25 @@ def test_explicit_missing_file_recovery_preserves_selected_custody_and_failure_s
     assert store.settings.get_setting(source) == sources[source]
     assert store.conn.execute('SELECT count(*) FROM '+preparation.SUBJECTS).fetchone()[0] == 3
     assert preparation.read_original(retained) == sources[source]
+
+
+@pytest.mark.parametrize('installed',[94],indirect=True)
+def test_frozen_upgrade_keeps_published_custody_and_prefers_native_owner(installed,tmp_path):
+    store,_ = installed
+    sources,_ = seed(store)
+    for name in preparation.JOBS:
+        publish(store.conn,name)
+    retained = {source:head(store.conn,source) for source in sources}
+    upgraded = Store(tmp_path/'frozen-native.db')
+    try:
+        upgraded.conn.execute('PRAGMA synchronous=OFF')
+        store.conn.backup(upgraded.conn)
+        runner.migrate(upgraded.conn,registry=registry.MIGRATIONS)
+        regular.validate(upgraded.conn)
+        for source,raw in sources.items():
+            assert publication.selected(upgraded.conn,source) is None
+            assert outputs.get(upgraded.conn,source) == raw
+            assert preparation.read_original(retained[source]) == raw
+        assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
+    finally:
+        upgraded.conn.close()

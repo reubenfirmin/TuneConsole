@@ -4,10 +4,16 @@ from unittest.mock import Mock
 from fastapi.testclient import TestClient
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
-from tests.store_fixture_support import file_consumer_store as store
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from tests.home_fixture_support import home_routes_only, publish_menu, without_metadata_providers
 
 pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'home_routes_only', 'without_metadata_providers')
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('house', 'House'), ('techno', 'Techno'))) as schema:
+        yield schema
 
 
 @pytest.fixture(autouse=True)

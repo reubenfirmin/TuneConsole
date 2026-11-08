@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core.migrations import current, migrate, registry, regular
+from yt_playlist.core.migrations import current, migrate, registry
 from yt_playlist.core.migrations import v083_home_offers as migration
 from yt_playlist.core.migrations.runner import Migration, MigrationError
 from yt_playlist.core.store import Store
@@ -15,20 +15,6 @@ def disable_periodic_library_sync():
     pass
 
 
-def test_offer_upgrade_input_keeps_both_histories_and_read_only_sql(compaction_inputs):
-    source = compaction_inputs(82).source
-    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert list(map(tuple, source.conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
-        (entry.version, entry.name) for entry in registry.MIGRATIONS[:82]]
-    assert list(map(tuple, source.conn.execute('SELECT version,name FROM schema_changes ORDER BY version'))) == [
-        (entry.version, entry.name) for entry in regular.CHANGES]
-    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
-
-
-@pytest.fixture
-def admitted_predecessor(tmp_path, compaction_inputs):
-    with compaction_inputs(82).open(tmp_path / 'offers.db') as store:
-        yield store
 
 
 @pytest.fixture
@@ -55,8 +41,8 @@ def upgrade(store):
     store._bind_repositories()
 
 
-def test_upgrade_eviction_restart_and_continuing_writes_preserve_offer_state(admitted_predecessor):
-    store = admitted_predecessor
+def test_upgrade_eviction_restart_and_continuing_writes_preserve_offer_state(predecessor):
+    store = predecessor
     seed(store)
     upgrade(store)
     assert store.rec_proposals.get_proposals('home_shown') == {'epoch': 4, 'signatures': ['first', 'second']}
@@ -132,30 +118,15 @@ def test_interrupted_cutover_rolls_back_then_retries(predecessor):
     assert predecessor.rec_proposals.get_proposals('home_shown') == {'epoch': 4, 'signatures': ['first', 'second']}
 
 
-@pytest.mark.parametrize('version', [64, 73, 79, 81, 82, 88, 93, 99, 102, 103, 107])
-def test_offer_contract_upgrade_input_keeps_genuine_history(_pristine_installed_schema, version):
-    source = _pristine_installed_schema(version)
-    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert list(map(tuple, source.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
-        (entry.version, entry.name) for entry in registry.MIGRATIONS[:version]]
-    assert not source.execute('PRAGMA foreign_key_check').fetchone()
-
-
-def test_fresh_offer_contract_input_is_admitted_and_read_only(_pristine_current_schema):
-    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
-    current.validate(_pristine_current_schema)
-
-
-def test_fresh_and_upgraded_offer_owners_have_the_same_contract(_pristine_installed_schema, _pristine_current_schema):
-    # Historical inputs own the genuine complete empty upgrade; populated
-    # offer relocation, interruption and restart remain independently exercised.
-    upgraded = _pristine_installed_schema(len(registry.MIGRATIONS))
+def test_fresh_and_upgraded_offer_owners_have_the_same_contract(predecessor, store):
+    upgrade(predecessor)
+    migrate(predecessor.conn, registry=registry.MIGRATIONS)
     for name in migration.OBJECTS:
-        old = upgraded.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()[0]
-        fresh = _pristine_current_schema.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()[0]
+        old = predecessor.conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()[0]
+        fresh = store.conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()[0]
         assert current._tokens(old) == current._tokens(fresh)
-    current.validate(upgraded)
-    current.validate(_pristine_current_schema)
+    current.validate(predecessor.conn)
+    current.validate(store.conn)
 
 
 def test_offer_storage_joins_and_rolls_back_with_outer_publication(store):

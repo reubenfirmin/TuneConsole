@@ -68,9 +68,9 @@ def installed(request, tmp_path, _pristine_installed_schema):
 
 @pytest.fixture(params=[79, 93, 102, 107])
 def consumer_installed(request, tmp_path, monkeypatch, _bounded_installed_schema):
-    """Exact completed SQL beneath publication tests, admitted by its builder.
+    """Exact completed SQL beneath publication tests, without startup admission.
 
-    The installed fixture above owns historical replay. These consumers keep
+    The installed fixture above owns historical replay and admission. These consumers keep
     their own file, WAL readers, compatibility repositories, revision guards
     and final installed-format validation.
     """

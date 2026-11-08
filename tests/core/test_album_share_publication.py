@@ -7,9 +7,10 @@ import sqlite3
 import pytest
 
 from tests.core.test_album_owner_preparation import finish, seed
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.store_fixture_support import publication_consumer_reads
-from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import guarded_numbered_store as guarded_installed
+from tests.store_fixture_support import (
+    numbered_store as installed, preparation_ddl_connection, publication_consumer_reads,
+)
 from yt_playlist.core import album_tracklists
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import album_shares as preparation, album_share_publication as publication
@@ -22,13 +23,6 @@ pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     """Album SQL and file publication do not start the HTTP lifecycle."""
-
-
-def test_album_share_consumer_input_keeps_real_history_and_snapshot_guards(_bounded_installed_schema):
-    source = _bounded_installed_schema(93).source
-    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 93
-    assert source._snapshot_revisions.conn is source.conn
-    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def complete_source(store, count=3):
@@ -102,29 +96,56 @@ def test_preopened_readers_use_exact_choices_aliases_and_existing_completeness(i
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['fields','member','reference','extra','omitted','original','plan'])
-def test_wrong_header_choices_references_coverage_or_files_cannot_publish(installed, failure):
+def test_wrong_header_choices_references_coverage_or_files_cannot_publish(installed, preparation_ddl_connection, failure):
     store, _ = installed
-    rejection_inputs(store)
-    header = preparation.head(store.conn, 'release')
-    with store.conn:
+    complete_source(store)
+    conn = preparation_ddl_connection
+    preparation.JOB.install(conn)
+    finish(preparation.JOB, conn)
+    assert publication.OWNER.selected(conn) is None
+    header = preparation.head(conn, 'release')
+    with conn:
         if failure == 'fields':
-            store.conn.execute("UPDATE prepared_album_share_generations SET title='different'")
+            conn.execute("UPDATE prepared_album_share_generations SET title='different'")
         elif failure == 'member':
-            store.conn.execute("UPDATE prepared_album_share_items SET raw_source_ref='different' WHERE position=0")
+            conn.execute("UPDATE prepared_album_share_items SET raw_source_ref='different' WHERE position=0")
         elif failure == 'reference':
-            store.conn.execute("UPDATE prepared_album_share_items SET entry_id=NULL,recording_id=NULL,resolution_status='unresolved' WHERE position=0")
+            conn.execute("UPDATE prepared_album_share_items SET entry_id=NULL,recording_id=NULL,resolution_status='unresolved' WHERE position=0")
         elif failure == 'extra':
-            store.conn.execute('INSERT INTO prepared_album_share_items SELECT source,preparation_revision,999,raw_source_ref,entry_id,recording_id,'
+            conn.execute('INSERT INTO prepared_album_share_items SELECT source,preparation_revision,999,raw_source_ref,entry_id,recording_id,'
                 'captured_title,captured_credit,resolution_status FROM prepared_album_share_items WHERE position=0')
         elif failure == 'omitted':
-            store.conn.execute('DELETE FROM prepared_album_share_heads')
+            conn.execute('DELETE FROM prepared_album_share_heads')
         else:
-            filename = header['plan_filename'] if failure == 'plan' else store.conn.execute('SELECT filename FROM prepared_album_share_parts LIMIT 1').fetchone()[0]
+            filename = header['plan_filename'] if failure == 'plan' else conn.execute('SELECT filename FROM prepared_album_share_parts LIMIT 1').fetchone()[0]
             Path(filename).write_bytes(b'corrupt')
-    selected = publication.OWNER.step(store.conn).id
+    selected = publication.OWNER.step(conn).id
     with pytest.raises((MigrationError, ValueError, OSError)):
-        publication.OWNER.publish(store.conn, stage=selected)
+        publication.OWNER.publish(conn, stage=selected)
+    assert publication.OWNER.selected(conn) is None
+    regular.migrate(conn)
+
+
+@pytest.mark.parametrize('guarded_installed', [93], indirect=True)
+def test_real_cache_writer_and_snapshots_reconcile_order_without_changing_archives(guarded_installed):
+    store, _ = guarded_installed
+    _, entry = complete_source(store, count=8192)
+    selected = stage(store.conn)
+    publication.OWNER.publish(store.conn, stage=selected)
+    key = store.conn.execute('SELECT r.identity_key FROM main.catalog_entries e JOIN main.recordings r ON r.id=e.recording_id WHERE e.id=?', (entry,)).fetchone()[0]
+    with store.read_snapshot() as snapshot:
+        assert len(snapshot.store.collection.cached_album_share('release')['video_ids']) == 8192
+        store.collection.cache_album_tracklist('release', 'Changed', 'Artist', None, [key]*3,
+            entries=[{'entry_id':entry}]*3, video_ids=['one','one','one'])
+        assert not snapshot.publish(lambda:None)
     assert publication.OWNER.selected(store.conn) is None
+    assert store.collection.cached_album_share('release') == {'title':'Changed', 'video_ids':['one']*3}
+    publication.OWNER.publish(store.conn, stage=stage(store.conn))
+    assert store.collection.cached_album_share('release') == {'title':'Changed', 'video_ids':['one']*3}
+    assert len(json.loads(publication.OWNER.value(store.conn, selected, 'release')['video_ids_json'])) == 8192
+    with pytest.raises(sqlite3.IntegrityError, match='retained'):
+        with store.conn:
+            store.conn.execute('DELETE FROM prepared_album_share_items')
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -159,7 +180,7 @@ def test_reference_race_and_interrupted_cutover_leave_no_mixed_selection(install
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_missing_files_and_failed_preparation_remain_independent_of_ddl(installed, monkeypatch, independent_regular_ddl):
+def test_missing_files_and_failed_preparation_remain_independent_of_ddl(installed, monkeypatch):
     store, _ = installed
     complete_source(store)
     selected = stage(store.conn)
@@ -181,6 +202,12 @@ def test_missing_files_and_failed_preparation_remain_independent_of_ddl(installe
     with pytest.raises(OSError, match='controlled album share'):
         preparation.JOB.step(store.conn)
     failed = preparation.JOB.progress(store.conn)
+    def install(conn, context):
+        conn.execute('CREATE TABLE independent_album_share_publication(value TEXT)')
+    def validate(conn):
+        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_album_share_publication'").fetchone()
+    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1,
+        'independent_album_share_publication', install, validate)))
     regular.migrate(store.conn)
     assert preparation.JOB.progress(store.conn) == failed
     monkeypatch.setattr(preparation.files, 'publish', publish)
@@ -188,3 +215,31 @@ def test_missing_files_and_failed_preparation_remain_independent_of_ddl(installe
         preparation.JOB.step(store.conn)
     preparation.JOB.step(store.conn, retry=True)
     publication.OWNER.publish(store.conn, stage=stage(store.conn))
+
+
+@pytest.mark.parametrize('installed', [98], indirect=True)
+def test_frozen_native_owner_has_precedence_without_losing_map_custody(installed):
+    store, _ = installed
+    path = store._db_path
+    try:
+        store.init_schema(defer_metadata=True)
+        complete_source(store)
+        selected = stage(store.conn)
+        publication.OWNER.publish(store.conn, stage=selected)
+        original = publication.OWNER.value(store.conn, selected, 'release')
+        store.conn.close()
+        store = Store(path)
+        store.conn.execute('PRAGMA synchronous=OFF')
+        runner.migrate(store.conn, registry=registry.MIGRATIONS)
+        store.init_schema(defer_metadata=True)
+        assert album_tracklists.available(store.conn)
+        assert publication.OWNER.selected(store.conn) is None
+        assert store.collection.cached_album_share('release') == {'title':'Frozen 東京','video_ids':['one','missing','one']}
+        assert publication.OWNER.value(store.conn, selected, 'release') == original
+        regular.validate(store.conn)
+        with store.conn:
+            store.conn.execute('DROP TRIGGER prepared_album_share_items_mapped_delete')
+        with pytest.raises(MigrationError, match='publication object'):
+            regular.validate(store.conn)
+    finally:
+        store.conn.close()

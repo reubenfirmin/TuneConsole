@@ -4,8 +4,7 @@ import json
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
-from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection
 from yt_playlist.core import albums
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import recommendation_demand as preparation
@@ -19,6 +18,11 @@ VALUES = {
     'home_genre_request': {'epoch': 125, 'include_genres': ['known-genre', 'Unknown captured', 'known-genre'],
                            'avoid_genres': [], 'held_by_vibe': False, 'suspended_by_vibe': True},
 }
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Demand preparation does not construct an HTTP application."""
 
 
 def seed(store):
@@ -80,7 +84,7 @@ def test_exact_demands_and_continuing_edits_keep_installed_owners(installed):
 
 
 @pytest.mark.parametrize('installed', [86], indirect=True)
-def test_interrupted_batch_and_invalid_source_require_explicit_recovery(installed, monkeypatch, independent_regular_ddl):
+def test_interrupted_batch_and_invalid_source_require_explicit_recovery(installed, monkeypatch, preparation_ddl_connection):
     store, _ = installed
     seed(store)
     preparation.JOB.install(store.conn)
@@ -99,7 +103,7 @@ def test_interrupted_batch_and_invalid_source_require_explicit_recovery(installe
     with pytest.raises(ValueError):
         finish(store.conn)
     assert preparation.JOB.progress(store.conn).status == 'failed'
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     store.rec_proposals.put_proposals('home_genre_request', VALUES['home_genre_request'], 200)
     with pytest.raises(MigrationError, match='retry explicitly'):
         preparation.JOB.step(store.conn)

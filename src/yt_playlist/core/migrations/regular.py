@@ -479,6 +479,7 @@ CHANGES = (
 
 def _applied(conn, changes):
     from .current import _tokens
+    from ..schema_inspection import reuse_objects
 
     row = conn.execute("SELECT type,sql FROM main.sqlite_schema WHERE name='schema_changes'").fetchone()
     if row is None:
@@ -488,10 +489,11 @@ def _applied(conn, changes):
     rows = conn.execute('SELECT version,name,applied_at FROM schema_changes ORDER BY version').fetchall()
     if len(rows) > len(changes):
         raise MigrationError('Regular schema changes are newer than this application')
-    for row, change in zip(rows, changes):
-        if row[0] != change.version or row[1] != change.name or not isinstance(row[2], (int, float)):
-            raise MigrationError('Regular schema history is not the supported contiguous prefix')
-        change.validate(conn)
+    with reuse_objects(conn):
+        for row, change in zip(rows, changes):
+            if row[0] != change.version or row[1] != change.name or not isinstance(row[2], (int, float)):
+                raise MigrationError('Regular schema history is not the supported contiguous prefix')
+            change.validate(conn)
     return len(rows)
 
 

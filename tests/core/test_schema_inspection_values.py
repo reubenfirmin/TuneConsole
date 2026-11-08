@@ -7,6 +7,74 @@ import pytest
 from yt_playlist.core import schema_definition, schema_inspection
 
 
+def test_named_definitions_observe_only_current_main_schema_and_allow_quoted_names():
+    with closing(sqlite3.connect(':memory:')) as conn, closing(sqlite3.connect(':memory:')) as other:
+        sql = 'CREATE TABLE "quoted\'name" (value INTEGER)'
+        conn.execute(sql)
+        conn.execute('CREATE TEMP TABLE "quoted\'name" (shadow TEXT)')
+        conn.execute('CREATE TABLE unrelated(value TEXT)')
+        names = ["quoted'name", 'missing', "quoted'name"]
+        assert schema_inspection.definitions(conn, iter(names)) == {"quoted'name": sql}
+        assert schema_inspection.definitions(other, names) == {}
+        conn.execute('DROP TABLE main."quoted\'name"')
+        assert schema_inspection.definitions(conn, names) == {}
+        changed = 'CREATE TABLE "quoted\'name" (changed TEXT)'
+        conn.execute(changed)
+        assert schema_inspection.definitions(conn, names) == {"quoted'name": changed}
+        assert schema_inspection.definitions(conn, []) == {}
+
+
+def test_named_definitions_keep_first_matching_object_when_trigger_and_table_share_a_name():
+    with closing(sqlite3.connect(':memory:')) as conn:
+        sql = 'CREATE TABLE shared(value INTEGER)'
+        conn.execute(sql)
+        conn.execute('CREATE TRIGGER shared AFTER INSERT ON shared BEGIN SELECT 1; END')
+        assert schema_inspection.definitions(conn, ['shared']) == {'shared': sql}
+
+
+def test_catalog_observations_end_before_rollback_and_schema_version_reuse():
+    with closing(sqlite3.connect(':memory:')) as conn:
+        conn.execute('CREATE TABLE original(value INTEGER)')
+        conn.execute('BEGIN')
+        conn.execute('CREATE TABLE rolled_back(value INTEGER)')
+        failed_version = conn.execute('PRAGMA schema_version').fetchone()[0]
+        with schema_inspection.reuse_objects(conn):
+            assert 'rolled_back' in schema_inspection.objects(conn)
+        conn.rollback()
+        conn.execute('BEGIN')
+        conn.execute('CREATE TABLE replacement(value TEXT)')
+        assert conn.execute('PRAGMA schema_version').fetchone()[0] == failed_version
+        with schema_inspection.reuse_objects(conn):
+            observed = schema_inspection.objects(conn)
+            assert 'rolled_back' not in observed
+            assert observed['replacement'] == ('table', 'CREATE TABLE replacement(value TEXT)')
+            observed.clear()
+            with schema_inspection.reuse_objects(conn):
+                assert 'replacement' in schema_inspection.objects(conn)
+        conn.commit()
+
+
+def test_catalog_observations_keep_nested_connections_and_later_external_ddl_independent(tmp_path):
+    path = tmp_path / 'catalog.db'
+    with closing(sqlite3.connect(path)) as first, closing(sqlite3.connect(path)) as other:
+        first.execute('PRAGMA journal_mode=WAL')
+        first.execute('CREATE TABLE original(value INTEGER)')
+        first.execute('BEGIN')
+        with schema_inspection.reuse_objects(first):
+            expected = schema_inspection.objects(first)
+            other.execute('ALTER TABLE original ADD COLUMN changed TEXT')
+            other.execute('BEGIN')
+            with schema_inspection.reuse_objects(other):
+                assert schema_inspection.objects(other)['original'] != expected['original']
+            other.rollback()
+            assert schema_inspection.objects(first) == expected
+        first.rollback()
+        first.execute('BEGIN')
+        with schema_inspection.reuse_objects(first):
+            assert schema_inspection.objects(first)['original'] != expected['original']
+        first.rollback()
+
+
 @pytest.mark.parametrize('definition', [
     'CREATE TABLE child(id INTEGER PRIMARY KEY AUTOINCREMENT, '
     'parent INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED, '

@@ -6,8 +6,7 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import guarded_numbered_store as installed
 from tests.core.test_collection_document_preparation import finish, seed
 from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import entity_names, spotify_job_state
@@ -25,13 +24,6 @@ def disable_periodic_library_sync():
     """Import publication checks do not start the HTTP lifecycle."""
 
 
-def test_import_rejection_schema_input_keeps_installed_history_and_snapshot_guards(_bounded_installed_schema):
-    source = _bounded_installed_schema(93).source
-    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 93
-    assert source._snapshot_revisions.conn is source.conn
-    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
-
-
 def prepare(conn):
     publication.OWNER.worker.install(conn)
     return finish(publication.OWNER.worker, conn).prepared_revision
@@ -42,19 +34,6 @@ def rejection_inputs(store):
     revision = prepare(store.conn)
     assert publication.OWNER.selected(store.conn) is None
     return raw, revision
-
-
-def test_import_rejection_input_keeps_exact_original_fields_and_unselected_custody(
-        _bounded_installed_schema, staged_custody_templates):
-    template = staged_custody_templates(93, 'spotify-import', rejection_inputs,
-        completed=_bounded_installed_schema(93))
-    raw, revision = template.result
-    header = publication.OWNER.capture(template.source.conn)
-    assert header['track_entries'] == json.loads(raw)['track_entries'] == 0
-    assert template.source.settings.get_setting(spotify_job_state.KEY) == raw
-    assert publication.OWNER.selected(template.source.conn) is None
-    assert publication.OWNER.worker.progress(template.source.conn).prepared_revision == revision
-    assert not template.source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.mark.parametrize('installed', [79, 93, 96], indirect=True)
@@ -113,9 +92,9 @@ def test_account_field_presence_and_unresolved_identity_do_not_admit_accounts(in
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['fields', 'account', 'recovery', 'original', 'plan'])
-def test_unverified_fields_or_files_never_select_a_report(installed, staged_custody, failure):
+def test_unverified_fields_or_files_never_select_a_report(installed, failure):
     store, _ = installed
-    raw, revision = staged_custody(installed, 'spotify-import', rejection_inputs)
+    raw, revision = rejection_inputs(store)
     header = publication.OWNER.capture(store.conn)
     with store.conn:
         if failure == 'fields':
@@ -130,6 +109,7 @@ def test_unverified_fields_or_files_never_select_a_report(installed, staged_cust
         publication.OWNER.publish(store.conn, revision=revision)
     assert publication.OWNER.selected(store.conn) is None
     assert store.settings.get_setting(spotify_job_state.KEY) == raw
+    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -189,7 +169,7 @@ def test_real_import_worker_keeps_account_spelling_and_reconciles_continuing_upd
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_missing_file_explicit_recovery_failure_keeps_regular_ddl_independent(installed, independent_regular_ddl):
+def test_missing_file_explicit_recovery_failure_keeps_regular_ddl_independent(installed):
     store, _ = installed
     _, raw, _, _ = seed(store)
     owner = publication.OWNER

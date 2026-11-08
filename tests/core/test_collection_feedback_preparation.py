@@ -4,8 +4,7 @@ import json
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
-from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection
 from yt_playlist.core import account_auth_state, album_feedback_storage, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import collection_feedback as preparation
@@ -13,6 +12,11 @@ from yt_playlist.core.store import Store
 
 
 JOBS = (preparation.FEEDBACK_JOB, preparation.AUTH_JOB)
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Collection preparation needs SQL and files without HTTP startup."""
 
 
 def finish(job, conn, size=16):
@@ -29,9 +33,11 @@ def head(conn, source='album_feedback'):
 
 
 def seed(store):
+    from yt_playlist.core import albums
+
     account = store.accounts.upsert_account('Main', 'main.json', None, True)
-    store.tracks.upsert_track('video', 'Song', 'Artist', 'Album', 100, album_browse_id='release')
     with store.conn:
+        albums.observe(store.conn, 'release', title='Album', artist='Artist')
         store.conn.execute("INSERT INTO album_provider_ids(provider,provider_id,album_id,is_primary,equivalence_digest,verified_at) "
             "SELECT 'youtube','alias',album_id,0,?,1 FROM album_provider_ids WHERE provider='youtube' AND provider_id='release'", ('a'*64,))
     feedback = {'release': {'kind': 'more', 'at': 12, 'opportunity_id': 'menu', 'action_id': None},
@@ -46,7 +52,7 @@ def seed(store):
 
 
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
-def test_independent_jobs_keep_exact_source_judgments_accounts_and_unknowns(installed):
+def test_independent_jobs_keep_exact_source_judgments_accounts_and_unknowns(installed, preparation_ddl_connection):
     store, _ = installed
     conn = store.conn
     original = seed(store)
@@ -72,6 +78,7 @@ def test_independent_jobs_keep_exact_source_judgments_accounts_and_unknowns(inst
     assert not conn.execute("SELECT 1 FROM album_provider_ids WHERE provider_id='missing-release'").fetchone()
     assert not conn.execute('PRAGMA foreign_key_check').fetchone()
     assert files.collect_orphans(conn) == 0
+    regular.migrate(preparation_ddl_connection)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -83,6 +90,7 @@ def test_frozen_upgrade_on_a_separate_copy_retains_the_same_decisions(installed,
         finish(job, store.conn)
     upgraded = Store(tmp_path / 'collection-upgrade.db')
     try:
+        upgraded.conn.execute('PRAGMA synchronous=OFF')
         store.conn.backup(upgraded.conn)
         runner.migrate(upgraded.conn, registry=registry.MIGRATIONS[:94])
         assert account_auth_state.read(upgraded.conn) == {int(key): value for key, value in json.loads(original['auth_expired_identities']).items()}
@@ -122,7 +130,7 @@ def test_long_maps_commit_at_most_the_requested_number_of_members(installed, sou
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_failure_of_one_job_does_not_block_the_other_or_regular_schema_changes(installed, independent_regular_ddl):
+def test_failure_of_one_job_does_not_block_the_other_or_regular_schema_changes(installed, preparation_ddl_connection):
     store, _ = installed
     seed(store)
     store.settings.set_setting('album_feedback', '{')
@@ -130,7 +138,7 @@ def test_failure_of_one_job_does_not_block_the_other_or_regular_schema_changes(i
     preparation.AUTH_JOB.install(store.conn)
     with pytest.raises(ValueError):
         finish(preparation.FEEDBACK_JOB, store.conn)
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert finish(preparation.AUTH_JOB, store.conn).status == 'prepared'
     assert preparation.FEEDBACK_JOB.progress(store.conn).status == 'failed'
     store.settings.set_setting('album_feedback', '{}')
@@ -258,7 +266,7 @@ def test_interrupted_member_and_failed_disk_keep_commits_for_explicit_reopened_r
     ('auth_expired_identities', '{"9223372036854775808":"Overflow"}'),
     ('auth_expired_identities', '{"1":null}'),
 ])
-def test_invalid_maps_fail_durably_and_remain_authoritative(installed, source, raw):
+def test_invalid_maps_fail_durably_and_remain_authoritative(installed, preparation_ddl_connection, source, raw):
     store, _ = installed
     store.settings.set_setting(source, raw)
     job = preparation.FEEDBACK_JOB if source == 'album_feedback' else preparation.AUTH_JOB
@@ -267,3 +275,4 @@ def test_invalid_maps_fail_durably_and_remain_authoritative(installed, source, r
         finish(job, store.conn)
     assert job.progress(store.conn).status == 'failed'
     assert store.settings.get_setting(source) == raw
+    regular.migrate(preparation_ddl_connection)

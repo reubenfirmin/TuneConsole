@@ -7,8 +7,30 @@ from yt_playlist.web.app import create_app
 from yt_playlist.rec import into_recently
 from yt_playlist.providers import wikipedia
 from tests.conftest import FakeClient
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
+from yt_playlist.core.store import Store
 
 NOW = 1_800_000_000
+
+
+@pytest.fixture(autouse=True)
+def story_routes(monkeypatch):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, home
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+        for module in (app_update, audio_preview, home)])
+
+
+@pytest.fixture
+def empty_story_store():
+    with bounded_consumer_schema(()) as schema:
+        database = Store(':memory:')
+        try:
+            initialize_consumer(database, schema)
+            yield database
+        finally:
+            database.conn.close()
 
 
 def _client(store):
@@ -377,7 +399,8 @@ def test_worker_lookups_are_bounded_and_do_not_hide_later_cached_stories(store, 
     assert [card["display"] for card in cards] == ["Band 9"]
 
 
-def test_empty_when_no_subject(store, monkeypatch):
+def test_empty_when_no_subject(empty_story_store, monkeypatch):
+    store = empty_story_store
     monkeypatch.setattr(into_recently, "ranked_subjects", lambda s, now: [])
     into_recently.prepare(store, NOW)
     r = _fragment_client(store).get('/test/story-fragment')

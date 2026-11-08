@@ -30,6 +30,7 @@ def store(request, tmp_path, home_page_schema, monkeypatch):
     database = Store(tmp_path / 'home-pages.db')
     with closing(database.conn):
         initialize_consumer(database, schema)
+        database.conn.execute('PRAGMA synchronous=NORMAL')
         database.conn.execute('PRAGMA wal_autocheckpoint=0')
         with reuse_reporting_reader(database, monkeypatch):
             yield database
@@ -214,11 +215,17 @@ def test_home_renders_for_you_and_no_sync_elsewhere(store):
         {"mode_id": 1, "label": "a", "families": [["house", 1]],
          "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 80, "rep_keys": []},
     ], retired_ids=[], now=now)
-    payload = publish_menu(store, now, prefix='gem', tracks_per_card=1, mode_ids=(1, 1, 1, 1))
+    payload = publish_menu(store, now, prefix='gem', tracks_per_card=8, mode_ids=(1, 1, 1, 1))
     for menu in payload['menus']:
         for proto in menu['protos']:
             if proto['lane'] == 'wheelhouse':
                 proto['label'] = 'More in your wheelhouse'
+                proto['tracks'][0] = {**proto['tracks'][0], 'key': 'gem|x', 'video_id': 'v1',
+                                      'title': 'Gem', 'artist': 'X'}
+        for slot in menu['slots']:
+            if slot['proto'] is not None and slot['proto']['lane'] == 'wheelhouse':
+                slot['proto']['tracks'][0] = {**slot['proto']['tracks'][0], 'key': 'gem|x',
+                                              'video_id': 'v1', 'title': 'Gem', 'artist': 'X'}
     store.rec_proposals.put_proposals('home_prepared', payload, now)
     store.rec_proposals.put_proposals('listening_choices', {
         'home_format': {'episodes': {'mixes': 1}}}, now)
@@ -228,6 +235,7 @@ def test_home_renders_for_you_and_no_sync_elsewhere(store):
     cards = c.get("/home/cards").text
     assert "More in your wheelhouse" in cards    # the wheelhouse card heading
     assert "Gem" in cards                        # the track appears in the card row
+    assert 'data-key="gem|x"' in cards
 
     home = c.get("/").text
     assert 'class="home-status card card--status is-live global-now-playing"' in home

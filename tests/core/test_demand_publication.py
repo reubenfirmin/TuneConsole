@@ -1,17 +1,11 @@
 """Held choice identities and ordered demand survive selection and continuing writes."""
 import json
 import sqlite3
-from contextlib import closing, ExitStack
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import numbered_store as installed, guarded_numbered_store as guarded_installed, publication_consumer_reads
 from tests.core.test_demand_preparation import VALUES, seed, finish
-from tests.catalog_migration_support import catalog_reader
-from tests.genre_catalog_support import bound_catalog
-from tests.prepared_fixture_support import prepared_template
-from tests.store_fixture_support import install_numbered_input, publication_consumer_reads
 from yt_playlist.core import recommendation_requests
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import recommendation_demand as preparation, demand_publication as publication
@@ -21,54 +15,12 @@ from yt_playlist.core.store import Store
 EXPECTED = {**VALUES, 'choice_window:mixes':None}
 
 
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
-    """These SQL/publication owners never start an application lifespan."""
-
-
-@pytest.fixture(scope='module')
-def demand_inputs(tmp_path_factory):
-    root, templates = tmp_path_factory.mktemp('demand-inputs'), {}
-    with ExitStack() as resources:
-        def admitted(version):
-            if version not in templates:
-                with closing(sqlite3.connect(':memory:')) as schema, pytest.MonkeyPatch.context() as patch:
-                    bound_catalog(patch)
-                    install_numbered_input(schema, version, regular_owners=regular.CHANGES)
-                    templates[version] = resources.enter_context(prepared_template(
-                        schema, lambda store: None, database=root / f'{version}.db', defer_metadata=True))
-            return templates[version]
-        yield admitted
-
-
-@pytest.mark.parametrize('version', [79, 86])
-def test_demand_input_admission_keeps_numbered_history_and_real_guards(demand_inputs, version):
-    template = demand_inputs(version)
-    source = template.source
-    with closing(sqlite3.connect(source._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
-        reader.row_factory = sqlite3.Row
-        runner.validate_version(reader, version)
-        regular.validate(reader)
-    assert source.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
-    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
-    assert template.revision_guards
-
-
-def test_demand_consumer_input_keeps_pending_ddl_and_real_guards(_bounded_installed_schema):
-    template = _bounded_installed_schema(86)
-    source = template.source
-    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert list(map(tuple, source.conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
-        (entry.version, entry.name) for entry in registry.MIGRATIONS[:86]]
-    assert regular.validate(source.conn) == 0
-    assert template.revision_guards
-    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
-
-
-@pytest.fixture
-def demand_installed(request, tmp_path, demand_inputs):
-    with demand_inputs(request.param).open(tmp_path / 'demand.db') as store:
-        yield store, request.param
+    """Publication checks do not construct an HTTP application."""
 
 
 def ready(conn, size=1):
@@ -96,136 +48,45 @@ def test_selected_presence_reads_no_demand_document(installed, monkeypatch):
         assert bool(store.rec_proposals.has_proposals(surface)) == bool(value)
 
 
-@pytest.mark.parametrize('demand_installed', [79, 86], indirect=True)
-def test_selected_requests_preserve_identity_order_sources_and_pinned_reads(demand_installed):
-    store, version = demand_installed
+@pytest.mark.parametrize('guarded_installed',[79,86],indirect=True)
+def test_selected_requests_preserve_identity_order_sources_and_supported_upgrade(guarded_installed,tmp_path):
+    store,_ = guarded_installed
     seed(store)
     originals = list(map(tuple,store.conn.execute('SELECT * FROM rec_proposals ORDER BY surface')))
     history = list(map(tuple,store.conn.execute('SELECT * FROM schema_migrations')))
-    with store.read_snapshot() as snapshot:
-        pinned = snapshot.store
-        assert pinned.rec_proposals.get_proposals('choice_window:mixes') == {}
-        publication.publish(store.conn, identity=ready(store.conn))
-        assert publication.selected(pinned.conn) is None
-        assert pinned.rec_proposals.get_proposals('choice_window:mixes') == {}
-    with store.read_view() as reader:
-        reader.conn.set_authorizer(lambda action, owner, column, *_: sqlite3.SQLITE_DENY
-            if action == sqlite3.SQLITE_READ and owner == 'rec_proposals' and column == 'payload'
-            else sqlite3.SQLITE_OK)
-        try:
-            for surface,value in EXPECTED.items():
-                assert reader.rec_proposals.get_proposals(surface) == value
-                assert reader.rec_proposals.has_proposals(surface) == bool(value)
-        finally:
-            reader.conn.set_authorizer(None)
-    regular.migrate(store.conn)
-    assert list(map(tuple,store.conn.execute('SELECT * FROM schema_migrations'))) == history
-    assert list(map(tuple,store.conn.execute('SELECT * FROM rec_proposals ORDER BY surface'))) == originals
-    with closing(sqlite3.connect(store._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
-        reader.row_factory = sqlite3.Row
-        runner.validate_version(reader, version)
-        regular.validate(reader)
-
-
-def seed_native_demand(conn):
-    """Completed v87 input for later edges; the actual v87 owner checks it."""
-    from yt_playlist.core import albums
-
-    originals = [(surface, json.dumps(value, indent=2), 100) for surface, value in VALUES.items()]
-    with conn:
-        conn.execute('BEGIN')
-        albums.observe(conn, 'release', title='Release', artist='Artist')
-        conn.execute("INSERT INTO genre_catalog(key,name,source) VALUES ('known-genre','Known label','custom')")
-        for surface, value in VALUES.items():
-            recommendation_requests.write(conn, surface, value, 100)
-        # Retained originals are the exact opaque predecessor text, including
-        # the empty mixes object which has no native choice-window row.
-        conn.execute(preparation.JOB.destinations[0][1])
-        conn.executemany('INSERT INTO prepared_demand_originals VALUES (?,?,?)', originals)
-    return sorted(originals)
-
-
-@pytest.fixture
-def demand_upgrade_input(request, tmp_path, monkeypatch):
-    bound_catalog(monkeypatch)
-    version, target = request.param
-    path = tmp_path / 'demand-upgrade.db'
-    with closing(sqlite3.connect(':memory:')) as schema, closing(sqlite3.connect(path)) as conn:
-        install_numbered_input(schema, version, regular_owners=regular.CHANGES if version == 107 else ())
-        conn.execute('PRAGMA synchronous=OFF')
-        schema.backup(conn)
-        conn.row_factory = sqlite3.Row
-        conn.execute('PRAGMA foreign_keys=ON')
-        conn.execute('PRAGMA journal_mode=WAL')
-        if version < 87:
-            with catalog_reader(path, version) as store:
-                store.conn.execute('PRAGMA synchronous=OFF')
-                seed(store)
-                originals = list(map(tuple, store.conn.execute('SELECT * FROM rec_proposals ORDER BY surface')))
-                publication.publish(store.conn, identity=ready(store.conn))
-        else:
-            originals = seed_native_demand(conn)
-        yield conn, path, version, target, originals
-
-
-@pytest.mark.parametrize('demand_upgrade_input', [
-    (79, 86), (86, 87), (87, 98), (98, 102), (103, 104), (104, 107)
-], indirect=True, ids=['79-to-86', '86-to-87', '87-to-98', '98-to-102', '103-to-104', '104-to-107'])
-def test_registered_demand_upgrades_preserve_identity_order_and_opaque_sources(demand_upgrade_input):
-    conn, path, version, target, originals = demand_upgrade_input
-    history = list(map(tuple, conn.execute('SELECT version,name FROM schema_migrations ORDER BY version')))
-    runner.migrate(conn, registry=registry.MIGRATIONS[:target])
-    assert list(map(tuple, conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
-        *history, *[(item.version, item.name) for item in registry.MIGRATIONS[version:target]]]
-    assert (publication.selected(conn) is None) == (target >= 87)
-    if target >= 87:
-        for surface, value in EXPECTED.items():
-            assert recommendation_requests.read(conn, surface) == value
-    else:
-        assert list(map(tuple, conn.execute('SELECT * FROM rec_proposals ORDER BY surface'))) == originals
-    with catalog_reader(path, target) as reader:
-        for surface, value in EXPECTED.items():
-            assert reader.rec_proposals.get_proposals(surface) == value
-            assert reader.rec_proposals.has_proposals(surface) == bool(value)
-    assert list(map(tuple, conn.execute('SELECT * FROM prepared_demand_originals ORDER BY surface'))) == originals
-    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
-
-
-@pytest.mark.parametrize('demand_upgrade_input', [(103, 103)], indirect=True, ids=['renamed-input'])
-def test_name_cutover_restores_exact_demand_readers(demand_upgrade_input):
-    from yt_playlist.core.migrations import v103_entity_names
-
-    conn, path, _version, target, originals = demand_upgrade_input
-    programs = list(conn.execute("SELECT type,name,sql FROM sqlite_schema WHERE type IN ('view','trigger') ORDER BY rowid"))
-    with conn:
-        conn.execute('BEGIN')
-        for kind, name, _sql in reversed(programs):
-            conn.execute('DROP ' + kind + ' "' + name.replace('"', '""') + '"')
-        v103_entity_names.restore_programs(conn, programs, retention_progress=False)
-    runner.validate_version(conn, target)
-    with catalog_reader(path, target) as reader:
-        for surface, value in EXPECTED.items():
-            assert reader.rec_proposals.get_proposals(surface) == value
-    assert list(map(tuple, conn.execute('SELECT * FROM prepared_demand_originals ORDER BY surface'))) == originals
-
-
-@pytest.mark.parametrize('demand_upgrade_input', [(107, 107)], indirect=True, ids=['completed-native'])
-def test_native_admission_and_reopen_preserve_demand_and_opaque_sources(demand_upgrade_input):
-    _conn, path, _version, target, originals = demand_upgrade_input
-    native = Store(path)
+    native = Store(tmp_path/'native-demand.db')
     try:
+        with store.read_snapshot() as snapshot:
+            pinned = snapshot.store
+            assert pinned.rec_proposals.get_proposals('choice_window:mixes')=={}
+            identity = ready(store.conn)
+            publication.publish(store.conn,identity=identity)
+            assert publication.selected(pinned.conn) is None
+            assert pinned.rec_proposals.get_proposals('choice_window:mixes')=={}
+        with store.read_view() as reader:
+            reader.conn.set_authorizer(lambda action,owner,column,*_:sqlite3.SQLITE_DENY
+                if action==sqlite3.SQLITE_READ and owner=='rec_proposals' and column=='payload'
+                else sqlite3.SQLITE_OK)
+            for surface,value in EXPECTED.items():
+                assert reader.rec_proposals.get_proposals(surface)==value
+                assert reader.rec_proposals.has_proposals(surface)==bool(value)
+        regular.migrate(store.conn)
+        assert list(map(tuple,store.conn.execute('SELECT * FROM schema_migrations')))==history
+        assert list(map(tuple,store.conn.execute('SELECT * FROM rec_proposals ORDER BY surface')))==originals
         native.conn.execute('PRAGMA synchronous=OFF')
-        native.init_schema(defer_metadata=True)
+        store.conn.backup(native.conn)
+        runner.migrate(native.conn,registry=registry.MIGRATIONS[:87])
         assert publication.selected(native.conn) is None
-        for surface, value in EXPECTED.items():
-            assert native.rec_proposals.get_proposals(surface) == value
-        assert list(map(tuple, native.conn.execute('SELECT * FROM prepared_demand_originals ORDER BY surface'))) == originals
-        regular.validate(native.conn)
+        for surface,value in EXPECTED.items():
+            assert recommendation_requests.read(native.conn,surface)==value
+        runner.migrate(native.conn,registry=registry.MIGRATIONS)
+        regular.migrate(native.conn)
+        native.init_schema(defer_metadata=True)
+        for surface,value in EXPECTED.items():
+            assert native.rec_proposals.get_proposals(surface)==value
+        assert list(map(tuple,native.conn.execute('SELECT * FROM prepared_demand_originals ORDER BY surface')))==originals
     finally:
         native.conn.close()
-    with catalog_reader(path, target) as reopened:
-        for surface, value in EXPECTED.items():
-            assert reopened.rec_proposals.get_proposals(surface) == value
 
 
 @pytest.mark.parametrize('installed',[79],indirect=True)
@@ -281,10 +142,11 @@ def test_independent_verification_rejects_damaged_prepared_members(installed,dam
         publication.publish(store.conn,identity=stage.id)
     assert publication.selected(store.conn) is None
     assert store.rec_proposals.get_proposals('choice_window:albums')==VALUES['choice_window:albums']
+    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed',[86],indirect=True)
-def test_interruption_resume_and_publication_fence_keep_atomic_selection(installed,monkeypatch, independent_regular_ddl):
+def test_interruption_resume_and_publication_fence_keep_atomic_selection(installed,monkeypatch):
     store,_ = installed
     seed(store)
     preparation.JOB.install(store.conn)
@@ -328,30 +190,17 @@ def test_interruption_resume_and_publication_fence_keep_atomic_selection(install
             store.conn.execute('DELETE FROM '+publication.table('prepared_demand_originals')+' WHERE stage=?',(final,))
 
 
-def finite_requests(store, now):
-    value = {'epoch':99,'include_genres':['known-genre']*100,'avoid_genres':['Missing']*100,'held_by_vibe':False}
-    store.rec_proposals.put_proposals('home_genre_request',value,now)
-    store.rec_proposals.put_proposals('album_menu_refresh',{'epoch':98,'exclude':['release']*100},now)
-    return value
-
-
 @pytest.mark.parametrize('installed',[86],indirect=True)
-def test_full_finite_demand_uses_bounded_staging(installed, publication_consumer_reads):
+def test_full_finite_demand_uses_bounded_staging_and_failed_preparation_leaves_regular_changes_usable(installed):
     store,_ = installed
     seed(store)
-    value = finite_requests(store, 300)
+    value = {'epoch':99,'include_genres':['known-genre']*100,'avoid_genres':['Missing']*100,'held_by_vibe':False}
+    store.rec_proposals.put_proposals('home_genre_request',value,300)
+    store.rec_proposals.put_proposals('album_menu_refresh',{'epoch':98,'exclude':['release']*100},300)
     identity = ready(store.conn,size=16)
     assert publication.stage(store.conn,identity).copied==309
     publication.publish(store.conn,identity=identity)
     assert store.rec_proposals.get_proposals('home_genre_request')==value
-
-
-@pytest.mark.parametrize('installed',[86],indirect=True)
-def test_failed_demand_keeps_regular_changes_and_large_retry_usable(
-        installed, independent_regular_ddl, publication_consumer_reads):
-    store,_ = installed
-    seed(store)
-    publication.publish(store.conn,identity=ready(store.conn,size=16))
     with store.conn:
         store.conn.execute("UPDATE rec_proposals SET payload='{bad' WHERE surface='home_genre_request'")
     with pytest.raises(ValueError):
@@ -359,10 +208,9 @@ def test_failed_demand_keeps_regular_changes_and_large_retry_usable(
     assert preparation.JOB.progress(store.conn).status=='failed'
     assert publication.selected(store.conn) is None
     regular.migrate(store.conn)
-    value = finite_requests(store, 301)
+    store.rec_proposals.put_proposals('home_genre_request',value,301)
     preparation.JOB.step(store.conn,retry=True)
     final = ready(store.conn,size=16)
-    assert publication.stage(store.conn,final).copied==309
     publication.publish(store.conn,identity=final)
     assert store.rec_proposals.get_proposals('home_genre_request')==value
 

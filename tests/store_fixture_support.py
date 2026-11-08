@@ -1,7 +1,7 @@
-"""Bind ordinary consumers to private copies of a validated empty schema.
+"""Bind ordinary consumers to private copies of the shipped empty schema.
 
 Admission, bootstrap, upgrade and repair tests construct or reopen real Stores.
-Consumer fixtures reuse the immutable schema admitted by the session builder;
+Consumer fixtures reuse immutable SQL built below startup admission;
 they retain real repositories, revision guards, repair and WAL configuration.
 """
 from copy import deepcopy
@@ -38,7 +38,7 @@ def publication_schema_inspections(request):
     Validators still check live SQL and refresh after external commits. Keep
     reader and artifact leases entirely under each test's control.
     """
-    fixture = next((name for name in ('installed', 'unadmitted_installed')
+    fixture = next((name for name in ('installed', 'unadmitted_installed', 'guarded_installed')
                     if name in request.fixturenames), None)
     if fixture is None:
         yield
@@ -58,7 +58,7 @@ def publication_consumer_reads(request, monkeypatch):
     validation keep their own connections. Independent native-upgrade cases
     in the same module have no installed consumer to configure.
     """
-    fixture = next((name for name in ('installed', 'unadmitted_installed')
+    fixture = next((name for name in ('installed', 'unadmitted_installed', 'guarded_installed')
                     if name in request.fixturenames), None)
     if fixture is None:
         yield
@@ -71,15 +71,15 @@ def publication_consumer_reads(request, monkeypatch):
 
 
 def assert_installed_consumer_input(store, version):
-    """Check the actual admitted SQL and private guards beneath consumers."""
+    """Check completed numbered SQL and private guards beneath consumers."""
     from yt_playlist.core.migrations import registry, regular
 
     source = store._fixture_installed_template.source
     assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
     assert list(map(tuple, store.conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
         (entry.version, entry.name) for entry in registry.MIGRATIONS[:version]]
-    # The immutable source was admitted when built. Validate the private copy
-    # against its recorded history without repeating the source's admission.
+    # Admission belongs to its independent owners. Check the private copy's
+    # actual completed regular history, including an unfinished regular prefix.
     def history(conn):
         if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='schema_changes'").fetchone():
             return []
@@ -124,8 +124,8 @@ class PristineSchema(sqlite3.Connection):
 
 
 @contextmanager
-def bounded_consumer_schema(entries, *, snapshot_guards=True):
-    """Shipped SQL with bounded genre inputs, for consumers below admission.
+def consumer_schema(*, entries=None, snapshot_guards=True):
+    """Shipped SQL for consumers below admission, with optional genre bounds.
 
     This deliberately does not validate schema admission. Upgrade and startup
     owners must exercise their real validators separately.
@@ -138,29 +138,36 @@ def bounded_consumer_schema(entries, *, snapshot_guards=True):
     with closing(sqlite3.connect(':memory:', factory=PristineSchema)) as schema:
         schema.execute('PRAGMA foreign_keys=ON')
         document = destination_schema.definition()
-        seeds = [sql for sql in document['destination_seeds'] if not sql.startswith(
-            ('INSERT INTO "genre_alias"', 'INSERT INTO "genre_catalog"', 'INSERT INTO "genre_family"'))]
         with pytest.MonkeyPatch.context() as patch, schema:
-            bound_catalog(patch, entries=entries)
-            patch.setattr(destination_schema, 'definition', lambda: {**document, 'destination_seeds': seeds})
+            if entries is not None:
+                seeds = [sql for sql in document['destination_seeds'] if not sql.startswith(
+                    ('INSERT INTO "genre_alias"', 'INSERT INTO "genre_catalog"', 'INSERT INTO "genre_family"'))]
+                bound_catalog(patch, entries=entries)
+                patch.setattr(destination_schema, 'definition', lambda: {**document, 'destination_seeds': seeds})
             schema.execute('BEGIN')
             schema_bootstrap.bootstrap(schema, registry.MIGRATIONS, regular.CHANGES,
                                        1., validation=lambda conn: None)
-            genre_identity.seed_catalog(schema)
+            if entries is not None:
+                genre_identity.seed_catalog(schema)
         if snapshot_guards:
             schema.capture_revisions(Revisions(schema))
         schema.execute('PRAGMA query_only=ON')
         yield schema
 
 
-def initialize_consumer(store, pristine, *, snapshot_guards=True):
+def bounded_consumer_schema(entries, *, snapshot_guards=True):
+    return consumer_schema(entries=entries, snapshot_guards=snapshot_guards)
+
+
+def initialize_consumer(store, pristine, *, snapshot_guards=True, compatibility=False):
     assert pristine.execute('PRAGMA query_only').fetchone()[0] == 1
     pristine.backup(store.conn)
-    store._schema_compatibility = False
+    store._schema_compatibility = compatibility
     store._rebuild_source_version = None
     store._schema_recovery_pending = False
     store._bind_repositories()
-    repair.run_once(store)
+    if not compatibility:
+        repair.run_once(store)
     if store._db_path is not None:
         mode = store.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0]
         assert mode.lower() == 'wal'
@@ -173,25 +180,56 @@ def numbered_store(request, tmp_path, monkeypatch):
     """Build shipped predecessor SQL without running application startup.
 
     Registered upgrades still admit and convert their actual populated input.
-    Consumers needing guarded snapshots use the admitted fixtures instead.
+    Consumers needing snapshots use guarded_numbered_store instead.
     """
+    with _numbered_input(request.param, tmp_path, monkeypatch) as value:
+        yield value
+
+
+@pytest.fixture
+def guarded_numbered_store(request, tmp_path, monkeypatch):
+    """Private predecessor SQL with real revision guards and WAL snapshots."""
+    with _numbered_input(request.param, tmp_path, monkeypatch, snapshot_guards=True) as value:
+        yield value
+
+
+@pytest.fixture
+def preparation_ddl_connection(installed):
+    """A real SQLite DDL worker beside the preparation's live Store.
+
+    These tests own migration progress alongside incomplete preparation. The
+    Store's query diagnostics are below that SQL/transaction boundary.
+    """
+    store, _ = installed
+    with closing(sqlite3.connect(store._db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        conn.execute('PRAGMA synchronous=NORMAL')
+        yield conn
+
+
+@contextmanager
+def _numbered_input(version, tmp_path, monkeypatch, *, snapshot_guards=False):
     from tests.genre_catalog_support import bound_catalog
     from yt_playlist.core import schema_inspection
     from yt_playlist.core.store import Store
 
-    version = request.param
     bound_catalog(monkeypatch)
     database = Store(tmp_path / 'numbered-input.db')
     with closing(database.conn):
+        # Preparation keeps real SQL transactions and files. Power-loss
+        # durability of this disposable input is outside those tests.
+        database.conn.execute('PRAGMA synchronous=OFF')
         with closing(sqlite3.connect(':memory:')) as schema:
             install_numbered_input(schema, version)
             schema.backup(database.conn)
         database.conn.execute('PRAGMA journal_mode=WAL')
-        database.conn.execute('PRAGMA synchronous=NORMAL')
         database._schema_compatibility = version < 103
         database._rebuild_source_version = None
         database._schema_recovery_pending = False
         database._bind_repositories()
+        if snapshot_guards:
+            database._snapshot_revisions = Revisions(database.conn)
         with schema_inspection.reuse_tables(database.conn):
             yield database, version
 

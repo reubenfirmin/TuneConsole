@@ -92,6 +92,58 @@ def state(conn):
     return result
 
 
+@pytest.mark.parametrize('version', [79, 93, 102, 107])
+def test_bounded_publication_input_matches_real_admission_and_preserves_private_guards(
+        _bounded_installed_schema, tmp_path, monkeypatch, version):
+    from tests.genre_catalog_support import bound_catalog
+    from tests.store_fixture_support import install_numbered_input, revision_definitions
+    from yt_playlist.core.migrations import regular
+
+    bound_catalog(monkeypatch)
+    with ExitStack() as resources:
+        admitted = Store(tmp_path / 'genuinely-admitted.db')
+        resources.callback(admitted.conn.close)
+        # Match the previous builder's input, then let actual startup determine
+        # its SQL, compatibility flags and guards. Full historical replay has
+        # separate owners above; shipped assembled DDL can differ textually.
+        with closing(sqlite3.connect(':memory:')) as numbered:
+            install_numbered_input(numbered, version)
+            numbered.backup(admitted.conn)
+        admitted.init_schema(defer_metadata=True)
+        template = _bounded_installed_schema(version)
+        assert state(template.source.conn) == state(admitted.conn)
+        assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+        flags = ('_schema_compatibility', '_rebuild_source_version', '_schema_recovery_pending')
+        assert [getattr(template.source, name) for name in flags] == [
+            getattr(admitted, name) for name in flags]
+        # Empty numbered input must not claim that pending regular work ran.
+        assert regular.validate(template.source.conn) == regular.validate(admitted.conn) == 0
+        first = resources.enter_context(template.open(tmp_path / 'first.db'))
+        second = resources.enter_context(template.open(tmp_path / 'second.db'))
+        guards = tuple(map(tuple, revision_definitions(admitted.conn)))
+        for clone in (first, second):
+            assert state(clone.conn) == state(admitted.conn)
+            assert tuple(map(tuple, revision_definitions(clone.conn))) == guards
+            assert clone.conn.execute('PRAGMA foreign_keys').fetchone()[0] == 1
+            assert clone.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
+            assert not clone.conn.execute('PRAGMA foreign_key_check').fetchone()
+        first.settings.set_setting('private-input', 'original')
+        with first.read_snapshot() as snapshot:
+            assert snapshot.store.settings.get_setting('private-input') == 'original'
+            first.settings.set_setting('private-input', 'changed')
+            assert snapshot.store.settings.get_setting('private-input') == 'original'
+            assert not snapshot.publish(lambda: pytest.fail('Published changed input'))
+        with first.read_snapshot() as snapshot:
+            assert snapshot.store.settings.get_setting('private-input') == 'changed'
+            with pytest.raises(RuntimeError, match='rollback input'):
+                with first.conn:
+                    first.conn.execute("UPDATE settings SET value='rolled back' WHERE key='private-input'")
+                    raise RuntimeError('rollback input')
+            assert snapshot.publish(lambda: None)
+        assert second.settings.get_setting('private-input') is None
+        assert template.source.settings.get_setting('private-input') is None
+
+
 @pytest.mark.parametrize('version', [20, 92])
 def test_genuine_history_ignores_and_restores_a_consumers_catalog(
         _pristine_installed_schema, genuine_replays, version):

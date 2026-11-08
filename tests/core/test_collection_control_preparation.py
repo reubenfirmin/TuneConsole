@@ -4,12 +4,16 @@ import json
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
-from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import numbered_store as installed
 from yt_playlist.core import album_tuning_state, model_selection_heads
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import collection_controls as preparation
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Collection-control preparation does not construct an HTTP app."""
 
 
 def finish(job, conn, size=1):
@@ -39,7 +43,8 @@ def seed(store, *, legacy=False):
 
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
 @pytest.mark.parametrize('legacy', [False, True])
-def test_exact_originals_order_and_unknown_references_survive_without_admission(installed, legacy):
+def test_exact_originals_order_and_unknown_references_survive_without_admission(
+        installed, legacy):
     store, _ = installed
     sources, run = seed(store, legacy=legacy)
     for job in preparation.JOBS.values():
@@ -67,6 +72,7 @@ def test_exact_originals_order_and_unknown_references_survive_without_admission(
     assert not album_tuning_state.available(store.conn)
     assert not model_selection_heads.available(store.conn)
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -124,7 +130,7 @@ def test_continuing_writes_reference_edits_and_removal_reconcile(installed):
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_interruption_and_explicit_retry_preserve_independent_checkpoints(installed, independent_regular_ddl):
+def test_interruption_and_explicit_retry_preserve_independent_checkpoints(installed):
     store, _ = installed
     sources, _ = seed(store)
     conn = store.conn
@@ -182,7 +188,8 @@ def test_null_blank_and_absent_controls_are_distinct(installed, raw, kind):
     ('model-pointers', 'rec_selection_active_run', '9223372036854775808'),
     ('model-pointers', 'rec_selection_active_run', '1' * (preparation.MAX_BYTES + 1)),
 ])
-def test_invalid_sources_fail_durably_without_changing_installed_values(installed, name, source, raw):
+def test_invalid_sources_fail_durably_without_changing_installed_values(
+        installed, name, source, raw):
     store, _ = installed
     store.settings.set_setting(source, raw)
     job = preparation.JOBS[name]
@@ -191,3 +198,4 @@ def test_invalid_sources_fail_durably_without_changing_installed_values(installe
         finish(job, store.conn)
     assert job.progress(store.conn).status == 'failed'
     assert store.settings.get_setting(source) == raw
+    regular.migrate(store.conn)

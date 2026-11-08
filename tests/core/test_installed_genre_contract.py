@@ -2,14 +2,13 @@
 from contextlib import closing
 import sqlite3
 import hashlib
-from types import SimpleNamespace
 import threading
 
 import pytest
 
 from tests.genre_catalog_support import bound_catalog
 from tests.home_fixture_support import install_home_routes
-from tests.store_fixture_support import install_numbered_input, reuse_reporting_reader
+from tests.store_fixture_support import reuse_reporting_reader
 from yt_playlist.core.migrations import MigrationError, current, migrate, registry, runner
 from yt_playlist.core.migrations import v092_installed_genre_contract as repair
 
@@ -99,117 +98,17 @@ def test_constraint_upgrade_failure_rolls_back_without_discarding_legacy_evidenc
         conn.close()
 
 
-@pytest.fixture(scope='module')
-def native_v88_steps(tmp_path_factory, earlier_template):
-    root = tmp_path_factory.mktemp('native-v88-app')
-    sequence = _native_v88_workflow(root / 'native-v88.db', earlier_template)
-    try:
-        yield sequence, root / 'app-home'
-    finally:
-        sequence.close()
-
-
-def _advance_native_v88(steps):
-    from yt_playlist.providers import genres
-
-    sequence, home = steps
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setenv('YT_PLAYLIST_HOME', str(home))
-        patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
-        patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
-        patch.delenv('DEEPSEEK_API_KEY', raising=False)
-        bound_catalog(patch, entries=(('jazz', 'Jazz'),))
-        patch.setattr(genres, 'configure', lambda *args, **kwargs: None)
-        return next(sequence)
-
-
-@pytest.fixture(scope='module')
-def native_v88_admitted(native_v88_steps):
-    return _advance_native_v88(native_v88_steps)
-
-
-def test_native_v88_admission_preserves_writable_legacy_owners(native_v88_admitted):
-    store = native_v88_admitted.store
-    assert store._schema_compatibility and not store.activity_paused
-    assert store.settings.get_setting('during-schema-update') == 'writable'
-    assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 88
-
-
-@pytest.fixture(scope='module')
-def native_v88_app(native_v88_admitted, native_v88_steps):
-    return _advance_native_v88(native_v88_steps)
-
-
-def test_native_v88_app_keeps_the_admitted_writer_and_actual_maintenance(native_v88_app):
-    ctx = native_v88_app.client.app.state.ctx
-    assert ctx.store is native_v88_app.store
-    assert ctx.storage_maintenance.store is ctx.store
-    assert ctx.storage_maintenance.phase == 'idle'
-    assert not ctx.storage_maintenance.active
-
-
-@pytest.fixture(scope='module')
-def native_v88_serving(native_v88_app, native_v88_steps):
-    return _advance_native_v88(native_v88_steps)
-
-
-def test_native_v88_home_serves_before_regular_maintenance(native_v88_serving):
-    assert native_v88_serving.first_status == 200
-    assert native_v88_serving.maintenance is None
-    assert not native_v88_serving.store.conn.execute(
-        "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='schema_changes'").fetchone()
-
-
-@pytest.fixture(scope='module')
-def native_v88_schema_prefix(native_v88_serving, native_v88_steps):
-    return _advance_native_v88(native_v88_steps)
-
-
-def test_native_v88_regular_worker_keeps_writes_available_between_actual_changes(native_v88_schema_prefix):
-    from yt_playlist.core.migrations import regular
-
-    store = native_v88_schema_prefix.store
-    applied = store.conn.execute('SELECT count(*) FROM schema_changes').fetchone()[0]
-    assert 0 < applied < len(regular.CHANGES)
-    assert native_v88_schema_prefix.maintenance._thread.is_alive()
-    store.settings.set_setting('during-regular-ddl', 'writable')
-    assert not store.activity_paused
-
-
-@pytest.fixture(scope='module')
-def native_v88_maintained(native_v88_schema_prefix, native_v88_steps):
-    return _advance_native_v88(native_v88_steps)
-
-
-def test_native_v88_real_maintenance_installs_every_regular_change(native_v88_maintained, caplog):
-    from yt_playlist.core.migrations import regular
-
-    state = native_v88_maintained
-    assert state.maintenance.phase == 'done'
-    assert list(map(tuple, state.store.conn.execute('SELECT version,name FROM schema_changes ORDER BY version'))) == [
-        (change.version, change.name) for change in regular.CHANGES]
-    assert not any(record.levelname in ('WARNING', 'ERROR') and record.name ==
-                   'yt_playlist.core.storage_maintenance' for record in caplog.get_records('setup') + caplog.records)
-
-
-@pytest.fixture(scope='module')
-def native_v88_finished(native_v88_maintained, native_v88_steps):
-    return _advance_native_v88(native_v88_steps)
-
-
-def test_exact_native_v88_triggers_admit_writable_app_without_bulk_conversion(native_v88_finished):
-    assert native_v88_finished.finished
-    assert native_v88_finished.final_status == 200
-    assert not native_v88_finished.store.conn.execute('PRAGMA foreign_key_check').fetchone()
-
-
-def _native_v88_workflow(path, earlier_template):
-    """Keep one actual v88 writer through admission, HTTP, DDL and stale reads."""
+def test_exact_native_v88_triggers_admit_writable_app_without_bulk_conversion(
+        tmp_path, earlier_template, monkeypatch, caplog):
+    """Keep admission, HTTP, all regular DDL and stale reads in one workflow."""
     from yt_playlist.core.store import Store
     from yt_playlist.core.db_diagnostics import DiagnosticConnection
     from yt_playlist.core.migrations import regular
     from yt_playlist.providers import genres
 
+    bound_catalog(monkeypatch, entries=(('jazz', 'Jazz'),))
+    monkeypatch.setattr(genres, 'configure', lambda *args, **kwargs: None)
+    path = tmp_path / 'native-v88.db'
     conn = sqlite3.connect(path)
     earlier_template.backup(conn)
     hashes = {'catalog_tracks_update': '223ba10042f4c50345b0568ed9d55ca99a44ce988ef29c7457ddc2dd8c7956bb',
@@ -236,25 +135,16 @@ def _native_v88_workflow(path, earlier_template):
         assert not store.activity_paused and store._schema_compatibility
         store.settings.set_setting('during-schema-update', 'writable')
         assert list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version'))) == history
-        state = SimpleNamespace(store=store, maintenance=None, finished=False)
-        yield state
         from fastapi.testclient import TestClient
         from yt_playlist.web.app import create_app
         with pytest.MonkeyPatch.context() as patch:
             install_home_routes(patch)
             app = create_app(store, lambda: {}, background_work=False)
         client = TestClient(app, base_url='http://127.0.0.1',backend_options={'use_uvloop':True})
-        state.client = client
-        yield state
         with pytest.MonkeyPatch.context() as patch, reuse_reporting_reader(store, patch):
-            state.first_status = client.get('/').status_code
-            assert state.first_status == 200
-        yield state
+            assert client.get('/').status_code == 200
         maintenance = app.state.ctx.storage_maintenance
-        state.maintenance = maintenance
-        # Hold the real worker at an actual change boundary. The next measured
-        # owner releases that same thread; every registered apply/validator and
-        # commit still runs, with no background work between the owners.
+        # Exercise a foreground write between two actual committed changes.
         reached = threading.Event()
         middle = len(regular.CHANGES) // 2
         commit = DiagnosticConnection.commit
@@ -273,13 +163,17 @@ def _native_v88_workflow(path, earlier_template):
             patch.setattr(DiagnosticConnection, 'commit', gated_commit)
             maintenance.start()
             assert reached.wait(15), maintenance.phase
-            yield state
+            assert 0 < store.conn.execute('SELECT count(*) FROM schema_changes').fetchone()[0] < len(regular.CHANGES)
+            assert maintenance._thread.is_alive()
+            store.settings.set_setting('during-regular-ddl', 'writable')
+            assert not store.activity_paused
             release.set()
             assert maintenance.ready.wait(15), maintenance.phase
             maintenance.join(1)
         assert maintenance.phase == 'done'
         assert not store._schema_recovery_pending and not store.activity_paused
-        yield state
+        assert not any(record.levelname in ('WARNING', 'ERROR') and record.name ==
+                       'yt_playlist.core.storage_maintenance' for record in caplog.records)
         assert list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version'))) == history
         assert list(map(tuple,store.conn.execute('SELECT version,name FROM schema_changes ORDER BY version'))) == [
             (change.version,change.name) for change in regular.CHANGES]
@@ -294,11 +188,8 @@ def _native_v88_workflow(path, earlier_template):
         store.settings.set_setting('after-upgrade', 'writable')
         assert not snapshot.publish(lambda: pytest.fail('Rebound revision guards accepted stale inputs'))
         with pytest.MonkeyPatch.context() as patch, reuse_reporting_reader(store, patch):
-            state.final_status = client.get('/').status_code
-            assert state.final_status == 200
+            assert client.get('/').status_code == 200
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-        state.finished = True
-        yield state
     finally:
         release.set()
         if maintenance is not None:
@@ -310,37 +201,8 @@ def _native_v88_workflow(path, earlier_template):
         genres.set_active(None)
 
 
-@pytest.fixture(scope='module')
-def missing_guard_input():
-    from yt_playlist.core.migrations import regular
-    from yt_playlist.core.preparation import installed_genre_contract
-
-    with pytest.MonkeyPatch.context() as patch, closing(sqlite3.connect(':memory:')) as conn:
-        bound_catalog(patch)
-        # Supply the completed v107 predecessor and its first seven regular
-        # owners, including the exact omission made by the historical bug.
-        install_numbered_input(conn, 107, regular_owners=regular.CHANGES[:7])
-        with conn:
-            for name, _ in installed_genre_contract.guards():
-                conn.execute('DROP TRIGGER ' + name)
-        conn.execute('PRAGMA query_only=ON')
-        yield conn
-
-
-def test_missing_guard_input_keeps_both_applied_histories_and_the_exact_omission(missing_guard_input):
-    from yt_playlist.core.migrations import regular
-
-    conn = missing_guard_input
-    assert list(map(tuple, conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
-        (item.version, item.name) for item in registry.MIGRATIONS]
-    assert list(map(tuple, conn.execute('SELECT version,name FROM schema_changes ORDER BY version'))) == [
-        (item.version, item.name) for item in regular.CHANGES[:7]]
-    assert not conn.execute("SELECT 1 FROM sqlite_schema WHERE name LIKE 'installed_taste_axis_guard_%'").fetchone()
-    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
-
-
 def test_bounded_repair_of_already_upgraded_missing_guards_preserves_applied_history(
-        tmp_path, monkeypatch, missing_guard_input):
+        tmp_path, monkeypatch):
     from yt_playlist.core.migrations import regular
     from yt_playlist.core.preparation import installed_genre_contract
 
@@ -348,11 +210,11 @@ def test_bounded_repair_of_already_upgraded_missing_guards_preserves_applied_his
     conn.row_factory = sqlite3.Row
     try:
         bound_catalog(monkeypatch)
-        # Only change 8 owns this repair. Later regular owners are exercised by
-        # the retained populated upgrade journey, rather than replayed here.
-        monkeypatch.setattr(regular, 'CHANGES', regular.CHANGES[:8])
-        missing_guard_input.backup(conn)
-        conn.execute('PRAGMA foreign_keys=ON')
+        migrate(conn, registry=registry.MIGRATIONS[:79])
+        regular.migrate(conn, changes=regular.CHANGES[:7])
+        with monkeypatch.context() as former:
+            former.setattr(regular, 'after_owner_upgrade', lambda conn: None)
+            migrate(conn, registry=registry.MIGRATIONS)
         assert not conn.execute("SELECT 1 FROM sqlite_schema WHERE name LIKE 'installed_taste_axis_guard_%'").fetchone()
         history = conn.execute('SELECT * FROM schema_migrations ORDER BY version').fetchall()
         changes = conn.execute('SELECT * FROM schema_changes ORDER BY version').fetchall()

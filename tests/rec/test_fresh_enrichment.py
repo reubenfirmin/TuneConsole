@@ -130,7 +130,7 @@ def _build_enrichment_inputs(store, signal):
         # provider delivery and queue writes for the changed discoveries below.
         items = [dict(key=identity_key(f'{group}{i}', group), video_id=f'{group}{i}',
                       title=f'{group}{i}', artist=group, genre=fields['genre'],
-                      year=fields['year'], duration_s=200) for i in range(7)]
+                      year=fields['year'], duration_s=200) for i in range(10)]
         seed_publication_subjects(store, items)
         tids = list(store.tracks.track_ids_for_videos([item['video_id'] for item in items]).values())
         if fields['audio']:
@@ -138,8 +138,8 @@ def _build_enrichment_inputs(store, signal):
                 store.conn.executemany('UPDATE recordings SET bpm=?,energy=?,danceability=? WHERE id=?',
                     [(fields['audio']['bpm'], fields['audio']['energy'], fields['audio']['danceability'], tid)
                      for tid in tids])
-        # Fourteen subjects retain the real eight-dimensional collaborative
-        # fit and its minimum vocabulary margin, in two balanced clusters.
+        # Preserve both original ten-track clusters for the real
+        # eight-dimensional collaborative fit.
         pid = store.playlists.upsert_playlist(iid, group, group, len(items), group, 1)
         store.playlists.set_playlist_tracks(pid, tids)
         complete_entries(store, tids, 200)
@@ -207,8 +207,8 @@ def _forbid_retraining(monkeypatch):
 def test_enrichment_updates_fresh_modes_and_generated_playlist(store, monkeypatch, signal):
     inputs = _build_enrichment_inputs(store, signal)
     monkeypatch.setattr(surfaces, 'playlist_taste', lambda s, *, now: inputs.taste)
-    assert store.conn.execute('SELECT count(*) FROM recordings').fetchone()[0] == 22
-    assert len(store.rec_query.library_keys()) == 14
+    assert store.conn.execute('SELECT count(*) FROM recordings').fetchone()[0] == 28
+    assert len(store.rec_query.library_keys()) == 20
     assert set(store.discovery.discovered_tracks_by_keys(inputs.changed + inputs.reference)) == set(
         inputs.changed + inputs.reference)
     assert inputs.model and {mode['mode_id'] for mode in store.modes.list_modes()} == {1, 2}

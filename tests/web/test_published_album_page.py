@@ -7,11 +7,14 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
 from tests.home_fixture_support import home_page_bytecode, without_metadata_providers
+from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
-from yt_playlist.core import albums, catalog
+from yt_playlist.core import albums, artists, catalog
+from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.library.album_fetch import UPLOAD_RELEASE_PREFIX
 from yt_playlist.web.app import create_app
+from yt_playlist.util.matching import identity_key
 
 
 pytestmark = pytest.mark.usefixtures('album_routes', 'without_metadata_providers')
@@ -59,9 +62,36 @@ def payload(videos):
             'tracks':[{'videoId':v,'title':v.title(),'duration':'3:00'} for v in videos]}
 
 
+@pytest.fixture
+def album_subjects(store, monkeypatch):
+    def ingest(video_id, title, artist, album=None, duration_s=None, *, library=True,
+               album_browse_id=None, **options):
+        # Occurrence publication and HTTP rendering consume completed catalog
+        # facts. Provider metadata capture is below this boundary; keep actual
+        # identities, credits, ownership and incidental release associations.
+        with atomic_write(store):
+            entry = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?',
+                                       (video_id,)).fetchone()
+            if entry is None:
+                key = identity_key(title, artist)
+                seed_publication_subjects(store, [dict(key=key, video_id=video_id, title=title,
+                    artist=artist, album=album, duration_s=duration_s)], unowned=() if library else (key,))
+                entry = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?',
+                                           (video_id,)).fetchone()
+                artists.observe(store.conn, entry[0], artist)
+            elif library:
+                store.conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'fixture',NULL)",
+                                   (entry[0],))
+            if album_browse_id:
+                albums.link(store.conn, entry[0], album_browse_id, title=album, artist=artist)
+            return entry[0]
+
+    monkeypatch.setattr(store.tracks, 'upsert_track', ingest)
+
+
 @pytest.mark.parametrize('ownership',['saved','unsaved','upload'])
 @pytest.mark.parametrize('case',['baseline','incidental','removed','unavailable','partial','offline'])
-def test_album_page_and_expansion_follow_published_occurrences(store,ownership,case):
+def test_album_page_and_expansion_follow_published_occurrences(store,ownership,case,album_subjects):
     account = store.accounts.upsert_account('Main','credential',None,True)
     browse = UPLOAD_RELEASE_PREFIX+'release' if ownership=='upload' else 'release'
     if ownership=='saved':

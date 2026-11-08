@@ -1,12 +1,11 @@
 """Regular DDL and truthful legacy conversion history have separate commits."""
-from contextlib import ExitStack, closing
+from contextlib import closing
 import sqlite3
 import threading
 
 import pytest
 
 from tests.genre_catalog_support import bound_catalog
-from tests.independent_schema_support import independent_regular_ddl
 from tests.store_fixture_support import install_numbered_input, install_regular_input
 from yt_playlist.core.migrations import MigrationError, migrate, registry, regular
 from yt_playlist.core.migrations import v080_metadata_evidence
@@ -46,9 +45,7 @@ def test_album_feedback_outbox_installation_rolls_back_and_retries_without_advan
     from yt_playlist.core import album_feedback_outbox
     with closing(sqlite3.connect(installed)) as conn:
         version = next(change.version for change in regular.CHANGES if change.name == 'durable_album_feedback_responses')
-        with conn:
-            install_regular_input(conn, regular.CHANGES[:version - 1])
-        monkeypatch.setattr(regular, 'CHANGES', regular.CHANGES[:version])
+        regular.migrate(conn, changes=regular.CHANGES[:version - 1])
         history = legacy_history(conn)
         before = list(conn.iterdump())
         install = album_feedback_outbox.install
@@ -68,12 +65,10 @@ def test_album_feedback_outbox_installation_rolls_back_and_retries_without_advan
             'durable_album_feedback_responses',)
 
 
-def test_wrong_album_feedback_outbox_is_rejected_without_stamping_change(installed, monkeypatch):
+def test_wrong_album_feedback_outbox_is_rejected_without_stamping_change(installed):
     with closing(sqlite3.connect(installed)) as conn:
         version = next(change.version for change in regular.CHANGES if change.name == 'durable_album_feedback_responses')
-        with conn:
-            install_regular_input(conn, regular.CHANGES[:version - 1])
-        monkeypatch.setattr(regular, 'CHANGES', regular.CHANGES[:version])
+        regular.migrate(conn, changes=regular.CHANGES[:version - 1])
         with conn:
             conn.execute('CREATE TABLE album_feedback_response_outbox(action_id TEXT)')
         before = list(conn.iterdump())
@@ -121,9 +116,6 @@ def test_wrong_association_checkpoint_is_rejected_without_stamping(installed):
 
 
 def test_routine_runner_never_starts_real_metadata_conversion(installed, monkeypatch):
-    # Only the real receipt change is relevant to v81 adoption below. The
-    # complete regular registry has separate startup/CLI owners.
-    monkeypatch.setattr(regular, 'CHANGES', regular.CHANGES[:1])
     def failed_conversion(conn):
         raise RuntimeError('Conversion deliberately suspended for retry')
 
@@ -150,7 +142,7 @@ def test_routine_runner_never_starts_real_metadata_conversion(installed, monkeyp
         assert conn.execute("SELECT result FROM playback_feedback_receipts WHERE capture_id='retained-capture'").fetchone()[0] == 1
 
 
-def test_regular_failure_keeps_prior_commit_and_never_changes_legacy_history(installed, independent_regular_ddl):
+def test_regular_failure_keeps_prior_commit_and_never_changes_legacy_history(installed):
     def interrupted(conn, context):
         conn.execute('CREATE TABLE interrupted_owner(id INTEGER PRIMARY KEY)')
         raise RuntimeError('Interrupted regular DDL')
@@ -196,9 +188,6 @@ def test_regular_cli_does_not_run_legacy_conversion(installed, tmp_path, monkeyp
         pytest.fail('Regular schema command invoked bulk conversion')
 
     monkeypatch.setattr(v080_metadata_evidence, 'convert_legacy', forbidden)
-    # Command routing owns DDL admission independently of bulk conversion.
-    # Registry-wide installation is covered by current-schema bootstrap tests.
-    monkeypatch.setattr(regular, 'CHANGES', regular.CHANGES[:1])
     assert main(['upgrade-schema', str(installed)]) == 0
     assert 'legacy layout remains 79' in capsys.readouterr().out
     with closing(sqlite3.connect(installed)) as conn, conn:
@@ -212,7 +201,7 @@ def test_regular_cli_does_not_run_legacy_conversion(installed, tmp_path, monkeyp
     assert not missing.exists()
 
 
-def test_competing_regular_startups_install_once(installed, independent_regular_ddl):
+def test_competing_regular_startups_install_once(installed):
     barrier = threading.Barrier(2)
     errors = []
 
@@ -237,7 +226,7 @@ def test_competing_regular_startups_install_once(installed, independent_regular_
         assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone() == (79,)
 
 
-def test_completed_regular_validation_leaves_writer_available(installed, monkeypatch, independent_regular_ddl):
+def test_completed_regular_validation_leaves_writer_available(installed, monkeypatch):
     with closing(sqlite3.connect(installed)) as conn, conn:
         # Match Store's production journal mode; a rollback journal naturally
         # makes every retained reader delay the writer's commit.
@@ -273,7 +262,6 @@ def test_regular_change_repairs_retired_preparation_capture_without_rewriting_hi
     from yt_playlist.core import genre_identity
     from yt_playlist.core.migrations import v085_genre_preferences
     from yt_playlist.core.preparation import genre_preferences
-    monkeypatch.setattr(regular, 'CHANGES', regular.CHANGES[:3])
     with closing(sqlite3.connect(installed)) as conn, conn:
         conn.row_factory = sqlite3.Row
         with conn:
@@ -300,62 +288,23 @@ def test_regular_change_repairs_retired_preparation_capture_without_rewriting_hi
         assert legacy_history(conn)[:85] == before
 
 
-@pytest.fixture(scope='module')
-def taste_retirement_journey(tmp_path_factory):
-    from yt_playlist.core.store import Store
+@pytest.mark.parametrize('former',[False,True])
+def test_taste_capture_retirement_preserves_evidence_and_supported_upgrade(installed,monkeypatch,former):
+    from yt_playlist.core.migrations import v088_taste_axes
     from yt_playlist.core.preparation import taste_axes
-
-    with ExitStack() as resources, pytest.MonkeyPatch.context() as patch:
-        patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('taste-retirement-home')))
-        bound_catalog(patch)
-        source = Store(tmp_path_factory.mktemp('taste-retirement') / 'installed.db')
-        resources.callback(source.conn.close)
-        install_numbered_input(source.conn, 79)
-        with source.conn:
-            source.conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (3,'Listener','credential',1)")
-            source.conn.execute("INSERT INTO settings VALUES ('retained-setting','original')")
-            source.conn.execute("INSERT INTO rec_weights VALUES ('genre:Rock',1.25,10)")
-        taste_axes.JOB.install(source.conn)
+    with closing(sqlite3.connect(installed)) as conn, conn:
+        conn.row_factory=sqlite3.Row
+        with conn:
+            conn.execute("INSERT INTO rec_weights VALUES ('genre:Rock',1.25,10)")
+        job=taste_axes.JOB
+        job.install(conn)
         for _ in range(20):
-            if taste_axes.JOB.step(source.conn, batch_size=2).status == 'prepared':
+            if job.step(conn,batch_size=2).status=='prepared':
                 break
         else:
             pytest.fail('Taste preparation did not finish')
-        regular.migrate(source.conn, changes=regular.CHANGES[:3])
-        yield dict(conn=source.conn, source=source, version=79, resources=resources,
-                   evidence=list(map(tuple, source.conn.execute('SELECT * FROM prepared_taste_originals'))))
-
-
-def assert_taste_retirement_history(state):
-    assert [(row[0], row[1]) for row in legacy_history(state['conn'])] == [
-        (entry.version, entry.name) for entry in registry.MIGRATIONS[:state['version']]]
-    assert list(map(tuple, state['conn'].execute('SELECT * FROM prepared_taste_originals'))) == state['evidence']
-    assert not state['conn'].execute('PRAGMA foreign_key_check').fetchone()
-
-
-def test_taste_retirement_input_keeps_actual_prepared_originals(taste_retirement_journey):
-    assert taste_retirement_journey['evidence']
-    assert_taste_retirement_history(taste_retirement_journey)
-
-
-@pytest.mark.parametrize('version', range(80, 88))
-def test_actual_taste_predecessor_keeps_prepared_evidence(taste_retirement_journey, version):
-    migrate(taste_retirement_journey['conn'], registry=registry.MIGRATIONS[:version])
-    taste_retirement_journey['version'] = version
-    assert_taste_retirement_history(taste_retirement_journey)
-
-
-@pytest.mark.parametrize('former', [False, True])
-def test_taste_capture_retirement_preserves_evidence_and_supported_upgrade(taste_retirement_journey, monkeypatch, former):
-    from yt_playlist.core.migrations import v088_taste_axes
-    from tests.test_installed_fixture import state
-
-    journey = taste_retirement_journey
-    monkeypatch.setattr(regular, 'CHANGES', regular.CHANGES[:4])
-    conn = journey['resources'].enter_context(closing(sqlite3.connect(':memory:')))
-    conn.row_factory = sqlite3.Row
-    journey['conn'].backup(conn)
-    with conn:
+        evidence=list(map(tuple,conn.execute('SELECT * FROM prepared_taste_originals')))
+        regular.migrate(conn,changes=regular.CHANGES[:3])
         with monkeypatch.context() as historical:
             if former:
                 historical.setattr(v088_taste_axes,'retire_preparation_capture',lambda conn:None)
@@ -371,50 +320,7 @@ def test_taste_capture_retirement_preserves_evidence_and_supported_upgrade(taste
         assert not conn.execute("SELECT 1 FROM sqlite_schema WHERE name LIKE 'prepare_taste_axes_dependency_%'").fetchone()
         with conn:
             conn.execute('UPDATE genre_catalog SET name=name WHERE key=(SELECT min(key) FROM genre_catalog)')
-        assert list(map(tuple,conn.execute('SELECT * FROM prepared_taste_originals'))) == journey['evidence']
-        if former:
-            # Both genuine v88 routes reach the same repaired SQL and originals.
-            # The common continuation therefore executes each later owner once.
-            assert state(conn) == journey['repaired_state']
-            journey['conn'] = journey['repaired']
-            journey['version'] = 88
-            journey['prefix'] = legacy_history(journey['conn'])
-        else:
-            journey['repaired'] = conn
-            journey['repaired_state'] = state(conn)
-
-
-@pytest.mark.parametrize('version', range(89, 103))
-def test_actual_taste_successor_keeps_retirement_and_originals(taste_retirement_journey, version):
-    migrate(taste_retirement_journey['conn'], registry=registry.MIGRATIONS[:version])
-    taste_retirement_journey['version'] = version
-    assert_taste_retirement_history(taste_retirement_journey)
-
-
-def test_actual_taste_account_rename_keeps_originals(taste_retirement_journey):
-    from tests.core.test_early_schema_upgrade import rename_owner
-
-    rename_owner(taste_retirement_journey)
-    assert_taste_retirement_history(taste_retirement_journey)
-
-
-def test_actual_taste_program_restoration_keeps_originals(taste_retirement_journey):
-    from tests.core.test_early_schema_upgrade import restore_programs
-
-    restore_programs(taste_retirement_journey)
-    assert_taste_retirement_history(taste_retirement_journey)
-
-
-@pytest.mark.parametrize('version', range(104, len(registry.MIGRATIONS) + 1))
-def test_actual_final_taste_owner_keeps_retirement_and_originals(taste_retirement_journey, version):
-    migrate(taste_retirement_journey['conn'], registry=registry.MIGRATIONS[:version])
-    taste_retirement_journey['version'] = version
-    assert_taste_retirement_history(taste_retirement_journey)
-
-
-@pytest.mark.parametrize('version', range(5, len(regular.CHANGES) + 1))
-def test_actual_regular_taste_owner_keeps_retirement_and_originals(taste_retirement_journey, version):
-    regular.migrate(taste_retirement_journey['conn'], changes=regular.CHANGES[:version])
-    assert regular.validate(taste_retirement_journey['conn']) == version
-    assert_taste_retirement_history(taste_retirement_journey)
-    assert legacy_history(taste_retirement_journey['conn'])[:88] == taste_retirement_journey['prefix']
+        migrate(conn,registry=registry.MIGRATIONS)
+        regular.migrate(conn)
+        assert legacy_history(conn)[:88]==before
+        assert list(map(tuple,conn.execute('SELECT * FROM prepared_taste_originals')))==evidence

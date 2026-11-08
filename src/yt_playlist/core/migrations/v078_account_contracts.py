@@ -117,8 +117,10 @@ def validate(conn, *, foreign_keys=True, data=True):
     from . import current
     current._validate(conn, current._schema_contract((ACCOUNT_TABLE, RECIPE_TABLE)), 78,
                       foreign_keys=foreign_keys, data=data)
+    from ..schema_inspection import objects
+    definitions = {name: sql for name, (_kind, sql) in objects(conn).items()}
     for sql in statements():
         name = sql.split()[3 if sql.startswith('CREATE UNIQUE') else 2]
-        row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
-        if row is None or current._tokens(row[0]) != current._tokens(sql):
+        actual = definitions.get(name)
+        if actual is None or current._tokens(actual) != current._tokens(sql):
             raise MigrationError(f'Incompatible account/scope contract: {name}')

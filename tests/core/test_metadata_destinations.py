@@ -7,7 +7,6 @@ import sqlite3
 import pytest
 
 from tests.core.test_metadata_owner_cutover import predecessor, seed
-from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_metadata_preparation import finish
 from tests.metadata_provenance_support import metadata_provenance
 from tests.core.test_metadata_publication import publish as read_publication
@@ -16,17 +15,23 @@ from yt_playlist.core.migrations import MigrationError, regular, migrate, regist
 from yt_playlist.core.preparation import metadata_evidence as preparation, metadata_destinations as publication
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Metadata publication runs directly without the HTTP application."""
+
+
 def stage(conn):
     finish(conn)
     identity = read_publication(conn)
     for _ in range(100):
-        current = publication.step(conn,identity=identity,batch_size=16)
+        current = publication.step(conn,identity=identity,batch_size=2)
         if current.complete:
             return identity
     pytest.fail('Metadata destinations did not finish')
 
 
-def test_files_typed_observations_and_explicit_unresolved_selection_preserve_choices(predecessor):
+def test_files_typed_observations_and_explicit_unresolved_selection_preserve_choices(
+        predecessor):
     store,conn = predecessor,predecessor.conn
     entry,recording,key = seed(store)
     preparation.JOB.install(conn)
@@ -84,9 +89,10 @@ def test_files_typed_observations_and_explicit_unresolved_selection_preserve_cho
     assert metadata_provenance(store, entry)['lineage']['genre']['choice']['observation']['value_kind']=='null'
     assert successor!=identity
     assert conn.execute('SELECT 1 FROM '+publication.table('choices')+' WHERE stage=?',(identity,)).fetchone()
+    regular.migrate(conn)
 
 
-def test_failed_file_batch_is_durable_and_retry_resumes_without_duplicates(predecessor,monkeypatch, independent_regular_ddl):
+def test_failed_file_batch_is_durable_and_retry_resumes_without_duplicates(predecessor,monkeypatch):
     conn = predecessor.conn
     seed(predecessor)
     preparation.JOB.install(conn)
@@ -115,7 +121,8 @@ def test_failed_file_batch_is_durable_and_retry_resumes_without_duplicates(prede
         'SELECT count(*) FROM '+preparation.TABLE).fetchone()[0]
 
 
-def test_unknown_active_choice_is_retained_as_failed_input_without_selection(predecessor):
+def test_unknown_active_choice_is_retained_as_failed_input_without_selection(
+        predecessor):
     conn = predecessor.conn
     entry,_,_ = seed(predecessor)
     with conn:
@@ -127,6 +134,7 @@ def test_unknown_active_choice_is_retained_as_failed_input_without_selection(pre
     assert conn.execute("SELECT value_json FROM entry_field_choices WHERE entry_id=? AND field='genre'",(entry,)).fetchone()[0]=='{}'
     assert preparation.JOB.progress(conn).status=='failed'
     assert preparation.JOB.progress(conn).error
+    regular.migrate(conn)
 
 
 def test_interrupted_head_selection_is_atomic_and_restart_keeps_serving(predecessor):
@@ -176,7 +184,33 @@ def test_profile_mismatch_blocks_selection_and_source_write_withdraws_it(predece
     assert publication.selected(conn) is None
 
 
-def test_file_failure_and_racing_source_never_select_incomplete_destinations(predecessor,monkeypatch, independent_regular_ddl):
+def test_native_upgrade_and_restart_keep_selected_files_and_prefer_native_owners(predecessor):
+    from yt_playlist.core.store import Store
+    conn = predecessor.conn
+    entry,_,key = seed(predecessor)
+    preparation.JOB.install(conn)
+    identity = stage(conn)
+    publication.publish(conn,identity=identity)
+    files = [row[0] for row in conn.execute('SELECT DISTINCT filename FROM '+publication.table('deliveries'))]
+    # Use an unbound connection, as the actual native migration runner does.
+    with closing(sqlite3.connect(predecessor._db_path)) as upgrade:
+        upgrade.row_factory = sqlite3.Row
+        upgrade.execute('PRAGMA foreign_keys=ON')
+        upgrade.execute('PRAGMA synchronous=OFF')
+        migrate(upgrade,registry=registry.MIGRATIONS)
+    reopened = Store(predecessor._db_path)
+    try:
+        reopened.init_schema()
+        assert publication.selected(reopened.conn) is None
+        assert metadata_provenance(reopened, entry)['lineage']['genre']['choice']['delivery']
+        assert reopened.enrichment_state.metadata_observations(key)
+        regular.migrate(reopened.conn)
+        assert all(Path(path).is_file() for path in files)
+    finally:
+        reopened.conn.close()
+
+
+def test_file_failure_and_racing_source_never_select_incomplete_destinations(predecessor,monkeypatch):
     conn = predecessor.conn
     seed(predecessor)
     preparation.JOB.install(conn)

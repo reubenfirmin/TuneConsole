@@ -130,6 +130,21 @@ def copy(conn, row, generation, position, unit):
         (row['key'], generation, rank, value, *reference(conn,value)))
 
 
+def copy_batch(conn, row, generation, selected):
+    # The existing writer transaction pins scope ownership for this batch.
+    # Repeated origins keep every occurrence, with one lookup per provider.
+    references, origins = {}, []
+    for position, unit in selected:
+        kind, rank, value = unit
+        if kind == 'file':
+            copy(conn, row, generation, position, unit)
+            continue
+        if value not in references:
+            references[value] = reference(conn, value)
+        origins.append((row['key'], generation, rank, value, *references[value]))
+    conn.executemany(f'INSERT INTO {ORIGINS} VALUES (?,?,?,?,?,?)', origins)
+
+
 def reference(conn, provider):
     scopes = entity_names.owner(conn, 'playlist_scopes')
     # The provider/kind uniqueness index admits at most one shared scope. The
@@ -179,7 +194,8 @@ def repair_files(conn,progress):
             raise MigrationError('Radio origin recovery differs from its retained file manifest')
 
 
-JOB = OrderedJob(DEFINITION, prepare, begin, copy, complete, delete, repair_files=repair_files)
+JOB = OrderedJob(DEFINITION, prepare, begin, copy, complete, delete,
+                 repair_files=repair_files, copy_batch=copy_batch)
 
 
 def main(argv=None):

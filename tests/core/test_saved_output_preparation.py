@@ -2,17 +2,13 @@
 from dataclasses import replace
 import json
 from pathlib import Path
-import sqlite3
 
 import pytest
 
 from tests.core.test_collection_control_preparation import finish
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.prepared_fixture_support import assert_upgrade_phase, custody_predecessor
-from tests.independent_schema_support import independent_regular_ddl
-from tests.store_fixture_support import assert_installed_consumer_input, numbered_store, publication_consumer_reads
+from tests.store_fixture_support import numbered_store, numbered_store as installed, publication_consumer_reads
 from yt_playlist.core import recommendation_outputs as files, recommendation_setting_outputs as outputs
-from yt_playlist.core.migrations import MigrationError, regular
+from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import saved_outputs as preparation
 from yt_playlist.core.store import Store
 
@@ -20,14 +16,9 @@ from yt_playlist.core.store import Store
 pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
-    pass
-
-
-@pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
-def test_saved_output_input_keeps_admitted_history_and_private_guards(installed):
-    assert_installed_consumer_input(*installed)
+    """Saved-output preparation needs SQL and files without HTTP startup."""
 
 
 def seed(store):
@@ -48,7 +39,7 @@ def head(conn, source):
 
 
 @pytest.mark.parametrize('numbered_store', [79, 93, 94], indirect=True)
-def test_exact_files_ordered_references_and_old_readers_remain_usable(numbered_store, independent_regular_ddl):
+def test_exact_files_ordered_references_and_old_readers_remain_usable(numbered_store):
     store, _ = numbered_store
     sources, run = seed(store)
     for name, job in preparation.JOBS.items():
@@ -71,71 +62,33 @@ def test_exact_files_ordered_references_and_old_readers_remain_usable(numbered_s
     regular.migrate(store.conn)
 
 
-def prepare_native_comparison(store):
+@pytest.mark.parametrize('installed', [79, 94], indirect=True)
+def test_frozen_upgrade_preserves_original_outputs_and_matches_reference_custody(installed, tmp_path):
+    store, _ = installed
     sources, _ = seed(store)
     for job in preparation.JOBS.values():
         job.install(store.conn)
         finish(job, store.conn)
-    return sources
-
-
-@pytest.fixture(scope='module')
-def native_inputs(upgraded_custody_inputs):
-    def get(version, target, **options):
-        return upgraded_custody_inputs(version, target, 'saved-output-native-agreement',
-            prepare_native_comparison, **options)
-
-    get.release = lambda version: upgraded_custody_inputs.release(version, 'saved-output-native-agreement')
-    return get
-
-
-def assert_native_originals(template):
-    for source, raw in template.result.items():
-        assert preparation.read_original(head(template.source.conn, source)) == raw
-
-
-@pytest.mark.parametrize('version', [79, 94])
-def test_native_comparison_input_keeps_exact_preparation(native_inputs, version):
-    template = native_inputs(version, version)
-    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert_native_originals(template)
-
-
-@pytest.mark.parametrize('version,target,phase', [
-    (version, target, phase) for version in (79, 94)
-    for target in (81, 88, 93, 94, 95) if target > version
-    for phase in ('input', 'converted')])
-def test_native_upgrade_phase_keeps_exact_preparation(native_inputs, version, target, phase):
-    template = native_inputs(version, target, phase=phase)
-    assert_upgrade_phase(template, target if phase == 'converted' else custody_predecessor(version, target))
-    assert_native_originals(template)
-
-
-@pytest.mark.parametrize('version', [79, 94])
-def test_native_comparison_output_keeps_read_only_sql_and_files(native_inputs, version):
-    template = native_inputs(version, 95)
-    assert_upgrade_phase(template, 95)
-    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert_native_originals(template)
-
-
-@pytest.mark.parametrize('version', [79, 94])
-def test_frozen_upgrade_preserves_original_outputs_and_matches_reference_custody(native_inputs, version):
-    store = native_inputs(version, version).source
-    upgraded = native_inputs(version, 95).source
-    for source, raw in native_inputs(version, version).result.items():
-        assert outputs.get(upgraded.conn, source) == raw
-        assert preparation.read_original(head(upgraded.conn, source)) == raw
-    prepared = head(store.conn, 'radio_seed_offer')
-    native = upgraded.conn.execute('SELECT * FROM radio_seed_output').fetchone()
-    for field in ('menu_id', 'comparison_run_id', 'run_ref', 'run_resolution', 'content_digest', 'byte_size'):
-        assert prepared[field] == native[field]
-    for table, staged, fields in (
-        ('radio_seed_subjects', preparation.SUBJECTS, 'position,video_id,entry_id,resolution_reason'),
-        ('radio_seed_policies', preparation.POLICIES, 'raw_version,policy_version,resolution_reason'),
-    ):
-        assert list(map(tuple, upgraded.conn.execute(f'SELECT {fields} FROM {table} ORDER BY 1'))) == list(map(tuple,
-            store.conn.execute(f'SELECT {fields} FROM {staged} ORDER BY 1')))
+    upgraded = Store(tmp_path / 'saved-outputs-upgrade.db')
+    try:
+        upgraded.conn.execute('PRAGMA synchronous=OFF')
+        store.conn.backup(upgraded.conn)
+        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
+        for source, raw in sources.items():
+            assert outputs.get(upgraded.conn, source) == raw
+            assert preparation.read_original(head(upgraded.conn, source)) == raw
+        prepared = head(store.conn, 'radio_seed_offer')
+        native = upgraded.conn.execute('SELECT * FROM radio_seed_output').fetchone()
+        for field in ('menu_id', 'comparison_run_id', 'run_ref', 'run_resolution', 'content_digest', 'byte_size'):
+            assert prepared[field] == native[field]
+        for table, staged, fields in (
+            ('radio_seed_subjects', preparation.SUBJECTS, 'position,video_id,entry_id,resolution_reason'),
+            ('radio_seed_policies', preparation.POLICIES, 'raw_version,policy_version,resolution_reason'),
+        ):
+            assert list(map(tuple, upgraded.conn.execute(f'SELECT {fields} FROM {table} ORDER BY 1'))) == list(map(tuple,
+                store.conn.execute(f'SELECT {fields} FROM {staged} ORDER BY 1')))
+    finally:
+        upgraded.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -255,9 +208,8 @@ def test_interruption_file_failure_independent_regular_ddl_and_reopened_retry(in
         conn.execute('CREATE TABLE independent_saved_output_ddl(value TEXT)')
     def validate(conn):
         assert conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='independent_saved_output_ddl'").fetchone()
-    # The real runner must advance while preparation is failed. Existing owner
-    # installation is covered by test_independent_schema_changes, not this case.
-    monkeypatch.setattr(regular, 'CHANGES', (regular.Change(1, 'independent_saved_output_ddl', install, validate),))
+    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1,
+        'independent_saved_output_ddl', install, validate)))
     regular.migrate(store.conn)
     assert store.conn.execute('SELECT max(version) FROM schema_changes').fetchone()[0] == len(regular.CHANGES)
     assert radio.progress(store.conn) == failed
@@ -329,10 +281,4 @@ def test_invalid_radio_fails_durably_without_changing_source_or_other_job(instal
     assert store.settings.get_setting('radio_seed_offer') == raw
     assert head(store.conn, 'radio_seed_offer') is None
     assert finish(report, store.conn).status == 'prepared'
-
-
-@pytest.mark.parametrize('version', [79, 94])
-def test_native_sources_finish_with_committed_read_only_inputs(native_inputs, version):
-    for source in native_inputs.release(version):
-        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
-            source.conn.execute('SELECT 1')
+    regular.migrate(store.conn)

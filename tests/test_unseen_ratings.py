@@ -7,11 +7,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
-from tests.store_fixture_support import file_consumer_store as store
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.core.store import Store
 from yt_playlist.library import player_events, ratings, sync
 from yt_playlist.rec import rec_worker
 from yt_playlist.web.app import create_app
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
 
 
 def _event(action="like", **outcome):

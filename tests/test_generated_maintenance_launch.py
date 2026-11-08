@@ -8,9 +8,13 @@ from fastapi.testclient import TestClient
 import pytest
 
 from tests.conftest import FakeClient, _track
+from tests.home_fixture_support import home_page_bytecode, home_pages_only, without_metadata_providers
 from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.library.sync import sync_identity
 from yt_playlist.web.app import create_app
+
+
+pytestmark = pytest.mark.usefixtures('home_pages_only', 'without_metadata_providers')
 
 
 @pytest.fixture(scope='module')
@@ -27,18 +31,14 @@ def test_maintenance_input_keeps_empty_playlists_and_real_guards(_pristine_curre
 
 
 @pytest.fixture(autouse=True)
-def maintenance_routes(monkeypatch):
-    # Exercise the real middleware, generation, remote/local playlist handling,
-    # bridge and sync. Unrelated chart, discovery and editing routers are below
-    # this HTTP contract, as is metadata-provider configuration.
-    from yt_playlist.providers import genres
+def maintenance_routes(monkeypatch, home_pages_only):
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, home, playlists, sync
+    from yt_playlist.web.routes import app_update, audio_preview, home_generation, sync
 
-    monkeypatch.setattr(webapp, 'build_all',
-                        lambda ctx: [module.build(ctx) for module in
-                                     (app_update, audio_preview, home, playlists, sync)])
-    monkeypatch.setattr(genres, 'configure', lambda *args, **kwargs: None)
+    # Keep generation, saved receipt reads and sync real across all three apps.
+    # The rest of Home's board and tuning endpoints are independent consumers.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+        for module in (app_update, audio_preview, home_generation, sync)])
 
 
 @pytest.mark.parametrize('phase', ['compacting', 'checkpoint'])

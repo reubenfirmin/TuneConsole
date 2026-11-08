@@ -4,17 +4,20 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import json
 from pathlib import Path
+import sqlite3
 from tempfile import TemporaryDirectory
 from threading import Event
 
 import pytest
 
 from tests.core.test_compact_groups_migration import historical_groups, apply
+from tests.genre_catalog_support import bound_catalog
 from tests.prepared_fixture_support import capture_template, roots
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.core import group_documents, group_reads as group_queries
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.migrations import v072_compact_groups as migration
+from yt_playlist.core.migrations import registry, runner
 from yt_playlist.core.store import Store
 from yt_playlist.repos import compact_group_publication as compact, group_publication as publication
 from yt_playlist.repos.compact_taste_groups import CompactTasteGroupsRepo
@@ -67,10 +70,26 @@ def restored_groups(template, path):
     store = Store(path)
     try:
         prepared = template.restore(store)
-        bind_compact_store(store)
+        store._bind_repositories()
+        assert store.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0] == 'wal'
+        assert store._snapshot_revisions.conn is store.conn
         yield store, prepared
     finally:
         store.conn.close()
+
+
+@pytest.fixture(scope='module')
+def bounded_compact_group_template(tmp_path_factory):
+    """Replay the real compact-group input with its one required genre."""
+    path = tmp_path_factory.mktemp('retention-group-input') / 'source.db'
+    with ExitStack() as resources:
+        with pytest.MonkeyPatch.context() as patch, closing(sqlite3.connect(':memory:')) as source:
+            bound_catalog(patch, entries=(('house', 'House'),))
+            source.execute('PRAGMA foreign_keys=ON')
+            runner.migrate(source, registry=registry.MIGRATIONS[:69])
+            source.execute('PRAGMA query_only=ON')
+            template = resources.enter_context(compacted_groups(source, path))
+        yield template
 
 
 @pytest.fixture

@@ -1,8 +1,15 @@
+import pytest
+
 from yt_playlist.util import genre_map
 from yt_playlist.rec import actions, embed, graduation, rec_params, scoring, surfaces, taste_analysis
 from tests import model_support
 from yt_playlist.util import duration
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Recommendation checks do not construct an HTTP application."""
 
 
 def test_wheelhouse_excludes_play_recency_lane(store):
@@ -174,7 +181,7 @@ def test_taste_sample_is_a_rotating_slice_not_the_top_n(monkeypatch):
 
     store = object()
     now = 1000.0
-    pool = [SimpleNamespace(key=f'deep-{n}') for n in range(16)]
+    pool = [SimpleNamespace(key=f'deep-{n}') for n in range(30)]
     ranked = Mock(return_value=pool)
     monkeypatch.setattr(surfaces, 'for_you', ranked)
     monkeypatch.setattr(surfaces.random, 'sample', Random(42).sample)

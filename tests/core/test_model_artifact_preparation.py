@@ -6,12 +6,16 @@ from pathlib import Path
 import pytest
 
 from tests.core.test_collection_control_preparation import finish
-from tests.core.test_predecessor_writes import installed
-from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection, reuse_reporting_reader
 from yt_playlist.core import model_state, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import model_artifacts as preparation
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Encoder preparation does not construct an HTTP application."""
 
 
 def seed(store):
@@ -30,31 +34,34 @@ def current(conn):
 
 
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
-def test_individual_parts_exact_originals_and_tokens_without_runtime_cutover(installed):
+def test_individual_parts_exact_originals_and_tokens_without_runtime_cutover(installed, preparation_ddl_connection, monkeypatch):
     store, _ = installed
     sources = seed(store)
+    conn = preparation_ddl_connection
     artifacts, tokens = preparation.ARTIFACT_JOB, preparation.FINGERPRINT_JOB
     for job in (artifacts, tokens):
-        job.install(store.conn)
+        job.install(conn)
     # The artist source has one part; the recording source has three. At most
     # one part is committed per invocation even when its document is longer.
     for _ in range(3):
-        before = store.conn.execute(f'SELECT count(*) FROM {preparation.PARTS}').fetchone()[0]
-        artifacts.step(store.conn, batch_size=1)
-        after = store.conn.execute(f'SELECT count(*) FROM {preparation.PARTS}').fetchone()[0]
+        before = conn.execute(f'SELECT count(*) FROM {preparation.PARTS}').fetchone()[0]
+        artifacts.step(conn, batch_size=1)
+        after = conn.execute(f'SELECT count(*) FROM {preparation.PARTS}').fetchone()[0]
         assert after - before <= 1
-    assert finish(artifacts, store.conn).status == 'prepared'
-    assert finish(tokens, store.conn).status == 'prepared'
-    assert {row['source']: preparation.read_original(store.conn, row) for row in current(store.conn)} == {
+    assert finish(artifacts, conn).status == 'prepared'
+    assert finish(tokens, conn).status == 'prepared'
+    assert {row['source']: preparation.read_original(conn, row) for row in current(conn)} == {
         key: sources[key] for key in preparation.ARTIFACTS}
-    assert dict(store.conn.execute(f'SELECT source,raw_value FROM {preparation.ORIGINALS}')) == {
+    assert dict(conn.execute(f'SELECT source,raw_value FROM {preparation.ORIGINALS}')) == {
         key: sources[key] for key in preparation.FINGERPRINTS}
-    assert [tuple(row) for row in store.conn.execute(f'SELECT owner,field,source_kind,token FROM {preparation.FINGERPRINT_TABLE} '
+    assert [tuple(row) for row in conn.execute(f'SELECT owner,field,source_kind,token FROM {preparation.FINGERPRINT_TABLE} '
                                                    "WHERE source IN ('rec_content_generation','rec_fit_inputs') ORDER BY source")] == [
         ('recording', 'generation', 'recorded', '0004'), ('recording', 'fit_fingerprint', 'null', None)]
-    assert not model_state.available(store.conn)
-    assert all(store.settings.get_setting(key) == value for key, value in sources.items())
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+    assert not model_state.available(conn)
+    with reuse_reporting_reader(store, monkeypatch):
+        assert all(store.settings.get_setting(key) == value for key, value in sources.items())
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+    regular.migrate(preparation_ddl_connection)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -66,6 +73,7 @@ def test_frozen_upgrade_still_consumes_the_exact_retained_encoder_sources(instal
         finish(job, store.conn)
     upgraded = Store(tmp_path / 'encoder-upgrade.db')
     try:
+        upgraded.conn.execute('PRAGMA synchronous=NORMAL')
         store.conn.backup(upgraded.conn)
         runner.migrate(upgraded.conn, registry=registry.MIGRATIONS[:94])
         for key, raw in sources.items():
@@ -104,7 +112,7 @@ def test_continuing_write_during_file_work_rejects_stale_checkpoint(installed, m
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_interrupt_disk_failure_independent_fingerprints_and_explicit_retry(installed, monkeypatch, independent_regular_ddl):
+def test_interrupt_disk_failure_independent_fingerprints_and_explicit_retry(installed, monkeypatch, preparation_ddl_connection):
     store, _ = installed
     seed(store)
     artifacts, tokens = preparation.ARTIFACT_JOB, preparation.FINGERPRINT_JOB
@@ -126,7 +134,7 @@ def test_interrupt_disk_failure_independent_fingerprints_and_explicit_retry(inst
         artifacts.step(store.conn, batch_size=1)
     assert artifacts.progress(store.conn).status == 'failed'
     assert finish(tokens, store.conn).status == 'prepared'
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     monkeypatch.setattr(files, 'publish', real_publish)
     reopened = Store(store._db_path)
     try:

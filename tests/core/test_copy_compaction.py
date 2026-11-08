@@ -10,7 +10,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.compaction_fixture_support import completed_installed, unfiltered_copy
 from tests.core.test_predecessor_writes import consumer_installed as installed
 from yt_playlist.core import db_handles
 from yt_playlist.core.db_rebuild import install, job
@@ -23,23 +22,10 @@ def disable_periodic_library_sync():
     """Closed-file replacement checks do not construct an HTTP application."""
 
 
-@pytest.mark.parametrize('version', [79, 93, 107])
-def test_compaction_input_keeps_each_installed_contract_and_snapshot_guards(compaction_inputs, version):
-    from yt_playlist.core.migrations import regular, runner
-
-    template = compaction_inputs(version)
-    source = template.source
-    with closing(sqlite3.connect(source._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
-        reader.row_factory = sqlite3.Row
-        runner.validate_version(reader, version)
-        assert regular.validate(reader) == len(regular.CHANGES)
-    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert template.revision_guards
-
-
-@pytest.mark.parametrize('completed_installed',[79,93,107],indirect=True)
-def test_closed_file_install_preserves_format_and_continuing_writes(completed_installed,unfiltered_copy,record_property):
-    store,version = completed_installed
+@pytest.mark.parametrize('installed',[79,93,107],indirect=True)
+def test_closed_file_install_preserves_format_and_continuing_writes(installed,record_property):
+    store,version = installed
+    store.init_schema()
     assert store._recommendation_revalidations
     store.settings.set_setting('personal','exact retained value')
     old = store.conn

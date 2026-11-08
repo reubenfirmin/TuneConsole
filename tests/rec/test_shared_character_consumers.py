@@ -9,13 +9,16 @@ from types import SimpleNamespace
 import pytest
 
 from tests.conftest import seed_catalog_track
+from tests.genre_catalog_support import bound_catalog
 from tests.home_fixture_support import publish_menu
 from tests.musical_support import prepare_profiles
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from yt_playlist.core.store import Store
 from yt_playlist.core import catalog
 from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.util import genre_map
+from yt_playlist.util import genre_catalog, genre_map
 from yt_playlist.rec import (fresh_pool, home_cards, home_prepared, home_vibe, library_pool,
                              mix_tuning, mode_surfaces, musical_character, musical_profiles,
                              musical_preparation, surfaces, vibe_pools, vibe_preparation)
@@ -122,14 +125,15 @@ def opportunities(store, opportunities_template):
 
 
 @pytest.fixture(scope='module')
-def profile_stamp_template(_pristine_current_schema):
+def profile_stamp_schema():
+    with bounded_consumer_schema((('techno', 'Techno'),)) as schema:
+        yield schema
+
+
+@pytest.fixture(scope='module')
+def profile_stamp_template(profile_stamp_schema):
     def build(store):
-        key = 'profile-stamp'
-        seed_catalog_track(store, key, 'Profile stamp', 'Artist', video_id=key,
-                           genre='Techno', energy=.05, mood_relaxed=.95)
-        publish_recording_profiles(store, 1000)
-        item = dict(key=key, video_id=key, title='Profile stamp', artist='Artist',
-                    album='', genre='Techno', score=1)
+        item = profile_stamp_input(store)
         # Ranking is a completed lower-layer input to this publication/consumer
         # contract. Keep real typed pools and profile files, without computing
         # six presets over 48 subjects or preparing whole Home menus twice.
@@ -142,8 +146,38 @@ def profile_stamp_template(_pristine_current_schema):
             store.settings.set_setting(home_vibe.SETTING, 'relax')
         return {'library': [item], 'fresh': []}
 
-    with prepared_template(_pristine_current_schema, build) as template:
+    with prepared_template(profile_stamp_schema, build) as template:
         yield template
+
+
+def profile_stamp_input(store):
+    key = 'profile-stamp'
+    seed_catalog_track(store, key, 'Profile stamp', 'Artist', video_id=key,
+                       genre='Techno', energy=.05, mood_relaxed=.95)
+    publish_recording_profiles(store, 1000)
+    return dict(key=key, video_id=key, title='Profile stamp', artist='Artist',
+                album='', genre='Techno', score=1)
+
+
+@pytest.fixture
+def radio_profile_store(tmp_path, profile_stamp_schema, monkeypatch):
+    # Radio persists one published profile; it does not consume a Vibe menu or
+    # the template's complete SQL/file-copy isolation workflow.
+    store = Store(tmp_path / 'radio-profile.db')
+    try:
+        store.conn.execute('PRAGMA synchronous=NORMAL')
+        initialize_consumer(store, profile_stamp_schema)
+        store.conn.execute('PRAGMA wal_autocheckpoint=0')
+        with monkeypatch.context() as patch, reuse_reporting_reader(store, monkeypatch):
+            bound_catalog(patch, entries=(('techno', 'Techno'),))
+            # This consumer has one named genre, with no ancestry dependency.
+            patch.setattr(genre_catalog, '_parents', lambda: {})
+            item = profile_stamp_input(store)
+            publish_bundles(store, {'all': {'wheelhouse': [item]},
+                                   '_meta': {'full_pools': True, 'comfort_pool': 0}}, 1000)
+            yield store
+    finally:
+        store.conn.close()
 
 
 def publish_recording_profiles(store, now):
@@ -397,12 +431,13 @@ def test_prepared_set_from_another_vibe_is_served_with_a_preference_notice(store
     assert home_prepared.cards(store, payload, 1000, service, record=False).protos
 
 
-def test_radio_midpoint_is_neutral_and_saved_session_preserves_profile_stamps(store, opportunities):
+def test_radio_midpoint_is_neutral_and_saved_session_preserves_profile_stamps(radio_profile_store):
     from yt_playlist.rec import radio_tuning
     from yt_playlist.rec.radio_candidates import RadioCandidates
     from yt_playlist.web import radio_persistence
     from yt_playlist.web.radio_state import Phase, Session
     from yt_playlist.rec.radio_directions import RadioDirections
+    store = radio_profile_store
     c = RadioCandidates(store, 1000, radio_tuning.DEFAULTS)
     track = c._load('local')[0]
     genres = SimpleNamespace(breadth=.5, bonus=lambda _: 0)

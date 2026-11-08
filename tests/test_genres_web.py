@@ -8,17 +8,24 @@ Coverage moved here from the old JSON-based test_web.py::test_genres_whitelist_e
 """
 from fastapi.testclient import TestClient
 from contextlib import closing
-from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from tests.store_fixture_support import bounded_consumer_schema, consumer_schema, initialize_consumer, reuse_reporting_reader
 from yt_playlist.core.store import Store
 from yt_playlist.util import genre_catalog
 
 import yt_playlist.providers.genres as g
 from yt_playlist.web.app import create_app
+
+
+@pytest.fixture(autouse=True)
+def genre_routes(monkeypatch):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, enrich, genres, home
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+        for module in (app_update, audio_preview, enrich, genres, home)])
 
 
 @pytest.fixture(scope='module')
@@ -37,7 +44,8 @@ def editor_vocabulary():
 @pytest.fixture(scope='module')
 def editor_schema(editor_vocabulary):
     records, _, families = editor_vocabulary
-    with bounded_consumer_schema(tuple((key, row['name']) for key, row in records.items())) as schema:
+    with bounded_consumer_schema(tuple((key, row['name']) for key, row in records.items()),
+                                 snapshot_guards=False) as schema:
         # Restore the shipped relationships: a subgenre must not become a
         # family just because the SQL fixture has a smaller vocabulary.
         schema.execute('PRAGMA query_only=OFF')
@@ -51,23 +59,30 @@ def editor_schema(editor_vocabulary):
 
 
 @pytest.fixture
-def store(request, tmp_path, monkeypatch, editor_schema, editor_vocabulary):
-    records, labels, families = editor_vocabulary
+def store(request, tmp_path, monkeypatch):
     if request.node.name == 'test_full_editor_reads_taxonomy_without_per_genre_queries':
         # Keep the actual complete vocabulary in the batching/scaling owner.
-        schema = request.getfixturevalue('_pristine_current_schema')
+        schema = request.getfixturevalue('full_editor_schema')
     else:
-        schema = editor_schema
+        schema = request.getfixturevalue('editor_schema')
+        records, labels, families = request.getfixturevalue('editor_vocabulary')
         # Editor behavior keeps shipped aliases and family relations. Catalog
         # curation and the full-size render are independent owners.
         monkeypatch.setattr(genre_catalog, 'catalog', lambda: (records, labels))
         monkeypatch.setattr(genre_catalog, 'family_labels', lambda: families)
     database = Store(tmp_path / 'genre-editor.db')
     with closing(database.conn):
-        initialize_consumer(database, schema)
+        initialize_consumer(database, schema, snapshot_guards=False)
         database.conn.execute('PRAGMA wal_autocheckpoint=0')
         with reuse_reporting_reader(database, monkeypatch):
             yield database
+
+
+@pytest.fixture(scope='module')
+def full_editor_schema():
+    # Genre editing uses direct repository reads, without background snapshots.
+    with consumer_schema(snapshot_guards=False) as schema:
+        yield schema
 
 
 def _client(store):
@@ -200,32 +215,14 @@ def test_preference_edits_do_not_reconfigure_the_catalog(store, monkeypatch):
     assert after == {**before, 'custom sound':1, 'hip hop':0}
 
 
-def test_full_editor_input_preserves_complete_catalog(_pristine_current_schema):
-    schema = _pristine_current_schema
-    assert schema.execute('SELECT count(*) FROM genre_catalog').fetchone()[0] == len(genre_catalog.catalog()[0]) > 2000
-    assert schema.execute('PRAGMA query_only').fetchone()[0] == 1
-
-
 def test_full_editor_reads_taxonomy_without_per_genre_queries(store):
-    from fastapi import FastAPI
-    from fastapi.templating import Jinja2Templates
-    from yt_playlist.web.routes import genres
-
-    # Configuration admission has its own owners. This reader must render the
-    # complete shipped vocabulary without resolving every name individually.
-    with store.conn:
-        store.conn.execute("INSERT OR REPLACE INTO genre_preferences "
-                           "SELECT key,1,'default' FROM genre_catalog")
+    client = _client(store)
     count = store.conn.execute('SELECT count(*) FROM genre_catalog').fetchone()[0]
     assert count > 2000
-    templates = Jinja2Templates(directory=str(Path(genres.__file__).parents[1] / 'templates'))
-    app = FastAPI()
-    app.include_router(genres.build(SimpleNamespace(store=store, templates=templates)))
     queries = []
     store.conn.set_trace_callback(queries.append)
     try:
-        with TestClient(app) as client:
-            response = client.get('/genres/list')
+        response = client.get('/genres/list')
     finally:
         store.conn.set_trace_callback(None)
     assert response.status_code == 200 and 'Rock' in response.text

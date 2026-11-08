@@ -7,9 +7,14 @@ import time
 
 import pytest
 
-from tests.repos.test_compact_group_publication import database, finish
+from tests.repos.test_compact_group_publication import (
+    bounded_compact_group_template as compact_group_template,
+    database,
+    finish,
+)
 from tests.core.test_compact_groups_migration import predecessor
 from tests.repos.test_group_retention import context, enable, drain
+from tests.store_fixture_support import reuse_reporting_reader
 from yt_playlist.core import group_documents, group_evidence, group_reads, group_retention_policy, group_retention_progress, recommendation_outputs
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.db_revisions import Revisions
@@ -18,9 +23,18 @@ from yt_playlist.repos import compact_group_publication as compact, group_retent
 from yt_playlist.rec import group_roots
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Retirement walks own SQL and file lifetimes without HTTP startup."""
+
+
 @pytest.fixture
 def walking(database):
     store, prepared = database
+    # Walk slices and their real rollback/reopen contracts keep WAL commits;
+    # automatic checkpoint scheduling and power-loss durability are separate.
+    store.conn.execute('PRAGMA synchronous=NORMAL')
+    store.conn.execute('PRAGMA wal_autocheckpoint=0')
     with store.conn:
         group_retention_progress.install(store.conn)
     enable(store)
@@ -42,19 +56,22 @@ def test_closure_beyond_old_limit_resumes_after_reopen_with_exact_history(walkin
         store.conn.execute('BEGIN IMMEDIATE')
         group_evidence.retain(store.conn, 'offer', 'historical', context(), 10)
     parent, source = 'second', 'second-leaf'
-    for serial in range(3, 17):
-        next_prepared = deepcopy(prepared)
-        next_prepared.update(generation=f'chain-{serial}', at=serial, serial=serial, _stage_parent=parent)
-        target = f'chain-{serial}-leaf'
-        next_prepared['lineage'] = [(source, target, 'continuation',
-            '{"old_share":1,"new_share":1,"overlap":1,"compatible":true}')]
-        for group in next_prepared['groups']:
-            group['version'] = group['version'].replace('third-', f'chain-{serial}-')
-            if group['parent_version']:
-                group['parent_version'] = group['parent_version'].replace('third-', f'chain-{serial}-')
-        owner = store.taste_groups.stage(next_prepared)
-        finish(store, next_prepared, owner)
-        parent, source = next_prepared['generation'], target
+    # Populate the real long chain below the closure/reopen boundary. Release
+    # this reporting reader before walking, reopening or collecting artifacts.
+    with reuse_reporting_reader(store, monkeypatch):
+        for serial in range(3, 17):
+            next_prepared = deepcopy(prepared)
+            next_prepared.update(generation=f'chain-{serial}', at=serial, serial=serial, _stage_parent=parent)
+            target = f'chain-{serial}-leaf'
+            next_prepared['lineage'] = [(source, target, 'continuation',
+                '{"old_share":1,"new_share":1,"overlap":1,"compatible":true}')]
+            for group in next_prepared['groups']:
+                group['version'] = group['version'].replace('third-', f'chain-{serial}-')
+                if group['parent_version']:
+                    group['parent_version'] = group['parent_version'].replace('third-', f'chain-{serial}-')
+            owner = store.taste_groups.stage(next_prepared)
+            finish(store, next_prepared, owner)
+            parent, source = next_prepared['generation'], target
     expected = group_reads.retention_closure(store.conn)
     assert len(expected[1]) == 15
     before = [tuple(row) for row in store.conn.execute('SELECT * FROM group_members ORDER BY 1,2')]
@@ -66,6 +83,8 @@ def test_closure_beyond_old_limit_resumes_after_reopen_with_exact_history(walkin
     path = store.conn.execute('PRAGMA database_list').fetchone()[2]
     reopened = Store(path)
     try:
+        reopened.conn.execute('PRAGMA synchronous=NORMAL')
+        reopened.conn.execute('PRAGMA wal_autocheckpoint=0')
         reopened._bind_repositories()
         reopened._snapshot_revisions = Revisions(reopened.conn)
         assert tuple(reopened.conn.execute('SELECT * FROM group_retention_walk').fetchone()) == progress

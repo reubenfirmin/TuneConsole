@@ -29,6 +29,8 @@ def genres(monkeypatch):
     repository.uses_keyed_preferences.return_value = True
     repository.current_key.side_effect = lambda key: key
     repository.label_matches.side_effect = lambda label, normalized: {normalized}
+    repository.axis_matches.side_effect = lambda labels: {
+        label: {normalized: None} for label, normalized in labels}
     repository.genre_name.return_value = None
     repository.alias_conflicts.return_value = False
     repository.get_genre_whitelist.return_value = ['Jazz', 'Custom']
@@ -133,6 +135,31 @@ def test_explicit_empty_legacy_choice_survives_upgrade(genres):
     assert genres.repository.configure_preferences.call_args.args[0] == []
 
 
+def test_catalog_configuration_batches_known_labels_and_still_admits_custom_names(genres):
+    genres.repository.axis_matches.side_effect = None
+    genres.repository.axis_matches.return_value = {
+        'Jazz': {'jazz': None}, 'New': {'new': None}, 'Custom': {}}
+    genres.repository.label_matches.side_effect = lambda *_args: set()
+    genres.configure_catalog()
+    assert set(genres.repository.axis_matches.call_args.args[0]) == {
+        ('Jazz', 'jazz'), ('New', 'new'), ('Custom', 'custom')}
+    genres.repository.label_matches.assert_called_once_with('Custom', 'custom')
+    genres.repository.insert_custom.assert_called_once_with('custom', 'Custom')
+    enabled, _defaults = genres.repository.configure_preferences.call_args.args
+    assert set(enabled) == {('jazz', 'default'), ('new', 'default'), ('custom', 'custom')}
+
+
+def test_ambiguous_catalog_label_cannot_publish_preferences(genres):
+    genres.repository.axis_matches.side_effect = None
+    genres.repository.axis_matches.return_value = {
+        'Jazz': {'jazz': None, 'other': None}, 'New': {'new': None}, 'Custom': {'custom': None}}
+    genres.repository.label_matches.side_effect = lambda *_args: {'jazz', 'other'}
+    with pytest.raises(ValueError, match='Ambiguous genre label'):
+        genres.configure_catalog()
+    genres.repository.configure_preferences.assert_not_called()
+    genres.repository.save_configuration.assert_not_called()
+
+
 def test_matcher_excludes_disabled_and_ambiguous_labels_and_follows_redirects(genres):
     genres.repository.matcher_facts.return_value = {
         'enabled': {'rock': 'Renamed Rock', 'jazz': 'Jazz'}, 'redirects': {'old-rock': 'rock'},
@@ -165,6 +192,7 @@ def test_model_axes_reject_ambiguity_and_use_catalog_family_changes(genres, monk
     from yt_playlist.util import genre_family_data
     fallback = Mock(return_value='rock-classic')
     monkeypatch.setattr(genre_family_data, 'family', fallback)
+    genres.repository.axis_matches.side_effect = None
     genres.repository.axis_matches.return_value = {
         'Alias': {'renamed': 'jazz'}, 'Ambiguous': {'rock': 'rock', 'jazz': 'jazz'},
         'Custom': {'custom': None}, 'Rock': {},

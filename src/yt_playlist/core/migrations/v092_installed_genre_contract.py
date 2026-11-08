@@ -66,7 +66,7 @@ def validate_predecessor(conn, version, *, foreign_keys=True, data=True):
     # predecessor. Never retain another database's accepted replacements.
     expected = reference.copy()
     objects = {name: (kind, sql) for name, kind, sql in conn.execute(
-        "SELECT name,type,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'")}
+        "SELECT name,type,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'").fetchall()}
     for name in (*REPLACEMENTS, 'taste_axes', 'taste_axis_legacy'):
         if name not in earlier or name not in objects:
             continue

@@ -13,10 +13,9 @@ from tests.home_fixture_support import home_routes_only, prepared_client as _pre
 from tests.home_fixture_support import publish_cards, publish_menu, without_metadata_providers
 from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects, seed_publication_subjects
-from tests.prepared_fixture_support import capture_template, prepared_template
+from tests.prepared_fixture_support import prepared_template
 from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store, reuse_reporting_reader
 from yt_playlist.core.activity import Activity
-from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import embedding_vectors as embed, fresh_pool, mode_surfaces, road_trip_candidates, surfaces
 from yt_playlist.util.matching import identity_key
 
@@ -53,9 +52,7 @@ def prepared_client(store):
 
 def test_fresh_card_waits_for_metadata_then_renders_discoveries(store):
     keys = []
-    # Four enriched discoveries satisfy the card's admission boundary. The
-    # requested-mix workflow below retains its full twelve-track requirement.
-    for i in range(4):
+    for i in range(12):
         title, artist = f"Unenriched {i}", f"Unknown artist {i}"
         key = identity_key(title, artist)
         store.discovery.upsert_discovered_track(key, f"new{i}", title, artist,
@@ -216,56 +213,61 @@ def fresh_workflow_menu(fresh_workflow_schema):
         yield template
 
 
-def test_fresh_workflow_menu_has_completed_library_inputs_and_no_discoveries(fresh_workflow_menu):
-    menu = fresh_workflow_menu.result['menus'][0]
-    assert {proto['lane'] for proto in menu['protos']} == {'comfort', 'wheelhouse', 'explore'}
-    tracks = [track for proto in menu['protos'] for track in proto['tracks']]
-    assert len(tracks) == 3 and all(track['genre'] == 'Jazz' for track in tracks)
-    assert len(fresh_workflow_menu.source.rec_query.tracks_by_keys([track['key'] for track in tracks])) == 3
-    assert fresh_workflow_menu.source.discovery.get_discovered_tracks() == []
-    assert fresh_workflow_menu.source.recommendations.head('fresh') is None
-
-
-def test_fresh_workflow_genre_preview_does_not_discover_or_rank(fresh_workflow_home, monkeypatch):
-    store, client = fresh_workflow_home
-    calls = []
-    monkeypatch.setattr(fresh_pool, 'populate', lambda *a, **k: calls.append('discover'))
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', lambda *a, **k: calls.append('rank'))
-    preview = client.post('/home/mix-genres', data={'genres': ['jazz', 'techno']})
-    assert preview.status_code == 200
-    assert 'class="fresh-pool-art"' in preview.text
-    assert 'aria-busy="false"' in preview.text
-    assert 'hx-post="/home/fresh-pool"' in preview.text
-    assert store.rec_proposals.get_proposals('home_genre_request')['include_genres'] == ['jazz', 'techno']
-    assert not client.app.state.ctx.jobs.has_active() and calls == []
-
-
-def test_fresh_workflow_explicit_post_starts_a_real_background_job(fresh_workflow_home, monkeypatch):
+def test_fresh_slot_starts_once_rejoins_on_refresh_and_becomes_a_scoped_mix(fresh_workflow_home, monkeypatch):
     store, client = fresh_workflow_home
     started, release = threading.Event(), threading.Event()
     calls = []
-
-    def populate(ctx, **parameters):
-        assert ctx.store is store and threading.current_thread() is not threading.main_thread()
-        calls.append({key: value for key, value in parameters.items() if key != 'on_progress'})
-        parameters['on_progress']('Finding fresh jazz songs…')
+    def populate(ctx, **params):
+        calls.append(params)
+        params["on_progress"]("Finding fresh jazz songs…")
         started.set()
-        assert release.wait(2)
-
-    monkeypatch.setattr(fresh_pool, 'populate', populate)
-    # The separate scheduled-publication owner exercises the real publisher.
-    monkeypatch.setattr(fresh_pool, 'prepare', lambda *args: None)
+        release.wait(5)
+    monkeypatch.setattr(fresh_pool, "populate", populate)
+    tracks, rankings = [], []
+    monkeypatch.setattr(surfaces, "cold_candidates", lambda *a, **k: rankings.append(True) or tracks)
+    preview = client.post("/home/mix-genres", data={"genres": ["jazz", "techno"]})
+    assert 'class="fresh-pool-art"' in preview.text
+    assert not calls  # merely rendering the slot does not start discovery
+    assert not rankings  # it must not score thousands of existing discoveries either
+    response = client.post("/home/fresh-pool", data={"include_genres": ["jazz", "techno"]})
+    assert started.wait(1)
+    job_id = _job_id(response)
     try:
-        response = client.post('/home/fresh-pool', data={'include_genres': ['jazz', 'techno']})
-        assert started.wait(1)
-        job = client.app.state.ctx.jobs.get(int(_job_id(response)))
-        assert not job.done and job.error is None
-        assert calls == [{'include_genres': ['jazz', 'techno'], 'avoid_genres': []}]
-        assert 'aria-busy="true"' in response.text and 'hx-trigger="every 2s"' in response.text
+        assert f'/home/fresh-pool/{job_id}' in client.get("/home/cards").text
+        second = client.post("/home/fresh-pool", data={"include_genres": ["jazz", "techno"]})
+        assert _job_id(second) == job_id and len(calls) == 1
+        assert calls[0]["include_genres"] == ["jazz", "techno"]
+        assert 'aria-busy="true"' in response.text
+        assert 'hx-trigger="every 2s"' in response.text
         assert 'hx-post="/home/generate"' not in response.text
+        assert not rankings  # polling and refreshing a running job must stay cheap
+        # The clicked job prepares the new cold pool without waiting for a periodic mode rebuild.
+        tracks.extend(surfaces.ForYouItem(f"New {i}", f"Artist {i}", "", f"new{i}", None, 0, "",
+                                        key=identity_key(f"New {i}", f"Artist {i}"),
+                                        genre="Jazz" if i % 2 else "Techno")
+                      for i in range(12))
+        for track in tracks:
+            store.discovery.upsert_discovered_track(track.key, track.video_id, track.title, track.artist,
+                "", None, track.genre, None, None, 1000)
     finally:
         release.set()
-        assert client.app.state.ctx.work.wait(2)
+    # This waits for the worker's real typed publication, not a page request.
+    # Polling stays responsive while the background preparation is unfinished.
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        ready = client.get(f"/home/fresh-pool/{job_id}")
+        if 'hx-trigger="every 2s"' not in ready.text:
+            break
+        time.sleep(.01)
+    assert 'data-title="New ' in ready.text
+    assert 'hx-post="/home/generate"' in ready.text
+    assert '"include": ["jazz", "techno"]' in ready.text
+    assert '"model": "fresh"' in ready.text
+    assert 'hx-trigger="every 2s"' not in ready.text
+    assert 'data-title="New ' in client.get("/home/cards").text
+    # Stored discoveries work with a new job registry too, without rebuilding cached modes.
+    assert 'data-title="New ' in _client(store).get("/home/cards").text
+    assert rankings == [True]  # ready cards reuse the persisted ranking across renders/restarts
 
 
 @pytest.mark.parametrize('deferred', [False, True])
@@ -310,192 +312,6 @@ def test_fresh_workflow_job_starts_once_and_rejoins_until_publication(monkeypatc
         assert start_fresh_pool(ctx, parameters) is job and len(calls) == 1
     else:
         ctx.rec_worker.trigger_candidate_refresh.assert_not_called()
-
-
-@pytest.mark.parametrize('waiting', [False, True])
-def test_fresh_workflow_board_refresh_and_repeat_click_keep_the_existing_poll(
-        fresh_workflow_home, monkeypatch, waiting):
-    from yt_playlist.rec import home_cache, home_cards, home_prepared, mix_tuning
-    from yt_playlist.web.routes.home_views import PoolJobs
-
-    store, client = fresh_workflow_home
-    ctx = client.app.state.ctx
-    parameters = {'include_genres': ['jazz', 'techno'], 'avoid_genres': []}
-    with mix_tuning.adjusting(store, 1000):
-        store.rec_proposals.put_proposals('home_genre_request',
-            {'epoch': mix_tuning.card_epoch(store), 'include_genres': ['jazz', 'techno']}, 1000)
-    service = home_cards.HomeCards(store, PoolJobs(ctx), logging.getLogger(__name__), genre_options=[
-        {'family': 'jazz', 'label': 'Jazz'}, {'family': 'techno', 'label': 'Techno'}])
-    previous = home_cache.read(store, home_prepared.SURFACE)
-    home_prepared.remember(store, previous, service.cards(home_cards.CardsRequest(1000, record=False)), 1000)
-    job, created = ctx.jobs.create_or_rejoin('fresh_pool', parameters)
-    assert created
-    if waiting:
-        job.outcome = 'waiting'
-        job.result = {'generation': None, 'requested_at': 1000}
-    calls = []
-    monkeypatch.setattr(fresh_pool, 'populate', lambda *a, **k: calls.append('discover'))
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', lambda *a, **k: calls.append('rank'))
-    board = client.get('/home/cards')
-    assert f'/home/fresh-pool/{job.id}' in board.text
-    response = client.post('/home/fresh-pool', data={'include_genres': ['jazz', 'techno']})
-    assert _job_id(response) == str(job.id)
-    assert 'aria-busy="true"' in response.text and 'hx-trigger="every 2s"' in response.text
-    assert 'hx-post="/home/generate"' not in response.text
-    assert 'Not enough matching songs yet' not in response.text
-    assert not job.done and calls == []
-
-
-@pytest.fixture(scope='module')
-def requested_fresh_workflow(fresh_workflow_menu, tmp_path_factory):
-    from yt_playlist.rec import home_cache, home_cards, home_prepared, mix_tuning
-
-    path = tmp_path_factory.mktemp('fresh-requested') / 'fresh.db'
-    with fresh_workflow_menu.open(path) as store:
-        with mix_tuning.adjusting(store, 1000):
-            store.rec_proposals.put_proposals('home_genre_request',
-                {'epoch': mix_tuning.card_epoch(store), 'include_genres': ['jazz', 'techno']}, 1000)
-        payload = home_cache.read(store, home_prepared.SURFACE)
-        # A completed library menu includes the requested, not-yet-built Fresh
-        # slot. The consumer replaces that slot when its typed pool is ready.
-        service = home_cards.HomeCards(store, None, logging.getLogger(__name__),
-                                       genre_options=payload['genre_options'])
-        pool = service.pool_view({'include_genres': ['jazz', 'techno'], 'avoid_genres': []})
-        payload['menus'][0]['slots'] = [
-            {'proto': None, 'pool': pool} if (slot.get('pool') or {}).get('lane') == 'fresh' else slot
-            for slot in payload['menus'][0]['slots'] if slot.get('pool') or slot.get('proto')]
-        payload['tuning'] = home_prepared.tuning_key(store, 1000)
-        home_cache.put(store, home_prepared.SURFACE, payload, 1000)
-        tracks = []
-        with atomic_write(store):
-            for index in range(12):
-                title, artist = f'New {index}', f'Artist {index}'
-                genre = 'Jazz' if index % 2 else 'Techno'
-                key = store.discovery.upsert_discovered_track(identity_key(title, artist), f'new{index}',
-                    title, artist, '', None, genre, None, 'genre:fixture', 1000)
-                tracks.append(dict(key=key, video_id=f'new{index}', title=title, artist=artist, genre=genre))
-        yield capture_template(store, tracks)
-
-
-def test_fresh_workflow_requested_slot_has_twelve_unranked_discoveries(requested_fresh_workflow):
-    from yt_playlist.rec import home_cache, home_prepared
-
-    store = requested_fresh_workflow.source
-    rows = store.discovery.get_discovered_tracks()
-    assert len(rows) == 12 and {track['identity_key'] for track in rows} == {
-        track['key'] for track in requested_fresh_workflow.result}
-    assert {track['genre'] for track in rows} == {'Jazz', 'Techno'}
-    assert store.recommendations.head('fresh') is None
-    slots = home_cache.read(store, home_prepared.SURFACE)['menus'][0]['slots']
-    assert len(slots) == 4
-    pool = next(slot['pool'] for slot in slots if slot['pool'])
-    assert pool['lane'] == 'fresh' and pool['parameters']['include_genres'] == ['jazz', 'techno']
-
-
-@pytest.fixture(scope='module')
-def published_fresh_workflow(requested_fresh_workflow, tmp_path_factory):
-    from yt_playlist.rec import candidate_refresh
-
-    rankings = []
-    path = tmp_path_factory.mktemp('fresh-published') / 'fresh.db'
-    with requested_fresh_workflow.open(path) as store:
-        tracks = requested_fresh_workflow.result
-
-        def ranked(reader, now, policies):
-            rankings.append(now)
-            fresh = policies.stamp(tracks, 'fresh')
-            return {'all': {'fresh': fresh}}, fresh
-
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(mode_surfaces, '_calculate_bundles', ranked)
-            candidate_refresh.checked(store, 940)
-            assert fresh_pool.prepare(store, 1000) is None
-            assert rankings == [] and store.recommendations.head('fresh') is None
-            assert fresh_pool.prepare(store, 4540) is not None
-        yield capture_template(store, {'tracks': tracks, 'rankings': rankings})
-
-
-def test_fresh_workflow_scheduled_preparation_publishes_all_twelve_ranked_discoveries(published_fresh_workflow):
-    template = published_fresh_workflow
-    store = template.source
-    assert template.result['rankings'] == [4540]
-    head = store.recommendations.head('fresh')
-    assert head and head['created_at'] == 4540
-    selected = fresh_pool.pick(store, 1000, ['jazz', 'techno'])
-    assert len(selected) == 12
-    assert {track['key'] for track in selected} == {track['key'] for track in template.result['tracks']}
-    assert {track['genre'] for track in selected} == {'Jazz', 'Techno'}
-
-
-@pytest.mark.parametrize('waiting', [False, True])
-def test_fresh_workflow_completed_pool_renders_and_remains_on_the_board(
-        published_fresh_workflow, fresh_template_bytecode, tmp_path, without_metadata_providers,
-        monkeypatch, waiting):
-    with published_fresh_workflow.open(tmp_path / 'ready.db') as store:
-        calls = []
-        monkeypatch.setattr(mode_surfaces, '_calculate_bundles', lambda *a, **k: calls.append('rank'))
-        with prepared_client(store) as client:
-            client.app.state.ctx.templates.env.bytecode_cache = fresh_template_bytecode
-            job, created = client.app.state.ctx.jobs.create_or_rejoin('fresh_pool',
-                {'include_genres': ['jazz', 'techno'], 'avoid_genres': []})
-            assert created
-            if waiting:
-                job.outcome = 'waiting'
-                job.result = {'generation': None, 'requested_at': 1000}
-            else:
-                job.done = True
-            ready = client.get(f'/home/fresh-pool/{job.id}')
-            assert ready.status_code == 200 and ready.text.count('class="gen-row"') == 12
-            assert 'data-title="New ' in ready.text and 'hx-post="/home/generate"' in ready.text
-            assert '"include": ["jazz", "techno"]' in ready.text and '"model": "fresh"' in ready.text
-            assert 'hx-trigger="every 2s"' not in ready.text and job.done
-            assert 'data-title="New ' in client.get('/home/cards').text
-        assert calls == []
-
-
-@pytest.fixture(scope='module')
-def completed_fresh_menu(published_fresh_workflow, tmp_path_factory):
-    from yt_playlist.rec import home_cache, home_cards, home_prepared
-
-    path = tmp_path_factory.mktemp('fresh-completed') / 'home.db'
-    with published_fresh_workflow.open(path) as store:
-        payload = home_cache.read(store, home_prepared.SURFACE)
-        menu = payload['menus'][0]
-        service = home_cards.HomeCards(store, None, logging.getLogger(__name__),
-                                       genre_options=payload['genre_options'])
-        proto = service.built_fresh({'include_genres': ['jazz', 'techno'], 'avoid_genres': []}, 1000)
-        protos = [*menu['protos'], proto]
-        slots = [{'proto': proto, 'pool': None} if slot['pool'] else slot for slot in menu['slots']]
-        result = home_cards.CardsResult(protos, slots, None, None, menu['genre_options'],
-                                       ['jazz', 'techno'], menu['epoch'], menu['vibe'])
-        home_prepared.remember(store, payload, result, 1000)
-        yield capture_template(store, proto)
-
-
-def test_fresh_workflow_completed_menu_persists_the_scoped_recipe_and_all_twelve_tracks(completed_fresh_menu):
-    from yt_playlist.rec import home_cache
-
-    proto = completed_fresh_menu.result
-    assert proto['lane'] == 'fresh' and len(proto['tracks']) == 12
-    assert proto['recipe']['model'] == 'fresh'
-    assert proto['recipe']['genre_request']['include'] == ['jazz', 'techno']
-    menu = home_cache.read(completed_fresh_menu.source, 'home_tuned')['menus'][0]
-    fresh = next(slot['proto'] for slot in menu['slots'] if slot['proto']['lane'] == 'fresh')
-    assert {track['key'] for track in fresh['tracks']} == {track['key'] for track in proto['tracks']}
-
-
-def test_fresh_workflow_new_job_registry_serves_the_persisted_menu_without_ranking(
-        completed_fresh_menu, fresh_template_bytecode, tmp_path, without_metadata_providers, monkeypatch):
-    calls = []
-    monkeypatch.setattr(mode_surfaces, '_calculate_bundles', lambda *a, **k: calls.append('rank'))
-    with completed_fresh_menu.open(tmp_path / 'restarted.db') as store, prepared_client(store) as client:
-        client.app.state.ctx.templates.env.bytecode_cache = fresh_template_bytecode
-        assert not client.app.state.ctx.jobs.has_active()
-        board = client.get('/home/cards')
-        assert board.status_code == 200 and 'data-title="New ' in board.text
-        assert '"include": ["jazz", "techno"]' in board.text
-        assert '"model": "fresh"' in board.text
-        assert calls == []
 
 
 def test_loading_and_choosing_genres_do_not_discover_or_rank_a_fresh_pool(fresh_workflow_home, monkeypatch):

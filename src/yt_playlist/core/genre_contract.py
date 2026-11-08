@@ -1,5 +1,6 @@
 """Genre owner names and compatible reads without preparation dependencies."""
 import re
+from functools import lru_cache
 from pathlib import Path
 import sqlite3
 
@@ -26,19 +27,29 @@ def definition_name(sql):
 
 def installed_definitions(names):
     """Finite repair programs shared with the retained schema definition files."""
+    for name, sql in _installed_definitions():
+        if name in names:
+            yield name, sql
+
+
+@lru_cache(maxsize=1)
+def _installed_definitions():
+    """Parse shipped reference SQL once; installed databases stay live inputs."""
     root = Path(__file__).with_name('migrations')
+    definitions = []
     for name in ('schema.sql', 'schema_metadata_evidence.sql',
                  'schema_genre_classifications.sql', 'schema_recipe_memberships.sql'):
         pending = ''
         for line in (root / name).read_text().splitlines(keepends=True):
             pending += line
             if sqlite3.complete_statement(pending):
-                if definition_name(pending) in names:
+                if definition_name(pending) is not None:
                     sql = classified_definition(pending).strip().rstrip(';')
-                    yield definition_name(sql), sql
+                    definitions.append((definition_name(sql), sql))
                 pending = ''
         if pending.strip():
             raise MigrationError('Incomplete installed genre definition: ' + name)
+    return tuple(definitions)
 
 
 def available(conn):
@@ -80,6 +91,7 @@ def sql_key(label):
             f'LEFT JOIN genre_redirects d ON d.retired_key=a.genre_key WHERE a.label={label} COLLATE NOCASE))')
 
 
+@lru_cache(maxsize=2048)
 def classified_definition(sql):
     """Adapt a retained label definition to the current genre owner contract."""
     head = sql.lstrip()

@@ -39,10 +39,11 @@ def install(conn, context=None):
 def validate(conn):
     from .schema_contract import tokens as _tokens
     from .schema_contract import MigrationError
-    for sql in statements():
-        name = sql.split()[2]
-        row = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()
-        if row is None or _tokens(row[0]) != _tokens(sql):
+    from .schema_inspection import definitions
+    expected = {sql.split()[2]: sql for sql in statements()}
+    actual = definitions(conn, expected)
+    for name, sql in expected.items():
+        if name not in actual or _tokens(actual[name]) != _tokens(sql):
             raise MigrationError('Incompatible artist credit retention owner: ' + name)
     if not conn.execute('SELECT 1 FROM artist_credit_retention WHERE id=1').fetchone():
         raise MigrationError('Missing artist credit retention state')

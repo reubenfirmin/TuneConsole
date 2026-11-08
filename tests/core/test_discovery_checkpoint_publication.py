@@ -8,13 +8,20 @@ import pytest
 
 from tests.core.test_discovery_checkpoint_preparation import finish, seed
 from tests.core.test_listening_preparation import connect
-from tests.core.test_predecessor_writes import installed
-from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import numbered_store as installed, publication_consumer_reads
 from yt_playlist.core import discovery_checkpoints, provider_frontiers
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import discovery_checkpoint_publication as publication
 from yt_playlist.core.preparation import discovery_checkpoints as preparation
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Checkpoint publication does not construct an HTTP application."""
 
 
 def ready(conn, name, size=1):
@@ -53,6 +60,7 @@ def test_selected_reads_use_typed_rows_and_preserve_exact_source_keys(installed)
                 assert owner.selected(preopened.conn) == identity
                 for suffix, raw in values[name].items():
                     assert owner.read(job, identity, preparation.PREFIXES[name]+suffix)['raw_value'] == raw
+            regular.migrate(job)
         with preopened.read_view() as reader:
             def mask(operation, table, column, *unused):
                 return sqlite3.SQLITE_IGNORE if operation == sqlite3.SQLITE_READ and table == 'settings' and column == 'value' else sqlite3.SQLITE_OK
@@ -135,10 +143,11 @@ def test_source_audit_rejects_omissions_extra_rows_and_false_preparation(install
         with pytest.raises(MigrationError, match='omits installed|no installed source|differ from installed'):
             owner.publish(job, stage=identity)
         assert owner.selected(job) is None
+        regular.migrate(job)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_interrupted_batch_and_final_selection_resume_without_moving_checkpoint(installed, independent_regular_ddl):
+def test_interrupted_batch_and_final_selection_resume_without_moving_checkpoint(installed):
     store, _ = installed
     seed(store)
     name, owner = 'fetch-history', publication.OWNERS['fetch-history']
@@ -174,7 +183,7 @@ def test_interrupted_batch_and_final_selection_resume_without_moving_checkpoint(
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
-def test_slow_verification_allows_real_write_and_regular_ddl_then_refuses_stale_selection(installed, monkeypatch, independent_regular_ddl):
+def test_slow_verification_allows_real_write_and_regular_ddl_then_refuses_stale_selection(installed, monkeypatch):
     store, _ = installed
     seed(store)
     owner = publication.OWNERS['provider-refresh']

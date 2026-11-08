@@ -9,7 +9,6 @@ import time
 import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_workflow_receipt_preparation import seed
 from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import workflow_settings
@@ -250,7 +249,7 @@ def test_source_and_reference_races_reject_selection_without_admitting_missing_i
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_file_recovery_and_explicit_failure_retry_do_not_block_regular_ddl(installed, monkeypatch, independent_regular_ddl):
+def test_file_recovery_and_explicit_failure_retry_do_not_block_regular_ddl(installed, monkeypatch):
     store, _ = installed
     _, originals, _, source = seed(store)
     owner = publication.OWNERS['playlists']

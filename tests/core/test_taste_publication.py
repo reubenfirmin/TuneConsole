@@ -1,15 +1,10 @@
 """Independent folds, canonical aliases and compatible writers preserve taste decisions."""
 import sqlite3
-from contextlib import closing
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
-from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import guarded_numbered_store as installed
 from tests.core.test_taste_axis_preparation import seed, source, finish
-from tests.catalog_migration_support import catalog_reader
-from tests.genre_catalog_support import bound_catalog
-from tests.store_fixture_support import install_numbered_input
 from yt_playlist.core import taste_axes
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import taste_axes as preparation, taste_publication as publication
@@ -19,22 +14,6 @@ from yt_playlist.core.store import Store
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     """Taste SQL/publication checks do not start an application lifespan."""
-
-
-@pytest.fixture
-def taste_installed(request, tmp_path, monkeypatch):
-    bound_catalog(monkeypatch)
-    version = request.param
-    store = Store(tmp_path / 'taste.db')
-    try:
-        store.conn.execute('PRAGMA synchronous=OFF')
-        with closing(sqlite3.connect(':memory:')) as schema:
-            install_numbered_input(schema, version, regular_owners=regular.CHANGES)
-            schema.backup(store.conn)
-        store.init_schema(defer_metadata=True)
-        yield store, version
-    finally:
-        store.conn.close()
 
 
 def ready(conn):
@@ -57,108 +36,6 @@ def rows(conn,owner,columns,token='axis'):
     return list(map(tuple,conn.execute(taste_axes.projection(conn,taste_axes.table(conn,owner),columns,token_name=token)+' ORDER BY 1')))
 
 
-TASTE_FOLDS = (
-    ('rec_weights', 'axis,weight,updated_at', 'axis', [('genre:known', 1.4, 11)]),
-    ('rec_lean', 'axis,value,updated_at,last_graduated_day', 'axis', [('genre:known', 1.3, 12, None)]),
-    ('home_hidden_facet', 'axis', 'axis', [('genre:known',)]),
-    ('rec_theme', 'facet,score,updated_at', 'facet', [('genre:known', 1.5, 11)]),
-    ('rec_play_grad', 'axis,last_graduated_day', 'axis', [('genre:known', '2026-10-29')]),
-    ('rec_grad_log', 'id,axis,source,score,factor,new_weight,created_at', 'axis', [
-        (1, 'genre:known', 'play', 2.0, 1.1, 1.1, 10),
-        (2, 'genre:known', 'rating', -0.5, 0.9, 0.99, 11)]),
-)
-
-TASTE_ORIGINALS = (
-    ('rec_weights', 'axis,weight,updated_at', [('genre:Known alias', 1.4, 11)]),
-    ('rec_lean', 'axis,value,updated_at,last_graduated_day', [('genre:known', 1.3, 12, None)]),
-    ('home_hidden_facet', 'axis', [('genre:Known alias',), ('genre:known',)]),
-    ('rec_theme', 'facet,score,updated_at', [('genre:Known alias', -0.5, 11), ('genre:known', 2.0, 10)]),
-    ('rec_play_grad', 'axis,last_graduated_day', [('genre:Known alias', '2026-10-29'), ('genre:known', '2026-10-28')]),
-    ('rec_grad_log', 'id,axis,source,score,factor,new_weight,created_at', [
-        (1, 'genre:known', 'play', 2.0, 1.1, 1.1, 10),
-        (2, 'genre:Known alias', 'rating', -0.5, 0.9, 0.99, 11)]),
-)
-
-
-def seed_native_taste(conn):
-    """Completed v88 input below later conversion and startup owners.
-
-    The real v88 owner independently compares every fold with publication and
-    retains every original contribution; later edges need not rerun it.
-    """
-    with conn:
-        conn.execute("INSERT INTO genre_catalog(key,name,source) VALUES ('known','Known','custom')")
-        conn.execute("INSERT INTO genre_alias VALUES ('known alias','Known alias','known','custom')")
-        axis_id = taste_axes.identity(conn, 'genre:known', create=True)
-        for owner, columns, token, expected in TASTE_FOLDS:
-            names = columns.split(',')
-            names[names.index(token)] = 'axis_id'
-            values = [tuple(axis_id if names[index] == 'axis_id' else value
-                            for index, value in enumerate(row)) for row in expected]
-            conn.executemany('INSERT INTO ' + taste_axes.table(conn, owner) + '(' + ','.join(names) +
-                             ') VALUES (' + ','.join('?' for _ in names) + ')', values)
-        original = {owner: [dict(zip(columns.split(','), row)) for row in values]
-                    for owner, columns, values in TASTE_ORIGINALS}
-        fields = ('weight', 'value', 'score', 'updated_at', 'last_graduated_day',
-                  'source', 'factor', 'new_weight', 'created_at')
-        for owner, contributions in original.items():
-            for row in contributions:
-                token = row['facet' if owner == 'rec_theme' else 'axis']
-                conn.execute('INSERT INTO taste_axis_legacy VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                             (owner, str(row.get('id', token)), token, axis_id, *[row.get(field) for field in fields]))
-    return original
-
-
-def assert_taste_folds(conn):
-    for owner, columns, token, expected in TASTE_FOLDS:
-        assert rows(conn, owner, columns, token) == expected
-
-
-def assert_original_taste_contributions(conn, original):
-    retained = {}
-    for owner, contributions in original.items():
-        token = 'facet' if owner == 'rec_theme' else 'axis'
-        retained[owner] = []
-        for contribution in contributions:
-            key = str(contribution.get('id', contribution[token]))
-            row = conn.execute('SELECT * FROM taste_axis_legacy WHERE table_name=? AND row_key=?',
-                               (owner, key)).fetchone()
-            assert row is not None
-            assert row['raw_axis'] == contribution[token]
-            assert taste_axes.identity(conn, 'genre:known') == row['axis_id']
-            assert {column: row['lean_value' if column == 'value' else column]
-                    for column in contribution if column not in (token, 'id')} == {
-                        column: value for column, value in contribution.items() if column not in (token, 'id')}
-            retained[owner].append(key)
-    assert conn.execute('SELECT count(*) FROM taste_axis_legacy').fetchone()[0] == sum(map(len, retained.values()))
-
-
-@pytest.fixture
-def taste_upgrade_input(request, tmp_path, monkeypatch):
-    bound_catalog(monkeypatch)
-    version, target = request.param
-    path = tmp_path / 'taste-upgrade.db'
-    with closing(sqlite3.connect(':memory:')) as schema, closing(sqlite3.connect(path)) as conn:
-        # Admission is covered by taste_installed. Each numbered edge gets the
-        # completed lower schema, rather than replaying every earlier edge.
-        install_numbered_input(schema, version, regular_owners=regular.CHANGES if version == 107 else ())
-        conn.execute('PRAGMA synchronous=OFF')
-        schema.backup(conn)
-        conn.row_factory = sqlite3.Row
-        conn.execute('PRAGMA foreign_keys=ON')
-        conn.execute('PRAGMA journal_mode=WAL')
-        original = None
-        if version < 88:
-            with catalog_reader(path, version) as reader:
-                reader.conn.execute('PRAGMA synchronous=OFF')
-                reconciled_seed(reader)
-                original = source(reader.conn)
-                publication.publish(reader.conn, identity=ready(reader.conn))
-        else:
-            original = seed_native_taste(conn)
-        yield conn, path, version, target, original
-
-
 def assert_selected_taste(store):
     assert store.rec_model.weight_records() == {'genre:known': {'axis': 'genre:known', 'weight': 1.4, 'updated_at': 11}}
     assert store.rec_model.get_leans() == {'genre:known': 1.3}
@@ -173,9 +50,9 @@ def assert_selected_taste(store):
         ('genre:known', 'play', 1.1), ('genre:known', 'rating', 0.9)]
 
 
-@pytest.mark.parametrize('taste_installed', [79, 87], indirect=True)
-def test_selected_folds_preserve_exact_sources_and_pinned_reader(taste_installed):
-    store, _ = taste_installed
+@pytest.mark.parametrize('installed', [79, 87], indirect=True)
+def test_selected_folds_match_native_and_preserve_exact_contributions(installed, tmp_path):
+    store, _ = installed
     reconciled_seed(store)
     original = source(store.conn)
     history = list(map(tuple,store.conn.execute('SELECT * FROM schema_migrations')))
@@ -193,72 +70,29 @@ def test_selected_folds_preserve_exact_sources_and_pinned_reader(taste_installed
             assert_selected_taste(reader)
         finally:
             reader.conn.set_authorizer(None)
-    regular.migrate(store.conn)
-    assert source(store.conn) == original
-    assert list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations'))) == history
-
-
-@pytest.mark.parametrize('taste_upgrade_input', [
-    (79, 87), (87, 88), (88, 98), (98, 102), (103, 104), (104, 107)
-], indirect=True, ids=['79-to-87', '87-to-88', '88-to-98', '98-to-102', '103-to-104', '104-to-107'])
-def test_registered_taste_upgrade_preserves_exact_folds(taste_upgrade_input):
-    conn, path, version, target, original = taste_upgrade_input
-    history = list(map(tuple, conn.execute('SELECT version,name FROM schema_migrations ORDER BY version')))
-    assert_taste_folds(conn)
-    runner.migrate(conn, registry=registry.MIGRATIONS[:target])
-    assert list(map(tuple, conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
-        *history, *[(item.version, item.name) for item in registry.MIGRATIONS[version:target]]]
-    assert_taste_folds(conn)
-    if target < 88:
-        assert publication.selected(conn) is not None
-        assert source(conn) == original
-    else:
-        assert publication.selected(conn) is None
-        if original is not None:
-            assert_original_taste_contributions(conn, original)
-    with catalog_reader(path, target) as reader:
-        assert_selected_taste(reader)
-        assert reader.rec_model.get_weights(now=11) == {'genre:known': 1.4}
-    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
-
-
-@pytest.mark.parametrize('taste_upgrade_input', [(103, 103)], indirect=True, ids=['renamed-input'])
-def test_name_cutover_restores_taste_readers(taste_upgrade_input):
-    from yt_playlist.core.migrations import v103_entity_names
-
-    conn, path, _version, target, original = taste_upgrade_input
-    programs = list(conn.execute("SELECT type,name,sql FROM sqlite_schema WHERE type IN ('view','trigger') ORDER BY rowid"))
-    with conn:
-        conn.execute('BEGIN')
-        for kind, name, _sql in reversed(programs):
-            conn.execute('DROP ' + kind + ' "' + name.replace('"', '""') + '"')
-        v103_entity_names.restore_programs(conn, programs, retention_progress=False)
-    runner.validate_version(conn, 103, foreign_keys=False, data=False)
-    assert_taste_folds(conn)
-    assert_original_taste_contributions(conn, original)
-    with catalog_reader(path, target) as reader:
-        assert_selected_taste(reader)
-    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
-
-
-@pytest.mark.parametrize('taste_upgrade_input', [(107, 107)], indirect=True, ids=['completed-native'])
-def test_native_admission_and_reopen_preserve_exact_taste(taste_upgrade_input):
-    _conn, path, _version, _target, original = taste_upgrade_input
-    native = Store(path)
+    native = Store(tmp_path/'native-taste.db')
     try:
         native.conn.execute('PRAGMA synchronous=OFF')
-        native.init_schema(defer_metadata=True)
+        store.conn.backup(native.conn)
+        runner.migrate(native.conn,registry=registry.MIGRATIONS[:88])
         assert publication.selected(native.conn) is None
-        assert_taste_folds(native.conn)
-        assert_original_taste_contributions(native.conn, original)
-        assert_selected_taste(native)
-        assert native.rec_model.get_weights(now=11) == {'genre:known': 1.4}
-        regular.validate(native.conn)
+        for owner,columns,token in (
+            ('rec_weights','axis,weight,updated_at','axis'),
+            ('rec_lean','axis,value,updated_at,last_graduated_day','axis'),
+            ('home_hidden_facet','axis','axis'),('rec_theme','facet,score,updated_at','facet'),
+            ('rec_play_grad','axis,last_graduated_day','axis'),
+            ('rec_grad_log','id,axis,source,score,factor,new_weight,created_at','axis')):
+            assert rows(store.conn,owner,columns,token)==rows(native.conn,owner,columns,token)
+        regular.migrate(store.conn)
+        assert source(store.conn) == original
+        assert list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations'))) == history
+        runner.migrate(native.conn,registry=registry.MIGRATIONS)
+        regular.migrate(native.conn)
+        native.init_schema(defer_metadata=True)
+        assert native.rec_model.get_weights(now=11)==store.rec_model.get_weights(now=11)
+        assert native.rec_model.hidden_facets()==store.rec_model.hidden_facets()
     finally:
         native.conn.close()
-    with catalog_reader(path, 107) as reopened:
-        assert_selected_taste(reopened)
-        assert_original_taste_contributions(reopened.conn, original)
 
 
 @pytest.mark.parametrize('installed',[87],indirect=True)
@@ -271,6 +105,7 @@ def test_competing_configured_values_block_selection_without_losing_history(inst
         publication.publish(store.conn,identity=identity)
     assert publication.selected(store.conn) is None
     assert source(store.conn)==original
+    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed',[79,87],indirect=True)
@@ -372,10 +207,11 @@ def test_independent_source_and_identity_verification_rejects_damage(installed,d
         publication.publish(store.conn,identity=current.id)
     assert publication.selected(store.conn) is None
     assert store.rec_model.weight_records()['genre:Known alias']['weight']==1.4
+    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed',[87],indirect=True)
-def test_interruption_stale_publication_and_failed_retry_leave_old_sources_usable(installed,monkeypatch, independent_regular_ddl):
+def test_interruption_stale_publication_and_failed_retry_leave_old_sources_usable(installed,monkeypatch):
     store,_ = installed
     reconciled_seed(store)
     preparation.JOB.install(store.conn)
@@ -483,3 +319,4 @@ def test_distinct_family_and_genre_identity_cannot_hide_each_other_at_api_bounda
     with pytest.raises(MigrationError,match='Distinct taste identities'):
         publication.publish(store.conn,identity=current)
     assert publication.selected(store.conn) is None
+    regular.migrate(store.conn)

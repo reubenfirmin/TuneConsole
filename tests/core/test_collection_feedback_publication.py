@@ -7,8 +7,9 @@ import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_collection_feedback_preparation import finish, head, seed
-from tests.independent_schema_support import independent_regular_ddl
-from tests.store_fixture_support import publication_consumer_reads
+from tests.store_fixture_support import (
+    preparation_ddl_connection, publication_consumer_reads, reuse_reporting_reader,
+)
 from yt_playlist.core import account_auth_state, album_feedback_storage
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import collection_feedback as preparation, collection_feedback_publication as publication
@@ -18,13 +19,47 @@ from yt_playlist.core.store import Store
 pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Publication exercises SQL and files without starting the HTTP app."""
+
+
+@pytest.fixture(autouse=True)
+def preparation_admission(monkeypatch):
+    from yt_playlist.core.preparation import rows
+
+    # These cases own publication's SQL, custody and source fences. The input
+    # fixture supplies the installed schema; preparation/admission tests own
+    # rejecting invalid base layouts. Keep installation of the real preparation
+    # tables and triggers, and keep explicit Store reopens fully admitted.
+    monkeypatch.setattr(rows, 'validate_version', lambda *args, **kwargs: None)
+
+
+@pytest.fixture
+def independent_ddl(installed, monkeypatch):
+    # Register after constructing the shared predecessor, so the new change
+    # must run against this case's incomplete or failed preparation.
+    store, _ = installed
+    assert regular.validate(store.conn) == 0
+    assert not store.conn.execute(
+        "SELECT 1 FROM sqlite_schema WHERE name='independent_preparation_ddl'").fetchone()
+    change = regular.Change(
+        1, 'independent_preparation_ddl',
+        lambda conn, context: conn.execute('CREATE TABLE independent_preparation_ddl (id INTEGER)'),
+        lambda conn: conn.execute('SELECT id FROM independent_preparation_ddl LIMIT 0'),
+    )
+    # This owns independent DDL during damaged preparation. Other regular
+    # changes and registry upgrades have their own migration tests.
+    monkeypatch.setattr(regular, 'CHANGES', (change,))
+
+
 def prepare(conn, owner):
     owner.worker.install(conn)
     return finish(owner.worker, conn, size=128).prepared_revision
 
 
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
-def test_preopened_and_reopened_runtime_readers_keep_exact_originals(installed):
+def test_preopened_and_reopened_runtime_readers_keep_exact_originals(installed, monkeypatch):
     store, _ = installed
     original = seed(store)
     other = Store(store._db_path)
@@ -35,7 +70,8 @@ def test_preopened_and_reopened_runtime_readers_keep_exact_originals(installed):
             owner.publish(store.conn, revision=revision)
             owner.publish(store.conn, revision=revision)
             assert owner.selected(other.conn) == revision
-        assert {key:other.settings.get_setting(key) for key in original} == original
+        with reuse_reporting_reader(other, monkeypatch):
+            assert {key:other.settings.get_setting(key) for key in original} == original
         assert album_feedback_storage.original(other.conn) == json.loads(original['album_feedback'])
         assert not album_feedback_storage.available(other.conn)
         assert not account_auth_state.available(other.conn)
@@ -45,7 +81,8 @@ def test_preopened_and_reopened_runtime_readers_keep_exact_originals(installed):
     reopened = Store(store._db_path)
     try:
         reopened.init_schema(defer_metadata=True)
-        assert {key:reopened.settings.get_setting(key) for key in original} == original
+        with reuse_reporting_reader(reopened, monkeypatch):
+            assert {key:reopened.settings.get_setting(key) for key in original} == original
         assert album_feedback_storage.original(reopened.conn) == json.loads(original['album_feedback'])
     finally:
         reopened.conn.close()
@@ -86,7 +123,7 @@ def test_writes_references_and_deletions_withdraw_only_the_affected_owner(instal
 @pytest.mark.parametrize('name', tuple(publication.OWNERS))
 @pytest.mark.parametrize('failure', ['file', 'missing-file', 'header', 'member', 'resolution'])
 def test_unverified_originals_and_typed_rows_cannot_be_selected(
-        installed, name, failure, independent_regular_ddl):
+        installed, name, failure, independent_ddl, preparation_ddl_connection):
     store, _ = installed
     original = seed(store)
     owner = publication.OWNERS[name]
@@ -110,7 +147,7 @@ def test_unverified_originals_and_typed_rows_cannot_be_selected(
         owner.publish(store.conn, revision=revision)
     assert owner.selected(store.conn) is None
     assert store.settings.get_setting(owner.source) == original[owner.source]
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert store.conn.execute('SELECT count(*) FROM independent_preparation_ddl').fetchone()[0] == 0
 
 
@@ -158,7 +195,7 @@ def test_verification_and_final_publication_fence_source_and_custody_races(insta
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 def test_publication_rollback_retry_immutable_custody_and_missing_file_recovery(
-        installed, monkeypatch, independent_regular_ddl):
+        installed, monkeypatch, independent_ddl, preparation_ddl_connection):
     store, _ = installed
     original = seed(store)
     owner = publication.OWNERS['album-feedback']
@@ -193,7 +230,7 @@ def test_publication_rollback_retry_immutable_custody_and_missing_file_recovery(
         owner.worker.step(store.conn, retry=True)
     progress = owner.worker.progress(store.conn)
     assert progress.status == 'failed'
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert store.conn.execute('SELECT count(*) FROM independent_preparation_ddl').fetchone()[0] == 0
     assert owner.worker.progress(store.conn) == progress
     monkeypatch.setattr(preparation.files, 'publish', real_publish)

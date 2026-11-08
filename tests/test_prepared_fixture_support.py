@@ -9,7 +9,6 @@ import sqlite3
 import pytest
 
 from tests.prepared_fixture_support import capture_template, historical_template, prepared_template, roots
-from tests.home_fixture_support import publish_menu
 from tests.rec.test_home_prepared import service
 from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.core import profile_files
@@ -376,13 +375,6 @@ def test_home_seed_templates_keep_matching_unprepared_inputs(
         assert getattr(target, '_fixture_bundle_payload', {}) == template.bundles
 
 
-def test_genre_candidate_input_keeps_all_six_modes_and_four_complete_lanes(genre_candidates_template):
-    template = genre_candidates_template
-    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert len(template.source.modes.list_modes(active_only=True)) == 6
-    for mid in map(str, range(6)):
-        assert set(template.bundles[mid]) == {'wheelhouse', 'explore', 'comfort', 'fresh'}
-        assert {len(items) for items in template.bundles[mid].values()} == {8}
 
 
 @pytest.mark.parametrize('template_name', [
@@ -407,7 +399,7 @@ def test_home_candidate_templates_keep_private_complete_inputs(
         assert group_serving.policy(template.source) == 'adaptive'
         assert home is None
     else:
-        count, modes = (8, 6) if template_name == 'genre_candidates_template' else (8, 2)
+        count, modes = (20, 6) if template_name == 'genre_candidates_template' else (8, 2)
         assert len(template.source.modes.list_modes(active_only=True)) == modes
         for mid in map(str, range(modes)):
             lanes = {'wheelhouse', 'explore', 'comfort', 'fresh'} if modes == 6 else {
@@ -459,34 +451,18 @@ def test_home_candidate_templates_keep_private_complete_inputs(
         assert target._fixture_bundle_payload == bundle
 
 
-def _assert_radio_genre_catalog(target, keys, library, metadata):
+def test_radio_genre_template_keeps_complete_private_inputs(
+        radio_genre_template, store, file_backed_store, request):
     import numpy as np
 
     from yt_playlist.rec import embedding_vectors
 
-    assert target.rec_query.tracks_by_keys(keys) == library
-    assert [tuple(row) for row in target.conn.execute(
-        'SELECT video_id,genre,mb_year FROM catalog_tracks ORDER BY video_id')] == metadata
-    assert target.conn.execute('SELECT count(*) FROM library_memberships').fetchone()[0] == 108
-    modes = target.modes.list_modes()
-    labels = ['Electronic'] * 5 + ['Synthwave', 'Jazz', 'Rock', 'Ambient']
-    assert len(modes) == 9
-    for index, (mode, label) in enumerate(zip(modes, labels)):
-        assert (mode['mode_id'], mode['label'], mode['size']) == (index + 1, label, 12)
-        assert mode['families'] == [[label, 12]]
-        assert mode['rep_keys'] == []
-        assert mode['space'] == embedding_vectors.content_space_id(target)
-        angle = index * .01 if index < 6 else (index - 5) * 1.2
-        np.testing.assert_array_equal(mode['centroid'], np.array(
-            [np.cos(angle), np.sin(angle)], dtype=np.float32))
-    assert target.conn.execute('PRAGMA foreign_key_check').fetchall() == []
-
-
-def test_radio_genre_template_has_complete_read_only_catalog(radio_genre_template):
     template = radio_genre_template
-    assert set(template.result) == set(map(str, range(1, 10)))
-    assert all(len(rows) == 12 for rows in template.result.values())
-    keys = {row['key'] for rows in template.result.values() for row in rows}
+    first, second = template.restore(store), template.restore(file_backed_store)
+    assert first == second == template.result
+    assert set(first) == set(map(str, range(1, 10)))
+    assert all(len(rows) == 12 for rows in first.values())
+    keys = {row['key'] for rows in first.values() for row in rows}
     assert len(keys) == 108
     library = template.source.rec_query.tracks_by_keys(keys)
     assert set(library) == keys
@@ -496,33 +472,27 @@ def test_radio_genre_template_has_complete_read_only_catalog(radio_genre_templat
     assert len(metadata) == 108
     assert {row[2] for row in metadata} == {'2001'}
     assert {row[1] for row in metadata} == set(labels)
-    _assert_radio_genre_catalog(template.source, keys, library, metadata)
-    assert template.source._fixture_bundle_payload == template.bundles
-    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    with pytest.raises(sqlite3.OperationalError, match='readonly'), template.source.conn.atomic():
-        template.source.settings.set_setting('private_radio_genre', 'forbidden')
-
-
-@pytest.mark.parametrize('disk', [False, True])
-def test_radio_genre_clone_keeps_complete_catalog_and_heads(radio_genre_template, tmp_path, disk):
-    template = radio_genre_template
-    keys = {row['key'] for rows in template.result.values() for row in rows}
-    library = template.source.rec_query.tracks_by_keys(keys)
-    metadata = [tuple(row) for row in template.source.conn.execute(
-        'SELECT video_id,genre,mb_year FROM catalog_tracks ORDER BY video_id')]
-    with template.open(tmp_path / 'radio.db' if disk else ':memory:') as target:
-        _assert_radio_genre_catalog(target, keys, library, metadata)
+    for target in (template.source, store, file_backed_store):
+        assert target.rec_query.tracks_by_keys(keys) == library
         assert target._fixture_bundle_payload == template.bundles
         assert target.recommendations.heads() == template.source.recommendations.heads()
-        if disk:
-            assert target.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
-
-
-def test_radio_genre_clones_keep_private_catalog_files_and_payloads(
-        radio_genre_template, store, file_backed_store, request):
-    template = radio_genre_template
-    first, second = template.restore(store), template.restore(file_backed_store)
-    assert first == second == template.result
+        assert [tuple(row) for row in target.conn.execute(
+            'SELECT video_id,genre,mb_year FROM catalog_tracks ORDER BY video_id')] == metadata
+        assert target.conn.execute('SELECT count(*) FROM library_memberships').fetchone()[0] == 108
+        modes = target.modes.list_modes()
+        assert len(modes) == 9
+        for index, (mode, label) in enumerate(zip(modes, labels)):
+            assert (mode['mode_id'], mode['label'], mode['size']) == (index + 1, label, 12)
+            assert mode['families'] == [[label, 12]]
+            assert mode['rep_keys'] == []
+            assert mode['space'] == embedding_vectors.content_space_id(target)
+            angle = index * .01 if index < 6 else (index - 5) * 1.2
+            np.testing.assert_array_equal(mode['centroid'], np.array(
+                [np.cos(angle), np.sin(angle)], dtype=np.float32))
+        assert target.conn.execute('PRAGMA foreign_key_check').fetchall() == []
+    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    with pytest.raises(sqlite3.OperationalError, match='readonly'):
+        template.source.settings.set_setting('private_radio_genre', 'forbidden')
 
     destinations = [roots(target.conn) for target in (store, file_backed_store)]
     retained = []
@@ -553,60 +523,100 @@ def test_radio_genre_clones_keep_private_catalog_files_and_payloads(
         assert target._fixture_bundle_payload == template.bundles
 
 
-@pytest.fixture
-def empty_clone_targets(tmp_path):
-    # The restore under test supplies the complete SQL image. Initializing
-    # another empty database first would copy and admit that image twice.
-    targets = Store(':memory:'), Store(tmp_path / 'consumer.db')
-    try:
-        yield targets
-    finally:
-        for target in targets:
-            target.conn.close()
+@pytest.mark.parametrize('variant', ['inputs', 'backend', 'browser'])
+def test_measured_sounds_template_keeps_complete_private_inputs(
+        variant, measured_sounds_template, measured_home_templates, store, file_backed_store):
+    from yt_playlist.rec import home_vibe, mix_tuning, mode_surfaces
 
+    template = (measured_sounds_template if variant == 'inputs'
+                else measured_home_templates(variant))
+    first, second = store, file_backed_store
+    template.restore(first)
+    template.restore(second)
+    bundle = template.bundles
+    assert set(bundle['_vibes']['pools']) == set(home_vibe.PRESETS)
+    for mid in range(6):
+        for lane in mode_surfaces.CARD_SURFACES:
+            items = bundle[str(mid)][lane]
+            assert len(items) == 20
+            assert sum(item['musical']['dimensions']['intensity']['value'] < .5
+                       for item in items) == 8
+    keys = {item['key'] for items in bundle['all'].values() for item in items}
+    assert len(keys) == 480
+    assert template.source.conn.execute('SELECT count(*) FROM recordings').fetchone()[0] == (
+        486 if variant == 'browser' else 480)
+    assert len(template.source.rec_query.library_keys()) == (366 if variant == 'browser' else 360)
+    assert len(template.source.discovery.discovered_tracks_by_keys(keys)) == 120
+    profiles = template.source.musical_profiles.by_keys(keys)
+    assert len(profiles) == len(keys)
+    heads = template.source.recommendations.heads()
+    assert {head['surface'] for head in heads} >= {'vibe:' + preset for preset in home_vibe.PRESETS}
+    for target in (template.source, first, second):
+        assert target.musical_profiles.by_keys(keys) == profiles
+        assert target.recommendations.heads() == heads
+        assert len(target.accounts.get_accounts()) == (0 if variant == 'inputs' else 1)
+        home = target.rec_proposals.get_proposals('home_prepared')
+        if variant == 'inputs':
+            assert not home
+        else:
+            assert home == template.source.rec_proposals.get_proposals('home_prepared')
+            assert home['menus'] and len(home['menus'][0]['protos']) == 4
+        if variant == 'browser':
+            playlists = target.playlists.get_playlists()
+            assert len(playlists) == 1
+            assert (playlists[0].provider_playlist_id, playlists[0].title,
+                    playlists[0].track_count) == ('PLZ', 'Old Mix', 3)
+        assert target.settings.get_setting(home_vibe.SETTING) is None
+        assert target.settings.get_setting(mix_tuning.UPDATED_AT_SETTING) is None
+        assert target.rec_model.get_leans() == {}
+        assert target.conn.execute('PRAGMA foreign_key_check').fetchall() == []
+    assert first._fixture_bundle_payload == second._fixture_bundle_payload == bundle
+    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    with pytest.raises(sqlite3.OperationalError, match='readonly'):
+        template.source.settings.set_setting('private_sound_fixture', 'forbidden')
 
-@pytest.fixture(scope='module')
-def clone_custody_input(_pristine_current_schema):
-    def build(source):
-        # Cloning owns custody and detached values, below ranking and profile
-        # inference. Keep four real Home cards and real native profile files.
-        home = publish_menu(source, genre='house', tracks_per_card=1)
-        assert home and len(home['menus'][0]['protos']) == 4
-        bundles = {'all': {proto['lane']: proto['tracks'] for proto in home['menus'][0]['protos']}}
-        source._fixture_bundle_payload = deepcopy(bundles)
-        keys = [row['key'] for rows in bundles['all'].values() for row in rows]
-        profile = {'version': musical_profiles.VERSION, 'dimensions': {
-            'intensity': {'value': .4, 'support': .8, 'provenance': ['captured fixture input']}}}
-        source.musical_profiles.publish_recordings([
-            (key, musical_profiles.canonical(profile), profile['version'], musical_profiles.digest(profile))
-            for key in keys], 1000)
-        return {'keys': keys, 'nested': [1], 'home': home}
-    with prepared_template(_pristine_current_schema, build) as template:
-        yield template
+    # Check every retained file, including source evidence and typed outputs,
+    # rather than proving only that SQL and one profile file were copied.
+    destinations = [roots(target.conn) for target in (first, second)]
+    copied = 0
+    for name, directory in template.files.items():
+        for source in directory.rglob('*'):
+            if not source.is_file():
+                continue
+            paths = [source, *(owned[name] / source.relative_to(directory) for owned in destinations)]
+            expected = source.read_bytes()
+            assert all(path.read_bytes() == expected for path in paths)
+            assert len({(path.stat().st_dev, path.stat().st_ino) for path in paths}) == 3
+            copied += 1
+    assert copied
 
-
-def test_clone_custody_input_keeps_four_cards_and_native_profile_files(clone_custody_input):
-    source = clone_custody_input.source
-    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert len(clone_custody_input.result['home']['menus'][0]['protos']) == 4
-    assert len(source.musical_profiles.by_keys(clone_custody_input.result['keys'])) == 4
-    assert profile_files.directory(source.conn).exists()
+    publication = first.conn.execute('SELECT publication FROM recording_profile_files LIMIT 1').fetchone()[0]
+    relative = profile_files.relative('recording', publication)
+    original = (profile_files.directory(second.conn) / relative).read_bytes()
+    (profile_files.directory(first.conn) / relative).write_bytes(b'Private corrupted profile')
+    assert (profile_files.directory(second.conn) / relative).read_bytes() == original
+    assert (profile_files.directory(template.source.conn) / relative).read_bytes() == original
+    first.settings.set_setting('private_sound_fixture', 'first consumer')
+    first._fixture_bundle_payload['_vibes']['pools']['relax']['fresh'][0]['musical']['dimensions']['intensity']['value'] = -1
+    for target in (template.source, second):
+        assert target.settings.get_setting('private_sound_fixture') is None
+        assert target._fixture_bundle_payload == bundle
 
 
 def test_prepared_clones_survive_source_removal_and_keep_private_mutations(
-        clone_custody_input, empty_clone_targets):
-    store, file_backed_store = empty_clone_targets
-    with historical_template(clone_custody_input.source.conn, lambda source: clone_custody_input.result,
-                             database=':memory:', completed=clone_custody_input) as template:
+        _pristine_current_schema, store, file_backed_store, home_prepared_template, tmp_path):
+    def build(source):
+        home = home_prepared_template.restore(source)
+        bundles = source._fixture_bundle_payload
+        assert home and len(home['menus'][0]['protos']) == 4
+        return {'keys': [row['key'] for row in bundles['all']['wheelhouse']], 'nested': [1], 'home': home}
+    with prepared_template(_pristine_current_schema, build) as template:
         expected = template.source.musical_profiles.by_keys(template.result['keys'])
-        assert len(expected) == 4
+        assert len(expected) == 24
         source_files = profile_files.directory(template.source.conn)
         assert source_files.exists()
         first = template.restore(store)
         second = template.restore(file_backed_store)
-        for target in (store, file_backed_store):
-            target._bind_repositories()
-        assert file_backed_store.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0] == 'wal'
         assert len({template.source._evidence_key, store._evidence_key, file_backed_store._evidence_key}) == 3
         assert len({source_files, profile_files.directory(store.conn),
                     profile_files.directory(file_backed_store.conn)}) == 3
@@ -617,8 +627,8 @@ def test_prepared_clones_survive_source_removal_and_keep_private_mutations(
         store._fixture_bundle_payload['all']['wheelhouse'].clear()
         assert second['nested'] == template.result['nested'] == [1]
         assert second['home'] == template.result['home']
-        assert len(file_backed_store._fixture_bundle_payload['all']['wheelhouse']) == 1
-        assert len(template.bundles['all']['wheelhouse']) == 1
+        assert len(file_backed_store._fixture_bundle_payload['all']['wheelhouse']) == 24
+        assert len(template.bundles['all']['wheelhouse']) == 24
     # Closing the memory source removes its profile files. Neither restored
     # consumer can borrow bytes from that source.
     assert not source_files.exists()
@@ -626,7 +636,7 @@ def test_prepared_clones_survive_source_removal_and_keep_private_mutations(
         assert target.musical_profiles.by_keys(second['keys']) == expected
         payload = home_prepared.load(target, 1000)
         assert payload == second['home']
-        assert len(payload['menus'][0]['protos']) == 4
+        assert len(home_prepared.cards(target, payload, 1000, service(target), record=False).protos) == 4
         assert target.conn.execute('PRAGMA foreign_keys').fetchone()[0] == 1
         assert target.conn.execute('PRAGMA foreign_key_check').fetchall() == []
     assert file_backed_store.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'

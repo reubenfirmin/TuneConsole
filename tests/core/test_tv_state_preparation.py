@@ -1,4 +1,5 @@
 """TV preparation retains finite typed relations and exact replay receipts."""
+from contextlib import closing
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -6,9 +7,7 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
-from tests.store_fixture_support import numbered_store
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection
 from tests.test_tv_stream import video
 from yt_playlist.core import tv_recommendation_state as state
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -64,30 +63,31 @@ def aliases(conn):
     finish(artist_lookup.JOB, conn)
 
 
-@pytest.mark.parametrize('numbered_store', [79, 93, 94], indirect=True)
-def test_all_five_jobs_retain_exact_shapes_clocks_and_reference_custody(numbered_store, independent_regular_ddl):
-    store, _ = numbered_store
+@pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
+def test_all_five_jobs_retain_exact_shapes_clocks_and_reference_custody(installed, preparation_ddl_connection):
+    store, _ = installed
+    conn = preparation_ddl_connection
     values, originals = seed(store)
-    aliases(store.conn)
+    aliases(conn)
     for name, job in preparation.JOBS.items():
-        job.install(store.conn)
-        finish(job, store.conn, size=1)
+        job.install(conn)
+        finish(job, conn, size=1)
         surface = preparation.SOURCES[name]
-        row = head(store.conn, surface)
-        assert preparation.read_original(store.conn, row) == originals[surface]
+        row = head(conn, surface)
+        assert preparation.read_original(conn, row) == originals[surface]
         assert row['built_at'] is None
         assert store.rec_proposals.get_proposals(surface) == values[surface]
         for relation in preparation.RELATIONS[surface]:
-            assert not store.conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?', (relation,)).fetchone()
-            assert all(fk[2].startswith('prepared_') for fk in store.conn.execute(f'PRAGMA foreign_key_list({preparation.relation(relation)})'))
-    assert [tuple(row) for row in store.conn.execute('SELECT source_resolution,video_resolution FROM ' +
+            assert not conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?', (relation,)).fetchone()
+            assert all(fk[2].startswith('prepared_') for fk in conn.execute(f'PRAGMA foreign_key_list({preparation.relation(relation)})'))
+    assert [tuple(row) for row in conn.execute('SELECT source_resolution,video_resolution FROM ' +
         preparation.relation('tv_pool_items') + ' ORDER BY position')] == [(None, None), ('missing_recording', 'external_video')]
-    assert [tuple(row) for row in store.conn.execute('SELECT requested_at,resolution_reason FROM ' +
+    assert [tuple(row) for row in conn.execute('SELECT requested_at,resolution_reason FROM ' +
         preparation.relation('tv_artist_requests') + ' ORDER BY id')] == [(None, None), (None, 'missing_artist')]
-    assert tuple(store.conn.execute('SELECT source_ref,target_ref,source_resolution,target_resolution,input_stream,request_id,built_at FROM ' +
+    assert tuple(conn.execute('SELECT source_ref,target_ref,source_resolution,target_resolution,input_stream,request_id,built_at FROM ' +
         preparation.relation('tv_continuation_receipts')).fetchone()) == (None, None, 'missing_playlist', 'missing_playlist', '', 'request:with:colons', None)
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    regular.migrate(store.conn)
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [79, 94], indirect=True)
@@ -98,18 +98,19 @@ def test_frozen_v95_upgrade_matches_every_prepared_relation_and_keeps_sources_fo
     for job in preparation.JOBS.values():
         job.install(store.conn)
         finish(job, store.conn)
-    upgraded = Store(tmp_path / 'tv-state-frozen-upgrade.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS[:95])
+    with closing(sqlite3.connect(tmp_path / 'tv-state-frozen-upgrade.db')) as upgraded:
+        upgraded.row_factory = sqlite3.Row
+        upgraded.execute('PRAGMA foreign_keys=ON')
+        upgraded.execute('PRAGMA synchronous=NORMAL')
+        store.conn.backup(upgraded)
+        upgraded.execute('PRAGMA journal_mode=WAL')
+        runner.migrate(upgraded, registry=registry.MIGRATIONS[:95])
         for surface, value in values.items():
-            assert state.read(upgraded.conn, surface) == value
+            assert state.read(upgraded, surface) == value
             for table in preparation.RELATIONS[surface]:
-                fields = ','.join('"' + row[1] + '"' for row in upgraded.conn.execute(f'PRAGMA table_info({table})'))
-                assert list(map(tuple, upgraded.conn.execute(f'SELECT {fields} FROM {table} ORDER BY 1,2'))) == list(map(tuple,
+                fields = ','.join('"' + row[1] + '"' for row in upgraded.execute(f'PRAGMA table_info({table})'))
+                assert list(map(tuple, upgraded.execute(f'SELECT {fields} FROM {table} ORDER BY 1,2'))) == list(map(tuple,
                     store.conn.execute(f'SELECT {fields} FROM {preparation.relation(table)} ORDER BY 1,2')))
-    finally:
-        upgraded.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -211,7 +212,7 @@ def test_file_work_has_no_transaction_and_rejects_concurrent_source_edit(install
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_interruption_missing_file_failed_job_new_regular_ddl_and_reopened_retry(installed, monkeypatch):
+def test_interruption_missing_file_failed_job_new_regular_ddl_and_reopened_retry(installed, preparation_ddl_connection, monkeypatch):
     store, _ = installed
     seed(store)
     pool, visual = preparation.JOBS['pool'], preparation.JOBS['visual-checks']
@@ -238,8 +239,9 @@ def test_interruption_missing_file_failed_job_new_regular_ddl_and_reopened_retry
         conn.execute('CREATE TABLE independent_tv_ddl(value TEXT)')
     def validate(conn):
         assert conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='independent_tv_ddl'").fetchone()
-    monkeypatch.setattr(regular, 'CHANGES', (regular.Change(1, 'independent_tv_ddl', install, validate),))
-    regular.migrate(store.conn)
+    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1,
+        'independent_tv_ddl', install, validate)))
+    regular.migrate(preparation_ddl_connection)
     assert store.conn.execute('SELECT max(version) FROM schema_changes').fetchone()[0] == len(regular.CHANGES)
     assert pool.progress(store.conn) == failed
     reopened = Store(store._db_path)
@@ -308,16 +310,47 @@ def test_alias_preparation_is_bounded_handles_ambiguity_and_is_an_explicit_artwo
     ('tv_continuations', '{"10::request":{"playlist_id":true,"stream":"next"}}'),
     ('tv_pool', 'null'), ('tv_pool', ' ' * (state.MAX_BYTES + 1)),
 ])
-def test_invalid_sources_fail_durably_without_changing_original_or_selecting_partial_state(installed, surface, raw):
-    store, _ = installed
-    with store.conn:
-        store.conn.execute('INSERT INTO rec_proposals VALUES (?,?,NULL)', (surface, raw))
-    aliases(store.conn)
+def test_invalid_sources_fail_durably_without_changing_original_or_selecting_partial_state(installed, preparation_ddl_connection, surface, raw):
+    conn = preparation_ddl_connection
+    with conn:
+        conn.execute('INSERT INTO rec_proposals VALUES (?,?,NULL)', (surface, raw))
+    aliases(conn)
     name = next(name for name, source in preparation.SOURCES.items() if source == surface)
     job = preparation.JOBS[name]
-    job.install(store.conn)
+    job.install(conn)
     with pytest.raises((ValueError, MigrationError, sqlite3.IntegrityError)):
-        finish(job, store.conn)
-    assert job.progress(store.conn).status == 'failed'
-    assert head(store.conn, surface) is None
-    assert store.conn.execute('SELECT payload FROM rec_proposals WHERE surface=?', (surface,)).fetchone()[0] == raw
+        finish(job, conn)
+    assert job.progress(conn).status == 'failed'
+    assert head(conn, surface) is None
+    assert conn.execute('SELECT payload FROM rec_proposals WHERE surface=?', (surface,)).fetchone()[0] == raw
+    regular.migrate(conn)
+
+
+@pytest.mark.parametrize('installed', [93], indirect=True)
+def test_full_receipt_budget_copies_individual_items_and_keeps_prior_complete_generation(installed):
+    store, _ = installed
+    job = preparation.JOBS['continuations']
+    store.rec_proposals.put_proposals('tv_continuations', {}, None)
+    job.install(store.conn)
+    finish(job, store.conn)
+    previous = head(store.conn, 'tv_continuations')
+    values = {f'{number + 1}::request:{number}': {'playlist_id': number + 101, 'stream': f'stream-{number}',
+        'items': [video(index) for index in range(60)]} for number in range(60)}
+    raw = json.dumps(values, indent=2)
+    store.rec_proposals.put_proposals('tv_continuations', values, 30)
+    tables = [preparation.relation(name) for name in preparation.RELATIONS['tv_continuations']] + [preparation.tables('tv_continuations')[2]]
+    for _ in range(40):
+        before = sum(store.conn.execute('SELECT count(*) FROM ' + table).fetchone()[0] for table in tables)
+        progress = job.step(store.conn, batch_size=128)
+        after = sum(store.conn.execute('SELECT count(*) FROM ' + table).fetchone()[0] for table in tables)
+        assert 0 <= after - before <= 128
+        if progress.status == 'prepared':
+            break
+        assert head(store.conn, 'tv_continuations')['preparation_revision'] == previous['preparation_revision']
+    assert progress.status == 'prepared'
+    current = head(store.conn, 'tv_continuations')
+    assert current['row_count'] == 3660
+    assert current['part_count'] > 1
+    assert json.loads(preparation.read_original(store.conn, current)) == json.loads(raw)
+    assert preparation.read_original(store.conn, previous) == '{}'
+    assert store.conn.execute('SELECT count(*) FROM ' + preparation.relation('tv_continuation_items')).fetchone()[0] == 3600

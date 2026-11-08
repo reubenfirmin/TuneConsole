@@ -75,7 +75,7 @@ def test_four_shards_cover_every_parameter_once_and_keep_modules_together():
 @pytest.mark.parametrize("shard", ["1/1", "2/2", "1/4", "4/4", "0/4", "5/4", "1/3", "1/8"])
 def test_runner_configuration_accepts_supported_splits_and_rejects_invalid_indices(tmp_path, shard):
     options = {"ci_shard": shard, "ci_shard_report": tmp_path / "shard.json",
-               "ci_suite": "unit", "ci_duration_baseline": BASELINE}
+               "ci_suite": "unit", "ci_duration_baseline": BASELINE, 'ci_source_report': None}
     registered = []
     config = SimpleNamespace(getoption=options.__getitem__, pluginmanager=SimpleNamespace(
         register=lambda plugin, name: registered.append(plugin)))
@@ -405,6 +405,35 @@ def test_retained_diagnostics_are_bounded_and_keep_exception_tail():
     retained = _diagnostic(text)
     assert len(json.dumps(retained, ensure_ascii=False).encode()) <= DIAGNOSTIC_BYTES
     assert retained.startswith('first line') and retained.endswith('last exception')
+
+
+def test_source_receipt_keeps_both_sides_of_a_run_including_added_and_removed_files(tmp_path):
+    import hashlib
+    import ci_test_shards as journal
+
+    (tmp_path / 'src').mkdir()
+    original = tmp_path / 'src' / 'subject.py'
+    original.write_bytes(b'before\n')
+    removed = tmp_path / 'old_plugin.py'
+    removed.write_bytes(b'old\n')
+    config = SimpleNamespace(rootpath=tmp_path, invocation_params=SimpleNamespace(args=('tests/subject.py',)))
+    path = tmp_path / 'evidence' / 'source.json'
+    shard = journal.Shard(config, 1, 1, tmp_path / 'evidence' / 'shard.json', 'unit', {}, source_path=path)
+    before = json.loads(path.read_text())
+    assert before['sources']['src/subject.py'] == hashlib.sha256(b'before\n').hexdigest()
+    assert 'after_sources' not in before
+    original.write_bytes(b'after\n')
+    removed.unlink()
+    (tmp_path / 'tests').mkdir()
+    (tmp_path / 'tests' / 'added.py').write_bytes(b'added\n')
+    shard.pytest_sessionfinish(None, 0)
+    report = json.loads(path.read_text())
+    assert report['sources'] == before['sources']
+    assert report['after_sources'] == {
+        'src/subject.py': hashlib.sha256(b'after\n').hexdigest(),
+        'tests/added.py': hashlib.sha256(b'added\n').hexdigest(),
+    }
+    assert report['arguments'] == ['tests/subject.py']
 
 
 def test_all_shards_pin_one_trusted_unexpired_baseline_artifact():

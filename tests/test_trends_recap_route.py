@@ -10,9 +10,34 @@ from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 from yt_playlist.rec.recap_details import slides
 from tests.conftest import FakeClient
-from tests.home_fixture_support import returning_listener
+from tests.home_fixture_support import home_page_bytecode, returning_listener
 from tests.onboarding_support import publish_personal_mix
-from tests.store_fixture_support import initialize_consumer
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
+
+
+@pytest.fixture(scope='session')
+def _pristine_current_schema():
+    # Recap readers keep the full prepared story and dashboard menu; the only
+    # catalog input used by their actual menu fixture is House.
+    with bounded_consumer_schema((('house', 'House'),)) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def recap_routes(monkeypatch, home_page_bytecode):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, home, trends
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (app_update, audio_preview, home, trends)])
+    templates = webapp.Jinja2Templates
+
+    def compiled_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        result.env.bytecode_cache = home_page_bytecode
+        return result
+
+    monkeypatch.setattr(webapp, 'Jinja2Templates', compiled_templates)
 
 _AURA = {"hue": "#8b7cff", "turbulence": 0.5, "reach": 0.6, "warmth": 0.4}
 _STORY = {

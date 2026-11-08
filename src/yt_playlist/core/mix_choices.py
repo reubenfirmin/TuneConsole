@@ -76,9 +76,11 @@ def install(conn, context=None):
 def validate(conn):
     from .schema_contract import tokens as _tokens
     from .schema_contract import MigrationError
-    for name, sql in definitions():
-        row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()
-        if row is None or _tokens(row[0]) != _tokens(sql):
+    from .schema_inspection import definitions as read_definitions
+    expected = tuple(definitions())
+    actual = read_definitions(conn, (name for name, _ in expected))
+    for name, sql in expected:
+        if actual.get(name) is None or _tokens(actual[name]) != _tokens(sql):
             raise MigrationError('Incompatible mix choice owner: ' + name)
 
 

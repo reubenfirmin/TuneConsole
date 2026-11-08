@@ -5,13 +5,22 @@ import json
 import pytest
 
 from tests.core.test_collection_control_preparation import finish
-from tests.core.test_predecessor_writes import installed
-from tests.independent_schema_support import independent_regular_ddl
 from tests.group_support import publish
+from tests.store_fixture_support import (
+    guarded_numbered_store as guarded_installed,
+    numbered_store as installed,
+    preparation_ddl_connection,
+    reuse_reporting_reader,
+)
 from yt_playlist.core import content_preparation_state, group_preparation_state, ranking_checkpoints
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import collection_controls, model_checkpoints as preparation
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Checkpoint preparation keeps SQL and files without HTTP startup."""
 
 
 def seed(store):
@@ -37,7 +46,7 @@ def seed(store):
 
 
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
-def test_typed_fields_exact_originals_and_unknown_generation_without_admission(installed):
+def test_typed_fields_exact_originals_and_unknown_generation_without_admission(installed, preparation_ddl_connection, monkeypatch):
     store, _ = installed
     sources = seed(store)
     for job in preparation.JOBS.values():
@@ -60,11 +69,13 @@ def test_typed_fields_exact_originals_and_unknown_generation_without_admission(i
     for name in preparation.SOURCES:
         actual.update(store.conn.execute('SELECT source,raw_value FROM ' + collection_controls.originals(name)))
     assert actual == {key: value for key, value in sources.items() if key != 'rec_vibe_version'}
-    assert all(store.settings.get_setting(key) == value for key, value in sources.items())
+    with reuse_reporting_reader(store, monkeypatch):
+        assert all(store.settings.get_setting(key) == value for key, value in sources.items())
     assert not content_preparation_state.available(store.conn)
     assert not group_preparation_state.available(store.conn)
     assert not ranking_checkpoints.available(store.conn)
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+    regular.migrate(preparation_ddl_connection)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -76,6 +87,7 @@ def test_frozen_upgrade_matches_checkpoint_domain_fields(installed, tmp_path):
         finish(job, store.conn)
     upgraded = Store(tmp_path / 'checkpoint-upgrade.db')
     try:
+        upgraded.conn.execute('PRAGMA synchronous=OFF')
         store.conn.backup(upgraded.conn)
         runner.migrate(upgraded.conn, registry=registry.MIGRATIONS[:94])
         for key in preparation.CONTENT:
@@ -89,9 +101,9 @@ def test_frozen_upgrade_matches_checkpoint_domain_fields(installed, tmp_path):
         upgraded.conn.close()
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_continuing_writes_renames_and_generation_arrival_reconcile(installed):
-    store, _ = installed
+@pytest.mark.parametrize('guarded_installed', [93], indirect=True)
+def test_continuing_writes_renames_and_generation_arrival_reconcile(guarded_installed):
+    store, _ = guarded_installed
     sources = seed(store)
     for job in preparation.JOBS.values():
         job.install(store.conn)
@@ -119,7 +131,7 @@ def test_continuing_writes_renames_and_generation_arrival_reconcile(installed):
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_interrupted_batch_failure_retry_and_independent_ddl(installed, independent_regular_ddl):
+def test_interrupted_batch_failure_retry_and_independent_ddl(installed, preparation_ddl_connection):
     store, _ = installed
     sources = seed(store)
     content = preparation.JOBS['content-checkpoints']
@@ -138,7 +150,7 @@ def test_interrupted_batch_failure_retry_and_independent_ddl(installed, independ
     assert content.progress(store.conn).status == 'failed'
     assert finish(preparation.JOBS['candidate-checkpoints'], store.conn).status == 'prepared'
     assert finish(preparation.JOBS['group-checkpoints'], store.conn).status == 'prepared'
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     store.settings.set_setting('rec_preparation_fit', sources['rec_preparation_fit'])
     reopened = Store(store._db_path)
     try:
@@ -181,7 +193,7 @@ def test_null_blank_then_removed_sources_keep_their_exact_original(installed, na
     ('candidate-checkpoints', 'rec_candidates_expire_at', 'NaN'),
     ('candidate-checkpoints', 'rec_candidate_preferences', 'x' * (preparation.MAX_BYTES + 1)),
 ])
-def test_invalid_or_oversized_inputs_fail_durably_without_changing_settings(installed, name, key, raw):
+def test_invalid_or_oversized_inputs_fail_durably_without_changing_settings(installed, preparation_ddl_connection, name, key, raw):
     store, _ = installed
     store.settings.set_setting(key, raw)
     job = preparation.JOBS[name]
@@ -190,3 +202,4 @@ def test_invalid_or_oversized_inputs_fail_durably_without_changing_settings(inst
         finish(job, store.conn)
     assert job.progress(store.conn).status == 'failed'
     assert store.settings.get_setting(key) == raw
+    regular.migrate(preparation_ddl_connection)

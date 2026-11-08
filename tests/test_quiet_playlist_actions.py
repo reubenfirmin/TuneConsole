@@ -6,8 +6,24 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.quiet_validation_support import DIAGNOSTIC, prepare_quiet_actions
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.library.playlist_positions import pending_insertions
 from yt_playlist.util.action_kinds import ADD_TRACKS
+
+
+@pytest.fixture(scope='session')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def action_routes(monkeypatch):
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import actions, app_update, audio_preview, playlists
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (actions, app_update, audio_preview, playlists)])
 
 
 @pytest.fixture

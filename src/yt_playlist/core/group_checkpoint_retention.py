@@ -25,9 +25,11 @@ def definitions(conn):
 def validate(conn):
     from .schema_contract import tokens as _tokens
     from .schema_contract import MigrationError
-    for name, sql in definitions(conn):
-        row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()
-        if row is None or _tokens(row[0]) != _tokens(sql):
+    from .schema_inspection import definitions as read_definitions
+    expected = dict(definitions(conn))
+    actual = read_definitions(conn, expected)
+    for name, sql in expected.items():
+        if name not in actual or _tokens(actual[name]) != _tokens(sql):
             raise MigrationError('Incompatible grouping checkpoint retention: ' + name)
 
 

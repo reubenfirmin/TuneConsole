@@ -5,9 +5,7 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
-from tests.independent_schema_support import independent_regular_ddl
-from tests.store_fixture_support import numbered_store
+from tests.store_fixture_support import numbered_store, numbered_store as installed
 from yt_playlist.core import collection_recovery, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import road_trip_drafts as preparation
@@ -49,7 +47,7 @@ def seed(store):
 
 
 @pytest.mark.parametrize('numbered_store', [79, 93], indirect=True)
-def test_exact_decisions_repetitions_unknowns_and_authority_survive_preparation(numbered_store, independent_regular_ddl):
+def test_exact_decisions_repetitions_unknowns_and_authority_survive_preparation(numbered_store):
     store, _ = numbered_store
     conn = store.conn
     identity, raw = seed(store)
@@ -238,7 +236,7 @@ def test_interruption_and_disk_failure_keep_prior_checkpoint_for_explicit_retry(
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('value', [[], {'picks': None}, {'banned': ['']}, {'picks': [3]}, {'value': float('inf')}])
-def test_invalid_draft_fails_durably_without_blocking_regular_ddl(installed, value, independent_regular_ddl):
+def test_invalid_draft_fails_durably_without_blocking_regular_ddl(installed, value):
     store, _ = installed
     identity = recipe(store)
     store.road_trip.save_road_trip_draft(identity, value, 1)

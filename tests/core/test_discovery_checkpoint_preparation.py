@@ -4,12 +4,16 @@ import json
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
-from tests.independent_schema_support import independent_regular_ddl
-from yt_playlist.core import discovery_checkpoints, provider_frontiers
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection
+from yt_playlist.core import albums, artists, discovery_checkpoints, provider_frontiers
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import discovery_checkpoints as preparation
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Checkpoint preparation does not construct an HTTP application."""
 
 
 def finish(job, conn):
@@ -21,8 +25,10 @@ def finish(job, conn):
 
 
 def seed(store):
-    store.tracks.upsert_track('video', 'Song', 'Artist', 'Album', 100, album_browse_id='release')
-    artist, = store.conn.execute("SELECT id FROM artists WHERE name='Artist'").fetchone()
+    # Checkpoints consume completed album/artist identities, below ingestion.
+    with store.conn:
+        albums.observe(store.conn, 'release', title='Album', artist='Artist')
+        artist = artists.ensure(store.conn, 'Artist')
     values = {
         'fetch-history': {'release': '1', 'unknown-release': '1', 'radio:episode': '1', 'artist:external': '1', 'genre:exact label': '1'},
         'artist-images': {str(artist): '123.50', '0' + str(artist): '124', '999': '125'},
@@ -38,7 +44,7 @@ def seed(store):
 
 @pytest.mark.parametrize('installed', [79, 93], indirect=True)
 @pytest.mark.parametrize('name', list(preparation.JOBS))
-def test_exact_originals_and_missing_references_remain_without_admission(installed, name):
+def test_exact_originals_and_missing_references_remain_without_admission(installed, name, preparation_ddl_connection):
     store, _ = installed
     conn = store.conn
     values = seed(store)
@@ -65,6 +71,7 @@ def test_exact_originals_and_missing_references_remain_without_admission(install
                 ('known', 'known', None, 7, 10, 'exact été', 1), ('unknown', None, 'missing_provider', 0, 9, 'other', 3)]
     assert before == {table: conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] for table in before}
     assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+    regular.migrate(preparation_ddl_connection)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -79,6 +86,7 @@ def test_separate_frozen_upgrade_preserves_supported_checkpoint_values(installed
         finish(job, store.conn)
     upgraded = Store(tmp_path / 'checkpoint-upgrade.db')
     try:
+        upgraded.conn.execute('PRAGMA synchronous=NORMAL')
         store.conn.backup(upgraded.conn)
         runner.migrate(upgraded.conn, registry=registry.MIGRATIONS[:94])
         for name, native, columns in [
@@ -158,7 +166,7 @@ def test_old_writers_reference_updates_and_cross_prefix_rename_reconcile(install
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 def test_interrupted_batch_and_failure_keep_independent_progress_for_reopened_retry(
-        installed, independent_regular_ddl):
+        installed, preparation_ddl_connection):
     store, _ = installed
     conn = store.conn
     seed(store)
@@ -177,7 +185,7 @@ def test_interrupted_batch_and_failure_keep_independent_progress_for_reopened_re
         conn.execute('UPDATE settings SET value=? WHERE key=?', ('bad', preparation.PREFIXES['fetch-history'] + 'release'))
     with pytest.raises(ValueError):
         finish(job, conn)
-    regular.migrate(conn)
+    regular.migrate(preparation_ddl_connection)
     assert finish(other, conn).status == 'prepared'
     store.settings.set_setting(preparation.PREFIXES['fetch-history'] + 'release', '1')
     reopened = Store(store._db_path)
@@ -199,7 +207,7 @@ def test_interrupted_batch_and_failure_keep_independent_progress_for_reopened_re
     ('provider-refresh', 'provider', '{"cursor":0,"cutoff":1,"fingerprint":"f","extra":true}'),
     ('provider-refresh', 'provider', ' ' * (preparation.MAX_BYTES + 1)),
 ])
-def test_invalid_checkpoints_fail_durably_and_retain_source(installed, name, suffix, raw):
+def test_invalid_checkpoints_fail_durably_and_retain_source(installed, name, suffix, raw, preparation_ddl_connection):
     store, _ = installed
     source = preparation.PREFIXES[name] + suffix
     store.settings.set_setting(source, raw)
@@ -209,3 +217,4 @@ def test_invalid_checkpoints_fail_durably_and_retain_source(installed, name, suf
         finish(job, store.conn)
     assert job.progress(store.conn).status == 'failed'
     assert store.settings.get_setting(source) == raw
+    regular.migrate(preparation_ddl_connection)

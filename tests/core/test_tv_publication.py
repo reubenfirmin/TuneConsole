@@ -6,17 +6,19 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_tv_state_preparation import aliases, finish, seed
 from tests.test_tv_stream import video
-from tests.store_fixture_support import publication_consumer_reads
+from tests.store_fixture_support import (
+    guarded_numbered_store as guarded_installed,
+    numbered_store as installed,
+    preparation_ddl_connection,
+    publication_consumer_reads,
+    reuse_reporting_reader,
+)
 from yt_playlist.core import tv_recommendation_state as state
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import tv_publication as publication, tv_state as preparation
 from yt_playlist.core.store import Store
-
-
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 
 
 @pytest.fixture(autouse=True)
@@ -24,26 +26,18 @@ def disable_periodic_library_sync():
     """TV SQL and file publication do not start the HTTP lifecycle."""
 
 
-@pytest.mark.parametrize('version', [79, 93, 94])
-def test_tv_publication_input_keeps_real_history_and_snapshot_guards(_bounded_installed_schema, version):
-    source = _bounded_installed_schema(version).source
-    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
-    assert source._snapshot_revisions.conn is source.conn
-    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
-
-
 def prepare(owner, conn, *, size=128):
     owner.worker.install(conn)
     return finish(owner.worker, conn, size=size).prepared_revision
 
 
-def rejection_inputs(store, *, surface, with_aliases):
+def rejection_inputs(store, conn, *, surface, with_aliases):
     _, originals = seed(store)
     if with_aliases:
-        aliases(store.conn)
+        aliases(conn)
     owner = publication.SOURCES[surface]
-    revision = prepare(owner, store.conn)
-    assert owner.selected(store.conn) is None
+    revision = prepare(owner, conn)
+    assert owner.selected(conn) is None
     return originals, revision
 
 
@@ -59,20 +53,8 @@ def published_writer_inputs(store):
     return values, originals
 
 
-@pytest.mark.parametrize('version', [79, 93])
-def test_tv_continuing_writer_input_keeps_all_five_actual_publications(
-        version, _bounded_installed_schema, staged_custody_templates):
-    template = staged_custody_templates(version, 'tv-continuing-writers', published_writer_inputs,
-        completed=_bounded_installed_schema(version), admit=False)
-    _, originals = template.result
-    assert len(publication.OWNERS) == 5
-    for owner in publication.OWNERS.values():
-        assert owner.selected(template.source.conn) == 0
-        assert owner.value(template.source.conn, 0) == originals[owner.source]
-    assert not template.source.conn.execute('PRAGMA foreign_key_check').fetchone()
-
-
 @pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_selected_presence_reads_no_display_document(installed, monkeypatch):
     store, _ = installed
     values, _ = seed(store)
@@ -86,58 +68,57 @@ def test_selected_presence_reads_no_display_document(installed, monkeypatch):
 
 
 @pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
-@pytest.mark.parametrize('surface', tuple(publication.SOURCES))
-def test_all_owners_work_for_preopened_and_reopened_readers(installed, surface):
+@pytest.mark.usefixtures('publication_consumer_reads')
+def test_all_owners_work_for_preopened_and_reopened_readers(installed, monkeypatch):
     store, _ = installed
     values, originals = seed(store)
     other = Store(store._db_path)
     try:
         other.init_schema(defer_metadata=True)
-        aliases(store.conn)
-        owner = publication.SOURCES[surface]
-        owner.publish(store.conn, revision=prepare(owner, store.conn))
-        assert owner.selected(other.conn) == 0
-        assert other.rec_proposals._proposal_json(surface) == originals[surface]
-        assert other.rec_proposals.get_proposals(surface) == values[surface]
-        assert other.rec_proposals.has_proposals(surface)
-        assert not other._tv_recommendations
-        if surface == 'tv_visual_checks':
+        publish_all(store)
+        with reuse_reporting_reader(other, monkeypatch):
+            for surface, owner in publication.SOURCES.items():
+                assert owner.selected(other.conn) == 0
+                assert other.rec_proposals._proposal_json(surface) == originals[surface]
+                assert other.rec_proposals.get_proposals(surface) == values[surface]
+                assert other.rec_proposals.has_proposals(surface)
+            assert not other._tv_recommendations
             assert other.tv.static_ids(2) == {'visual00001'}
-        elif surface == 'tv_continuations':
-            assert other.tv.receipt('10::request:with:colons') == values[surface]['10::request:with:colons']
+            assert other.tv.receipt('10::request:with:colons') == values['tv_continuations']['10::request:with:colons']
         regular.validate(other.conn)
     finally:
         other.conn.close()
     reopened = Store(store._db_path)
     try:
         reopened.init_schema(defer_metadata=True)
-        assert reopened.rec_proposals.get_proposals(surface) == values[surface]
+        with reuse_reporting_reader(reopened, monkeypatch):
+            for surface, value in values.items():
+                assert reopened.rec_proposals.get_proposals(surface) == value
     finally:
         reopened.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-@pytest.mark.parametrize('surface', tuple(publication.SOURCES))
-def test_absence_empty_shapes_and_recreated_sources_remain_distinct(installed, surface):
+@pytest.mark.usefixtures('publication_consumer_reads')
+def test_absence_empty_shapes_and_recreated_sources_remain_distinct(installed):
     store, _ = installed
-    aliases(store.conn)
-    owner = publication.SOURCES[surface]
-    owner.publish(store.conn, revision=prepare(owner, store.conn))
-    assert owner.selected(store.conn) == 0
-    assert store.rec_proposals.get_proposals(owner.source) is None
-    assert not store.rec_proposals.has_proposals(owner.source)
-    store.rec_proposals.put_proposals(owner.source, {}, None)
-    assert owner.selected(store.conn) is None
-    owner.publish(store.conn, revision=prepare(owner, store.conn))
-    assert store.rec_proposals.get_proposals(owner.source) == {}
-    assert not store.rec_proposals.has_proposals(owner.source)
-    revision = owner.selected(store.conn)
-    with store.conn:
-        store.conn.execute('DELETE FROM rec_proposals WHERE surface=?', (owner.source,))
-    assert owner.selected(store.conn) is None
-    owner.publish(store.conn, revision=prepare(owner, store.conn))
-    assert store.rec_proposals.get_proposals(owner.source) is None
-    assert owner.value(store.conn, revision) == '{}'
+    publish_all(store)
+    for owner in publication.OWNERS.values():
+        assert owner.selected(store.conn) == 0
+        assert store.rec_proposals.get_proposals(owner.source) is None
+        assert not store.rec_proposals.has_proposals(owner.source)
+        store.rec_proposals.put_proposals(owner.source, {}, None)
+        assert owner.selected(store.conn) is None
+        owner.publish(store.conn, revision=prepare(owner, store.conn))
+        assert store.rec_proposals.get_proposals(owner.source) == {}
+        assert not store.rec_proposals.has_proposals(owner.source)
+        revision = owner.selected(store.conn)
+        with store.conn:
+            store.conn.execute('DELETE FROM rec_proposals WHERE surface=?', (owner.source,))
+        assert owner.selected(store.conn) is None
+        owner.publish(store.conn, revision=prepare(owner, store.conn))
+        assert store.rec_proposals.get_proposals(owner.source) is None
+        assert owner.value(store.conn, revision) == '{}'
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -146,48 +127,53 @@ def test_absence_empty_shapes_and_recreated_sources_remain_distinct(installed, s
     ('tv_artist_artwork_requests', 'requested_at', 99),
     ('tv_visual_checks', 'sample_times', 99), ('tv_continuations', 'target_stream', 'wrong'),
 ])
-def test_each_owner_rejects_unverified_typed_state(installed, surface, column, value):
+def test_each_owner_rejects_unverified_typed_state(installed, surface, column, value, preparation_ddl_connection):
     store, _ = installed
+    conn = preparation_ddl_connection
     owner = publication.SOURCES[surface]
-    originals, revision = rejection_inputs(store, surface=surface, with_aliases=True)
+    originals, revision = rejection_inputs(store, conn, surface=surface, with_aliases=True)
     table = {'tv_pool':'tv_pool_state', 'tv_artist_artwork':'tv_artist_artwork',
         'tv_artist_artwork_requests':'tv_artist_requests', 'tv_visual_checks':'tv_visual_samples',
         'tv_continuations':'tv_continuation_receipts'}[surface]
     if column == 'sample_times':
         column = 'at'
-    with store.conn:
-        store.conn.execute('UPDATE '+preparation.relation(table)+' SET '+column+'=?'+
+    with conn:
+        conn.execute('UPDATE '+preparation.relation(table)+' SET '+column+'=?'+
             (' WHERE resolution_reason IS NULL' if column == 'artist_id' else ''), (value,))
     with pytest.raises(MigrationError, match='differs'):
-        owner.publish(store.conn, revision=revision)
-    assert owner.selected(store.conn) is None
+        owner.publish(conn, revision=revision)
+    assert owner.selected(conn) is None
     assert store.rec_proposals._proposal_json(surface) == originals[surface]
+    regular.migrate(preparation_ddl_connection)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['time', 'missing', 'extra', 'original'])
-def test_time_completeness_and_original_file_are_verified(installed, failure):
+def test_time_completeness_and_original_file_are_verified(installed, failure, preparation_ddl_connection):
     store, _ = installed
+    conn = preparation_ddl_connection
     owner = publication.OWNERS['pool']
-    _, revision = rejection_inputs(store, surface=owner.source, with_aliases=False)
-    with store.conn:
+    _, revision = rejection_inputs(store, conn, surface=owner.source, with_aliases=False)
+    with conn:
         if failure == 'time':
-            store.conn.execute('UPDATE '+preparation.tables(owner.source)[0]+' SET built_at=1')
+            conn.execute('UPDATE '+preparation.tables(owner.source)[0]+' SET built_at=1')
         elif failure == 'missing':
-            store.conn.execute('DELETE FROM '+preparation.relation('tv_pool_items')+' WHERE position=1')
+            conn.execute('DELETE FROM '+preparation.relation('tv_pool_items')+' WHERE position=1')
         elif failure == 'extra':
-            store.conn.execute('INSERT INTO '+preparation.relation('tv_pool_attempts')+
+            conn.execute('INSERT INTO '+preparation.relation('tv_pool_attempts')+
                 '(source,preparation_revision,pool_id,position,raw_key,resolution_reason) VALUES (?,?,1,2,?,?)',
                 (owner.source, revision, 'extra', 'missing_recording'))
         else:
-            Path(store.conn.execute('SELECT filename FROM '+preparation.tables(owner.source)[2]).fetchone()[0]).write_bytes(b'corrupt')
+            Path(conn.execute('SELECT filename FROM '+preparation.tables(owner.source)[2]).fetchone()[0]).write_bytes(b'corrupt')
     with pytest.raises((MigrationError, OSError, ValueError)):
-        owner.publish(store.conn, revision=revision)
-    assert owner.selected(store.conn) is None
+        owner.publish(conn, revision=revision)
+    assert owner.selected(conn) is None
+    regular.migrate(preparation_ddl_connection)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('timing', ['files', 'rows'])
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_source_and_custody_races_cannot_select_stale_tv_state(installed, timing, monkeypatch):
     store, _ = installed
     seed(store)
@@ -218,10 +204,11 @@ def test_source_and_custody_races_cannot_select_stale_tv_state(installed, timing
         other.close()
 
 
-@pytest.mark.parametrize('installed', [79, 93], indirect=True)
-def test_real_continuing_writers_withdraw_selections_and_reconcile(installed, staged_custody):
-    store, _ = installed
-    values, originals = staged_custody(installed, 'tv-continuing-writers', published_writer_inputs, admit=False)
+@pytest.mark.parametrize('guarded_installed', [79, 93], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
+def test_real_continuing_writers_withdraw_selections_and_reconcile(guarded_installed):
+    store, _ = guarded_installed
+    values, originals = published_writer_inputs(store)
     with store.read_snapshot() as snapshot:
         assert snapshot.store.tv.receipt('10::request:with:colons') == values['tv_continuations']['10::request:with:colons']
         store.tv.complete_receipt('11:stream:next', {'playlist_id':21, 'stream':'continued', 'items':[video(3)]}, 99)
@@ -244,6 +231,7 @@ def test_real_continuing_writers_withdraw_selections_and_reconcile(installed, st
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
 def test_legacy_artwork_publication_survives_later_request_removal_failure(installed, monkeypatch):
     store, _ = installed
     values, _ = seed(store)
@@ -281,7 +269,9 @@ def test_legacy_artwork_publication_survives_later_request_removal_failure(insta
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_selected_custody_missing_file_and_failed_recovery_keep_ddl_independent(installed, monkeypatch):
+@pytest.mark.usefixtures('publication_consumer_reads')
+def test_selected_custody_missing_file_and_failed_recovery_keep_ddl_independent(
+        installed, monkeypatch, preparation_ddl_connection):
     store, _ = installed
     _, originals = seed(store)
     owner = publication.OWNERS['pool']
@@ -299,13 +289,46 @@ def test_selected_custody_missing_file_and_failed_recovery_keep_ddl_independent(
     before = owner.worker.progress(store.conn)
     assert before.status == 'failed'
     store.init_schema(defer_metadata=True)
-    monkeypatch.setattr(regular, 'CHANGES', (regular.Change(1, 'independent_tv_publication',
+    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_tv_publication',
         lambda conn, context: conn.execute('CREATE TABLE independent_tv_publication(value TEXT)'),
         lambda conn: conn.execute('SELECT value FROM independent_tv_publication LIMIT 0')),))
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert owner.worker.progress(store.conn) == before
     with pytest.raises(MigrationError, match='retry explicitly'):
         owner.worker.step(store.conn)
     owner.worker.step(store.conn, retry=True)
     owner.publish(store.conn, revision=owner.worker.progress(store.conn).prepared_revision)
     assert store.rec_proposals._proposal_json(owner.source) == originals[owner.source]
+
+
+@pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.usefixtures('publication_consumer_reads')
+def test_receipt_budget_numeric_affinity_and_interrupted_cutover(installed):
+    store, _ = installed
+    value = {f'{number+1}:stream:request:{number}':{'playlist_id':number+101, 'stream':'next',
+        'items':[video(index) for index in range(60)]} for number in range(60)}
+    raw = json.dumps(value, indent=2)
+    with store.conn:
+        store.conn.execute('INSERT INTO rec_proposals VALUES (?,?,?)', ('tv_continuations', raw, 9007199254740993))
+    original = tuple(store.conn.execute('SELECT * FROM rec_proposals WHERE surface=?', ('tv_continuations',)).fetchone())
+    owner = publication.OWNERS['continuations']
+    revision = prepare(owner, store.conn, size=512)
+    assert store.conn.execute('SELECT count(*) FROM '+preparation.relation('tv_continuation_receipts')+
+        ' WHERE preparation_revision=?', (revision,)).fetchone()[0] == 60
+    assert store.conn.execute('SELECT count(*) FROM '+preparation.relation('tv_continuation_items')+
+        ' WHERE preparation_revision=?', (revision,)).fetchone()[0] == 3600
+    owner.install(store.conn)
+    with store.conn:
+        store.conn.execute('CREATE TRIGGER controlled_tv_interrupt BEFORE INSERT ON '+owner.tables[1]+
+            " BEGIN SELECT RAISE(ABORT,'controlled TV interruption'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='controlled TV interruption'):
+        owner.publish(store.conn, revision=revision)
+    assert not store.conn.execute('SELECT 1 FROM '+owner.tables[0]).fetchone()
+    assert owner.selected(store.conn) is None and not store.conn.in_transaction
+    with store.conn:
+        store.conn.execute('DROP TRIGGER controlled_tv_interrupt')
+    owner.publish(store.conn, revision=revision)
+    assert store.rec_proposals._proposal_json(owner.source) == raw
+    assert store.rec_proposals.get_proposals(owner.source) == value
+    assert tuple(store.conn.execute('SELECT * FROM rec_proposals WHERE surface=?', (owner.source,)).fetchone()) == original
+    assert not store.conn.in_transaction and not store.conn.execute('PRAGMA foreign_key_check').fetchone()

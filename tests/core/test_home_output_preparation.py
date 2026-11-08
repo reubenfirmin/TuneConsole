@@ -4,13 +4,18 @@ import json
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
+from tests.core.test_predecessor_writes import consumer_installed as admitted_installed
 from tests.publication_timing_support import publication_costs
+from tests.store_fixture_support import numbered_store as installed
 from yt_playlist.core import group_evidence, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import home_outputs as preparation
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Preparation uses real SQL and files without constructing the HTTP app."""
 
 
 def finish(job, conn, size=2):
@@ -54,18 +59,15 @@ def root_rows(conn):
 
 
 @pytest.fixture
-def home_inputs(installed, staged_custody):
-    return staged_custody(installed, 'home-output-inputs', seed, admit=False)
-
-
-@pytest.mark.parametrize('installed', [79, 90], indirect=True)
-def test_home_preparation_input_keeps_multibyte_displays_and_existing_roots(installed, home_inputs):
+def home_inputs(installed):
     store, version = installed
+    documents = seed(store)
     assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
-    assert len(home_inputs['adaptive_group_preview'].encode()) > 128 * 1024
-    assert {row[0] for row in store.conn.execute('SELECT surface FROM rec_proposals')} == set(home_inputs)
+    assert len(documents['adaptive_group_preview'].encode()) > 128 * 1024
+    assert {row[0] for row in store.conn.execute('SELECT surface FROM rec_proposals')} == set(documents)
     assert sum(map(len, root_rows(store.conn).values())) == 4
     assert not store.conn.execute("SELECT 1 FROM sqlite_schema WHERE name=?", (preparation.HEAD,)).fetchone()
+    return documents
 
 
 @pytest.mark.parametrize('installed', [79, 90], indirect=True)
@@ -78,6 +80,7 @@ def test_exact_display_parts_policies_and_existing_evidence_roots_are_additive(
     preparation.JOB.install(conn)
     assert preparation.JOB.step(conn, batch_size=1).processed == 1
     assert head(conn, 'adaptive_group_preview') is None
+    regular.migrate(conn)
     finish(preparation.JOB, conn, size=128)
     for surface, raw in original.items():
         assert preparation.read_original(conn, head(conn, surface)) == raw
@@ -156,12 +159,12 @@ def test_partial_replacement_and_renamed_source_withdraw_only_current_heads(inst
     assert conn.execute(f'SELECT 1 FROM {preparation.HEAD} WHERE surface=\'home_prepared\'').fetchone()
 
 
-@pytest.mark.parametrize('installed', [90], indirect=True)
-def test_roots_capture_continuing_release_without_reinterpreting_unknown_alias(installed, staged_custody_templates):
-    store, _ = installed
+@pytest.mark.parametrize('admitted_installed', [90], indirect=True)
+def test_roots_capture_continuing_release_without_reinterpreting_unknown_alias(admitted_installed, staged_custody_templates):
+    store, _ = admitted_installed
     conn = store.conn
     original = seed(store)  # Independent uncached producer for the shared input prefix.
-    template = staged_custody_templates(installed[1], 'home-output-inputs', seed)
+    template = staged_custody_templates(admitted_installed[1], 'home-output-inputs', seed)
     assert original == template.result
     assert root_rows(conn) == root_rows(template.source.conn)
     if template.source.conn.execute(
@@ -188,12 +191,12 @@ def test_roots_capture_continuing_release_without_reinterpreting_unknown_alias(i
     assert conn.execute(f'SELECT count(*) FROM {preparation.ORIGINALS}').fetchone()[0] == original_count + 2
 
 
-@pytest.mark.parametrize('installed', [79], indirect=True)
-def test_real_group_and_recommendation_publications_keep_their_original_retention_pins(installed):
+@pytest.mark.parametrize('admitted_installed', [79], indirect=True)
+def test_real_group_and_recommendation_publications_keep_their_original_retention_pins(admitted_installed):
     from tests.group_support import publish as publish_groups, recordings
     from tests.repos.test_typed_recommendation_publication import plan, publish
     from yt_playlist.core import recommendation_custody
-    store, _ = installed
+    store, _ = admitted_installed
     conn = store.conn
     tracks = recordings([('House', 12, .3)])
     with conn:
@@ -235,6 +238,7 @@ def test_oversized_root_fails_without_truncation_or_releasing_the_source(install
         finish(preparation.ROOT_JOB, conn)
     assert preparation.ROOT_JOB.progress(conn).status == 'failed'
     assert conn.execute('SELECT source_context FROM unresolved_group_contexts').fetchone()[0] == raw
+    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
@@ -298,7 +302,7 @@ def test_interrupt_and_disk_failure_preserve_checkpoint_until_explicit_retry(ins
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
 @pytest.mark.parametrize('raw', ['{', '{"schema":true}', '{"generation":12}', '{"value":NaN}'])
-def test_invalid_display_fails_durably_without_blocking_regular_ddl(installed, raw, independent_regular_ddl):
+def test_invalid_display_fails_durably_without_blocking_regular_ddl(installed, raw):
     store, _ = installed
     with store.conn:
         store.conn.execute('INSERT INTO rec_proposals VALUES (?, ?, 1)', ('home_prepared', raw))

@@ -6,9 +6,23 @@ Which group a playlist is in lives in the local database, so it doesn't exist on
 as ordinary library playlists, and start reading its suggestions back as your taste. The YouTube
 account is the one thing every install shares, so the marker lives there and sync reconciles from it.
 """
+import pytest
+
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.library import playlist_generated, sync, playlist_metadata
 from yt_playlist.repos.base import GENERATED_GROUP
 from tests.conftest import FakeClient, _track
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Playlist marker checks do not construct an HTTP application."""
 
 
 class _DescClient(FakeClient):

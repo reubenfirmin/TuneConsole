@@ -142,9 +142,9 @@ def large_ranked_catalog(monkeypatch, store):
 
 def test_prepare_reaches_genres_below_the_old_global_pool_cutoff(
         monkeypatch, store, large_ranked_catalog):
-    # Vibe reservation consumes these completed ranks in the next owner. Keep
-    # real full-library bucketing, temporal hydration and typed publication here.
-    monkeypatch.setattr(ms.vibe_pools, 'prepare', lambda *args, **kwargs: None)
+    # Imported songs have no prepared musical profiles. Keep every genre
+    # reserve and typed publication while supplying this lower input directly.
+    monkeypatch.setattr(ms.vibe_pools.musical_character, 'load', lambda reader, keys: {})
 
     payload = ms.prepare_bundles(store, now=10.0)
 
@@ -155,21 +155,6 @@ def test_prepare_reaches_genres_below_the_old_global_pool_cutoff(
     assert {item['genre'] for item in payload['all']['temporal']} == {'House'}
 
 
-def test_vibe_genre_reserves_publish_from_the_complete_large_ranked_pool(
-        monkeypatch, store, large_ranked_catalog):
-    # These imported songs have no prepared musical profiles. Profile loading
-    # is a completed lower input; genre reservation and publication stay real.
-    monkeypatch.setattr(ms.vibe_pools.musical_character, 'load', lambda reader, keys: {})
-    ranked = [ms._item_dict(item) for item in large_ranked_catalog]
-    payload = {'all': {lane: [dict(item) for item in ranked]
-                       for lane in ('wheelhouse', 'explore', 'comfort')},
-               '_meta': {'comfort_pool': 500, 'year_cuts': [2000, 2000], 'full_pools': True}}
-    payload['all']['temporal'] = [{**item, 'genre': 'House', 'year': 2000} for item in ranked]
-    with store.read_view() as reader:
-        ms.vibe_pools.prepare(reader, payload, 10, ms.measurement.PoolPolicies(reader, 10))
-    # The cutoff owner already publishes every ordinary 500-track pool. This
-    # owner publishes the actual Vibe reserves produced from that full input.
-    publish_bundles(store, {'_vibes': payload['_vibes'], '_meta': payload['_meta']}, 10)
     for preset in home_vibe.PRESETS:
         for lane, label in (('wheelhouse', 'house'), ('explore', 'house'),
                             ('comfort', 'house'), ('temporal:0', 'House')):

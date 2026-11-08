@@ -4,8 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
-from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import recipe_memberships as preparation
 from yt_playlist.core.store import Store
@@ -13,6 +12,11 @@ from yt_playlist.core.store import Store
 
 LISTS = {'artists': ['Known artist', 'Unadmitted artist', 'Known artist'],
          'genres': ['Known', 'Unadmitted genre', 'Known'], 'blacklist_genres': ['Known']}
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Recipe preparation does not construct an HTTP application."""
 
 
 def seed(store, lists=LISTS):
@@ -43,7 +47,7 @@ def head(conn, recipe_id=1):
 
 
 @pytest.mark.parametrize('installed', [79, 88], indirect=True)
-def test_member_batches_keep_repetitions_unresolved_labels_and_conflicts(installed):
+def test_member_batches_keep_repetitions_unresolved_labels_and_conflicts(installed, preparation_ddl_connection):
     store, _ = installed
     original = seed(store)
     conn = store.conn
@@ -52,6 +56,7 @@ def test_member_batches_keep_repetitions_unresolved_labels_and_conflicts(install
     assert first.processed == 2 and first.prepared_revision is None
     assert conn.execute(f'SELECT count(*) FROM {preparation.ITEMS}').fetchone()[0] == 2
     assert head(conn) is None
+    regular.migrate(preparation_ddl_connection)
     finish(conn)
     captured = head(conn)
     assert captured['members_count'] == 7
@@ -141,7 +146,7 @@ def test_file_publication_is_outside_transaction_and_stale_capture_is_not_admitt
 
 
 @pytest.mark.parametrize('installed', [88], indirect=True)
-def test_interruption_failure_restart_and_explicit_retry_keep_member_checkpoint(installed, monkeypatch, independent_regular_ddl):
+def test_interruption_failure_restart_and_explicit_retry_keep_member_checkpoint(installed, monkeypatch, preparation_ddl_connection):
     store, _ = installed
     original = seed(store)
     conn = store.conn
@@ -163,7 +168,7 @@ def test_interruption_failure_restart_and_explicit_retry_keep_member_checkpoint(
         preparation.JOB.step(conn, batch_size=2)
     assert preparation.JOB.progress(conn).status == 'failed'
     assert conn.execute(f'SELECT count(*) FROM {preparation.ITEMS}').fetchone()[0] == 2
-    regular.migrate(conn)
+    regular.migrate(preparation_ddl_connection)
     monkeypatch.setattr(preparation, '_copy', copy)
     reopened = Store(store._db_path)
     try:
@@ -180,7 +185,7 @@ def test_interruption_failure_restart_and_explicit_retry_keep_member_checkpoint(
 
 @pytest.mark.parametrize('installed', [88], indirect=True)
 @pytest.mark.parametrize('raw', ['null', '{}', '[1]', '[" "]', '["valid",null]', '[bad'])
-def test_invalid_saved_selection_fails_without_modifying_source(installed, raw):
+def test_invalid_saved_selection_fails_without_modifying_source(installed, raw, preparation_ddl_connection):
     store, _ = installed
     seed(store)
     with store.conn:
@@ -189,6 +194,7 @@ def test_invalid_saved_selection_fails_without_modifying_source(installed, raw):
     with pytest.raises((MigrationError, ValueError)):
         preparation.JOB.step(store.conn)
     assert preparation.JOB.progress(store.conn).status == 'failed'
+    regular.migrate(preparation_ddl_connection)
     assert store.conn.execute('SELECT artists FROM road_trip_recipes WHERE id=1').fetchone()[0] == raw
     assert head(store.conn) is None
 

@@ -1,4 +1,5 @@
 """Model trials retain decisions and ordered baselines without blocking serving."""
+from contextlib import closing
 from dataclasses import replace
 import json
 import sqlite3
@@ -6,12 +7,16 @@ import sqlite3
 import pytest
 
 from tests.core.test_collection_control_preparation import finish
-from tests.core.test_predecessor_writes import installed
-from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import numbered_store as installed, preparation_ddl_connection
 from yt_playlist.core import model_comparison_state as state
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import model_trials as preparation
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Trial preparation does not construct an HTTP application."""
 
 
 def seed(store):
@@ -36,7 +41,7 @@ def head(conn, surface):
 
 
 @pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
-def test_independent_controls_retain_exact_inputs_and_explicit_run_custody(installed):
+def test_independent_controls_retain_exact_inputs_and_explicit_run_custody(installed, preparation_ddl_connection):
     store, _ = installed
     values, originals = seed(store)
     runs = list(map(tuple, store.conn.execute('SELECT * FROM rec_model_selection_runs')))
@@ -56,6 +61,7 @@ def test_independent_controls_retain_exact_inputs_and_explicit_run_custody(insta
     assert [row[0] for row in store.conn.execute(f'SELECT value FROM {preparation.BASELINE} ORDER BY position')] == [.1, .5, 1]
     assert list(map(tuple, store.conn.execute('SELECT * FROM rec_model_selection_runs'))) == runs
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+    regular.migrate(preparation_ddl_connection)
 
 
 @pytest.mark.parametrize('installed', [79, 94], indirect=True)
@@ -65,19 +71,20 @@ def test_destination_fields_match_frozen_v95_without_changing_the_upgrade_route(
     for job in preparation.JOBS.values():
         job.install(store.conn)
         finish(job, store.conn)
-    upgraded = Store(tmp_path / 'trial-frozen-upgrade.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS[:95])
+    with closing(sqlite3.connect(tmp_path / 'trial-frozen-upgrade.db')) as upgraded:
+        upgraded.row_factory = sqlite3.Row
+        upgraded.execute('PRAGMA foreign_keys=ON')
+        upgraded.execute('PRAGMA synchronous=NORMAL')
+        store.conn.backup(upgraded)
+        upgraded.execute('PRAGMA journal_mode=WAL')
+        runner.migrate(upgraded, registry=registry.MIGRATIONS[:95])
         for surface, value in values.items():
             prepared = head(store.conn, surface)
-            native = dict(upgraded.conn.execute('SELECT * FROM ' + state.OWNERS[surface][0]).fetchone())
+            native = dict(upgraded.execute('SELECT * FROM ' + state.OWNERS[surface][0]).fetchone())
             assert {key: prepared[key] for key in native if key != 'id'} == {key: val for key, val in native.items() if key != 'id'}
-            assert state.read(upgraded.conn, surface) == value
-        assert list(map(tuple, upgraded.conn.execute('SELECT position,value FROM model_monitor_baseline ORDER BY position'))) == [
+            assert state.read(upgraded, surface) == value
+        assert list(map(tuple, upgraded.execute('SELECT position,value FROM model_monitor_baseline ORDER BY position'))) == [
             (row[0], row[1]) for row in store.conn.execute(f'SELECT position,value FROM {preparation.BASELINE} ORDER BY position')]
-    finally:
-        upgraded.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -157,7 +164,7 @@ def test_concurrent_edit_between_planning_and_checkpoint_rejects_stale_source(in
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_interruption_durable_failure_independent_new_ddl_and_reopened_retry(installed, monkeypatch, independent_regular_ddl):
+def test_interruption_durable_failure_independent_new_ddl_and_reopened_retry(installed, monkeypatch, preparation_ddl_connection):
     store, _ = installed
     values, _ = seed(store)
     job = preparation.JOBS['listening-monitor']
@@ -177,7 +184,7 @@ def test_interruption_durable_failure_independent_new_ddl_and_reopened_retry(ins
     assert failed.status == 'failed'
     assert finish(preparation.JOBS['live-trial'], store.conn).status == 'prepared'
     assert finish(preparation.JOBS['album-assignment'], store.conn).status == 'prepared'
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert store.conn.execute('SELECT max(version) FROM schema_changes').fetchone()[0] == len(regular.CHANGES)
     assert job.progress(store.conn) == failed
     store.rec_proposals.put_proposals('model_listening_monitor', values['model_listening_monitor'], 80)

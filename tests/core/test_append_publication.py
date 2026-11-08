@@ -6,10 +6,12 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_append_operation_preparation import seed
-from tests.store_fixture_support import publication_consumer_reads
+from tests.store_fixture_support import (
+    guarded_numbered_store as guarded_installed,
+    numbered_store as installed,
+    publication_consumer_reads,
+)
 from yt_playlist.core import collection_recovery, radio_storage
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import append_operations as preparation, append_publication as publication
@@ -19,20 +21,10 @@ from yt_playlist.core.store import Store
 pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     # These SQL/file owners do not construct the web application.
     pass
-
-
-@pytest.mark.parametrize('version', [93, 97])
-def test_append_input_keeps_installed_history_and_private_snapshot_guards(
-        version, _bounded_installed_schema):
-    source = _bounded_installed_schema(version).source
-    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert runner.history(source.conn, registry.MIGRATIONS) == version
-    assert source._snapshot_revisions.conn is source.conn
-    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def prepare(owner, conn):
@@ -123,46 +115,48 @@ def test_incorrect_operation_state_members_coverage_or_files_cannot_publish(inst
     with pytest.raises((MigrationError, ValueError, OSError)):
         owner.publish(store.conn, stage=identity)
     assert owner.selected(store.conn) is None
+    regular.migrate(store.conn)
 
 
-@pytest.mark.parametrize('installed', [93, 97], indirect=True)
-@pytest.mark.parametrize('surface', ['tv', 'radio'])
-def test_continuing_checkpoint_writes_and_snapshots_preserve_previous_operations(installed, surface):
-    store, version = installed
-    # Cross the default 128-member transfer boundary, including its final
-    # member. Repeating identical members 8,192 times adds no write/snapshot
-    # obligation; the preparation owner separately checks long resumptions.
-    names, sources, recipe, state = seed(store, version, count=129)
-    name, source = (names[0], sources[0]) if surface == 'tv' else (names[1], sources[1])
-    owner = publication.OWNERS[name]
-    identity = stage(owner, store.conn)
-    owner.publish(store.conn, stage=identity)
-    original = owner.value(store.conn, identity, source)
+@pytest.mark.parametrize('guarded_installed', [93, 97], indirect=True)
+def test_continuing_checkpoint_writes_and_snapshots_preserve_previous_operations(guarded_installed):
+    store, version = guarded_installed
+    names, sources, recipe, state = seed(store, version, count=8192)
+    originals, identities = {}, {}
+    for name, source in zip(names, sources):
+        owner = publication.OWNERS[name]
+        identity = stage(owner, store.conn)
+        owner.publish(store.conn, stage=identity)
+        originals[name], identities[name] = owner.value(store.conn, identity, source), identity
+    tv = publication.OWNERS[names[0]]
     with store.read_snapshot() as snapshot:
-        if surface == 'tv':
-            assert snapshot.store.playlist_recipes.get_recipe('TV') == recipe
-            completed = {**recipe, 'tv_refill':{'request_id':'request', 'state':'complete', 'items':[]}}
-            store.playlist_recipes.set_recipe('TV', completed, 4)
-        else:
-            actual, revision = radio_storage.load(snapshot.store.conn)
-            assert actual == state
-            newer = {**state, 'replacement':None, 'pending':None, 'phase':'playing'}
-            if version < 94:
-                store.settings.set_setting(radio_storage.SESSION_KEY, json.dumps(newer))
-            else:
-                with store.conn:
-                    radio_storage.save(store.conn, newer, expected=revision, now=4)
+        assert snapshot.store.playlist_recipes.get_recipe('TV') == recipe
+        completed = {**recipe, 'tv_refill':{'request_id':'request', 'state':'complete', 'items':[]}}
+        store.playlist_recipes.set_recipe('TV', completed, 4)
         assert not snapshot.publish(lambda:None)
-    assert owner.selected(store.conn) is None
-    owner.publish(store.conn, stage=stage(owner, store.conn))
-    if surface == 'tv':
-        assert store.playlist_recipes.get_recipe('TV') == completed
-    else:
-        assert radio_storage.load(store.conn)[0] == newer
-    assert owner.value(store.conn, identity, source) == original
-    with pytest.raises(sqlite3.IntegrityError, match='retained'):
-        with store.conn:
-            store.conn.execute('DELETE FROM '+preparation.table(name, 'items'))
+    assert tv.selected(store.conn) is None
+    tv.publish(store.conn, stage=stage(tv, store.conn))
+    assert store.playlist_recipes.get_recipe('TV') == completed
+    radio = publication.OWNERS[names[1]]
+    with store.read_snapshot() as snapshot:
+        actual, revision = radio_storage.load(snapshot.store.conn)
+        assert actual == state
+        newer = {**state, 'replacement':None, 'pending':None, 'phase':'playing'}
+        if version < 94:
+            store.settings.set_setting(radio_storage.SESSION_KEY, json.dumps(newer))
+        else:
+            with store.conn:
+                radio_storage.save(store.conn, newer, expected=revision, now=4)
+        assert not snapshot.publish(lambda:None)
+    assert radio.selected(store.conn) is None
+    radio.publish(store.conn, stage=stage(radio, store.conn))
+    assert radio_storage.load(store.conn)[0] == newer
+    for name, source in zip(names, sources):
+        owner = publication.OWNERS[name]
+        assert owner.value(store.conn, identities[name], source) == originals[name]
+        with pytest.raises(sqlite3.IntegrityError, match='retained'):
+            with store.conn:
+                store.conn.execute('DELETE FROM '+preparation.table(name, 'items'))
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -194,7 +188,7 @@ def test_race_and_interrupted_publication_do_not_select_mixed_operations(install
 
 
 @pytest.mark.parametrize('installed', [93, 97], indirect=True)
-def test_missing_files_and_failed_preparation_remain_independent_of_regular_ddl(installed, monkeypatch, independent_regular_ddl):
+def test_missing_files_and_failed_preparation_remain_independent_of_regular_ddl(installed, monkeypatch):
     store, version = installed
     names, sources, recipe, _ = seed(store, version)
     name, source = names[0], sources[0]
@@ -221,6 +215,11 @@ def test_missing_files_and_failed_preparation_remain_independent_of_regular_ddl(
     with pytest.raises(OSError, match='controlled append recovery failure'):
         owner.worker.step(store.conn)
     failed = owner.worker.progress(store.conn)
+    def independent(conn, context):
+        conn.execute('CREATE TABLE independent_append_publication_ddl(value TEXT)')
+    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1,
+        'independent_append_publication_ddl', independent,
+        lambda conn: conn.execute('SELECT * FROM independent_append_publication_ddl LIMIT 0'))))
     regular.migrate(store.conn)
     assert owner.worker.progress(store.conn) == failed
     monkeypatch.setattr(preparation, 'recovery', publish)
@@ -257,6 +256,7 @@ def test_frozen_owner_replacement_retires_old_selections_and_native_ops_keep_arc
         originals[name] = owner.value(store.conn, identities[name], source)
     upgraded = Store(tmp_path/'append-publication-native.db')
     try:
+        upgraded.conn.execute('PRAGMA synchronous=OFF')
         store.conn.backup(upgraded.conn)
         runner.migrate(upgraded.conn, registry=registry.MIGRATIONS[:97])
         upgraded.init_schema(defer_metadata=True)
@@ -272,6 +272,7 @@ def test_frozen_owner_replacement_retires_old_selections_and_native_ops_keep_arc
         # one-time invocation does; serving connections have TEMP read adapters.
         upgraded.conn.close()
         upgraded = Store(upgraded._db_path)
+        upgraded.conn.execute('PRAGMA synchronous=OFF')
         runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
         upgraded.init_schema(defer_metadata=True)
         regular.validate(upgraded.conn)

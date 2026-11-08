@@ -32,18 +32,8 @@ def _pristine_current_schema():
 
 @pytest.fixture
 def intensity_controller(store, intensity_inputs, monkeypatch, controlled_radio_checkpoints):
-    # Controller/persistence/HTTP behavior uses a real small database. Prepared
-    # recommendation inputs are controlled below RadioCandidates, as above.
-    # Four six-song directions need 24 quiet alternatives. The separate refill
-    # contract above owns exhausting more than a complete 96-song lookahead.
-    intensity_inputs.pools['9'][:] = intensity_inputs.pools['9'][:12 + 24]
-    # Two loud Electronic styles leave 24 alternatives after initial playback;
-    # the quiet Ambient style distinguishes retuning across the genre boundary.
-    # Neighbour policy has its own nine-style cases above.
-    for mode in list(intensity_inputs.pools):
-        if mode not in {'1', '2', '9'}:
-            del intensity_inputs.pools[mode]
-            del intensity_inputs.modes[mode]
+    # Keep the original nine styles and 110-track quiet tail. Prepared inputs
+    # are controlled below RadioCandidates; controller SQL and playback are real.
     tracks = [track for rows in intensity_inputs.pools.values() for track in rows]
     with store.conn:
         store.conn.executemany('INSERT INTO recordings(id,identity_key,title,artist,unresolved_genre) VALUES (?,?,?,?,?)',

@@ -7,11 +7,23 @@ import threading
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
-from tests.independent_schema_support import independent_regular_ddl
+from tests.genre_catalog_support import bound_shipped_catalog, use_shipped_catalog
+from tests.store_fixture_support import numbered_store as installed
 from yt_playlist.core import genre_identity
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import genre_preferences as preparation, genre_preference_publication as publication
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Selection exercises real SQL and files without HTTP startup."""
+
+
+@pytest.fixture(autouse=True)
+def preference_vocabulary(installed, monkeypatch):
+    """Keep the shipped identities and aliases used by the original cases."""
+    use_shipped_catalog(monkeypatch)
+    bound_shipped_catalog(monkeypatch, ('drum bass', 'rock'))
 
 
 def seed(store, *, custom=False):
@@ -99,6 +111,7 @@ def test_ambiguity_stops_selection_and_compatible_edits_reconcile(installed):
     with pytest.raises(MigrationError,match='ambiguity repair'):
         publication.step(store.conn)
     assert publication.selected(store.conn) is None
+    regular.migrate(store.conn)
     with store.conn:
         store.conn.execute("DELETE FROM genre_alias WHERE label_key='ambiguous'")
     stage = ready(store.conn)
@@ -134,10 +147,11 @@ def test_independent_verification_rejects_wrong_or_missing_preparation(installed
     with pytest.raises(MigrationError,match='differs|missing|extra'):
         publication.publish(store.conn,identity=stage)
     assert publication.selected(store.conn) is None
+    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
-def test_missing_file_admission_repair_and_failed_preparation_are_independent(installed, independent_regular_ddl):
+def test_missing_file_admission_repair_and_failed_preparation_are_independent(installed):
     store, _ = installed
     seed(store)
     stage = ready(store.conn)
@@ -198,7 +212,7 @@ def test_interrupted_staging_and_late_write_cannot_select_stale_generation(insta
 
 
 @pytest.mark.parametrize('installed', [84], indirect=True)
-def test_slow_file_verification_leaves_serving_writes_and_regular_ddl_available(installed,monkeypatch, independent_regular_ddl):
+def test_slow_file_verification_leaves_serving_writes_and_regular_ddl_available(installed,monkeypatch):
     store, _ = installed
     seed(store)
     stage=ready(store.conn)
