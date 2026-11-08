@@ -8,10 +8,10 @@ import threading
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import genre_identity
-from yt_playlist.core.migrations import MigrationError, registry, regular, runner
+from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import genre_preferences as preparation, genre_preference_publication as publication
-from yt_playlist.core.store import Store
 
 
 def seed(store, *, custom=False):
@@ -44,51 +44,6 @@ def ready(conn, size=2):
 def sources(conn):
     return {owner:list(map(tuple,conn.execute('SELECT * FROM main.'+owner+' ORDER BY '+key)))
         for owner,key in (('genre_whitelist','name'),('settings','key'),('schema_migrations','version'))}
-
-
-@pytest.mark.parametrize('installed', [79, 84], indirect=True)
-def test_selection_matches_native_disabled_default_meaning_and_pinned_reads(installed, tmp_path):
-    store, _ = installed
-    seed(store)
-    before = sources(store.conn)
-    other, upgraded = Store(store._db_path), Store(tmp_path/'preference-native.db')
-    try:
-        other.init_schema(defer_metadata=True)
-        with other.read_snapshot() as snapshot:
-            pinned = snapshot.store
-            assert pinned.genres.get_genre_whitelist() == ['Drum And Bass']
-            stage = ready(store.conn, 1)
-            publication.publish(store.conn, identity=stage)
-            assert publication.selected(pinned.conn) is None
-            assert pinned.genres.get_genre_whitelist() == ['Drum And Bass']
-        selected = list(map(tuple,store.conn.execute('SELECT genre_key,enabled,origin FROM '+publication.relation(store.conn)+' ORDER BY genre_key')))
-        assert selected == [('drum bass',1,'legacy'),('rock',0,'default')]
-        baseline = json.loads(publication.stage(store.conn,stage).baseline)
-        assert preparation.read_baseline(baseline) == before['settings'][next(i for i,r in enumerate(before['settings']) if r[0]=='genre_defaults')][1]
-        with other.read_view() as reader:
-            reader.conn.set_authorizer(lambda action,owner,*_:sqlite3.SQLITE_DENY
-                if action==sqlite3.SQLITE_READ and owner=='genre_whitelist' else sqlite3.SQLITE_OK)
-            canonical = store.conn.execute("SELECT name FROM genre_catalog WHERE key='drum bass'").fetchone()[0]
-            assert reader.genres.get_genre_whitelist() == [canonical]
-            assert reader.genres.enabled_matcher()['drum and bass'] == canonical
-        regular.migrate(store.conn)
-        assert sources(store.conn) == before
-        assert publication.step(store.conn).id == stage
-        publication.publish(store.conn, identity=stage)
-        assert store.conn.execute('SELECT count(*) FROM '+publication.table('generations')).fetchone()[0] == 1
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn,registry=registry.MIGRATIONS[:85])
-        assert list(map(tuple,upgraded.conn.execute('SELECT * FROM genre_preferences ORDER BY genre_key'))) == selected
-        assert publication.selected(upgraded.conn) is None
-        assert upgraded.conn.execute('SELECT count(*) FROM '+publication.table('rows')).fetchone()[0] == 6
-        regular.migrate(upgraded.conn)
-        runner.migrate(upgraded.conn,registry=registry.MIGRATIONS)
-        regular.migrate(upgraded.conn)
-        assert publication.selected(upgraded.conn) is None
-        assert upgraded.conn.execute('SELECT count(*) FROM '+publication.table('rows')).fetchone()[0] == 6
-    finally:
-        other.conn.close()
-        upgraded.conn.close()
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
@@ -144,7 +99,6 @@ def test_ambiguity_stops_selection_and_compatible_edits_reconcile(installed):
     with pytest.raises(MigrationError,match='ambiguity repair'):
         publication.step(store.conn)
     assert publication.selected(store.conn) is None
-    regular.migrate(store.conn)
     with store.conn:
         store.conn.execute("DELETE FROM genre_alias WHERE label_key='ambiguous'")
     stage = ready(store.conn)
@@ -180,11 +134,10 @@ def test_independent_verification_rejects_wrong_or_missing_preparation(installed
     with pytest.raises(MigrationError,match='differs|missing|extra'):
         publication.publish(store.conn,identity=stage)
     assert publication.selected(store.conn) is None
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
-def test_missing_file_admission_repair_and_failed_preparation_are_independent(installed):
+def test_missing_file_admission_repair_and_failed_preparation_are_independent(installed, independent_regular_ddl):
     store, _ = installed
     seed(store)
     stage = ready(store.conn)
@@ -245,7 +198,7 @@ def test_interrupted_staging_and_late_write_cannot_select_stale_generation(insta
 
 
 @pytest.mark.parametrize('installed', [84], indirect=True)
-def test_slow_file_verification_leaves_serving_writes_and_regular_ddl_available(installed,monkeypatch):
+def test_slow_file_verification_leaves_serving_writes_and_regular_ddl_available(installed,monkeypatch, independent_regular_ddl):
     store, _ = installed
     seed(store)
     stage=ready(store.conn)

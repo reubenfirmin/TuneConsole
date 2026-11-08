@@ -7,6 +7,7 @@ import pytest
 
 from tests.core.test_collection_control_preparation import finish
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_saved_output_preparation import head, seed
 from yt_playlist.core import recommendation_setting_outputs as outputs
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -140,7 +141,7 @@ def test_verification_rejects_source_and_prepared_custody_races(installed,monkey
 
 @pytest.mark.parametrize('installed',[93],indirect=True)
 @pytest.mark.parametrize('failure',['file','missing-file','metadata','subject','policy'])
-def test_corrupt_custody_does_not_select_a_file_or_block_regular_ddl(installed,failure):
+def test_corrupt_custody_does_not_select_a_file_or_block_regular_ddl(installed,failure,independent_regular_ddl):
     store,_ = installed
     sources,_ = seed(store)
     source = 'radio_seed_offer'
@@ -230,7 +231,7 @@ def test_long_repeated_subjects_and_policies_publish_without_identity_admission(
 
 
 @pytest.mark.parametrize('installed',[93],indirect=True)
-def test_explicit_missing_file_recovery_preserves_selected_custody_and_failure_state(installed,monkeypatch):
+def test_explicit_missing_file_recovery_preserves_selected_custody_and_failure_state(installed,monkeypatch,independent_regular_ddl):
     store,_ = installed
     sources,_ = seed(store)
     source = 'radio_seed_offer'

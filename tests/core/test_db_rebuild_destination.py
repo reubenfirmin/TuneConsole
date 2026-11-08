@@ -177,12 +177,13 @@ def seed_development_metadata(path):
         native_key = conn.execute('SELECT source_key FROM rec_musical_sources').fetchone()[0]
         expected_native = metadata_native.source_values(conn,native_key)
         conn.commit()
-    def verify(store):
+    def verify(store, *, compacted=True):
         assert_versioned_scores(store.conn)
         assert metadata_runtime.active(store.conn) and served_facts.active(store.conn)
         from yt_playlist.core.metadata_retention import RETIRED
-        assert all(store.conn.execute('SELECT count(*) FROM '+table).fetchone()[0] == 0 for table in RETIRED)
-        assert store.conn.execute('SELECT provenance FROM rec_served_impressions WHERE id=503').fetchone()[0] == '{}'
+        if compacted:
+            assert all(store.conn.execute('SELECT count(*) FROM '+table).fetchone()[0] == 0 for table in RETIRED)
+            assert store.conn.execute('SELECT provenance FROM rec_served_impressions WHERE id=503').fetchone()[0] == '{}'
         receipt = store.conn.execute('SELECT * FROM artist_credit_replays WHERE delivery_key=?',
                                      ('metadata-delivery:'+str(delivery),)).fetchone()
         assert receipt['metadata_bound'] == 1
@@ -623,11 +624,7 @@ def source_contents(path):
     return {str(value):hashlib.sha256(value.read_bytes()).hexdigest() for value in files}
 
 
-@pytest.mark.parametrize('source_fixture',['production64','development93'])
-def test_populated_import_preserves_catalog_decisions_and_evidence(request,source_fixture,tmp_path,record_property):
-    started = time.perf_counter()
-    path = request.getfixturevalue(source_fixture)
-    record_property('installed_source_seconds', time.perf_counter() - started)
+def seed_populated_decisions(path):
     draft = {'revision':'held','picks':['selected','selected','video-8'],'banned':['excluded'],
              'seed':17,'building':True,'opaque':{'edited':True}}
     radio = {'version':2,'episode_id':'held-episode','identity':11,'phase':'appending','playlist':'RADIO',
@@ -660,34 +657,36 @@ def test_populated_import_preserves_catalog_decisions_and_evidence(request,sourc
             (410,25,None,3,None,9,2,1,1,'youtube'),(417,25,108,None,None,None,None,None,0,'library')])
         conn.execute('INSERT INTO album_fetch_state VALUES (25,17,1,3)')
         conn.commit()
+    return draft, radio, recipe
+
+
+@pytest.mark.parametrize('source_fixture',['production64'])
+def test_populated_import_preserves_catalog_decisions_and_evidence(request,source_fixture,tmp_path,record_property):
+    started = time.perf_counter()
+    path = request.getfixturevalue(source_fixture)
+    record_property('installed_source_seconds', time.perf_counter() - started)
+    draft, radio, recipe = seed_populated_decisions(path)
     discovery_checks = seed_discovery_visibility(path)
-    if source_fixture == 'development93':
-        with closing(sqlite3.connect(path)) as conn:
-            conn.row_factory = sqlite3.Row
-            vibe_versions.install(conn)
-            conn.execute("INSERT INTO vibe_versions VALUES (23,'retained-unused-version')")
-            conn.commit()
-        metadata_checks, continuing_metadata_writes = seed_development_metadata(path)
-        seed_metadata_preparation(path, active=False)
-        journal_checks = seed_journal_policy(path)
-    else:
-        released_checks = seed_released_evidence(path)
+    # Development-domain obligations have focused real owners in
+    # test_db_rebuild_populated.py.
+    released_checks = seed_released_evidence(path)
     before = source_contents(path)
     contract = destination.for_source(path)
-    if source_fixture == 'development93':
-        assert [stage.name for stage in contract.stages
-                if stage.name in {'copy:vibe_versions', 'copy:measurements', 'copy:recording_vibes'}] == [
-                    'copy:vibe_versions', 'copy:measurements', 'copy:recording_vibes']
     output = tmp_path/'decisions.db'
     # Interruption after a committed conversion batch must not duplicate files,
     # decisions or occurrence rows when this same candidate resumes.
-    checkpoints = ['road_trip_drafts'] + (['metadata:choices'] if source_fixture == 'development93' else [])
+    checkpoints = ['road_trip_drafts']
+    # Only interrupted domains need tiny batches. Applying that limit to the
+    # vocabulary, indexes and guards creates thousands of unrelated commits.
+    contract = replace(contract, stages=tuple(
+        replace(stage, batch_size=2) if stage.name in checkpoints else stage
+        for stage in contract.stages))
     for checkpoint in checkpoints:
         def interrupt(phase,detail):
             if detail.get('stage')==checkpoint:
                 raise InterruptedError('controlled committed '+checkpoint+' batch')
         with pytest.raises(InterruptedError,match='controlled committed'):
-            build.construct(path,output,contract,batch_size=2,progress=interrupt)
+            build.construct(path,output,contract,progress=interrupt)
     checked_discovery = []
     def challenge_discovery(phase,detail):
         if phase != 'verify' or detail.get('destination') != contract.version:
@@ -708,7 +707,7 @@ def test_populated_import_preserves_catalog_decisions_and_evidence(request,sourc
                 candidate.rollback()
             discovery_checks(candidate)
         checked_discovery.append(True)
-    report = build.construct(path,output,contract,batch_size=2,progress=challenge_discovery)
+    report = build.construct(path,output,contract,progress=challenge_discovery)
     assert checked_discovery == [True]
     assert report['destination']==contract.version
     # Read leases and compatibility materialization can create new cache/lock
@@ -721,8 +720,7 @@ def test_populated_import_preserves_catalog_decisions_and_evidence(request,sourc
         store.init_schema()
         conn = store.conn
         assert runner.history(conn,registry.MIGRATIONS)==registry.MIGRATIONS[-1].version
-        assert conn.execute('SELECT max(version) FROM database_rebuild_source_history').fetchone()[0] == (
-            64 if source_fixture == 'production64' else 93)
+        assert conn.execute('SELECT max(version) FROM database_rebuild_source_history').fetchone()[0] == 64
         assert [tuple(row) for row in conn.execute('SELECT id,label FROM accounts ORDER BY id')] == [
             (11,'Main'),(29,'Other account')]
         assert [tuple(row) for row in conn.execute('SELECT id,account_id FROM playlists ORDER BY id')] == [(41,11),(73,29)]
@@ -744,19 +742,9 @@ def test_populated_import_preserves_catalog_decisions_and_evidence(request,sourc
         assert conn.execute('SELECT current_tracklist_id FROM albums WHERE id=25').fetchone()[0] is None
         assert conn.execute('SELECT count(*) FROM metadata_observations').fetchone()[0]==0
         discovery_checks(conn)
-        if source_fixture == 'development93':
-            metadata_checks(store)
-            assert conn.execute('SELECT value FROM vibe_versions WHERE id=23').fetchone()[0] == 'retained-unused-version'
-            assert not conn.execute('SELECT 1 FROM metadata_runtime_choices WHERE id=999').fetchone()
-            assert {row[0] for row in conn.execute('SELECT impression_id FROM served_facts')} == {
-                41, 42, 501, 502, 503}
-            journal_checks(conn)
-        else:
-            released_checks(conn)
+        released_checks(conn)
         store.settings.set_setting('post_rebuild_write','works')
         assert store.settings.get_setting('post_rebuild_write')=='works'
-        if source_fixture == 'development93':
-            continuing_metadata_writes(store)
         assert not conn.execute('PRAGMA foreign_key_check').fetchall()
     finally:
         store.conn.close()

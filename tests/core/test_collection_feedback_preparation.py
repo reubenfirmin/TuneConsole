@@ -5,6 +5,7 @@ import json
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import account_auth_state, album_feedback_storage, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import collection_feedback as preparation
@@ -71,7 +72,6 @@ def test_independent_jobs_keep_exact_source_judgments_accounts_and_unknowns(inst
     assert not conn.execute("SELECT 1 FROM album_provider_ids WHERE provider_id='missing-release'").fetchone()
     assert not conn.execute('PRAGMA foreign_key_check').fetchone()
     assert files.collect_orphans(conn) == 0
-    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -122,7 +122,7 @@ def test_long_maps_commit_at_most_the_requested_number_of_members(installed, sou
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_failure_of_one_job_does_not_block_the_other_or_regular_schema_changes(installed):
+def test_failure_of_one_job_does_not_block_the_other_or_regular_schema_changes(installed, independent_regular_ddl):
     store, _ = installed
     seed(store)
     store.settings.set_setting('album_feedback', '{')
@@ -267,4 +267,3 @@ def test_invalid_maps_fail_durably_and_remain_authoritative(installed, source, r
         finish(job, store.conn)
     assert job.progress(store.conn).status == 'failed'
     assert store.settings.get_setting(source) == raw
-    regular.migrate(store.conn)

@@ -4,6 +4,7 @@ import json
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation.recommendation_state import BYTE_LIMITS, JOBS
 
@@ -38,7 +39,6 @@ def test_documents_stay_authoritative_and_capture_continuing_replacements(instal
     raw = store.conn.execute('SELECT payload,built_at FROM rec_proposals WHERE surface=?', (surface,)).fetchone()
     job.install(store.conn)
     job.step(store.conn, batch_size=1)
-    regular.migrate(store.conn)
     finish(job, store.conn)
     assert tuple(store.conn.execute('SELECT payload,built_at FROM rec_proposals WHERE surface=?', (surface,)).fetchone()) == tuple(raw)
     assert store.rec_proposals.get_proposals(surface) == value
@@ -67,7 +67,7 @@ def test_documents_stay_authoritative_and_capture_continuing_replacements(instal
 
 
 @pytest.mark.parametrize('installed,job_name', CASES[::2], indirect=['installed'])
-def test_invalid_document_failure_keeps_source_and_requires_explicit_retry(installed, job_name):
+def test_invalid_document_failure_keeps_source_and_requires_explicit_retry(installed, job_name, independent_regular_ddl):
     store, _ = installed
     job = JOBS[job_name]
     surface, value = VALUES[job_name]

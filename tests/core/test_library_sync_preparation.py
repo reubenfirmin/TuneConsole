@@ -5,6 +5,7 @@ import json
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import entity_names, recommendation_outputs as files, sync_state
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import library_sync as preparation
@@ -70,7 +71,6 @@ def test_exact_report_resources_stamps_and_unresolved_owners_remain_retained(ins
     assert not sync_state.available(conn)
     assert files.collect_orphans(conn) == 0
     assert not conn.execute('PRAGMA foreign_key_check').fetchone()
-    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -199,7 +199,8 @@ def test_file_work_allows_concurrent_source_update_and_rejects_stale_copy(instal
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_interrupted_head_and_disk_failure_keep_independent_stamps_and_reopened_retry(installed, monkeypatch):
+def test_interrupted_head_and_disk_failure_keep_independent_stamps_and_reopened_retry(
+        installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     conn = store.conn
     raw = seed(store)
@@ -252,4 +253,3 @@ def test_invalid_sync_input_fails_durably_and_retains_authoritative_source(insta
         finish(job, store.conn)
     assert job.progress(store.conn).status == 'failed'
     assert store.settings.get_setting(source) == raw
-    regular.migrate(store.conn)

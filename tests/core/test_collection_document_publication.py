@@ -7,7 +7,8 @@ from time import perf_counter
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_collection_document_preparation import seed
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import collection_documents as preparation, collection_document_publication as publication
@@ -205,7 +206,6 @@ def test_unverified_fields_members_or_files_cannot_select_saved_documents(instal
     with pytest.raises((MigrationError, ValueError, OSError)):
         owner.publish(store.conn, stage=identity)
     assert owner.selected(store.conn) is None
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -280,7 +280,7 @@ def test_real_writers_snapshot_invalidation_and_owner_independence(installed):
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('name', ['recipes', 'canvases'])
-def test_missing_files_can_be_repaired_without_rewriting_mapped_rows_or_blocking_ddl(installed, name):
+def test_missing_files_can_be_repaired_without_rewriting_mapped_rows_or_blocking_ddl(installed, name, independent_regular_ddl):
     store, _ = installed
     seed(store)
     owner = publication.OWNERS[name]
@@ -301,7 +301,7 @@ def test_missing_files_can_be_repaired_without_rewriting_mapped_rows_or_blocking
 
 
 @pytest.mark.parametrize('installed', [85], indirect=True)
-def test_new_optional_axis_owner_withdraws_selection_without_blocking_regular_ddl(installed, tmp_path):
+def test_new_optional_axis_owner_withdraws_selection_without_blocking_regular_ddl(installed, tmp_path, independent_regular_ddl):
     store, _ = installed
     seed(store)
     owner = publication.OWNERS['recipes']

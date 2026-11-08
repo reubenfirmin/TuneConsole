@@ -165,7 +165,7 @@ def test_failure_retry_and_independent_regular_ddl_preserve_recovery_sources(ins
         conn.execute('CREATE TABLE independent_workflow_ddl(value TEXT)')
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_workflow_ddl'").fetchone()
-    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_workflow_ddl', install, validate)))
+    monkeypatch.setattr(regular, 'CHANGES', (regular.Change(1, 'independent_workflow_ddl', install, validate),))
     regular.migrate(store.conn)
     assert job.progress(store.conn) == failed
     monkeypatch.setattr(policy_documents, '_publish_encoded', publish)

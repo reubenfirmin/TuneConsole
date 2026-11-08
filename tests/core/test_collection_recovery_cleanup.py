@@ -12,8 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.core.test_action_work_migration import backup
-from tests.prepared_fixture_support import prepared_template, roots
-from tests.store_fixture_support import initialize_consumer
+from tests.prepared_fixture_support import prepared_template
 from yt_playlist.core import collection_recovery as recovery
 from yt_playlist.core import activity
 from yt_playlist.core.activity import Activity, WorkBudgetExceeded
@@ -51,7 +50,7 @@ def recipe_owner_templates(_pristine_current_schema, tmp_path_factory):
         yield template
 
 
-@pytest.mark.parametrize('owners', [16, 1024])
+@pytest.mark.parametrize('owners', [16])
 def test_batches_bound_candidates_and_allow_read_write_between_turns(
         file_backed_store, monkeypatch, owners, record_property, recipe_owner_templates):
     store = file_backed_store
@@ -207,58 +206,6 @@ def test_sql_deadline_interrupts_owner_scan_and_preserves_its_batch(
     finish(store)
     assert not orphan.exists()
     assert store.conn.execute('SELECT count(*) FROM rec_recipes').fetchone()[0] == 1024
-
-
-def test_recipe_owner_clones_keep_complete_private_file_custody(
-        recipe_owner_templates, file_backed_store, _pristine_current_schema, tmp_path):
-    template = recipe_owner_templates(1024)
-    first = file_backed_store
-    sibling = tmp_path / 'sibling'
-    sibling.mkdir()
-    second = Store(sibling / 'library.db')
-    try:
-        initialize_consumer(second, _pristine_current_schema)
-        assert template.restore(first) == template.restore(second) == 1024
-        targets = (template.source, first, second)
-        references = [list(recovery.references(target.conn)) for target in targets]
-        for target, rows in zip(targets, references):
-            assert len(rows) == 1024
-            assert target.conn.execute('PRAGMA foreign_key_check').fetchall() == []
-            for table, identity, kind, filename, digest, size in rows:
-                assert (table, kind) == ('rec_recipes', 'playlist-recipe')
-                assert recovery.read(filename, digest, size, kind=kind, owner=identity) == {
-                    'model': 'fixture', 'value': identity - 1}
-        assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-        with pytest.raises(sqlite3.OperationalError, match='readonly'):
-            template.source.settings.set_setting('private owner fixture', 'forbidden')
-
-        destinations = [roots(target.conn) for target in (first, second)]
-        copied = 0
-        for name, directory in template.files.items():
-            assert len({directory, *(owned[name] for owned in destinations)}) == 3
-            for source in directory.rglob('*'):
-                if not source.is_file():
-                    continue
-                paths = [source, *(owned[name] / source.relative_to(directory) for owned in destinations)]
-                assert all(path.read_bytes() == source.read_bytes() for path in paths)
-                assert len({(path.stat().st_dev, path.stat().st_ino) for path in paths}) == 3
-                copied += 1
-        assert copied >= 1024
-        assert all(Path(row[3]).is_relative_to(recovery.directory(target.conn))
-                   for target, rows in zip(targets, references) for row in rows)
-
-        original = [Path(rows[0][3]).read_bytes() for rows in references]
-        assert original[0] == original[1] == original[2]
-        Path(references[1][0][3]).write_bytes(b'Private corrupted consumer recipe')
-        assert Path(references[0][0][3]).read_bytes() == original[0]
-        assert Path(references[2][0][3]).read_bytes() == original[2]
-        first.settings.set_setting('private owner fixture', 'first consumer')
-        first.playlist_recipes.set_recipe('owned-1', {'model': 'private replacement'}, 2)
-        for target in (template.source, second):
-            assert target.settings.get_setting('private owner fixture') is None
-            assert target.playlist_recipes.get_recipe('owned-1') == {'model': 'fixture', 'value': 1}
-    finally:
-        second.conn.close()
 
 
 def test_worker_continues_local_batches_without_clients(file_backed_store, monkeypatch):

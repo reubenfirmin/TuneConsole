@@ -6,7 +6,8 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_ranked_state_preparation import seed
 from tests.publication_timing_support import publication_costs
 from yt_playlist.core import group_evidence, recommendation_custody
@@ -78,7 +79,7 @@ def test_preopened_readers_keep_compressed_originals_ranked_members_modes_and_ro
             ' m JOIN '+preparation.ORIGINALS+' o ON o.owner=m.owner AND o.source_key=m.source_key AND o.digest=m.source_digest '
             "WHERE m.stage=? AND m.owner='unresolved_group_contexts'", (stage,)).fetchall()
         assert any(json.loads(row[0])['source_context'] == 'original:unavailable' for row in contexts)
-        regular.migrate(other.conn)
+        regular.validate(other.conn)
     finally:
         other.conn.close()
     reopened = Store(store._db_path)
@@ -93,8 +94,9 @@ def test_preopened_readers_keep_compressed_originals_ranked_members_modes_and_ro
 @pytest.mark.parametrize('failure', ['vector', 'display', 'run', 'context', 'root', 'root_original', 'missing_root', 'missing_output'])
 def test_unverified_projection_or_retention_state_cannot_publish(installed, failure):
     store, _ = installed
-    _, run_id = seed(store)
-    roots(store, run_id)
+    _, run_id = seed(store, surfaces={'incumbent:radio', 'challenger:mixes'})
+    if failure in {'root', 'root_original', 'missing_root'}:
+        roots(store, run_id)
     owner = publication.OWNER
     prepare(store.conn)
     with store.conn:
@@ -125,7 +127,6 @@ def test_unverified_projection_or_retention_state_cannot_publish(installed, fail
     with pytest.raises((MigrationError, OSError, ValueError)):
         owner.publish(store.conn, stage=stage.id)
     assert owner.selected(store.conn) is None
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -210,7 +211,7 @@ def test_interrupted_publication_and_root_race_cannot_select_partial_custody(ins
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_missing_display_or_output_files_and_failed_roots_do_not_block_ddl(installed):
+def test_missing_display_or_output_files_and_failed_roots_do_not_block_ddl(installed, independent_regular_ddl):
     store, _ = installed
     _, run_id = seed(store)
     key = roots(store, run_id)

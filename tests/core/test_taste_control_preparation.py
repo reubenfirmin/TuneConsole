@@ -81,7 +81,6 @@ def test_three_jobs_keep_exact_settings_ordered_evidence_and_unadmitted_referenc
     if axes is not None:
         assert axes == list(map(tuple, store.conn.execute('SELECT * FROM taste_axes')))
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [79, 95], indirect=True)
@@ -195,7 +194,7 @@ def test_failure_interruption_explicit_retry_and_independent_regular_ddl(install
         conn.execute('CREATE TABLE independent_taste_ddl(value TEXT)')
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_taste_ddl'").fetchone()
-    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_taste_ddl', install, validate)))
+    monkeypatch.setattr(regular, 'CHANGES', (regular.Change(1, 'independent_taste_ddl', install, validate),))
     regular.migrate(store.conn)
     assert job.progress(store.conn) == failed
     finish(independent, store.conn)

@@ -6,6 +6,7 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import albums, album_tracklists
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import frozen_shares as audit
@@ -71,7 +72,7 @@ def test_guard_precedes_audit_and_exact_empty_repeated_unknown_choices_survive(i
 
 @pytest.mark.parametrize('installed',[104],indirect=True)
 @pytest.mark.parametrize('corruption',['append','missing','reordered'])
-def test_bad_history_stays_explicit_without_blocking_guard_or_regular_ddl(installed,corruption,monkeypatch):
+def test_bad_history_stays_explicit_without_blocking_guard_or_regular_ddl(installed,corruption,monkeypatch, independent_regular_ddl):
     store, _ = installed
     frozen = capture(store.conn)
     with store.conn:
@@ -92,11 +93,6 @@ def test_bad_history_stays_explicit_without_blocking_guard_or_regular_ddl(instal
     assert_originals(store.conn)
     assert sources(store.conn) == before
     progress = audit.JOB.progress(store.conn)
-    def install(conn,context):
-        conn.execute('CREATE TABLE independent_share_ddl(value TEXT)')
-    def validate(conn):
-        assert conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='independent_share_ddl'").fetchone()
-    monkeypatch.setattr(regular,'CHANGES',(*regular.CHANGES,regular.Change(len(regular.CHANGES) + 1,'independent_share_ddl',install,validate)))
     regular.migrate(store.conn)
     assert audit.JOB.progress(store.conn) == progress
     capture(store.conn,('later',),title='Usable continuing writer')
@@ -106,7 +102,7 @@ def test_bad_history_stays_explicit_without_blocking_guard_or_regular_ddl(instal
 
 
 @pytest.mark.parametrize('installed',[104],indirect=True)
-def test_bounded_batches_failure_interruption_and_reopened_retry_keep_counts_exact(installed,monkeypatch):
+def test_bounded_batches_failure_interruption_and_reopened_retry_keep_counts_exact(installed,monkeypatch, independent_regular_ddl):
     store, _ = installed
     capture(store.conn,tuple('video-'+str(index) for index in range(1040)))
     before = sources(store.conn)
@@ -124,11 +120,6 @@ def test_bounded_batches_failure_interruption_and_reopened_retry_keep_counts_exa
     assert audit.JOB.progress(store.conn).processed == progress.processed
     assert list(map(tuple,store.conn.execute('SELECT snapshot_id,member_count FROM '+audit.SUMMARIES))) == counts
     failed = audit.JOB.progress(store.conn)
-    def install(conn,context):
-        conn.execute('CREATE TABLE independent_failed_share_ddl(value TEXT)')
-    def validate(conn):
-        assert conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='independent_failed_share_ddl'").fetchone()
-    monkeypatch.setattr(regular,'CHANGES',(*regular.CHANGES,regular.Change(len(regular.CHANGES) + 1,'independent_failed_share_ddl',install,validate)))
     regular.migrate(store.conn)
     assert audit.JOB.progress(store.conn) == failed
     reopened = Store(store._db_path)

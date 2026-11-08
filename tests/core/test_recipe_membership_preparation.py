@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import recipe_memberships as preparation
 from yt_playlist.core.store import Store
@@ -51,7 +52,6 @@ def test_member_batches_keep_repetitions_unresolved_labels_and_conflicts(install
     assert first.processed == 2 and first.prepared_revision is None
     assert conn.execute(f'SELECT count(*) FROM {preparation.ITEMS}').fetchone()[0] == 2
     assert head(conn) is None
-    regular.migrate(conn)
     finish(conn)
     captured = head(conn)
     assert captured['members_count'] == 7
@@ -141,7 +141,7 @@ def test_file_publication_is_outside_transaction_and_stale_capture_is_not_admitt
 
 
 @pytest.mark.parametrize('installed', [88], indirect=True)
-def test_interruption_failure_restart_and_explicit_retry_keep_member_checkpoint(installed, monkeypatch):
+def test_interruption_failure_restart_and_explicit_retry_keep_member_checkpoint(installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     original = seed(store)
     conn = store.conn
@@ -189,7 +189,6 @@ def test_invalid_saved_selection_fails_without_modifying_source(installed, raw):
     with pytest.raises((MigrationError, ValueError)):
         preparation.JOB.step(store.conn)
     assert preparation.JOB.progress(store.conn).status == 'failed'
-    regular.migrate(store.conn)
     assert store.conn.execute('SELECT artists FROM road_trip_recipes WHERE id=1').fetchone()[0] == raw
     assert head(store.conn) is None
 

@@ -7,6 +7,7 @@ import threading
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core.migrations import regular
 from yt_playlist.core.preparation import (choice_publication, conflict_publication, demand_publication, discovery_artist_publication, discovery_checkpoint_publication,
     genre_preference_publication, genre_publication, home_publication, library_sync_publication, metadata_destinations, metadata_publication, recipe_publication, subject_publication, taste_publication)
@@ -14,7 +15,8 @@ from yt_playlist.core.preparation import (choice_publication, conflict_publicati
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
 @pytest.mark.parametrize('family', ['artist', 'listening', 'home', 'checkpoints', 'document', 'genre', 'preferences', 'recipes', 'demand', 'taste', 'choice', 'conflicts', 'metadata', 'metadata_destinations'])
-def test_existing_schema_validation_allows_serving_writes_and_regular_ddl(installed, family, monkeypatch):
+def test_existing_schema_validation_allows_serving_writes_and_regular_ddl(
+        installed, family, monkeypatch, independent_regular_ddl):
     store, _ = installed
     conn = store.conn
     if family in ('genre','preferences','demand','taste','metadata','metadata_destinations'):

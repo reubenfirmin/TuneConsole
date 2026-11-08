@@ -5,6 +5,7 @@ Consumer fixtures reuse the immutable schema admitted by the session builder;
 they retain real repositories, revision guards, repair and WAL configuration.
 """
 from copy import deepcopy
+from contextlib import closing, contextmanager, nullcontext
 import sqlite3
 
 from yt_playlist.core import repair
@@ -42,7 +43,37 @@ class PristineSchema(sqlite3.Connection):
         return revisions
 
 
-def initialize_consumer(store, pristine):
+@contextmanager
+def bounded_consumer_schema(entries, *, snapshot_guards=True):
+    """Shipped SQL with bounded genre inputs, for consumers below admission.
+
+    This deliberately does not validate schema admission. Upgrade and startup
+    owners must exercise their real validators separately.
+    """
+    import pytest
+    from tests.genre_catalog_support import bound_catalog
+    from yt_playlist.core import destination_schema, genre_identity, schema_bootstrap
+    from yt_playlist.core.migrations import registry, regular
+
+    with closing(sqlite3.connect(':memory:', factory=PristineSchema)) as schema:
+        schema.execute('PRAGMA foreign_keys=ON')
+        document = destination_schema.definition()
+        seeds = [sql for sql in document['destination_seeds'] if not sql.startswith(
+            ('INSERT INTO "genre_alias"', 'INSERT INTO "genre_catalog"', 'INSERT INTO "genre_family"'))]
+        with pytest.MonkeyPatch.context() as patch, schema:
+            bound_catalog(patch, entries=entries)
+            patch.setattr(destination_schema, 'definition', lambda: {**document, 'destination_seeds': seeds})
+            schema.execute('BEGIN')
+            schema_bootstrap.bootstrap(schema, registry.MIGRATIONS, regular.CHANGES,
+                                       1., validation=lambda conn: None)
+            genre_identity.seed_catalog(schema)
+        if snapshot_guards:
+            schema.capture_revisions(Revisions(schema))
+        schema.execute('PRAGMA query_only=ON')
+        yield schema
+
+
+def initialize_consumer(store, pristine, *, snapshot_guards=True):
     assert pristine.execute('PRAGMA query_only').fetchone()[0] == 1
     pristine.backup(store.conn)
     store._schema_compatibility = False
@@ -53,4 +84,78 @@ def initialize_consumer(store, pristine):
     if store._db_path is not None:
         mode = store.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0]
         assert mode.lower() == 'wal'
-    store._snapshot_revisions = pristine.bind_revisions(store.conn)
+    if snapshot_guards:
+        store._snapshot_revisions = pristine.bind_revisions(store.conn)
+
+
+
+def install_numbered_input(conn, version, *, regular_owners=()):
+    """Completed numbered SQL below an upgrade or publication test boundary.
+
+    Real migration runners still own the edge under test. This supplies their
+    exact empty predecessor contract without replaying every earlier conversion.
+    Callers choose their genre vocabulary and any completed regular owners.
+    """
+    from yt_playlist.core import genre_identity, schema_admission, schema_definition
+    from yt_playlist.core.migrations import registry
+    from yt_playlist.core.migrations.runner import Context
+
+    conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA foreign_keys=ON')
+    with conn:
+        conn.execute('BEGIN')
+        # The assembled v86 contract deliberately admits optional v80-v85
+        # owners. A publication predecessor needs their actual absence before
+        # takeover, so start at v79 and apply only those small historical edges.
+        base_version = 79 if 79 <= version < 86 else version
+        statements = (schema_admission.reference()['statements'] if base_version == 79
+                      else schema_definition.statements(version=version))
+        for sql in statements:
+            conn.execute(sql)
+        conn.executemany('INSERT INTO schema_migrations VALUES (?,?,1)',
+                         [(item.version, item.name) for item in registry.MIGRATIONS[:base_version]])
+        conn.executemany('INSERT INTO settings VALUES (?,?)', schema_definition.SEED_SETTINGS.items())
+        for sql in schema_definition.INITIAL_STATE:
+            conn.execute(sql)
+        genre_identity.seed_catalog(conn)
+        for migration in registry.MIGRATIONS[base_version:version]:
+            with schema_definition.migration_definitions(migration.version):
+                migration.apply(conn, Context(1.))
+            conn.execute('INSERT INTO schema_migrations VALUES (?,?,1)',
+                         (migration.version, migration.name))
+        if regular_owners:
+            install_regular_input(conn, regular_owners)
+
+
+def install_regular_input(conn, changes):
+    """Supply completed lower regular owners before the real edge under test.
+
+    The caller owns the transaction. The runner being tested still validates
+    this predecessor and owns the next change's commit, rollback and ledger.
+    """
+    from yt_playlist.core.migrations import regular
+    from yt_playlist.core.migrations.runner import Context
+
+    conn.execute(regular.HISTORY_SQL)
+    for change in changes:
+        change.apply(conn, Context(1.))
+        conn.execute('INSERT INTO schema_changes VALUES (?,?,1)', (change.version, change.name))
+
+
+@contextmanager
+def reuse_reporting_reader(store, monkeypatch):
+    """Reuse one real file reader below tests of reporting consumers.
+
+    Snapshot/publication tests keep their real private snapshot connections.
+    Reader-pool admission and time budgets have separate owners.
+    """
+    assert store._db_path is not None
+    with store._retained_readers():
+        reader = store._make_reader()
+        try:
+            assert reader._read_only
+            with monkeypatch.context() as patch:
+                patch.setattr(store, 'read_view', lambda **kwargs: nullcontext(reader))
+                yield reader
+        finally:
+            reader.conn.close()

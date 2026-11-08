@@ -1,7 +1,7 @@
 """Small published Home menus for tests of consumers, not preparation."""
 import pytest
 
-from tests.conftest import seed_catalog_track
+from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import initialize_consumer
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
@@ -11,6 +11,11 @@ from yt_playlist.rec import home_cache, home_cards, home_prepared
 @pytest.fixture
 def home_routes_only(monkeypatch):
     """Keep real Home HTTP handling without constructing unrelated routers."""
+    install_home_routes(monkeypatch)
+
+
+def install_home_routes(monkeypatch):
+    """Use the same real Home routers in consumers and prepared HTTP inputs."""
     from fastapi import APIRouter
     from yt_playlist.web import app as webapp
     from yt_playlist.web.routes import app_update, audio_preview, home
@@ -19,6 +24,37 @@ def home_routes_only(monkeypatch):
                         lambda ctx: [app_update.build(ctx), audio_preview.build(ctx), home.build(ctx)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
     monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
+
+
+@pytest.fixture(scope='module')
+def home_page_bytecode(tmp_path_factory):
+    from jinja2 import FileSystemBytecodeCache
+
+    return FileSystemBytecodeCache(str(tmp_path_factory.mktemp('home-page-bytecode')))
+
+
+@pytest.fixture
+def home_pages_only(monkeypatch, home_page_bytecode):
+    """Real Home and the pages used to check its shared layout and setup state."""
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, charts, collection, home, playlists, sync
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+        for module in (app_update, audio_preview, charts, collection, home, playlists, sync)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
+    templates = webapp.Jinja2Templates
+
+    def compiled_templates(*args, **kwargs):
+        result = templates(*args, **kwargs)
+        result.env.bytecode_cache = home_page_bytecode
+        return result
+
+    # Cache source-checked compiled code, keeping each app's environment,
+    # globals, database reads and rendered responses private. Cold compilation
+    # remains charged to the first request that actually uses each template.
+    monkeypatch.setattr(webapp, 'Jinja2Templates', compiled_templates)
 
 
 @pytest.fixture
@@ -53,7 +89,7 @@ def returning_listener(store, *formats, now=1):
     store.settings.set_setting('onboard_setup_complete', '1')
 
 
-def prepared_client(store, now=1000, *, background_work=True):
+def prepared_client(store, now=1000, *, background_work=True, backend_options=None):
     """Create the ordinary HTTP app after restoring genuinely prepared Home."""
     from fastapi.testclient import TestClient
     from tests.conftest import FakeClient
@@ -63,11 +99,11 @@ def prepared_client(store, now=1000, *, background_work=True):
     identity = store.accounts.upsert_account('main', 'cred', None, True)
     return TestClient(create_app(store, lambda: {identity: FakeClient()}, now_fn=lambda: now,
                                  background_work=background_work),
-                      base_url='http://127.0.0.1')
+                      base_url='http://127.0.0.1', backend_options=backend_options)
 
 
 def publish_menu(store, now=1000, *, prefix='prepared', count=4, tracks_per_card=4,
-                 surface='home_prepared', modeled=False, mode_ids=()):
+                 surface='home_prepared', modeled=False, mode_ids=(), genre_options=(), genre='house'):
     """Publish real subjects through the cache writer without running ranking.
 
     Different prefixes own disjoint tracks. Preparation, readiness and ranking
@@ -81,9 +117,16 @@ def publish_menu(store, now=1000, *, prefix='prepared', count=4, tracks_per_card
                 number = index * tracks_per_card + offset
                 title, video = f'{prefix.title()} {number}', f'{prefix}-{number}'
                 key = f'{prefix} {number}|artist'
-                seed_catalog_track(store, key, title, 'Artist', video_id=video, genre='house')
                 tracks.append({'key': key, 'title': title, 'artist': 'Artist', 'video_id': video,
-                               'album': '', 'thumbnail': None, 'genre': 'house'})
+                               'album': '', 'thumbnail': None, 'genre': genre})
+            seed_publication_subjects(store, tracks)
+            # Preserve the catalog's artist credits; metadata ingestion is not
+            # part of a prepared-menu consumer fixture.
+            from yt_playlist.core import artists
+            for track in tracks:
+                recording = store.conn.execute('SELECT id FROM recordings WHERE identity_key=?',
+                                               (track['key'],)).fetchone()[0]
+                artists.observe(store.conn, recording, track['artist'])
             proto = home_cards._proto(store, lane, f'A {lane} mix for you', tracks, now)
             proto['recipe'] = {'lane': lane}
             if index < len(mode_ids):
@@ -93,7 +136,7 @@ def publish_menu(store, now=1000, *, prefix='prepared', count=4, tracks_per_card
                 proto['mode_id'] = None
             protos.append(proto)
     result = home_cards.CardsResult(protos, [{'proto': proto, 'pool': None} for proto in protos],
-                                   None, None, [], [], home_cards._epoch(store, 'cards'), None)
+                                   None, None, list(genre_options), [], home_cards._epoch(store, 'cards'), None)
     previous = home_cache.read(store, 'home_prepared') if surface == 'home_tuned' else None
     home_prepared.remember(store, previous, result, now)
     payload = home_cache.read(store, 'home_tuned')

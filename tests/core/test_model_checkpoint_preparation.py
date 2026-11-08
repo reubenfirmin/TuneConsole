@@ -6,6 +6,7 @@ import pytest
 
 from tests.core.test_collection_control_preparation import finish
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from tests.group_support import publish
 from yt_playlist.core import content_preparation_state, group_preparation_state, ranking_checkpoints
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -64,7 +65,6 @@ def test_typed_fields_exact_originals_and_unknown_generation_without_admission(i
     assert not group_preparation_state.available(store.conn)
     assert not ranking_checkpoints.available(store.conn)
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -119,7 +119,7 @@ def test_continuing_writes_renames_and_generation_arrival_reconcile(installed):
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_interrupted_batch_failure_retry_and_independent_ddl(installed):
+def test_interrupted_batch_failure_retry_and_independent_ddl(installed, independent_regular_ddl):
     store, _ = installed
     sources = seed(store)
     content = preparation.JOBS['content-checkpoints']
@@ -190,4 +190,3 @@ def test_invalid_or_oversized_inputs_fail_durably_without_changing_settings(inst
         finish(job, store.conn)
     assert job.progress(store.conn).status == 'failed'
     assert store.settings.get_setting(key) == raw
-    regular.migrate(store.conn)

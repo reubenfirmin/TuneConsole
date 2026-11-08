@@ -9,7 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_workflow_receipt_preparation import seed
 from yt_playlist.core import workflow_settings
 from yt_playlist.core.migrations import MigrationError, regular
@@ -86,9 +87,9 @@ def test_preopened_readers_and_real_callers_use_exact_selected_receipts(installe
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['fields', 'account', 'slot', 'extra', 'omitted', 'original', 'recovery', 'plan'])
-def test_incorrect_receipt_fields_members_coverage_or_files_cannot_publish(installed, staged_custody, failure):
+def test_incorrect_receipt_fields_members_coverage_or_files_cannot_publish(installed, failure):
     store, _ = installed
-    source = staged_custody(installed, 'workflow-playlists', rejection_inputs)
+    source = rejection_inputs(store)
     owner = publication.OWNERS['playlists']
     header = preparation.head(store.conn, 'playlists', source)
     receipts, items = (preparation.table('playlists', suffix) for suffix in ('receipts', 'items'))
@@ -113,7 +114,6 @@ def test_incorrect_receipt_fields_members_coverage_or_files_cannot_publish(insta
     with pytest.raises((MigrationError, ValueError, OSError)):
         owner.publish(store.conn, stage=identity)
     assert owner.selected(store.conn) is None
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -264,7 +264,7 @@ def test_source_and_reference_races_reject_selection_without_admitting_missing_i
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_file_recovery_and_explicit_failure_retry_do_not_block_regular_ddl(installed, monkeypatch):
+def test_file_recovery_and_explicit_failure_retry_do_not_block_regular_ddl(installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     _, originals, _, source = seed(store)
     owner = publication.OWNERS['playlists']
@@ -291,10 +291,6 @@ def test_file_recovery_and_explicit_failure_retry_do_not_block_regular_ddl(insta
     with pytest.raises(OSError, match='controlled workflow file failure'):
         owner.worker.step(store.conn)
     progress = owner.worker.progress(store.conn)
-    def independent(conn, context):
-        conn.execute('CREATE TABLE independent_workflow_publication_ddl(value TEXT)')
-    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_workflow_publication_ddl', independent,
-        lambda conn:conn.execute('SELECT * FROM independent_workflow_publication_ddl LIMIT 0'))))
     regular.migrate(store.conn)
     assert owner.worker.progress(store.conn) == progress
     monkeypatch.setattr(preparation.policy_documents, '_publish_encoded', install)

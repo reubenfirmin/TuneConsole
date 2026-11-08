@@ -1,6 +1,7 @@
 """Saved discovery metadata queues background preparation with the established models."""
 import logging
-from tests.enrichment_support import (complete_entries, complete_discovered, seed_audio,
+from contextlib import closing
+from tests.enrichment_support import (complete_entries, complete_discovered,
                                       seed_discovered_enrichment)
 from types import SimpleNamespace
 
@@ -9,13 +10,29 @@ import pytest
 
 from tests.conftest import FakeClient
 from tests.playlist_fixture_support import remote_catalog
-from tests.recommendation_support import publish_bundles
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
+from yt_playlist.core.store import Store
 from yt_playlist.enrich.enrich_worker import EnrichWorker
 from yt_playlist.library import playlist_generated
 from yt_playlist.rec import content_model, embedding_training as training, embedding_vectors as embed, fresh_pool, mode_selection, mode_surfaces, model_refresh, recipes, surfaces
 from yt_playlist.rec.scoring import PlaylistTaste
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
+
+
+@pytest.fixture(scope='module')
+def enrichment_schema():
+    with bounded_consumer_schema((('house', 'House'), ('techno', 'Techno'), ('folk', 'Folk'))) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(enrichment_schema):
+    database = Store(':memory:')
+    with closing(database.conn):
+        initialize_consumer(database, enrichment_schema)
+        yield database
 
 
 def _pool(store, surface, mode, lane):
@@ -88,12 +105,18 @@ def test_enrichment_updates_fresh_modes_and_generated_playlist(store, monkeypatc
     iid = store.accounts.upsert_account("main", "cred", None, True)
     groups = []
     for group, fields in (("A", a), ("B", b)):
-        tids = [store.tracks.upsert_track(f"{group}{i}", f"{group}{i}", group, None, 200) for i in range(10)]
-        for tid in tids:
-            store.tracks.set_track_genre(tid, fields["genre"])
-            store.tracks.set_track_year(tid, fields["year"])
-            if fields["audio"]:
-                seed_audio(store, tid, **fields["audio"])
+        # The owned library is completed input to the enrichment test. Keep
+        # provider delivery and queue writes for the changed discoveries below.
+        items = [dict(key=identity_key(f'{group}{i}', group), video_id=f'{group}{i}',
+                      title=f'{group}{i}', artist=group, genre=fields['genre'],
+                      year=fields['year'], duration_s=200) for i in range(10)]
+        seed_publication_subjects(store, items)
+        tids = list(store.tracks.track_ids_for_videos([item['video_id'] for item in items]).values())
+        if fields['audio']:
+            with store.conn:
+                store.conn.executemany('UPDATE recordings SET bpm=?,energy=?,danceability=? WHERE id=?',
+                    [(fields['audio']['bpm'], fields['audio']['energy'], fields['audio']['danceability'], tid)
+                     for tid in tids])
         pid = store.playlists.upsert_playlist(iid, group, group, 10, group, 1)
         store.playlists.set_playlist_tracks(pid, tids)
         complete_entries(store, tids, 200)

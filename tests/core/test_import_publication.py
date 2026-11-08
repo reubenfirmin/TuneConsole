@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_collection_document_preparation import finish, seed
 from yt_playlist.core import entity_names, spotify_job_state
 from yt_playlist.core.migrations import MigrationError, regular
@@ -100,7 +101,6 @@ def test_unverified_fields_or_files_never_select_a_report(installed, staged_cust
         publication.OWNER.publish(store.conn, revision=revision)
     assert publication.OWNER.selected(store.conn) is None
     assert store.settings.get_setting(spotify_job_state.KEY) == raw
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -153,12 +153,14 @@ def test_real_import_worker_keeps_account_spelling_and_reconciles_continuing_upd
     store.settings.delete_setting(owner.source)
     assert owner.selected(store.conn) is None
     assert spotify_import.load_job(store) is None
+    assert store.settings.get_setting(owner.source, 'absent') == 'absent'
+    assert store.conn.execute('SELECT value FROM settings WHERE key=?', (owner.source,)).fetchone() is None
     owner.publish(store.conn, revision=prepare(store.conn))
     assert store.settings.get_setting(owner.source, 'absent') == 'absent'
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_missing_file_explicit_recovery_failure_keeps_regular_ddl_independent(installed):
+def test_missing_file_explicit_recovery_failure_keeps_regular_ddl_independent(installed, independent_regular_ddl):
     store, _ = installed
     _, raw, _, _ = seed(store)
     owner = publication.OWNER

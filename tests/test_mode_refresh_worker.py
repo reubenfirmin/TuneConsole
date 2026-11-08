@@ -1,16 +1,13 @@
 """Genre groups repair in the worker, without sync, provider access or request-time fitting."""
 import logging
-from tests.enrichment_support import seed_enrichment
 import threading
 import time
 from types import SimpleNamespace
 
 import pytest
-from fastapi.testclient import TestClient
 
 from yt_playlist.rec import (content_model, embedding_training as training, embedding_vectors as embed,
-                             model_refresh, mode_surfaces, rec_params, rec_worker, taste_modes, taste_viz)
-from yt_playlist.web.app import create_app
+                             model_refresh, mode_surfaces, rec_params, rec_worker, taste_modes)
 from tests.model_support import build_content_model, publish_modes
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles
@@ -42,12 +39,7 @@ def mode_refresh_library_template(_pristine_current_schema):
 
 
 @pytest.fixture
-def library(store, mode_refresh_library_template, request, record_property):
-    if getattr(request, 'param', 27) == 60:
-        # Independent full-sized producer, followed by the actual async worker.
-        tracks = _seed_library(store, per_genre=60)
-        record_property('library_tracks', len(tracks))
-        return tracks
+def library(store, mode_refresh_library_template, record_property):
     record_property('library_tracks', len(mode_refresh_library_template.result))
     return mode_refresh_library_template.restore(store)
 
@@ -126,85 +118,6 @@ def test_deferred_model_fit_still_prepares_candidates(store, monkeypatch):
     monkeypatch.setattr(worker, '_refresh_bundles', lambda: prepared.append(True))
     worker._rebuild()
     assert prepared == [True]
-
-
-@pytest.mark.parametrize('reason,library', [('stale', 27), ('missing', 27), ('missing', 60)],
-                         indirect=['library'], ids=['stale', 'missing', 'full-library-control'])
-def test_startup_repairs_groups_without_sync_or_extension(store, library, monkeypatch, reason):
-    old_modes = taste_modes.live_modes(store)
-    old_ids = {m["mode_id"] for m in old_modes}
-    if reason == "missing":
-        store.conn.execute("DELETE FROM taste_modes")
-        store.conn.commit()
-    else:
-        # New release metadata adds a column while coverage stays in the same bucket.
-        per_genre = len(library) // 3
-        for tid in library[per_genre:2 * per_genre]:
-            seed_enrichment(store, tid, "Jazz", "2001")
-        build_content_model(store)
-        assert not taste_viz.overview(store, 2000.0)["recent"]["styles_current"]
-    store.settings.set_setting("enrich_worker_enabled", "0")
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("Requests must not fit models, and local repair must not need a provider")
-
-    monkeypatch.setattr(rec_worker.RecWorker, "start_ticker", lambda self: None)
-    started, release, finished = threading.Event(), threading.Event(), threading.Event()
-    original = rec_worker.RecWorker._do_mode_refresh
-
-    def refresh(self, **kwargs):
-        started.set()
-        try:
-            assert release.wait(5)
-            original(self, **kwargs)
-        finally:
-            finished.set()
-
-    monkeypatch.setattr(rec_worker.RecWorker, "_do_mode_refresh", refresh)
-    app = create_app(store, forbidden, now_fn=lambda: 2000.0, background_work=True)
-    app.state.ctx.rec_worker.debounce_s = 0
-    with TestClient(app, base_url="http://127.0.0.1") as client:
-        try:
-            # Startup and requests remain available while the repair is still waiting.
-            assert started.wait(5)
-            with monkeypatch.context() as request_guard:
-                request_guard.setattr(training, "build_vectors_from_baskets", forbidden)
-                assert client.get("/taste").status_code == 200
-                assert not finished.is_set()
-                pending = client.get("/taste/panels/overview").text
-                assert 'hx-trigger="every 3s"' in pending
-                assert "Updating your music groups automatically" in pending
-        finally:
-            release.set()
-        # This is background model adoption and typed publication; the request
-        # availability assertions above retain their independent short bound.
-        assert finished.wait(60)
-        deadline = time.monotonic() + 60
-        while app.state.ctx.rec_worker.busy and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert not app.state.ctx.rec_worker.busy
-        live = taste_modes.live_modes(store)
-        assert len(live) == 3
-        if reason == 'stale':
-            assert {m["mode_id"] for m in live} == old_ids
-        else:
-            # Deleted identities cannot be reused after the retained high-water
-            # mark. Reconstructed groups must cover the same musical regions.
-            assert {m['mode_id'] for m in live}.isdisjoint(old_ids)
-            assert min(m['mode_id'] for m in live) > max(old_ids)
-            assert {tuple(tuple(pair) for pair in m['families']) for m in live} == {
-                tuple(tuple(pair) for pair in m['families']) for m in old_modes}
-        assert all(m["last_seen"] == 2000.0 for m in live)
-        recent = taste_viz.overview(store, 2000.0)["recent"]
-        assert recent["styles_current"] and recent["n"] == 4
-        assert len(recent["shifts"]) == 3
-        with monkeypatch.context() as request_guard:
-            request_guard.setattr(training, "build_vectors_from_baskets", forbidden)
-            html = client.get("/taste/panels/overview").text
-        assert "genre groups need to be updated" not in html
-        assert 'hx-trigger="every 3s"' not in html
-        assert store.recommendations.head('home') is not None
-        assert _pool_keys(store, 'temporal')
 
 
 def test_content_update_refreshes_original_models_and_places_track(store, library, monkeypatch):

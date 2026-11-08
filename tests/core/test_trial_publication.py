@@ -6,7 +6,8 @@ import sqlite3
 import pytest
 
 from tests.core.test_model_trial_preparation import head, seed
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.independent_schema_support import independent_regular_ddl
 from tests.publication_timing_support import publication_costs
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import model_trials as preparation, trial_publication as publication
@@ -39,7 +40,7 @@ def test_preopened_and_reopened_readers_preserve_exact_trial_decisions(installed
             captured = owner.capture(other.conn)
             assert captured['built_at'] is None
             assert captured['run_ref'] == (1 if owner.source == 'model_live_comparison' else None)
-        regular.migrate(other.conn)
+        regular.validate(other.conn)
     finally:
         other.conn.close()
     reopened = Store(store._db_path)
@@ -78,7 +79,6 @@ def test_incorrect_fields_baseline_or_original_cannot_publish(installed, failure
     with pytest.raises(MigrationError):
         owner.publish(store.conn, revision=revision)
     assert owner.selected(store.conn) is None
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -130,7 +130,7 @@ def test_full_baseline_null_blank_and_missing_nested_inputs_remain_exact(install
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_source_race_interrupted_cutover_and_failed_preparation_do_not_block_ddl(installed):
+def test_source_race_interrupted_cutover_and_failed_preparation_do_not_block_ddl(installed, independent_regular_ddl):
     store, _ = installed
     seed(store)
     owner = publication.OWNERS['live-trial']

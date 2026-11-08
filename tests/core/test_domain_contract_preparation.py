@@ -66,7 +66,7 @@ def test_invalid_history_is_retained_and_blocks_verification_without_blocking_dd
         conn.execute('CREATE TABLE independent_contract_ddl(value TEXT)')
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_contract_ddl'").fetchone()
-    monkeypatch.setattr(regular,'CHANGES',(*regular.CHANGES,regular.Change(len(regular.CHANGES) + 1,'independent_contract_ddl',install,validate)))
+    monkeypatch.setattr(regular,'CHANGES',(regular.Change(1,'independent_contract_ddl',install,validate),))
     regular.migrate(store.conn)
     assert job.progress(store.conn) == progress
     with pytest.raises(sqlite3.IntegrityError,match='Invalid future discovered_artists.score'):
@@ -82,8 +82,14 @@ def test_invalid_history_is_retained_and_blocks_verification_without_blocking_dd
 @pytest.mark.parametrize('installed',[93],indirect=True)
 def test_bounded_batches_continuing_sources_failure_and_reopened_retry(installed):
     store, _ = installed
-    for index in range(140):
-        store.tracks.upsert_track('video-'+str(index),'Track '+str(index),'Artist',None,10)
+    # This subject audits stored availability values. Catalog ingestion has its
+    # own owners; populate the minimum real rows the audit needs in one commit.
+    with store.conn:
+        recording = store.conn.execute(
+            "INSERT INTO recordings(identity_key) VALUES ('audit-recording')").lastrowid
+        store.conn.executemany(
+            'INSERT INTO youtube_items(video_id,recording_id,available) VALUES (?,?,1)',
+            [('video-'+str(index), recording) for index in range(140)])
     job = audit.job(store.conn,'youtube_items')
     job.install(store.conn)
     checkpoint = job.step(store.conn,batch_size=512)

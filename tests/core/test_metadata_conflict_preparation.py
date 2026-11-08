@@ -8,6 +8,7 @@ import time
 import pytest
 
 from tests.core.test_metadata_owner_cutover import predecessor
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import metadata_conflicts as preparation
 from yt_playlist.core.store import Store
@@ -69,8 +70,6 @@ def test_ordered_candidates_null_blank_and_resolution_keep_separate_identity(pre
     with phase('first_checkpoint'):
         first = preparation.JOB.step(conn, batch_size=2)
     assert first.processed == 2 and head(conn, identity) is None
-    with phase('regular_migration'):
-        regular.migrate(conn)
     with phase('completion'):
         finish(conn)
     captured = head(conn, identity)
@@ -191,7 +190,7 @@ def test_file_io_does_not_hold_transaction_and_rejects_a_stale_source(predecesso
         second.conn.close()
 
 
-def test_interruption_and_failure_preserve_committed_candidates_and_need_explicit_retry(predecessor, monkeypatch, phase):
+def test_interruption_and_failure_preserve_committed_candidates_and_need_explicit_retry(predecessor, monkeypatch, phase, independent_regular_ddl):
     conn = predecessor.conn
     with phase('source_insertion'):
         identity, _ = seed(predecessor, snapshot=False)
@@ -247,8 +246,6 @@ def test_oversized_source_fails_before_file_io_and_retains_source(predecessor, m
         assert preparation.JOB.progress(conn).status == 'failed'
     with phase('source_verification'):
         assert conn.execute('SELECT candidates FROM enrichment_conflict WHERE id=?', (identity,)).fetchone()[0] == raw
-    with phase('regular_migration'):
-        regular.migrate(conn)
 
 
 def test_missing_recorded_association_stays_entry_local(predecessor):
@@ -294,5 +291,3 @@ def test_invalid_resolution_status_is_a_durable_failure(predecessor, phase):
         assert preparation.JOB.progress(conn).status == 'failed'
     assert head(conn, identity) is None
     assert dict(conn.execute('SELECT * FROM enrichment_conflict WHERE id=?', (identity,)).fetchone()) == original
-    with phase('regular_migration'):
-        regular.migrate(conn)

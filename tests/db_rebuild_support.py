@@ -31,31 +31,37 @@ def build_production64(conn):
         assert fingerprint == PRODUCTION_DDL_SHA256, 'Fixture no longer matches the released schema'
         conn.execute('PRAGMA foreign_keys=ON')
         with conn:
-            conn.executemany('INSERT INTO identities(id,label,credential_ref,is_master) VALUES(?,?,?,?)',
-                [(11, 'Main', 'main.json', 1), (29, 'Other account', 'other.json', 0)])
-            for identity in (3, 8, 19):
-                video, key = 'video-'+str(identity), 'song '+str(identity)+'|artist'
-                conn.execute('INSERT INTO recordings(id,identity_key,title,artist) VALUES(?,?,?,?)',
-                             (identity, key, 'Song '+str(identity), 'Artist'))
-                conn.execute('INSERT INTO youtube_items(video_id,recording_id,duration_s,available) VALUES(?,?,200,1)',
-                             (video, identity))
-                conn.execute('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES(?,?,?)',
-                             (identity+100, identity, video))
-                conn.execute("INSERT INTO library_memberships VALUES(?,'released fixture',1000)", (identity+100,))
-            for account, playlist in ((11, 41), (29, 73)):
-                scope = f'@account:{account}:LM'
-                conn.execute("INSERT INTO playlist_scopes VALUES(?,'LM',?,'account')", (scope, account))
-                conn.execute('INSERT INTO playlists(id,identity_id,ytm_playlist_id,title,scope_ref) VALUES(?,?,?,?,?)',
-                             (playlist, account, 'LM', 'Favorites', scope))
-                conn.executemany('INSERT INTO playlist_items VALUES(?,?,?)',
-                                 [(playlist, 'video-'+str(identity), position)
-                                  for position, identity in enumerate((19, 3, 8))])
-            conn.execute("INSERT INTO item_ratings VALUES(11,'video-8','LIKE','api',1001)")
-            conn.execute('INSERT INTO play_events(id,identity_id,identity_key,video_id,played_at,recording_id) '
-                         "VALUES(91,11,'song 8|artist','video-8',1002,8)")
-            conn.execute("INSERT INTO play_event_sources VALUES(91,'live')")
+            populate_catalog(conn)
         assert conn.execute('PRAGMA integrity_check').fetchone() == ('ok',)
         assert not conn.execute('PRAGMA foreign_key_check').fetchall()
+
+
+def populate_catalog(conn):
+    """The same captured identities below either admitted layout's converters."""
+    conn.executemany('INSERT INTO identities(id,label,credential_ref,is_master) VALUES(?,?,?,?)',
+        [(11, 'Main', 'main.json', 1), (29, 'Other account', 'other.json', 0)])
+    for identity in (3, 8, 19):
+        video, key = 'video-'+str(identity), 'song '+str(identity)+'|artist'
+        conn.execute('INSERT INTO recordings(id,identity_key,title,artist) VALUES(?,?,?,?)',
+                     (identity, key, 'Song '+str(identity), 'Artist'))
+        conn.execute('INSERT INTO youtube_items(video_id,recording_id,duration_s,available) VALUES(?,?,200,1)',
+                     (video, identity))
+        conn.execute('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES(?,?,?)',
+                     (identity+100, identity, video))
+        conn.execute("INSERT INTO library_memberships VALUES(?,'released fixture',1000)", (identity+100,))
+    for account, playlist in ((11, 41), (29, 73)):
+        scope = f'@account:{account}:LM'
+        conn.execute("INSERT INTO playlist_scopes(ref,provider_id,identity_id,kind) VALUES(?,'LM',?,'account')",
+                     (scope, account))
+        conn.execute('INSERT INTO playlists(id,identity_id,ytm_playlist_id,title,scope_ref) VALUES(?,?,?,?,?)',
+                     (playlist, account, 'LM', 'Favorites', scope))
+        conn.executemany('INSERT INTO playlist_items VALUES(?,?,?)',
+                         [(playlist, 'video-'+str(identity), position)
+                          for position, identity in enumerate((19, 3, 8))])
+    conn.execute("INSERT INTO item_ratings VALUES(11,'video-8','LIKE','api',1001)")
+    conn.execute('INSERT INTO play_events(id,identity_id,identity_key,video_id,played_at,recording_id) '
+                 "VALUES(91,11,'song 8|artist','video-8',1002,8)")
+    conn.execute("INSERT INTO play_event_sources VALUES(91,'live')")
 
 
 @pytest.fixture

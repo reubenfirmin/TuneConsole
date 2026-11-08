@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from yt_playlist.core import home_offers
 from yt_playlist.core.migrations import MigrationError, migrate, registry, regular
 from yt_playlist.core.preparation import offer_publication

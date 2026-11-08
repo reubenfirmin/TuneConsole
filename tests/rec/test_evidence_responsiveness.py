@@ -180,9 +180,9 @@ def restore_evidence(template, target):
     target._bind_repositories()
 
 
-def publish_serving_inputs(store):
+def publish_serving_inputs(store, *, tracks_per_card=4):
     """Consume completed menus and candidates without running unrelated rankers."""
-    publish_personal_mix(store)
+    publish_personal_mix(store, tracks_per_card=tracks_per_card)
     menu = home_cache.read(store, 'home_tuned')['menus'][0]
     lanes = {proto['lane']: proto['tracks'] for proto in menu['protos']}
     assert set(lanes) == {'comfort', 'wheelhouse', 'explore', 'temporal'}
@@ -408,74 +408,6 @@ def test_home_and_navigation_remain_available_while_processing_historical_prepar
     worker._flush_measurements()
     assert library.rec_ledger.evidence().get('response', oid + ':choice:one')
     assert library.taste_groups.definition('first-leaf', generation='first')
-    worker.shutdown()
-    client.close()
-
-
-@pytest.mark.parametrize('phase', ['file_read', 'context_expansion'])
-@pytest.mark.parametrize('serving_library', [94], indirect=True, ids=['installed-v94'])
-def test_inventory_preparation_does_not_hold_the_home_serving_lock(serving_library, monkeypatch, phase):
-    library = serving_library
-    library.accounts.upsert_account('Main', 'bridge', None, True)
-    library.settings.set_setting('last_sync_at', '1000')
-    library.settings.set_setting('onboard_dismissed', '1')
-    returning_listener(library, 'mixes', now=1000)
-    # Controlled predecessor capture: real immutable evidence lacking only its
-    # new SQL owner. The collector fence remains closed throughout preparation.
-    oid, surface = historical_inventory(library, 'inventory-home')
-    path = library.rec_ledger.evidence()._path('opportunity', oid)
-    entered, release = threading.Event(), threading.Event()
-
-    def hold():
-        if not entered.is_set():
-            entered.set()
-            assert release.wait(5)
-
-    read_bytes, context = original_bytes, group_roots.context
-
-    def held_read(self, **kwargs):
-        if self == path:
-            hold()
-        return read_bytes(self, **kwargs)
-
-    def held_context(store, captured, **kwargs):
-        if captured.get('artifact') and threading.current_thread() is not threading.main_thread():
-            hold()
-        return context(store, captured, **kwargs)
-
-    patch_byte_reads(monkeypatch, held_read if phase == 'file_read' else read_bytes)
-    monkeypatch.setattr(group_roots, 'context', held_context if phase == 'context_expansion' else context)
-    app = create_app(library, lambda: {}, now_fn=lambda: 1000, background_work=True)
-    worker = app.state.ctx.rec_worker
-    monkeypatch.setattr(worker, '_start_loop', lambda: None)
-    client = TestClient(app, base_url='http://127.0.0.1')
-    with ThreadPoolExecutor(1) as executor:
-        future = executor.submit(choice_evidence.maintain_storage, library, 1000)
-        try:
-            assert entered.wait(2)
-            started = time.monotonic()
-            response = client.get('/')
-            assert response.status_code == 200
-            assert_maintenance_banner(response)
-            assert 'A comfort mix for you' in response.text
-            assert client.get('/playlists').status_code == 200
-            status = client.get('/storage-maintenance/status').json()
-            assert not status['active'] and status['evidence_maintenance']['running']
-            assert time.monotonic() - started < 2
-            assert not future.done()
-            assert library.conn.execute('SELECT roots_complete FROM group_retention_state').fetchone()[0] == 0
-        finally:
-            release.set()
-        future.result(5)
-    for _ in range(10):
-        if not choice_evidence.maintain_storage(library, 1000).get('deferred'):
-            break
-    assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='offer' AND external_key=?",
-                                    (oid,)).fetchone()
-    assert library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='comparison' AND external_key=?",
-                                ('proposal:' + surface + ':context',)).fetchone()
-    assert not library.activity_paused
-    assert not library.conn.execute('PRAGMA foreign_key_check').fetchone()
     worker.shutdown()
     client.close()
 

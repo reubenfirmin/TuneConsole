@@ -12,9 +12,20 @@ from yt_playlist.rec import candidate_refresh, fresh_pool
 from yt_playlist.web.jobs import start_fresh_pool
 
 
+def test_quiet_fresh_input_keeps_playable_library_cards_and_no_discoveries(quiet_home_template):
+    store = quiet_home_template.source
+    cards = quiet_home_template.result
+    assert {card['lane'] for card in cards} == {'comfort', 'wheelhouse', 'explore'}
+    tracks = [track for card in cards for track in card['tracks']]
+    assert len(tracks) == 3 and all(track['genre'] == 'Jazz' for track in tracks)
+    assert len(store.rec_query.tracks_by_keys([track['key'] for track in tracks])) == 3
+    assert store.discovery.get_discovered_tracks() == []
+    assert store.recommendations.head('fresh') is None
+
+
 @pytest.mark.parametrize('kind', ['json', 'value'])
 @pytest.mark.parametrize('boundary', ['populate', 'prepare'])
-def test_fresh_failure_preserves_menu_genres_and_requires_explicit_retry(quiet_pool, kind, boundary, caplog):
+def test_fresh_failure_preserves_menu_genres_and_exposes_only_explicit_retry(quiet_pool, kind, boundary, caplog):
     case = quiet_pool
     http, ctx = case.http, case.ctx
     chosen = http.post('/home/mix-genres', data={'genres': ['jazz']})
@@ -41,6 +52,21 @@ def test_fresh_failure_preserves_menu_genres_and_requires_explicit_retry(quiet_p
     assert case.calls == [parameters] and not case.refreshes
     assert len(case.calculations) == int(boundary == 'prepare')
 
+
+@pytest.mark.parametrize('kind', ['json', 'value'])
+@pytest.mark.parametrize('boundary', ['populate', 'prepare'])
+def test_fresh_explicit_retry_rejoins_scheduled_publication_and_recovers(quiet_pool, kind, boundary):
+    case = quiet_pool
+    http, ctx = case.http, case.ctx
+    assert http.post('/home/mix-genres', data={'genres': ['jazz']}).status_code == 200
+    parameters = {'include_genres': ['jazz'], 'avoid_genres': []}
+    case.fault, case.boundary = kind, boundary
+    # The failure-rendering owner above exercises the original HTTP submission.
+    # Retry consumes a failed real worker job, without repeating its board/poll
+    # rendering merely to establish the same committed precondition.
+    job = start_fresh_pool(ctx, parameters)
+    assert ctx.work.wait(5)
+    assert job.done and job.outcome == 'failed' and DIAGNOSTIC in job.error
     case.fault = None
     assert http.post('/home/fresh-pool', data={'include_genres': ['jazz']}).status_code == 200
     assert ctx.work.wait(5)

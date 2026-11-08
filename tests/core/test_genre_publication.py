@@ -7,6 +7,7 @@ import threading
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import albums, genre_classifications, genre_identity
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import genre_classifications as preparation, genre_publication as publication
@@ -82,7 +83,6 @@ def test_selection_keeps_null_blank_ambiguity_and_all_originals_with_pinned_read
         assert [row[0] for row in rows] == ['resolved', 'null', 'blank', 'unknown_genre', 'ambiguous_genre']
         assert [json.loads(row[1])['label'] for row in rows] == [
             'Drum And Bass', None, '', 'Unregistered style', 'Ambiguous']
-        regular.migrate(conn)
         for owner, original in before.items():
             assert list(map(tuple, conn.execute('SELECT * FROM main.'+owner))) == original
     finally:
@@ -192,7 +192,6 @@ def test_independent_verification_rejects_preparation_damage(installed, damage):
     with pytest.raises(MigrationError, match='differs|missing|extra'):
         publication.publish(conn, identity=stage.id)
     assert publication.selected(conn) is None
-    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
@@ -231,7 +230,7 @@ def test_interrupted_batch_resume_and_final_fence_rejects_late_writer(installed,
 
 
 @pytest.mark.parametrize('installed', [85], indirect=True)
-def test_slow_verification_keeps_writes_and_regular_admission_available(installed, monkeypatch):
+def test_slow_verification_keeps_writes_and_regular_admission_available(installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     seed(store)
     stage = ready(store.conn)
@@ -263,7 +262,7 @@ def test_slow_verification_keeps_writes_and_regular_admission_available(installe
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
-def test_oversized_source_fails_durably_and_regular_schema_remains_independent(installed):
+def test_oversized_source_fails_durably_and_regular_schema_remains_independent(installed, independent_regular_ddl):
     store, _ = installed
     seed(store)
     conn = store.conn

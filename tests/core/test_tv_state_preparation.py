@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.test_tv_stream import video
 from yt_playlist.core import tv_recommendation_state as state
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -80,7 +80,6 @@ def test_all_five_jobs_retain_exact_shapes_clocks_and_reference_custody(installe
     assert tuple(store.conn.execute('SELECT source_ref,target_ref,source_resolution,target_resolution,input_stream,request_id,built_at FROM ' +
         preparation.relation('tv_continuation_receipts')).fetchone()) == (None, None, 'missing_playlist', 'missing_playlist', '', 'request:with:colons', None)
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [79, 94], indirect=True)
@@ -261,7 +260,7 @@ def test_interruption_missing_file_failed_job_new_regular_ddl_and_reopened_retry
         conn.execute('CREATE TABLE independent_tv_ddl(value TEXT)')
     def validate(conn):
         assert conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='independent_tv_ddl'").fetchone()
-    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_tv_ddl', install, validate)))
+    monkeypatch.setattr(regular, 'CHANGES', (regular.Change(1, 'independent_tv_ddl', install, validate),))
     regular.migrate(store.conn)
     assert store.conn.execute('SELECT max(version) FROM schema_changes').fetchone()[0] == len(regular.CHANGES)
     assert pool.progress(store.conn) == failed
@@ -344,4 +343,3 @@ def test_invalid_sources_fail_durably_without_changing_original_or_selecting_par
     assert job.progress(store.conn).status == 'failed'
     assert head(store.conn, surface) is None
     assert store.conn.execute('SELECT payload FROM rec_proposals WHERE surface=?', (surface,)).fetchone()[0] == raw
-    regular.migrate(store.conn)

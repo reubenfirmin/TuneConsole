@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import collection_recovery, policy_documents, radio_storage, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import append_operations as preparation
@@ -164,7 +165,8 @@ def test_large_members_resume_without_source_io_and_continuing_replacement(insta
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_failure_interrupt_missing_plan_retry_and_new_regular_ddl(installed, monkeypatch):
+def test_failure_interrupt_missing_plan_retry_and_new_regular_ddl(
+        installed, monkeypatch, independent_regular_ddl):
     store, version = installed
     names, sources, _, _ = seed(store, version)
     name, source = names[0], sources[0]
@@ -178,11 +180,6 @@ def test_failure_interrupt_missing_plan_retry_and_new_regular_ddl(installed, mon
     with pytest.raises(OSError, match='file failure'):
         job.step(store.conn)
     failed = job.progress(store.conn)
-    def install(conn, context):
-        conn.execute('CREATE TABLE independent_append_ddl(value TEXT)')
-    def validate(conn):
-        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_append_ddl'").fetchone()
-    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_append_ddl', install, validate)))
     regular.migrate(store.conn)
     assert job.progress(store.conn) == failed
     monkeypatch.setattr(policy_documents, '_publish_encoded', publish)

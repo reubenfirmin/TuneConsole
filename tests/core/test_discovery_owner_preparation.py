@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.store_fixture_support import reuse_reporting_reader
 from yt_playlist.core import collection_recovery, discovery_provenance as provenance, policy_documents
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import discovery_artists as documents, discovery_subjects as rows
@@ -22,22 +23,25 @@ def finish(job, conn, size=128):
 
 
 def seed(store):
-    account = store.accounts.upsert_account('Main','main.json',None,True)
-    store.discovery.upsert_discovered_track('song|artist','song','Song','Artist',None,None,None,None,'radio:song',1)
-    store.discovery.upsert_discovered_album('release','Artist','Release',None,None,1)
-    store.discovery.upsert_discovered_artist('Candidate',2,['Anchor','Anchor'],['Playlist'],None,1)
-    aid = store.conn.execute('SELECT artist_id FROM main.discovered_artists').fetchone()[0]
-    rid = store.conn.execute("SELECT recording_id FROM main.catalog_entries WHERE video_id='song'").fetchone()[0]
-    album = store.conn.execute("SELECT album_id FROM main.album_provider_ids WHERE provider='youtube' AND provider_id='release'").fetchone()[0]
-    with store.conn:
-        store.conn.execute('INSERT INTO main.artist_scans VALUES (?,NULL,?)', ('@artist:' + str(aid), aid))
-        store.conn.executemany('INSERT INTO main.discovery_artist_sources VALUES (?,?,?,?)',
-            [(aid, 'spotify_export:' + str(account), account, 3), (aid, 'artist:missing-provider', None, 1)])
-        store.conn.executemany('INSERT INTO main.discovery_visible_impressions VALUES (?,?,?,?)',
-            [('visit','track','song|artist',3),('visit','artist',str(aid),3),('other','artist',str(aid),4),
-             ('missing','album','absent',5),('unsupported','mystery','unknown',6)])
-        store.conn.execute('UPDATE main.discovered_artists SET offered_count=9,first_shown=0,last_shown=4,legacy_offered_count=7,legacy_first_shown=NULL,legacy_last_shown=1')
-    return account, aid, rid, album
+    # Ingestion is fixture setup here. Keep its real SQL and file-backed reader,
+    # without repeatedly admitting reporting connections for each source.
+    with pytest.MonkeyPatch.context() as patch, reuse_reporting_reader(store, patch):
+        account = store.accounts.upsert_account('Main','main.json',None,True)
+        store.discovery.upsert_discovered_track('song|artist','song','Song','Artist',None,None,None,None,'radio:song',1)
+        store.discovery.upsert_discovered_album('release','Artist','Release',None,None,1)
+        store.discovery.upsert_discovered_artist('Candidate',2,['Anchor','Anchor'],['Playlist'],None,1)
+        aid = store.conn.execute('SELECT artist_id FROM main.discovered_artists').fetchone()[0]
+        rid = store.conn.execute("SELECT recording_id FROM main.catalog_entries WHERE video_id='song'").fetchone()[0]
+        album = store.conn.execute("SELECT album_id FROM main.album_provider_ids WHERE provider='youtube' AND provider_id='release'").fetchone()[0]
+        with store.conn:
+            store.conn.execute('INSERT INTO main.artist_scans VALUES (?,NULL,?)', ('@artist:' + str(aid), aid))
+            store.conn.executemany('INSERT INTO main.discovery_artist_sources VALUES (?,?,?,?)',
+                [(aid, 'spotify_export:' + str(account), account, 3), (aid, 'artist:missing-provider', None, 1)])
+            store.conn.executemany('INSERT INTO main.discovery_visible_impressions VALUES (?,?,?,?)',
+                [('visit','track','song|artist',3),('visit','artist',str(aid),3),('other','artist',str(aid),4),
+                 ('missing','album','absent',5),('unsupported','mystery','unknown',6)])
+            store.conn.execute('UPDATE main.discovered_artists SET offered_count=9,first_shown=0,last_shown=4,legacy_offered_count=7,legacy_first_shown=NULL,legacy_last_shown=1')
+        return account, aid, rid, album
 
 
 def artist_job(version):
@@ -170,7 +174,7 @@ def test_large_artist_key_only_resume_failure_and_retry(installed,monkeypatch):
         conn.execute('CREATE TABLE independent_discovery_ddl(value TEXT)')
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_discovery_ddl'").fetchone()
-    monkeypatch.setattr(regular,'CHANGES',(*regular.CHANGES,regular.Change(len(regular.CHANGES) + 1,'independent_discovery_ddl',install,validate)))
+    monkeypatch.setattr(regular,'CHANGES',(regular.Change(1,'independent_discovery_ddl',install,validate),))
     regular.migrate(store.conn)
     assert job.progress(store.conn) == failed
     monkeypatch.setattr(policy_documents,'_publish_encoded',publish)

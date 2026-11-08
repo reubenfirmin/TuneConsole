@@ -14,6 +14,7 @@ from tests.test_home_tuning import home_clients, prepare_tuning_home
 from tests.musical_support import prepare_profiles, prepare_vibes
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
 from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import home_vibe, mix_tuning, mode_surfaces, musical_character, musical_profiles, rec_params
 
@@ -117,7 +118,17 @@ def vibe_http_calculation(completed, selection):
 
 
 @pytest.fixture(scope='module')
-def vibe_http_template(_pristine_current_schema):
+def vibe_http_schema():
+    # HTTP consumers exercise real catalog/SQL/files with their six input
+    # genres plus the ordinary menu's House; full vocabulary is owned by admission.
+    with bounded_consumer_schema((('jazz', 'Jazz'), ('techno', 'Techno'), ('classical', 'Classical'),
+                                 ('ambient', 'Ambient'), ('trance', 'Trance'), ('indie-rock', 'Indie Rock'),
+                                 ('house', 'House'))) as schema:
+        yield schema
+
+
+@pytest.fixture(scope='module')
+def vibe_http_template(vibe_http_schema):
     from yt_playlist.rec import home_cache, home_cards, home_prepared, measurement
 
     def seed(store):
@@ -143,7 +154,7 @@ def vibe_http_template(_pristine_current_schema):
             publish_bundles(store, {'all': {'wheelhouse': baseline.protos[0]['tracks']}}, 1000)
             return SimpleNamespace(payload=payload, completed=completed)
 
-    with prepared_template(_pristine_current_schema, seed) as template:
+    with prepared_template(vibe_http_schema, seed) as template:
         yield template
 
 
@@ -354,30 +365,74 @@ def seed_sounds(store, *, by_mode=False):
     publish_bundles(store, bundles, 1, fresh=bundles['all']['fresh'], vibes=True)
 
 
+@pytest.fixture
+def ordinary_menu_client(vibe_http_schema, vibe_template_bytecode,
+                         home_routes_only, without_metadata_providers):
+    from fastapi.testclient import TestClient
+    from tests.home_fixture_support import publish_menu
+    from yt_playlist.core.store import Store
+    from yt_playlist.web.app import create_app
+
+    # Capture consumes an already prepared menu. Vibe ranking, typed candidate
+    # publication and profiles belong to the independent selection owners.
+    store = Store(':memory:')
+    try:
+        initialize_consumer(store, vibe_http_schema)
+        publish_menu(store, tracks_per_card=1)
+        app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
+        app.state.ctx.templates.env.bytecode_cache = vibe_template_bytecode
+        with TestClient(app, base_url='http://127.0.0.1',
+                        backend_options={'use_uvloop': True}) as client:
+            yield store, client
+    finally:
+        store.conn.close()
+
+
+def test_ordinary_menu_capture_has_no_vibe_purpose(ordinary_menu_client, caplog):
+    import html
+    import json
+    import re
+    store, client = ordinary_menu_client
+    ordinary = client.get('/home/cards')
+    assert ordinary.status_code == 200
+    ordinary_recipes = [json.loads(html.unescape(value)) for value in
+                        re.findall(r"data-recipe='([^']*)'", ordinary.text)]
+    assert len(ordinary_recipes) == 4
+    from yt_playlist.rec import choice_evidence
+    for displayed in ordinary_recipes:
+        captured = choice_evidence.opportunity(store, displayed['opportunity_id'])
+        assert captured and 'vibe' not in captured
+        assert any(str(row['id']) == displayed['option_id'] for row in captured['options'])
+    assert not any('Mix choice capture failed' in record.getMessage() for record in caplog.records)
+
+
 def test_vibe_renders_changed_selection_with_visible_choice_evidence(vibe_http_inputs, vibe_clients):
     import html
     import json
     import re
+    from yt_playlist.rec import choice_evidence
+
     store = vibe_http_inputs.store
-    clock = [1000.0]
-    client = vibe_clients(clock)
+    client = vibe_clients([1000.0])
     before = store.recommendations.head('home')
     learned = store.rec_model.get_weights()
-    response = select_vibe(client, 'relax', expected_phase=None)
+    response = select_vibe(client, 'relax')
     assert response.status_code == 200
     assert 'data-vibe="relax"' in response.text
     assert '"vibe": "relax"' in response.text
     assert response.headers["X-Mix-Tuning-Active"] == "true"
     # Mix outcomes retain the visible theme/raw genres after a later temporary
     # vibe change; #688 deliberately retires hidden recipe/profile precision.
-    opportunities = [row for row in store.rec_ledger.evidence().records('opportunity')
-                     if row['format'] == 'mixes']
-    assert opportunities
-    offered = opportunities[-1]
+    recipes = [json.loads(html.unescape(value)) for value in re.findall(r"data-recipe='([^']*)'", response.text)]
+    assert len(recipes) == 4 and all(recipe['vibe'] == 'relax' for recipe in recipes)
+    offered = choice_evidence.opportunity(store, recipes[0]['opportunity_id'])
+    assert offered and offered['format'] == 'mixes' and offered['vibe'] == 'relax'
     rendered_genres = [json.loads(html.unescape(value)) for value in
                        re.findall(r"data-genres='([^']*)'", response.text)]
     from yt_playlist.core import mix_choices
     options = [mix_choices.expand(store.conn, option) for option in offered['options']]
+    assert all(recipe['opportunity_id'] == offered['id'] for recipe in recipes)
+    assert all('descriptor_id' in row and not {'recipe', 'tracks', 'keys'} & row.keys() for row in offered['options'])
     assert [option['genres'] for option in options] == [sorted(set(g)) for g in rendered_genres]
     assert all(option['label'] and option['intent'] and 'recipe' not in option
                and 'tracks' not in option for option in options)

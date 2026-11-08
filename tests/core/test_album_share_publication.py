@@ -8,6 +8,7 @@ import pytest
 
 from tests.core.test_album_owner_preparation import finish, seed
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import album_tracklists
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import album_shares as preparation, album_share_publication as publication
@@ -85,9 +86,9 @@ def test_preopened_readers_use_exact_choices_aliases_and_existing_completeness(i
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['fields','member','reference','extra','omitted','original','plan'])
-def test_wrong_header_choices_references_coverage_or_files_cannot_publish(installed, staged_custody, failure):
+def test_wrong_header_choices_references_coverage_or_files_cannot_publish(installed, failure):
     store, _ = installed
-    staged_custody(installed, 'album-shares', rejection_inputs)
+    rejection_inputs(store)
     header = preparation.head(store.conn, 'release')
     with store.conn:
         if failure == 'fields':
@@ -108,7 +109,6 @@ def test_wrong_header_choices_references_coverage_or_files_cannot_publish(instal
     with pytest.raises((MigrationError, ValueError, OSError)):
         publication.OWNER.publish(store.conn, stage=selected)
     assert publication.OWNER.selected(store.conn) is None
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -165,7 +165,7 @@ def test_reference_race_and_interrupted_cutover_leave_no_mixed_selection(install
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_missing_files_and_failed_preparation_remain_independent_of_ddl(installed, monkeypatch):
+def test_missing_files_and_failed_preparation_remain_independent_of_ddl(installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     complete_source(store)
     selected = stage(store.conn)
@@ -187,11 +187,6 @@ def test_missing_files_and_failed_preparation_remain_independent_of_ddl(installe
     with pytest.raises(OSError, match='controlled album share'):
         preparation.JOB.step(store.conn)
     failed = preparation.JOB.progress(store.conn)
-    def install(conn, context):
-        conn.execute('CREATE TABLE independent_album_share_publication(value TEXT)')
-    def validate(conn):
-        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_album_share_publication'").fetchone()
-    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_album_share_publication', install, validate)))
     regular.migrate(store.conn)
     assert preparation.JOB.progress(store.conn) == failed
     monkeypatch.setattr(preparation.files, 'publish', publish)

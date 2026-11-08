@@ -6,7 +6,8 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_append_operation_preparation import seed
 from yt_playlist.core import collection_recovery, radio_storage
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -102,7 +103,6 @@ def test_incorrect_operation_state_members_coverage_or_files_cannot_publish(inst
     with pytest.raises((MigrationError, ValueError, OSError)):
         owner.publish(store.conn, stage=identity)
     assert owner.selected(store.conn) is None
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93, 97], indirect=True)
@@ -175,7 +175,7 @@ def test_race_and_interrupted_publication_do_not_select_mixed_operations(install
 
 
 @pytest.mark.parametrize('installed', [93, 97], indirect=True)
-def test_missing_files_and_failed_preparation_remain_independent_of_regular_ddl(installed, monkeypatch):
+def test_missing_files_and_failed_preparation_remain_independent_of_regular_ddl(installed, monkeypatch, independent_regular_ddl):
     store, version = installed
     names, sources, recipe, _ = seed(store, version)
     name, source = names[0], sources[0]
@@ -202,10 +202,6 @@ def test_missing_files_and_failed_preparation_remain_independent_of_regular_ddl(
     with pytest.raises(OSError, match='controlled append recovery failure'):
         owner.worker.step(store.conn)
     failed = owner.worker.progress(store.conn)
-    def independent(conn, context):
-        conn.execute('CREATE TABLE independent_append_publication_ddl(value TEXT)')
-    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_append_publication_ddl', independent,
-        lambda conn:conn.execute('SELECT * FROM independent_append_publication_ddl LIMIT 0'))))
     regular.migrate(store.conn)
     assert owner.worker.progress(store.conn) == failed
     monkeypatch.setattr(preparation, 'recovery', publish)

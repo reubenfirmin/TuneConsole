@@ -5,6 +5,7 @@ import json
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import album_playback_context, entity_names, playback_bindings, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import playback_context as preparation
@@ -74,7 +75,6 @@ def test_exact_sources_repeated_bindings_queue_and_unknown_owners_are_retained(i
     assert counts == {table: conn.execute(f'SELECT count(*) FROM main.{table}').fetchone()[0] for table in counts}
     assert not conn.execute('PRAGMA foreign_key_check').fetchone()
     assert files.collect_orphans(conn) == 0
-    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -218,7 +218,7 @@ def test_continuing_writer_reference_changes_and_cross_job_renames_reconcile(ins
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_independent_failure_does_not_block_regular_ddl_or_pending_updates(installed):
+def test_independent_failure_does_not_block_regular_ddl_or_pending_updates(installed, independent_regular_ddl):
     store, _ = installed
     seed(store)
     store.settings.set_setting(preparation.BINDINGS_KEY, '{')
@@ -321,4 +321,3 @@ def test_invalid_contexts_fail_durably_without_changing_authoritative_source(ins
         finish(job, store.conn)
     assert job.progress(store.conn).status == 'failed'
     assert store.settings.get_setting(source) == raw
-    regular.migrate(store.conn)

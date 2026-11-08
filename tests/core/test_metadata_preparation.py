@@ -11,11 +11,12 @@ from yt_playlist.core.migrations.runner import MigrationError
 from yt_playlist.core.preparation import metadata_evidence as preparation
 
 from tests.core.test_metadata_owner_cutover import predecessor, seed
+from tests.independent_schema_support import independent_regular_ddl
 
 
 def finish(conn):
     for _ in range(200):
-        result = preparation.JOB.step(conn, batch_size=2)
+        result = preparation.JOB.step(conn, batch_size=128)
         if result.status == 'prepared':
             return result
     pytest.fail('Finite metadata fixture did not finish')
@@ -33,7 +34,6 @@ def test_durable_metadata_copy_preserves_choices_and_reconciles_composite_keys(p
     choose_field(store, entry, 'genre', 'Blues')
     with store.conn:
         catalog.choose_field(store.conn, entry, 'bpm', '', 'user')
-    regular.migrate(store.conn)
     finish(store.conn)
     staged = {row['field']:dict(row) for row in store.conn.execute(
         f"SELECT * FROM {preparation.TABLE} WHERE owner='entry_field_choices'")}
@@ -63,7 +63,7 @@ def test_durable_metadata_copy_preserves_choices_and_reconciles_composite_keys(p
     assert {'Blues', None} <= {json.loads(snapshot['value_json']) for snapshot in snapshots}
 
 
-def test_metadata_failure_is_durable_and_does_not_block_live_writers(predecessor):
+def test_metadata_failure_is_durable_and_does_not_block_live_writers(predecessor, independent_regular_ddl):
     store = predecessor
     entry, _, _ = seed(store)
     job = preparation.JOB
@@ -176,7 +176,6 @@ def test_invalid_operational_input_fails_durably_without_rewriting_it(predecesso
     with pytest.raises((MigrationError, ValueError)):
         finish(store.conn)
     assert preparation.JOB.progress(store.conn).status == 'failed'
-    regular.migrate(store.conn)
     assert store.conn.execute('SELECT fields_json FROM provider_attempts').fetchone()[0] == raw
 
 

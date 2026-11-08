@@ -5,11 +5,11 @@ from types import SimpleNamespace
 import numpy as np
 
 from tests.musical_support import prepare_profiles
-from tests.recommendation_support import publish_bundles
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from yt_playlist.util.matching import identity_key
 
 
-def publication_inputs(store, monkeypatch):
+def publication_inputs(store, monkeypatch, *, tracks_per_card=1):
     """Controlled menu calculation beneath real preparation and publication.
 
     Selection/ranking and typed pool heads remain owned by test_home_cards,
@@ -25,31 +25,20 @@ def publication_inputs(store, monkeypatch):
         bundles[str(mid)] = {}
         for lane in lanes:
             source_lane, subject = ('fresh', 0) if lane == 'fresh' else ('wheelhouse', mid)
-            track = {'key': f'{source_lane} {subject} 0|artist {subject} 0',
-                     'title': f'{source_lane} {subject} 0', 'artist': f'Artist {subject} 0',
-                     'video_id': f'v-{source_lane}-{subject}-0', 'genre': genre, 'album': '',
-                     'thumbnail': None, 'plays': 0, 'reason': '', 'lane': lane}
-            bundles[str(mid)][lane] = [track]
-            bundles['all'].setdefault(lane, []).append(track)
+            tracks = [{'key': f'{source_lane} {subject} {index}|artist {subject} {index}',
+                       'title': f'{source_lane} {subject} {index}', 'artist': f'Artist {subject} {index}',
+                       'video_id': f'v-{source_lane}-{subject}-{index}', 'genre': genre, 'album': '',
+                       'thumbnail': None, 'plays': 0, 'reason': '', 'lane': lane}
+                      for index in range(tracks_per_card)]
+            bundles[str(mid)][lane] = tracks
+            bundles['all'].setdefault(lane, []).extend(tracks)
     # Metadata ingestion is not part of a publication precondition. Keep real
     # catalog identities and memberships without re-running every ingestion
     # observer, artist resolver and profile producer for each controlled track.
     library = list({track['key']: track for lane, tracks in bundles['all'].items()
                     if lane != 'fresh' for track in tracks}.values())
-    with store.conn:
-        store.conn.executemany('INSERT INTO recordings(id,identity_key,title,artist) VALUES (?,?,?,?)',
-            [(rid, track['key'], track['title'], track['artist'])
-             for rid, track in enumerate(library, 1)])
-        store.conn.executemany('INSERT INTO youtube_items(video_id,recording_id,title,artist) VALUES (?,?,?,?)',
-            [(track['video_id'], rid, track['title'], track['artist'])
-             for rid, track in enumerate(library, 1)])
-        store.conn.executemany('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
-            [(rid, rid, track['video_id']) for rid, track in enumerate(library, 1)])
-        store.conn.executemany("INSERT INTO library_memberships VALUES (?,'fixture',NULL)",
-            [(rid,) for rid in range(1, len(library) + 1)])
-    for track in {track['key']: track for track in bundles['all']['fresh']}.values():
-        store.discovery.upsert_discovered_track(track['key'], track['video_id'],
-            track['title'], track['artist'], '', None, track['genre'], None, None, 1)
+    fresh = {track['key']: track for track in bundles['all']['fresh']}
+    seed_publication_subjects(store, [*library, *fresh.values()], discoveries=fresh, now=1)
     store.modes.replace_modes([
         {'mode_id': mid, 'label': genre, 'families': [], 'size': 4,
          'centroid': np.eye(6)[mid], 'rep_keys': []}

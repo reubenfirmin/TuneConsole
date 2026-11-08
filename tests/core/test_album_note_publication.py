@@ -6,7 +6,8 @@ import sqlite3
 import pytest
 
 from tests.core.test_album_note_preparation import NOTES, finish, header, seed
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import album_notes as preparation, album_note_publication as publication
@@ -113,7 +114,6 @@ def test_incorrect_files_headers_references_or_coverage_cannot_publish(installed
     with pytest.raises((MigrationError, ValueError, OSError)):
         publication.publish(store.conn, revision=revision)
     assert publication.selected(store.conn) is None
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [83], indirect=True)
@@ -194,7 +194,7 @@ def test_continuing_sources_and_reference_races_reject_stale_publication(install
 
 
 @pytest.mark.parametrize('installed', [83], indirect=True)
-def test_interrupted_cutover_missing_files_recovery_and_failed_job_do_not_block_ddl(installed, monkeypatch):
+def test_interrupted_cutover_missing_files_recovery_and_failed_job_do_not_block_ddl(installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     raw = seed(store)
     revision = prepared(store.conn)
@@ -226,11 +226,6 @@ def test_interrupted_cutover_missing_files_recovery_and_failed_job_do_not_block_
     with pytest.raises(OSError, match='controlled note file failure'):
         preparation.JOB.step(store.conn)
     failed = preparation.JOB.progress(store.conn)
-    def install(conn, context):
-        conn.execute('CREATE TABLE independent_note_publication(value TEXT)')
-    def validate(conn):
-        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_note_publication'").fetchone()
-    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES,regular.Change(len(regular.CHANGES) + 1,'independent_note_publication',install,validate)))
     regular.migrate(store.conn)
     assert preparation.JOB.progress(store.conn) == failed
     with pytest.raises(MigrationError, match='retry explicitly'):

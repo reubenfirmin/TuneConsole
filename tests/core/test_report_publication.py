@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_report_preparation import VALUE, finish, head, seed
 from yt_playlist.core import recommendation_outputs as files, recommendation_reports as reports
 from yt_playlist.core.migrations import MigrationError, migrate, regular, registry

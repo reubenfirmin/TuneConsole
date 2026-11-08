@@ -5,6 +5,7 @@ import json
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import albums
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import recommendation_demand as preparation
@@ -44,7 +45,6 @@ def test_exact_demands_and_continuing_edits_keep_installed_owners(installed):
     preparation.JOB.install(store.conn)
     first = preparation.JOB.step(store.conn, batch_size=1)
     assert first.processed == 1 and first.status == 'copying'
-    regular.migrate(store.conn)
     finish(store.conn)
     assert [tuple(row) for row in store.conn.execute('SELECT * FROM rec_proposals ORDER BY surface')] == raw
     assert [tuple(row) for row in store.conn.execute('SELECT * FROM prepared_demand_originals ORDER BY surface')] == raw
@@ -80,7 +80,7 @@ def test_exact_demands_and_continuing_edits_keep_installed_owners(installed):
 
 
 @pytest.mark.parametrize('installed', [86], indirect=True)
-def test_interrupted_batch_and_invalid_source_require_explicit_recovery(installed, monkeypatch):
+def test_interrupted_batch_and_invalid_source_require_explicit_recovery(installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     seed(store)
     preparation.JOB.install(store.conn)

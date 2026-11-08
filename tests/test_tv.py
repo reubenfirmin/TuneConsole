@@ -1,5 +1,6 @@
 """TV inherits prepared musical choices and resolves only bounded visual editions."""
 import json
+from contextlib import closing
 from tests.enrichment_support import complete_entries, complete_discovered
 from tests.derived_rating_support import seed_dislike, seed_like
 
@@ -9,8 +10,77 @@ from fastapi.testclient import TestClient
 from tests.conftest import FakeClient
 from tests.onboarding_support import publish_personal_mix
 from tests.prepared_fixture_support import prepared_template
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from yt_playlist.core.store import Store
 from yt_playlist.rec import account_growth, tv
 from yt_playlist.web.app import create_app
+
+
+@pytest.fixture(scope='module')
+def tv_schema():
+    with bounded_consumer_schema((('house', 'House'),)) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(request, tmp_path, tv_schema, monkeypatch):
+    if 'tv_journey_inputs' in request.fixturenames:
+        yield request.getfixturevalue('store')
+        return
+    database = Store(tmp_path / 'tv.db')
+    with closing(database.conn):
+        initialize_consumer(database, tv_schema)
+        # These cases own TV serving and publication, independently of the
+        # periodic WAL checkpoint policy covered by test_publication_checkpoint.
+        database.conn.execute('PRAGMA wal_autocheckpoint=0')
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
+
+
+@pytest.fixture(autouse=True)
+def tv_http_routes(monkeypatch):
+    """Build the real TV, playlist and bridge routes used by these checks."""
+    from yt_playlist.providers import genres
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, home, playlists
+
+    monkeypatch.setattr(genres, 'configure', lambda *args, **kwargs: None)
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        module.build(ctx) for module in (app_update, audio_preview, home, playlists)])
+    monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
+
+
+@pytest.fixture
+def completed_video_catalog(store, monkeypatch):
+    """Supply completed video ingestion below the real TV launch/playlist writer.
+
+    The launch still creates its remote playlist, records confirmation, publishes
+    SQL membership and recipe, and handles playback through the actual routes.
+    Track metadata ingestion is covered by the track controller's own tests.
+    """
+    from yt_playlist.util.matching import identity_key
+
+    def install(items):
+        rows = [{**item, 'key': identity_key(item['title'], item['artist']),
+                 'duration_s': item['duration']} for item in items]
+        seed_publication_subjects(store, rows)
+        with store.conn:
+            # Prepared visual editions are unowned until the generated TV
+            # playlist publishes them; they must retain generated quarantine.
+            store.conn.executemany('DELETE FROM library_memberships WHERE entry_id='
+                '(SELECT id FROM catalog_entries WHERE video_id=?)', [(row['video_id'],) for row in rows])
+        entries = {row['video_id']: store.conn.execute(
+            'SELECT id FROM catalog_entries WHERE video_id=?', (row['video_id'],)).fetchone()[0]
+            for row in rows}
+
+        def ingested(video, title='', artist='', album=None, duration_s=None, **kwargs):
+            assert video in entries, video
+            return entries[video]
+
+        monkeypatch.setattr(store.tracks, 'upsert_track', ingested)
+
+    return install
 
 
 def row(index=0, title='Prepared 0 (Official Music Video)', **values):
@@ -38,9 +108,22 @@ def tv_journey_inputs(store, early_journey_template):
     early_journey_template.restore(store)
 
 
+@pytest.fixture
+def prepared_tv_predecessors(monkeypatch):
+    # These TV HTTP cases consume prerequisite readiness. The real preparation
+    # path remains in test_home_keeps_tv_entry_with_prepared_queue_after_the_early_journey
+    # and test_growth_journey.test_early_pool_then_small_discover_interlude_precede_four_playable_mixes.
+    from yt_playlist.rec import growth_readiness
+
+    def prepared():
+        for name in ('foundation', 'albums', 'discover'):
+            monkeypatch.setattr(growth_readiness, name, lambda *args, **kwargs: True)
+    return prepared
+
+
 def prepare_tv_formats(store, *, mixes=4):
     """Publish this case's mixes/radio after its independent early journey."""
-    tracks = publish_personal_mix(store, count=mixes)
+    tracks = publish_personal_mix(store, count=mixes, tracks_per_card=1)
     store.settings.set_setting('radio_seed_offer', json.dumps({
         'menu_id': 'prepared-radio', 'tracks': tracks[:4]}))
     complete_entries(store, [row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1000)
@@ -423,13 +506,15 @@ def test_refill_continues_across_menu_changes_and_keeps_prepared_videos(store, m
                for query, _ in client.searches[tv.MAX_SEEDS * len(tv.SEARCHES):])
 
 
-def test_precalculated_serving_parameters_generation_and_sidebar_launch(store, caplog):
+def test_precalculated_serving_parameters_generation_and_sidebar_launch(
+        store, caplog, prepared_tv_predecessors, completed_video_catalog):
     from collections import Counter
     from tests.test_tv_stream import video
 
     iid = store.accounts.upsert_account('main', 'cred', None, True)
     store.settings.set_setting('last_sync_at', '1')
-    seeds = prepare_tv_journey(store)
+    prepared_tv_predecessors()
+    seeds = prepare_tv_formats(store)
     client = Videos([row(i, title=f'Prepared {i} Visualizer') for i in range(4)])
     prepare_pool(store, client, seeds=seeds)
     pool = tv.cached(store)
@@ -441,6 +526,7 @@ def test_precalculated_serving_parameters_generation_and_sidebar_launch(store, c
     client._catalog.update({item['video_id']: {
         'videoId': item['video_id'], 'title': item['title'], 'artists': [{'name': item['artist']}],
         'duration_seconds': item['duration']} for item in extras})
+    completed_video_catalog([*pool['items'], *extras])
     assert account_growth.view(store, 1)['ready_areas']['tv']
     searches = len(client.searches)
     app = create_app(store, lambda: {iid: client}, now_fn=lambda: 1)
@@ -566,23 +652,27 @@ def test_handoff_waits_for_extension_confirmation_and_never_assumes_success(stor
         assert web.post('/home/tv/takeover').status_code == 409
 
 
-def test_tv_length_cap_can_admit_long_video_without_changing_music_limit(store):
+def test_tv_length_cap_can_admit_long_video_without_changing_music_limit(
+        store, prepared_tv_predecessors, completed_video_catalog):
     from yt_playlist.library.playlist_generated import create_generated_playlist
     from tests.test_tv_stream import video
     iid = store.accounts.upsert_account('main', 'cred', None, True)
-    seeds = prepare_tv_journey(store)
-    client = Videos([row(duration_seconds=2100)])
-    prepare_pool(store, client, seeds=seeds)
-    pool = tv.cached(store)
-    extras = [video(10 + i, duration=2100) for i in range(11)]
-    store.rec_proposals.put_proposals(tv.SURFACE, {**pool, 'items': [*pool['items'], *extras]}, 1)
-    client._catalog.update({item['video_id']: {
+    prepare_tv_formats(store)
+    prepared_tv_predecessors()
+    # Resolver matching has separate owners; length admission consumes a full
+    # completed queue containing only long visual editions.
+    videos = [video(i, duration=2100) for i in range(tv.QUEUE_SIZE)]
+    store.rec_proposals.put_proposals(tv.SURFACE, {
+        'schema': tv.SCHEMA, 'key': 'long-editions', 'at': 1,
+        'attempted': [], 'items': videos}, 1)
+    client = FakeClient(catalog={item['video_id']: {
         'videoId': item['video_id'], 'title': item['title'], 'artists': [{'name': item['artist']}],
-        'duration_seconds': item['duration']} for item in extras})
+        'duration_seconds': item['duration']} for item in videos})
     assert not tv.queue(store, 1)
     store.settings.set_setting(tv.SETTING, '40')
     items = tv.queue(store, 1)
     assert len(items) == tv.QUEUE_SIZE and all(item['duration'] == 2100 for item in items)
+    completed_video_catalog(items)
     with pytest.raises(ValueError, match='maximum track length'):
         create_generated_playlist(store, 'Music', items, client, 1, iid)
     app = create_app(store, lambda: {iid: client}, now_fn=lambda: 1)
@@ -592,7 +682,7 @@ def test_tv_length_cap_can_admit_long_video_without_changing_music_limit(store):
         assert result.json()['items'][0]['duration'] == 2100
 
 
-def test_tv_tab_waits_for_real_mixes_and_follows_long_play(store):
+def test_tv_tab_waits_for_real_mixes_and_follows_long_play(store, prepared_tv_predecessors):
     from html.parser import HTMLParser
     from tests.conftest import seed_catalog_track
 
@@ -625,7 +715,8 @@ def test_tv_tab_waits_for_real_mixes_and_follows_long_play(store):
                     base_url='http://127.0.0.1') as web:
         assert 'TV' not in [label.strip() for label in Tabs(web.get('/').text).labels]
         from tests.test_tv_stream import video
-        prepare_tv_journey(store)
+        prepared_tv_predecessors()
+        prepare_tv_formats(store)
         store.rec_proposals.put_proposals(tv.SURFACE, {
             'schema': tv.SCHEMA, 'key': 'ready-tv-tab', 'at': 1, 'attempted': [],
             'items': [video(i) for i in range(tv.QUEUE_SIZE)]}, 1)

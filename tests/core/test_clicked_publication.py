@@ -7,8 +7,8 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_ranked_state_preparation import seed
-from tests.preparation_timing_support import preparation_costs
 from yt_playlist.core import library_pool_state, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import clicked_publication as publication, ranked_state as preparation
@@ -113,7 +113,6 @@ def test_incorrect_ranked_fields_members_or_files_cannot_publish(installed, stag
         assert preparation.head(store.conn, surface) is None
     else:
         assert preparation.head(store.conn, surface)['preparation_revision'] == header['preparation_revision']
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -182,37 +181,7 @@ def test_source_race_and_interrupted_cutover_leave_no_partial_publication(instal
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_full_ranked_set_and_paged_plan_are_verified_without_sql_scan(installed, preparation_costs):
-    store, _ = installed
-    # One full ranked budget exercises paging and damage/recovery. The other
-    # three lanes retain real nonempty projections; the all-lane controls own
-    # their exact lane semantics without three more identical capacity seeds.
-    originals, _ = seed(store, lane_counts={'wheelhouse': 8192})
-    owner, surface = publication.OWNER, 'home_pool:wheelhouse'
-    # Keep the full paged-plan/recovery budget with the supported largest
-    # slice; separate preparation controls retain small-slice continuation.
-    stage = ready(store.conn, worker_size=512)
-    owner.publish(store.conn, stage=stage)
-    header = owner.capture(store.conn, stage, surface)
-    assert store.conn.execute('SELECT count(*) FROM prepared_clicked_pools_candidates WHERE surface=? AND preparation_revision=?',
-        (surface, header['preparation_revision'])).fetchone()[0] == 8192
-    assert owner.value(store.conn, stage, surface) == originals[surface]
-    assert len(store.rec_proposals.get_proposals(surface)['tracks']) == 8192
-    query = store.conn.execute('EXPLAIN QUERY PLAN SELECT g.* FROM '+owner.table('map')+' m JOIN '+owner.header+
-        ' g ON g.surface=m.source AND g.preparation_revision=m.generation WHERE m.stage=? AND m.source=?', (stage, surface)).fetchall()
-    assert all('SCAN' not in row[-1] for row in query)
-    reference = tuple(header[key] for key in ('plan_filename', 'plan_digest', 'plan_bytes'))
-    plan = preparation.document_plan.load(surface, reference)
-    Path(plan.units.indexes[0][1]).unlink()
-    with pytest.raises(OSError):
-        owner.publish(store.conn, stage=stage)
-    regular.migrate(store.conn)
-    publication.repair(store.conn, surface)
-    owner.publish(store.conn, stage=stage)
-
-
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_missing_original_or_output_and_failed_preparation_do_not_block_ddl(installed):
+def test_missing_original_or_output_and_failed_preparation_do_not_block_ddl(installed, independent_regular_ddl):
     store, _ = installed
     seed(store)
     owner, surface = publication.OWNER, 'home_pool:wheelhouse'

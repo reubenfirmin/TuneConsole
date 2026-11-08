@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_playback_context_preparation import finish, head, seed
 from yt_playlist.core import album_playback_context, entity_names, playback_bindings
 from yt_playlist.core.migrations import MigrationError, regular
@@ -102,7 +102,6 @@ def test_incorrect_context_or_original_never_selects_a_runtime_owner(installed, 
         owner.publish(store.conn, revision=revision)
     assert owner.selected(store.conn) is None
     assert store.settings.get_setting(owner.source) == original[owner.source]
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

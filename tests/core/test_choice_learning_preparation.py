@@ -6,6 +6,7 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import choice_learning_state as learning, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import choice_learning as preparation
@@ -27,6 +28,14 @@ def head(conn, surface='choice_interests'):
 
 def seed(store):
     store.tracks.upsert_track('video', 'Song', 'Artist', 'Album', 100, album_browse_id='release')
+    documents = originals()
+    with store.conn:
+        store.conn.executemany('INSERT INTO rec_proposals VALUES (?,?,NULL)', documents.items())
+    return documents
+
+
+def originals():
+    """Exact lower-layer documents shared by preparation and native consumers."""
     values = {
         'choice_bandit': {'schema': 1, 'rows': [{'mode_id': 99, 'label': 'Exact été', 'estimate': .5}],
                           'parameters': {'open': .25, 'window_d': 30}, 'excluded': {'unseen': 2}, 'expires_at': None},
@@ -41,10 +50,7 @@ def seed(store):
             'album_track_days': {'release': {'song|artist': 2, 'unknown|artist': 0}, 'missing-release': {}},
             'interest_version': 'effective'},
     }
-    documents = {surface: json.dumps(value, ensure_ascii=False, indent=2) for surface, value in values.items()}
-    with store.conn:
-        store.conn.executemany('INSERT INTO rec_proposals VALUES (?,?,NULL)', documents.items())
-    return documents
+    return {surface: json.dumps(value, ensure_ascii=False, indent=2) for surface, value in values.items()}
 
 
 @pytest.mark.parametrize('installed', [92], indirect=True)
@@ -73,7 +79,6 @@ def test_exact_originals_and_typed_relations_preserve_installed_authority(instal
     preparation.JOB.install(conn)
     assert preparation.JOB.step(conn, batch_size=1).processed == 1
     assert head(conn, 'choice_bandit') is None
-    regular.migrate(conn)
     finish(conn)
     for surface, raw in original.items():
         assert preparation.read_original(conn, head(conn, surface)) == raw
@@ -167,7 +172,6 @@ def test_source_and_reference_changes_reconcile_without_pinning_mutable_owners(i
     finish(conn)
     assert head(conn) is None and head(conn, 'choice_bandit') is None
     assert preparation.read_original(conn, previous) == original['choice_interests']
-    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [92], indirect=True)
@@ -214,7 +218,7 @@ def test_file_io_fences_a_concurrent_replacement_without_holding_a_transaction(i
 
 
 @pytest.mark.parametrize('installed', [92], indirect=True)
-def test_interrupted_members_and_disk_failure_preserve_the_committed_prefix(installed, monkeypatch):
+def test_interrupted_members_and_disk_failure_preserve_the_committed_prefix(installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     conn = store.conn
     store.rec_proposals.put_proposals('choice_interests', {'contexts': [{'feature': [.1] * 600}]}, 10)
@@ -235,6 +239,9 @@ def test_interrupted_members_and_disk_failure_preserve_the_committed_prefix(inst
     with pytest.raises(OSError, match='controlled learning disk failure'):
         preparation.JOB.step(conn, batch_size=128)
     assert preparation.JOB.progress(conn).status == 'failed'
+    failed_progress = preparation.JOB.progress(conn)
+    regular.migrate(conn)
+    assert preparation.JOB.progress(conn) == failed_progress
     monkeypatch.setattr(files, 'publish', publish)
     reopened = Store(store._db_path)
     try:
@@ -281,7 +288,6 @@ def test_whitespace_in_original_counts_toward_the_byte_budget(installed):
     assert preparation.JOB.progress(store.conn).status == 'failed'
     assert not store.conn.execute(f'SELECT 1 FROM {preparation.PUBLICATIONS}').fetchone()
     assert store.conn.execute("SELECT length(payload) FROM rec_proposals WHERE surface='choice_bandit'").fetchone()[0] == len(raw)
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [92], indirect=True)
@@ -300,4 +306,3 @@ def test_invalid_numerical_or_ambiguous_relations_fail_without_changing_source(i
         finish(store.conn)
     assert preparation.JOB.progress(store.conn).status == 'failed'
     assert store.conn.execute('SELECT payload FROM rec_proposals WHERE surface=?', (surface,)).fetchone()[0] == raw
-    regular.migrate(store.conn)

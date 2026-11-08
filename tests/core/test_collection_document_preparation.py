@@ -74,7 +74,6 @@ def test_sources_exact_known_account_facets_repetitions_and_verbatim_canvas(inst
     if axes is not None:
         assert axes == list(map(tuple, store.conn.execute('SELECT * FROM taste_axes')))
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [79, 96], indirect=True)
@@ -184,7 +183,7 @@ def test_interruption_missing_plan_retry_and_independent_regular_change(installe
         conn.execute('CREATE TABLE independent_document_ddl(value TEXT)')
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_document_ddl'").fetchone()
-    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_document_ddl', install, validate)))
+    monkeypatch.setattr(regular, 'CHANGES', (regular.Change(1, 'independent_document_ddl', install, validate),))
     regular.migrate(store.conn)
     assert job.progress(store.conn) == failed
     independent = preparation.JOBS['canvases']

@@ -5,6 +5,7 @@ import json
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import taste_axes as preparation
 
@@ -48,7 +49,6 @@ def test_exact_sources_and_configured_conflicts_survive_bounded_copy(installed):
     preparation.JOB.install(conn)
     first = preparation.JOB.step(conn, batch_size=2)
     assert first.processed == 2 and first.prepared_revision is None
-    regular.migrate(conn)
     finish(conn)
     assert source(conn) == original
     assert conn.execute('SELECT count(*) FROM prepared_taste_rows').fetchone()[0] == 11
@@ -112,7 +112,7 @@ def test_family_priority_unknowns_and_reference_reconciliation(installed):
 
 
 @pytest.mark.parametrize('installed', [87], indirect=True)
-def test_interruption_and_invalid_batch_preserve_prefix_until_explicit_retry(installed):
+def test_interruption_and_invalid_batch_preserve_prefix_until_explicit_retry(installed, independent_regular_ddl):
     store, _ = installed
     seed(store)
     conn = store.conn

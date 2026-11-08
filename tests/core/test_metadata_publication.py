@@ -8,6 +8,7 @@ import pytest
 
 from tests.core.test_metadata_owner_cutover import predecessor, seed
 from tests.core.test_metadata_preparation import finish
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import catalog, genre_identity, metadata
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import metadata_evidence as preparation, metadata_publication as publication
@@ -15,7 +16,7 @@ from yt_playlist.core.preparation import metadata_evidence as preparation, metad
 
 def publish(conn):
     for _ in range(200):
-        current = publication.step(conn,batch_size=2)
+        current = publication.step(conn,batch_size=16)
         if current.complete:
             publication.publish(conn,identity=current.id)
             return current.id
@@ -103,9 +104,9 @@ def test_continuing_provider_choice_reference_and_delete_updates_withdraw_select
     "DELETE FROM prepared_metadata_evidence WHERE owner='entry_field_choices'",
 ])
 def test_corrupt_preparation_is_not_publishable_and_regular_schema_remains_independent(
-        predecessor, staged_custody, damage):
+        predecessor, damage, independent_regular_ddl):
     conn = predecessor.conn
-    staged_custody((predecessor, 79), 'metadata-evidence', rejection_inputs, admit=False)
+    rejection_inputs(predecessor)
     with conn:
         conn.execute(damage)
     with pytest.raises(MigrationError,match='differ|missing|extra'):
@@ -153,5 +154,4 @@ def test_all_source_payloads_are_clipped_before_transfer_and_fail_without_trunca
     with pytest.raises(MigrationError,match='byte budget'):
         finish(conn)
     assert preparation.JOB.progress(conn).status=='failed'
-    regular.migrate(conn)
     assert conn.execute('SELECT 1 FROM '+owner+' WHERE '+column+'=?',(raw,)).fetchone()

@@ -445,10 +445,39 @@ def _admitted_installed_schema(tmp_path_factory, _pristine_installed_schema):
             if version not in templates:
                 admitted = resources.enter_context(prepared_template(
                     _pristine_installed_schema(version), lambda source: None,
-                    database=root / f'{version}.db'))
+                    database=root / f'{version}.db', defer_metadata=True))
+                assert admitted.source.conn.execute(
+                    'SELECT max(version) FROM schema_migrations').fetchone()[0] == version
                 # PreparedTemplate owns the admitted source's revision tracker
                 # and installs its TEMP guards when restoring each consumer.
                 templates[version] = admitted
+            return templates[version]
+
+        yield template
+
+
+@pytest.fixture(scope='session')
+def _bounded_installed_schema(tmp_path_factory):
+    """Admit empty publication inputs once; keep private SQL and TEMP guards."""
+    from tests.genre_catalog_support import bound_catalog
+    from tests.prepared_fixture_support import prepared_template
+    from tests.store_fixture_support import install_numbered_input
+
+    root = tmp_path_factory.mktemp('bounded-installed-schemas')
+    templates = {}
+    with ExitStack() as resources:
+        def template(version):
+            if version not in templates:
+                with pytest.MonkeyPatch.context() as patch:
+                    bound_catalog(patch)
+                    source = resources.enter_context(closing(sqlite3.connect(':memory:')))
+                    install_numbered_input(source, version)
+                    source.execute('PRAGMA query_only=ON')
+                    templates[version] = resources.enter_context(prepared_template(
+                        source, lambda store: None, database=root / f'{version}.db',
+                        defer_metadata=True))
+                    assert templates[version].source.conn.execute(
+                        'SELECT max(version) FROM schema_migrations').fetchone()[0] == version
             return templates[version]
 
         yield template

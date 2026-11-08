@@ -4,6 +4,7 @@ import sqlite3
 
 import pytest
 
+from tests.genre_catalog_support import bound_catalog
 from yt_playlist.core import entity_names
 from yt_playlist.core.config import AccountConfig
 from yt_playlist.core.migrations import runner
@@ -32,6 +33,7 @@ def admitted_installed(request, tmp_path, _admitted_installed_schema):
         # SQL/files. Rebinding an empty tracker would install them twice.
         assert store._snapshot_revisions.conn is store.conn
         history = [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')]
+        assert max(row[0] for row in history) == version
         yield store, version
         assert [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')] == history
         with closing(sqlite3.connect(store._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
@@ -59,6 +61,36 @@ def installed(request, tmp_path, _pristine_installed_schema):
         with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as reader:
             reader.row_factory = sqlite3.Row
             runner.validate_version(reader, request.param)
+    finally:
+        store.conn.close()
+
+
+
+@pytest.fixture(params=[79, 93, 102, 107])
+def consumer_installed(request, tmp_path, monkeypatch, _bounded_installed_schema):
+    """Exact completed SQL beneath publication tests, admitted by its builder.
+
+    The installed fixture above owns historical replay. These consumers keep
+    their own file, WAL readers, compatibility repositories, revision guards
+    and final installed-format validation.
+    """
+    version = request.param
+    bound_catalog(monkeypatch)
+    store = Store(tmp_path / 'consumer-installed.db')
+    try:
+        template = _bounded_installed_schema(version)
+        template.restore(store)
+        for name in ('_schema_compatibility', '_rebuild_source_version', '_schema_recovery_pending'):
+            setattr(store, name, getattr(template.source, name))
+        store._bind_repositories()
+        assert store.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal'
+        assert store._snapshot_revisions.conn is store.conn
+        history = [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')]
+        yield store, version
+        assert [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')] == history
+        with closing(sqlite3.connect(store._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
+            reader.row_factory = sqlite3.Row
+            runner.validate_version(reader, version)
     finally:
         store.conn.close()
 

@@ -2,7 +2,8 @@
 import asyncio
 from tests.derived_rating_support import seed_dislike
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import nullcontext
+from copy import deepcopy
 import logging
 import sqlite3
 import threading
@@ -11,59 +12,92 @@ from types import SimpleNamespace
 import pytest
 
 from yt_playlist.core.activity import Activity
-from yt_playlist.core.store import Store
 from yt_playlist.rec import candidate_refresh, embedding_vectors as embed, measurement, mode_surfaces, surfaces
 from tests import model_support
 from tests.prepared_fixture_support import prepared_template, roots
-from tests.recommendation_support import publish_bundles
-from tests.store_fixture_support import initialize_consumer
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema, reuse_reporting_reader
 from yt_playlist.rec.rec_worker import RecWorker
 
 
 @pytest.fixture(scope="module")
-def isolation_template(_pristine_current_schema):
-    with prepared_template(_pristine_current_schema, _seed) as template:
+def isolation_schema():
+    with bounded_consumer_schema((('house', 'House'),)) as schema:
+        yield schema
+
+
+@pytest.fixture(scope="module")
+def isolation_template(isolation_schema):
+    with prepared_template(isolation_schema, _seed) as template:
         yield template
 
 
 @pytest.fixture(params=["memory", "file"])
-def database(request, tmp_path, _pristine_current_schema, isolation_template):
-    store = Store(":memory:" if request.param == "memory" else tmp_path / "state.db")
-    with closing(store.conn):
-        initialize_consumer(store, _pristine_current_schema)
-        store._isolation_saved_heads = isolation_template.restore(store)
-        assert store._isolation_saved_heads == isolation_template.result
-        assert all(head is not original for head, original in zip(
-            store._isolation_saved_heads, isolation_template.result, strict=True))
-        _assert_content_inputs(store, isolation_template.source)
-        _saved(store)
-        destinations = roots(store.conn)
-        copied = 0
-        for name, source in isolation_template.files.items():
-            destination = destinations[name]
-            assert destination != source
-            for path in source.rglob("*"):
-                if path.is_file():
-                    private = destination / path.relative_to(source)
-                    assert private.read_bytes() == path.read_bytes()
-                    assert not private.samefile(path)
-                    copied += 1
-        assert copied
-        yield store
+def database(request, tmp_path, isolation_schema, isolation_template, ranking_inputs, monkeypatch):
+    path = ":memory:" if request.param == "memory" else tmp_path / "state.db"
+    with isolation_template.open(path) as store:
+        if request.param == 'file':
+            # Preserve actual WAL commits/readers without a passive checkpoint
+            # after every pool row. Checkpoint policy has independent owners.
+            store.conn.execute('PRAGMA wal_autocheckpoint=0')
+        store._isolation_saved_heads = deepcopy(isolation_template.result)
+        reporting = reuse_reporting_reader(store, monkeypatch) if request.param == 'file' else nullcontext()
+        with reporting:
+            assert store._isolation_saved_heads == isolation_template.result
+            assert all(head is not original for head, original in zip(
+                store._isolation_saved_heads, isolation_template.result, strict=True))
+            _assert_content_inputs(store, isolation_template.source)
+            _saved(store)
+            destinations = roots(store.conn)
+            copied = 0
+            for name, source in isolation_template.files.items():
+                destination = destinations[name]
+                assert destination != source
+                for path in source.rglob("*"):
+                    if path.is_file():
+                        private = destination / path.relative_to(source)
+                        assert private.read_bytes() == path.read_bytes()
+                        assert not private.samefile(path)
+                        copied += 1
+            assert copied
+            yield store
 
 
 @pytest.fixture
-def _worker_store(tmp_path):
-    # Keep real fresh startup as well as the real seed in the worker control.
-    store = Store(tmp_path / "state.db")
-    with closing(store.conn):
-        store.init_schema()
+def ranking_inputs(monkeypatch):
+    """Supply ranker output below real snapshot calculation and publication.
+
+    Scoring, vibe generation and PPR have independent owners. These cases keep
+    actual model vectors, bucketing, temporal membership, policy capture, typed
+    file staging and SQL heads while racing the captured work with UI writes.
+    """
+    from yt_playlist.rec import ppr
+
+    def pools(reader, now, limit):
+        library = surfaces.ForYouItem('Song', 'Artist', None, 'video', None, 0,
+            'Captured ranking', key='song|artist', genre='House')
+        fresh = surfaces.ForYouItem('Fresh', 'New artist', None, 'fresh', None, 0,
+            'Captured discovery', key='fresh|new artist', genre='House')
+        return {lane: [fresh if lane == 'fresh' else library]
+                for lane in ('wheelhouse', 'explore', 'comfort', 'fresh')}
+
+    monkeypatch.setattr(mode_surfaces, '_rank_pools', pools)
+    monkeypatch.setattr(mode_surfaces.vibe_pools, 'prepare', lambda *args, **kwargs: None)
+    monkeypatch.setattr(ppr, 'mode_rankings', lambda *args, **kwargs: {1: ['song|artist']})
+
+
+@pytest.fixture
+def _worker_store(tmp_path, isolation_template):
+    # Clone real model/candidate files below the worker cancellation boundary.
+    # The SQL interruption and concurrent foreground writes remain per case.
+    with isolation_template.open(tmp_path / "state.db") as store:
+        store._isolation_saved_heads = deepcopy(isolation_template.result)
         yield store
 
 
 def _seed(store):
-    tid = store.tracks.upsert_track("video", "Song", "Artist", None, None)
-    store.tracks.set_track_genre(tid, "House")
+    seed_publication_subjects(store, [{'key': 'song|artist', 'video_id': 'video',
+        'title': 'Song', 'artist': 'Artist', 'genre': 'House'}])
     model_support.build_content_model(store)
     keys, vectors, _ = embed.load_content_vectors(store)
     store.modes.replace_modes([{"mode_id": 1, "label": "House", "families": [["house", 1]],
@@ -71,8 +105,7 @@ def _seed(store):
         "space": embed.content_space_id(store)}], retired_ids=[], now=1)
     fresh = {'key': 'fresh|new artist', 'video_id': 'fresh', 'title': 'Fresh',
              'artist': 'New artist', 'genre': 'House'}
-    store.discovery.upsert_discovered_track(fresh['key'], fresh['video_id'], fresh['title'],
-        fresh['artist'], None, None, fresh['genre'], None, 'test', 1)
+    seed_publication_subjects(store, [fresh], discoveries=[fresh['key']])
     publish_bundles(store, {'all': {'wheelhouse': [{'key': keys[0], 'video_id': 'video',
         'title': 'Song', 'artist': 'Artist', 'genre': 'House'}]}}, 1, fresh=[fresh])
     store._isolation_saved_heads = store.recommendations.heads()
@@ -87,17 +120,18 @@ def _assert_content_inputs(store, original):
 
 
 def _saved(store):
-    assert store.recommendations.heads() == store._isolation_saved_heads
-    assert [row['video_id'] for row in store.recommendations.candidate_page(
-        'home', 'all', 'wheelhouse', limit=4)['tracks']] == ['video']
-    assert [row['video_id'] for row in store.recommendations.candidate_page(
-        'fresh', 'all', 'fresh', limit=4)['tracks']] == ['fresh']
+    # One actual captured view owns this complete consistency assertion.
+    with store.read_view() as reader:
+        assert reader.recommendations.heads() == store._isolation_saved_heads
+        assert [row['video_id'] for row in reader.recommendations.candidate_page(
+            'home', 'all', 'wheelhouse', limit=4)['tracks']] == ['video']
+        assert [row['video_id'] for row in reader.recommendations.candidate_page(
+            'fresh', 'all', 'fresh', limit=4)['tracks']] == ['fresh']
 
 
 def test_ui_read_and_write_complete_while_bundle_scorer_is_still_running(
         _worker_store, isolation_template, monkeypatch):
     store = _worker_store
-    _seed(store)
     _assert_content_inputs(store, isolation_template.source)
     started = threading.Event()
     work = Activity()
@@ -156,7 +190,11 @@ def test_mutation_during_calculation_finishes_and_serving_applies_current_exclus
     assert result is not None and result['all']['temporal']
     assert store.recommendations.heads() != store._isolation_saved_heads
     assert not mode_surfaces.assemble_cards(store, 100, 0)
-    monkeypatch.setattr(mode_surfaces, "_calculate_bundles", calculate)
+
+
+def test_next_calculation_omits_tracks_excluded_after_the_saved_generation(database):
+    store = database
+    seed_dislike(store, 'song|artist', until=None, now=100)
     assert mode_surfaces.prepare_bundles(store, 100) is not None
     assert "song|artist" not in {item['key'] for item in store.recommendations.candidate_page(
         'home', 'all', 'temporal', limit=4)['tracks']}

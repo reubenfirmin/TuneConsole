@@ -5,7 +5,10 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.independent_schema_support import independent_regular_ddl
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import reuse_reporting_reader
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import listening_subjects as preparation
 
@@ -14,14 +17,19 @@ pytestmark = pytest.mark.parametrize('installed', [79, 99], indirect=True)
 
 
 def populated(store):
-    account = store.accounts.upsert_account('Main', 'main.json', None, True)
-    for index in range(3):
-        video = f'upload-{index}'
-        store.tracks.upsert_track(video, f'Song {index}', 'Artist', None, 120)
-        key = store.tracks.identity_key_for_video(video)
-        store.history.record_play_event(account, key, video, 1704844800 + index * 4000,
-                                        source_timezone='UTC')
-    store.history.record_history_plays(account, 1704844800, [key, 'unresolved|artist'], source_timezone='UTC')
+    # Completed catalog input is below listening preparation. Keep genuine
+    # history/calendar rows and their SQL guards without metadata ingestion.
+    seed_publication_subjects(store, [
+        {'key': f'song {index}|artist', 'video_id': f'upload-{index}',
+         'title': f'Song {index}', 'artist': 'Artist', 'duration_s': 120}
+        for index in range(3)])
+    with pytest.MonkeyPatch.context() as patch, reuse_reporting_reader(store, patch):
+        account = store.accounts.upsert_account('Main', 'main.json', None, True)
+        for index in range(3):
+            store.history.record_play_event(account, f'song {index}|artist', f'upload-{index}',
+                1704844800 + index * 4000, source_timezone='UTC')
+        store.history.record_history_plays(account, 1704844800,
+            ['song 2|artist', 'unresolved|artist'], source_timezone='UTC')
     return account
 
 
@@ -32,7 +40,7 @@ def connect(store):
     return closing(conn)
 
 
-def finish(conn, *, batch_size=1):
+def finish(conn, *, batch_size=16):
     for _ in range(100):
         result = preparation.step(conn, batch_size=batch_size)
         if result.status == 'prepared':
@@ -53,7 +61,7 @@ def assert_exact_sources(conn):
             assert staged['unresolved_subject_key'] == (row['identity_key'] if row['recording_id'] is None else None)
 
 
-def test_checkpoints_reconcile_changed_deleted_and_reused_ids_while_regular_ddl_advances(installed):
+def test_checkpoints_reconcile_changed_deleted_and_reused_ids_while_regular_ddl_advances(installed, independent_regular_ddl):
     store, _ = installed
     account = populated(store)
     with connect(store) as conn:
@@ -86,7 +94,7 @@ def test_checkpoints_reconcile_changed_deleted_and_reused_ids_while_regular_ddl_
     assert store.settings.get_setting('during-listening-preparation') == 'ordinary-write'
 
 
-def test_failed_batch_retains_prior_commit_and_requires_explicit_retry(installed):
+def test_failed_batch_retains_prior_commit_and_requires_explicit_retry(installed, independent_regular_ddl):
     store, _ = installed
     account = populated(store)
     with connect(store) as conn:

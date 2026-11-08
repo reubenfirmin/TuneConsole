@@ -20,8 +20,8 @@ def finish_partial_import(store, now=1000):
     }, now)
 
 
-def publish_personal_mix(store, now=1000, count=4):
-    payload = publish_menu(store, now, count=count, surface='home_tuned')
+def publish_personal_mix(store, now=1000, count=4, *, tracks_per_card=4):
+    payload = publish_menu(store, now, count=count, tracks_per_card=tracks_per_card, surface='home_tuned')
     return [track for proto in payload['menus'][0]['protos'] for track in proto['tracks']]
 
 

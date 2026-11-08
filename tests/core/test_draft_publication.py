@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_road_trip_draft_preparation import recipe, seed
 from tests.preparation_timing_support import preparation_costs
 from yt_playlist.core.migrations import MigrationError, regular
@@ -121,7 +122,6 @@ def test_incorrect_draft_fields_members_or_original_cannot_publish(installed, st
         owner.publish(store.conn, stage=selected)
     assert owner.selected(store.conn) is None
     assert store.road_trip.get_road_trip_draft(identity) == json.loads(raw)
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -227,7 +227,7 @@ def test_full_selection_budget_retains_order_and_repeated_uploads(installed, pre
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_missing_files_and_failed_preparation_do_not_block_regular_ddl(installed):
+def test_missing_files_and_failed_preparation_do_not_block_regular_ddl(installed, independent_regular_ddl):
     store, _ = installed
     identity, raw = seed(store)
     owner = publication.OWNER

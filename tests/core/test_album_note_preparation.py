@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import albums, recommendation_outputs
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import album_notes as preparation
@@ -26,7 +27,7 @@ def seed(store, value=NOTES):
 
 def finish(conn):
     for _ in range(20):
-        result = preparation.JOB.step(conn, batch_size=1)
+        result = preparation.JOB.step(conn, batch_size=128)
         if result.status == 'prepared':
             return result
     pytest.fail('Album-note preparation did not finish')
@@ -45,7 +46,7 @@ def prepared(conn, generation):
 
 
 @pytest.mark.parametrize('installed', [79, 83], indirect=True)
-def test_bounded_files_retain_exact_originals_and_reconcile_replacements(installed):
+def test_bounded_files_retain_exact_originals_and_reconcile_replacements(installed, independent_regular_ddl):
     store, version = installed
     raw = seed(store)
     history = list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
@@ -120,7 +121,8 @@ def test_file_publication_runs_without_transaction_and_rejects_stale_source(inst
 
 
 @pytest.mark.parametrize('installed', [83], indirect=True)
-def test_restart_and_explicit_file_failure_recovery_preserve_prior_batches(installed, monkeypatch):
+def test_restart_and_explicit_file_failure_recovery_preserve_prior_batches(
+        installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     raw = seed(store)
     preparation.JOB.install(store.conn)

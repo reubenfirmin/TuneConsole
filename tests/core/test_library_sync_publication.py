@@ -1,12 +1,12 @@
 """Sync report and stamp cutover keeps exact originals and continuing writes."""
 import json
-from functools import partial
 from pathlib import Path
 import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_library_sync_preparation import finish, head, seed
 from yt_playlist.core import sync_state
 from yt_playlist.core.migrations import MigrationError, regular
@@ -113,7 +113,7 @@ def test_continuing_result_stamp_and_reference_writes_withdraw_independently(ins
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('name', tuple(publication.OWNERS))
-def test_absent_sources_failed_work_and_regular_ddl_are_independent(installed, name):
+def test_absent_sources_failed_work_and_regular_ddl_are_independent(installed, name, independent_regular_ddl):
     store, _ = installed
     for owner in publication.OWNERS.values():
         owner.publish(store.conn, revision=prepare(store.conn, owner))
@@ -139,11 +139,10 @@ def test_absent_sources_failed_work_and_regular_ddl_are_independent(installed, n
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['fields', 'member', 'resolution', 'file', 'stamp-fields', 'stamp-original'])
-def test_corrupt_preparation_never_selects_an_owner(installed, staged_custody, failure):
+def test_corrupt_preparation_never_selects_an_owner(installed, failure):
     store, _ = installed
     owner = publication.STAMPS if failure.startswith('stamp-') else publication.RESULT
-    revision = staged_custody(installed, ('library-sync', owner.source),
-        partial(rejection_inputs, owner=owner))
+    revision = rejection_inputs(store, owner=owner)
     with store.conn:
         if failure == 'fields':
             store.conn.execute('UPDATE '+preparation.HEAD+" SET phase='complete'")
@@ -160,7 +159,6 @@ def test_corrupt_preparation_never_selects_an_owner(installed, staged_custody, f
     with pytest.raises((MigrationError, ValueError, OSError)):
         owner.publish(store.conn, revision=revision)
     assert owner.selected(store.conn) is None
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

@@ -6,6 +6,7 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_taste_control_preparation import finish, members, seed
 from yt_playlist.core import collection_recovery, experiment_decision_state, recommendation_outputs as files, taste_control_state
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -91,7 +92,6 @@ def test_corrupt_members_metadata_or_files_never_select_a_control(installed, fai
         owner.publish(store.conn, revision=revision)
     assert owner.selected(store.conn) is None
     assert store.settings.get_setting(owner.source) == originals[owner.source]
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -180,7 +180,7 @@ def test_independent_writes_withdraw_selection_and_preserve_pinned_snapshots(ins
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('file_kind', ['original', 'plan', 'recovery'])
-def test_missing_retained_files_require_explicit_retry_without_mutating_published_rows(installed, file_kind):
+def test_missing_retained_files_require_explicit_retry_without_mutating_published_rows(installed, file_kind, independent_regular_ddl):
     store, _ = installed
     _, originals = seed(store)
     owner = publication.OWNERS['baseline']
@@ -203,7 +203,7 @@ def test_missing_retained_files_require_explicit_retry_without_mutating_publishe
 
 
 @pytest.mark.parametrize('installed', [85], indirect=True)
-def test_new_optional_owners_withdraw_old_selection_without_blocking_regular_ddl(installed, tmp_path):
+def test_new_optional_owners_withdraw_old_selection_without_blocking_regular_ddl(installed, tmp_path, independent_regular_ddl):
     store, _ = installed
     _, originals = seed(store)
     owner = publication.OWNERS['checkpoint']

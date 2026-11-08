@@ -9,7 +9,8 @@ import time
 import pytest
 
 from tests.core.test_action_ledger_preparation import finish, rows, seed
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import admitted_installed as installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import action_backup_files, action_work
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import action_ledger as preparation, action_publication as publication
@@ -130,7 +131,6 @@ def test_wrong_fields_members_coverage_or_files_cannot_publish(installed, staged
         publication.OWNER.publish(store.conn, stage=selected)
     assert publication.OWNER.selected(store.conn) is None
     assert path.read_bytes() == backup
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -293,7 +293,7 @@ def test_bounded_maps_and_interrupted_cutover_resume_without_losing_archives(ins
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_missing_files_and_failed_job_do_not_hold_regular_ddl_and_retry_is_explicit(installed, monkeypatch):
+def test_missing_files_and_failed_job_do_not_hold_regular_ddl_and_retry_is_explicit(installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     _, _, identities = seed(store)
     selected = stage(store.conn)
@@ -315,11 +315,6 @@ def test_missing_files_and_failed_job_do_not_hold_regular_ddl_and_retry_is_expli
     with pytest.raises(OSError, match='controlled action'):
         preparation.JOB.step(store.conn)
     progress = preparation.JOB.progress(store.conn)
-    def install(conn, context):
-        conn.execute('CREATE TABLE independent_action_publication(value TEXT)')
-    def validate(conn):
-        assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_action_publication'").fetchone()
-    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_action_publication', install, validate)))
     regular.migrate(store.conn)
     assert preparation.JOB.progress(store.conn) == progress
     with pytest.raises(MigrationError, match='retry explicitly'):

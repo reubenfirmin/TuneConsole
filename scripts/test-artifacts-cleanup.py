@@ -50,6 +50,11 @@ def private_fixture_workspace(path):
             and re.fullmatch(r'run-(?:sqlite-)?[1-9][0-9]*-[0-9a-f]{32}', path.name) is not None)
 
 
+def legacy_schema_workspace(path):
+    return (path.parent == REPOSITORY / 'build' / 'schema-acceptance'
+            and re.fullmatch(r'schema[1-9][0-9]*-[a-z0-9_]{8}', path.name) is not None)
+
+
 def private_image_workspace(path):
     return (path.parent == REPOSITORY / 'build/library-image-poc/volume'
             and re.fullmatch(r'proof-[a-z0-9_]{8}', path.name) is not None)
@@ -133,7 +138,8 @@ def validate_path(value, *, registering=False):
     if path == Path('/tmp') or path == REPOSITORY / '.pytest_cache':
         raise ValueError('shared parent directory')
     if not (path.is_relative_to('/tmp') or path.is_relative_to(REPOSITORY / '.pytest_cache')
-            or private_build_workspace(path) or private_fixture_workspace(path) or private_image_workspace(path)
+            or private_build_workspace(path) or private_fixture_workspace(path) or legacy_schema_workspace(path)
+            or private_image_workspace(path)
             or managed_image_workspace(path)):
         raise ValueError('outside supported temporary workspace locations')
     for component in (path, *path.parents):
@@ -156,7 +162,7 @@ def validate_path(value, *, registering=False):
                  and any(p.name.startswith('tuneconsole-review') for p in path.parents))
     workspace |= path.parent == Path('/tmp') and path.name.startswith('tuneconsole-') and 'workspace' in path.name
     workspace |= (private_build_workspace(path) or private_fixture_workspace(path) or private_image_workspace(path)
-                  or managed_image_workspace(path))
+                  or managed_image_workspace(path) or legacy_schema_workspace(path))
     pytest_run = path.parent.name.startswith('pytest-of-') and bool(re.fullmatch(r'pytest-\d+', path.name))
     new_workspace = registering and (path.is_relative_to(REPOSITORY / '.pytest_cache')
         or any(p.name.startswith('tuneconsole-') for p in (path, *path.parents) if p.parent == Path('/tmp')))

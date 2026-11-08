@@ -5,6 +5,7 @@ import json
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import discovery_checkpoints, provider_frontiers
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import discovery_checkpoints as preparation
@@ -64,7 +65,6 @@ def test_exact_originals_and_missing_references_remain_without_admission(install
                 ('known', 'known', None, 7, 10, 'exact été', 1), ('unknown', None, 'missing_provider', 0, 9, 'other', 3)]
     assert before == {table: conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0] for table in before}
     assert not conn.execute('PRAGMA foreign_key_check').fetchone()
-    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -157,7 +157,8 @@ def test_old_writers_reference_updates_and_cross_prefix_rename_reconcile(install
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_interrupted_batch_and_failure_keep_independent_progress_for_reopened_retry(installed):
+def test_interrupted_batch_and_failure_keep_independent_progress_for_reopened_retry(
+        installed, independent_regular_ddl):
     store, _ = installed
     conn = store.conn
     seed(store)
@@ -208,4 +209,3 @@ def test_invalid_checkpoints_fail_durably_and_retain_source(installed, name, suf
         finish(job, store.conn)
     assert job.progress(store.conn).status == 'failed'
     assert store.settings.get_setting(source) == raw
-    regular.migrate(store.conn)

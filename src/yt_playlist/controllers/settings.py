@@ -177,7 +177,7 @@ class Settings:
             return self.set_values({key: None})
         if key in taste_control_state.KEYS and self.repository.native_taste_controls():
             return self.set_values({key: None})
-        if key == spotify_job_state.KEY:
+        if key == spotify_job_state.KEY and self.repository.native_import_jobs():
             return self.set_values({key: None})
         if key in model_state.FIELDS and self.repository.native_models():
             return self.set_values({key: None})

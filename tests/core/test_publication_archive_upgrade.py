@@ -25,8 +25,9 @@ from tests.core import test_taste_control_publication as taste
 from tests.core import test_tv_publication as tv
 from tests.core import test_workflow_publication as workflows
 from tests.core.test_predecessor_writes import installed
-from tests.core.test_metadata_owner_cutover import predecessor
 from tests.core.test_genre_preferences_migration import bounded_vocabulary
+from tests.store_fixture_support import install_numbered_input
+from tests.archive_upgrade_support import completed_archive_input, archive_reader
 from yt_playlist.core import collection_recovery, genre_identity, group_evidence, group_storage, recommendation_custody, schema_definition
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -81,6 +82,7 @@ def upgraded_archive(source, tmp_path, version):
     """
     upgraded = Store(tmp_path / 'archive-upgrade.db')
     try:
+        upgraded.conn.execute('PRAGMA synchronous=OFF')
         source.conn.backup(upgraded.conn)
         upgraded.conn.execute('PRAGMA journal_mode=WAL')
         runner.migrate(upgraded.conn, registry=registry.MIGRATIONS[:version])
@@ -115,74 +117,186 @@ def test_completed_archive_cutover_is_idempotent_and_admitted(archive_input):
         reopened.conn.close()
 
 
-def test_v79_upgrade_preserves_metadata_conflicts_and_discovery(predecessor, tmp_path):
-    store, conn = predecessor, predecessor.conn
-    # Discovery establishes the shared Song/Artist recording before metadata
-    # captures its attempt; later catalog seeding would reset that attempt.
-    discovery.seed(store)
-    entry, recording, key = metadata.seed(store)
-    # Separate recordings preserve both original continuing-writer checks.
-    conflict, conflict_original = conflicts.seed(
-        store, [{'provider': 'a', 'value': 120}], resolved=0,
-        video_id='conflict-video', title='Conflict song')
-    assert conflict_original['track_id'] != entry
-    assert conflict_original['recording_id'] != recording
-    assert store.enrichment_state.enrichment_attempts(key)['a']['fields']['bpm'] == 120
-    encoder_sources = models.seed(store)
+@pytest.fixture
+def domain_archive_input(request, tmp_path, bounded_vocabulary):
+    """Completed lower DDL; the populated registered domain cutover stays real."""
+    store = Store(tmp_path / 'domain-archive.db')
+    try:
+        store.conn.execute('PRAGMA synchronous=OFF')
+        with closing(sqlite3.connect(':memory:')) as schema:
+            install_numbered_input(schema, request.param)
+            schema.backup(store.conn)
+        store.conn.execute('PRAGMA journal_mode=WAL')
+        store._schema_compatibility = request.param < 103
+        store._rebuild_source_version = None
+        store._schema_recovery_pending = False
+        store._bind_repositories()
+        yield store
+    finally:
+        store.conn.close()
 
+
+@pytest.mark.parametrize('domain_archive_input', [79], indirect=True)
+def test_metadata_archive_cutover_keeps_attempts_and_continuing_choices(domain_archive_input, tmp_path):
+    store, conn = domain_archive_input, domain_archive_input.conn
+    entry, _, key = metadata.seed(store)
     metadata.preparation.JOB.install(conn)
     metadata.finish(conn)
-    metadata_selection = metadata.publish(conn)
-    conflicts.preparation.JOB.install(conn)
-    conflicts.finish(conn)
-    conflict_selection = conflicts.publish(conn)
-    discovery_owner, discovery_selection = discovery.ready(conn)
-    discovery_owner.publish(conn, stage=discovery_selection)
-    encoder_revisions = models.prepare(store)
-    models.publication.publish(conn, **encoder_revisions)
-    assert metadata.publication.selected(conn) == metadata_selection
-    assert conflicts.publication.OWNER.selected(conn) == conflict_selection
-    assert discovery_owner.selected(conn) == discovery_selection
-    assert models.publication.selected(conn) == (
-        encoder_revisions['artifact_revision'], encoder_revisions['fingerprint_revision'])
-    expected_artists = store.discovery.get_discovered_artists()
-    retained = {kind: list(map(tuple, conn.execute(
-        'SELECT * FROM ' + discovery_owner.table('input_' + kind))))
-        for kind in discovery_owner.kinds}
-    conflict_heads = list(map(tuple, conn.execute(
-        'SELECT * FROM ' + conflicts.preparation.HEAD + ' ORDER BY conflict_id,generation')))
-
-    upgraded = Store(tmp_path / 'native-v79-archives.db')
-    try:
-        conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        upgraded._bind_repositories()
+    identity = metadata.publish(conn)
+    assert metadata.publication.selected(conn) == identity
+    with upgraded_archive(store, tmp_path, 80) as upgraded:
         assert metadata.publication.selected(upgraded.conn) is None
-        assert conflicts.publication.OWNER.selected(upgraded.conn) is None
-        assert models.publication.selected(upgraded.conn) is None
-        assert all(models.model_state.get(upgraded.conn, name) == raw
-                   for name, raw in encoder_sources.items())
-        regular.validate(upgraded.conn)
-        regular.migrate(upgraded.conn)
-        upgraded.init_schema(defer_metadata=True)
-        assert discovery_owner.selected(upgraded.conn) is None
-        assert upgraded.discovery.get_discovered_artists() == expected_artists
-        for kind, rows in retained.items():
-            assert list(map(tuple, upgraded.conn.execute(
-                'SELECT * FROM ' + discovery_owner.table('input_' + kind)))) == rows
-        assert list(map(tuple, upgraded.conn.execute(
-            'SELECT * FROM ' + conflicts.preparation.HEAD + ' ORDER BY conflict_id,generation'))) == conflict_heads
-        assert upgraded.conn.execute('SELECT count(*) FROM ' + conflicts.preparation.HEAD +
-            ' WHERE conflict_id=?', (conflict,)).fetchone()[0] == 1
         metadata.choose_field(upgraded, entry, 'bpm', 140)
         assert metadata.metadata_provenance(upgraded, entry)['fields']['bpm']['value'] == 140
         assert upgraded.enrichment_state.enrichment_attempts(key)['a']['fields']['bpm'] == 120
-        conflicts.choose_field(upgraded, conflict_original['track_id'], 'bpm', 140)
-        assert conflicts.metadata_provenance(
-            upgraded, conflict_original['track_id'])['fields']['bpm']['value'] == 140
-        assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.mark.parametrize('domain_archive_input', [79], indirect=True)
+def test_conflict_archive_cutover_keeps_exact_heads_and_continuing_choices(domain_archive_input, tmp_path):
+    store, conn = domain_archive_input, domain_archive_input.conn
+    conflict, original = conflicts.seed(store, [{'provider': 'a', 'value': 120}], resolved=0,
+                                        video_id='conflict-video', title='Conflict song')
+    conflicts.preparation.JOB.install(conn)
+    conflicts.finish(conn)
+    identity = conflicts.publish(conn)
+    heads = list(map(tuple, conn.execute('SELECT * FROM ' + conflicts.preparation.HEAD)))
+    assert conflicts.publication.OWNER.selected(conn) == identity
+    with upgraded_archive(store, tmp_path, 80) as upgraded:
+        assert conflicts.publication.OWNER.selected(upgraded.conn) is None
+        assert list(map(tuple, upgraded.conn.execute('SELECT * FROM ' + conflicts.preparation.HEAD))) == heads
+        assert upgraded.conn.execute('SELECT count(*) FROM ' + conflicts.preparation.HEAD +
+                                     ' WHERE conflict_id=?', (conflict,)).fetchone()[0] == 1
+        conflicts.choose_field(upgraded, original['track_id'], 'bpm', 140)
+        assert conflicts.metadata_provenance(upgraded, original['track_id'])['fields']['bpm']['value'] == 140
+
+
+@pytest.mark.parametrize('domain_archive_input', [93], indirect=True)
+def test_model_archive_cutover_keeps_exact_encoders_and_tokens(domain_archive_input, tmp_path):
+    store, conn = domain_archive_input, domain_archive_input.conn
+    sources = models.seed(store)
+    revisions = models.prepare(store)
+    models.publication.publish(conn, **revisions)
+    assert models.publication.selected(conn) == (revisions['artifact_revision'], revisions['fingerprint_revision'])
+    with upgraded_archive(store, tmp_path, 94) as upgraded:
+        assert models.publication.selected(upgraded.conn) is None
+        assert {name: models.model_state.get(upgraded.conn, name) for name in sources} == sources
+
+
+def assert_early_archive_consumers(store, version, expected):
+    conn = store.conn
+    if version >= 80:
+        assert metadata.publication.selected(conn) is None
+        assert conflicts.publication.OWNER.selected(conn) is None
+    if version >= 94:
+        assert models.publication.selected(conn) is None
+        assert {key: models.model_state.get(conn, key) for key in expected['model_sources']} == expected['model_sources']
+    if version >= 101:
+        assert discovery.publication.OWNERS[expected['discovery_owner']].selected(conn) is None
+        assert store.discovery.get_discovered_artists() == expected['artists']
+    assert store.enrichment_state.enrichment_attempts(expected['key'])['a']['fields']['bpm'] == 120
+    assert conn.execute('SELECT count(*) FROM ' + conflicts.preparation.HEAD +
+                        ' WHERE conflict_id=?', (expected['conflict'],)).fetchone()[0] == 1
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def retained_early_archive_rows(conn, expected):
+    owner = discovery.publication.OWNERS[expected['discovery_owner']]
+    tables = [conflicts.preparation.HEAD, *(owner.table('input_' + kind) for kind in owner.kinds)]
+    return {table: list(map(tuple, conn.execute('SELECT * FROM ' + table))) for table in tables}
+
+
+@pytest.mark.parametrize('completed_archive_input', [
+    (79, 80), (80, 92), (92, 94), (94, 98), (98, 100), (100, 102), (103, 104), (104, 107)
+], indirect=True, ids=['metadata', 'genre-contract', 'models', 'documents', 'listening',
+                       'discovery', 'domain-contracts', 'native-admission'])
+def test_registered_upgrade_keeps_early_archives_and_native_precedence(completed_archive_input):
+    conn, path, source, target, expected = completed_archive_input
+    retained = retained_early_archive_rows(conn, expected)
+    if source == 79:
+        assert metadata.publication.selected(conn) is not None
+        assert conflicts.publication.OWNER.selected(conn) is not None
+        assert models.publication.selected(conn) is not None
+        assert discovery.publication.OWNERS[expected['discovery_owner']].selected(conn) is not None
+        with archive_reader(path, source) as reader:
+            assert reader.discovery.get_discovered_artists() == expected['artists']
+    history = list(map(tuple, conn.execute('SELECT version,name FROM schema_migrations ORDER BY version')))
+    runner.migrate(conn, registry=registry.MIGRATIONS[:target])
+    assert list(map(tuple, conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
+        *history, *[(item.version, item.name) for item in registry.MIGRATIONS[source:target]]]
+    assert retained_early_archive_rows(conn, expected) == retained
+    with archive_reader(path, target) as reader:
+        assert_early_archive_consumers(reader, target, expected)
+    regular.validate(conn)
+
+
+@pytest.mark.parametrize('completed_archive_input', [(103, 103)], indirect=True, ids=['renamed-input'])
+def test_name_cutover_restores_early_archive_programs_and_custody(completed_archive_input):
+    from yt_playlist.core.migrations import v103_entity_names
+
+    conn, path, _, target, expected = completed_archive_input
+    retained = retained_early_archive_rows(conn, expected)
+    programs = list(conn.execute("SELECT type,name,sql FROM sqlite_schema WHERE type IN ('view','trigger') ORDER BY rowid"))
+    with conn:
+        conn.execute('BEGIN')
+        for kind, name, _sql in reversed(programs):
+            conn.execute('DROP ' + kind + ' "' + name.replace('"', '""') + '"')
+        v103_entity_names.restore_programs(conn, programs, retention_progress=False)
+    runner.validate_version(conn, 103, foreign_keys=False, data=False)
+    with archive_reader(path, target) as reader:
+        assert_early_archive_consumers(reader, target, expected)
+    assert retained_early_archive_rows(conn, expected) == retained
+    with pytest.raises(sqlite3.IntegrityError, match='retained'):
+        with conn:
+            conn.execute('DELETE FROM ' + conflicts.preparation.CANDIDATES)
+
+
+@pytest.mark.parametrize('completed_archive_input', [(107, 107)], indirect=True, ids=['native-input'])
+def test_native_archive_reopen_admits_history_without_losing_originals(completed_archive_input):
+    conn, path, _, _, expected = completed_archive_input
+    retained = retained_early_archive_rows(conn, expected)
+    history = list(map(tuple, conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
+    reopened = Store(path)
+    try:
+        reopened.init_schema(defer_metadata=True)
+        assert retained_early_archive_rows(reopened.conn, expected) == retained
+        assert list(map(tuple, reopened.conn.execute('SELECT * FROM schema_migrations ORDER BY version'))) == history
     finally:
-        upgraded.conn.close()
+        reopened.conn.close()
+
+
+@pytest.mark.parametrize('completed_archive_input', [(107, 107)], indirect=True, ids=['native-input'])
+def test_native_archive_sql_admission_is_idempotent(completed_archive_input):
+    conn, _, _, _, expected = completed_archive_input
+    retained = retained_early_archive_rows(conn, expected)
+    history = list(map(tuple, conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
+    regular.validate(conn)
+    before = conn.total_changes
+    regular.migrate(conn)
+    assert conn.total_changes == before
+    assert retained_early_archive_rows(conn, expected) == retained
+    assert list(map(tuple, conn.execute('SELECT * FROM schema_migrations ORDER BY version'))) == history
+
+
+@pytest.mark.parametrize('completed_archive_input', [(107, 107)], indirect=True, ids=['native-input'])
+def test_native_archive_consumers_keep_exact_models_and_discovery(completed_archive_input):
+    _, path, _, _, expected = completed_archive_input
+    with archive_reader(path, 107) as reader:
+        assert_early_archive_consumers(reader, 107, expected)
+
+
+@pytest.mark.parametrize('completed_archive_input', [(107, 107)], indirect=True, ids=['native-input'])
+@pytest.mark.parametrize('field_owner', ['metadata', 'conflict'])
+def test_native_archive_continuing_choices_keep_separate_recordings(completed_archive_input, field_owner):
+    conn, path, _, _, expected = completed_archive_input
+    assert expected['entry'] != expected['conflict_entry']
+    entry = expected['entry'] if field_owner == 'metadata' else expected['conflict_entry']
+    with archive_reader(path, 107) as reader:
+        metadata.choose_field(reader, entry, 'bpm', 140)
+        assert metadata.metadata_provenance(reader, entry)['fields']['bpm']['value'] == 140
+        other = expected['conflict_entry'] if field_owner == 'metadata' else expected['entry']
+        assert metadata.metadata_provenance(reader, other)['fields']['bpm']['value'] != 140
+        assert reader.enrichment_state.enrichment_attempts(expected['key'])['a']['fields']['bpm'] == 120
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.mark.parametrize('archive_input', [93], indirect=True)

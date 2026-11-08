@@ -1,17 +1,96 @@
 """Independent acceptance of selected learning inputs and exact retention roots."""
 import json
+from contextlib import closing, contextmanager
 from pathlib import Path
 import sqlite3
 
 import pytest
 
 from tests.core.test_predecessor_writes import installed
-from tests.core.test_choice_learning_preparation import seed,finish,head
-from tests.publication_timing_support import publication_costs
-from yt_playlist.core import group_evidence
+from tests.core.test_choice_learning_preparation import seed,finish,head,originals
+from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import install_numbered_input
+from yt_playlist.core import group_evidence,choice_learning_state
 from yt_playlist.core.migrations import regular,registry,runner,MigrationError
 from yt_playlist.core.preparation import choice_learning as preparation,choice_publication as publication
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These SQL/file owners start no web application or periodic worker."""
+
+
+@pytest.fixture
+def choice_installed(request,tmp_path,monkeypatch):
+    bound_catalog(monkeypatch)
+    version=request.param
+    store=Store(tmp_path/'choice.db')
+    try:
+        store.conn.execute('PRAGMA synchronous=OFF')
+        store.conn.execute('PRAGMA wal_autocheckpoint=0')
+        with closing(sqlite3.connect(':memory:')) as source:
+            install_numbered_input(source,version,regular_owners=regular.CHANGES)
+            source.backup(store.conn)
+        store.init_schema(defer_metadata=True)
+        yield store,version
+    finally:
+        store.conn.close()
+
+
+def seed_choice_input(conn,*,native=False):
+    """Completed catalog inputs, without provider/credit ingestion producers."""
+    documents=originals()
+    with conn:
+        conn.execute("INSERT INTO recordings(id,identity_key,title,artist) VALUES (1,'song|artist','Song','Artist')")
+        conn.execute("INSERT INTO youtube_items(video_id,recording_id,title,artist,album,duration_s) "
+                     "VALUES ('video',1,'Song','Artist','Album',100)")
+        conn.execute("INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (1,1,'video')")
+        conn.execute("INSERT INTO library_memberships VALUES (1,'fixture',NULL)")
+        conn.execute("INSERT INTO albums(id,title,artist,metadata_rank) VALUES (1,'Album','Artist',0)")
+        conn.execute("INSERT INTO album_provider_ids(provider,provider_id,album_id,is_primary) VALUES ('youtube','release',1,1)")
+        for surface,raw in documents.items():
+            if native:
+                choice_learning_state.write(conn,surface,choice_learning_state.decode(surface,raw),None,historical=True)
+            else:
+                conn.execute('INSERT INTO rec_proposals VALUES (?,?,NULL)',(surface,raw))
+    return documents
+
+
+@pytest.fixture
+def choice_upgrade_input(request,tmp_path,monkeypatch):
+    bound_catalog(monkeypatch)
+    version,target=request.param
+    path=tmp_path/'choice-upgrade.db'
+    with closing(sqlite3.connect(':memory:')) as schema, closing(sqlite3.connect(path)) as conn:
+        # Regular admission/order is owned by choice_installed. These cases
+        # retain the numbered conversion and independent publication contracts.
+        install_numbered_input(schema,version)
+        conn.execute('PRAGMA synchronous=OFF')
+        conn.execute('PRAGMA wal_autocheckpoint=0')
+        schema.backup(conn)
+        conn.row_factory=sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        conn.execute('PRAGMA journal_mode=WAL')
+        original=seed_choice_input(conn,native=version>=93)
+        if version<93:
+            preparation.JOB.install(conn)
+            finish(conn)
+            publish(conn)
+        yield conn,path,version,target,original
+
+
+@contextmanager
+def choice_reader(path,version):
+    store=Store(path)
+    try:
+        store._schema_compatibility=version<103
+        store._rebuild_source_version=None
+        store._schema_recovery_pending=False
+        store._bind_repositories()
+        yield store
+    finally:
+        store.conn.close()
 
 
 def publish(conn,size=16):
@@ -23,11 +102,11 @@ def publish(conn,size=16):
     pytest.fail('Learning publication did not finish')
 
 
-@pytest.mark.parametrize('installed',[79,92],indirect=True)
-def test_exact_selected_values_no_original_reads_and_genuine_upgrade(installed,tmp_path,publication_costs):
-    store,version = installed
+@pytest.mark.parametrize('choice_installed',[79,92],indirect=True)
+def test_exact_selected_values_do_not_read_originals(choice_installed):
+    store,version = choice_installed
     conn = store.conn
-    original = seed(store)
+    original = seed_choice_input(conn)
     history = list(map(tuple,conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
     preparation.JOB.install(conn)
     finish(conn)
@@ -37,28 +116,60 @@ def test_exact_selected_values_no_original_reads_and_genuine_upgrade(installed,t
         if action==sqlite3.SQLITE_READ and owner in denied and (owner!='rec_proposals' or column=='payload'):
             return sqlite3.SQLITE_DENY
         return sqlite3.SQLITE_OK
-    conn.set_authorizer(authorize)
-    try:
-        for surface,raw in original.items():
-            assert store.rec_proposals.get_proposals(surface)==json.loads(raw)
-            assert store.rec_proposals.has_proposals(surface)
-    finally:
-        conn.set_authorizer(None)
+    with store.read_view() as selected:
+        selected.conn.set_authorizer(authorize)
+        try:
+            for surface,raw in original.items():
+                assert selected.rec_proposals.get_proposals(surface)==json.loads(raw)
+                assert selected.rec_proposals.has_proposals(surface)
+        finally:
+            selected.conn.set_authorizer(None)
     assert list(map(tuple,conn.execute('SELECT * FROM schema_migrations ORDER BY version')))==history
     assert dict(conn.execute('SELECT surface,payload FROM rec_proposals WHERE surface LIKE \'%choice%\''))==original
     regular.migrate(conn)
-    upgraded = Store(tmp_path/'upgraded.db')
-    try:
-        conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn,registry=registry.MIGRATIONS[:107])
-        upgraded._bind_repositories()
-        assert publication.selected(upgraded.conn) is None
+    regular.validate(conn)
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.mark.parametrize('choice_upgrade_input',[
+    (79,92),(92,93),(93,98),(98,102),(103,104),(104,107)
+],indirect=True,ids=['79-to-92','92-to-93','93-to-98','98-to-102','103-to-104','104-to-107'])
+def test_registered_choice_upgrade_preserves_exact_selected_values(choice_upgrade_input):
+    conn,path,version,target,original=choice_upgrade_input
+    history=list(map(tuple,conn.execute('SELECT version,name FROM schema_migrations ORDER BY version')))
+    runner.migrate(conn,registry=registry.MIGRATIONS[:target])
+    assert list(map(tuple,conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
+        *history,*[(item.version,item.name) for item in registry.MIGRATIONS[version:target]]]
+    with choice_reader(path,target) as upgraded:
+        if target<93:
+            assert publication.selected(upgraded.conn) is not None
+        else:
+            assert publication.selected(upgraded.conn) is None
         for surface,raw in original.items():
             assert upgraded.rec_proposals.get_proposals(surface)==json.loads(raw)
         regular.validate(upgraded.conn)
         assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        upgraded.conn.close()
+
+
+@pytest.mark.parametrize('choice_upgrade_input',[(103,103)],indirect=True,ids=['renamed-input'])
+def test_name_cutover_restores_choice_readers_and_immutable_inputs(choice_upgrade_input):
+    from yt_playlist.core.migrations import v103_entity_names
+
+    conn,path,_version,target,original=choice_upgrade_input
+    programs=list(conn.execute("SELECT type,name,sql FROM sqlite_schema WHERE type IN ('view','trigger') ORDER BY rowid"))
+    with conn:
+        conn.execute('BEGIN')
+        for kind,name,_sql in reversed(programs):
+            conn.execute('DROP '+kind+' "'+name.replace('"','""')+'"')
+        v103_entity_names.restore_programs(conn,programs,retention_progress=False)
+    runner.validate_version(conn,103,foreign_keys=False,data=False)
+    with choice_reader(path,target) as reader:
+        for surface,raw in original.items():
+            assert reader.rec_proposals.get_proposals(surface)==json.loads(raw)
+    with pytest.raises(sqlite3.IntegrityError,match='immutable'):
+        with conn:
+            conn.execute('UPDATE choice_interest_features SET value=.99')
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.mark.parametrize('installed',[92],indirect=True)
@@ -149,7 +260,6 @@ def test_incorrect_preparation_cannot_be_published(installed,damage):
     with pytest.raises(MigrationError,match='differs|differ|omits'):
         publish(conn)
     assert publication.selected(conn) is None
-    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed',[92],indirect=True)

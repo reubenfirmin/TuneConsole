@@ -6,6 +6,7 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import recommendation_outputs as files, recommendation_reports as reports
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import recommendation_reports as preparation
@@ -48,7 +49,6 @@ def test_exact_multi_part_report_and_usage_keep_source_authority(installed):
     preparation.JOB.install(conn)
     first = preparation.JOB.step(conn, batch_size=1)
     assert first.processed == 1 and first.prepared_revision is None
-    regular.migrate(conn)
     finish(conn)
     captured = head(conn)
     assert captured['part_count'] > 1
@@ -101,7 +101,7 @@ def test_file_work_releases_snapshot_and_rejects_concurrent_replacement(installe
 
 
 @pytest.mark.parametrize('installed', [92], indirect=True)
-def test_disk_failure_interruption_and_restart_keep_committed_reports(installed, monkeypatch):
+def test_disk_failure_interruption_and_restart_keep_committed_reports(installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     raw = seed(store)
     conn = store.conn
@@ -150,7 +150,6 @@ def test_invalid_report_does_not_change_source_or_publish_staging_head(installed
     with pytest.raises((MigrationError, ValueError, sqlite3.Error)):
         preparation.JOB.step(store.conn)
     assert preparation.JOB.progress(store.conn).status == 'failed'
-    regular.migrate(store.conn)
     assert store.conn.execute("SELECT payload FROM rec_proposals WHERE surface='listening_choices'").fetchone()[0] == raw
     assert head(store.conn) is None
 

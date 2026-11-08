@@ -66,6 +66,12 @@ def apply(conn,context):
             conn.execute(f'ALTER TABLE {table} RENAME COLUMN {old} TO {new}')
     conn.execute('DROP INDEX ix_playlist_scope')
     conn.execute('CREATE INDEX ix_playlist_scope_account ON playlists(playlist_scope_id,account_id)')
+    restore_programs(conn, dependent, retention_progress=retention_progress)
+
+
+def restore_programs(conn, dependent, *, retention_progress):
+    """Restore canonical programs and retained custom programs after renaming."""
+    from .. import group_retention_progress
     from .current import statements
     canonical = set()
     for sql in statements(version=103):

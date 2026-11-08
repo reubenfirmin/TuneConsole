@@ -124,7 +124,6 @@ def test_incomplete_or_corrupt_preparation_keeps_installed_origins(installed,fai
     assert publication.selected(store.conn) is None
     assert radio_provenance.ids(store.conn) == ['shared','LM','missing']
     assert {key:store.settings.get_setting(key) for key in original} == original
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed',[93],indirect=True)

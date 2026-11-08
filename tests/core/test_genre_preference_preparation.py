@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import genre_preferences as preparation
 from yt_playlist.core.store import Store
@@ -46,7 +47,6 @@ def test_enabled_choices_keep_labels_custom_intent_and_case_only_renames(install
     choices.install(conn)
     first = choices.step(conn, batch_size=1)
     assert first.processed == 1 and first.prepared_revision is None
-    regular.migrate(conn)
     finish(choices, conn)
     assert [tuple(row) for row in conn.execute('SELECT raw_label,genre_key,proposed_key,disposition '
         'FROM prepared_genre_choices ORDER BY raw_label')] == [
@@ -87,7 +87,6 @@ def test_disabled_defaults_keep_exact_baseline_and_prior_generations(installed):
     preparation.DEFAULTS.install(conn)
     first = preparation.DEFAULTS.step(conn, batch_size=2)
     assert first.processed == 2 and first.status == 'copying'
-    regular.migrate(conn)
     finish(preparation.DEFAULTS, conn)
     original = head(conn)
     assert preparation.read_baseline(original) == raw
@@ -168,7 +167,7 @@ def test_file_work_releases_transaction_and_concurrent_source_edit_is_fenced(ins
 
 
 @pytest.mark.parametrize('installed', [84], indirect=True)
-def test_failure_interrupt_and_restart_keep_committed_batches(installed, monkeypatch):
+def test_failure_interrupt_and_restart_keep_committed_batches(installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     conn = store.conn
     with conn:
@@ -216,13 +215,12 @@ def test_invalid_defaults_fail_durably_without_replacing_original(installed, raw
     with pytest.raises((MigrationError, ValueError)):
         preparation.DEFAULTS.step(store.conn)
     assert preparation.DEFAULTS.progress(store.conn).status == 'failed'
-    regular.migrate(store.conn)
     assert store.conn.execute("SELECT value FROM settings WHERE key='genre_defaults'").fetchone()[0] == raw
     assert not store.conn.execute(f'SELECT 1 FROM {preparation.HEAD}').fetchone()
 
 
 @pytest.mark.parametrize('installed', [84], indirect=True)
-def test_choice_failure_requires_explicit_retry_and_keeps_prior_batch(installed):
+def test_choice_failure_requires_explicit_retry_and_keeps_prior_batch(installed, independent_regular_ddl):
     store, _ = installed
     with store.conn:
         store.conn.executemany('INSERT INTO genre_whitelist VALUES (?)', [('First',), ('Second',)])

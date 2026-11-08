@@ -1,30 +1,31 @@
 import json
-from tests.enrichment_support import complete_entries, seed_audio, seed_enrichment
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
-from tests.historical_support import upgrade_fixture
 
-from yt_playlist.core.migrations import Migration, MigrationError, migrate
+from tests.catalog_migration_support import catalog_input, catalog_reader
+from tests.enrichment_support import complete_entries, seed_audio, seed_enrichment
+from yt_playlist.core.migrations import Migration, MigrationError, migrate, regular
 from yt_playlist.core.migrations.registry import MIGRATIONS
-from yt_playlist.core.migrations.runner import validate_version
+from yt_playlist.core.migrations.runner import Context, validate_version
 from yt_playlist.core.migrations import v008_recordings
-from yt_playlist.core.store import Store
 from yt_playlist.core import legacy_evidence
+from yt_playlist.core.store import Store
 
 
 def populate_legacy(store):
     store.conn.executescript((Path(__file__).parents[1] / 'fixtures/migrations/recording_catalog.sql').read_text())
 
 
-def test_populated_migration_preserves_identity_membership_choices_and_raw_evidence(legacy_store):
-    s = legacy_store
-    populate_legacy(s)
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    # This module starts no HTTP application or periodic jobs.
+    pass
+
+
+def assert_converted_catalog(s):
     centroid = b'\x00\x00\x80\x3f'
-    s.conn.execute("INSERT INTO taste_modes(mode_id,label,families,centroid,size,rep_keys,active,first_seen,last_seen,space) VALUES (1,'House','[]',?,1,?,1,1,1,'old-space')",
-                   (centroid,json.dumps(['old spelling|artist'])))
-    s.conn.commit()
-    upgrade_fixture(s)
     assert s.conn.execute('SELECT COUNT(*) FROM youtube_items').fetchone()[0] == 4
     assert s.conn.execute('SELECT COUNT(*) FROM recordings').fetchone()[0] == 5
     assert s.conn.execute('SELECT COUNT(*) FROM legacy_catalog_evidence').fetchone()[0] == 7
@@ -51,7 +52,6 @@ def test_populated_migration_preserves_identity_membership_choices_and_raw_evide
     assert s.enrichment_state.enrichment_attempts('cold|other')['deezer']['fields']['art'] == 'full-cover'
     assert s.conn.execute("SELECT COUNT(*) FROM metadata_legacy_evidence WHERE kind='legacy_enrichment_attempt'").fetchone()[0] == 1
     assert s.conn.execute('SELECT COUNT(*) FROM tracks').fetchone()[0] == 4
-    assert len(s.enrichment_queue.next_enrich_batch(20)) == 5  # library/discovery overlap is queued once
     canvas = json.loads(s.playlist_recipes.get_cluster_canvas('CLUSTER'))
     key = s.tracks.catalog_subject(3)['identity_key']
     mode = s.conn.execute('SELECT centroid,rep_keys,space FROM taste_modes WHERE mode_id=1').fetchone()
@@ -63,12 +63,105 @@ def test_populated_migration_preserves_identity_membership_choices_and_raw_evide
     assert canvas['nodes'][0]['key'] == key
     assert canvas['nodes'][0]['seeds'][0]['keys'] == [key]
     assert canvas['trunk'] == [1] and canvas['label'] == 'old spelling|artist'
-    before = list(map(tuple,s.conn.execute('SELECT * FROM play_events')))
-    s.init_schema(); s.init_schema()
-    assert list(map(tuple,s.conn.execute('SELECT * FROM play_events'))) == before
     assert not s.conn.execute('PRAGMA foreign_key_check').fetchall()
     assert s.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
     assert s.tracks.upsert_track('new-upload','New','Artist',None,None) > 10
+
+
+@pytest.mark.parametrize('catalog_input', [(7, 79), (79, 88), (88, 102)],
+                         indirect=True, ids=['recordings', 'metadata', 'subjects'])
+def test_populated_catalog_conversion_preserves_values_and_evidence(catalog_input):
+    conn, path, source, target = catalog_input
+    before = tuple(conn.execute('SELECT version,name FROM schema_migrations'))
+    migrate(conn, registry=MIGRATIONS[:target], clock=lambda: 1.)
+    assert tuple(conn.execute('SELECT version,name FROM schema_migrations'))[:source] == before
+    assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == target
+    with catalog_reader(path, target) as store:
+        assert_converted_catalog(store)
+
+
+@pytest.mark.parametrize('catalog_input', [(102, 103)], indirect=True)
+def test_populated_catalog_account_cutover_preserves_rows(catalog_input, monkeypatch):
+    from yt_playlist.core.migrations import v103_entity_names
+
+    conn, _path, _source, target = catalog_input
+    tables = ('playlists', 'playlist_scopes', 'playlist_membership_refs', 'play_events',
+              'listening_observations', 'recordings', 'catalog_entries', 'rec_feedback')
+    before = {name: list(map(tuple, conn.execute(f'SELECT * FROM "{name}"'))) for name in tables}
+    restore = Mock()
+    monkeypatch.setattr(v103_entity_names, 'restore_programs', restore)
+    migrate(conn, registry=MIGRATIONS[:target], clock=lambda: 1.)
+    restore.assert_called_once()
+    # The restoration owner installs and validates every canonical program.
+    # This owner retains actual account/scope renames and populated row IDs.
+    assert list(conn.execute('SELECT * FROM accounts'))
+    assert not conn.execute("SELECT 1 FROM sqlite_schema WHERE name='identities'").fetchone()
+    for name in tables:
+        assert list(map(tuple, conn.execute(f'SELECT * FROM "{name}"'))) == before[name]
+    assert {'account_id', 'playlist_scope_id', 'provider_playlist_id'} <= {
+        row[1] for row in conn.execute('PRAGMA table_info(playlists)')}
+    assert not conn.execute('PRAGMA foreign_key_check').fetchall()
+
+
+@pytest.mark.parametrize('catalog_input', [(103, 104), (104, 107)], indirect=True,
+                         ids=['domain-contracts', 'native-admission'])
+def test_populated_catalog_native_upgrade_preserves_values_and_evidence(catalog_input):
+    conn, path, _source, target = catalog_input
+    migrate(conn, registry=MIGRATIONS[:target], clock=lambda: 1.)
+    with catalog_reader(path, target) as store:
+        assert_converted_catalog(store)
+
+
+def complete_regular_input(conn):
+    # Supply unrelated completed regular owners below production admission.
+    with conn:
+        conn.execute('BEGIN')
+        conn.execute(regular.HISTORY_SQL)
+        for change in regular.CHANGES:
+            change.apply(conn, Context(1.))
+            conn.execute('INSERT INTO schema_changes VALUES (?,?,1)', (change.version, change.name))
+        regular.validate(conn)
+
+
+@pytest.mark.parametrize('catalog_input', [(107, 107)], indirect=True)
+def test_native_catalog_admission_is_repeatable_without_changing_history(catalog_input):
+    conn, _path, _source, _target = catalog_input
+    complete_regular_input(conn)
+    before = tuple(map(tuple, conn.execute('SELECT * FROM play_events')))
+    history = tuple(map(tuple, conn.execute('SELECT * FROM schema_migrations')))
+    assert migrate(conn, defer_validation=True) is False
+    assert migrate(conn, defer_validation=True) is False
+    assert tuple(map(tuple, conn.execute('SELECT * FROM play_events'))) == before
+    assert tuple(map(tuple, conn.execute('SELECT * FROM schema_migrations'))) == history
+    assert not conn.execute('PRAGMA foreign_key_check').fetchall()
+    assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+
+
+@pytest.mark.parametrize('catalog_input', [(107, 107)], indirect=True)
+def test_native_catalog_reopen_keeps_converted_history_and_originals(catalog_input):
+    conn, path, _source, _target = catalog_input
+    complete_regular_input(conn)
+    before = tuple(map(tuple, conn.execute('SELECT * FROM play_events')))
+    history = tuple(map(tuple, conn.execute('SELECT * FROM schema_migrations')))
+    original = legacy_evidence.original(conn, 'recommendation', 'taste_modes', '1')
+    store = Store(path)
+    try:
+        store.init_schema()
+        assert tuple(map(tuple, store.conn.execute('SELECT * FROM play_events'))) == before
+        assert tuple(map(tuple, store.conn.execute('SELECT * FROM schema_migrations'))) == history
+        assert legacy_evidence.original(store.conn, 'recommendation', 'taste_modes', '1') == original
+        assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
+    finally:
+        store.conn.close()
+
+
+@pytest.mark.parametrize('catalog_input', [(107, 107)], indirect=True)
+def test_converted_catalog_enrichment_queue_deduplicates_membership(catalog_input):
+    _conn, path, _source, target = catalog_input
+    with catalog_reader(path, target, snapshot_guards=True) as store:
+        batch = store.enrichment_queue.next_enrich_batch(20)
+        assert len(batch) == 5
+        assert {row['id'] for row in batch} == {3, 8, 9, 10, 11}
 
 
 def test_failure_after_reference_remapping_rolls_back_and_can_resume(legacy_store, monkeypatch):
@@ -85,8 +178,8 @@ def test_failure_after_reference_remapping_rolls_back_and_can_resume(legacy_stor
     assert s.conn.execute('SELECT COUNT(*) FROM tracks').fetchone()[0] == 5
     assert not s.conn.execute("SELECT 1 FROM sqlite_master WHERE name='recordings'").fetchone()
     monkeypatch.setattr(v008_recordings,'remap_state',original)
-    # Exercise the interrupted owner's retry. The populated upgrade above owns
-    # the remaining historical suffix and current application admission.
+    # Exercise this interrupted owner's retry. The populated conversion and
+    # native admission owners above cover the later contracts independently.
     migrate(s.conn, registry=MIGRATIONS[:8])
     validate_version(s.conn, 8)
     assert tuple(s.conn.execute(

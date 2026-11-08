@@ -1,11 +1,34 @@
 import json
+from contextlib import closing
 from tests.derived_rating_support import seed_dislike, seed_like
+from tests.home_fixture_support import home_page_bytecode, home_pages_only, without_metadata_providers
+from tests.test_growth_readiness import readiness_policy
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
 
 import pytest
 from fastapi.testclient import TestClient
 from yt_playlist.core.store import Store
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
+
+
+pytestmark = pytest.mark.usefixtures('home_pages_only', 'without_metadata_providers', 'readiness_policy')
+
+
+@pytest.fixture(scope='module')
+def onboarding_schema():
+    with bounded_consumer_schema((('house', 'House'), ('jazz', 'Jazz'))) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(tmp_path, onboarding_schema, monkeypatch):
+    database = Store(tmp_path / 'onboarding-routes.db')
+    with closing(database.conn):
+        initialize_consumer(database, onboarding_schema)
+        database.conn.execute('PRAGMA wal_autocheckpoint=0')
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
 
 
 def _client(store):
@@ -100,17 +123,33 @@ def test_uploaded_starter_preserves_existing_browser_handoff(store):
     assert 'Play mix' not in html
 
 
-def test_generated_starter_hides_radio_until_setup_is_complete(store):
+def test_generated_starter_hides_radio_until_setup_is_complete(store, monkeypatch):
+    from unittest.mock import Mock
+    from yt_playlist.library import playlist_generated
     from yt_playlist.rec.onboarding import SETUP_COMPLETE
 
     _synced_thin(store)
     fake, client = _client(store)
+    account = store.accounts.get_accounts()[0].id
+    store.playlists.mark_generated_playlist('starter-generated')
+    store.playlists.set_playlist_group('starter-generated', playlist_generated.GENERATED_GROUP)
+    playlist_id = store.playlists.upsert_playlist(account, 'starter-generated', 'First mix', 1, None, 1000)
+    track_id = store.conn.execute("SELECT id FROM catalog_entries WHERE video_id='v1'").fetchone()[0]
+    store.playlists.set_playlist_tracks(playlist_id, [track_id])
+    tracks = [{'video_id': 'v1', 'title': 'T', 'artist': 'A'}]
+    # Generation has independent playlist owners. This case checks the real
+    # route's navigation response and the playlist page's setup-dependent actions.
+    generate = Mock(return_value={'new_ytm': 'starter-generated', 'pid': playlist_id,
+                                  'added': 1, 'tracks': tracks})
+    monkeypatch.setattr(playlist_generated, 'create_generated_playlist', generate)
     response = client.post('/home/generate', data={
         'name': 'Something to listen to - January 1 1970',
-        'tracks': json.dumps([{'video_id': 'v1', 'title': 'T', 'artist': 'A'}]),
+        'tracks': json.dumps(tracks),
     })
     assert response.status_code == 200
-    playlist = next(p for p in store.playlists.get_playlists() if p.provider_playlist_id == fake.created[0][0])
+    generate.assert_called_once_with(store, 'Something to listen to - January 1 1970',
+                                     tracks, fake, 1000.0, account, recipe=None)
+    playlist = store.playlists.get_playlist(playlist_id)
     assert f'data-generated-playlist="{playlist.provider_playlist_id}"' in response.text
     assert f'window.location.assign("/playlist/{playlist.id}")' in response.text
     html = client.get(f'/playlist/{playlist.id}').text
@@ -299,7 +338,7 @@ def test_established_home_keeps_retry_diagnostics_out_of_the_dashboard(store, ou
     from tests.onboarding_support import publish_personal_mix
 
     _, client = _client(store)
-    publish_personal_mix(store)
+    publish_personal_mix(store, tracks_per_card=1)
     store.rec_proposals.put_proposals('listening_choices', {
         'home_format': {'episodes': {'mixes': 1}}}, 1000)
     store.settings.set_setting("last_sync_at", "1000")
@@ -348,7 +387,7 @@ def test_setup_banner_tracks_import_then_models_across_pages(store):
     from tests.onboarding_support import publish_personal_mix
     from tests.test_growth_journey import early_journey
     early_journey(store)
-    publish_personal_mix(store)
+    publish_personal_mix(store, tracks_per_card=1)
     assert client.get("/home/onboard/status").json()["setup"]["complete"]
     assert 'class="setup-banner"' not in client.get("/playlists").text
 
@@ -366,7 +405,10 @@ def test_partial_sync_with_playable_offers_finishes_setup_without_faking_sync_su
     assert not before['setup']['complete'] and before['songs'] == 0
     assert 'id="onboarding-feed"' in client.get('/').text
 
-    (publish_personal_mix if format == 'mixes' else publish_personal_album)(store)
+    if format == 'mixes':
+        publish_personal_mix(store, tracks_per_card=1)
+    else:
+        publish_personal_album(store)
     # A downstream offer cannot skip prerequisite destinations. Their separate
     # preparation can finish even while the collection import needs retrying.
     assert not client.get('/home/onboard/status').json()['setup']['complete']
@@ -397,7 +439,7 @@ def test_prepared_offer_readiness_agrees_between_home_and_setup_without_modes(st
     _, client = _client(store)
     store.settings.set_setting("last_sync_at", "1000")
     early_journey(store)
-    publish_personal_mix(store)
+    publish_personal_mix(store, tracks_per_card=1)
     assert store.modes.list_modes(active_only=True) == []
 
     # A sparse account already has a usable personal mix on a direct Home visit.
@@ -416,20 +458,25 @@ def test_prepared_offer_readiness_agrees_between_home_and_setup_without_modes(st
 
 
 @pytest.mark.parametrize('format', ['mixes', 'albums'])
-def test_completed_setup_survives_offer_loss_and_a_database_restart(tmp_path, format):
+def test_completed_setup_survives_offer_loss_and_a_database_restart(
+        tmp_path, onboarding_schema, monkeypatch, format):
+    from tests.genre_catalog_support import bound_catalog
     from tests.onboarding_support import publish_personal_mix
     from tests.test_growth_journey import early_journey
     from yt_playlist.core import home_outputs
     from yt_playlist.rec import onboarding
 
     path = tmp_path / 'library.db'
+    bound_catalog(monkeypatch, entries=(('house', 'House'), ('jazz', 'Jazz')))
     first = Store(path)
-    first.init_schema()
-    try:
+    # Begin below fresh-schema admission, then retain a genuine close/reopen.
+    initialize_consumer(first, onboarding_schema)
+    first.conn.execute('PRAGMA wal_autocheckpoint=0')
+    with closing(first.conn), reuse_reporting_reader(first, monkeypatch):
         first.settings.set_setting('last_sync_at', '1000')
         early_journey(first)
         if format == 'mixes':
-            publish_personal_mix(first)
+            publish_personal_mix(first, tracks_per_card=1)
         client = TestClient(create_app(first, lambda: {}, now_fn=lambda: 1000,
                                        background_work=False), base_url='http://127.0.0.1')
         assert client.get('/home/onboard/status').json()['setup']['complete']
@@ -438,11 +485,9 @@ def test_completed_setup_survives_offer_loss_and_a_database_restart(tmp_path, fo
         with first.conn:
             first.conn.execute('BEGIN IMMEDIATE')
             home_outputs.clear(first.conn, ('home_prepared','home_tuned','home_choice','album_prepared'))
-    finally:
-        first.conn.close()
     restored = Store(path)
     restored.init_schema()
-    try:
+    with closing(restored.conn), reuse_reporting_reader(restored, monkeypatch):
         client = TestClient(create_app(restored, lambda: {}, now_fn=lambda: 1100,
                                        background_work=False), base_url='http://127.0.0.1')
         setup = client.get('/home/onboard/status').json()['setup']
@@ -454,8 +499,6 @@ def test_completed_setup_survives_offer_loss_and_a_database_restart(tmp_path, fo
         assert 'id="home-feed"' in html
         assert 'id="onboarding-feed"' not in html
         assert 'class="setup-banner"' not in html
-    finally:
-        restored.conn.close()
 
 
 @pytest.mark.parametrize('surface,payload', [
@@ -507,7 +550,7 @@ def test_snapshot_readiness_does_not_write_setup_completion(store):
 
     store.settings.set_setting('last_sync_at', '1000')
     early_journey(store)
-    publish_personal_mix(store)
+    publish_personal_mix(store, tracks_per_card=1)
     with store.read_snapshot() as snapshot:
         assert not onboarding.initial_setup_pending(snapshot.store, 1000)
     assert store.settings.get_setting(onboarding.SETUP_COMPLETE) is None

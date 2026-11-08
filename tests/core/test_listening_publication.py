@@ -91,7 +91,6 @@ def test_incorrect_headers_references_files_and_source_coverage_cannot_publish(i
     with pytest.raises((MigrationError, ValueError, OSError)):
         publication.OWNER.publish(store.conn, stage=stage.id)
     assert publication.OWNER.selected(store.conn) is None
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [89], indirect=True)
@@ -249,7 +248,7 @@ def test_interruptions_missing_file_repair_and_failed_preparation_leave_ddl_inde
         conn.execute('CREATE TABLE independent_listening_publication(value TEXT)')
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_listening_publication'").fetchone()
-    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES,regular.Change(len(regular.CHANGES) + 1,'independent_listening_publication',install,validate)))
+    monkeypatch.setattr(regular, 'CHANGES', (regular.Change(1,'independent_listening_publication',install,validate),))
     regular.migrate(store.conn)
     assert preparation.JOB.progress(store.conn) == failed
     with pytest.raises(MigrationError, match='retry explicitly'):

@@ -98,6 +98,34 @@ def test_only_individual_named_fixture_bases_are_eligible(cleanup):
             cleanup.validate_path(path)
 
 
+def test_legacy_schema_cleanup_preserves_live_databases_and_sibling_reports(cleanup, monkeypatch):
+    root = cleanup.REPOSITORY / 'build' / 'schema-acceptance'
+    workspace = root / 'schema490-xfeb93y_'
+    workspace.mkdir(parents=True)
+    database = workspace / 'annotations.db'
+    database.write_bytes(b'disposable')
+    report = root / 'report.json'
+    report.write_text('retained')
+    unrelated = root / 'important'
+    unrelated.mkdir()
+    malformed = root / 'schema490-short'
+    malformed.mkdir()
+    for path in (root, unrelated, malformed):
+        with pytest.raises(ValueError):
+            cleanup.validate_path(path)
+    active = cleanup.Process(os.getpid() + 100, '1', ('python',), (str(database),))
+    monkeypatch.setattr(cleanup, 'processes', lambda: [active])
+    assert cleanup.main(['--delete', str(workspace)]) == 1
+    assert database.read_bytes() == b'disposable'
+    monkeypatch.setattr(cleanup, 'processes', lambda: [])
+    assert cleanup.main([str(workspace)]) == 0
+    assert database.exists()
+    assert cleanup.main(['--delete', str(workspace)]) == 0
+    assert not workspace.exists()
+    assert report.read_text() == 'retained'
+    assert unrelated.is_dir() and malformed.is_dir()
+
+
 def test_live_fixture_owner_blocks_cleanup_even_without_open_files(cleanup):
     base = cleanup.REPOSITORY / 'build' / 'pytest' / ('run-12345-' + 'a' * 32)
     active = cleanup.Process(12345, '1', ('pytest', 'test_probe.py'), ())

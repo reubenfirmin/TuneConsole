@@ -7,7 +7,8 @@ import struct
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.independent_schema_support import independent_regular_ddl
 from tests.comparison_support import legacy_projection
 from tests.recommendation_support import seed_publication_subjects
 from yt_playlist.core import fao, library_pool_state, model_projections, recommendation_outputs as files
@@ -26,7 +27,7 @@ def finish(job, conn, size=128):
     pytest.fail('Ranked preparation did not finish bounded fixture')
 
 
-def seed(store, count=4, *, lane_counts=None):
+def seed(store, count=4, *, lane_counts=None, surfaces=None):
     seed_publication_subjects(store, [{'key': 'known|artist', 'video_id': 'known-video',
                                      'title': 'Known', 'artist': 'Artist', 'duration_s': 100}])
     store.rec_ledger.record_serving_policy('ranked-policy', {'algorithm': 'captured'}, 1)
@@ -54,6 +55,9 @@ def seed(store, count=4, *, lane_counts=None):
         lane_items = candidates(lane_counts[lane]) if lane_counts and lane in lane_counts else items
         values['home_pool:' + lane] = json.dumps({'parameters': {'lane': lane, 'epoch': 0,
             'include_genres': ['rock', 'other:Unregistered style'], 'avoid_genres': []}, 'tracks': lane_items}, indent=2)
+    if surfaces is not None:
+        values = {surface: raw for surface, raw in values.items()
+                  if surface.split(':', 2)[-1] in surfaces}
     with store.conn:
         store.conn.execute("INSERT INTO genre_family(key,name) VALUES ('rock','Rock') ON CONFLICT DO NOTHING")
         store.conn.executemany('INSERT INTO rec_proposals VALUES (?,?,?)', [(surface, raw, None) for surface, raw in values.items()])
@@ -92,7 +96,6 @@ def test_all_six_projections_and_four_lanes_preserve_sources_and_unknown_clocks(
             assert rows(store.conn, surface, 'genres', 'position,raw_key,family_key,genre_key,resolution_reason') == [
                 (0, 'rock', 'rock', None, None), (1, 'other:Unregistered style', None, None, 'unknown_genre')]
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [79, 94], indirect=True)
@@ -241,7 +244,7 @@ def test_interrupt_failure_retry_and_independent_regular_ddl(installed, monkeypa
         conn.execute('CREATE TABLE independent_ranked_ddl(value TEXT)')
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_ranked_ddl'").fetchone()
-    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_ranked_ddl', install, validate)))
+    monkeypatch.setattr(regular, 'CHANGES', (regular.Change(1, 'independent_ranked_ddl', install, validate),))
     regular.migrate(store.conn)
     assert clicked.progress(store.conn) == failed
     assert store.conn.execute('SELECT max(version) FROM schema_changes').fetchone()[0] == len(regular.CHANGES)
@@ -343,7 +346,7 @@ def test_roots_preserve_real_generations_versions_and_releases_in_bounded_batche
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('kind', ['address', 'candidate', 'codec', 'policy', 'size'])
-def test_invalid_source_fails_closed_retains_authoritative_bytes_and_does_not_block_regular_ddl(installed, monkeypatch, kind):
+def test_invalid_source_fails_closed_retains_authoritative_bytes_and_does_not_block_regular_ddl(installed, monkeypatch, kind, independent_regular_ddl):
     store, _ = installed
     originals, run_id = seed(store)
     surface = f'model_pair:{run_id}:incumbent:radio'

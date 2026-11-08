@@ -6,28 +6,33 @@ import threading
 
 import pytest
 
-from tests.core.test_predecessor_writes import admitted_installed as installed
-from tests.core.test_predecessor_writes import installed as unadmitted_installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.core.test_predecessor_writes import consumer_installed as unadmitted_installed
+from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_discovery_owner_preparation import seed
 from tests.core.test_discovery_artist_publication import ready as artist_ready
-from yt_playlist.core import artists, collection_recovery
+from yt_playlist.core import schema_inspection, artists, collection_recovery
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import discovery_publication as publication, discovery_subjects as preparation
 from yt_playlist.core.store import Store
 
 
 def prepare(conn):
-    owner = publication.owner(conn)
-    artifact, stage = artist_ready(conn)
-    artifact.publish(conn, stage=stage)
-    for job in owner.jobs:
-        job.install(conn)
-        for _ in range(500):
-            if job.step(conn, batch_size=16).status == 'prepared':
-                break
-        else:
-            pytest.fail('Discovery subject fixture did not prepare')
-    return owner
+    # These are completed lower inputs for publication. Reuse the production
+    # table-inspection session while real workers build them; all validators,
+    # source copying and file writes still run.
+    with schema_inspection.reuse_tables(conn):
+        owner = publication.owner(conn)
+        artifact, stage = artist_ready(conn)
+        artifact.publish(conn, stage=stage)
+        for job in owner.jobs:
+            job.install(conn)
+            for _ in range(500):
+                if job.step(conn, batch_size=16).status == 'prepared':
+                    break
+            else:
+                pytest.fail('Discovery subject fixture did not prepare')
+        return owner
 
 
 def ready(conn, size=16):
@@ -149,7 +154,7 @@ def test_origin_aliases_fold_and_keep_exact_contributions(installed):
 
 
 @pytest.mark.parametrize('unadmitted_installed', [79, 93], indirect=True)
-def test_selected_readers_use_one_generation_and_writes_reconcile_without_losing_visits(unadmitted_installed):
+def test_selected_readers_use_one_generation_and_writes_reconcile_without_losing_visits(unadmitted_installed, independent_regular_ddl):
     store, _ = unadmitted_installed
     _, aid, _, _ = seed(store)
     other = Store(store._db_path)
@@ -245,7 +250,7 @@ def test_canonical_artist_collision_preserves_first_metadata_last_explanation_an
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('damage', ['clock', 'identity', 'original', 'missing', 'classification'])
-def test_independent_publication_check_rejects_damaged_preparation(installed, damage):
+def test_independent_publication_check_rejects_damaged_preparation(installed, damage, independent_regular_ddl):
     store, _ = installed
     _, aid, _, _ = seed(store)
     with store.conn:
@@ -276,7 +281,7 @@ def test_independent_publication_check_rejects_damaged_preparation(installed, da
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
-def test_interrupted_stage_and_head_resume_without_partial_selection_or_stale_publish(installed, monkeypatch):
+def test_interrupted_stage_and_head_resume_without_partial_selection_or_stale_publish(installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     seed(store)
     owner = prepare(store.conn)
@@ -329,7 +334,7 @@ def test_interrupted_stage_and_head_resume_without_partial_selection_or_stale_pu
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_slow_verification_leaves_real_writes_and_regular_migrations_available(installed, monkeypatch):
+def test_slow_verification_leaves_real_writes_and_regular_migrations_available(installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     _, aid, _, _ = seed(store)
     owner, stage = ready(store.conn)
@@ -360,7 +365,7 @@ def test_slow_verification_leaves_real_writes_and_regular_migrations_available(i
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_repeated_stage_schema_validation_does_not_reserve_writer(installed, monkeypatch):
+def test_repeated_stage_schema_validation_does_not_reserve_writer(installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     _, aid, _, _ = seed(store)
     owner, stage = ready(store.conn)
@@ -418,7 +423,7 @@ def test_frozen_native_upgrade_keeps_retained_inputs_and_prefers_native_readers(
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
 @pytest.mark.parametrize('version', [86, 100])
-def test_partly_upgraded_genre_layout_admits_earlier_retained_publication(installed, version, tmp_path):
+def test_partly_upgraded_genre_layout_admits_earlier_retained_publication(installed, version, tmp_path, independent_regular_ddl):
     store, _ = installed
     seed(store)
     owner, stage = ready(store.conn)
@@ -438,7 +443,7 @@ def test_partly_upgraded_genre_layout_admits_earlier_retained_publication(instal
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_listening_upgrade_preserves_selected_discovery_views_until_native_takeover(installed, tmp_path):
+def test_listening_upgrade_preserves_selected_discovery_views_until_native_takeover(installed, tmp_path, independent_regular_ddl):
     store, _ = installed
     seed(store)
     owner, stage = ready(store.conn)

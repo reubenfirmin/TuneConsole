@@ -5,7 +5,7 @@ import pytest
 
 from tests.core.test_append_operation_preparation import seed
 from tests.core.test_append_publication import stage
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from yt_playlist.core import collection_recovery, radio_storage
 from yt_playlist.core.migrations import registry, runner
 from yt_playlist.core.preparation import append_operations, append_publication

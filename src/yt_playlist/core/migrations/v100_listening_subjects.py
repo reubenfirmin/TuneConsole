@@ -124,4 +124,8 @@ def apply(conn,context):
     for name, sql in metadata_publication.views():
         if name in dropped:
             conn.execute(sql)
+    from ..preparation import genre_preference_publication
+    for name, sql in genre_preference_publication.definitions():
+        if name == genre_preference_publication.table('preferences') and name in dropped:
+            conn.execute(sql)
     conn.execute("DELETE FROM settings WHERE key IN ('trend_first_play_watermark','trend_first_play_source')")

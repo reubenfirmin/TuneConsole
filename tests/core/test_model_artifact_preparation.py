@@ -7,6 +7,7 @@ import pytest
 
 from tests.core.test_collection_control_preparation import finish
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import model_state, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import model_artifacts as preparation
@@ -54,7 +55,6 @@ def test_individual_parts_exact_originals_and_tokens_without_runtime_cutover(ins
     assert not model_state.available(store.conn)
     assert all(store.settings.get_setting(key) == value for key, value in sources.items())
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -104,7 +104,7 @@ def test_continuing_write_during_file_work_rejects_stale_checkpoint(installed, m
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_interrupt_disk_failure_independent_fingerprints_and_explicit_retry(installed, monkeypatch):
+def test_interrupt_disk_failure_independent_fingerprints_and_explicit_retry(installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     seed(store)
     artifacts, tokens = preparation.ARTIFACT_JOB, preparation.FINGERPRINT_JOB
@@ -187,4 +187,3 @@ def test_invalid_or_oversized_source_fails_durably_and_keeps_installed_state(ins
         finish(job, store.conn)
     assert job.progress(store.conn).status == 'failed'
     assert store.settings.get_setting(key) == raw
-    regular.migrate(store.conn)

@@ -4,7 +4,7 @@ from tests.derived_rating_support import seed_dislike
 
 import pytest
 
-from tests.recommendation_support import publish_bundles, seed_bundle_subjects
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import album_feedback, growth_readiness, home_prepared, measurement, musical_character, vibe_preparation
 
@@ -22,7 +22,9 @@ def fresh_reserve(store, count=48, score=.8):
     tracks = [{'key': f'new {i}|artist {i}', 'video_id': f'new-{i}', 'title': f'New {i}',
                'artist': f'Artist {i}', 'genre': 'Jazz', 'score': score} for i in range(count)]
     bundle = {'all': {'fresh': tracks}}
-    seed_bundle_subjects(store, bundle)
+    existing = store.discovery.discovered_tracks_by_keys([track['key'] for track in tracks])
+    missing = [track for track in tracks if track['key'] not in existing]
+    seed_publication_subjects(store, missing, discoveries=[track['key'] for track in missing])
     publish_bundles(store, bundle)
     return tracks
 
@@ -133,7 +135,9 @@ def publish_vibe_menus(store):
     with atomic_write(store):
         for lane in ('wheelhouse', 'explore', 'fresh', 'comfort'):
             tracks = []
-            for index in range(48 if lane == 'fresh' else 36 if lane == 'comfort' else 16):
+            # Keep the journey's real Fresh and Comfort capacity gates. Four
+            # contrasting pairs suffice for the other preset lanes.
+            for index in range(48 if lane == 'fresh' else 36 if lane == 'comfort' else 8):
                 key = f'{lane} {index}|{lane} artist {index}'
                 soft = index % 2 == 0
                 audio = {'energy': .1 if soft else .9, 'mood_relaxed': .9 if soft else .1,
@@ -219,7 +223,7 @@ def test_readiness_follows_normal_worker_updates_between_menu_publications(
 
     lanes = vibe_menus
     # Three supported Fresh candidates cannot fill the four-supported-song
-    # requirement. Change only the decisive lane, keeping the other 68 real
+    # requirement. Change only the decisive lane, keeping the other 52 real
     # library candidates and their current evidence available throughout.
     entries = [store.conn.execute('SELECT id FROM catalog_tracks WHERE identity_key=?',
                                  (item['key'],)).fetchone()[0]

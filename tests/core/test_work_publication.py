@@ -5,7 +5,7 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.prepared_fixture_support import coordinates
 from tests.test_installed_fixture import state
 from yt_playlist.core import file_owners, recommendation_work

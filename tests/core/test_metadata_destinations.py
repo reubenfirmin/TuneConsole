@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 from tests.core.test_metadata_owner_cutover import predecessor, seed
+from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_metadata_preparation import finish
 from tests.metadata_provenance_support import metadata_provenance
 from tests.core.test_metadata_publication import publish as read_publication
@@ -19,7 +20,7 @@ def stage(conn):
     finish(conn)
     identity = read_publication(conn)
     for _ in range(100):
-        current = publication.step(conn,identity=identity,batch_size=2)
+        current = publication.step(conn,identity=identity,batch_size=16)
         if current.complete:
             return identity
     pytest.fail('Metadata destinations did not finish')
@@ -83,10 +84,9 @@ def test_files_typed_observations_and_explicit_unresolved_selection_preserve_cho
     assert metadata_provenance(store, entry)['lineage']['genre']['choice']['observation']['value_kind']=='null'
     assert successor!=identity
     assert conn.execute('SELECT 1 FROM '+publication.table('choices')+' WHERE stage=?',(identity,)).fetchone()
-    regular.migrate(conn)
 
 
-def test_failed_file_batch_is_durable_and_retry_resumes_without_duplicates(predecessor,monkeypatch):
+def test_failed_file_batch_is_durable_and_retry_resumes_without_duplicates(predecessor,monkeypatch, independent_regular_ddl):
     conn = predecessor.conn
     seed(predecessor)
     preparation.JOB.install(conn)
@@ -127,7 +127,6 @@ def test_unknown_active_choice_is_retained_as_failed_input_without_selection(pre
     assert conn.execute("SELECT value_json FROM entry_field_choices WHERE entry_id=? AND field='genre'",(entry,)).fetchone()[0]=='{}'
     assert preparation.JOB.progress(conn).status=='failed'
     assert preparation.JOB.progress(conn).error
-    regular.migrate(conn)
 
 
 def test_interrupted_head_selection_is_atomic_and_restart_keeps_serving(predecessor):
@@ -203,7 +202,7 @@ def test_native_upgrade_and_restart_keep_selected_files_and_prefer_native_owners
         reopened.conn.close()
 
 
-def test_file_failure_and_racing_source_never_select_incomplete_destinations(predecessor,monkeypatch):
+def test_file_failure_and_racing_source_never_select_incomplete_destinations(predecessor,monkeypatch, independent_regular_ddl):
     conn = predecessor.conn
     seed(predecessor)
     preparation.JOB.install(conn)

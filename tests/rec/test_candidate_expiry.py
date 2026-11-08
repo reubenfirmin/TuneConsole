@@ -8,7 +8,8 @@ import pytest
 from tests.candidate_timing_support import candidate_costs, candidate_prefix_costs
 from tests.conftest import seed_catalog_track
 from tests.rec.test_model_refresh import refresh_costs
-from tests.prepared_fixture_support import prepared_template
+from tests.prepared_fixture_support import capture_template, prepared_template
+from tests.store_fixture_support import bounded_consumer_schema
 from tests.rec.test_candidate_refresh import candidate, no_fit
 from yt_playlist.core.store import Store
 from yt_playlist.rec import candidate_refresh, embedding_training as embed, mode_surfaces
@@ -70,7 +71,13 @@ def expiry_rankers():
 
 
 @pytest.fixture(scope='module')
-def candidate_library_template(_pristine_current_schema, expiry_rankers):
+def candidate_expiry_schema():
+    with bounded_consumer_schema((('techno', 'Techno'), ('jazz', 'Jazz'), ('rock', 'Rock'))) as schema:
+        yield schema
+
+
+@pytest.fixture(scope='module')
+def candidate_library_template(candidate_expiry_schema, expiry_rankers):
     """Expiry needs ranked subjects and fitted vectors, not mode discovery.
 
     Keep three genres, overlapping playlists and real saved vectors/ranks. The
@@ -98,7 +105,7 @@ def candidate_library_template(_pristine_current_schema, expiry_rankers):
         assert rows
         return rows[0]['key']
 
-    with prepared_template(_pristine_current_schema, build) as template:
+    with prepared_template(candidate_expiry_schema, build) as template:
         yield template
 
 
@@ -121,6 +128,15 @@ def snooze(store, key, until=3000.1, now=2100):
     store.rec_model.record_feedback('for_you', key, 'not_now', until=until, now=now)
     refresh(store, now)
     assert candidate(store, key) is None
+
+
+def test_candidate_expiry_inputs_publish_a_ranked_wheelhouse(candidate_library_template):
+    source = candidate_library_template.source
+    assert candidate(source, candidate_library_template.result)
+    assert {key for key, _vector in source.rec_model.get_rec_vectors()} == {'expiry-0', 'expiry-1', 'expiry-2'}
+    assert len(source.rec_query.library_keys()) == 3
+    assert source.rec_model.suppressed_keys('for_you', 2000) == set()
+    assert source.recommendations.head('home') is not None
 
 
 def test_expiry_restores_candidate_without_source_edit_or_fitting(store, monkeypatch, candidate_library_template):
@@ -170,18 +186,40 @@ def test_expiry_preserves_unavailable_and_removed_sources(
     assert candidate(store, key) is None
 
 
-def test_expiry_survives_restart(tmp_path, monkeypatch, candidate_library_template):
-    path = tmp_path / 'expiry.db'
+@pytest.fixture(scope='module')
+def snoozed_library_template(candidate_library_template, tmp_path_factory):
+    path = tmp_path_factory.mktemp('snoozed-candidates') / 'snoozed.db'
     with candidate_library_template.open(path) as store:
         key = candidate_library_template.result
         snooze(store, key)
+        yield capture_template(store, key)
+
+
+def test_snoozed_candidate_persists_its_deadline_and_keeps_fitted_vectors(
+        snoozed_library_template, candidate_library_template):
+    source = snoozed_library_template.source
+    assert candidate(source, snoozed_library_template.result) is None
+    assert not candidate_refresh.due(source, 3000)
+    assert candidate_refresh.due(source, 3000.1)
+    assert source.rec_model.get_rec_vectors() == candidate_library_template.source.rec_model.get_rec_vectors()
+
+
+def test_expiry_survives_restart(tmp_path, monkeypatch, snoozed_library_template):
+    path = tmp_path / 'expiry.db'
+    with snoozed_library_template.open(path) as store:
+        key = snoozed_library_template.result
+        vectors = store.rec_model.get_rec_vectors()
     monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
     store = Store(path)
     try:
         store.init_schema()
-        assert candidate_refresh.due(store, 3100)
+        with store.read_view() as reader:
+            assert reader.rec_model.get_rec_vectors() == vectors
+            assert candidate_refresh.due(reader, 3100)
         refresh(store, 3100)
-        assert candidate(store, key)
+        with store.read_view() as reader:
+            assert candidate(reader, key)
+            assert reader.rec_model.get_rec_vectors() == vectors
     finally:
         store.conn.close()
 

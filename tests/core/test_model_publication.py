@@ -9,7 +9,7 @@ import pytest
 
 from tests.core.test_collection_control_preparation import finish
 from tests.core.test_model_artifact_preparation import current, seed
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from yt_playlist.core import model_state, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import model_artifacts as preparation, model_publication as publication
@@ -95,9 +95,9 @@ def test_source_and_compatible_writes_withdraw_the_entire_selection(installed, k
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('mutation', ['encoder', 'fingerprint', 'manifest'])
 def test_continuing_writes_during_file_verification_cannot_publish_stale_inputs(
-        installed, staged_custody, monkeypatch, mutation):
+        installed, monkeypatch, mutation):
     store, _ = installed
-    _, revisions = staged_custody(installed, 'model-artifacts-and-fingerprints', rejection_inputs)
+    _, revisions = rejection_inputs(store)
     real_read = files.read
     changed = False
     def change_during_read(*args, **kwargs):
@@ -116,14 +116,13 @@ def test_continuing_writes_during_file_verification_cannot_publish_stale_inputs(
     with pytest.raises(MigrationError, match='(reconciled preparation|changed during publication)'):
         publication.publish(store.conn, **revisions)
     assert publication.selected(store.conn) is None
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['missing-file', 'fingerprint', 'original'])
-def test_incomplete_or_corrupt_preparation_does_not_select_a_model(installed, staged_custody, failure):
+def test_incomplete_or_corrupt_preparation_does_not_select_a_model(installed, failure):
     store, _ = installed
-    sources, revisions = staged_custody(installed, 'model-artifacts-and-fingerprints', rejection_inputs)
+    sources, revisions = rejection_inputs(store)
     if failure == 'missing-file':
         Path(store.conn.execute(f'SELECT filename FROM {preparation.PARTS} LIMIT 1').fetchone()[0]).unlink()
     elif failure == 'fingerprint':
@@ -138,7 +137,6 @@ def test_incomplete_or_corrupt_preparation_does_not_select_a_model(installed, st
         publication.publish(store.conn, **revisions)
     assert publication.selected(store.conn) is None
     assert all(store.settings.get_setting(key) == raw for key, raw in sources.items())
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -152,7 +150,6 @@ def test_publication_interruption_rolls_back_then_explicit_retry_succeeds(instal
         publication.publish(store.conn, **revisions, clock=interrupt)
     assert not store.conn.in_transaction
     assert publication.selected(store.conn) is None
-    regular.migrate(store.conn)
     publication.publish(store.conn, **revisions)
     assert publication.selected(store.conn) == (0, 0)
 

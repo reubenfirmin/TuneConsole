@@ -12,11 +12,9 @@ from tests import model_support
 from tests.derived_rating_support import seed_dislike
 from tests.genre_catalog_support import bound_catalog
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
-from tests.store_fixture_support import PristineSchema, initialize_consumer
-from yt_playlist.core import listening, schema_bootstrap
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
+from yt_playlist.core import listening
 from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.core.db_revisions import Revisions
-from yt_playlist.core.migrations import registry, regular
 from yt_playlist.core.store import Store
 from yt_playlist.rec import (candidate_refresh, discover, home_prepared,
                              embedding_vectors, measurement, mode_surfaces, surfaces, taste_modes)
@@ -40,12 +38,12 @@ def ranker_library(tmp_path, playback_schema, record_property, monkeypatch):
                         lambda reader, now: {'rec_candidate_preferences': 'captured-ranker-inputs'})
     store = Store(tmp_path / 'rankers.db')
     with closing(store.conn):
-        initialize_consumer(store, playback_schema)
         # This check owns visibility and concurrency, not power-loss recovery.
         store.conn.execute('PRAGMA synchronous=OFF')
         # WAL checkpoint maintenance has independent owners; committed WAL
         # visibility to the pinned reader and concurrent writer remains real.
         store.conn.execute('PRAGMA wal_autocheckpoint=0')
+        initialize_consumer(store, playback_schema)
         record_property('ranker_schema_setup_seconds', time.monotonic() - started)
         _seed_ranker_inputs(store)
         record_property('ranker_input_setup_seconds', time.monotonic() - started)
@@ -134,14 +132,7 @@ def playback_schema():
     # These cases own consumer coordination, not schema admission. Install the
     # shipped definition once with its FK checks and genuine generated revision
     # guards. Every consumer gets a private SQL/file namespace and real guards.
-    with closing(sqlite3.connect(':memory:', factory=PristineSchema)) as schema:
-        schema.execute('PRAGMA foreign_keys=ON')
-        with schema:
-            schema.execute('BEGIN')
-            schema_bootstrap.bootstrap(schema, registry.MIGRATIONS, regular.CHANGES,
-                                       1., validation=lambda conn: None)
-        schema.capture_revisions(Revisions(schema))
-        schema.execute('PRAGMA query_only=ON')
+    with bounded_consumer_schema((('rock', 'Rock'), ('jazz', 'Jazz'), ('techno', 'Techno'))) as schema:
         yield schema
 
 
@@ -160,11 +151,11 @@ def library(tmp_path, playback_schema, monkeypatch):
     # every unrelated file owner in a prepared-template copy.
     store = Store(tmp_path / 'playback.db')
     with closing(store.conn):
-        initialize_consumer(store, playback_schema)
         # These visibility/fencing cases do not exercise power-loss recovery
         # or background WAL checkpoint policy.
         store.conn.execute('PRAGMA synchronous=OFF')
         store.conn.execute('PRAGMA wal_autocheckpoint=0')
+        initialize_consumer(store, playback_schema)
         playback_library(store)
         yield store
 

@@ -1,10 +1,15 @@
 """Automatic retries repair failed resources without repeating healthy remote reads."""
 import json
 from collections import Counter
+from contextlib import nullcontext
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from tests.conftest import FakeClient, _track
+from tests.repository_mock_support import no_database, repository_store
+from yt_playlist.controllers.sync import LibrarySync
 from yt_playlist.library import sync
 from yt_playlist.library.sync_outcomes import RETRY_BASE_S, sync_due
 from yt_playlist.core import playlist_scopes, sync_state
@@ -50,9 +55,38 @@ def no_request_retries(monkeypatch):
     monkeypatch.setattr(sync, "with_retry", lambda fn, **kw: fn())
 
 
-def test_two_accounts_retry_only_four_incomplete_playlists_and_failed_listing(store, caplog):
-    first = store.accounts.upsert_account("First", "bridge", None, True)
-    second = store.accounts.upsert_account("Second", "bridge", "brand", False)
+def test_two_accounts_retry_only_four_incomplete_playlists_and_failed_listing(no_database, monkeypatch, caplog):
+    first, second = 1, 2
+    settings = {}
+    store = repository_store(
+        values={'sync': None},
+        accounts={'get_accounts': [SimpleNamespace(id=first, label='First'),
+                                   SimpleNamespace(id=second, label='Second')]},
+        settings={'get_setting': None, 'set_setting': None, 'publish_values': None},
+        tracks={'upsert_track': 1, 'observe_track_entry': None},
+        playlists={'playlist_revisions': {}, 'get_playlists': [], 'get_playlist_groups': {},
+                   'playlist_reference': None, 'publish_playlist_snapshot': 1,
+                   'get_playlist': None, 'ensure_playlist_thumbnail': None,
+                   'reconcile_playlist_provenance': None, 'is_quarantined_playlist': False},
+        history={'record_history_plays': None},
+        collection={'saved_album_ids': set(), 'saved_album_revision': 0,
+                    'replace_saved_album_snapshots': {first, second},
+                    'get_saved_albums': [], 'complete_album_tracklist_ids': set()},
+    )
+    store.settings.get_setting.side_effect = settings.get
+    store.settings.set_setting.side_effect = settings.__setitem__
+    store.settings.publish_values.side_effect = settings.update
+    store.playlists.playlist_reference.side_effect = lambda pid, account_id: (account_id, pid)
+    repository = Mock(spec_set=['state_facts', 'has_attempt_state', 'require_revision'])
+    repository.state_facts.side_effect = lambda: {'raw': settings.get('library_sync_state', '{}')}
+    repository.has_attempt_state.return_value = False
+    recovery = Mock(spec_set=['retained'])
+    recovery.retained.side_effect = nullcontext
+    store.sync = LibrarySync(repository, store.settings, recovery, None)
+    # This case owns scheduling across a large mixed result. Membership and
+    # rating writes have their own real-storage tests in test_sync and repos.
+    monkeypatch.setattr(sync.ratings, 'record_observations', Mock())
+    monkeypatch.setattr(sync.ratings, 'reconcile_pending', Mock())
     good, bad = CountedClient(133), CountedClient()
     good.partial = {f"PL{i}" for i in range(129, 133)}
     bad.library_failed = True

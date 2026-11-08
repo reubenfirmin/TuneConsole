@@ -5,6 +5,7 @@ import json
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from tests.publication_timing_support import publication_costs
 from yt_playlist.core import group_evidence, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, regular
@@ -67,7 +68,6 @@ def test_exact_display_parts_policies_and_existing_evidence_roots_are_additive(
     preparation.JOB.install(conn)
     assert preparation.JOB.step(conn, batch_size=1).processed == 1
     assert head(conn, 'adaptive_group_preview') is None
-    regular.migrate(conn)
     finish(preparation.JOB, conn, size=128)
     for surface, raw in original.items():
         assert preparation.read_original(conn, head(conn, surface)) == raw
@@ -225,7 +225,6 @@ def test_oversized_root_fails_without_truncation_or_releasing_the_source(install
         finish(preparation.ROOT_JOB, conn)
     assert preparation.ROOT_JOB.progress(conn).status == 'failed'
     assert conn.execute('SELECT source_context FROM unresolved_group_contexts').fetchone()[0] == raw
-    regular.migrate(conn)
 
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
@@ -289,7 +288,7 @@ def test_interrupt_and_disk_failure_preserve_checkpoint_until_explicit_retry(ins
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
 @pytest.mark.parametrize('raw', ['{', '{"schema":true}', '{"generation":12}', '{"value":NaN}'])
-def test_invalid_display_fails_durably_without_blocking_regular_ddl(installed, raw):
+def test_invalid_display_fails_durably_without_blocking_regular_ddl(installed, raw, independent_regular_ddl):
     store, _ = installed
     with store.conn:
         store.conn.execute('INSERT INTO rec_proposals VALUES (?, ?, 1)', ('home_prepared', raw))

@@ -51,7 +51,8 @@ def test_exact_files_ordered_references_and_old_readers_remain_usable(installed)
         ('missing-policy', None, 'missing_policy'), ('saved-policy', 'saved-policy', None)]
     assert store.conn.execute('SELECT count(*) FROM rec_model_selection_runs').fetchone()[0] == 1
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    regular.migrate(store.conn)
+    # Regular DDL during pending/failed preparation belongs to the explicit
+    # interruption control below, rather than every saved-output shape.
 
 
 @pytest.mark.parametrize('installed', [79, 94], indirect=True)
@@ -64,7 +65,9 @@ def test_frozen_upgrade_preserves_original_outputs_and_matches_reference_custody
     upgraded = Store(tmp_path / 'saved-outputs-upgrade.db')
     try:
         store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
+        # v95 owns the saved-output cutover. Later independent owner conversions
+        # have their own migration tests and do not alter this comparison.
+        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS[:95])
         for source, raw in sources.items():
             assert outputs.get(upgraded.conn, source) == raw
             assert preparation.read_original(head(upgraded.conn, source)) == raw
@@ -199,7 +202,9 @@ def test_interruption_file_failure_independent_regular_ddl_and_reopened_retry(in
         conn.execute('CREATE TABLE independent_saved_output_ddl(value TEXT)')
     def validate(conn):
         assert conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='independent_saved_output_ddl'").fetchone()
-    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_saved_output_ddl', install, validate)))
+    # The real runner must advance while preparation is failed. Existing owner
+    # installation is covered by test_independent_schema_changes, not this case.
+    monkeypatch.setattr(regular, 'CHANGES', (regular.Change(1, 'independent_saved_output_ddl', install, validate),))
     regular.migrate(store.conn)
     assert store.conn.execute('SELECT max(version) FROM schema_changes').fetchone()[0] == len(regular.CHANGES)
     assert radio.progress(store.conn) == failed
@@ -271,4 +276,3 @@ def test_invalid_radio_fails_durably_without_changing_source_or_other_job(instal
     assert store.settings.get_setting('radio_seed_offer') == raw
     assert head(store.conn, 'radio_seed_offer') is None
     assert finish(report, store.conn).status == 'prepared'
-    regular.migrate(store.conn)

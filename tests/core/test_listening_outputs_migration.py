@@ -1,10 +1,13 @@
 """Listening display publication retains its exact bytes and file ownership."""
+from contextlib import closing
 import hashlib
 import json
 import sqlite3
 
 import pytest
 
+from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import install_numbered_input
 from yt_playlist.core import listening_outputs as owner, recommendation_outputs as files
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.migrations import migrate, registry, v090_listening_outputs
@@ -23,14 +26,26 @@ def bundle(label='one'):
     return {key: raw}, manifest, edition
 
 
+@pytest.fixture(scope='module')
+def listening_predecessor_schema():
+    # This module owns v90 display conversion, including exact file custody.
+    # Supply completed earlier SQL below it.
+    with closing(sqlite3.connect(':memory:')) as schema, pytest.MonkeyPatch.context() as patch:
+        bound_catalog(patch)
+        install_numbered_input(schema, 89)
+        schema.execute('PRAGMA query_only=ON')
+        yield schema
+
+
 @pytest.fixture
-def predecessor(tmp_path, _pristine_installed_schema, record_property):
+def predecessor(tmp_path, listening_predecessor_schema, record_property, monkeypatch):
     import time
 
+    bound_catalog(monkeypatch)
     store = Store(tmp_path / 'listening.db')
     try:
         began = time.perf_counter()
-        template = _pristine_installed_schema(89)
+        template = listening_predecessor_schema
         record_property('legacy_prefix_seconds', time.perf_counter() - began)
         began = time.perf_counter()
         template.backup(store.conn)
@@ -44,7 +59,7 @@ def predecessor(tmp_path, _pristine_installed_schema, record_property):
 
 
 def cutover(store):
-    migrate(store.conn, registry=registry.MIGRATIONS)
+    migrate(store.conn, registry=registry.MIGRATIONS[:90])
     store._bind_repositories()
     store._snapshot_revisions = Revisions(store.conn)
 

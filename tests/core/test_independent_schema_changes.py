@@ -5,6 +5,9 @@ import threading
 
 import pytest
 
+from tests.genre_catalog_support import bound_catalog
+from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import install_numbered_input, install_regular_input
 from yt_playlist.core.migrations import MigrationError, migrate, registry, regular
 from yt_playlist.core.migrations import v080_metadata_evidence
 from yt_playlist.core.migrations.runner import validate_version
@@ -12,13 +15,16 @@ from yt_playlist.core.migrations.__main__ import main
 
 
 @pytest.fixture
-def installed(tmp_path, _pristine_installed_schema):
+def installed(tmp_path, monkeypatch):
+    # These cases own regular DDL and admission over an exact v79 input.
+    # Historical construction is covered by the frozen migration owners.
+    bound_catalog(monkeypatch)
     path = tmp_path / 'old-format.db'
     conn = sqlite3.connect(path)
     try:
         conn.row_factory = sqlite3.Row
         conn.execute('PRAGMA foreign_keys=ON')
-        _pristine_installed_schema(79).backup(conn)
+        install_numbered_input(conn, 79)
         with conn:
             conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (3,'Listener','credential',1)")
             conn.execute("INSERT INTO settings VALUES ('retained-setting','original')")
@@ -35,7 +41,9 @@ def test_album_feedback_outbox_installation_rolls_back_and_retries_without_advan
     from yt_playlist.core import album_feedback_outbox
     with closing(sqlite3.connect(installed)) as conn:
         version = next(change.version for change in regular.CHANGES if change.name == 'durable_album_feedback_responses')
-        regular.migrate(conn, changes=regular.CHANGES[:version - 1])
+        with conn:
+            install_regular_input(conn, regular.CHANGES[:version - 1])
+        monkeypatch.setattr(regular, 'CHANGES', regular.CHANGES[:version])
         history = legacy_history(conn)
         before = list(conn.iterdump())
         install = album_feedback_outbox.install
@@ -55,10 +63,12 @@ def test_album_feedback_outbox_installation_rolls_back_and_retries_without_advan
             'durable_album_feedback_responses',)
 
 
-def test_wrong_album_feedback_outbox_is_rejected_without_stamping_change(installed):
+def test_wrong_album_feedback_outbox_is_rejected_without_stamping_change(installed, monkeypatch):
     with closing(sqlite3.connect(installed)) as conn:
         version = next(change.version for change in regular.CHANGES if change.name == 'durable_album_feedback_responses')
-        regular.migrate(conn, changes=regular.CHANGES[:version - 1])
+        with conn:
+            install_regular_input(conn, regular.CHANGES[:version - 1])
+        monkeypatch.setattr(regular, 'CHANGES', regular.CHANGES[:version])
         with conn:
             conn.execute('CREATE TABLE album_feedback_response_outbox(action_id TEXT)')
         before = list(conn.iterdump())
@@ -72,7 +82,8 @@ def test_wrong_album_feedback_outbox_is_rejected_without_stamping_change(install
 def test_association_checkpoint_installation_rolls_back_and_retries(installed, monkeypatch):
     from yt_playlist.core import association_work
     with closing(sqlite3.connect(installed)) as conn:
-        regular.migrate(conn, changes=regular.CHANGES[:34])
+        with conn:
+            install_regular_input(conn, regular.CHANGES[:34])
         before = list(conn.iterdump())
         install = association_work.install
 
@@ -94,7 +105,8 @@ def test_association_checkpoint_installation_rolls_back_and_retries(installed, m
 
 def test_wrong_association_checkpoint_is_rejected_without_stamping(installed):
     with closing(sqlite3.connect(installed)) as conn:
-        regular.migrate(conn, changes=regular.CHANGES[:34])
+        with conn:
+            install_regular_input(conn, regular.CHANGES[:34])
         with conn:
             conn.execute('CREATE TABLE recording_association_work(video_id TEXT)')
         before = list(conn.iterdump())
@@ -104,6 +116,9 @@ def test_wrong_association_checkpoint_is_rejected_without_stamping(installed):
 
 
 def test_routine_runner_never_starts_real_metadata_conversion(installed, monkeypatch):
+    # Only the real receipt change is relevant to v81 adoption below. The
+    # complete regular registry has separate startup/CLI owners.
+    monkeypatch.setattr(regular, 'CHANGES', regular.CHANGES[:1])
     def failed_conversion(conn):
         raise RuntimeError('Conversion deliberately suspended for retry')
 
@@ -130,7 +145,7 @@ def test_routine_runner_never_starts_real_metadata_conversion(installed, monkeyp
         assert conn.execute("SELECT result FROM playback_feedback_receipts WHERE capture_id='retained-capture'").fetchone()[0] == 1
 
 
-def test_regular_failure_keeps_prior_commit_and_never_changes_legacy_history(installed):
+def test_regular_failure_keeps_prior_commit_and_never_changes_legacy_history(installed, independent_regular_ddl):
     def interrupted(conn, context):
         conn.execute('CREATE TABLE interrupted_owner(id INTEGER PRIMARY KEY)')
         raise RuntimeError('Interrupted regular DDL')
@@ -176,6 +191,9 @@ def test_regular_cli_does_not_run_legacy_conversion(installed, tmp_path, monkeyp
         pytest.fail('Regular schema command invoked bulk conversion')
 
     monkeypatch.setattr(v080_metadata_evidence, 'convert_legacy', forbidden)
+    # Command routing owns DDL admission independently of bulk conversion.
+    # Registry-wide installation is covered by current-schema bootstrap tests.
+    monkeypatch.setattr(regular, 'CHANGES', regular.CHANGES[:1])
     assert main(['upgrade-schema', str(installed)]) == 0
     assert 'legacy layout remains 79' in capsys.readouterr().out
     with closing(sqlite3.connect(installed)) as conn, conn:
@@ -189,7 +207,7 @@ def test_regular_cli_does_not_run_legacy_conversion(installed, tmp_path, monkeyp
     assert not missing.exists()
 
 
-def test_competing_regular_startups_install_once(installed):
+def test_competing_regular_startups_install_once(installed, independent_regular_ddl):
     barrier = threading.Barrier(2)
     errors = []
 
@@ -214,7 +232,7 @@ def test_competing_regular_startups_install_once(installed):
         assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone() == (79,)
 
 
-def test_completed_regular_validation_leaves_writer_available(installed, monkeypatch):
+def test_completed_regular_validation_leaves_writer_available(installed, monkeypatch, independent_regular_ddl):
     with closing(sqlite3.connect(installed)) as conn, conn:
         # Match Store's production journal mode; a rollback journal naturally
         # makes every retained reader delay the writer's commit.
@@ -250,6 +268,7 @@ def test_regular_change_repairs_retired_preparation_capture_without_rewriting_hi
     from yt_playlist.core import genre_identity
     from yt_playlist.core.migrations import v085_genre_preferences
     from yt_playlist.core.preparation import genre_preferences
+    monkeypatch.setattr(regular, 'CHANGES', regular.CHANGES[:3])
     with closing(sqlite3.connect(installed)) as conn, conn:
         conn.row_factory = sqlite3.Row
         with conn:
@@ -280,6 +299,7 @@ def test_regular_change_repairs_retired_preparation_capture_without_rewriting_hi
 def test_taste_capture_retirement_preserves_evidence_and_supported_upgrade(installed,monkeypatch,former):
     from yt_playlist.core.migrations import v088_taste_axes
     from yt_playlist.core.preparation import taste_axes
+    monkeypatch.setattr(regular, 'CHANGES', regular.CHANGES[:4])
     with closing(sqlite3.connect(installed)) as conn, conn:
         conn.row_factory=sqlite3.Row
         with conn:

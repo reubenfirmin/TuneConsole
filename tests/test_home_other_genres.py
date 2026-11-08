@@ -2,7 +2,7 @@ import html
 import json
 import logging
 import re
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 
 import numpy as np
 import pytest
@@ -68,6 +68,12 @@ def template_bytecode(tmp_path_factory):
 
 @pytest.fixture(autouse=True)
 def genre_routes(monkeypatch, home_routes_only, template_bytecode):
+    with genre_route_context(monkeypatch, template_bytecode):
+        yield
+
+
+@contextmanager
+def genre_route_context(monkeypatch, template_bytecode):
     from yt_playlist.providers import genres as genre_provider
     from yt_playlist.web import app as webapp
 
@@ -127,6 +133,10 @@ def _client(store, now=1000.0, *, prepare=True):
 
 @pytest.fixture
 def genre_http_inputs(monkeypatch):
+    install_genre_http_inputs(monkeypatch)
+
+
+def install_genre_http_inputs(monkeypatch):
     # These routes own genre selection, saved requests, rotation and rendering.
     # Journey numerics and learning capture have independent owners in
     # test_journeys, test_choice_evidence and test_measurement_isolation.
@@ -178,32 +188,6 @@ def genre_bundles(store, *, genres=None, tracks_per_lane=20, fresh=True):
 def offered(response):
     return {g for value in re.findall(r"data-genres='([^']*)'", response.text)
             for g in json.loads(html.unescape(value))}
-
-
-def test_other_genres_changes_actual_themes_without_changing_taste(store, genre_controls, genre_http_inputs):
-    client = _client(store)
-    before = client.get("/home/cards")
-    current = offered(before)
-    assert len(current) == 4
-    generation = store.recommendations.head('home')
-    weights, leans = store.rec_model.get_weights(), store.rec_model.get_leans()
-    response = client.post("/home/other-genres", data={"genres": json.dumps(sorted(current))})
-    assert response.status_code == 200
-    assert len(offered(response)) == 2
-    assert not offered(response) & current
-    assert "Different genres for this set" in response.text
-    assert "genre_request" in response.text  # saved recipe and diagnostic audit carry the request
-    assert store.rec_model.get_weights() == weights and store.rec_model.get_leans() == leans
-    assert store.recommendations.head('home') == generation
-    assert home._epoch(store, "cards") == 1
-
-    # Re-fetching and steering preserve this menu's request. A normal refresh ends it.
-    assert offered(client.get("/home/cards")) == offered(response)
-    preview = client.post("/home/breadth", data={"breadth_bias": "0.5"})
-    assert offered(preview) == offered(response)
-    regular = client.post("/home/refresh-cards")
-    assert len(offered(regular)) == 4
-    assert "genre_request" not in regular.text
 
 
 def test_no_alternative_genres_keeps_usable_mixes_and_explains(store, genre_controls):
@@ -291,25 +275,6 @@ def test_genre_filter_resolves_library_metadata_without_mutating_candidates(stor
 
     assert len(result) == 1 and result[0]["genre"] == "Techno"
     assert items[0]["genre"] == "Jazz"
-
-
-def test_chosen_genres_constrain_tracks_and_expire_without_changing_taste(store, genre_controls, genre_http_inputs):
-    client = _client(store)
-    weights, leans = store.rec_model.get_weights(), store.rec_model.get_leans()
-    generation = store.recommendations.head('home')
-    response = client.post("/home/mix-genres", data={"genres": ["jazz", "techno"]})
-
-    assert response.status_code == 200
-    assert offered(response) == {"jazz", "techno"}
-    assert "Your chosen genres" in response.text
-    assert '"kind": "chosen_genres"' in response.text
-    assert store.rec_model.get_weights() == weights and store.rec_model.get_leans() == leans
-    assert store.recommendations.head('home') == generation
-    assert offered(client.get("/home/cards")) == offered(response)
-    assert offered(client.post("/home/breadth", data={"breadth_bias": "0.5"})) == offered(response)
-    regular = client.post("/home/refresh-cards")
-    assert len(offered(regular)) == 4
-    assert '"kind": "chosen_genres"' not in regular.text
 
 
 def test_chosen_genres_filter_backfill_and_keep_mode_attribution(store, genre_candidates):

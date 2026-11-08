@@ -6,19 +6,23 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.home_fixture_support import prepared_client, returning_listener
+from tests.home_fixture_support import prepared_client, publish_menu, returning_listener
 from tests.prepared_fixture_support import prepared_template
-from tests.test_home_other_genres import seed_genres
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.rec import (choice_evidence, fresh_pool, home_cache, home_cards,
-                             home_prepared, measurement, mode_surfaces, road_trip_candidates)
+                             measurement, mode_surfaces, road_trip_candidates)
 
 
 DIAGNOSTIC = 'internal-diagnostic-879-fresh: invalid stored ranking document'
 
 
 @pytest.fixture
-def quiet_pool(store, quiet_home_template, monkeypatch, home_routes_only, without_metadata_providers):
-    selected = quiet_home_template.restore(store)
+def quiet_pool(quiet_home_template, monkeypatch, home_routes_only, without_metadata_providers):
+    with quiet_home_template.open(':memory:') as store:
+        yield from quiet_case(store, quiet_home_template.result, monkeypatch)
+
+
+def quiet_case(store, selected, monkeypatch):
     # Job recovery consumes a completed Jazz selection. Keep HomeCards itself
     # real: it owns job/error slots and must preserve the actual saved request.
     # Genre filtering and card framing have independent real owners in
@@ -43,7 +47,7 @@ def quiet_pool(store, quiet_home_template, monkeypatch, home_routes_only, withou
     monkeypatch.setattr(choice_evidence, 'present', lambda *args, **kwargs: None)
     # Explicit Fresh jobs remain real. Periodic model/choice workers own
     # separate tests and must not replace this controlled listener's history.
-    http = prepared_client(store, background_work=False)
+    http = prepared_client(store, background_work=False, backend_options={'use_uvloop': True})
     ctx = http.app.state.ctx
     case = SimpleNamespace(store=store, http=http, ctx=ctx, fault=None, boundary='populate',
         calls=[], calculations=[], refreshes=[], schedules=[], entered=threading.Event(), release=threading.Event())
@@ -107,32 +111,16 @@ def quiet_pool(store, quiet_home_template, monkeypatch, home_routes_only, withou
 
 
 @pytest.fixture(scope='module')
-def quiet_home_template(_pristine_current_schema):
+def quiet_home_template():
     def build(source):
-        # Three complete four-song lanes and two contrasting genres are enough
-        # for retained titles/genre requests. Queue capacity is owned separately.
-        bundles = seed_genres(source, genres=['Jazz', 'Techno'], tracks_per_lane=4, fresh=False)
         returning_listener(source, 'mixes', now=1000)
         source.accounts.upsert_account('main', 'cred', None, True)
-        # Recovery consumes completed lower-layer cards, not the selection
-        # producer. Keep real subjects, typed pools and the SQL/file cache writer;
-        # actual initial selection belongs to test_stored_home and genre controls.
-        selected = []
-        for lane, tracks in bundles['0'].items():
-            proto = home_cards._proto(source, lane, lane.title(), tracks, 1000)
-            proto.update(mode_id=0, ranker='cosine', recipe={
-                'model': 'mode', 'mode_id': 0, 'lane': lane, 'journey': 'shuffle', 'dj': {}})
-            selected.append(proto)
-        result = home_cards.CardsResult(selected, [], None, None, [
-            {'family': 'jazz', 'label': 'Jazz'}, {'family': 'techno', 'label': 'Techno'}],
-            [], home_cards._epoch(source, 'cards'), None)
-        home_prepared.remember(source, None, result, 1000)
-        payload = home_cache.read(source, 'home_tuned')
-        assert home_prepared._valid(payload)
-        home_cache.put(source, home_prepared.SURFACE, payload, 1000)
-        home_cache.put(source, 'home_tuned', {}, 1000)
-        home_cache.put(source, 'home_choice', {}, 1000)
-        return selected
+        # Job recovery consumes completed library cards. One actual subject per
+        # lane retains titles and genre selection without rebuilding rank models.
+        payload = publish_menu(source, count=3, tracks_per_card=1, genre='Jazz', mode_ids=(0, 0, 0),
+            genre_options=[{'family': 'jazz', 'label': 'Jazz'}, {'family': 'techno', 'label': 'Techno'}])
+        return payload['menus'][0]['protos']
 
-    with prepared_template(_pristine_current_schema, build) as template:
-        yield template
+    with bounded_consumer_schema((('house', 'House'), ('jazz', 'Jazz'), ('techno', 'Techno'))) as schema:
+        with prepared_template(schema, build) as template:
+            yield template

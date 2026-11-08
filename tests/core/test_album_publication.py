@@ -1,14 +1,16 @@
 """Album occurrence cutover proves source custody, grouping and continuing writes."""
 from dataclasses import replace
-from functools import wraps
+from contextlib import closing, ExitStack
 import json
 import sqlite3
-import time
 
 import pytest
 
 from tests.core.test_album_owner_preparation import finish, seed
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.genre_catalog_support import bound_catalog
+from tests.prepared_fixture_support import capture_template, prepared_template
+from tests.store_fixture_support import install_numbered_input
 from yt_playlist.core import albums
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import album_occurrences as preparation, album_publication as publication
@@ -71,7 +73,7 @@ def test_preopened_projection_groups_match_frozen_native_without_losing_original
     try:
         preopened.init_schema(defer_metadata=True)
         store.conn.backup(native.conn)
-        runner.migrate(native.conn, registry=registry.MIGRATIONS)
+        runner.migrate(native.conn, registry=registry.MIGRATIONS[:99])
         native.init_schema(defer_metadata=True)
         identity = stage(store.conn, size=1)
         evidence = store.conn.execute('SELECT evidence_changes FROM rec_preparation WHERE id=1').fetchone()[0]
@@ -119,9 +121,9 @@ def test_preopened_projection_groups_match_frozen_native_without_losing_original
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['field','reference','provider','extra','omitted','state','original','group','group-omitted'])
 def test_invalid_typed_rows_originals_coverage_and_groups_cannot_publish(
-        installed, staged_custody, failure, monkeypatch):
+        installed, failure, monkeypatch):
     store, _ = installed
-    staged_custody(installed, 'album-occurrences', rejection_inputs)
+    rejection_inputs(store)
     with store.conn:
         if failure == 'field':
             store.conn.execute("UPDATE prepared_album_track_rows SET captured_title='different'")
@@ -149,88 +151,131 @@ def test_invalid_typed_rows_originals_coverage_and_groups_cannot_publish(
     with pytest.raises((MigrationError, ValueError)):
         publication.publish(store.conn, identity=identity)
     assert publication.selected(store.conn) is None
-    regular.migrate(store.conn)
+    # The interruption control owns regular DDL independence; each malformed
+    # projection only needs to prove that real publication rejects it.
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_bounded_large_capture_real_writer_snapshot_and_immutable_custody(installed, monkeypatch, record_property):
-    costs = {}
+@pytest.fixture(scope='module')
+def album_numbered_input():
+    with closing(sqlite3.connect(':memory:')) as schema:
+        with pytest.MonkeyPatch.context() as patch:
+            bound_catalog(patch)
+            install_numbered_input(schema, 93)
+        schema.execute('PRAGMA query_only=ON')
+        yield schema
 
-    def timed(name, operation):
-        @wraps(operation)
-        def call(*args, **kwargs):
-            started = time.perf_counter()
-            try:
-                return operation(*args, **kwargs)
-            finally:
-                values = costs.setdefault(name, [0, 0.0])
-                values[0] += 1
-                values[1] += time.perf_counter() - started
-        return call
 
-    for owner, attribute in ((preparation, 'entry'), (preparation, 'provider'),
-            (preparation, 'original'), (preparation, 'describe'),
-            (publication, 'step'), (publication, 'verify'), (publication, 'publish')):
-        name = owner.__name__.rsplit('.', 1)[-1] + '_' + attribute
-        monkeypatch.setattr(owner, attribute, timed(name, getattr(owner, attribute)))
-    store, _ = installed
-    for owner, attribute in ((type(store.charts), 'album_tracks_detail'),
-                             (type(store.collection), 'cache_album_tracklist')):
-        monkeypatch.setattr(owner, attribute, timed(attribute, getattr(owner, attribute)))
-    started = time.perf_counter()
-    album, entry = seed(store)
-    with store.conn:
-        store.conn.execute('DELETE FROM main.album_tracks WHERE album_id=? AND is_full=1', (album,))
-        store.conn.executemany("INSERT INTO main.album_tracks(album_id,entry_id,position,is_full,source) VALUES (?,?,?,1,'large')",
-            [(album, entry, position) for position in range(8192)])
-        store.conn.execute('UPDATE main.album_fetch_state SET expected_track_count=8192 WHERE album_id=?', (album,))
-    record_property('large_seed_seconds', time.perf_counter() - started)
-    started = time.perf_counter()
-    preparation.JOB.install(store.conn)
-    for _ in range(300):
-        if preparation.JOB.step(store.conn).status == 'prepared':
-            break
-    record_property('large_preparation_seconds', time.perf_counter() - started)
-    first = publication.step(store.conn)
-    assert first.copied == 32 and not first.complete
-    # A reopened worker resumes the same immutable stage and bounded cursor.
-    other = sqlite3.connect(store._db_path)
-    other.row_factory = sqlite3.Row
-    try:
-        assert publication.step(other).copied == 64
-    finally:
-        other.close()
-    started = time.perf_counter()
-    identity = stage(store.conn)
-    record_property('large_publication_drain_seconds', time.perf_counter() - started)
-    before_entry_calls = costs.get('album_occurrences_entry', [0])[0]
-    publication.publish(store.conn, identity=identity)
-    verification_entry_calls = costs['album_occurrences_entry'][0] - before_entry_calls
-    # The repeated entry remains checked once per real 32-row page, rather
-    # than once for every occurrence. No source/original comparison is skipped.
-    assert 1 < verification_entry_calls <= 257
-    record_property('large_publication_entry_reads', verification_entry_calls)
-    assert len(store.charts.album_tracks_detail('release')) == 8192
-    with store.read_snapshot() as snapshot:
-        assert len(snapshot.store.charts.album_tracks_detail('release')) == 8192
-        store.collection.cache_album_tracklist('release','Continuing','Artist',None,[],entries=[{'entry_id':entry}]*3,video_ids=['one']*3)
-        assert len(snapshot.store.charts.album_tracks_detail('release')) == 8192
-        assert not snapshot.publish(lambda:None)
-    assert publication.selected(store.conn) is None
-    assert len(store.charts.album_tracks_detail('release')) == 3
-    next_stage = stage(store.conn)
-    publication.publish(store.conn, identity=next_stage)
-    assert len(store.charts.album_tracks_detail('release')) == 3
-    assert store.conn.execute('SELECT count(*) FROM '+publication.table('tracks')+' WHERE stage=? AND is_full=1', (identity,)).fetchone()[0] == 8192
-    for sql in ['DELETE FROM '+publication.table('tracks'), 'UPDATE '+publication.table('groups')+" SET status='partial'",
-            'DELETE FROM '+preparation.ORIGINALS,
-            'INSERT INTO '+publication.table('states')+' SELECT * FROM '+publication.table('states')+' LIMIT 1']:
-        with pytest.raises(sqlite3.IntegrityError, match='retained|cleanup'):
-            with store.conn:
-                store.conn.execute(sql)
-    for name, (calls, seconds) in costs.items():
-        record_property(name + '_calls', calls)
-        record_property(name + '_wall_s', seconds)
+def test_album_publication_predecessor_has_the_exact_numbered_contract(album_numbered_input):
+    runner.validate_version(album_numbered_input, 93)
+    assert album_numbered_input.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 93
+    assert album_numbered_input.execute('SELECT count(*) FROM album_tracks').fetchone()[0] == 0
+
+
+@pytest.fixture(scope='module')
+def album_publication_input(album_numbered_input, tmp_path_factory):
+    # Empty numbered DDL is a completed lower input. This owner still performs
+    # actual installed admission and installs all regular changes and guards.
+    with ExitStack() as resources:
+        with pytest.MonkeyPatch.context() as patch:
+            bound_catalog(patch)
+            path = tmp_path_factory.mktemp('album-publication-input') / 'installed.db'
+            template = resources.enter_context(prepared_template(
+                album_numbered_input, lambda store: None, database=path, defer_metadata=True))
+        yield template
+
+
+def test_album_publication_input_is_admitted_with_its_installed_history(album_publication_input):
+    store = album_publication_input.source
+    # Admission installs compatibility TEMP views on the Store connection.
+    # Validate physical installed columns on the ordinary read-only connection.
+    with closing(sqlite3.connect(store._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
+        reader.row_factory = sqlite3.Row
+        runner.validate_version(reader, 93)
+        regular.validate(reader)
+    assert store.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
+    assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 93
+    assert store.conn.execute('SELECT count(*) FROM main.album_tracks').fetchone()[0] == 0
+    assert album_publication_input.revision_guards
+
+
+@pytest.fixture(scope='module')
+def bounded_album_capture(album_publication_input, tmp_path_factory):
+    path = tmp_path_factory.mktemp('bounded-album-capture') / 'capture.db'
+    with album_publication_input.open(path) as store:
+        album, entry = seed(store)
+        # Three 32-row pages exercise both resume boundaries and per-page
+        # reference reuse. Thousands more identical rows repeated that contract.
+        occurrences = 65
+        with store.conn:
+            store.conn.execute('DELETE FROM main.album_tracks WHERE album_id=? AND is_full=1', (album,))
+            store.conn.executemany("INSERT INTO main.album_tracks(album_id,entry_id,position,is_full,source) VALUES (?,?,?,1,'paged')",
+                [(album, entry, position) for position in range(occurrences)])
+            store.conn.execute('UPDATE main.album_fetch_state SET expected_track_count=? WHERE album_id=?', (occurrences, album))
+        preparation.JOB.install(store.conn)
+        finish(preparation.JOB, store.conn)
+        first = publication.step(store.conn)
+        assert first.copied == 32 and not first.complete
+        # A different actual SQLite connection resumes the durable stage.
+        with closing(sqlite3.connect(path)) as other:
+            other.row_factory = sqlite3.Row
+            resumed = publication.step(other)
+            assert resumed.id == first.id and resumed.copied == 64 and not resumed.complete
+        identity = stage(store.conn)
+        reads = []
+        entry_reader = preparation.entry
+
+        def read_entry(conn, identity):
+            reads.append(identity)
+            return entry_reader(conn, identity)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(preparation, 'entry', read_entry)
+            publication.publish(store.conn, identity=identity)
+        yield capture_template(store, {'album': album, 'entry': entry, 'identity': identity,
+            'occurrences': occurrences, 'entry_reads': reads, 'first': first, 'resumed': resumed})
+
+
+def test_album_capture_resumes_bounded_pages_and_verifies_each_reference_once_per_page(bounded_album_capture):
+    store, state = bounded_album_capture.source, bounded_album_capture.result
+    assert state['first'].copied == 32 and state['resumed'].copied == 64
+    assert state['entry_reads'] == [state['entry']] * 3
+    assert publication.selected(store.conn) == state['identity']
+    assert [row[0] for row in store.conn.execute(
+        'SELECT position FROM '+publication.table('tracks')+' WHERE stage=? AND is_full=1 ORDER BY position',
+        (state['identity'],))] == list(range(65))
+    assert len(store.charts.album_tracks_detail('release')) == 65
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_album_capture_snapshot_keeps_the_old_projection_during_a_real_writer(bounded_album_capture, tmp_path):
+    with bounded_album_capture.open(tmp_path / 'snapshot.db') as store:
+        entry = bounded_album_capture.result['entry']
+        with store.read_snapshot() as snapshot:
+            assert len(snapshot.store.charts.album_tracks_detail('release')) == 65
+            store.collection.cache_album_tracklist('release', 'Continuing', 'Artist', None, [],
+                entries=[{'entry_id': entry}] * 3, video_ids=['one'] * 3)
+            assert len(snapshot.store.charts.album_tracks_detail('release')) == 65
+            assert not snapshot.publish(lambda: pytest.fail('Published a changed album input'))
+        assert publication.selected(store.conn) is None
+        assert len(store.charts.album_tracks_detail('release')) == 3
+
+
+def test_album_capture_republication_keeps_old_custody_and_rejects_mutation(bounded_album_capture, tmp_path):
+    with bounded_album_capture.open(tmp_path / 'republication.db') as store:
+        state = bounded_album_capture.result
+        store.collection.cache_album_tracklist('release', 'Continuing', 'Artist', None, [],
+            entries=[{'entry_id': state['entry']}] * 3, video_ids=['one'] * 3)
+        publication.publish(store.conn, identity=stage(store.conn))
+        assert len(store.charts.album_tracks_detail('release')) == 3
+        assert store.conn.execute('SELECT count(*) FROM '+publication.table('tracks')+
+            ' WHERE stage=? AND is_full=1', (state['identity'],)).fetchone()[0] == 65
+        for sql in ['DELETE FROM '+publication.table('tracks'),
+                'UPDATE '+publication.table('groups')+" SET status='partial'",
+                'DELETE FROM '+preparation.ORIGINALS,
+                'INSERT INTO '+publication.table('states')+' SELECT * FROM '+publication.table('states')+' LIMIT 1']:
+            with pytest.raises(sqlite3.IntegrityError, match='retained|cleanup'):
+                with store.conn:
+                    store.conn.execute(sql)
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -311,7 +356,7 @@ def test_interrupted_copy_cutover_failed_preparation_and_independent_ddl(install
         conn.execute('CREATE TABLE independent_album_publication(value TEXT)')
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_album_publication'").fetchone()
-    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1,'independent_album_publication',install,validate)))
+    monkeypatch.setattr(regular, 'CHANGES', (regular.Change(1, 'independent_album_publication', install, validate),))
     regular.migrate(store.conn)
     assert preparation.JOB.progress(store.conn) == failed
     with pytest.raises(MigrationError, match='retry explicitly'):
@@ -374,4 +419,3 @@ def test_missing_provider_or_complete_order_gap_does_not_publish(installed, fail
     with pytest.raises(MigrationError, match='order|provider'):
         stage(store.conn)
     assert publication.selected(store.conn) is None
-    regular.migrate(store.conn)

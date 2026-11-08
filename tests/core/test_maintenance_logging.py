@@ -1,20 +1,36 @@
 """Routine maintenance stays quiet while progress, source guards and failures stay observable."""
+from contextlib import closing
 import logging
+from unittest.mock import Mock
 from types import SimpleNamespace
 
 import pytest
 
 from yt_playlist.core import db_diagnostics, work_diagnostics
 from yt_playlist.core.activity import WorkBudgetExceeded
-from yt_playlist.rec import home_prepared, mode_surfaces
+from yt_playlist.core.db_revisions import Revisions
+from yt_playlist.core.store import Store
+from yt_playlist.rec import album_choices, album_notes, choice_evidence, home_prepared, measurement, mode_surfaces
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.rec.worker_tasks import ServingTasks
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
 
 
+@pytest.fixture
+def publication_store():
+    """Real snapshot/publication diagnostics need only their settings input."""
+    source = Store(':memory:')
+    with closing(source.conn):
+        source.conn.execute('CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)')
+        source._bind_repositories()
+        source._snapshot_revisions = Revisions(source.conn)
+        yield source
+
+
 @pytest.mark.parametrize('publication_threshold', [0., float('inf')])
 def test_publication_summaries_are_bounded_and_keep_phase_reason_and_progress_counts(
-        store, caplog, monkeypatch, publication_threshold):
+        publication_store, caplog, monkeypatch, publication_threshold):
+    store = publication_store
     monkeypatch.setattr(db_diagnostics, 'SLOW_LOCK_SECONDS', publication_threshold)
     clock = [0.0]
     store.maintenance_diagnostics = work_diagnostics.MaintenanceDiagnostics(clock=lambda: clock[0])
@@ -72,6 +88,16 @@ def test_home_budget_is_counted_once_and_keeps_last_good_collections(
         exhausted_calls.append(now)
         raise WorkBudgetExceeded('budget exhausted')
 
+    # Keep the task adapter, Home budget boundary and last-good SQL output real.
+    # Other producers have their own preparation/worker owners.
+    monkeypatch.setattr(measurement, 'maintain_storage', Mock())
+    monkeypatch.setattr(choice_evidence, 'prepare_context', Mock())
+    monkeypatch.setattr(choice_evidence, 'refresh_report', Mock())
+    monkeypatch.setattr(album_choices, 'prepare_cached', Mock(return_value={'items': []}))
+    monkeypatch.setattr(album_choices, 'selection', Mock(return_value=(None, [], None)))
+    monkeypatch.setattr(album_notes, 'prepare', Mock(return_value=False))
+    monkeypatch.setattr(home_prepared, 'prepare_discovery', Mock())
+    monkeypatch.setattr(home_prepared, 'prepare_revisit', Mock())
     monkeypatch.setattr(home_prepared, '_prepare', exhausted)
     tasks = ServingTasks(SimpleNamespace(store=store, now_fn=lambda: 1000, client_provider=lambda: {},
         logger=logging.getLogger('test')), lambda name, target, *args, **kwargs: target(*args, **kwargs))
@@ -80,6 +106,10 @@ def test_home_budget_is_counted_once_and_keeps_last_good_collections(
         # publication diagnostics visible rather than suppressing them.
         monkeypatch.setattr(db_diagnostics, 'SLOW_LOCK_SECONDS', 0.)
     caplog.set_level(logging.INFO)
+    # A real unrelated publication must remain visible without inflating Home's
+    # budget count, regardless of which producer happens to publish that day.
+    with store.read_snapshot() as snapshot:
+        assert snapshot.publish(lambda: store.settings.set_setting('other-output', 'ready'))
 
     def summaries():
         return [record for record in caplog.records if record.name == work_diagnostics.logger.name

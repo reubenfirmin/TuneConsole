@@ -963,6 +963,16 @@ def collections(store, payload, now):
     revisit = store.rec_proposals.get_proposals(REVISIT_SURFACE) or {}
     payload = {**payload, **{field: revisit[field] for field in
         ('rediscover', 'rediscover_albums', 'rediscover_tracks') if field in revisit}}
+    # This bounded projection bypasses full menu validation. Check its own
+    # fields before rendering; a damaged collection must not break healthy
+    # menus or the independent discovery/revisit publications.
+    for field, identity in (('rediscover', 'id'), ('rediscover_albums', 'browse_id'),
+                            ('rediscover_tracks', 'key'), ('discovery_albums', 'browse_id'),
+                            ('discovery_artists', 'artist_id'), ('discovery_tracks', 'key')):
+        rows = payload.get(field, [])
+        if not isinstance(rows, list) or any(
+                not isinstance(row, dict) or identity not in row for row in rows):
+            payload[field] = []
     epoch = max(0, store.rec_ledger.card_views('rediscover')-1)
     playlists = [{**p, **current} for p in payload.get('rediscover', [])
                  if (current := store.playlists.home_preview(p['id']))]

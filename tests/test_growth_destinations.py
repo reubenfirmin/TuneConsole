@@ -1,13 +1,12 @@
 """Festival availability follows real serving outputs, including partial preparation."""
-import html
 import json
-import re
 from tests.enrichment_support import complete_entries, complete_discovered
 from tests.derived_rating_support import seed_dislike
 
 import pytest
 
 from tests.conftest import seed_catalog_track
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
 from tests.onboarding_support import publish_personal_mix
 from tests.test_tv_stream import video
 from yt_playlist.core.db_writes import atomic_write
@@ -64,7 +63,7 @@ def publish_journey_prefix(store, now=1000, *, vibe_template=None):
         from copy import deepcopy
         from tests.recommendation_support import publish_bundles
 
-        # The shared source already owns all 116 real profiles. Add the earlier
+        # The shared source already owns all 100 real profiles. Add the earlier
         # journey outputs and republish their actual Vibe candidates together;
         # rebuilding numeric profiles would repeat the same completed producer.
         publish_bundles(store, deepcopy(vibe_template.bundles), now, vibes=True)
@@ -245,92 +244,119 @@ def test_earned_mix_guard_does_not_assemble_later_vibe_readiness(store, monkeypa
     assert response.status_code == 200 and 'gen-wheelhouse' in response.text
 
 
-def test_vibe_access_matches_journey_and_omits_unrelated_destinations(
-        store, monkeypatch, full_journey_prefix, caplog):
-    from fastapi.testclient import TestClient
-    from yt_playlist.web.app import create_app
+@pytest.fixture(scope='module')
+def vibe_journey_schema():
+    with bounded_consumer_schema((('house', 'House'), ('jazz', 'Jazz'))) as schema:
+        yield schema
 
-    full_journey_prefix.restore(store)
-    finish_full_journey(store)
-    def agrees(now, radio=None):
-        expected = account_growth.has_access(account_growth.view(store, now, radio=radio), 'vibes')
-        with monkeypatch.context() as patch:
-            patch.setattr(into_recently, 'load', lambda *a, **k: pytest.fail('Vibe access loaded articles'))
-            patch.setattr(account_growth.deepseek, 'settings', lambda *a, **k: pytest.fail('Vibe access loaded bonuses'))
-            assert account_growth.vibe_access(store, now, radio) is expected
-        return expected
-    assert agrees(1000)
+
+@pytest.fixture
+def vibe_journey_store(vibe_journey_schema):
+    from yt_playlist.core.store import Store
+
+    store = Store(':memory:')
+    try:
+        initialize_consumer(store, vibe_journey_schema)
+        yield store
+    finally:
+        store.conn.close()
+
+
+@pytest.fixture
+def vibe_journey(vibe_journey_store, monkeypatch):
+    from tests.home_fixture_support import publish_menu
+    from tests.musical_support import prepare_profiles
+    from tests.recommendation_support import seed_publication_subjects
+
+    store = vibe_journey_store
+    # This coordinator consumes completed Foundation and Vibe pool decisions.
+    # Their independent real capacity/selection owners live in growth_readiness.
+    # Keep current SQL sound evidence, every intervening destination and their
+    # eligibility reads real, rather than rebuilding 100 unchanged profiles.
+    monkeypatch.setattr(account_growth.growth_readiness, 'foundation', lambda *args: True)
+    monkeypatch.setattr(account_growth.growth_readiness, 'vibes', lambda *args: True)
+    publish_menu(store, tracks_per_card=1)
+    seed_catalog_track(store, 'measured|artist', 'Measured', 'Artist', video_id='measured',
+                       genre='Jazz', energy=.1, mood_relaxed=.9, mood_happy=.8)
+    prepare_profiles(store)
+    store.rec_proposals.put_proposals('album_prepared', {'built_at': 1000, 'context': {}, 'items': [
+        {'browse_id': f'MPRE{i}', 'title': f'Record {i}', 'artist': f'Artist {i}',
+         'classification': 'discovery', 'score': .8} for i in range(2)]}, 1000)
+    tracks = [{'key': f'new {i}|artist', 'video_id': f'new-{i}', 'title': f'New {i}',
+               'artist': 'Artist', 'genre': 'Jazz'} for i in range(10)]
+    seed_publication_subjects(store, tracks, discoveries=[track['key'] for track in tracks])
+    store.rec_proposals.put_proposals(home_prepared.DISCOVERY_SURFACE,
+        {'discovery_albums': [], 'discovery_artists': [], 'discovery_tracks': tracks}, 1000)
+    store.rec_proposals.put_proposals(tv.SURFACE, {'schema': tv.SCHEMA, 'key': 'ready',
+        'at': 1000, 'attempted': [], 'items': [video(i) for i in range(tv.QUEUE_SIZE)]}, 1000)
+    complete_journey(store)
+    return store
+
+
+def assert_vibe_access_agrees(store, monkeypatch, expected, now=1000, radio=None):
+    state = account_growth.view(store, now, radio=radio)
+    assert account_growth.has_access(state, 'vibes') is expected
+    with monkeypatch.context() as patch:
+        patch.setattr(into_recently, 'load', lambda *a, **k: pytest.fail('Vibe access loaded articles'))
+        patch.setattr(account_growth.deepseek, 'settings', lambda *a, **k: pytest.fail('Vibe access loaded bonuses'))
+        assert account_growth.vibe_access(store, now, radio) is expected
+
+
+@pytest.mark.parametrize('radio_case', ['prepared', 'empty-offer', 'short-offer', 'no-offer'])
+def test_vibe_access_matches_journey_and_omits_unrelated_destinations(vibe_journey, monkeypatch, radio_case):
+    store = vibe_journey
+    if radio_case == 'prepared':
+        assert_vibe_access_agrees(store, monkeypatch, True)
+        return
     saved_offer = store.settings.get_setting('radio_seed_offer')
-    for seeds in ([], json.loads(saved_offer)['tracks'][:3]):
+    seeds = json.loads(saved_offer)['tracks'][:3] if radio_case == 'short-offer' else []
+    if radio_case == 'no-offer':
+        store.settings.delete_setting('radio_seed_offer')
+    else:
         store.settings.set_setting('radio_seed_offer', json.dumps({'menu_id': 'changed', 'tracks': seeds}))
-        radio = {'state': {'active': True}, 'seedMenu': 'changed', 'seeds': seeds}
-        assert agrees(1000, radio)
-        assert not agrees(1000, {**radio, 'state': {'active': False}})
-    store.settings.delete_setting('radio_seed_offer')
-    radio = {'state': {'active': True}, 'seedMenu': None, 'seeds': []}
-    assert agrees(1000, radio)
-    assert not agrees(1000, {**radio, 'state': {'active': False}})
-    store.settings.set_setting('radio_seed_offer', saved_offer)
-    # Downstream Vibe preparation must not skip an unfinished required TV stop.
+    radio = {'state': {'active': True}, 'seedMenu': None if radio_case == 'no-offer' else 'changed', 'seeds': seeds}
+    assert_vibe_access_agrees(store, monkeypatch, True, radio=radio)
+    assert_vibe_access_agrees(store, monkeypatch, False, radio={**radio, 'state': {'active': False}})
+
+
+def test_tv_history_keeps_prefix_but_never_invents_vibe_output(vibe_journey, monkeypatch):
+    store = vibe_journey
+    assert_vibe_access_agrees(store, monkeypatch, True)
     store.rec_proposals.put_proposals(tv.SURFACE, {}, 1001)
-    assert not agrees(1001)
-    # Deliberate prior TV use retains the preceding route even during refresh.
+    assert_vibe_access_agrees(store, monkeypatch, False, now=1001)
     store.settings.set_setting('tv_draw', '1')
-    assert agrees(1002)
-    # Capture the actual rendered compact menu, rather than authoring a report
-    # or retaining a hidden recipe in a synthetic historical opportunity.
-    with TestClient(create_app(store, lambda: {}, now_fn=lambda: 1002,
-                              background_work=False), base_url='http://127.0.0.1') as client:
-        ordinary = client.get('/')
-        assert ordinary.status_code == 200
-        ordinary_recipes = [json.loads(html.unescape(value)) for value in
-                            re.findall(r"data-recipe='([^']*)'", ordinary.text)]
-        assert len(ordinary_recipes) == 4
-        for displayed in ordinary_recipes:
-            assert displayed.get('opportunity_id')
-            captured = choice_evidence.opportunity(store, displayed['opportunity_id'])
-            assert captured and 'vibe' not in captured
-            assert any(str(row['id']) == displayed['option_id'] for row in captured['options'])
-        assert not any('Mix choice capture failed' in record.getMessage() for record in caplog.records)
-        ordinary_recipe = ordinary_recipes[0]
-        for action in ('choice', 'start'):
-            assert choice_evidence.respond(store, ordinary_recipe['opportunity_id'], action, 1002,
-                option_id=ordinary_recipe['option_id'], synchronous=True)
-        usage = choice_evidence.compile_report(store, 1002)['home_format']
-        assert usage['episodes']['mixes'] == 1 and usage['vibe_episodes'] == 0
-        response = client.post('/home/vibe', data={'vibe': 'relax'})
-        assert response.status_code == 200
-        assert client.app.state.ctx.work.wait(20)
-        assert client.get('/home/vibe/status').json()['phase'] == 'ready'
-        response = client.get('/home/cards')
-    assert response.status_code == 200
-    recipes = [json.loads(html.unescape(value)) for value in
-               re.findall(r"data-recipe='([^']*)'", response.text)]
-    assert len(recipes) == 4 and all(recipe['vibe'] == 'relax' for recipe in recipes)
-    recipe = recipes[0]
-    identity, option = recipe['opportunity_id'], recipe['option_id']
-    assert identity != ordinary_recipe['opportunity_id']
-    offer = choice_evidence.opportunity(store, identity)
-    assert offer['vibe'] == 'relax'
-    assert all('descriptor_id' in row and not {'recipe', 'tracks', 'keys'} & row.keys()
-               for row in offer['options'])
-    assert choice_evidence.respond(store, identity, 'choice', 1002, option_id=option,
-                                   synchronous=True)
-    assert not choice_evidence.compile_report(store, 1002)['home_format']['vibe_episodes']
-    # Historical TV access cannot fabricate usable specialist Vibe output.
+    assert_vibe_access_agrees(store, monkeypatch, True, now=1002)
     with store.conn:
         store.conn.execute('DELETE FROM recording_vibes')
-    assert not agrees(1003)
-    # Only confirmed playback earns access; output remains genuinely unready.
-    assert choice_evidence.respond(store, identity, 'start', 1004, option_id=option,
-                                   synchronous=True)
+    assert_vibe_access_agrees(store, monkeypatch, False, now=1003)
+
+
+def test_real_vibe_choice_start_and_withdrawal_control_earned_access(vibe_journey_store, monkeypatch):
+    store = vibe_journey_store
+    option = {'id': 'chosen', 'label': 'A Jazz mix', 'intent': 'energy_arc', 'genres': ['Jazz']}
+    ordinary = choice_evidence.issue(store, 'mixes', [option], 1000, context={})
+    assert 'vibe' not in choice_evidence.opportunity(store, ordinary)
+    for action in ('choice', 'start'):
+        assert choice_evidence.respond(store, ordinary, action, 1001, option_id='chosen', synchronous=True)
+    usage = choice_evidence.compile_report(store, 1001)['home_format']
+    assert usage['episodes']['mixes'] == 1 and usage['vibe_episodes'] == 0
+    identity = choice_evidence.issue(store, 'mixes', [option], 1002, context={}, vibe='relax')
+    assert identity != ordinary
+    offer = choice_evidence.opportunity(store, identity)
+    assert offer['vibe'] == 'relax'
+    assert all('descriptor_id' in row and not {'recipe', 'tracks', 'keys'} & row.keys() for row in offer['options'])
+    assert choice_evidence.respond(store, identity, 'choice', 1002, option_id='chosen', synchronous=True)
+    assert not choice_evidence.compile_report(store, 1002)['home_format']['vibe_episodes']
+    assert_vibe_access_agrees(store, monkeypatch, False, now=1003)
+    assert choice_evidence.respond(store, identity, 'start', 1004, option_id='chosen', synchronous=True)
     assert choice_evidence.compile_report(store, 1004)['home_format']['vibe_episodes'] == 1
-    assert account_growth.retained_access(store, 'vibes') and agrees(1004)
+    assert account_growth.retained_access(store, 'vibes')
+    assert_vibe_access_agrees(store, monkeypatch, True, now=1004)
     state = account_growth.view(store, 1004)
     vibe = next(node for node in state['nodes'] if node['id'] == 'vibes')
     assert not state['vibes_ready'] and vibe['used'] and vibe['unlocked']
-    # Corrections withdraw the real evidence instead of leaving a permanent flag.
     assert choice_evidence.respond(store, identity, 'withdraw', 1005,
-        details={'action_id': f'{identity}:choice:{option}'}, synchronous=True)
+        details={'action_id': f'{identity}:choice:chosen'}, synchronous=True)
     assert not choice_evidence.compile_report(store, 1005)['home_format']['vibe_episodes']
-    assert not account_growth.retained_access(store, 'vibes') and not agrees(1005)
+    assert not account_growth.retained_access(store, 'vibes')
+    assert_vibe_access_agrees(store, monkeypatch, False, now=1005)

@@ -1,19 +1,28 @@
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 import re
 
 import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
-from tests.home_fixture_support import home_routes_only, without_metadata_providers
+from tests.home_fixture_support import home_routes_only, publish_menu, without_metadata_providers
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects
-from tests.test_home_other_genres import _client as genre_client, genre_bundles, seed_genres
+from tests.test_home_other_genres import (
+    genre_bundles, genre_http_inputs, genre_routes,
+    template_bytecode,
+)
 from tests.test_mode_cards_route import prepare_home
 from yt_playlist.rec import graduation, home_cards, mix_tuning, mode_surfaces, rec_params, scoring
 from yt_playlist.web.app import create_app
 
-pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
+pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'genre_routes', 'genre_http_inputs')
+
+
+
+@pytest.fixture
+def store(file_backed_store):
+    return file_backed_store
 
 
 def prepare_tuning_home(store, now):
@@ -28,9 +37,21 @@ def client_at(store, clock):
 
 
 @pytest.fixture
-def home_clients(store):
+def home_clients(store, monkeypatch):
     with ExitStack() as resources:
+        reader = None
+        if store._db_path is not None:
+            reader = store._make_reader()
+            resources.callback(reader.conn.close)
+
         def open_client(clock):
+            # Route controls consume synchronous reads; connection lifetime
+            # has separate owners in core/test_reporting_reads. Worker
+            # read_snapshot and its isolation remain real.
+            # Memory readers need a current SQL snapshot before binding; their
+            # normal read_view owns that copy. A bare _make_reader is empty.
+            if reader is not None:
+                monkeypatch.setattr(store, 'read_view', lambda **kwargs: nullcontext(reader))
             client = client_at(store, clock)
             # TestClient's context closes the app lifespan; close the HTTP
             # client too, including if startup or the test fails.
@@ -43,10 +64,11 @@ def home_clients(store):
 @pytest.fixture(scope='module')
 def tuning_template(_pristine_current_schema):
     def build(source):
-        # Four distinct artists per lane keep every genre's four mixes usable.
-        # These controls exercise expiry/reset, not twenty-track queue capacity.
-        seed_genres(source, tracks_per_lane=4)
-        prepare_tuning_home(source, 1000.0)
+        # Expiry consumes completed output; the reset case below retains real
+        # genre-filtered selection, and preparation has its own worker owners.
+        source.accounts.upsert_account('main', 'cred', None, True)
+        publish_menu(source, 1000.0, genre_options=[
+            {'family': 'jazz', 'label': 'Jazz'}, {'family': 'techno', 'label': 'Techno'}])
 
     with prepared_template(_pristine_current_schema, build) as template:
         yield template
@@ -85,7 +107,7 @@ def test_clear_resets_genre_selections_and_all_biases_together(
     seed_bundle_subjects(store, bundles)
     publish_bundles(store, bundles, 1.0)
     monkeypatch.setattr(home_cards.HomeCards, 'audit', lambda *args, **kwargs: None)
-    client = genre_client(store, prepare=False)
+    client = client_at(store, clock)
     store.rec_model.set_weight("genre:jazz", 1.4, now=clock[0])
     learned = store.rec_model.get_weights(now=clock[0])
     with mix_tuning.adjusting(store, clock[0]):

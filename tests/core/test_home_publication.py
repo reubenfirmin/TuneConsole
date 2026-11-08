@@ -10,7 +10,8 @@ import time
 import pytest
 
 from tests.core.test_home_output_preparation import seed, root_rows
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import group_evidence, recommendation_custody
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import home_outputs as preparation, home_publication as publication
@@ -84,7 +85,7 @@ def test_preopened_and_pinned_readers_select_exact_files_without_legacy_payload(
         assert root_rows(store.conn) == roots
         assert publication.OWNER.root_stage(store.conn, stage)['copied'] == sum(map(len, roots.values()))
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-        regular.migrate(other.conn)
+        regular.validate(other.conn)
     finally:
         other.conn.close()
 
@@ -120,7 +121,6 @@ def test_missing_or_incorrect_documents_and_custody_cannot_publish(installed, fa
     with pytest.raises((MigrationError, OSError, ValueError)):
         publication.OWNER.publish(store.conn, stage=stage.id)
     assert publication.OWNER.selected(store.conn) is None
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
@@ -181,7 +181,7 @@ def test_interrupted_publication_and_source_race_cannot_select_partial_state(ins
 
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
-def test_missing_file_repair_and_failed_roots_leave_regular_schema_independent(installed):
+def test_missing_file_repair_and_failed_roots_leave_regular_schema_independent(installed, independent_regular_ddl):
     store, _ = installed
     originals = seed(store)
     owner = publication.OWNER
@@ -252,7 +252,7 @@ def test_interrupted_root_copy_resumes_from_another_connection(installed):
 
 
 @pytest.mark.parametrize('installed', [90], indirect=True)
-def test_slow_file_verification_leaves_writer_and_regular_schema_usable(installed, monkeypatch):
+def test_slow_file_verification_leaves_writer_and_regular_schema_usable(installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     seed(store)
     stage = ready(store.conn)

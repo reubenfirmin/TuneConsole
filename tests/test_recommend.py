@@ -165,19 +165,25 @@ def test_rotate_page_advances_and_wraps(store):
     assert surfaces.rotate_page([], 4, epoch=3) == []
 
 
-def test_taste_sample_is_a_rotating_slice_not_the_top_n(store):
+def test_taste_sample_is_a_rotating_slice_not_the_top_n(monkeypatch):
     """The Taste page's 'refresh sample' must show a *random slice* of matching tracks: each refresh
     a new set (even with knobs unchanged), drawn from beyond the deterministic top-N."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    now = 1000.0
-    for n in range(30):                                            # 30 artists -> 30 deep-cut candidates
-        store.tracks.upsert_track(f"h{n}", f"Hit{n}", f"Band{n}", None, None)
-        store.tracks.upsert_track(f"d{n}", f"Deep{n}", f"Band{n}", None, None)
-        store.history.record_history_plays(iid, now - 100, [f"hit{n}|band{n}"], source_timezone="UTC")
-        store.history.record_history_plays(iid, now - 50, [f"hit{n}|band{n}"], source_timezone="UTC")
+    from random import Random
+    from types import SimpleNamespace
+    from unittest.mock import Mock
 
+    store = object()
+    now = 1000.0
+    pool = [SimpleNamespace(key=f'deep-{n}') for n in range(16)]
+    ranked = Mock(return_value=pool)
+    monkeypatch.setattr(surfaces, 'for_you', ranked)
+    monkeypatch.setattr(surfaces.random, 'sample', Random(42).sample)
     runs = [tuple(i.key for i in surfaces.taste_sample(store, now, limit=8)) for _ in range(15)]
+    assert ranked.call_count == 15
+    ranked.assert_called_with(store, now, limit=64, include_traces=True)
     assert all(len(set(r)) == 8 for r in runs)         # a full, deduped slice every refresh
+    assert all(list(r) == sorted(r, key=lambda key: int(key.split('-')[1])) for r in runs)
+    assert all(set(r) <= {item.key for item in pool} for r in runs)
     assert len(set(runs)) > 1                           # refresh yields a new set, not the same top-8
     union = {k for r in runs for k in r}
     assert len(union) > 8                               # samples reach beyond a fixed top-8

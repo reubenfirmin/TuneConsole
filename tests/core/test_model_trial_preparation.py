@@ -7,6 +7,7 @@ import pytest
 
 from tests.core.test_collection_control_preparation import finish
 from tests.core.test_predecessor_writes import installed
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import model_comparison_state as state
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import model_trials as preparation
@@ -55,7 +56,6 @@ def test_independent_controls_retain_exact_inputs_and_explicit_run_custody(insta
     assert [row[0] for row in store.conn.execute(f'SELECT value FROM {preparation.BASELINE} ORDER BY position')] == [.1, .5, 1]
     assert list(map(tuple, store.conn.execute('SELECT * FROM rec_model_selection_runs'))) == runs
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [79, 94], indirect=True)
@@ -157,7 +157,7 @@ def test_concurrent_edit_between_planning_and_checkpoint_rejects_stale_source(in
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_interruption_durable_failure_independent_new_ddl_and_reopened_retry(installed, monkeypatch):
+def test_interruption_durable_failure_independent_new_ddl_and_reopened_retry(installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     values, _ = seed(store)
     job = preparation.JOBS['listening-monitor']
@@ -177,11 +177,6 @@ def test_interruption_durable_failure_independent_new_ddl_and_reopened_retry(ins
     assert failed.status == 'failed'
     assert finish(preparation.JOBS['live-trial'], store.conn).status == 'prepared'
     assert finish(preparation.JOBS['album-assignment'], store.conn).status == 'prepared'
-    def install(conn, context):
-        conn.execute('CREATE TABLE independent_trial_check(value TEXT)')
-    def validate(conn):
-        assert conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='independent_trial_check'").fetchone()
-    monkeypatch.setattr(regular, 'CHANGES', (*regular.CHANGES, regular.Change(len(regular.CHANGES) + 1, 'independent_trial_check', install, validate)))
     regular.migrate(store.conn)
     assert store.conn.execute('SELECT max(version) FROM schema_changes').fetchone()[0] == len(regular.CHANGES)
     assert job.progress(store.conn) == failed
@@ -231,4 +226,3 @@ def test_invalid_or_oversized_documents_fail_durably_and_leave_ordinary_source_u
     assert job.progress(store.conn).status == 'failed'
     assert store.conn.execute('SELECT payload FROM rec_proposals WHERE surface=?', (surface,)).fetchone()[0] == raw
     assert head(store.conn, surface) is None
-    regular.migrate(store.conn)

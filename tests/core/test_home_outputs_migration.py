@@ -1,9 +1,12 @@
 """Home output is replaceable without erasing its actual evidence lineage."""
+from contextlib import closing
 import json
 import sqlite3
 
 import pytest
 
+from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import install_numbered_input
 from yt_playlist.core import home_outputs as owner, json_cache, recommendation_outputs as files
 from yt_playlist.core.migrations import migrate, registry, v091_home_outputs
 from yt_playlist.core.migrations.runner import MigrationError
@@ -11,19 +14,31 @@ from yt_playlist.core.store import Store
 from yt_playlist.core.db_revisions import Revisions
 
 
+@pytest.fixture(scope='module')
+def home_predecessor_schema():
+    # v91 owns display conversion. Prior domain conversions and the independent
+    # regular registry have separate owners. Supply the completed predecessor.
+    with closing(sqlite3.connect(':memory:')) as schema, pytest.MonkeyPatch.context() as patch:
+        bound_catalog(patch)
+        install_numbered_input(schema, 90)
+        schema.execute('PRAGMA query_only=ON')
+        yield schema
+
+
 @pytest.fixture
-def predecessor(tmp_path, request, _pristine_installed_schema):
+def predecessor(tmp_path, request, home_predecessor_schema, monkeypatch):
+    bound_catalog(monkeypatch)
     store = Store(tmp_path / 'home.db')
     request.addfinalizer(store.conn.close)
     store.conn.execute('PRAGMA journal_mode=WAL')
-    _pristine_installed_schema(90).backup(store.conn)
+    home_predecessor_schema.backup(store.conn)
     store._bind_repositories()
     store._snapshot_revisions = Revisions(store.conn)
     yield store
 
 
 def upgrade(store):
-    migrate(store.conn, registry=registry.MIGRATIONS)
+    migrate(store.conn, registry=registry.MIGRATIONS[:91])
     store._bind_repositories()
     store._snapshot_revisions = Revisions(store.conn)
 
@@ -31,7 +46,7 @@ def upgrade(store):
 def test_registered_cutover_preserves_large_display_unknown_time_and_explicit_roots(predecessor):
     from yt_playlist.core import group_evidence
     value = {'schema': 2, 'generation': 'original-generation', 'context': {'artifact': 'missing-artifact'},
-             'menus': {'wheelhouse': [{'title': 'été' * 400000}], 'explore': []}}
+             'menus': {'wheelhouse': [{'title': 'été' * (files.MAX_BYTES // 13 + 1)}], 'explore': []}}
     raw = json.dumps(value)
     with predecessor.conn.atomic():
         predecessor.conn.execute('INSERT INTO rec_proposals VALUES (?,?,?)', ('adaptive_group_preview', raw, None))
@@ -49,7 +64,7 @@ def test_registered_cutover_preserves_large_display_unknown_time_and_explicit_ro
     assert not predecessor.conn.execute('PRAGMA foreign_key_check').fetchall()
     reopened = Store(predecessor._db_path)
     try:
-        reopened.init_schema()
+        reopened.init_schema(defer_metadata=True)
         assert reopened.rec_proposals.get_proposals('adaptive_group_preview') == value
     finally:
         reopened.conn.close()
@@ -185,7 +200,7 @@ def test_replacement_keeps_pinned_reader_files_and_backup_restores_current_head(
     try:
         predecessor.conn.backup(restored.conn)
         files.restore(restored.conn, backup)
-        restored.init_schema()
+        restored.init_schema(defer_metadata=True)
         assert restored.rec_proposals.get_proposals('home_prepared') == {'title': 'two'}
     finally:
         restored.conn.close()
@@ -212,5 +227,5 @@ def test_malformed_legacy_display_retains_original_and_schema(predecessor, raw):
         predecessor.conn.execute('INSERT INTO rec_proposals VALUES (?,?,1)', ('home_prepared', raw))
     before = list(predecessor.conn.iterdump())
     with pytest.raises(MigrationError):
-        migrate(predecessor.conn, registry=registry.MIGRATIONS)
+        migrate(predecessor.conn, registry=registry.MIGRATIONS[:91])
     assert list(predecessor.conn.iterdump()) == before

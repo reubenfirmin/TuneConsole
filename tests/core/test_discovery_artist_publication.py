@@ -7,22 +7,27 @@ import threading
 
 import pytest
 
-from tests.core.test_predecessor_writes import admitted_installed as installed
-from tests.core.test_predecessor_writes import installed as unadmitted_installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.core.test_predecessor_writes import consumer_installed as unadmitted_installed
+from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_discovery_owner_preparation import seed
-from yt_playlist.core import collection_recovery, policy_documents
+from yt_playlist.core import schema_inspection, collection_recovery, policy_documents
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import discovery_artists as preparation, discovery_artist_publication as publication
 from yt_playlist.core.store import Store
 
 
 def prepare(conn):
-    owner = publication.owner(conn)
-    owner.worker.install(conn)
-    for _ in range(300):
-        if owner.worker.step(conn, batch_size=8).status == 'prepared':
-            return owner
-    pytest.fail('Discovery explanation fixture did not prepare')
+    # These are completed lower inputs for publication. Reuse the production
+    # table-inspection session while real workers build them; all validators,
+    # source copying and file writes still run.
+    with schema_inspection.reuse_tables(conn):
+        owner = publication.owner(conn)
+        owner.worker.install(conn)
+        for _ in range(300):
+            if owner.worker.step(conn, batch_size=8).status == 'prepared':
+                return owner
+        pytest.fail('Discovery explanation fixture did not prepare')
 
 
 def ready(conn, size=8):
@@ -35,7 +40,7 @@ def ready(conn, size=8):
 
 
 @pytest.mark.parametrize('unadmitted_installed', [79, 85, 86, 100], indirect=True)
-def test_selected_files_keep_installed_identity_counters_genres_and_preopened_readers(unadmitted_installed):
+def test_selected_files_keep_installed_identity_counters_genres_and_preopened_readers(unadmitted_installed, independent_regular_ddl):
     store, _ = unadmitted_installed
     _, aid, _, _ = seed(store)
     with store.conn:
@@ -78,7 +83,7 @@ def test_selected_files_keep_installed_identity_counters_genres_and_preopened_re
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('damage', ['metadata', 'identity', 'file', 'part', 'plan', 'missing'])
-def test_independent_verification_rejects_incorrect_files_metadata_and_coverage(installed, damage):
+def test_independent_verification_rejects_incorrect_files_metadata_and_coverage(installed, damage, independent_regular_ddl):
     store, _ = installed
     seed(store)
     owner = prepare(store.conn)
@@ -174,7 +179,7 @@ def test_interruption_and_final_publication_race_keep_durable_checkpoint(install
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
-def test_missing_files_regular_admission_and_explicit_unchanged_source_repair(installed):
+def test_missing_files_regular_admission_and_explicit_unchanged_source_repair(installed, independent_regular_ddl):
     store, _ = installed
     seed(store)
     owner, stage = ready(store.conn)
@@ -194,7 +199,7 @@ def test_missing_files_regular_admission_and_explicit_unchanged_source_repair(in
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_slow_verification_allows_real_writer_and_independent_ddl(installed, monkeypatch):
+def test_slow_verification_allows_real_writer_and_independent_ddl(installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     seed(store)
     owner, stage = ready(store.conn)
@@ -224,7 +229,7 @@ def test_slow_verification_allows_real_writer_and_independent_ddl(installed, mon
 
 
 @pytest.mark.parametrize('installed', [79], indirect=True)
-def test_oversized_prepared_key_fails_before_map_writer_and_valid_original_is_retained(installed):
+def test_oversized_prepared_key_fails_before_map_writer_and_valid_original_is_retained(installed, independent_regular_ddl):
     store, _ = installed
     seed(store)
     owner = prepare(store.conn)

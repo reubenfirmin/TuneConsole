@@ -7,7 +7,7 @@ import pytest
 
 from tests.core.test_collection_control_preparation import finish
 from tests.core.test_model_checkpoint_preparation import seed
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.group_support import publish as publish_groups
 from yt_playlist.core import content_preparation_state, group_preparation_state, ranking_checkpoints
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner

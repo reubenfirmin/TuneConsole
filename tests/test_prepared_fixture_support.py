@@ -407,7 +407,7 @@ def test_radio_genre_template_keeps_complete_private_inputs(
         assert target._fixture_bundle_payload == template.bundles
 
 
-@pytest.mark.parametrize('variant', ['inputs', 'backend', 'browser'])
+@pytest.mark.parametrize('variant', ['inputs', 'backend'])
 def test_measured_sounds_template_keeps_complete_private_inputs(
         variant, measured_sounds_template, measured_home_templates, store, file_backed_store):
     from yt_playlist.rec import home_vibe, mix_tuning, mode_surfaces
@@ -427,9 +427,8 @@ def test_measured_sounds_template_keeps_complete_private_inputs(
                        for item in items) == 8
     keys = {item['key'] for items in bundle['all'].values() for item in items}
     assert len(keys) == 480
-    assert template.source.conn.execute('SELECT count(*) FROM recordings').fetchone()[0] == (
-        486 if variant == 'browser' else 480)
-    assert len(template.source.rec_query.library_keys()) == (366 if variant == 'browser' else 360)
+    assert template.source.conn.execute('SELECT count(*) FROM recordings').fetchone()[0] == 480
+    assert len(template.source.rec_query.library_keys()) == 360
     assert len(template.source.discovery.discovered_tracks_by_keys(keys)) == 120
     profiles = template.source.musical_profiles.by_keys(keys)
     assert len(profiles) == len(keys)
@@ -445,11 +444,6 @@ def test_measured_sounds_template_keeps_complete_private_inputs(
         else:
             assert home == template.source.rec_proposals.get_proposals('home_prepared')
             assert home['menus'] and len(home['menus'][0]['protos']) == 4
-        if variant == 'browser':
-            playlists = target.playlists.get_playlists()
-            assert len(playlists) == 1
-            assert (playlists[0].provider_playlist_id, playlists[0].title,
-                    playlists[0].track_count) == ('PLZ', 'Old Mix', 3)
         assert target.settings.get_setting(home_vibe.SETTING) is None
         assert target.settings.get_setting(mix_tuning.UPDATED_AT_SETTING) is None
         assert target.rec_model.get_leans() == {}
