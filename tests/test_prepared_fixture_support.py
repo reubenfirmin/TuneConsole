@@ -376,6 +376,15 @@ def test_home_seed_templates_keep_matching_unprepared_inputs(
         assert getattr(target, '_fixture_bundle_payload', {}) == template.bundles
 
 
+def test_genre_candidate_input_keeps_all_six_modes_and_four_complete_lanes(genre_candidates_template):
+    template = genre_candidates_template
+    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert len(template.source.modes.list_modes(active_only=True)) == 6
+    for mid in map(str, range(6)):
+        assert set(template.bundles[mid]) == {'wheelhouse', 'explore', 'comfort', 'fresh'}
+        assert {len(items) for items in template.bundles[mid].values()} == {8}
+
+
 @pytest.mark.parametrize('template_name', [
     'genre_candidates_template', 'fresh_genre_candidates_template',
     'adaptive_library_template', 'fresh_home_template',
@@ -398,7 +407,7 @@ def test_home_candidate_templates_keep_private_complete_inputs(
         assert group_serving.policy(template.source) == 'adaptive'
         assert home is None
     else:
-        count, modes = (20, 6) if template_name == 'genre_candidates_template' else (8, 2)
+        count, modes = (8, 6) if template_name == 'genre_candidates_template' else (8, 2)
         assert len(template.source.modes.list_modes(active_only=True)) == modes
         for mid in map(str, range(modes)):
             lanes = {'wheelhouse', 'explore', 'comfort', 'fresh'} if modes == 6 else {

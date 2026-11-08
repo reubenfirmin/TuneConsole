@@ -1,6 +1,10 @@
 """A skip is a temporary recording break, including on cached Radio plans."""
 from types import SimpleNamespace
 from tests.derived_rating_support import seed_like
+from tests.conftest import seed_catalog_track
+from tests.enrichment_support import seed_enrichment
+from tests.store_fixture_support import bounded_consumer_schema
+from yt_playlist.util.matching import identity_key
 
 import pytest
 
@@ -14,6 +18,17 @@ from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.rec.radio_policy import CandidateView, FeedbackContext, PlaybackHistory, RadioPolicy
 
 DAY = 86400
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Skip feedback tests do not construct the web application."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('downtempo', 'Downtempo'),)) as schema:
+        yield schema
 
 
 @pytest.fixture
@@ -162,7 +177,15 @@ def test_a_file_backed_restart_retains_the_break(tmp_path, consumer_store):
 
 @pytest.mark.parametrize('energy', [0, .5, 1])
 def test_live_skip_removes_a_cached_radio_choice_and_cannot_return_on_refill(store, listener, energy):
-    tracks = [catalog_track(store, f'radio-{i}')[0] for i in range(32)]
+    tracks = []
+    for i in range(32):
+        video, artist = f'radio-{i}', f'Artist radio-{i}'
+        key = identity_key(video, artist)
+        entry = seed_catalog_track(store, key, video, artist, video_id=video)
+        seed_enrichment(store, entry, 'Downtempo', '2001')
+        with store.conn:
+            store.conn.execute('UPDATE youtube_items SET duration_s=200 WHERE video_id=?', (video,))
+        tracks.append(dict(key=key, video_id=video, title=video, artist=artist, genre='Downtempo'))
     publish_bundles(store, {'all': {'wheelhouse': tracks}})
     candidates = RadioCandidates(store, 100, {**radio_tuning.DEFAULTS, 'energy': energy})
     directions = RadioDirections(candidates, tracks[0])

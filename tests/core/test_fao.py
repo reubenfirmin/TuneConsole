@@ -1,5 +1,6 @@
 """Useful file behavior through the read/write/prepare/delete interface."""
 import bz2
+from contextlib import contextmanager
 import hashlib
 from pathlib import Path
 
@@ -52,6 +53,43 @@ def test_read_copy_validates_source_before_replacing_target(tmp_path):
         fao.write(target, fao.read(source))
     assert fao.read(target).bytes == b'verified source'
     assert not list(tmp_path.glob('.fao-pending-*'))
+
+
+@pytest.mark.parametrize('corrupt_last', [False, True])
+def test_lazy_inventory_copy_bounds_open_streams_and_closes_failed_reads(tmp_path, monkeypatch, corrupt_last):
+    sources = [tmp_path / 'originals' / str(index) for index in range(8)]
+    expected = [f'original {index}'.encode() for index in range(len(sources))]
+    for path, data in zip(sources, expected):
+        fao.write(path, data)
+    if corrupt_last:
+        sources[-1].write_bytes(b'BZh invalid compressed content')
+
+    opened, peak = [], 0
+    real_open = fao._open_reader
+
+    @contextmanager
+    def observed(*args, **kwargs):
+        nonlocal peak
+        with real_open(*args, **kwargs) as reader:
+            opened.append(reader.raw)
+            peak = max(peak, sum(not stream.closed for stream in opened))
+            yield reader
+
+    monkeypatch.setattr(fao, '_open_reader', observed)
+    inventory = [fao.read(path) for path in sources]
+    assert not opened
+    for index, content in enumerate(inventory):
+        target = tmp_path / 'copies' / str(index)
+        if corrupt_last and index == len(inventory) - 1:
+            with pytest.raises(fao.CorruptFile):
+                fao.write(target, content)
+            assert not target.exists()
+        else:
+            fao.write(target, content)
+            assert fao.read(target).bytes == expected[index]
+        assert all(stream.closed for stream in opened)
+    assert peak <= 2
+    assert not list(tmp_path.rglob('.fao-pending-*'))
 
 
 def test_prepare_is_private_until_publish_and_always_cleans_up(tmp_path):

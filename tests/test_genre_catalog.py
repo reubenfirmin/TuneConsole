@@ -52,6 +52,30 @@ def test_equivalent_spellings_share_identity():
     assert genre_map.subgenre("rap") == genre_map.subgenre("Hip-Hop") == "hip hop"
 
 
+@pytest.mark.parametrize('shipped', [False, True], ids=['bounded', 'shipped-subset'])
+def test_restricted_catalog_caches_are_private_and_restore_the_full_vocabulary(shipped):
+    from tests.genre_catalog_support import bound_catalog, bound_shipped_catalog
+    from yt_playlist.rec import musical_profiles
+
+    family = genre_map.family('Rock')
+    profile = musical_profiles.genre_profile('Ambient')
+    assert profile['relaxed']['value'] == pytest.approx(.8)
+    assert catalog.is_subgenre('Deep House', 'House')
+    with pytest.MonkeyPatch.context() as patch:
+        if shipped:
+            bound_shipped_catalog(patch, ('rock',))
+        else:
+            bound_catalog(patch, entries=(('rock', 'Rock'),))
+        expected_family = family if shipped else 'rock'
+        assert genre_map.family('Rock') == expected_family
+        assert genre_map._load()[0]['rock'] == expected_family
+        assert musical_profiles.genre_profile('Ambient') == {}
+        assert not catalog.is_subgenre('Deep House', 'House')
+    assert genre_map.family('Rock') == family
+    assert musical_profiles.genre_profile('Ambient') == profile
+    assert catalog.is_subgenre('Deep House', 'House')
+
+
 @pytest.mark.parametrize("left,right", [
     ("Afrobeat", "Afrobeats"), ("Hyper Techno", "Hypertechno"), ("Metal", "Heavy Metal"),
     ("Electronic", "Electro"), ("Electronic", "Electronica"), ("Acid", "Acid House"),

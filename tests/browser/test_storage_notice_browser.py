@@ -16,6 +16,19 @@ from yt_playlist.web.app import create_app
 from yt_playlist.web import app as app_module
 
 
+def drain_captured_feedback(store, capture):
+    # Status and settings requests can briefly own the serving connection.
+    # Replay deliberately yields to them; wait for the durable outcome.
+    deadline = time.monotonic() + 5
+    while store.playback_feedback.pending():
+        playback_feedback.drain(store)
+        if not store.playback_feedback.pending():
+            break
+        assert time.monotonic() < deadline, 'Captured feedback did not drain'
+        time.sleep(.01)
+    assert store.playback_feedback.repository.has_receipt(capture)
+
+
 @pytest.fixture
 def notice_app(store):
     identity = store.accounts.upsert_account('Main', 'credential', None, True)
@@ -67,8 +80,8 @@ def test_cleanup_pending_after_recovery_does_not_keep_the_frontend_paused(notice
     assert status['evidence_maintenance']['pending'] and status['recording'] and not status['active']
     assert page.request.post(url + '/settings/lastfm-key', form={'key': 'cleanup-pending'}).status == 204
     identity = store.accounts.get_master_account().id
-    playback_feedback.capture(store, 'player', identity, {'kind': 'state', 'state': 'paused'}, 10)
-    assert playback_feedback.drain(store) == 1
+    capture = playback_feedback.capture(store, 'player', identity, {'kind': 'state', 'state': 'paused'}, 10)
+    drain_captured_feedback(store, capture)
     page.screenshot(path='/tmp/tuneconsole-866-retention-resumed.png', full_page=True)
 
 
@@ -163,8 +176,8 @@ def test_single_line_notice_with_sidebar_and_without_polling(notice_app, store, 
     assert page.request.post(url + '/settings/lastfm-key', form={'key': 'notice-test-key'}).status == 204
     assert store.settings.get_setting('lastfm_api_key') == 'notice-test-key'
     account = store.accounts.get_master_account().id
-    playback_feedback.capture(store, 'player', account, {'kind': 'state', 'state': 'paused'}, 1)
-    assert playback_feedback.drain(store) == 1
+    capture = playback_feedback.capture(store, 'player', account, {'kind': 'state', 'state': 'paused'}, 1)
+    drain_captured_feedback(store, capture)
     # Preparation has the same useful server-rendered notice without polling.
     page.route('**/static/storage-maintenance.js*', lambda route: route.abort())
     measured('reload', page.reload)
@@ -178,11 +191,11 @@ def test_single_line_notice_with_sidebar_and_without_polling(notice_app, store, 
     expect(banner).to_be_hidden()
     if width == 1536:
         account = store.accounts.get_master_account().id
-        playback_feedback.capture(store, 'player', account, {'kind': 'state', 'state': 'paused'}, 2)
+        capture = playback_feedback.capture(store, 'player', account, {'kind': 'state', 'state': 'paused'}, 2)
         assert poll()['pending_feedback'] == 1
         expect(banner).to_be_hidden()
         assert page.request.post(url + '/settings/lastfm-key', form={'key': 'feedback-pending'}).status == 204
-        assert playback_feedback.drain(store) == 1
+        drain_captured_feedback(store, capture)
         assert poll()['pending_feedback'] == 0
         expect(banner).to_be_hidden()
 

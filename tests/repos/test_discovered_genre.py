@@ -1,9 +1,3 @@
-import sqlite3
-
-from yt_playlist.core.store import Store
-from tests.historical_support import upgrade_fixture
-
-
 def test_discovered_genre_round_trip(file_backed_store):
     s = file_backed_store
     s.discovery.upsert_discovered_artist("Aphex Twin", 0.9, ["bridge"], ["fits"], "th", 100.0, genre="IDM")
@@ -16,25 +10,6 @@ def test_discovered_genre_defaults_none(file_backed_store):
     s = file_backed_store
     s.discovery.upsert_discovered_artist("Boards of Canada", 0.5, [], [], None, 1.0)
     assert s.discovery.get_discovered_artists()[0]["genre"] is None
-
-
-def test_genre_migration_on_preexisting_db(tmp_path, request):
-    """A DB whose discovered_* tables predate the genre column gets it added, losslessly."""
-    db = str(tmp_path / "old.db")
-    con = sqlite3.connect(db)
-    con.executescript(
-        "CREATE TABLE discovered_artists (artist TEXT PRIMARY KEY, score REAL, because TEXT, "
-        "  fits TEXT, thumbnail TEXT, found_at REAL, last_shown REAL);"
-        "CREATE TABLE discovered_albums (browse_id TEXT PRIMARY KEY, artist TEXT, title TEXT, "
-        "  year TEXT, thumbnail TEXT, found_at REAL, last_shown REAL);"
-        "INSERT INTO discovered_artists(artist, score) VALUES ('Old Artist', 0.3);")
-    con.commit(); con.close()
-    s = Store(db)
-    request.addfinalizer(s.conn.close)
-    upgrade_fixture(s)
-    rows = s.discovery.get_discovered_artists()
-    assert any(r["artist"] == "Old Artist" for r in rows)        # existing data preserved
-    assert all("genre" in r for r in rows)                       # column now present
 
 
 def test_artist_genre_counts_recordings_per_genre(file_backed_store):

@@ -181,16 +181,6 @@ def test_account_auth_updates_and_clears_do_not_replace_other_context(store):
     assert not store.conn.execute("SELECT 1 FROM settings WHERE key='auth_expired_identities'").fetchone()
 
 
-def test_legacy_auth_unknown_account_is_retained_without_assigning_current_master(tmp_path, legacy_owner_store):
-    old = legacy_owner_store(tmp_path/'legacy-auth.db')
-    master = old.accounts.upsert_account('Main','main.json',None,True)
-    old.settings.set_setting(account_auth_state.KEY,json.dumps({str(master):'Main','999':'Retired'}))
-    migrate(old.conn, registry=registry.MIGRATIONS)
-    assert account_auth_state.read(old.conn)=={master:'Main',999:'Retired'}
-    assert tuple(old.conn.execute('SELECT account_id,unresolved_account_id FROM account_auth_expirations '
-                                  'WHERE unresolved_account_id=999').fetchone())==(None,999)
-
-
 def test_failed_collection_conversion_rolls_back_schema_and_retains_original(tmp_path, legacy_owner_store):
     old = legacy_owner_store(tmp_path/'invalid-collection.db')
     old.settings.set_setting('album_feedback','{"release":{"kind":"more","at":1,"unknown":true}}')

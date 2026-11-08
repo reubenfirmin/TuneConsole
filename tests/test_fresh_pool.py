@@ -10,7 +10,7 @@ import pytest
 from tests.test_home_other_genres import seed_genres
 from tests.test_mode_cards_route import _client as current_client
 from tests.home_fixture_support import home_routes_only, prepared_client as _prepared_client, returning_listener
-from tests.home_fixture_support import publish_menu, without_metadata_providers
+from tests.home_fixture_support import publish_cards, publish_menu, without_metadata_providers
 from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects, seed_publication_subjects
 from tests.prepared_fixture_support import capture_template, prepared_template
@@ -198,10 +198,19 @@ def fresh_workflow_home(fresh_workflow_menu, fresh_template_bytecode,
 
 @pytest.fixture(scope='module')
 def fresh_workflow_menu(fresh_workflow_schema):
+    from yt_playlist.rec import home_cards, home_prepared
+
     def seed(store):
         returning_listener(store, 'mixes', now=1000)
-        return publish_menu(store, count=3, tracks_per_card=1, genre='Jazz', genre_options=[
+        payload = publish_menu(store, count=3, tracks_per_card=1, genre='Jazz', genre_options=[
             {'family': 'jazz', 'label': 'Jazz'}, {'family': 'techno', 'label': 'Techno'}])
+        selected = [{**proto, 'mode_id': None, 'ranker': 'completed-library-selection'}
+                    for proto in payload['menus'][0]['protos']]
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(mode_surfaces, 'assemble_cards', lambda *args, **kwargs: selected)
+            service = home_cards.HomeCards(store, home_prepared._NoJobs(), logging.getLogger(__name__),
+                genre_options=payload['genre_options'])
+            return publish_cards(store, service.cards(home_cards.CardsRequest(1000, record=False)), 1000)
 
     with prepared_template(fresh_workflow_schema, seed) as template:
         yield template
@@ -352,7 +361,9 @@ def requested_fresh_workflow(fresh_workflow_menu, tmp_path_factory):
         service = home_cards.HomeCards(store, None, logging.getLogger(__name__),
                                        genre_options=payload['genre_options'])
         pool = service.pool_view({'include_genres': ['jazz', 'techno'], 'avoid_genres': []})
-        payload['menus'][0]['slots'].insert(2, {'proto': None, 'pool': pool})
+        payload['menus'][0]['slots'] = [
+            {'proto': None, 'pool': pool} if (slot.get('pool') or {}).get('lane') == 'fresh' else slot
+            for slot in payload['menus'][0]['slots'] if slot.get('pool') or slot.get('proto')]
         payload['tuning'] = home_prepared.tuning_key(store, 1000)
         home_cache.put(store, home_prepared.SURFACE, payload, 1000)
         tracks = []
@@ -487,18 +498,23 @@ def test_fresh_workflow_new_job_registry_serves_the_persisted_menu_without_ranki
         assert calls == []
 
 
-def test_loading_and_choosing_genres_do_not_discover_or_rank_a_fresh_pool(store, monkeypatch, prepared_fresh_home):
+def test_loading_and_choosing_genres_do_not_discover_or_rank_a_fresh_pool(fresh_workflow_home, monkeypatch):
+    from yt_playlist.rec import choice_evidence
+
+    store, client = fresh_workflow_home
     calls = []
     monkeypatch.setattr(surfaces, "cold_candidates", lambda *a, **k: calls.append("rank") or [])
     monkeypatch.setattr(fresh_pool, "populate", lambda *a, **k: calls.append("discover"))
-    client = prepared_client(store)
+    # Visible-choice capture has separate persistence owners. This contract
+    # observes whether these ordinary controls trigger discovery or ranking.
+    monkeypatch.setattr(choice_evidence, 'present', lambda *args, **kwargs: None)
     for response in [client.get("/home/cards"),
                      client.post("/home/mix-genres", data={"genres": ["jazz", "techno"]}),
                      client.get("/home/cards"),
                      client.post("/home/breadth", data={"breadth_bias": "0.5"})]:
         assert 'class="fresh-pool-art"' in response.text
         assert 'aria-busy="false"' in response.text
-        assert 'data-title="Song ' in response.text
+        assert 'data-title="Prepared ' in response.text
     assert calls == []
 
 

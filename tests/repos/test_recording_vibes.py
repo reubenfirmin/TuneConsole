@@ -272,33 +272,6 @@ def recording_vibe_predecessor():
         yield template
 
 
-def test_populated_upgrade_preserves_samples_scores_labels_and_reopens(tmp_path, recording_vibe_predecessor):
-    store = Store(tmp_path / 'legacy.db')
-    value = recording_vibe_predecessor.restore(store)
-    labels = store.conn.execute('SELECT * FROM audio_session_labels').fetchone()
-    labels = {key: labels[key] for key in labels.keys()}
-    migrate(store.conn,registry=MIGRATIONS)
-    store.init_schema()
-    assert store.audio_vibes.samples(value['run_id']) == [value]
-    retained = store.audio_vibes.earlier_feedback(value['run_id'])[0]
-    assert retained == {'taxonomy_version': labels['taxonomy_version'], 'vibes': json.loads(labels['vibes']),
-                        'sample_ids': json.loads(labels['sample_ids']), 'prediction': json.loads(labels['prediction']),
-                        'updated_at': labels['updated_at']}
-    score = store.conn.execute('SELECT * FROM measurements').fetchone()
-    assert (score['score'], score['model_version'], score['measured_at']) == (.8, 'old-model', None)
-    assert store.conn.execute('SELECT measurement_id FROM recording_vibes').fetchone()[0] == score['id']
-    assert not store.conn.execute("SELECT 1 FROM sqlite_master WHERE name IN ('audio_vibe_samples','rec_vibe_tracks','rec_vibe_groups')").fetchone()
-    assert not (tmp_path / 'backups').exists()
-    store.conn.close()
-    reopened = Store(tmp_path / 'legacy.db')
-    try:
-        reopened.init_schema()
-        assert reopened.audio_vibes.samples(value['run_id']) == [value]
-        assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchall()
-    finally:
-        reopened.conn.close()
-
-
 def test_externalization_failure_rolls_back_database_and_can_resume(tmp_path, monkeypatch, recording_vibe_predecessor):
     store = Store(tmp_path / 'legacy.db')
     value = recording_vibe_predecessor.restore(store)

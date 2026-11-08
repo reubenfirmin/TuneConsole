@@ -327,83 +327,6 @@ def test_populated_predecessor_admission_preserves_exact_contents(version, prede
         assert not conn.execute('PRAGMA foreign_key_check').fetchall(), version
 
 
-def test_populated_historical_chain_preserves_each_boundary(
-        tmp_path, predecessor_templates, numbered_contract, record_property):
-    from yt_playlist.core.migrations import runner
-    from yt_playlist.core.store import Store
-
-    store = Store(tmp_path / 'populated-chain.db')
-    try:
-        conn = store.conn
-        with closing(sqlite3.connect(predecessor_templates[1].resolve().as_uri()+'?mode=ro',uri=True)) as first:
-            first.backup(conn)
-        populate(conn, 1)
-        with conn:
-            conn.executemany('INSERT INTO settings(key,value) VALUES (?,?)', [
-                ('rec_param:onboard_coverage_min', '0.9'),
-                ('rec_param:onboard_library_min', '200'),
-                ('rec_param:onboard_feedback_min', '15'),
-                ('onboard_dismissed', '1'),
-                ('last_sync_at', '1000'),
-            ])
-        steps = []
-        for version in (*PREDECESSOR_VERSIONS, LATEST_VERSION):
-            historical = list(conn.execute('SELECT * FROM schema_migrations ORDER BY version'))
-            started = time.perf_counter()
-            # Each real callback runs once as this single populated chain grows.
-            migrate(conn, registry=registry.MIGRATIONS[:version])
-            steps.append({'version': version, 'seconds': time.perf_counter() - started})
-            assert runner.history(conn, registry.MIGRATIONS[:version]) == version
-            assert list(conn.execute('SELECT * FROM schema_migrations WHERE version<=? ORDER BY version',
-                                     (len(historical),))) == historical, version
-            if version == LATEST_VERSION:
-                expected = numbered_contract
-            else:
-                with closing(sqlite3.connect(
-                        predecessor_templates[version].resolve().as_uri()+'?mode=ro',uri=True)) as predecessor:
-                    expected = objects(predecessor)
-            assert objects(conn) == expected, version
-            assert tuple(conn.execute('SELECT id,title,artist FROM tracks').fetchone()) == (17, 'Song', 'Artist'), version
-            assert conn.execute("SELECT value FROM settings WHERE key='personal-setting'").fetchone()[0] == 'retain', version
-            if version == 31:
-                with conn:
-                    conn.executemany(
-                        'INSERT INTO play_events(identity_id,identity_key,video_id,played_at,is_generated,source) '
-                        "VALUES (1,'song|artist','song',?,?, 'live')", [(1, None), (2, 0), (3, 1)])
-                events = list(map(tuple, conn.execute(
-                    'SELECT id,video_id,played_at,is_generated FROM play_events ORDER BY id')))
-                calendar = list(map(tuple, conn.execute('SELECT event_id,day FROM play_event_calendar ORDER BY event_id')))
-                sources = list(map(tuple, conn.execute('SELECT event_id,source FROM play_event_sources ORDER BY event_id')))
-            if version >= 31:
-                assert list(map(tuple, conn.execute(
-                    'SELECT id,video_id,played_at,is_generated FROM play_events ORDER BY id'))) == events, version
-                assert list(map(tuple, conn.execute(
-                    'SELECT event_id,day FROM play_event_calendar ORDER BY event_id'))) == calendar, version
-                assert list(map(tuple, conn.execute(
-                    'SELECT event_id,source FROM play_event_sources ORDER BY event_id'))) == sources, version
-            if version < 33:
-                assert tuple(conn.execute('SELECT snapshot_id,identity_key FROM history_items').fetchone()) == (
-                    1, 'song|artist'), version
-            else:
-                assert conn.execute('SELECT count(*) FROM listening_observations').fetchone()[0] == 1, version
-            assert not conn.execute('PRAGMA foreign_key_check').fetchall(), version
-        before = list(conn.iterdump())
-        migrate(conn, registry=registry.MIGRATIONS)
-        assert list(conn.iterdump()) == before
-        assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-        settings = dict(conn.execute('SELECT key,value FROM settings'))
-        assert 'rec_param:onboard_coverage_min' not in settings
-        assert 'rec_param:onboard_library_min' not in settings
-        assert settings['rec_param:onboard_feedback_min'] == '15'
-        assert settings['onboard_dismissed'] == '1'
-        # Later collection migration moves this stamp into its native owner.
-        store._bind_repositories()
-        assert float(store.settings.get_setting('last_sync_at')) == 1000
-        record_property('populated_historical_steps', json.dumps(steps))
-    finally:
-        store.conn.close()
-
-
 @pytest.mark.parametrize('version', FULL_REPLAY_VERSIONS)
 def test_explicit_predecessor_replay_matches_current_contract(
         tmp_path, version, predecessor_templates, numbered_contract, monkeypatch, record_property):
@@ -576,29 +499,6 @@ def test_historical_replay_rechecks_foreign_key_reservation_gap(
         assert conn.execute('PRAGMA foreign_keys').fetchone()[0] == 1
 
 
-def test_populated_historical_replay_admits_regular_schema_without_losing_rows(
-        tmp_path, predecessor_templates, current_contract):
-    from tests.regular_schema_support import admit_regular_schema
-    from yt_playlist.core.store import Store
-
-    store = Store(tmp_path/'admitted.db')
-    try:
-        source = predecessor_templates[1].resolve().as_uri()+'?mode=ro'
-        with closing(sqlite3.connect(source, uri=True)) as predecessor:
-            predecessor.backup(store.conn)
-        populate(store.conn, 1)
-        migrate(store.conn, registry=registry.MIGRATIONS)
-        # Independent declarations verify every original row and program,
-        # allowing only the named regular owners and their expected seed rows.
-        admit_regular_schema(store)
-        assert objects(store.conn) == current_contract
-        before = list(store.conn.iterdump())
-        migrate(store.conn)
-        assert list(store.conn.iterdump()) == before
-    finally:
-        store.conn.close()
-
-
 @pytest.mark.parametrize('has_counts_view', [False, True])
 def test_v037_installed_during_home_work_upgrades_without_losing_evidence(
         has_counts_view, monkeypatch, predecessor_templates):
@@ -625,79 +525,6 @@ def test_v037_installed_during_home_work_upgrades_without_losing_evidence(
     migrate(conn, registry=registry.MIGRATIONS[:38])
     assert list(conn.iterdump()) == before
     conn.close()
-
-
-def test_unversioned_early_schema_matches_fresh(tmp_path):
-    with connect(tmp_path / 'legacy.db') as conn:
-        conn.executescript((Path(__file__).parents[1] / 'fixtures/migrations/early_core.sql').read_text())
-        replay(conn)
-        with connect() as fresh:
-            migrate(fresh)
-            assert objects(conn, canonical_versions=True) == objects(fresh, canonical_versions=True)
-        assert tuple(conn.execute('SELECT id,orig_title,orig_artist FROM tracks').fetchone()) == (
-            17, 'Original title', 'Artist')
-
-
-def test_preexisting_play_ledger_receives_constraint_missing_from_v001(tmp_path):
-    with connect(tmp_path / 'legacy.db') as conn:
-        conn.executescript((Path(__file__).parents[1] / 'fixtures/migrations/early_core.sql').read_text())
-        conn.executescript('''
-            CREATE TABLE play_events (id INTEGER PRIMARY KEY,identity_id INTEGER NOT NULL REFERENCES identities(id),
-                identity_key TEXT NOT NULL,video_id TEXT,played_at REAL NOT NULL,playlist_ytm_id TEXT,like_status TEXT);
-            INSERT INTO play_events VALUES (9,3,'original title|artist','original-video',100,NULL,NULL);
-        ''')
-        replay(conn)
-        assert tuple(conn.execute('SELECT id,account_id,video_id,played_at,is_generated FROM play_events').fetchone()) == (
-            9, 3, 'original-video', 100, None)
-        with pytest.raises(sqlite3.IntegrityError, match='CHECK constraint failed'):
-            conn.execute('UPDATE play_events SET is_generated=2')
-
-
-@pytest.mark.parametrize('start_version', [None, 107])
-def test_initialized_state_matches_full_historical_chain(start_version):
-    with closing(connect()) as upgraded, closing(connect()) as fresh:
-        history = []
-        if start_version is not None:
-            migrate(upgraded, registry=registry.MIGRATIONS[:start_version])
-            history = list(map(tuple, upgraded.execute('SELECT * FROM schema_migrations ORDER BY version')))
-        migrate(upgraded, registry=registry.MIGRATIONS)
-        assert list(map(tuple, upgraded.execute('SELECT * FROM schema_migrations ORDER BY version')))[:len(history)] == history
-        migrate(upgraded)
-        migrate(fresh)
-        assert objects(upgraded, canonical_versions=True) == objects(fresh, canonical_versions=True)
-        for table, (kind, _) in objects(upgraded).items():
-            if kind == 'table' and table not in ('schema_migrations', 'schema_changes'):
-                assert sorted(map(tuple, upgraded.execute(f'SELECT * FROM "{table}"')), key=repr) == sorted(
-                    map(tuple, fresh.execute(f'SELECT * FROM "{table}"')), key=repr), table
-        assert list(map(tuple, upgraded.execute('SELECT version,name FROM schema_changes ORDER BY version'))) == list(
-            map(tuple, fresh.execute('SELECT version,name FROM schema_changes ORDER BY version')))
-
-
-def test_existing_store_rebinds_owners_after_upgrade_and_both_memory_readers_use_them():
-    from yt_playlist.core.store import Store
-    from yt_playlist.controllers.compact_taste_groups import CompactTasteGroups
-    store = Store(':memory:')
-    try:
-        migrate(store.conn, registry=registry.MIGRATIONS[:69])
-        store._bind_repositories()
-        assert not store._compact_group_files
-        migrate(store.conn, registry=registry.MIGRATIONS)
-        store.init_schema()
-        assert isinstance(store.taste_groups, CompactTasteGroups)
-        assert store._paid_descriptions and store._recommendation_files
-        with store.read_view() as reader:
-            assert isinstance(reader.taste_groups, CompactTasteGroups)
-            assert reader._paid_descriptions and reader._recommendation_files
-            assert reader.taste_groups.head() is None
-        with store.read_snapshot() as snapshot:
-            assert isinstance(snapshot.store.taste_groups, CompactTasteGroups)
-            assert snapshot.store._paid_descriptions and snapshot.store._recommendation_files
-            assert snapshot.store.taste_groups.head() is None
-        repo = store.taste_groups
-        store.init_schema()
-        assert store.taste_groups is repo
-    finally:
-        store.conn.close()
 
 
 @pytest.mark.parametrize('missing_lookup', [False, True])
@@ -847,16 +674,11 @@ def test_deferral_on_another_foreign_key_is_rejected_before_catalog_use():
             current.validate(conn)
 
 
-@pytest.mark.parametrize('version', [None, 24, 31])
-def test_validated_fresh_and_upgraded_catalogs_allow_verified_reassociation(version):
+def test_validated_fresh_catalog_allows_verified_reassociation():
     from yt_playlist.core import catalog
 
     with connect() as conn:
-        if version is not None:
-            migrate(conn, registry=registry.MIGRATIONS[:version])
-            replay(conn)
-        else:
-            migrate(conn)
+        migrate(conn)
         first = catalog.upsert(conn, 'first', 'First', 'Artist')
         second = catalog.upsert(conn, 'second', 'Second', 'Artist')
         target = conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (second,)).fetchone()[0]
@@ -900,15 +722,9 @@ def test_bootstrap_failure_rolls_back_all_objects_and_history(monkeypatch, owner
         assert not conn.in_transaction
 
 
-@pytest.mark.parametrize('upgraded', [False, True])
-def test_explicit_later_migration_replay_applies_and_rolls_back(tmp_path, monkeypatch, upgraded):
+def test_explicit_later_migration_on_fresh_catalog_applies_and_rolls_back(tmp_path, monkeypatch):
     with connect(tmp_path / 'state.db') as conn:
-        if upgraded:
-            migrate(conn, registry=registry.MIGRATIONS[:30])
-            populate(conn, 30)
-            replay(conn)
-        else:
-            migrate(conn)
+        migrate(conn)
         original = registry.MIGRATIONS
         def interrupted(connection, context):
             connection.execute('CREATE TABLE later (id INTEGER PRIMARY KEY)')

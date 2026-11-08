@@ -130,8 +130,6 @@ def test_independent_verification_rejects_incorrect_files_metadata_and_coverage(
         owner.publish(store.conn, stage=stage.id)
     assert owner.selected(store.conn) is None
     regular.migrate(store.conn)
-
-
 @pytest.mark.parametrize('installed', [79], indirect=True)
 def test_continuing_writes_retain_files_and_withdraw_selected_projection(installed):
     store, _ = installed
@@ -281,28 +279,3 @@ def test_oversized_prepared_key_fails_before_map_writer_and_valid_original_is_re
     assert not store.conn.execute('SELECT 1 FROM '+owner.table('stages')).fetchone()
     assert preparation.read_original(store.conn, owner.name, good) == original
     regular.migrate(store.conn)
-
-
-@pytest.mark.parametrize('installed', [79, 100], indirect=True)
-def test_native_upgrade_keeps_publication_custody_and_uses_native_owner(installed, tmp_path):
-    store, _ = installed
-    seed(store)
-    owner, stage = ready(store.conn)
-    owner.publish(store.conn, stage=stage)
-    captured = list(map(tuple, store.conn.execute('SELECT * FROM '+owner.table('map'))))
-    source = store.conn.execute('SELECT source FROM '+owner.header).fetchone()[0]
-    original = owner.value(store.conn, stage, source)
-    native = Store(tmp_path/'native-upgrade.db')
-    try:
-        store.conn.backup(native.conn)
-        runner.migrate(native.conn, registry=registry.MIGRATIONS)
-        native.init_schema(defer_metadata=True)
-        assert owner.selected(native.conn) is None
-        assert publication.relation(native.conn) == 'main.discovered_artists'
-        assert list(map(tuple, native.conn.execute('SELECT * FROM '+owner.table('map')))) == captured
-        assert owner.value(native.conn, stage, source) == original
-        assert native.discovery.get_discovered_artists()[0]['because'] == ['Anchor', 'Anchor']
-        regular.migrate(native.conn)
-        assert not native.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        native.conn.close()

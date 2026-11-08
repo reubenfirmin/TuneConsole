@@ -6,11 +6,18 @@ import pytest
 from yt_playlist.core.store import Store
 from yt_playlist.rec import scorecard
 from tests.publication_support import plan, publish, stage
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
 
 
-def test_scorecard_inputs_remain_usable_after_all_connections_close(tmp_path):
+@pytest.fixture(scope='module')
+def publication_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+def test_scorecard_inputs_remain_usable_after_all_connections_close(tmp_path, publication_schema):
     store = Store(tmp_path / "report.db")
-    store.init_schema()
+    initialize_consumer(store, publication_schema)
     try:
         iid = store.accounts.upsert_account("main", "credential", None, True)
         store.tracks.upsert_track("video", "Song", "Artist", None, 200)
@@ -28,9 +35,9 @@ def test_scorecard_inputs_remain_usable_after_all_connections_close(tmp_path):
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_proposals_and_policies_commit_before_the_publication_marker(tmp_path, fail):
+def test_proposals_and_policies_commit_before_the_publication_marker(tmp_path, fail, publication_schema):
     store = Store(tmp_path / "publish.db")
-    store.init_schema()
+    initialize_consumer(store, publication_schema)
     try:
         old = publish(store, plan(store, 'old', value={'generation': 1}))
         build = stage(store, plan(store, 'new', value={'generation': 2}))

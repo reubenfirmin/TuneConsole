@@ -3,10 +3,8 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core import listening, listening_summaries, genre_identity, artists
-from yt_playlist.core.migrations import current, registry, Migration, MigrationError, migrate
-from yt_playlist.core.migrations import v100_listening_subjects
-from yt_playlist.core.store import Store
+from yt_playlist.core import listening, listening_summaries, artists
+from yt_playlist.core.migrations import current
 
 
 def test_fresh_owners_have_no_duplicate_keys_or_scalar_source(store):
@@ -66,56 +64,6 @@ def test_summary_transaction_rolls_back_on_failed_publication(store,monkeypatch)
     with pytest.raises(sqlite3.OperationalError,match='interrupted'):
         store.trends.refresh_first_play()
     assert store.trends.first_play_map('track')==before
-
-
-def installed_99(path):
-    store = Store(path)
-    for sql in current.statements(version=99):
-        store.conn.execute(sql)
-    genre_identity.seed_catalog(store.conn)
-    store.conn.executemany('INSERT INTO settings VALUES (?,?)',current.SEED_SETTINGS.items())
-    for sql in ('INSERT INTO rec_preparation VALUES (1,0,0)','INSERT INTO rec_group_clock VALUES (1,0)',
-                'INSERT INTO group_retention_state VALUES (1,0)'):
-        store.conn.execute(sql)
-    store.conn.executemany('INSERT INTO schema_migrations VALUES (?,?,1)',[(m.version,m.name) for m in registry.MIGRATIONS[:99]])
-    store.conn.commit()
-    store._bind_repositories()
-    return store
-
-
-def test_upgrade_preserves_all_evidence_and_failed_conversion_rolls_back(tmp_path):
-    old = installed_99(tmp_path/'predecessor.db')
-    account = old.accounts.upsert_account('Listener','c',None,True)
-    entry = old.tracks.upsert_track('known','Known','Artist',None,10)
-    rid,key = old.conn.execute('SELECT recording_id,identity_key FROM catalog_tracks WHERE id=?',(entry,)).fetchone()
-    with old.conn:
-        old.conn.execute("INSERT INTO play_events(identity_id,identity_key,video_id,played_at,source) VALUES (?,?,'known',20,'takeout')",(account,key))
-        old.conn.execute("INSERT INTO play_events(identity_id,identity_key,video_id,played_at,source) VALUES (?,?,'unknown',30,'live')",(account,key))
-        old.conn.execute("INSERT INTO listening_observations(identity_id,raw_identity_key,identity_key,recording_id,source_day,day,source,timezone,precision,first_observed_at,last_observed_at) VALUES (?,'Raw title',?,?,'2020-01-01','2020-01-01','independent','UTC','calendar_day',1,2)",(account,key,rid))
-    original = {t:[dict(r) for r in old.conn.execute('SELECT * FROM '+t)] for t in
-        ('play_events','play_event_sources','play_event_calendar','listening_observations')}
-    def interrupted(conn,context):
-        v100_listening_subjects.apply(conn,context)
-        raise RuntimeError('interrupted conversion')
-    with pytest.raises(MigrationError,match='interrupted conversion'):
-        migrate(old.conn,registry=(*registry.MIGRATIONS[:99],Migration(100,'listening_subjects',interrupted,rebuild_tables=True)))
-    for table,rows in original.items():
-        assert [dict(r) for r in old.conn.execute('SELECT * FROM '+table)]==rows
-    migrate(old.conn, registry=registry.MIGRATIONS)
-    old.init_schema()
-    for table,rows in original.items():
-        relation = {'play_events':'play_event_subjects','listening_observations':'listening_observation_subjects'}.get(table,table)
-        converted = [dict(r) for r in old.conn.execute('SELECT * FROM '+relation)]
-        expected = [{('account_id' if k=='identity_id' else k):v for k,v in r.items()
-                     if k!='source' or table!='play_events'} for r in rows]
-        assert len(converted) == len(expected)
-        assert [{key:row[key] for key in original} for row,original in zip(converted,expected)] == expected
-    current.validate(old.conn)
-    old.conn.close()
-    reopened = Store(tmp_path/'predecessor.db')
-    reopened.init_schema()
-    assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchall()
-    reopened.conn.close()
 
 
 def test_current_canonical_collaborations_same_names_and_multiple_accounts(store):

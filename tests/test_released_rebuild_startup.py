@@ -5,6 +5,8 @@ import threading
 
 from tests.conftest import FakeClient
 from tests.db_rebuild_support import production64
+from tests.home_fixture_support import without_metadata_providers
+from tests.rebuild_startup_support import startup_destination
 from yt_playlist.core import playback_feedback
 from yt_playlist.core.runtime import Runtime
 from yt_playlist.core.setup import write_config
@@ -14,9 +16,21 @@ from yt_playlist.web.app import create_app
 
 
 @pytest.mark.parametrize('background', [False, True])
-def test_released_source_serves_playlists_without_advancing_history(production64, background, monkeypatch):
-    from yt_playlist.core.db_rebuild import build
+def test_released_source_serves_playlists_without_advancing_history(
+        production64, background, monkeypatch, startup_destination, without_metadata_providers):
+    from fastapi import APIRouter
+    from yt_playlist.core.db_rebuild import build, destination
     from yt_playlist.web import app as web_app
+    from yt_playlist.web.routes import app_update, audio_preview, home, likes, playlists, sync
+
+    # This owner covers released startup, HTTP availability, the maintenance
+    # installer and confirmed-feedback replay. Domain conversion is a completed
+    # lower input; the real registered converters have independent owners.
+    monkeypatch.setattr(destination, 'for_source', lambda *args, **kwargs: startup_destination)
+    monkeypatch.setattr(web_app, 'build_all', lambda ctx: [module.build(ctx)
+        for module in (app_update, audio_preview, home, likes, playlists, sync)])
+    monkeypatch.setattr(web_app, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(web_app, '_install_idle_shutdown', lambda *args: None)
     copying, release = threading.Event(), threading.Event()
     construct = build.construct
     def hold_copy(*args, **kwargs):
@@ -43,7 +57,7 @@ def test_released_source_serves_playlists_without_advancing_history(production64
         monkeypatch.setattr(ctx.rec_worker,'start_ticker',lambda: None)
         monkeypatch.setattr(ctx.rec_worker,'trigger_mode_refresh',lambda: None)
         monkeypatch.setattr(ctx.enrich_worker,'start_ticker',lambda: None)
-        with TestClient(app, base_url='http://127.0.0.1') as client:
+        with TestClient(app, base_url='http://127.0.0.1', backend_options={'use_uvloop': True}) as client:
             if background:
                 assert copying.wait(20)
             assert client.get('/').status_code == 200

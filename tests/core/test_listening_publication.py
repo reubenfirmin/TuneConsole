@@ -7,7 +7,7 @@ import time
 import pytest
 
 from tests.core.test_listening_output_preparation import chunk, head, seed
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.publication_timing_support import publication_costs
 from yt_playlist.core import recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner

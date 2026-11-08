@@ -7,6 +7,26 @@ They deliberately live outside production repositories.
 from yt_playlist.core import catalog, metadata
 
 
+def use_existing_album_tracks(store, monkeypatch):
+    """Keep release comparison real while supplying controlled catalog inputs."""
+    from tests.conftest import seed_catalog_track
+    from yt_playlist.util.matching import identity_key
+
+    def observe(video, title, artist, **fields):
+        row = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?', (video,)).fetchone()
+        if row is not None:
+            return row[0]
+        entry = seed_catalog_track(store, identity_key(title, artist), title, artist, video_id=video)
+        with store.conn:
+            # A fetched release supplies catalog entries, not library ownership.
+            store.conn.execute('DELETE FROM library_memberships WHERE entry_id=?', (entry,))
+            store.conn.execute('UPDATE youtube_items SET album=?,album_browse_id=?,duration_s=? WHERE video_id=?',
+                (fields.get('album'), fields.get('album_browse_id'), fields.get('duration_s'), video))
+        return entry
+
+    monkeypatch.setattr(store.tracks, 'observe_track_entry', observe)
+
+
 def seed_enrichment(store, entry, genre, year):
     with store._lock, store.conn:
         metadata.fill(store.conn, catalog.resolve_entry(store.conn, entry),

@@ -1,9 +1,39 @@
 """Current identity edits preserve classification, preferences and source evidence."""
 import pytest
 
+from tests.genre_catalog_support import bound_shipped_catalog
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
 from yt_playlist.core import audio_vibe_metadata, genre_classifications, genre_identity, metadata
+from yt_playlist.core.store import Store
 from yt_playlist.providers import genres
 from yt_playlist.rec import album_choices, content_model, group_similarity, radio_genres, transient
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Genre consumers do not construct the web application."""
+
+
+@pytest.fixture(scope='module')
+def genre_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(genre_schema, monkeypatch, tmp_path):
+    # Keep the shipped aliases and families for the identities being edited.
+    # Full vocabulary curation is owned by test_genre_catalog.
+    bound_shipped_catalog(monkeypatch, ('synth pop', 'drum bass', 'jazz'))
+    database = Store(tmp_path / 'genre-lifecycle.db')
+    try:
+        initialize_consumer(database, genre_schema)
+        with database.conn:
+            genre_identity.seed_catalog(database.conn)
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
+    finally:
+        database.conn.close()
 
 
 def test_rename_family_filter_and_provider_aliases_follow_identity(store):

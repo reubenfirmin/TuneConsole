@@ -13,6 +13,7 @@ import pytest
 
 from tests.core.test_action_work_migration import backup
 from tests.prepared_fixture_support import prepared_template
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.core import collection_recovery as recovery
 from yt_playlist.core import activity
 from yt_playlist.core.activity import Activity, WorkBudgetExceeded
@@ -25,6 +26,17 @@ def finish(store, limit=2000):
         if not store.retention.collection_recovery_pending():
             return
     pytest.fail('Bounded collection did not complete')
+
+
+@pytest.fixture
+def disable_periodic_library_sync():
+    """Collection tests do not construct the web lifespan or sync worker."""
+
+
+@pytest.fixture(scope='module')
+def collection_schema():
+    with bounded_consumer_schema((('rock', 'Rock'), ('jazz', 'Jazz'))) as source:
+        yield source
 
 
 def seed_recipe_owners(store, owners):
@@ -47,7 +59,7 @@ def seed_recipe_owners(store, owners):
 
 
 @pytest.fixture(scope='module')
-def recipe_owner_templates(_pristine_current_schema, tmp_path_factory):
+def recipe_owner_templates(collection_schema, tmp_path_factory):
     directory = tmp_path_factory.mktemp('recipe-owner-templates')
     templates = {}
     with ExitStack() as resources:
@@ -56,20 +68,21 @@ def recipe_owner_templates(_pristine_current_schema, tmp_path_factory):
                 home = directory / str(owners)
                 home.mkdir()
                 templates[owners] = resources.enter_context(prepared_template(
-                    _pristine_current_schema, lambda source: seed_recipe_owners(source, owners),
+                    collection_schema, lambda source: seed_recipe_owners(source, owners),
                     database=home / 'library.db'))
             return templates[owners]
         yield template
 
 
-def test_collection_schema_input_keeps_admitted_history_and_real_guards(_pristine_current_schema):
-    source = _pristine_current_schema
+def test_collection_schema_input_keeps_sql_history_and_real_guards(collection_schema):
+    source = collection_schema
     assert source.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert source.execute("SELECT 1 FROM sqlite_temp_schema WHERE type='trigger' LIMIT 1").fetchone()
     assert not source.execute('PRAGMA foreign_key_check').fetchone()
     assert source.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 107
 
 
-@pytest.mark.parametrize('owners', [16, 1024])
+@pytest.mark.parametrize('owners', [16, 128])
 def test_collection_owner_input_keeps_exact_recipe_sql_and_distinct_readable_files(recipe_owner_templates, owners):
     source = recipe_owner_templates(owners).source
     assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
@@ -210,21 +223,35 @@ def test_interrupted_batch_retains_cursor_and_releases_all_protection(file_backe
     assert not orphan.exists()
 
 
+@pytest.fixture
+def deadline_store(tmp_path, recipe_owner_templates):
+    # 128 real owners cross the unchanged 1,000-opcode callback interval. The
+    # test observes that callback interrupting SQL rather than assuming size.
+    with recipe_owner_templates(128).open(tmp_path / 'deadline-collection.db') as store:
+        yield store
+
+
 def test_sql_deadline_interrupts_owner_scan_and_preserves_its_batch(
-        file_backed_store, monkeypatch, recipe_owner_templates):
-    store = file_backed_store
-    assert recipe_owner_templates(1024).restore(store) == 1024
+        deadline_store, monkeypatch):
+    store = deadline_store
     orphan = Path(recovery.publish(store.conn, 'playlist-recipe', 'orphan', {'value': 'unowned'})[0])
-    clock, interrupted_queries = [0], []
+    clock, interrupted_queries, interrupted_progress = [0], [], []
 
     def trace(sql):
         if sql.startswith('WITH page AS MATERIALIZED') and ' FROM rec_recipes ' in sql:
             interrupted_queries.append(sql)
             clock[0] = 1  # Expire only after SQLite has begun the actual owner query.
 
+    def progress():
+        interrupted = activity.interrupt_query()
+        if interrupted:
+            interrupted_progress.append(interrupted_queries[-1])
+        return interrupted
+
     with monkeypatch.context() as deadline:
         deadline.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
         store.conn.set_trace_callback(trace)
+        store.conn.set_progress_handler(progress, 1000)
         try:
             for _ in range(100):
                 store.retention.maintain_collection_recovery()
@@ -232,13 +259,14 @@ def test_sql_deadline_interrupts_owner_scan_and_preserves_its_batch(
                     break
         finally:
             store.conn.set_trace_callback(None)
-    assert interrupted_queries and orphan.exists()
+            store.conn.set_progress_handler(activity.interrupt_query, 1000)
+    assert interrupted_queries and interrupted_progress and orphan.exists()
     assert store.retention.collection_recovery_pending() and store.retention.database._collection_orphans.batch
     assert not store.conn.in_transaction
     store.settings.set_setting('after SQL deadline', 'usable')
     finish(store)
     assert not orphan.exists()
-    assert store.conn.execute('SELECT count(*) FROM rec_recipes').fetchone()[0] == 1024
+    assert store.conn.execute('SELECT count(*) FROM rec_recipes').fetchone()[0] == 128
 
 
 def test_worker_continues_local_batches_without_clients(file_backed_store, monkeypatch):
@@ -285,3 +313,13 @@ def test_worker_continues_local_batches_without_clients(file_backed_store, monke
     assert clock[0] == 86400  # Discovery keeps its original daily deadline.
     assert discoveries == [0]
     assert not any(path.exists() for path in orphaned)
+
+
+@pytest.mark.parametrize('owners', [16, 128])
+def test_collection_owner_inputs_release_their_connections(recipe_owner_templates, owners):
+    source = recipe_owner_templates(owners).source
+    assert not source.conn.in_transaction
+    source._fixture_released = True
+    source.conn.close()
+    with pytest.raises(sqlite3.ProgrammingError, match='closed database'):
+        source.conn.execute('SELECT 1')

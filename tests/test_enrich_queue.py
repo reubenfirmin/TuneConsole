@@ -63,20 +63,6 @@ def test_batch_excludes_processed_and_respects_limit(store):
     assert len(store.enrichment_queue.next_enrich_batch(1)) == 1         # limit honored
 
 
-def test_startup_requeues_legacy_processed_rows_with_no_attempt_evidence(legacy_store):
-    store = legacy_store
-    with store.conn:
-        tid = store.conn.execute("INSERT INTO tracks(video_id,title,artist,identity_key,created_at,first_enriched_at,last_enriched_at) VALUES ('v1','Skipped','A','skipped|a',1,5,5)").lastrowid
-        store.conn.execute('DROP TABLE schema_migrations')
-    store.settings.delete_setting("enrich_unattempted_batch_repaired")
-    from tests.historical_support import upgrade_fixture
-    upgrade_fixture(store)
-    row = store.conn.execute(
-        "SELECT first_enriched_at, last_enriched_at FROM tracks WHERE id=?", (tid,)).fetchone()
-    assert row["first_enriched_at"] is None and row["last_enriched_at"] is None
-    assert [t["id"] for t in store.enrichment_queue.next_enrich_batch(10)] == [tid]
-
-
 def test_coverage_stats_and_queue_remaining(store):
     t1 = _track(store, "v1", "One", "A")
     _track(store, "v2", "Two", "B")

@@ -5,6 +5,8 @@ import hashlib
 
 import pytest
 
+from tests.genre_catalog_support import bound_catalog
+from tests.store_fixture_support import install_numbered_input
 from yt_playlist.core.migrations import MigrationError, current, migrate, registry, runner
 from yt_playlist.core.migrations import v092_installed_genre_contract as repair
 
@@ -185,18 +187,49 @@ def test_exact_native_v88_triggers_admit_writable_app_without_bulk_conversion(tm
         genres.set_active(None)
 
 
-def test_bounded_repair_of_already_upgraded_missing_guards_preserves_applied_history(tmp_path, monkeypatch):
+@pytest.fixture(scope='module')
+def missing_guard_input():
+    from yt_playlist.core.migrations import regular
+    from yt_playlist.core.preparation import installed_genre_contract
+
+    with pytest.MonkeyPatch.context() as patch, closing(sqlite3.connect(':memory:')) as conn:
+        bound_catalog(patch)
+        # Supply the completed v107 predecessor and its first seven regular
+        # owners, including the exact omission made by the historical bug.
+        install_numbered_input(conn, 107, regular_owners=regular.CHANGES[:7])
+        with conn:
+            for name, _ in installed_genre_contract.guards():
+                conn.execute('DROP TRIGGER ' + name)
+        conn.execute('PRAGMA query_only=ON')
+        yield conn
+
+
+def test_missing_guard_input_keeps_both_applied_histories_and_the_exact_omission(missing_guard_input):
+    from yt_playlist.core.migrations import regular
+
+    conn = missing_guard_input
+    assert list(map(tuple, conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
+        (item.version, item.name) for item in registry.MIGRATIONS]
+    assert list(map(tuple, conn.execute('SELECT version,name FROM schema_changes ORDER BY version'))) == [
+        (item.version, item.name) for item in regular.CHANGES[:7]]
+    assert not conn.execute("SELECT 1 FROM sqlite_schema WHERE name LIKE 'installed_taste_axis_guard_%'").fetchone()
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_bounded_repair_of_already_upgraded_missing_guards_preserves_applied_history(
+        tmp_path, monkeypatch, missing_guard_input):
     from yt_playlist.core.migrations import regular
     from yt_playlist.core.preparation import installed_genre_contract
 
     conn = sqlite3.connect(tmp_path / 'previously-upgraded.db')
     conn.row_factory = sqlite3.Row
     try:
-        migrate(conn, registry=registry.MIGRATIONS[:79])
-        regular.migrate(conn, changes=regular.CHANGES[:7])
-        with monkeypatch.context() as former:
-            former.setattr(regular, 'after_owner_upgrade', lambda conn: None)
-            migrate(conn, registry=registry.MIGRATIONS)
+        bound_catalog(monkeypatch)
+        # Only change 8 owns this repair. Later regular owners are exercised by
+        # the retained populated upgrade journey, rather than replayed here.
+        monkeypatch.setattr(regular, 'CHANGES', regular.CHANGES[:8])
+        missing_guard_input.backup(conn)
+        conn.execute('PRAGMA foreign_keys=ON')
         assert not conn.execute("SELECT 1 FROM sqlite_schema WHERE name LIKE 'installed_taste_axis_guard_%'").fetchone()
         history = conn.execute('SELECT * FROM schema_migrations ORDER BY version').fetchall()
         changes = conn.execute('SELECT * FROM schema_changes ORDER BY version').fetchall()

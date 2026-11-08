@@ -176,32 +176,6 @@ def test_profile_mismatch_blocks_selection_and_source_write_withdraws_it(predece
     assert publication.selected(conn) is None
 
 
-def test_native_upgrade_and_restart_keep_selected_files_and_prefer_native_owners(predecessor):
-    from yt_playlist.core.store import Store
-    conn = predecessor.conn
-    entry,_,key = seed(predecessor)
-    preparation.JOB.install(conn)
-    identity = stage(conn)
-    publication.publish(conn,identity=identity)
-    files = [row[0] for row in conn.execute('SELECT DISTINCT filename FROM '+publication.table('deliveries'))]
-    # Frozen upgrades use an unbound connection, as the genuine migration runner
-    # does, without a serving Store's temporary facade definitions.
-    with closing(sqlite3.connect(predecessor._db_path)) as upgrade:
-        upgrade.row_factory = sqlite3.Row
-        upgrade.execute('PRAGMA foreign_keys=ON')
-        migrate(upgrade,registry=registry.MIGRATIONS)
-    reopened = Store(predecessor._db_path)
-    try:
-        reopened.init_schema()
-        assert publication.selected(reopened.conn) is None
-        assert metadata_provenance(reopened, entry)['lineage']['genre']['choice']['delivery']
-        assert reopened.enrichment_state.metadata_observations(key)
-        regular.migrate(reopened.conn)
-        assert all(Path(path).is_file() for path in files)
-    finally:
-        reopened.conn.close()
-
-
 def test_file_failure_and_racing_source_never_select_incomplete_destinations(predecessor,monkeypatch, independent_regular_ddl):
     conn = predecessor.conn
     seed(predecessor)

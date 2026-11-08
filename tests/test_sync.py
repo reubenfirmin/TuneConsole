@@ -3,6 +3,20 @@ from yt_playlist.library.playlist_metadata import content_hash
 from yt_playlist.library import sync as sync_mod
 from yt_playlist.library import playlist_generated
 from tests.conftest import FakeClient, _track
+from tests.store_fixture_support import bounded_consumer_schema
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Sync tests invoke their operations directly without constructing an app."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
 
 
 # The message ytmusicapi raises when YouTube serves the SIGNED-OUT layout (singleColumnBrowseResultsRenderer
@@ -31,10 +45,14 @@ def test_is_auth_error_still_matches_http_codes_and_ignores_transient():
     assert sync_mod._is_auth_error(Exception("temporary network blip")) is False
 
 
-def test_sync_identity_soft_skips_on_bridge_disconnect(store):
+def test_sync_identity_soft_skips_on_bridge_disconnect(store, monkeypatch):
     """A BridgeError (extension disconnected / no signed-in tab) is a CONNECTION problem, not a dead
     session: sync_identity must skip quietly, NOT flag re-auth, and NOT raise."""
     from yt_playlist.core.bridge import BridgeError
+    from yt_playlist.util.retry import with_retry
+    waits = []
+    monkeypatch.setattr(sync_mod, 'with_retry', lambda fn, **kwargs:
+                        with_retry(fn, sleep=waits.append, **kwargs))
     iid = store.accounts.upsert_account("main", "cred", None, True)
 
     class _DisconnectedClient(FakeClient):
@@ -46,6 +64,7 @@ def test_sync_identity_soft_skips_on_bridge_disconnect(store):
                   on_auth_expired=lambda i, label: expired.__setitem__(i, label or str(i)))
     assert expired == {}                       # NOT flagged for re-auth
     assert store.playlists.get_playlists() == []         # nothing pruned/changed
+    assert waits == [.5, 1.]
 
 
 def test_sync_all_records_last_sync_at(store):
@@ -143,7 +162,7 @@ def test_history_sync_uses_browser_timezone_across_utc_and_local_midnight(store)
     sync_identity(store, iid, client, now=first + 7 * 3600)
     assert store.history.listening_day_counts(iid) == {"song|artist": 2}
 
-def test_sync_identity_no_truncation_beyond_defaults(store):
+def test_sync_identity_no_truncation_beyond_defaults(store, monkeypatch):
     """Regression: sync_identity must pass limit=None so >25 playlists and >100 tracks are
     not silently truncated by ytmusicapi's defaults."""
     iid = store.accounts.upsert_account("main", "cred", None, True)
@@ -155,6 +174,20 @@ def test_sync_identity_no_truncation_beyond_defaults(store):
         pl['playlistId']: [_track(f"v{i}_{j}", f"Song {j}", "Artist") for j in range(pl['count'])]
         for i, pl in enumerate(playlists)
     }
+
+    # This case owns unbounded provider reads and actual playlist publication.
+    # Supply completed catalog entries below that boundary; provider metadata
+    # capture and artist-credit acquisition have their own ingestion owners.
+    subjects = [track for rows in tracks_per_pl.values() for track in rows]
+    entries = {track['videoId']: index for index, track in enumerate(subjects, 1)}
+    with store.conn:
+        store.conn.executemany('INSERT INTO recordings(id,identity_key,title,artist) VALUES (?,?,?,?)',
+            [(entries[t['videoId']], t['videoId'] + '|artist', t['title'], 'Artist') for t in subjects])
+        store.conn.executemany('INSERT INTO youtube_items(video_id,recording_id,title,artist) VALUES (?,?,?,?)',
+            [(t['videoId'], entries[t['videoId']], t['title'], 'Artist') for t in subjects])
+        store.conn.executemany('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
+            [(entry, entry, video) for video, entry in entries.items()])
+    monkeypatch.setattr(store.tracks, 'upsert_track', lambda video, *args, **kwargs: entries[video])
 
     client = FakeClient(playlists=playlists, tracks=tracks_per_pl, history=[])
     sync_identity(store, iid, client, now=2000.0)
@@ -201,7 +234,8 @@ def test_sync_preserves_generated_playlist_created_during_library_fetch(store):
                 self, now=101, account_id=iid)
             return listing
 
-    client = GeneratingClient(playlists=[{"playlistId": "EXISTING", "title": same_title}])
+    client = GeneratingClient(playlists=[{"playlistId": "EXISTING", "title": same_title}],
+        catalog={'new-song': _track('new-song', 'New song', 'Artist')})
     sync_identity(store, iid, client, now=100)
 
     generated = client.generated
@@ -210,6 +244,7 @@ def test_sync_preserves_generated_playlist_created_during_library_fetch(store):
     assert saved.provider_playlist_id == generated["new_ytm"]
     assert saved.created_at == 101
     assert [t["video_id"] for t in store.charts.playlist_tracks_detail(saved.id)] == ["new-song"]
+    assert [t['videoId'] for t in client.get_playlist(generated['new_ytm'])['tracks']] == ['new-song']
     assert store.collection.playback_source(generated["new_ytm"], "new-song") == {
         "kind": "playlist", "id": saved.id, "title": same_title}
     assert {p.provider_playlist_id for p in store.playlists.get_playlists()} == {"EXISTING", generated["new_ytm"]}

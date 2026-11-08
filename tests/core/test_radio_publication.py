@@ -6,7 +6,7 @@ import sqlite3
 import pytest
 
 from tests.core.test_radio_preparation import finish, header
-from tests.core.test_legacy_radio_upgrade import seed_installed_radio
+from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import catalog, radio_reads, radio_storage
 from yt_playlist.core.radio_files import RadioFiles
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -18,13 +18,6 @@ from yt_playlist.web.radio_persistence import RadioPersistence
 def prepare(conn):
     preparation.JOB.install(conn)
     return finish(conn).prepared_revision
-
-
-def rejection_inputs(store):
-    seed_installed_radio(store)
-    revision = prepare(store.conn)
-    assert publication.selected(store.conn) is None
-    return revision
 
 
 def test_preopened_readers_and_compatible_writer_keep_exact_checkpoint(tmp_path, monkeypatch, installed_radio):
@@ -89,10 +82,10 @@ def test_preopened_readers_and_compatible_writer_keep_exact_checkpoint(tmp_path,
 
 @pytest.mark.parametrize('failure',['header','queue','corrupt-file','missing-file'])
 def test_invalid_preparation_does_not_replace_installed_checkpoint(
-        tmp_path, installed_radio, staged_custody, failure):
+        tmp_path, installed_radio, failure, independent_regular_ddl):
     store, state, raw = installed_radio(tmp_path / 'invalid.db')
     try:
-        revision = staged_custody((store, 93), 'radio-session', rejection_inputs, admit=False)
+        revision = prepare(store.conn)
         row = header(store.conn)
         if failure == 'header':
             with store.conn:
@@ -110,6 +103,7 @@ def test_invalid_preparation_does_not_replace_installed_checkpoint(
         assert radio_storage.load_published(store.conn) == (state,None)
         assert store.conn.execute('SELECT value FROM main.settings WHERE key=?',(preparation.KEY,)).fetchone()[0] == raw
         regular.migrate(store.conn)
+        assert store.conn.execute('SELECT count(*) FROM independent_preparation_ddl').fetchone()[0] == 0
     finally:
         store.conn.close()
 
@@ -183,7 +177,8 @@ def test_selected_custody_is_immutable_and_missing_file_has_explicit_recovery(tm
         store.conn.close()
 
 
-def test_interrupted_publication_retains_previous_generation_and_retry_is_atomic(tmp_path, installed_radio):
+def test_interrupted_publication_retains_previous_generation_and_retry_is_atomic(
+        tmp_path, installed_radio, independent_regular_ddl):
     store, state, raw = installed_radio(tmp_path / 'interrupted.db')
     try:
         first = prepare(store.conn)
@@ -207,6 +202,7 @@ def test_interrupted_publication_retains_previous_generation_and_retry_is_atomic
         assert publication.selected(store.conn) is None
         assert preparation.read(old) == raw
         regular.migrate(store.conn)
+        assert store.conn.execute('SELECT count(*) FROM independent_preparation_ddl').fetchone()[0] == 0
         store.conn.execute('DROP TRIGGER temp.interrupt_radio_cutover')
         publication.publish(store.conn,revision=revision)
         assert publication.selected(store.conn) == revision

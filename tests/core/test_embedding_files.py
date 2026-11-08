@@ -1,5 +1,6 @@
 """Binary vectors keep exact bytes, coherent bases and discovery tie ordering."""
 from tests.file_custody_support import export_owner, restore_owner
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
 import shutil
 import sqlite3
 import struct
@@ -11,6 +12,27 @@ from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.preparation import embeddings as preparation
 from yt_playlist.core.store import Store
 from yt_playlist.core.rec_model_policy import VectorChanges
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Embedding storage tests do not construct the web application."""
+
+
+@pytest.fixture(scope='module')
+def embedding_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(embedding_schema):
+    database = Store(':memory:')
+    try:
+        initialize_consumer(database, embedding_schema)
+        yield database
+    finally:
+        database.conn.close()
 
 
 def test_basis_validation_work_grows_linearly_and_rejects_both_storage_forms(store):
@@ -165,13 +187,17 @@ def test_required_chunks_snapshot_and_independent_restore(store, tmp_path):
 
 
 @pytest.mark.parametrize('converted',[1,3])
-def test_installed_append_after_conversion_and_restart_preserves_discovery_order(tmp_path,converted):
+def test_installed_append_after_conversion_and_restart_preserves_discovery_order(
+        tmp_path, converted, embedding_schema):
     database = tmp_path/'installed.db'
     store = Store(database)
     try:
-        store.init_schema()
-        for key in ('zulu','alpha','middle','newest'):
-            store.tracks.upsert_track(key,key,'Artist','',100)
+        initialize_consumer(store, embedding_schema)
+        # Conversion consumes recording IDs and captured insertion order.
+        # Provider ingestion and metadata publication have separate owners.
+        with atomic_write(store):
+            store.conn.executemany('INSERT INTO recordings(identity_key) VALUES (?)',
+                [(key,) for key in ('zulu', 'alpha', 'middle', 'newest')])
         subjects = list(store.conn.execute('SELECT id,identity_key FROM recordings ORDER BY id'))
         vector = struct.pack('=ff',.5,-.0)
         with atomic_write(store):
@@ -182,7 +208,9 @@ def test_installed_append_after_conversion_and_restart_preserves_discovery_order
         store.conn.close()
     store = Store(database)
     try:
-        store.init_schema()
+        # The schema is unchanged across this real close/reopen. Admission has
+        # separate owners; this case owns persisted conversion and tie order.
+        store._bind_repositories()
         with atomic_write(store):
             store.conn.execute('INSERT INTO recording_embeddings VALUES (?,?,?,?,?,?)',
                 (subjects[3][0],'content_discovery','basis',2,vector,2))

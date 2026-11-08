@@ -20,6 +20,17 @@ from yt_playlist.library import playlist_gc_retry
 from yt_playlist.library.spotify_library import _playlist_transfers
 
 
+def test_workflow_publication_input_keeps_installed_history_and_snapshot_guards(_bounded_installed_schema):
+    from yt_playlist.core.migrations import registry
+
+    source = _bounded_installed_schema(93).source
+    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert list(map(tuple, source.conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
+        (entry.version, entry.name) for entry in registry.MIGRATIONS[:93]]
+    assert source._snapshot_revisions.conn is source.conn
+    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+
 def prepare(owner, conn):
     owner.worker.install(conn)
     for _ in range(3000):
@@ -151,8 +162,10 @@ def test_bounded_map_restart_and_atomic_cutover_keep_earlier_custody(installed, 
             record_property('workflow_map_' + name + '_seconds', time.perf_counter() - began)
 
     store, _ = installed
+    # Five originals retain two full pages and a tail. The inherited mapper's
+    # production 128-link limit has a real canvas boundary owner.
     inputs = {workflow_settings.ALBUM+':'+str(index): '["first", "first", "last"]'
-              for index in range(259)}
+              for index in range(5)}
     # Only the initial source rows share a transaction. Preparation, map
     # checkpoints, continuing writes and publication still own their commits.
     with phase('source_settings'):
@@ -163,25 +176,25 @@ def test_bounded_map_restart_and_atomic_cutover_keep_earlier_custody(installed, 
     with phase('initial_preparation'):
         prepare(owner, store.conn)
     with phase('first_map_checkpoint'):
-        first = owner.step(store.conn, batch_size=128)
-    assert first.copied == 128 and not first.complete
+        first = owner.step(store.conn, batch_size=2)
+    assert first.copied == 2 and not first.complete
     with store.conn:
         store.conn.execute('CREATE TRIGGER controlled_workflow_map BEFORE INSERT ON '+owner.table('map')+
             " BEGIN SELECT RAISE(ABORT,'controlled map interruption'); END")
     with phase('failed_map_continuation'), pytest.raises(sqlite3.IntegrityError, match='controlled map interruption'):
-        owner.step(store.conn, batch_size=128)
+        owner.step(store.conn, batch_size=2)
     assert owner.stage(store.conn, first.id) == first
-    assert store.conn.execute('SELECT count(*) FROM '+owner.table('custody')).fetchone()[0] == 128
+    assert store.conn.execute('SELECT count(*) FROM '+owner.table('custody')).fetchone()[0] == 2
     with store.conn:
         store.conn.execute('DROP TRIGGER controlled_workflow_map')
-    changed = workflow_settings.ALBUM+':100'
+    changed = workflow_settings.ALBUM+':1'
     with phase('continuing_source_write'):
         store.settings.set_setting(changed, '["continuing"]')
     with phase('restart_preparation_and_map'):
-        identity = stage(owner, store.conn)
+        identity = stage(owner, store.conn, size=2)
     assert identity != first.id
     completed = owner.stage(store.conn, identity)
-    assert completed.copied == 259 and completed.complete
+    assert completed.copied == 5 and completed.complete
     with store.conn:
         store.conn.execute('CREATE TRIGGER controlled_workflow_cutover BEFORE INSERT ON '+owner.table('head')+
             " BEGIN SELECT RAISE(ABORT,'controlled cutover interruption'); END")

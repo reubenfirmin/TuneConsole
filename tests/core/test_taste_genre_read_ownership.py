@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from tests.conftest import FakeClient
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from yt_playlist.core import catalog, genre_identity
 from yt_playlist.rec import home_cards, home_prepared, mix_tuning, onboarding, rec_params, surfaces, taste_analysis, taste_viz
 from yt_playlist.web.app import create_app
@@ -17,9 +17,11 @@ from yt_playlist.web.app import create_app
 def _library(store):
     account = store.accounts.upsert_account('Main', 'credentials', None, True)
     with store.conn:
-        for family in ('pop', 'jazz'):
+        for family in ('pop', 'jazz', 'house'):
             store.conn.execute('INSERT INTO genre_family VALUES (?,?) ON CONFLICT DO NOTHING',
                                (family, family))
+        store.conn.execute("INSERT INTO genre_catalog(key,name,family_key,source) "
+                           "VALUES ('house','House','house','curated') ON CONFLICT DO NOTHING")
         for key, name in (('owned-seed', 'Owned Seed'), ('owned-candidate', 'Owned Candidate')):
             store.conn.execute('INSERT INTO genre_catalog(key,name,family_key,source) VALUES (?,?,?,?)',
                                (key, name, 'pop', 'custom'))

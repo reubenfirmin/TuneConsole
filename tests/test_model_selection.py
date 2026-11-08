@@ -11,6 +11,19 @@ from tests import model_support
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.util.matching import identity_key
 from tests.repository_mock_support import no_database, repository_store
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Model selection tests drive their workers directly."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
 
 
 def _result(now=1000, status="applied"):
@@ -140,17 +153,26 @@ def test_startup_recovers_interrupted_comparison_and_unchanged_refresh_reuses_mo
         worker.shutdown()
 
 
-def test_real_history_drives_automatic_comparison_without_manual_action(store, monkeypatch):
+def test_real_history_drives_automatic_comparison_without_manual_action(file_consumer_store, monkeypatch):
+    store = file_consumer_store
     iid = store.accounts.upsert_account("main", "cred", None, True)
     all_keys = []
+    # 104 real recordings exceed the 100-track readiness threshold. The first
+    # five per group are prior context; the other 64 give held-out first plays
+    # across eight active days, exceeding both comparison evidence thresholds.
+    subjects = [dict(key=identity_key(f'Song{group}_{i}', f'Artist{group}'),
+                     title=f'Song{group}_{i}', artist=f'Artist{group}',
+                     video_id=f'{group}-{i}', created_at=0)
+                for group in range(8) for i in range(13)]
+    seed_publication_subjects(store, subjects)
+    entries = {row['video_id']: row['id'] for row in store.conn.execute('SELECT id,video_id FROM catalog_entries')}
     for group in range(8):
-        tracks, keys = [], []
-        for i in range(20):
-            tracks.append(store.tracks.upsert_track(f"{group}-{i}", f"Song{group}_{i}", f"Artist{group}", None, None, created_at=0))
-            keys.append(identity_key(f"Song{group}_{i}", f"Artist{group}"))
+        rows = subjects[group * 13:(group + 1) * 13]
+        tracks = [entries[row['video_id']] for row in rows]
+        keys = [row['key'] for row in rows]
         all_keys.append(keys)
-        store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, f"PL{group}", "Mix", 20, str(group), 0), tracks)
-    for period in range(4):
+        store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, f"PL{group}", "Mix", 13, str(group), 0), tracks)
+    for period in range(3):
         batch = [key for keys in all_keys for key in keys[period * 5:period * 5 + 5]]
         for offset in range(5):
             at = (-100 if period == 0 else period * 10 - 5) * ms.DAY + offset * ms.DAY
@@ -166,7 +188,7 @@ def test_real_history_drives_automatic_comparison_without_manual_action(store, m
     assert result['kind'] == 'daily' and result['phase'] == 'complete'
     assert result['holdout_days'] == 30 and len(result['grid']) == 1
     assert result['previous'] == {'method': 'svd', 'dim': 4}
-    assert store.rec_model.rec_vectors_count() == 160
+    assert store.rec_model.rec_vectors_count() == 104
     assert ms.maintain(store, now + 1) is None
     assert len(store.model_selection.selection_runs()) == 1
 

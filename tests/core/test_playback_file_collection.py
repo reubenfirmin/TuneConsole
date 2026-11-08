@@ -12,11 +12,41 @@ import pytest
 from yt_playlist.core import fao, playback_feedback
 from yt_playlist.core.preparation import managed_files
 from tests.playback_feedback_support import event
+from tests.store_fixture_support import bounded_consumer_schema
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Inbox collection tests do not construct the web application."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def close_collection(file_backed_store):
+    yield
+    managed_files.close(file_backed_store.retention.database)
 
 
 def collect(store, now):
+    database = store.retention.database
+    completed = set()
     for _ in range(128):
+        work = getattr(database, '_managed_file_orphans', None)
+        position = work.position if work is not None else 0
         store.retention.maintain_managed_files(now)
+        work = database._managed_file_orphans
+        if work.position != position:
+            completed.add(position)
+        # A zero-removal turn does not prove traversal. Visit every ownership
+        # domain and finish the crash-left stream scan before checking custody.
+        if len(completed) == len(work.contracts) and not hasattr(database, '_managed_file_pending'):
+            return
+    pytest.fail('Managed-file collection did not complete within 128 turns')
 
 
 @pytest.mark.parametrize('failure', ['insert', 'acknowledge'])
@@ -54,7 +84,7 @@ def test_observation_orphans_collect_while_pending_capture_replays_once(file_bac
     abandoned.write_bytes(b'incomplete private stream')
     collect(store, time.time())
     assert orphan.exists() and abandoned.exists()
-    managed_files.close(store)
+    managed_files.close(store.retention.database)
     collect(store, time.time() + 31 * 86400)
     assert not orphan.exists() and not abandoned.exists()
     assert fao.read(pending['filename']).bytes == encoded
@@ -96,6 +126,6 @@ def test_collection_cannot_remove_active_capture_before_inbox_insert(file_backed
                 capture.result(timeout=10)
         else:
             capture.result(timeout=10)
-    managed_files.close(store)
+    managed_files.close(store.retention.database)
     collect(store, time.time() + 31 * 86400)
     assert paths[0].exists() is not rollback

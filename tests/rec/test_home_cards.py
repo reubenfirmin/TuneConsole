@@ -5,8 +5,21 @@ from unittest.mock import Mock
 
 import pytest
 
+from tests.conftest import seed_catalog_track
 from tests.repository_mock_support import no_database, transient_repository_store
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.rec import home_cards, measurement, mode_surfaces, stored_home
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Home policy tests do not construct the web application."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
 
 
 class Jobs:
@@ -116,11 +129,13 @@ def test_pool_failure_and_polling_do_not_admit_jobs_or_record_offers(home_store)
 
 
 def test_catalog_excludes_only_displayed_wheelhouse_tracks(store, monkeypatch):
-    for i in range(60):
+    # Two complete 12-track menus plus an undisplayed candidate distinguish
+    # displayed-track exclusion from excluding the whole wheelhouse pool.
+    for i in range(25):
         title, artist = f"Song {i}", f"Artist {i}"
-        store.tracks.upsert_track(f"v{i}", title, artist, None, None)
+        seed_catalog_track(store, f'song {i}|artist {i}', title, artist, video_id=f'v{i}')
     from yt_playlist.rec import measurement
-    shared = [{'key': f'song {i}|artist {i}'} for i in range(60)]
+    shared = [{'key': f'song {i}|artist {i}'} for i in range(25)]
     with store.read_snapshot() as snapshot:
         policies = measurement.PoolPolicies(snapshot.store, 999)
         pool = policies.stamp(shared, 'wheelhouse')

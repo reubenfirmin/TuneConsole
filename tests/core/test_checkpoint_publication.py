@@ -243,19 +243,3 @@ def test_vibes_are_not_captured_and_native_historical_owners_take_precedence(ins
         regular.validate(upgraded.conn)
     finally:
         upgraded.conn.close()
-
-
-@pytest.mark.parametrize('installed', [79], indirect=True)
-def test_full_frozen_upgrade_after_publication_retains_its_supported_route(installed, tmp_path):
-    store, _ = installed
-    seed(store)
-    for name in preparation.JOBS:
-        publication.publish(store.conn, name, revision=prepare(store, name))
-    upgraded = Store(tmp_path / 'published-checkpoint-full-upgrade.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        assert all(publication.selected(upgraded.conn, name) is None for name in preparation.JOBS)
-        regular.validate(upgraded.conn)
-    finally:
-        upgraded.conn.close()

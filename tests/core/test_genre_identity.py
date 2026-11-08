@@ -1,7 +1,27 @@
 """Alias collisions must never attribute provider evidence to an arbitrary genre."""
 import pytest
 
+from tests.genre_catalog_support import bound_shipped_catalog
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.core import genre_identity, metadata_values
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Genre SQL tests do not construct the web application."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def genre_inputs(store, monkeypatch):
+    bound_shipped_catalog(monkeypatch, ('synth pop', 'drum bass', 'techno'))
+    with store.conn:
+        genre_identity.seed_catalog(store.conn)
 
 
 def test_exact_key_name_and_alias_must_agree(store):

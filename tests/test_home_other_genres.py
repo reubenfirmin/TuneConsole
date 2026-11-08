@@ -9,9 +9,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
-from tests.home_fixture_support import home_routes_only
-from tests.prepared_fixture_support import prepared_template
-from tests.recommendation_support import publish_bundles, seed_bundle_subjects
+from tests.home_fixture_support import home_routes_only, install_home_routes
+from tests.prepared_fixture_support import capture_template, prepared_template
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.rec import choice_evidence, home_cache, home_prepared, home_themes, measurement, mode_surfaces
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
@@ -20,17 +21,32 @@ from yt_playlist.rec import home_cards as home
 pytestmark = pytest.mark.usefixtures('unlocked_home_controls')
 
 
-@pytest.fixture(scope='module')
-def genre_candidates_template(_pristine_current_schema):
-    # Eight candidates still require general-pool backfill when a mode is
-    # trimmed to four below. Extra copies do not add a filtering scenario.
-    with prepared_template(_pristine_current_schema,
-                           lambda source: seed_genres(source, tracks_per_lane=8)) as template:
-        yield template
+@pytest.fixture(scope='module', autouse=True)
+def isolated_template_home(tmp_path_factory):
+    # Module-scoped memory Stores can retain file-backed publication evidence
+    # before the function-scoped application-home fixture runs.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('genre-template-home')))
+        yield
 
 
 @pytest.fixture(scope='module')
-def genre_controls_template(_pristine_current_schema):
+def genre_controls_schema():
+    with bounded_consumer_schema((('jazz', 'Jazz'), ('techno', 'Techno'), ('trance', 'Trance'),
+                                 ('indie-rock', 'Indie Rock'), ('ambient', 'Ambient'),
+                                 ('classical', 'Classical'))) as schema:
+        yield schema
+
+
+def test_genre_controls_schema_keeps_every_offered_family(genre_controls_schema):
+    assert {row[0] for row in genre_controls_schema.execute('SELECT name FROM genre_family')} == {
+        'Jazz', 'Techno', 'Trance', 'Indie Rock', 'Ambient', 'Classical'}
+    assert genre_controls_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert genre_controls_schema._revision_script
+
+
+@pytest.fixture(scope='module')
+def genre_control_candidates(genre_controls_schema):
     # HTTP controls need four playable tracks per lane. Backfill checks retain
     # the larger candidate template above and manipulate its real pools.
     def seed(source):
@@ -45,13 +61,42 @@ def genre_controls_template(_pristine_current_schema):
                 items = [{**track, 'lane': lane} for track in tracks]
                 bundles[str(mode)][lane] = items
                 bundles['all'].setdefault(lane, []).extend(items)
-        seed_bundle_subjects(source, bundles)
+        tracks = {item['key']: item for items in bundles['all'].values() for item in items}
+        for track in tracks.values():
+            track['video_id'] = track['key']
+        seed_publication_subjects(source, tracks.values())
         publish_bundles(source, bundles, 1.0)
-        _publish_menu(source, 1000.0)
         return bundles
 
-    with prepared_template(_pristine_current_schema, seed) as template:
+    with prepared_template(genre_controls_schema, seed) as template:
         yield template
+
+
+def test_genre_control_candidates_keep_all_four_lanes_and_the_real_typed_head(genre_control_candidates):
+    template = genre_control_candidates
+    assert template.source.recommendations.head('home')
+    assert template.source.rec_proposals.get_proposals(home_prepared.SURFACE) is None
+    assert template.source.conn.execute('SELECT count(*) FROM library_memberships').fetchone()[0] == 24
+    for mid in map(str, range(6)):
+        assert set(template.bundles[mid]) == set(mode_surfaces.CARD_SURFACES)
+        assert {len(items) for items in template.bundles[mid].values()} == {4}
+
+
+@pytest.fixture(scope='module')
+def genre_controls_template(genre_control_candidates):
+    with genre_control_candidates.open(':memory:') as source:
+        _publish_menu(source, 1000.0)
+        yield capture_template(source, genre_control_candidates.result)
+
+
+def test_genre_controls_input_keeps_four_real_recordings_per_family_and_prepared_menu(genre_controls_template):
+    template = genre_controls_template
+    assert home_prepared._valid(home_cache.read(template.source, home_prepared.SURFACE))
+    assert template.source.conn.execute('SELECT count(*) FROM library_memberships').fetchone()[0] == 24
+    assert len(template.source.modes.list_modes(active_only=True)) == 6
+    for mid in map(str, range(6)):
+        assert {len(items) for items in template.bundles[mid].values()} == {4}
+    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
 
 
 @pytest.fixture
@@ -159,7 +204,13 @@ def install_genre_http_inputs(monkeypatch):
 
 def seed_genres(store, *, genres=None, tracks_per_lane=20, fresh=True):
     bundles = genre_bundles(store, genres=genres, tracks_per_lane=tracks_per_lane, fresh=fresh)
-    seed_bundle_subjects(store, bundles)
+    # Candidate consumers need completed membership and metadata, rather than
+    # repeating provider ingestion and genre delivery for each input row.
+    tracks = {item['key']: item for items in bundles['all'].values() for item in items}
+    for track in tracks.values():
+        track['video_id'] = track['key']
+    discoveries = {item['key'] for item in bundles['all'].get('fresh', ())}
+    seed_publication_subjects(store, tracks.values(), discoveries=discoveries)
     publish_bundles(store, bundles, 1.0)
     return bundles
 
@@ -306,19 +357,78 @@ def test_chosen_genres_validate_before_advancing_the_menu(store, monkeypatch):
     assert store.rec_proposals.get_proposals("home_genre_request") is None
 
 
-def test_chosen_genres_keep_a_fresh_skeleton_when_the_pool_cannot_fill_a_mix(store, genre_http_inputs):
+@pytest.fixture(scope='module')
+def skeleton_schema():
+    with bounded_consumer_schema((('house', 'House'), ('jazz', 'Jazz'), ('techno', 'Techno'))) as schema:
+        yield schema
+
+
+@pytest.fixture(scope='module')
+def skeleton_template(skeleton_schema):
     # Four Techno tracks per lane keep the usual menu usable. The requested
     # Jazz pool remains genuinely underfilled without preparing four unused
     # genre families or duplicate candidate tracks.
-    bundles = genre_bundles(store, genres=['Jazz', 'Techno'], tracks_per_lane=4)
+    def seed(store):
+        bundles = genre_bundles(store, genres=['Jazz', 'Techno'], tracks_per_lane=4)
+        jazz = bundles['0']['wheelhouse'][:1]
+        techno = bundles['1']['wheelhouse']
+        for lane in mode_surfaces.CARD_SURFACES:
+            bundles['0'][lane] = [{**track, 'lane': lane} for track in jazz]
+            bundles['1'][lane] = [{**track, 'lane': lane} for track in techno]
+            bundles['all'][lane] = bundles['1'][lane]
+        for track in [*jazz, *techno]:
+            track['video_id'] = track['key']
+        seed_publication_subjects(store, [*jazz, *techno])
+        publish_bundles(store, bundles, 1.0)
+        return bundles
+
+    with prepared_template(skeleton_schema, seed) as template:
+        yield template
+
+
+def test_skeleton_input_has_four_usable_techno_tracks_and_only_one_jazz_per_lane(skeleton_template):
+    bundles = skeleton_template.result
+    assert len(skeleton_template.source.rec_query.tracks_by_keys(
+        [track['key'] for track in bundles['1']['wheelhouse']])) == 4
     for lane in mode_surfaces.CARD_SURFACES:
-        bundles["0"][lane] = bundles["0"][lane][:1]
-        bundles["all"][lane] = [t for t in bundles["all"][lane] if t["genre"] != "Jazz"]
-    seed_bundle_subjects(store, bundles)
-    publish_bundles(store, bundles, 1.0)
-    client = _client(store)
-    assert 'techno' in offered(client.get('/home/cards'))
-    response = client.post("/home/mix-genres", data={"genres": ["jazz"]})
+        assert len(bundles['0'][lane]) == 1 and bundles['0'][lane][0]['genre'] == 'Jazz'
+        assert len(bundles['1'][lane]) == 4
+        assert all(track['genre'] == 'Techno' for track in bundles['all'][lane])
+
+
+@pytest.fixture(scope='module')
+def skeleton_menu(skeleton_template):
+    with skeleton_template.open(':memory:') as store:
+        with pytest.MonkeyPatch.context() as patch:
+            install_genre_http_inputs(patch)
+            _publish_menu(store, 1000)
+        yield capture_template(store, home_cache.read(store, home_prepared.SURFACE))
+
+
+def test_skeleton_menu_keeps_usable_techno_and_the_unfilled_fresh_slot(skeleton_menu):
+    payload = skeleton_menu.result
+    assert home_prepared._valid(payload)
+    assert any(proto['tracks'] and all(t['genre'] == 'Techno' for t in proto['tracks'])
+               for menu in payload['menus'] for proto in menu['protos'])
+    assert any(slot.get('pool', {}).get('lane') == 'fresh'
+               for menu in payload['menus'] for slot in menu['slots'] if slot.get('pool'))
+
+
+@pytest.fixture(scope='module')
+def skeleton_client(skeleton_menu, template_bytecode):
+    with pytest.MonkeyPatch.context() as patch:
+        install_home_routes(patch)
+        install_genre_http_inputs(patch)
+        with genre_route_context(patch, template_bytecode), skeleton_menu.open(':memory:') as store:
+            yield _client(store, prepare=False)
+
+
+def test_usual_genre_menu_serves_techno_before_an_underfilled_request(skeleton_client):
+    assert 'techno' in offered(skeleton_client.get('/home/cards'))
+
+
+def test_chosen_genres_keep_a_fresh_skeleton_when_the_pool_cannot_fill_a_mix(skeleton_client):
+    response = skeleton_client.post("/home/mix-genres", data={"genres": ["jazz"]})
     assert response.status_code == 200
     assert 'id="gen-fresh"' in response.text and 'class="fresh-pool-art"' in response.text
     assert 'hx-post="/home/fresh-pool"' in response.text

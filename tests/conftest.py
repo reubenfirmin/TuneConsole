@@ -311,14 +311,19 @@ def mode_cards_home_template(_pristine_current_schema, mode_cards_inputs_templat
 
 
 @pytest.fixture(scope='session')
-def genre_candidates_template(_pristine_current_schema):
+def genre_candidates_template(_pristine_current_schema, tmp_path_factory):
     from tests.prepared_fixture_support import prepared_template
     from tests.test_home_other_genres import seed_genres
 
-    # Keep all six genres, four lanes and twenty songs per lane. Consumers
-    # change these candidates before Home preparation, so stop at publication.
-    with prepared_template(_pristine_current_schema, seed_genres) as template:
-        yield template
+    # Eight candidates per lane retain general-pool backfill after a consumer
+    # trims a mode to four. Keep every genre/lane, without twelve extra copies
+    # of the same filtering scenario. Memory input owns private evidence under
+    # its own home, before any function-scoped application-home fixture runs.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('genre-candidates-home')))
+        with prepared_template(_pristine_current_schema,
+                               lambda source: seed_genres(source, tracks_per_lane=8)) as template:
+            yield template
 
 
 @pytest.fixture
@@ -678,12 +683,13 @@ def upgraded_custody_inputs(tmp_path_factory, _pristine_installed_schema, _bound
 
 
 @pytest.fixture(scope='session')
-def legacy_radio_template(tmp_path_factory, _pristine_installed_schema):
+def legacy_radio_template(tmp_path_factory, _bounded_installed_schema):
     from tests.core.test_legacy_radio_upgrade import seed_installed_radio
     from tests.prepared_fixture_support import historical_template
 
     root = tmp_path_factory.mktemp('legacy-radio-template')
-    with historical_template(_pristine_installed_schema(93), seed_installed_radio,
+    completed = _bounded_installed_schema(93)
+    with historical_template(completed.source.conn, seed_installed_radio,
                              database=root / 'source.db') as template:
         yield template
 

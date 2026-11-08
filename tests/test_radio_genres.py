@@ -20,6 +20,13 @@ def disable_periodic_library_sync():
     """These candidate and controller checks do not construct an HTTP app."""
 
 
+@pytest.fixture(scope='module', autouse=True)
+def isolated_genre_evidence_home(tmp_path_factory):
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('YT_PLAYLIST_HOME', str(tmp_path_factory.mktemp('radio-genre-evidence-home')))
+        yield
+
+
 def test_empty_radio_input_has_real_schema_and_snapshot_guards(_pristine_current_schema):
     from yt_playlist.core.migrations import current, regular
 

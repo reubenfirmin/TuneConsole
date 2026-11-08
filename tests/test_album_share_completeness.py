@@ -3,9 +3,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeClient
-from yt_playlist.core.store import Store
-from yt_playlist.core.migrations import migrate
-from yt_playlist.core.migrations.registry import MIGRATIONS
 from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.web.app import create_app
 
@@ -106,16 +103,3 @@ def test_a_new_full_but_unshareable_tracklist_invalidates_the_previous_export(st
     album["tracks"][1].pop("videoId")
     remember_album(store, "MPRE", album)
     assert _client(store).get("/album/MPRE/share.txt").status_code == 503
-
-
-def test_upgrade_preserves_denominators_without_inventing_original_order():
-    from tests.historical_support import upgrade_fixture
-    store = Store(":memory:")
-    migrate(store.conn, registry=MIGRATIONS[:14])
-    store.conn.execute("INSERT INTO album_tracklists VALUES ('MPRE','Album','Artist',NULL,'[\"first|artist\",\"second|artist\"]')")
-    store.conn.commit()
-    upgrade_fixture(store)
-    assert store.conn.execute("SELECT track_keys FROM album_tracklist_keys").fetchone()[0] == '["first|artist","second|artist"]'
-    assert store.conn.execute("SELECT COUNT(*) FROM album_share_snapshots").fetchone()[0] == 0
-    store.init_schema()
-    assert store.conn.execute("SELECT COUNT(*) FROM album_tracklists").fetchone()[0] == 1

@@ -1,4 +1,5 @@
 """Prepared reports select verified files and atomically withdraw on source edits."""
+from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
@@ -7,10 +8,27 @@ import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_report_preparation import VALUE, finish, head, seed
-from yt_playlist.core import recommendation_outputs as files, recommendation_reports as reports
-from yt_playlist.core.migrations import MigrationError, migrate, regular, registry
+from tests.prepared_fixture_support import assert_upgrade_phase
+from tests.store_fixture_support import publication_consumer_reads, reuse_reporting_reader
+from yt_playlist.core import recommendation_outputs as files, recommendation_reports as reports, schema_inspection
+from yt_playlist.core.migrations import MigrationError, migrate, regular, registry, runner
 from yt_playlist.core.preparation import recommendation_reports as preparation, report_publication as publication
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Report publication has no HTTP lifecycle or scheduled library sync."""
+
+
+@pytest.mark.parametrize('version', [79, 92])
+def test_report_publication_schema_input_keeps_installed_history_and_real_guards(_bounded_installed_schema, version):
+    template = _bounded_installed_schema(version)
+    assert_upgrade_phase(template, version)
+    assert template.source._snapshot_revisions.conn is template.source.conn
 
 
 def prepare(conn):
@@ -18,13 +36,62 @@ def prepare(conn):
     return finish(conn).prepared_revision
 
 
-@pytest.mark.parametrize('installed', [79, 92], indirect=True)
-def test_publication_reads_files_and_typed_usage_while_continuing_writers_withdraw_it(installed, monkeypatch):
-    store, _ = installed
-    raw = seed(store)
+def prepare_report_input(store):
+    with schema_inspection.reuse_tables(store.conn):
+        raw = seed(store)
+        return raw, prepare(store.conn)
+
+
+@pytest.fixture(scope='module')
+def report_publication_inputs(staged_custody_templates, _bounded_installed_schema):
+    inputs = {}
+
+    def get(version):
+        inputs[version] = staged_custody_templates(version, 'report-publication-prepared', prepare_report_input,
+                                                  admit=False, completed=_bounded_installed_schema(version))
+        return inputs[version]
+
+    def release(version):
+        source = inputs[version].source
+        assert not source.conn.in_transaction
+        source._fixture_released = True
+        source.conn.close()
+        return source
+
+    get.release = release
+    return get
+
+
+@pytest.mark.parametrize('version', [79, 92])
+def test_report_publication_input_keeps_exact_multipart_files_and_unselected_revision(report_publication_inputs, version):
+    template = report_publication_inputs(version)
+    assert_upgrade_phase(template, version)
+    raw, revision = template.result
+    conn = template.source.conn
+    assert revision == preparation.JOB.progress(conn).prepared_revision
+    assert not reports.prepared_owner(conn)
+    captured = head(conn)
+    assert captured['part_count'] > 1
+    assert preparation.read_original(conn, captured) == raw
+    assert json.loads(raw) == VALUE
+
+
+@pytest.fixture
+def prepared_report_store(report_publication_inputs, version, tmp_path, monkeypatch):
+    template = report_publication_inputs(version)
+    with template.open(tmp_path / 'prepared-report.db') as store:
+        with reuse_reporting_reader(store, monkeypatch), schema_inspection.reuse_tables(store.conn):
+            yield store, template.result
+        with closing(sqlite3.connect(store._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
+            reader.row_factory = sqlite3.Row
+            with schema_inspection.reuse_tables(reader):
+                runner.validate_version(reader, version)
+
+
+@pytest.mark.parametrize('version', [79, 92])
+def test_publication_reads_files_and_typed_usage_while_continuing_writers_withdraw_it(prepared_report_store, version, monkeypatch):
+    store, (raw, revision) = prepared_report_store
     conn = store.conn
-    version = conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0]
-    revision = prepare(conn)
     assert not reports.prepared_owner(conn)
     publication.publish(conn, revision=revision)
     assert reports.prepared_owner(conn)
@@ -59,9 +126,11 @@ def test_publication_reads_files_and_typed_usage_while_continuing_writers_withdr
     assert conn.execute(f'SELECT count(DISTINCT revision) FROM {publication.LINKS}').fetchone()[0] == 2
     reopened = Store(store._db_path)
     try:
-        reopened.init_schema()
-        assert reopened.rec_proposals.get_proposals('listening_choices') == replacement
-        assert reopened.rec_proposals.report_checkpoint('listening_choices')['at'] == 202
+        with schema_inspection.reuse_tables(reopened.conn):
+            reopened.init_schema(defer_metadata=True)
+        with reuse_reporting_reader(reopened, monkeypatch):
+            assert reopened.rec_proposals.get_proposals('listening_choices') == replacement
+            assert reopened.rec_proposals.report_checkpoint('listening_choices')['at'] == 202
     finally:
         reopened.conn.close()
     assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
@@ -190,3 +259,10 @@ def test_frozen_upgrade_route_keeps_genuine_v93_owner_authoritative(installed, t
         assert not converted.conn.execute("SELECT 1 FROM rec_proposals WHERE surface='listening_choices'").fetchone()
     finally:
         converted.conn.close()
+
+
+@pytest.mark.parametrize('version', [79, 92])
+def test_report_publication_inputs_release_their_prepared_files_and_sql(report_publication_inputs, version):
+    source = report_publication_inputs.release(version)
+    with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+        source.conn.execute('SELECT 1')

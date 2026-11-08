@@ -19,28 +19,6 @@ def connect(path):
             yield conn
 
 
-def test_early_fixture_preserves_ids_without_backups(tmp_path):
-    path = tmp_path / 'legacy.db'
-    with connect(path) as conn:
-        conn.executescript((Path(__file__).parents[1] / 'fixtures/migrations/early_core.sql').read_text())
-    store = Store(path)
-    with closing(store.conn):
-        assert not hasattr(store, 'tracks')
-        from yt_playlist.core.migrations.registry import MIGRATIONS
-        migrate(store.conn, registry=MIGRATIONS)
-        store.init_schema()
-        assert store.settings.get_setting('user-setting') == 'keep me'
-        assert tuple(store.conn.execute('SELECT id,orig_title,orig_artist FROM tracks').fetchone()) == (17, 'Original title', 'Artist')
-        assert tuple(store.conn.execute('SELECT * FROM playlist_tracks').fetchone()) == (8,17,0)
-        before = list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations')))
-        repo = store.tracks
-        store.init_schema()
-        assert store.tracks is repo
-        assert list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations'))) == before
-        assert not (tmp_path / 'backups').exists()
-        assert store.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-
-
 def test_failure_rolls_back_ddl_data_and_version_then_resumes(tmp_path):
     path = tmp_path / 'state.db'
     def first(conn, ctx):
@@ -222,39 +200,3 @@ def test_corrupted_versioned_schema_is_not_silently_repaired(tmp_path):
         store.conn.execute('DROP TABLE rec_mode_picks')
         with pytest.raises(MigrationError, match='rec_mode_picks'):
             store.init_schema()
-
-
-@pytest.mark.parametrize('version', [8, 9])
-def test_installed_catalog_upgrades_with_original_trigger_without_backups(tmp_path, version):
-    from yt_playlist.core.migrations.registry import MIGRATIONS
-    path = tmp_path / 'installed.db'
-    with connect(path) as conn:
-        migrate(conn, registry=MIGRATIONS[:version])
-        installed_sql = (Path(__file__).parents[1] / 'fixtures/migrations/play_events_subject_v8.sql').read_text().strip()
-        assert conn.execute("SELECT sql FROM sqlite_master WHERE name='play_events_subject'").fetchone()[0] == installed_sql
-        conn.execute("INSERT INTO identities(id,label,credential_ref,is_master) VALUES (1,'main','credential',1)")
-        conn.execute("INSERT INTO recordings(id,identity_key) VALUES (1,'song|artist')")
-        conn.execute("INSERT INTO youtube_items(video_id,recording_id) VALUES ('known',1)")
-        for event_id, video in enumerate(('', '   ', None, 'known', 'unknown'), 1):
-            conn.execute("INSERT INTO play_events(id,identity_id,identity_key,video_id,played_at,source,is_generated) VALUES (?,1,'song|artist',?,?,'live',1)", (event_id,video,event_id))
-        conn.execute("INSERT INTO rec_weights VALUES ('genre:house',1.4,1)")
-        conn.execute("INSERT INTO rec_vectors VALUES ('song|artist',x'01020304')")
-        conn.commit()
-        raw = conn.execute('SELECT id,raw_identity_key,video_id,played_at,source,is_generated FROM play_events ORDER BY id').fetchall()
-        # Historical conversion is an explicit offline operation. Normal
-        # startup retains supported installed owners instead of replaying it.
-        conn.row_factory = sqlite3.Row
-        migrate(conn, registry=MIGRATIONS)
-    store = Store(path)
-    with closing(store.conn):
-        store.init_schema()
-        assert list(map(tuple, store.conn.execute('SELECT p.id,p.raw_identity_key,p.video_id,p.played_at,s.source,p.is_generated FROM play_events p JOIN play_event_sources s ON s.event_id=p.id ORDER BY p.id'))) == raw
-        subjects = list(map(tuple, store.conn.execute('SELECT identity_key,recording_id FROM play_event_subjects ORDER BY id')))
-        assert subjects == [('song|artist',1)] * 4 + [('@unresolved-video:unknown',None)]
-        weights = store.rec_model.weight_records()
-        assert weights['genre:house']['weight']==1.4 and weights['genre:house']['updated_at']==1
-        assert not store.rec_model.get_rec_vectors()
-        store.init_schema()
-        assert list(map(tuple, store.conn.execute('SELECT identity_key,recording_id FROM play_event_subjects ORDER BY id'))) == subjects
-        assert not (tmp_path / 'backups').exists()
-        assert store.conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'

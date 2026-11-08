@@ -1,17 +1,49 @@
 """Readable predecessor admission; full-library audits are explicitly requested."""
-from contextlib import closing
+from contextlib import ExitStack, closing
 import sqlite3
 import threading
 import time
 
 import pytest
 
-from tests.store_fixture_support import initialize_consumer
+from tests.conftest import seed_catalog_track
+from tests.genre_catalog_support import bound_catalog
+from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, install_numbered_input
 from yt_playlist.core import schema_definition as current
 from yt_playlist.core.migrations import registry, runner
 from yt_playlist.core.migrations.audit import audit
 from yt_playlist.core.storage_maintenance import StorageMaintenance
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Admission and audit tests do not construct the web application."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('jazz', 'Jazz'),)) as schema:
+        yield schema
+
+
+@pytest.fixture(scope='module')
+def _pristine_installed_schema():
+    # Admission and full audits remain real in each test. Their empty numbered
+    # inputs do not need every earlier data conversion or the shipped vocabulary.
+    schemas = {}
+    with ExitStack() as resources:
+        def get(version):
+            if version not in schemas:
+                conn = resources.enter_context(closing(sqlite3.connect(':memory:')))
+                with pytest.MonkeyPatch.context() as patch:
+                    bound_catalog(patch, entries=(('jazz', 'Jazz'),))
+                    install_numbered_input(conn, version)
+                conn.execute('PRAGMA query_only=ON')
+                schemas[version] = conn
+            return schemas[version]
+        yield get
 
 
 @pytest.fixture
@@ -83,7 +115,9 @@ def installed_library(tmp_path, _pristine_current_schema, _pristine_installed_sc
             else:
                 _pristine_installed_schema(version).backup(setup.conn)
                 setup._bind_repositories()
-            setup.tracks.upsert_track('committed', 'Committed song', 'Artist', None, 213)
+            seed_catalog_track(setup, 'committed song|artist', 'Committed song', 'Artist', video_id='committed')
+            with setup.conn:
+                setup.conn.execute("UPDATE youtube_items SET duration_s=213 WHERE video_id='committed'")
             setup.conn.execute('PRAGMA journal_mode=WAL')
         finally:
             setup.conn.close()
@@ -260,12 +294,16 @@ def test_audit_interruption_preserves_writes_history_and_revisions(installed_lib
 
 
 @pytest.mark.parametrize('version', [81, current.VERSION])
-def test_app_loads_saved_genres_without_writes_or_waiting_for_bulk_conversion(installed_library, version):
+def test_app_loads_saved_genres_without_writes_or_waiting_for_bulk_conversion(installed_library, version, request):
     from yt_playlist.providers import genres
     from yt_playlist.util import genre_catalog
     from yt_playlist.web.app import create_app
 
     path = installed_library(version)
+    if version < current.VERSION:
+        # Keep real independent DDL while testing startup's saved vocabulary.
+        # Registry installation/ordering is owned by test_independent_schema_changes.
+        request.getfixturevalue('independent_regular_ddl')
     with closing(sqlite3.connect(path)) as setup, setup:
         setup.execute("INSERT OR REPLACE INTO settings VALUES ('genre_catalog_revision','previous')")
         if version < 85:
@@ -288,6 +326,8 @@ def test_app_loads_saved_genres_without_writes_or_waiting_for_bulk_conversion(in
             maintenance = app.state.ctx.storage_maintenance
             maintenance.start()
             maintenance.join(15)
+            if version < current.VERSION:
+                assert store.conn.execute('SELECT * FROM independent_preparation_ddl').fetchall() == []
             assert not store.activity_paused and not store._schema_recovery_pending
             assert store.settings.get_setting('genre_catalog_revision') == 'previous'
             assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
@@ -301,7 +341,8 @@ def test_app_loads_saved_genres_without_writes_or_waiting_for_bulk_conversion(in
             genres.set_active(None)
 
 
-def test_installed_v84_regular_ddl_retains_writable_owners_and_snapshot_guards(tmp_path, caplog, installed_library):
+def test_installed_v84_regular_ddl_retains_writable_owners_and_snapshot_guards(
+        tmp_path, caplog, installed_library, independent_regular_ddl):
     """An independent schema writer never starts the frozen bulk conversions."""
     import hashlib
     import json
@@ -387,6 +428,7 @@ def test_installed_v84_regular_ddl_retains_writable_owners_and_snapshot_guards(t
         assert 'genre_preferences' not in store._snapshot_revisions.tables
         assert [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')] == history
         assert store.conn.execute('SELECT version FROM schema_changes').fetchone()[0] == 1
+        assert store.conn.execute('SELECT * FROM independent_preparation_ddl').fetchall() == []
         report['installed_owners_retained'] = True
         # The schema guard conservatively rejects work captured before any DDL.
         # It must not publish against a schema other than the one it observed.

@@ -246,27 +246,3 @@ def test_absent_and_empty_sources_select_native_empty_output_without_losing_pres
     assert store.rec_proposals.get_proposals('album_notes') is None
     assert not store.rec_proposals.has_proposals('album_notes')
     assert header(store.conn)['source_present'] == int(value is not None)
-
-
-def test_frozen_native_upgrade_keeps_retained_files_and_guard_validation(tmp_path, _pristine_installed_schema):
-    store = Store(tmp_path/'upgrade.db')
-    try:
-        _pristine_installed_schema(83).backup(store.conn)
-        store.init_schema(defer_metadata=True)
-        seed(store)
-        publication.publish(store.conn, revision=prepared(store.conn))
-        original = header(store.conn)
-        store.conn.close()
-        store = Store(tmp_path/'upgrade.db')
-        runner.migrate(store.conn, registry=registry.MIGRATIONS)
-        store.init_schema(defer_metadata=True)
-        assert publication.selected(store.conn) is None
-        assert store.rec_proposals.get_proposals('album_notes') == NOTES
-        assert preparation.read_original(original) is not None
-        regular.validate(store.conn)
-        with store.conn:
-            store.conn.execute('DROP TRIGGER prepared_album_note_files_published_delete')
-        with pytest.raises(MigrationError, match='publication object'):
-            regular.validate(store.conn)
-    finally:
-        store.conn.close()

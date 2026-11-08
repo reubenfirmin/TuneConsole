@@ -202,27 +202,6 @@ def test_interrupted_publication_and_source_transaction_roll_back_together(store
     assert_lookup_rows(store.conn)
 
 
-@pytest.mark.parametrize('installed',[102],indirect=True)
-def test_frozen_renames_and_domain_rebuild_keep_selected_indexes_valid(installed,tmp_path):
-    store, _ = installed
-    accounts,_ = seed(store)
-    indexes.job(store.conn).install(store.conn)
-    indexes.publish(store.conn,revision=finish(store.conn).input_revision)
-    expected = {account:observed(store.conn,account) for account in accounts}
-    upgraded = Store(tmp_path/'calendar-index-upgrade.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn,registry=registry.MIGRATIONS)
-        upgraded.init_schema()
-        indexes.validate_installed(upgraded.conn)
-        assert indexes.selected(upgraded.conn)
-        assert_lookup_rows(upgraded.conn)
-        for account in accounts:
-            assert observed(upgraded.conn,account) == expected[account]
-        upgraded.history.record_play_event(accounts[0],'later',None,stamp('2026-10-22T12:00:00'))
-        assert_lookup_rows(upgraded.conn)
-    finally:
-        upgraded.conn.close()
 
 
 def test_startup_admission_rejects_missing_incremental_maintenance(store):

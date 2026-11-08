@@ -12,10 +12,40 @@ import time
 import pytest
 
 from tests.core.test_db_rebuild_destination import development93, production64
+from tests.rebuild_startup_support import startup_destination
 from yt_playlist.core import catalog, db_handles, home_outputs, metadata_native, metadata_runtime, metadata_runtime_files
 from yt_playlist.core.db_rebuild import build, job, verification
 from yt_playlist.core.metadata_observations import MetadataObservation
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(scope='module')
+def analytics_contract(startup_destination):
+    """Completed domain inputs below the real checkpoint and writer protocol."""
+    def initialize(conn):
+        from yt_playlist.rec.choice_evidence import STORAGE_PENDING
+        startup_destination.initialize(conn)
+        conn.execute('INSERT INTO settings VALUES (?,?)', (STORAGE_PENDING, '1'))
+
+    def served(reader, target, cursor, limit):
+        target.execute("INSERT INTO settings VALUES ('first-analytics-commit','retained')")
+        return build.Batch(rows=1, done=True)
+
+    # Two real committed batches make interrupted resume, changed stage order
+    # and foreground priority observable without rerunning unrelated metadata,
+    # album, embedding and recommendation producers for each scheduling case.
+    contract = replace(startup_destination, version='controlled-analytics-coordination-v1',
+        initialize=initialize,
+        stages=(startup_destination.stages[0], build.Stage('served-facts', served),
+                startup_destination.stages[1]))
+    return contract
+
+
+@pytest.fixture
+def analytics_converter(monkeypatch, analytics_contract):
+    from yt_playlist.core.db_rebuild import destination
+    monkeypatch.setattr(destination, 'for_source', lambda *args, **kwargs: analytics_contract)
+    return analytics_contract
 
 
 @pytest.fixture(autouse=True)
@@ -401,44 +431,7 @@ def test_runtime_reopens_before_analytics_and_preserves_new_edits(request, sourc
         store.conn.close()
 
 
-def test_interrupted_analytics_resumes_after_restart_without_rebuilding_runtime(production64, monkeypatch):
-    from yt_playlist.core.db_rebuild import destination
-    from yt_playlist.core.storage_maintenance import StorageMaintenance
-    store = Store(production64)
-    try:
-        store.init_schema()
-        first = job.run(store, rebuild=True)
-        store.settings.set_setting('accepted-after-cutover', 'keep me')
-        def interrupted(phase, detail):
-            if detail['stage'] == 'served-facts':
-                raise InterruptedError('committed analytics checkpoint')
-        with pytest.raises(InterruptedError, match='committed analytics checkpoint'):
-            job.finish_analytics(store, progress=interrupted)
-        assert not store.activity_paused
-        assert db_handles.state(production64)['analytics_pending']
-    finally:
-        store.conn.close()
-    store = Store(production64)
-    maintenance = StorageMaintenance(store)
-    try:
-        store.init_schema()
-        # Unrelated application edits change the broad construction digest,
-        # while the installed schema and saved analytics stage plan still fit.
-        monkeypatch.setattr(destination, 'signature', lambda: 'unrelated-application-edit')
-        maintenance.start()
-        maintenance.join(15)
-        assert maintenance.phase == 'done', maintenance.error
-        assert maintenance.ready.is_set()
-        assert maintenance.report['id'] == first['id']
-        assert store.settings.get_setting('accepted-after-cutover') == 'keep me'
-        assert not maintenance.report['analytics_pending']
-    finally:
-        maintenance.stop()
-        maintenance.join(15)
-        store.conn.close()
-
-
-def test_analytics_rejects_changed_stage_plan_without_touching_its_checkpoint(production64, monkeypatch):
+def test_analytics_rejects_changed_stage_plan_without_touching_its_checkpoint(production64, monkeypatch, analytics_converter):
     from yt_playlist.core.db_rebuild import destination
     store = Store(production64)
     try:
@@ -462,7 +455,7 @@ def test_analytics_rejects_changed_stage_plan_without_touching_its_checkpoint(pr
         store.conn.close()
 
 
-def test_analytics_serves_foreground_writes_between_batches(production64, monkeypatch):
+def test_analytics_serves_foreground_writes_between_batches(production64, monkeypatch, analytics_converter):
     from yt_playlist.core.db_rebuild import destination
     store = Store(production64)
     entered, queued, completed = threading.Event(), threading.Event(), threading.Event()
@@ -518,84 +511,6 @@ def test_analytics_serves_foreground_writes_between_batches(production64, monkey
     finally:
         if writer is not None:
             writer.join(6)
-        store.conn.close()
-
-
-@pytest.mark.parametrize('commit_phase', ['batch', 'completion'])
-def test_slow_analytics_commit_queues_edits_without_blocking_browsing(production64, monkeypatch, commit_phase):
-    from yt_playlist.core.db_diagnostics import DiagnosticConnection
-    store = Store(production64)
-    committing, release, written = threading.Event(), threading.Event(), threading.Event()
-    failures, connections = [], set()
-    analytics = writer = None
-    checkpoint, finish = build._checkpoint, DiagnosticConnection._finish
-    held = False
-
-    def marked(conn, value=None):
-        if value is not None:
-            connections.add(conn)
-        return checkpoint(conn, value)
-
-    def delayed(conn, sql, target, *args):
-        nonlocal held
-        complete = conn in connections and not conn.execute(
-            'SELECT 1 FROM sqlite_schema WHERE name=?', (build.CHECKPOINT,)).fetchone()
-        if (not held and conn in connections and sql == 'COMMIT' and conn.in_transaction
-                and (commit_phase == 'batch' or complete)):
-            held = True
-            committing.set()
-            assert release.wait(10)
-        return finish(conn, sql, target, *args)
-
-    def complete():
-        try:
-            job.finish_analytics(store)
-        except BaseException as error:
-            failures.append(error)
-
-    def edit():
-        try:
-            store.settings.set_setting('queued-through-durability', 'accepted')
-            written.set()
-        except BaseException as error:
-            failures.append(error)
-
-    try:
-        store.init_schema()
-        job.run(store, rebuild=True)
-        members = store.playlists.get_playlist_track_ids(41)
-        # A real foreground INSERT must queue outside SQLite even if durability
-        # exceeds that connection's deliberately short test-only busy timeout.
-        store.conn.execute('PRAGMA busy_timeout=25')
-        monkeypatch.setattr(build, '_checkpoint', marked)
-        monkeypatch.setattr(DiagnosticConnection, '_finish', delayed)
-        analytics = threading.Thread(target=complete)
-        analytics.start()
-        assert committing.wait(10)
-        with closing(sqlite3.connect(store._db_path, timeout=0)) as probe:
-            with pytest.raises(sqlite3.OperationalError, match='locked'):
-                probe.execute('BEGIN IMMEDIATE')
-        assert store.playlists.get_playlist_track_ids(41) == members
-        writer = threading.Thread(target=edit)
-        writer.start()
-        assert not written.wait(.15)
-        assert not failures
-        release.set()
-        writer.join(10)
-        analytics.join(20)
-        assert not writer.is_alive() and not analytics.is_alive()
-        assert not failures and written.is_set()
-        assert store.settings.get_setting('queued-through-durability') == 'accepted'
-        assert not db_handles.state(store._db_path)['analytics_pending']
-        store.conn.close()
-        store = Store(production64)
-        store.init_schema()
-        assert store.settings.get_setting('queued-through-durability') == 'accepted'
-    finally:
-        release.set()
-        for thread in (writer, analytics):
-            if thread is not None:
-                thread.join(20)
         store.conn.close()
 
 

@@ -5,12 +5,17 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_collection_feedback_preparation import finish, head, seed
+from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import publication_consumer_reads
 from yt_playlist.core import account_auth_state, album_feedback_storage
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import collection_feedback as preparation, collection_feedback_publication as publication
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
 
 
 def prepare(conn, owner):
@@ -80,7 +85,8 @@ def test_writes_references_and_deletions_withdraw_only_the_affected_owner(instal
 @pytest.mark.parametrize('installed', [93], indirect=True)
 @pytest.mark.parametrize('name', tuple(publication.OWNERS))
 @pytest.mark.parametrize('failure', ['file', 'missing-file', 'header', 'member', 'resolution'])
-def test_unverified_originals_and_typed_rows_cannot_be_selected(installed, name, failure):
+def test_unverified_originals_and_typed_rows_cannot_be_selected(
+        installed, name, failure, independent_regular_ddl):
     store, _ = installed
     original = seed(store)
     owner = publication.OWNERS[name]
@@ -105,6 +111,7 @@ def test_unverified_originals_and_typed_rows_cannot_be_selected(installed, name,
     assert owner.selected(store.conn) is None
     assert store.settings.get_setting(owner.source) == original[owner.source]
     regular.migrate(store.conn)
+    assert store.conn.execute('SELECT count(*) FROM independent_preparation_ddl').fetchone()[0] == 0
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -150,7 +157,8 @@ def test_verification_and_final_publication_fence_source_and_custody_races(insta
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
-def test_publication_rollback_retry_immutable_custody_and_missing_file_recovery(installed, monkeypatch):
+def test_publication_rollback_retry_immutable_custody_and_missing_file_recovery(
+        installed, monkeypatch, independent_regular_ddl):
     store, _ = installed
     original = seed(store)
     owner = publication.OWNERS['album-feedback']
@@ -186,6 +194,7 @@ def test_publication_rollback_retry_immutable_custody_and_missing_file_recovery(
     progress = owner.worker.progress(store.conn)
     assert progress.status == 'failed'
     regular.migrate(store.conn)
+    assert store.conn.execute('SELECT count(*) FROM independent_preparation_ddl').fetchone()[0] == 0
     assert owner.worker.progress(store.conn) == progress
     monkeypatch.setattr(preparation.files, 'publish', real_publish)
     owner.worker.step(store.conn, retry=True)
@@ -201,7 +210,8 @@ def test_long_maps_snapshot_fence_and_real_compatible_feedback_write(installed):
     store, _ = installed
     seed(store)
     owner = publication.OWNERS['album-feedback']
-    value = {'release-'+str(index):{'kind':'more', 'at':index} for index in range(2000)}
+    # Cross the actual 128-row preparation boundary and retain its final member.
+    value = {'release-'+str(index):{'kind':'more', 'at':index} for index in range(129)}
     store.settings.set_setting(owner.source, json.dumps(value))
     before = store.conn.execute('SELECT count(*) FROM albums').fetchone()[0]
     revision = prepare(store.conn, owner)

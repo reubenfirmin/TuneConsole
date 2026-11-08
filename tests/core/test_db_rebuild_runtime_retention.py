@@ -1,5 +1,6 @@
 """Runtime admission excludes history while retaining independent live owners."""
 from contextlib import closing
+from dataclasses import replace
 import hashlib
 import inspect
 import json
@@ -11,6 +12,7 @@ import pytest
 
 from tests.core.test_db_rebuild_destination import production64, development93
 from tests.db_rebuild_support import completed_destination_schema, completed_destination_sql
+from tests.rebuild_startup_support import startup_destination
 from yt_playlist.core import group_storage
 from yt_playlist.core.db_rebuild import build, destination
 
@@ -25,6 +27,71 @@ def completed_rebuild_input(request):
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     """Database reconstruction has no web lifecycle or periodic sync."""
+
+
+@pytest.fixture
+def convert_runtime(completed_destination_schema, monkeypatch):
+    """Exercise the real domain plan below the separately tested job protocol.
+
+    Retention owns which captured rows and files reach the runtime database.
+    Supply completed catalog subjects below its real registered converters;
+    per-batch checkpoints, compaction and installation have their own tests.
+    """
+    from yt_playlist.core.db_rebuild import files, source
+    from yt_playlist.core.schema_inspection import reuse_tables
+
+    admit = source.admit
+
+    def admit_once(conn):
+        with reuse_tables(conn):
+            return admit(conn)
+
+    monkeypatch.setattr(source, 'admit', admit_once)
+
+    def convert(original, target, *, domain='groups'):
+        contract = destination.for_source(original, split=True)
+        assert contract.runtime_stages is not None
+        prefixes = {
+            'groups': ('rec_group_', 'released_group_', 'copy:group_', 'copy:unresolved_group_',
+                       'copy:recommendation_polic'),
+            'credits': ('copy:artist_credit', 'copy:entry_artist_', 'history:credits'),
+        }[domain]
+        names = ({'settings', 'rec_proposals', 'copy:generation_groups', 'copy:taste_groups'}
+                 if domain == 'groups' else {'history:replay-identities'})
+        stages = tuple(stage for stage in contract.stages[:contract.runtime_stages]
+                       if stage.name in names or stage.name.startswith(prefixes))
+        assert stages
+        files.borrow(original, target)
+        with closing(sqlite3.connect(original.as_uri()+'?mode=ro', uri=True)) as reader, \
+                closing(sqlite3.connect(target.as_uri(), uri=True)) as writer, reuse_tables(writer):
+            build._configure(reader)
+            build._configure(writer)
+            reader.execute('BEGIN')
+            writer.execute('ATTACH DATABASE ? AS rebuild_source', (original.as_uri()+'?mode=ro',))
+            with writer:
+                writer.execute('BEGIN IMMEDIATE')
+                contract.initialize(writer)
+                # The catalog converter is below retention. Preserve the donor's
+                # exact subject IDs without repeating metadata/album producers.
+                for table, fields in (
+                        ('recordings', 'id,identity_key,title,artist'),
+                        ('youtube_items', 'video_id,recording_id,duration_s,available'),
+                        ('catalog_entries', 'id,recording_id,video_id')):
+                    columns = fields.split(',')
+                    writer.executemany('INSERT INTO '+table+'('+fields+') VALUES ('+
+                        ','.join('?' for _ in columns)+')', reader.execute('SELECT '+fields+' FROM '+table))
+                for stage in stages:
+                    assert not stage.repositories and stage.prepare is None, stage.name
+                    cursor = None
+                    while True:
+                        batch = stage.copy(reader, writer, cursor, stage.batch_size)
+                        assert isinstance(batch, build.Batch)
+                        if batch.done:
+                            break
+                        assert batch.cursor != cursor, stage.name
+                        cursor = batch.cursor
+                assert not writer.execute('PRAGMA foreign_key_check').fetchall()
+    return convert
 
 
 def test_rebuild_input_released_schema_and_catalog(production64_template):
@@ -115,7 +182,7 @@ def groups(conn, *, released):
 
 
 @pytest.mark.parametrize('fixture',['production64','development93'])
-def test_runtime_keeps_current_checkpoint_and_unpublished_lineage_without_obsolete_graph(request,fixture,tmp_path):
+def test_runtime_keeps_current_checkpoint_and_unpublished_lineage_without_obsolete_graph(request,fixture,tmp_path,convert_runtime):
     source = request.getfixturevalue(fixture)
     with closing(sqlite3.connect(source)) as conn:
         conn.row_factory = sqlite3.Row
@@ -125,7 +192,7 @@ def test_runtime_keeps_current_checkpoint_and_unpublished_lineage_without_obsole
             groups(conn,released=fixture=='production64')
     original = source.read_bytes()
     target = tmp_path/'runtime.db'
-    build.construct(source,target,destination.for_source(source,split=True),runtime_only=True)
+    convert_runtime(source, target)
     assert source.read_bytes()==original
     with closing(sqlite3.connect(target)) as conn:
         assert {r[0] for r in conn.execute('SELECT external_key FROM group_generations')}=={
@@ -140,7 +207,7 @@ def test_runtime_keeps_current_checkpoint_and_unpublished_lineage_without_obsole
         assert not conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
-def test_released_runtime_retains_compressed_comparison_body_context(production64,tmp_path):
+def test_released_runtime_retains_compressed_comparison_body_context(production64,tmp_path,convert_runtime):
     import base64
     import zlib
     from yt_playlist.core import model_projections
@@ -164,7 +231,7 @@ def test_released_runtime_retains_compressed_comparison_body_context(production6
             groups(conn,released=True)
             conn.executemany('INSERT INTO rec_proposals VALUES (?,?,?)',envelopes)
     target = tmp_path/'runtime.db'
-    build.construct(production64,target,destination.for_source(production64,split=True),runtime_only=True)
+    convert_runtime(production64, target)
     with closing(sqlite3.connect(target)) as conn:
         conn.row_factory = sqlite3.Row
         for surface, _, _ in envelopes:
@@ -185,7 +252,7 @@ def test_released_nonobject_group_preview_has_no_context(production64):
 
 
 
-def test_unknown_time_captures_and_known_delivery_receipts_survive_without_raw_metadata(development93,tmp_path):
+def test_unknown_time_captures_and_known_delivery_receipts_survive_without_raw_metadata(development93,tmp_path,convert_runtime):
     from yt_playlist.core import artist_credits
     with closing(sqlite3.connect(development93)) as conn:
         conn.row_factory = sqlite3.Row
@@ -202,7 +269,7 @@ def test_unknown_time_captures_and_known_delivery_receipts_survive_without_raw_m
                     (identity,version,seen,seen,kind,'delivery-'+str(identity) if kind=='provider_delivery' else None))
             conn.execute('INSERT INTO artist_credit_capture_heads VALUES (108,\'provider\',4)')
     target = tmp_path/'runtime.db'
-    build.construct(development93,target,destination.for_source(development93,split=True),runtime_only=True)
+    convert_runtime(development93, target, domain='credits')
     with closing(sqlite3.connect(target)) as conn:
         assert {r[0] for r in conn.execute('SELECT id FROM artist_credit_observations')}=={1,2,4}
         assert conn.execute('SELECT count(*) FROM artist_credit_replays').fetchone()==(2,)
@@ -263,7 +330,33 @@ def _clone_captured_rebuild(source,target,name='development93.db'):
 
 
 @pytest.fixture(scope='module')
-def legacy_runtime_template(tmp_path_factory,production64_template):
+def legacy_repair_contracts(startup_destination):
+    """Completed domain output below the genuine old-plan repair protocol."""
+    from yt_playlist.core import metadata_runtime
+    from yt_playlist.rec.choice_evidence import STORAGE_PENDING
+
+    def initialize(conn):
+        startup_destination.initialize(conn)
+        conn.execute('INSERT INTO settings VALUES (?,?)', (STORAGE_PENDING, '1'))
+        conn.execute("INSERT INTO provider_attempts(id,recording_id,input_video_id,provider,at,status) "
+                     "VALUES(1,8,'video-8','fixture',1000,'ok')")
+        metadata_runtime.activate(conn)
+
+    current = replace(startup_destination, initialize=initialize,
+                      version='controlled-current-repair-v1')
+    legacy = replace(current, version='controlled-legacy-repair-v1', stages=(
+        current.stages[0], replace(current.stages[1], name='legacy-analytics-input')))
+    return current, legacy
+
+
+@pytest.fixture
+def legacy_repair_converter(monkeypatch, legacy_repair_contracts):
+    monkeypatch.setattr(destination, 'for_source',
+                        lambda *args, legacy=False, **kwargs: legacy_repair_contracts[int(legacy)])
+
+
+@pytest.fixture(scope='module')
+def legacy_runtime_template(tmp_path_factory,production64_template,legacy_repair_contracts):
     from yt_playlist.core.db_rebuild import job
     from yt_playlist.core.store import Store
 
@@ -277,15 +370,32 @@ def legacy_runtime_template(tmp_path_factory,production64_template):
         store = Store(path)
         try:
             store.init_schema()
-            first = job.run(store,destination=destination.for_source(path,split=True,legacy=True))
+            first = job.run(store,destination=legacy_repair_contracts[1])
             assert first['phase']=='complete' and first['analytics_pending']
         finally:
             store.conn.close()
     return root
 
 
+def test_rebuild_input_legacy_runtime_keeps_original_and_pending_old_plan(
+        legacy_runtime_template, legacy_repair_contracts):
+    from yt_playlist.core import db_handles, metadata_runtime
+    from yt_playlist.core.db_rebuild import install
+    path = legacy_runtime_template/'production64.db'
+    state = db_handles.state(path)
+    assert state['phase'] == 'complete' and state['analytics_pending']
+    assert install.digest(state['original']) == state['original_sha256']
+    with closing(sqlite3.connect(path.as_uri()+'?mode=ro', uri=True)) as conn:
+        pending = build._checkpoint(conn)
+        assert pending['stages'] == [stage.name for stage in legacy_repair_contracts[1].stages]
+        assert pending['stage'] == 1
+        assert metadata_runtime.active(conn)
+        assert conn.execute('SELECT recording_id,provider FROM provider_attempts').fetchall() == [(8, 'fixture')]
+        assert not conn.execute('PRAGMA foreign_key_check').fetchall()
+
+
 @pytest.fixture
-def legacy_runtime(legacy_runtime_template,tmp_path):
+def legacy_runtime(legacy_runtime_template,tmp_path,legacy_repair_converter):
     from yt_playlist.core import db_handles
 
     original = _workspace_contents(legacy_runtime_template)

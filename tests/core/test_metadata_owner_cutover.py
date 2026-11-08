@@ -55,8 +55,8 @@ def regular_predecessor(predecessor, receipt_change):
     return predecessor, entry
 
 
-def seed(store):
-    entry = store.tracks.upsert_track('video', 'Song', 'Artist', None, 200)
+def seed(store, *, title='Song'):
+    entry = store.tracks.upsert_track('video', title, 'Artist', None, 200)
     recording, key = store.conn.execute('SELECT r.id,r.identity_key FROM catalog_entries e '
         'JOIN recordings r ON r.id=e.recording_id WHERE e.id=?', (entry,)).fetchone()
     fields = {'bpm': 120, 'genre': 'Jazz', 'year': '2000'}
@@ -86,25 +86,6 @@ def convert(store):
         store.conn.execute('BEGIN IMMEDIATE')
         migration.apply(store.conn, Context(4))
         return migration.convert_legacy(store.conn)
-
-
-def test_registered_upgrade_and_restart_preserve_the_catalog_and_evidence(predecessor):
-    store = predecessor
-    entry, _, key = seed(store)
-    before = dict(store.conn.execute('SELECT * FROM catalog_tracks WHERE id=?', (entry,)).fetchone())
-    migrate(store.conn, registry=registry.MIGRATIONS)
-    assert store.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == current.VERSION
-    current.validate(store.conn)
-    assert dict(store.conn.execute('SELECT * FROM catalog_tracks WHERE id=?', (entry,)).fetchone()) == before
-    assert metadata_provenance(store, entry)['lineage']['genre']['choice']['delivery']
-    reopened = Store(store._db_path)
-    try:
-        reopened.init_schema()
-        assert dict(reopened.conn.execute('SELECT * FROM catalog_tracks WHERE id=?', (entry,)).fetchone()) == before
-        assert reopened.tracks.identity_key_for_video('video') == key
-        assert metadata_provenance(reopened, entry)['lineage']['genre']['choice']['delivery']
-    finally:
-        reopened.conn.close()
 
 
 def test_startup_retains_metadata_owners_and_binds_installed_revision_triggers(

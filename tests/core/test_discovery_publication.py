@@ -45,6 +45,8 @@ def prepare_subjects(conn, *, installed=False):
         for job in owner.jobs:
             if not installed:
                 job.install(conn)
+            elif job.progress(conn).status == 'prepared':
+                continue
             for _ in range(500):
                 if job.step(conn, batch_size=16).status == 'prepared':
                     break
@@ -179,14 +181,15 @@ def prepared_discovery_store(version, discovery_prepared_inputs, tmp_path, monke
 
 
 @pytest.fixture
-def canonical_discovery_store(version, canonical_discovery_inputs, tmp_path, monkeypatch):
+def canonical_discovery_store(version, canonical_discovery_inputs, tmp_path):
     template = canonical_discovery_inputs(version)
     with template.open(tmp_path / 'canonical-discovery.db') as store:
         with schema_inspection.reuse_tables(store.conn):
             yield store, template.result
         with closing(sqlite3.connect(store._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
             reader.row_factory = sqlite3.Row
-            runner.validate_version(reader, version)
+            with schema_inspection.reuse_tables(reader):
+                runner.validate_version(reader, version)
 
 
 def assert_retained_discovery(template):
@@ -253,7 +256,6 @@ def seed_canonical_visits(store, identities):
     with schema_inspection.reuse_tables(store.conn):
         artifact, document_stage = artist_ready(store.conn)
         artifact.publish(store.conn, stage=document_stage)
-        prepare_subjects(store.conn)
     return account, aid, rid, album
 
 
@@ -261,30 +263,44 @@ def seed_canonical_visits(store, identities):
 def canonical_discovery_inputs(staged_custody_templates, discovery_seed_inputs):
     inputs = {}
 
-    def get(version):
+    def get(version, phase='subjects'):
         seeded = discovery_seed_inputs(version)
 
-        def build(store):
+        def artists(store):
             return seed_canonical_visits(store, seeded.result)
 
-        inputs[version] = staged_custody_templates(version, 'canonical-discovery-visits', build,
-                                                  admit=False, completed=seeded)
-        return inputs[version]
+        def subjects(store):
+            prepare_subjects(store.conn)
+            return seeded.result
+
+        completed = seeded
+        for name, build in (('artists', artists), ('subjects', subjects)):
+            completed = staged_custody_templates(version, 'canonical-discovery-visits:' + name, build,
+                                                  admit=False, completed=completed)
+            inputs[version, name] = completed
+            if name == phase:
+                return completed
+        raise ValueError(phase)
 
     def release(version):
-        source = inputs[version].source
-        assert not source.conn.in_transaction
-        source._fixture_released = True
-        source.conn.close()
-        return source
+        sources = []
+        for (current, _), template in inputs.items():
+            if current == version:
+                source = template.source
+                assert not source.conn.in_transaction
+                source._fixture_released = True
+                source.conn.close()
+                sources.append(source)
+        return sources
 
     get.release = release
     return get
 
 
-@pytest.mark.parametrize('version', [79, 85, 86, 100])
-def test_canonical_discovery_input_keeps_raw_alias_visits_and_album_counter(canonical_discovery_inputs, version):
-    template = canonical_discovery_inputs(version)
+@pytest.mark.parametrize('version,phase', [(version, phase) for phase in ('artists', 'subjects')
+                                         for version in (79, 85, 86, 100)])
+def test_canonical_discovery_input_keeps_raw_alias_visits_and_album_counter(canonical_discovery_inputs, version, phase):
+    template = canonical_discovery_inputs(version, phase)
     store = template.source
     _, _, rid, _ = template.result
     assert_upgrade_phase(template, version)
@@ -292,7 +308,8 @@ def test_canonical_discovery_input_keeps_raw_alias_visits_and_album_counter(cano
     assert store.conn.execute("SELECT recording_id FROM main.recording_aliases WHERE alias='song alias'").fetchone()[0] == rid
     assert store.conn.execute('SELECT offered_count FROM main.album_discovery_memberships').fetchone()[0] == 5
     assert publication.owner(store.conn).artist.selected(store.conn) is not None
-    assert store.conn.execute('SELECT count(*) FROM ' + preparation.IMPRESSIONS).fetchone()[0] > 0
+    if phase == 'subjects':
+        assert store.conn.execute('SELECT count(*) FROM ' + preparation.IMPRESSIONS).fetchone()[0] > 0
 
 
 @pytest.mark.parametrize('version', [79, 85, 86, 100])
@@ -540,11 +557,12 @@ def test_rejection_input_keeps_completed_subjects_and_captured_classification(ve
 @pytest.mark.parametrize('version', [93])
 @pytest.mark.parametrize('damage', ['clock', 'identity', 'original', 'missing', 'classification'])
 def test_independent_publication_check_rejects_damaged_preparation(
-        rejection_store, damage, independent_regular_ddl):
+        rejection_store, damage):
     store = rejection_store
     # Completed artist documents and subject rows are inputs to this independent
     # publication verifier. Each case damages its own restored SQL/files, then
-    # runs the real map writer, verifier, selection and regular DDL.
+    # runs the real map writer, verifier and selection. Concurrent regular DDL
+    # is exercised by the two publication-verification concurrency cases below.
     owner = publication.owner(store.conn)
     with store.conn:
         if damage == 'clock':
@@ -567,14 +585,10 @@ def test_independent_publication_check_rejects_damaged_preparation(
     assert owner.selected(store.conn) is None
     assert not store.conn.execute('SELECT 1 FROM '+owner.table('generations')).fetchone()
     assert store.discovery.get_discovered_artists()[0]['offered_count'] == 9
-    regular.migrate(store.conn)
 
 
-@pytest.mark.parametrize('installed', [79], indirect=True)
-def test_interrupted_stage_and_head_resume_without_partial_selection_or_stale_publish(installed, monkeypatch, independent_regular_ddl):
-    store, _ = installed
-    seed(store)
-    owner = prepare(store.conn)
+def interrupted_discovery_input(store):
+    owner = publication.owner(store.conn)
     first = owner.step(store.conn, batch_size=1)
     assert first.owner == 'sources' and first.copied == 1 and not first.complete
     with store.conn:
@@ -583,11 +597,42 @@ def test_interrupted_stage_and_head_resume_without_partial_selection_or_stale_pu
     with pytest.raises(sqlite3.IntegrityError, match='controlled discovery interruption'):
         owner.step(store.conn, batch_size=1)
     assert owner.stage(store.conn, first.id) == first
-    regular.migrate(store.conn)
+    def install(conn, context):
+        conn.execute('CREATE TABLE independent_preparation_ddl(value TEXT)')
+
+    def validate(conn):
+        assert conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='independent_preparation_ddl'").fetchone()
+
+    regular.migrate(store.conn, changes=(regular.Change(1, 'independent_preparation_ddl', install, validate),))
     with store.conn:
         store.conn.execute('DROP TRIGGER controlled_subject_stage_failure')
-    reopened = Store(store._db_path)
-    try:
+    return first
+
+
+@pytest.fixture(scope='module')
+def interrupted_discovery_template(staged_custody_templates, discovery_prepared_inputs):
+    def get():
+        return staged_custody_templates(79, 'interrupted-discovery-stage', interrupted_discovery_input,
+            admit=False, completed=discovery_prepared_inputs(79))
+    return get
+
+
+def test_interrupted_discovery_stage_keeps_exact_checkpoint_and_allows_independent_ddl(interrupted_discovery_template):
+    template = interrupted_discovery_template()
+    owner = publication.owner(template.source.conn)
+    assert owner.stage(template.source.conn, template.result.id) == template.result
+    assert owner.selected(template.source.conn) is None
+    assert template.source.conn.execute('SELECT count(*) FROM independent_preparation_ddl').fetchone()[0] == 0
+    assert template.source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
+
+
+def test_interrupted_stage_and_head_resume_without_partial_selection_or_stale_publish(
+        interrupted_discovery_template, tmp_path, monkeypatch, independent_regular_ddl):
+    template = interrupted_discovery_template()
+    first = template.result
+    with template.open(tmp_path / 'restarted-discovery.db') as reopened, schema_inspection.reuse_tables(reopened.conn):
+        store = reopened
+        owner = publication.owner(reopened.conn)
         for _ in range(30):
             stage = owner.step(reopened.conn, batch_size=1)
             if stage.complete:
@@ -612,17 +657,17 @@ def test_interrupted_stage_and_head_resume_without_partial_selection_or_stale_pu
             owner.publish(reopened.conn, stage=stage.id)
         assert owner.selected(reopened.conn) is None
         monkeypatch.setattr(type(owner), 'verify', verify)
-        owner, later = ready(reopened.conn)
+        with schema_inspection.reuse_tables(reopened.conn):
+            artifact, document_stage = artist_ready(reopened.conn, installed=True)
+            artifact.publish(reopened.conn, stage=document_stage)
+            prepare_subjects(reopened.conn, installed=True)
+            owner, later = stage_discovery(reopened.conn)
         assert later != stage.id
         owner.publish(reopened.conn, stage=later)
         assert read(reopened.conn, owner, later, 'discovery_sources')[0]['last_found_at'] == 20
         with pytest.raises(sqlite3.IntegrityError, match='[Rr]etained'):
             with reopened.conn:
                 reopened.conn.execute('DELETE FROM '+owner.table('input_sources')+' WHERE stage=?', (stage.id,))
-    finally:
-        reopened.conn.close()
-
-
 @pytest.mark.parametrize('version', [93])
 def test_slow_verification_leaves_real_writes_and_regular_migrations_available(
         rejection_store, monkeypatch, independent_regular_ddl):
@@ -719,8 +764,9 @@ def test_partly_upgraded_genre_layout_admits_earlier_retained_publication(discov
     partial = Store(tmp_path/'partial-discovery.db')
     try:
         prepared.restore(partial)
-        partial.init_schema(defer_metadata=True)
-        regular.migrate(partial.conn)
+        with schema_inspection.reuse_tables(partial.conn):
+            partial.init_schema(defer_metadata=True)
+            regular.migrate(partial.conn)
         assert publication.read_owners(partial.conn).revision is None
         assert partial.discovery.get_discovered_artists()[0]['offered_count'] == 9
         assert partial.conn.execute('SELECT copied FROM '+stages+' WHERE id=?', (stage,)).fetchone()[0] > 0
@@ -730,18 +776,20 @@ def test_partly_upgraded_genre_layout_admits_earlier_retained_publication(discov
 
 
 @pytest.mark.parametrize('version', [93])
-def test_listening_upgrade_preserves_selected_discovery_views_until_native_takeover(discovery_upgrade_inputs, version, tmp_path, independent_regular_ddl):
+def test_listening_upgrade_preserves_selected_discovery_views_until_native_takeover(discovery_upgrade_inputs, version, tmp_path, monkeypatch, independent_regular_ddl):
     prepared = discovery_upgrade_inputs(version, 100)
     stage, expected, _, _ = prepared.result
     partial = Store(tmp_path/'listening-upgrade.db')
     try:
         prepared.restore(partial)
-        partial.init_schema(defer_metadata=True)
-        regular.migrate(partial.conn)
-        assert publication.read_owners(partial.conn).revision == stage
-        assert partial.discovery.get_discovered_artists() == expected
-        assert partial.discovery.discovery_album_view(10, 7)[0]['first_shown'] is None
-        assert partial.discovery.get_discovered_tracks()[0]['offered_count'] == 1
+        with schema_inspection.reuse_tables(partial.conn):
+            partial.init_schema(defer_metadata=True)
+            regular.migrate(partial.conn)
+        with reuse_reporting_reader(partial, monkeypatch):
+            assert publication.read_owners(partial.conn).revision == stage
+            assert partial.discovery.get_discovered_artists() == expected
+            assert partial.discovery.discovery_album_view(10, 7)[0]['first_shown'] is None
+            assert partial.discovery.get_discovered_tracks()[0]['offered_count'] == 1
     finally:
         partial.conn.close()
 
@@ -766,6 +814,8 @@ def test_prepared_discovery_inputs_release_each_lower_owner(discovery_prepared_i
 
 @pytest.mark.parametrize('version', [79, 85, 86, 100])
 def test_canonical_discovery_inputs_release_their_files_and_connection(canonical_discovery_inputs, version):
-    source = canonical_discovery_inputs.release(version)
-    with pytest.raises(sqlite3.ProgrammingError, match='closed'):
-        source.conn.execute('SELECT 1')
+    sources = canonical_discovery_inputs.release(version)
+    assert len(sources) == 2
+    for source in sources:
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            source.conn.execute('SELECT 1')

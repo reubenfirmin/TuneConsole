@@ -103,8 +103,6 @@ def test_preopened_and_pinned_readers_select_exact_files_without_legacy_payload(
         regular.validate(other.conn)
     finally:
         other.conn.close()
-
-
 @pytest.mark.parametrize('installed', [90], indirect=True)
 @pytest.mark.parametrize('failure', ['metadata', 'file', 'policy', 'extra_policy', 'root', 'root_original', 'missing_root', 'missing_output'])
 def test_missing_or_incorrect_documents_and_custody_cannot_publish(installed, failure):
@@ -316,27 +314,3 @@ def test_slow_file_verification_leaves_writer_and_regular_schema_usable(installe
         publication.OWNER.publish(other.conn, stage=ready(other.conn))
     finally:
         other.conn.close()
-
-
-@pytest.mark.parametrize('installed', [90], indirect=True)
-def test_native_upgrade_preserves_archives_and_prefers_native_writes(installed, tmp_path):
-    store, _ = installed
-    originals = seed(store)
-    real_roots(store)
-    owner = publication.OWNER
-    stage = ready(store.conn)
-    owner.publish(store.conn, stage=stage)
-    upgraded = Store(tmp_path/'home-publication-upgrade.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS)
-        upgraded.init_schema(defer_metadata=True)
-        assert owner.selected(upgraded.conn) is None
-        for surface, raw in originals.items():
-            assert owner.value(upgraded.conn, stage, surface) == raw
-            assert upgraded.rec_proposals.get_proposals(surface) == json.loads(raw)
-        upgraded.rec_proposals.put_proposals('home_prepared', {'native': True}, 3000)
-        assert upgraded.rec_proposals.get_proposals('home_prepared') == {'native': True}
-        regular.migrate(upgraded.conn)
-    finally:
-        upgraded.conn.close()

@@ -1,16 +1,39 @@
 """Deliberate returns follow verified releases without multiplying shared dates."""
 from copy import deepcopy
-from tests.enrichment_support import seed_enrichment
-from contextlib import ExitStack
+from tests.enrichment_support import seed_enrichment, use_existing_album_tracks
 
 import numpy as np
 import pytest
 
 from tests import model_support
 from tests.repos.test_album_aliases import OLD, ALIAS, release
-from tests.prepared_fixture_support import prepared_template
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from yt_playlist.core.store import Store
 from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.rec import choice_evidence, scoring
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Scoring and evidence tests do not construct the web application."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('rock', 'Rock'),)) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(_pristine_current_schema, tmp_path, monkeypatch):
+    database = Store(tmp_path / 'album-return.db')
+    try:
+        initialize_consumer(database, _pristine_current_schema)
+        use_existing_album_tracks(database, monkeypatch)
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
+    finally:
+        database.conn.close()
 
 
 def seed_return_catalog(store, first, before, saved):
@@ -19,9 +42,9 @@ def seed_return_catalog(store, first, before, saved):
     remember_album(store, first, payload)
     # Fetching a release caches catalog entries; it does not own its tracks.
     # Both vector spaces need actual library inputs for this scoring check.
-    for track in payload['tracks']:
-        store.tracks.upsert_track(track['videoId'], track['title'], 'All Them Witches',
-                                  payload['title'], 181, album_browse_id=first)
+    with store.conn:
+        store.conn.execute("INSERT OR IGNORE INTO library_memberships "
+                           "SELECT id,'fixture',NULL FROM catalog_entries")
     if saved:
         store.collection.add_saved_album({'browse': first, 'title': payload['title'], 'artist': 'All Them Witches'})
     if not before:
@@ -35,26 +58,11 @@ def seed_return_catalog(store, first, before, saved):
     return payload, keys
 
 
-@pytest.fixture(scope='module')
-def return_catalogs(_pristine_current_schema):
-    with ExitStack() as resources:
-        templates = {}
-
-        def restore(store, first, before, saved):
-            key = first, before, saved
-            if key not in templates:
-                templates[key] = resources.enter_context(prepared_template(
-                    _pristine_current_schema,
-                    lambda source: seed_return_catalog(source, first, before, saved)))
-            return templates[key].restore(store)
-
-        yield restore
-
-
 @pytest.fixture
-def return_catalog(store, return_catalogs, first, before, saved):
+def return_catalog(store, first, before, saved):
     # Preserve alias/save/model construction order for every distinct baseline.
-    return return_catalogs(store, first, before, saved)
+    # Each combination is used once, so a retained template only copies it again.
+    return seed_return_catalog(store, first, before, saved)
 
 
 @pytest.mark.parametrize('first', [OLD, ALIAS])

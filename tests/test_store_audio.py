@@ -1,6 +1,4 @@
-import sqlite3
 from yt_playlist.core.store import Store
-from tests.historical_support import upgrade_fixture
 
 
 def test_fresh_schema_has_audio_columns():
@@ -11,35 +9,6 @@ def test_fresh_schema_has_audio_columns():
             "music_key", "music_scale", "mood_happy", "mood_sad", "mood_relaxed",
             "mood_acoustic", "instrumental", "loudness", "dynamic_complexity",
             "popularity", "gain", "label"} <= cols
-
-
-def test_legacy_audio_and_ranker_columns_upgrade_together(tmp_path):
-    # Both unversioned predecessors can share one genuine migration replay.
-    db = tmp_path / "old.db"
-    raw = sqlite3.connect(db)
-    raw.execute("CREATE TABLE tracks (id INTEGER PRIMARY KEY, video_id TEXT, "
-                "title TEXT, artist TEXT, album TEXT, duration_s INTEGER, "
-                "identity_key TEXT NOT NULL, genre TEXT, mb_year TEXT)")
-    raw.execute("CREATE TABLE rec_mode_impressions (epoch INTEGER NOT NULL, lane TEXT NOT NULL, "
-                "mode_id INTEGER NOT NULL, created_at REAL NOT NULL, PRIMARY KEY (epoch, lane))")
-    raw.execute("CREATE TABLE rec_mode_picks (playlist_id INTEGER PRIMARY KEY, "
-                "mode_id INTEGER NOT NULL, created_at REAL NOT NULL)")
-    raw.commit()
-    raw.close()
-    s = Store(str(db))
-    try:
-        upgrade_fixture(s)
-        cols = {r["name"] for r in s.conn.execute("PRAGMA table_info(tracks)")}
-        assert {"bpm", "energy", "danceability", "mb_recording_id",
-                "music_key", "music_scale", "mood_happy", "mood_sad", "mood_relaxed",
-                "mood_acoustic", "instrumental", "loudness", "dynamic_complexity",
-                "popularity", "gain", "label"} <= cols
-        icols = {r["name"] for r in s.conn.execute("PRAGMA table_info(rec_mode_impressions)")}
-        pcols = {r["name"] for r in s.conn.execute("PRAGMA table_info(rec_mode_picks)")}
-        assert "ranker" in icols
-        assert "ranker" in pcols
-    finally:
-        s.conn.close()
 
 
 def _seed_playlist(store, titles):

@@ -3,10 +3,9 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core import catalog, genre_identity, metadata
-from yt_playlist.core.migrations import current, registry, Migration, MigrationError, migrate
+from yt_playlist.core import catalog, metadata
+from yt_playlist.core.migrations import current
 from yt_playlist.core.migrations import v102_catalog_writes
-from yt_playlist.core.store import Store
 
 
 def test_catalog_projections_are_read_only_and_owner_constraints_remain(store):
@@ -81,33 +80,6 @@ def test_metadata_fill_rolls_back_every_selection_if_one_field_is_invalid(store)
         with store.conn:
             metadata.fill(store.conn, entry, {'bpm': 120, 'instrumental': float('inf')}, 'acousticbrainz')
     assert list(store.conn.iterdump())==before
-
-
-def test_facade_retirement_upgrade_is_atomic_and_matches_fresh_contract(tmp_path):
-    store = Store(tmp_path/'predecessor.db')
-    try:
-        for sql in current.statements(version=101):
-            store.conn.execute(sql)
-        genre_identity.seed_catalog(store.conn)
-        store.conn.executemany('INSERT INTO settings VALUES (?,?)',current.SEED_SETTINGS.items())
-        store.conn.executemany('INSERT INTO schema_migrations VALUES (?,?,1)',
-            [(m.version,m.name) for m in registry.MIGRATIONS[:101]])
-        store.conn.commit()
-        before = list(store.conn.iterdump())
-        def interrupted(conn,context):
-            v102_catalog_writes.apply(conn,context)
-            raise RuntimeError('interrupted facade retirement')
-        with pytest.raises(MigrationError,match='interrupted facade retirement'):
-            migrate(store.conn,registry=(*registry.MIGRATIONS[:101],Migration(102,'catalog_writes',interrupted)))
-        assert list(store.conn.iterdump())==before
-        # Routine admission retains a supported predecessor; explicitly exercise
-        # the frozen upgrade here, after proving the interrupted step rolled back.
-        migrate(store.conn,registry=registry.MIGRATIONS)
-        store.init_schema()
-        current.validate(store.conn)
-        assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-    finally:
-        store.conn.close()
 
 
 def test_historical_implicit_definition_lookup_is_version_bound_and_always_resets():

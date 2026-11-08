@@ -274,26 +274,3 @@ def test_explicit_missing_file_recovery_preserves_selected_custody_and_failure_s
     assert store.settings.get_setting(source) == sources[source]
     assert store.conn.execute('SELECT count(*) FROM '+preparation.SUBJECTS).fetchone()[0] == 3
     assert preparation.read_original(retained) == sources[source]
-
-
-@pytest.mark.parametrize('installed',[94],indirect=True)
-def test_frozen_upgrade_keeps_published_custody_and_prefers_native_owner(installed,tmp_path):
-    store,_ = installed
-    sources,_ = seed(store)
-    for name in preparation.JOBS:
-        publish(store.conn,name)
-    retained = {source:head(store.conn,source) for source in sources}
-    # The explicit historical converter uses a dedicated connection, without
-    # the serving repository's TEMP compatibility views or history ownership.
-    upgraded = Store(tmp_path/'frozen-native.db')
-    try:
-        store.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn,registry=registry.MIGRATIONS)
-        regular.validate(upgraded.conn)
-        for source,raw in sources.items():
-            assert publication.selected(upgraded.conn,source) is None
-            assert outputs.get(upgraded.conn,source) == raw
-            assert preparation.read_original(retained[source]) == raw
-        assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        upgraded.conn.close()

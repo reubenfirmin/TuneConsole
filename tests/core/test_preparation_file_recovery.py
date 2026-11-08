@@ -8,9 +8,10 @@ import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.genre_catalog_support import bound_catalog
+from tests.prepared_fixture_support import assert_upgrade_phase, custody_predecessor, custody_upgrade_cases
 from tests.store_fixture_support import publication_consumer_reads, reuse_reporting_reader
 from tests import file_custody_support as fixture_files
-from yt_playlist.core import fao, preparation_files as recovery
+from yt_playlist.core import fao, preparation_files as recovery, schema_inspection
 from yt_playlist.core.preparation import document_plan
 from yt_playlist.core.store import Store
 
@@ -119,7 +120,8 @@ def selected_inputs(tmp_path_factory, _bounded_installed_schema):
             if kind not in owners:
                 with pytest.MonkeyPatch.context() as patch:
                     bound_catalog(patch)
-                    owners[kind] = selected_owner(producer, kind)
+                    with reuse_reporting_reader(producer, patch), schema_inspection.reuse_tables(producer.conn):
+                        owners[kind] = selected_owner(producer, kind)
                     producer._snapshot_revisions.refresh()
             return owners[kind]
 
@@ -245,9 +247,10 @@ def test_selected_files_read_exactly_without_producer(selected_reads, tmp_path, 
         root.rename(hidden)
         if original:
             fixture_files.restore_files(candidate.conn, report['manifests'])
-        candidate.init_schema(defer_metadata=True)
-        with reuse_reporting_reader(candidate, monkeypatch):
-            assert {kind: read(candidate) for kind, (_root, read, _selected) in owners.items()} == expected
+        with schema_inspection.reuse_tables(candidate.conn):
+            candidate.init_schema(defer_metadata=True)
+            with reuse_reporting_reader(candidate, monkeypatch):
+                assert {kind: read(candidate) for kind, (_root, read, _selected) in owners.items()} == expected
         assert {kind: selected(candidate.conn) for kind, (_root, _read, selected) in owners.items()} == selection
         assert_sql_custody(candidate.conn, custody, original=original)
         assert not candidate.conn.execute('PRAGMA foreign_key_check').fetchone()
@@ -302,26 +305,76 @@ def test_interrupted_coordinate_relocation_restores_guards_heads_and_epochs(inst
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
-@pytest.mark.parametrize('installed', [97], indirect=True)
-@pytest.mark.parametrize('original', [False, True], ids=['restored', 'snapshot'])
-def test_native_operation_captures_survive_owner_rename_and_recovery(installed, tmp_path, original):
+def capture_incomplete_native_operations(store):
     from tests.core.test_append_operation_preparation import seed
-    from yt_playlist.core.migrations import registry, runner
     from yt_playlist.core.preparation import append_operations as preparation
-    producer, version = installed
-    names, _, _, _ = seed(producer, version)
-    for name in names:
-        job = preparation.JOBS[name]
-        job.install(producer.conn)
-        job.step(producer.conn, batch_size=1)
-    # Upgrade a separate copy through the real owner renames, retaining the
-    # incomplete earlier custody. The producer's historical schema stays exact.
-    upgraded = Store(tmp_path / 'upgraded.db')
+
+    with schema_inspection.reuse_tables(store.conn):
+        names, _, _, _ = seed(store, 97)
+        originals = {}
+        for name in names:
+            job = preparation.JOBS[name]
+            job.install(store.conn)
+            assert job.step(store.conn, batch_size=1).status != 'prepared'
+            row = store.conn.execute('SELECT * FROM ' + preparation.table(name, 'generations')).fetchone()
+            originals[name] = preparation.read_original(store.conn, name, row)
+        return originals
+
+
+@pytest.fixture(scope='module')
+def native_recovery_inputs(upgraded_custody_inputs):
+    def get(target, **options):
+        return upgraded_custody_inputs(97, target, 'incomplete-native-file-recovery',
+                                       capture_incomplete_native_operations, **options)
+
+    get.release = lambda: upgraded_custody_inputs.release(97, 'incomplete-native-file-recovery')
+    return get
+
+
+def assert_native_recovery_capture(template):
+    from yt_playlist.core.preparation import append_operations as preparation
+
+    for name, expected in template.result.items():
+        conn = template.source.conn
+        progress = preparation.JOBS[name].progress(conn)
+        assert progress.status != 'prepared' and progress.processed == 1
+        row = conn.execute('SELECT * FROM ' + preparation.table(name, 'generations')).fetchone()
+        assert preparation.read_original(conn, name, row) == expected
+
+
+def test_native_recovery_schema_input_keeps_installed_history_and_guards(_bounded_installed_schema):
+    assert_upgrade_phase(_bounded_installed_schema(97), 97)
+
+
+def test_native_recovery_input_keeps_incomplete_sql_and_exact_operation_files(native_recovery_inputs):
+    template = native_recovery_inputs(97)
+    assert_upgrade_phase(template, 97)
+    assert_native_recovery_capture(template)
+
+
+@pytest.mark.parametrize('version,target,phase', custody_upgrade_cases((97,)))
+def test_native_recovery_upgrade_keeps_incomplete_operation_captures(native_recovery_inputs, version, target, phase):
+    template = native_recovery_inputs(target, phase=phase)
+    assert_upgrade_phase(template, target if phase == 'converted' else custody_predecessor(version, target))
+    assert_native_recovery_capture(template)
+
+
+def test_native_recovery_serving_input_keeps_real_private_guards(native_recovery_inputs):
+    template = native_recovery_inputs(107)
+    assert_upgrade_phase(template, 107)
+    assert template.source._snapshot_revisions.conn is template.source.conn
+    assert_native_recovery_capture(template)
+
+
+@pytest.mark.parametrize('original', [False, True], ids=['restored', 'snapshot'])
+def test_native_operation_captures_survive_owner_rename_and_recovery(native_recovery_inputs, tmp_path, original):
+    # Real historical migrations are named measured input owners above. Each
+    # recovery path still exports, restores and admits its own SQL and files.
+    upgraded = native_recovery_inputs(107).source
     candidate = None
-    root = producer._db_path.with_name(producer._db_path.name + '.preparation')
+    root = upgraded._db_path.with_name(upgraded._db_path.name + '.preparation')
+    original_sql, original_files = database_dump(upgraded._db_path), hashes(root)
     try:
-        producer.conn.backup(upgraded.conn)
-        runner.migrate(upgraded.conn, registry=registry.MIGRATIONS[:107])
         before = sql_custody(upgraded.conn)
         report = fixture_files.snapshot_library(upgraded._db_path, tmp_path / 'recovered',
                                                restore=not original)
@@ -352,7 +405,7 @@ def test_native_operation_captures_survive_owner_rename_and_recovery(installed, 
     finally:
         if candidate:
             candidate.conn.close()
-        upgraded.conn.close()
+    assert database_dump(upgraded._db_path) == original_sql and hashes(root) == original_files
 
 
 @pytest.mark.parametrize('installed', [97], indirect=True)
@@ -530,3 +583,19 @@ def test_unfinished_nested_plans_and_backups_resume_without_producer(installed, 
         candidate.conn.close()
         hidden.rename(root)
     assert list(store.conn.iterdump()) == before and hashes(root) == before_files
+
+
+def test_native_recovery_inputs_release_every_private_predecessor(native_recovery_inputs):
+    sources = native_recovery_inputs.release()
+    assert sources
+    for source in sources:
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            source.conn.execute('SELECT 1')
+
+
+def test_selected_recovery_input_releases_its_file_reader(selected_inputs):
+    producer, _, _ = selected_inputs
+    assert not producer.conn.in_transaction
+    producer.conn.close()
+    with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+        producer.conn.execute('SELECT 1')

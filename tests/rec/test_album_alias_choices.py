@@ -1,13 +1,14 @@
 """Verified release identity groups choice dates without rewriting evidence."""
 from copy import deepcopy
 from contextlib import ExitStack
-from tests.enrichment_support import seed_enrichment
+from tests.enrichment_support import seed_enrichment, use_existing_album_tracks
 
 import numpy as np
 import pytest
 
 from tests import model_support
 from tests.prepared_fixture_support import prepared_template
+from tests.store_fixture_support import bounded_consumer_schema, reuse_reporting_reader
 from tests.repos.test_album_aliases import OLD, ALIAS, release
 from yt_playlist.library.album_catalog import remember_album
 from yt_playlist.rec import choice_evidence, choice_learning, rec_params, scoring
@@ -15,6 +16,27 @@ from yt_playlist.rec import choice_evidence, choice_learning, rec_params, scorin
 DAY = 86400
 START = 1_700_000_000
 NOW = START + 4 * DAY
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Scoring and evidence tests do not construct the web application."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('rock', 'Rock'), ('folk', 'Folk'))) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(choice_catalogs, first, tmp_path, monkeypatch):
+    directory = tmp_path / 'album-choice'
+    directory.mkdir()
+    with choice_catalogs(first).open(directory / 'library.db') as database:
+        use_existing_album_tracks(database, monkeypatch)
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
 
 
 def raw(store):
@@ -32,8 +54,10 @@ def seed_choice_catalog(store, first):
     vectors = []
     for index, track in enumerate(payload['tracks']):
         key = f'track {index}|all them witches'
-        entry = store.tracks.upsert_track(track['videoId'], track['title'], 'All Them Witches',
-                                         payload['title'], 181, album_browse_id=first)
+        entry = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?',
+                                   (track['videoId'],)).fetchone()[0]
+        with store.conn:
+            store.conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'fixture',NULL)", (entry,))
         seed_enrichment(store, entry, 'Rock', '2015')
         tracks.append({'key': key, 'video_id': track['videoId']})
         vectors.append((key, np.array([1., 0.], dtype=np.float32).tobytes()))
@@ -48,14 +72,19 @@ def seed_choice_catalog(store, first):
 
 
 @pytest.fixture(scope='module')
-def choice_catalogs(_pristine_current_schema):
+def choice_catalogs(_pristine_current_schema, tmp_path_factory):
     with ExitStack() as resources:
         templates = {}
 
         def template(first):
             if first not in templates:
+                def build(source):
+                    with pytest.MonkeyPatch.context() as patch, reuse_reporting_reader(source, patch):
+                        use_existing_album_tracks(source, patch)
+                        return seed_choice_catalog(source, first)
                 templates[first] = resources.enter_context(prepared_template(
-                    _pristine_current_schema, lambda source: seed_choice_catalog(source, first)))
+                    _pristine_current_schema, build,
+                    database=tmp_path_factory.mktemp('album-choice-catalog') / 'source.db'))
             return templates[first]
 
         yield template
@@ -63,7 +92,8 @@ def choice_catalogs(_pristine_current_schema):
 
 @pytest.fixture
 def choice_catalog(store, choice_catalogs, first):
-    return choice_catalogs(first).restore(store)
+    # The Store already owns one complete private copy, including retained files.
+    return deepcopy(choice_catalogs(first).result)
 
 
 @pytest.mark.parametrize('first', [OLD, ALIAS])

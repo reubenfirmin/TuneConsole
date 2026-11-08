@@ -8,7 +8,8 @@ from yt_playlist.core.migrations import current, registry, migrate, Migration, M
 from yt_playlist.core.migrations import v104_domain_contracts as domains
 from yt_playlist.core.store import Store
 from tests.genre_catalog_support import bound_catalog
-from tests.regular_schema_support import admit_regular_connection, captured
+from tests.regular_schema_support import admit_regular_connection, assert_regular_expectation, captured, regular_expectation
+from tests.store_fixture_support import install_regular_input
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -199,10 +200,16 @@ def clone_predecessor(path, source):
 
 @pytest.fixture(scope='module')
 def admitted_predecessor(domain_predecessor):
-    """Build regular DDL once; each domain failure still owns its database."""
+    """Completed regular owners below each real domain conversion/failure."""
+    from yt_playlist.core.migrations import regular
+
     source = clone_predecessor(':memory:', domain_predecessor)
     try:
-        admit_regular_connection(source)
+        expected = regular_expectation(source, clock=1)
+        with source:
+            source.execute('BEGIN')
+            install_regular_input(source, regular.CHANGES)
+        assert_regular_expectation(source, expected)
         from tests.prepared_fixture_support import coordinates
         assert not coordinates(source), 'SQL-only predecessor retains external files'
         source.execute('PRAGMA query_only=ON')
@@ -212,8 +219,28 @@ def admitted_predecessor(domain_predecessor):
 
 
 @pytest.fixture(scope='module')
-def converted_predecessor(admitted_predecessor):
+def interrupted_predecessor(admitted_predecessor):
     source = clone_predecessor(':memory:', admitted_predecessor)
+    try:
+        before = list(source.iterdump())
+
+        def interrupted(conn, context):
+            domains.apply(conn, context)
+            raise RuntimeError('interrupted domain cutover')
+
+        with pytest.raises(MigrationError, match='interrupted domain cutover'):
+            migrate(source, registry=(*registry.MIGRATIONS[:103],
+                Migration(104, 'domain_contracts', interrupted, rebuild_tables=True)))
+        assert list(source.iterdump()) == before
+        source.execute('PRAGMA query_only=ON')
+        yield source
+    finally:
+        source.close()
+
+
+@pytest.fixture(scope='module')
+def converted_predecessor(interrupted_predecessor):
+    source = clone_predecessor(':memory:', interrupted_predecessor)
     try:
         before = captured(source)
         programs = dict(source.execute("SELECT name,sql FROM sqlite_schema WHERE type IN ('view','trigger')"))
@@ -265,6 +292,12 @@ def test_domain_regular_input_keeps_installed_values_and_complete_history(admitt
     assert tuple(admitted_predecessor.execute(
         'SELECT id,identity_key,provisional FROM recordings').fetchone()) == (1, 'recording', 1)
     assert not admitted_predecessor.execute('PRAGMA foreign_key_check').fetchone()
+
+
+def test_interrupted_replacement_rolls_back_every_owner_then_restarts(interrupted_predecessor, admitted_predecessor):
+    assert captured(interrupted_predecessor) == captured(admitted_predecessor)
+    assert list(interrupted_predecessor.iterdump()) == list(admitted_predecessor.iterdump())
+    assert not interrupted_predecessor.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def test_domain_conversion_input_preserves_programs_sequences_and_values(converted_predecessor):
@@ -379,25 +412,5 @@ def test_first_regular_admission_preserves_invalid_domain_before_failed_conversi
     conn = clone_predecessor(path, invalid_regular_predecessor)
     try:
         assert_invalid_upgrade_retains_database(conn,path,'recordings','provisional')
-    finally:
-        conn.close()
-
-
-def test_interrupted_replacement_rolls_back_every_owner_then_restarts(tmp_path):
-    path = tmp_path/'interrupted.db'
-    conn = installed(path)
-    try:
-        admitted = admit_regular_connection(conn)
-        before = list(conn.iterdump())
-        def interrupted(conn,context):
-            domains.apply(conn,context)
-            raise RuntimeError('interrupted domain cutover')
-        with pytest.raises(MigrationError,match='interrupted domain cutover'):
-            migrate(conn,registry=(*registry.MIGRATIONS[:103],Migration(104,'domain_contracts',interrupted,rebuild_tables=True)))
-        assert list(conn.iterdump())==before
-        migrate(conn, registry=registry.MIGRATIONS, clock=lambda: 2000)
-        admit_reopened_store(path)
-        assert captured(conn)=={**admitted, 'schema_migrations': converted_history(admitted)}
-        current.validate(conn)
     finally:
         conn.close()

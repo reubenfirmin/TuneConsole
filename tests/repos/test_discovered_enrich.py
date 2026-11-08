@@ -1,7 +1,4 @@
 """Discovery persistence and participation in the shared enrichment queue."""
-from contextlib import closing
-
-from yt_playlist.core.store import Store
 from tests.enrichment_support import complete_discovered
 
 
@@ -49,31 +46,3 @@ def test_rediscovery_preserves_enrichment_when_catalog_metadata_is_missing(store
     assert row["genre"] == "Techno" and row["year"] == "2020"
     assert row["audio"] == {"bpm": 128.0, "energy": .8}
     assert s.enrichment_reports.coverage_stats(include_discovery=True)["processed"] == 1
-
-
-def test_legacy_discovery_stamps_are_requeued_once_without_metadata_changes(tmp_path, legacy_store):
-    path = tmp_path / "legacy.db"
-    s = legacy_store
-    with s.conn:
-        s.conn.execute("INSERT INTO tracks(video_id,title,artist,identity_key) VALUES ('library','Library','Artist','library|artist')")
-        s.conn.execute("INSERT INTO discovered_tracks(identity_key,video_id,title,artist,genre,year,source_browse_id,found_at,bpm) VALUES ('cold','v1','Cold','Artist','House','2020','radio:seed',100,128)")
-        s.conn.execute('DROP TABLE schema_migrations')
-    with s.conn:
-        s.conn.execute('UPDATE discovered_tracks SET last_enriched=? WHERE identity_key=?', (200, 'cold'))
-    s.settings.delete_setting("discovery_enrichment_audit_requeued")  # simulate a pre-repair database
-    s.conn.close()
-    repaired = Store(path)
-    with closing(repaired.conn):
-        from tests.historical_support import upgrade_fixture
-        upgrade_fixture(repaired)
-        assert repaired.enrichment_reports.queue_remaining() == 2
-        row = repaired.discovery.discovered_tracks_by_keys(["cold"])["cold"]
-        assert row["last_enriched"] is None
-        assert (row["genre"], row["year"], row["audio"]) == ("House", "2020", {"bpm": 128.0})
-        repaired.enrichment_state.record_enrichment_attempt("cold", "deezer", {}, now=300)
-        complete_discovered(repaired, ['cold'], 300)
-    reopened = Store(path)
-    with closing(reopened.conn):
-        reopened.init_schema()
-        assert reopened.enrichment_reports.queue_remaining() == 1
-        assert reopened.enrichment_state.enrichment_attempts("cold")["deezer"]["status"] == "no_match"

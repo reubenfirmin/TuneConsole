@@ -67,7 +67,8 @@ def startup_destination():
     def runtime(reader, target, cursor, limit):
         target.executemany('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
                             reader.execute('SELECT key,value FROM settings'))
-        target.execute('UPDATE settings SET value=\'0\' WHERE key=?', (STORAGE_PENDING,))
+        target.execute('INSERT INTO settings VALUES(?,\'0\') ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                       (STORAGE_PENDING,))
         target.executemany('INSERT INTO database_rebuild_source_history VALUES(?,?,?)',
                             reader.execute('SELECT * FROM schema_migrations'))
         return build.Batch(rows=3, done=True)
