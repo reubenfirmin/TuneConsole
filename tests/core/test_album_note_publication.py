@@ -8,10 +8,14 @@ import pytest
 from tests.core.test_album_note_preparation import NOTES, finish, header, seed
 from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import publication_schema_inspections
 from yt_playlist.core import recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import album_notes as preparation, album_note_publication as publication
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_schema_inspections')
 
 
 def prepared(conn):
@@ -119,7 +123,8 @@ def test_incorrect_files_headers_references_or_coverage_cannot_publish(installed
 @pytest.mark.parametrize('installed', [83], indirect=True)
 def test_large_map_resume_snapshot_real_writer_and_custody(installed):
     store, _ = installed
-    value = {str(position):{'description':'Observed text','positions':list(range(8192)) if position == 0 else [2,2,1]} for position in range(128)}
+    # Two eight-file checkpoints and a tail retain the real reopen boundary.
+    value = {str(position):{'description':'Observed text','positions':list(range(8192)) if position == 0 else [2,2,1]} for position in range(17)}
     raw = seed(store, value)
     preparation.JOB.install(store.conn)
     first = preparation.JOB.step(store.conn, batch_size=8)
@@ -143,10 +148,10 @@ def test_large_map_resume_snapshot_real_writer_and_custody(installed):
         assert not snapshot.publish(lambda:None)
     assert publication.selected(store.conn) is None
     current = store.rec_proposals.get_proposals('album_notes')
-    assert current['0'] == {'description':'Continuing result'} and len(current) == 128
+    assert current['0'] == {'description':'Continuing result'} and len(current) == 17
     publication.publish(store.conn, revision=prepared(store.conn))
     assert store.rec_proposals.get_proposals('album_notes') == current
-    assert store.conn.execute('SELECT count(*) FROM prepared_album_note_files WHERE generation=?', (old,)).fetchone()[0] == 128
+    assert store.conn.execute('SELECT count(*) FROM prepared_album_note_files WHERE generation=?', (old,)).fetchone()[0] == 17
     for sql in ['DELETE FROM prepared_album_note_files', 'UPDATE prepared_album_note_generations SET built_at=0',
             'INSERT INTO prepared_album_note_files SELECT generation,0,\'forbidden\',album_provider_id,unresolved_reason,filename,digest,byte_size FROM prepared_album_note_files LIMIT 1']:
         with pytest.raises(sqlite3.IntegrityError, match='retained'):

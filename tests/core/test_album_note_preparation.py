@@ -6,6 +6,7 @@ import pytest
 
 from tests.core.test_predecessor_writes import installed
 from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import numbered_store
 from yt_playlist.core import albums, recommendation_outputs
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import album_notes as preparation
@@ -15,6 +16,11 @@ from yt_playlist.core.store import Store
 NOTES = {'release': {'description': 'Paid result: exact prose', 'links': [{'url': 'https://example.org'}]},
          'unadmitted': {'description': None, 'positions': [2, 2, 1]},
          'third': {'label': 'Last good'}}
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Album-note preparation does not construct an HTTP application."""
 
 
 def seed(store, value=NOTES):
@@ -45,9 +51,9 @@ def prepared(conn, generation):
                                     (generation,))}
 
 
-@pytest.mark.parametrize('installed', [79, 83], indirect=True)
-def test_bounded_files_retain_exact_originals_and_reconcile_replacements(installed, independent_regular_ddl):
-    store, version = installed
+@pytest.mark.parametrize('numbered_store', [79, 83], indirect=True)
+def test_bounded_files_retain_exact_originals_and_reconcile_replacements(numbered_store, independent_regular_ddl):
+    store, version = numbered_store
     raw = seed(store)
     history = list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
     preparation.JOB.install(store.conn)

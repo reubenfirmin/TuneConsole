@@ -6,6 +6,7 @@ import pytest
 
 from tests.core.test_predecessor_writes import installed
 from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import numbered_store
 from yt_playlist.core import album_playback_context, entity_names, playback_bindings, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import playback_context as preparation
@@ -13,6 +14,11 @@ from yt_playlist.core.store import Store
 
 
 JOBS = (preparation.BINDINGS_JOB, preparation.PENDING_JOB)
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Playback preparation does not construct an HTTP application."""
 
 
 def finish(job, conn, size=16):
@@ -47,9 +53,9 @@ def seed(store):
     return documents
 
 
-@pytest.mark.parametrize('installed', [79, 93], indirect=True)
-def test_exact_sources_repeated_bindings_queue_and_unknown_owners_are_retained(installed):
-    store, _ = installed
+@pytest.mark.parametrize('numbered_store', [79, 93], indirect=True)
+def test_exact_sources_repeated_bindings_queue_and_unknown_owners_are_retained(numbered_store):
+    store, _ = numbered_store
     conn = store.conn
     originals = seed(store)
     counts = {table: conn.execute(f'SELECT count(*) FROM main.{table}').fetchone()[0]

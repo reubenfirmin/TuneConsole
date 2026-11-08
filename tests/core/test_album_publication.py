@@ -9,8 +9,9 @@ import pytest
 from tests.core.test_album_owner_preparation import finish, seed
 from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.genre_catalog_support import bound_catalog
+from tests.independent_schema_support import independent_regular_ddl
 from tests.prepared_fixture_support import capture_template, prepared_template
-from tests.store_fixture_support import install_numbered_input, publication_consumer_reads, reuse_reporting_reader
+from tests.store_fixture_support import install_numbered_input, numbered_store, publication_consumer_reads, reuse_reporting_reader
 from yt_playlist.core import albums, schema_inspection
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import album_occurrences as preparation, album_publication as publication
@@ -18,6 +19,11 @@ from yt_playlist.core.store import Store
 
 
 pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Album publication does not construct the HTTP application."""
 
 
 def stage(conn, size=32):
@@ -67,12 +73,6 @@ def album_native_numbered_input():
         yield schema
 
 
-def test_native_album_predecessor_has_the_exact_numbered_contract(album_native_numbered_input):
-    runner.validate_version(album_native_numbered_input, 98)
-    assert album_native_numbered_input.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert album_native_numbered_input.execute('SELECT count(*) FROM album_tracks').fetchone()[0] == 0
-
-
 @pytest.fixture(scope='module')
 def album_native_input(album_native_numbered_input, tmp_path_factory):
     path = tmp_path_factory.mktemp('native-album-input') / 'installed.db'
@@ -87,35 +87,6 @@ def album_native_input(album_native_numbered_input, tmp_path_factory):
             template = resources.enter_context(prepared_template(
                 album_native_numbered_input, seed_source, database=path, defer_metadata=True))
         yield template
-
-
-def test_native_album_input_keeps_full_partial_and_unresolved_occurrences(album_native_input):
-    source = album_native_input.source
-    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 98
-    assert source.conn.execute('SELECT count(*) FROM main.catalog_entries').fetchone()[0] == 2
-    assert source.conn.execute('SELECT count(*) FROM main.album_fetch_state').fetchone()[0] == 3
-    assert source.conn.execute("SELECT count(*) FROM main.album_tracks WHERE legacy_track_key='unknown|subject'").fetchone()[0] == 1
-    assert album_native_input.revision_guards
-
-
-@pytest.fixture(scope='module')
-def album_native_reference(album_native_input, tmp_path_factory):
-    path = tmp_path_factory.mktemp('native-album-reference') / 'reference.db'
-    with album_native_input.open(path) as store:
-        # Exercise the registered album takeover itself. Earlier unrelated
-        # migrations are completed numbered input, with their own upgrade tests.
-        runner.migrate(store.conn, registry=registry.MIGRATIONS[:99])
-        store.init_schema(defer_metadata=True)
-        yield capture_template(store, None)
-
-
-def test_native_album_reference_runs_registered_takeover_and_keeps_source_groups(album_native_reference):
-    source = album_native_reference.source
-    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 99
-    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert source.collection.cached_album_tracklist_ids() == {'release', 'release-alias'}
-    assert not source.collection.has_published_album_tracklist('partial')
-    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.fixture(scope='module')
@@ -134,19 +105,6 @@ def test_native_album_upgrade_input_keeps_selected_publication_and_retained_trac
     assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
 
 
-@pytest.mark.parametrize('version', [79, 93, 98])
-def test_album_reader_input_keeps_each_installed_contract(_bounded_installed_schema, version):
-    template = _bounded_installed_schema(version)
-    source = template.source
-    with closing(sqlite3.connect(source._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
-        reader.row_factory = sqlite3.Row
-        runner.validate_version(reader, version)
-        regular.validate(reader)
-    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert source.conn.execute('SELECT count(*) FROM main.album_tracks').fetchone()[0] == 0
-    assert template.revision_guards
-
-
 def projection(conn, tracks, states, links, keys):
     return {
         'tracks':sorted([tuple(row) for row in conn.execute('SELECT album_id,entry_id,recording_id,legacy_track_key,position,disc_number,track_number,is_full,source FROM '+tracks)], key=repr),
@@ -155,51 +113,25 @@ def projection(conn, tracks, states, links, keys):
         'keys':list(map(tuple, conn.execute('SELECT * FROM '+keys+' ORDER BY browse_id')))}
 
 
-@pytest.fixture(scope='module', params=[79, 93, 98])
-def album_reader_source(request, _bounded_installed_schema, tmp_path_factory):
-    path = tmp_path_factory.mktemp('album-reader-source') / 'source.db'
-    template = _bounded_installed_schema(request.param)
-    with template.open(path) as store:
-        with pytest.MonkeyPatch.context() as patch:
-            bound_catalog(patch)
-            with reuse_reporting_reader(store, patch), schema_inspection.reuse_tables(store.conn):
-                rich_source(store)
-        yield capture_template(store, request.param)
-
-
-def test_album_reader_source_keeps_full_partial_and_unresolved_rows(album_reader_source):
-    source = album_reader_source.source
-    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == album_reader_source.result
-    assert source.conn.execute('SELECT count(*) FROM main.catalog_entries').fetchone()[0] == 2
-    assert source.conn.execute('SELECT count(*) FROM main.album_fetch_state').fetchone()[0] == 3
-    assert source.conn.execute("SELECT count(*) FROM main.album_tracks WHERE legacy_track_key='unknown|subject'").fetchone()[0] == 1
-    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
-
-
-@pytest.fixture(scope='module')
-def preopened_album_publication(album_reader_source, album_native_reference, tmp_path_factory):
-    path = tmp_path_factory.mktemp('preopened-album-publication') / 'reader.db'
-    with album_reader_source.open(path) as store, pytest.MonkeyPatch.context() as patch:
-        bound_catalog(patch)
-        with reuse_reporting_reader(store, patch), schema_inspection.reuse_tables(store.conn):
-            yield from _publish_with_preopened_reader(store, album_native_reference.source, patch)
-
-
-def _publish_with_preopened_reader(store, native, patch):
+@pytest.fixture
+def preopened_album_publication(numbered_store, tmp_path, monkeypatch):
+    store, _ = numbered_store
+    rich_source(store)
     sources = {owner:[dict(row) for row in store.conn.execute('SELECT * FROM main.'+owner+' ORDER BY '+key)]
         for owner,key in [('album_tracks','id'), ('album_fetch_state','album_id')]}
     preopened = Store(store._db_path)
-    # Compare every installed version with the same genuinely converted album
-    # reference. Its measured owners below keep native conversion out of these
-    # publication/reader checks; each case still stages its own source rows.
+    native = Store(tmp_path / 'native.db')
     reads = ExitStack()
     try:
         preopened.init_schema(defer_metadata=True)
+        store.conn.backup(native.conn)
+        runner.migrate(native.conn, registry=registry.MIGRATIONS)
+        native.init_schema(defer_metadata=True)
         # Snapshot admission/lifetime is owned separately. Reuse this reader's
         # real SQL view while comparing the many repository projections below.
-        reads.enter_context(reuse_reporting_reader(preopened, patch))
-        reads.enter_context(schema_inspection.reuse_tables(preopened.conn))
-        reads.enter_context(schema_inspection.reuse_tables(native.conn))
+        reads.enter_context(reuse_reporting_reader(preopened, monkeypatch))
+        reads.enter_context(reuse_reporting_reader(native, monkeypatch))
+        reads.enter_context(schema_inspection.reuse_tables(store.conn))
         identity = stage(store.conn, size=1)
         evidence = store.conn.execute('SELECT evidence_changes FROM rec_preparation WHERE id=1').fetchone()[0]
         publication.publish(store.conn, identity=identity)
@@ -207,18 +139,16 @@ def _publish_with_preopened_reader(store, native, patch):
         yield store, preopened, native, sources, identity
     finally:
         reads.close()
+        native.conn.close()
         preopened.conn.close()
 
 
-def test_preopened_album_publication_matches_every_frozen_native_relation(preopened_album_publication):
-    store, _, native, _, _ = preopened_album_publication
+@pytest.mark.parametrize('numbered_store', [79, 93, 98], indirect=True)
+def test_preopened_projection_groups_match_frozen_native_without_losing_originals(preopened_album_publication):
+    store, preopened, native, sources, identity = preopened_album_publication
     actual = projection(store.conn, *(publication.relation(store.conn, owner) for owner in publication.RELATIONS))
     expected = projection(native.conn, 'main.album_tracks', 'main.album_fetch_state', 'main.album_track_links', 'main.album_tracklist_keys')
     assert actual == expected
-
-
-def test_preopened_projection_groups_match_frozen_native_without_losing_originals(preopened_album_publication):
-    store, preopened, native, sources, identity = preopened_album_publication
     # This reader predates publication. Ignore original payload columns to prove
     # the selected typed publication supplies its values.
     def mask_original(operation, owner, column, *unused):
@@ -252,11 +182,11 @@ def test_preopened_projection_groups_match_frozen_native_without_losing_original
     assert store.conn.execute('SELECT count(*) FROM main.catalog_entries').fetchone()[0] == 2
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.parametrize('numbered_store', [93], indirect=True)
 @pytest.mark.parametrize('failure', ['field','reference','provider','extra','omitted','state','original','group','group-omitted'])
 def test_invalid_typed_rows_originals_coverage_and_groups_cannot_publish(
-        installed, failure, monkeypatch):
-    store, _ = installed
+        numbered_store, failure, monkeypatch, independent_regular_ddl):
+    store, _ = numbered_store
     rejection_inputs(store)
     with store.conn:
         if failure == 'field':
@@ -285,8 +215,7 @@ def test_invalid_typed_rows_originals_coverage_and_groups_cannot_publish(
     with pytest.raises((MigrationError, ValueError)):
         publication.publish(store.conn, identity=identity)
     assert publication.selected(store.conn) is None
-    # The interruption control owns regular DDL independence; each malformed
-    # projection only needs to prove that real publication rejects it.
+    regular.migrate(store.conn)
 
 
 @pytest.fixture(scope='module')

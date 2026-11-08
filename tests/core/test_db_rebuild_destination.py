@@ -115,6 +115,15 @@ def admitted_development93(admitted_development93_template, tmp_path):
         return path
 
 
+@pytest.fixture
+def admitted_development93_store(admitted_development93_template, tmp_path):
+    # Admission has its real owners above. Installation consumes one private
+    # admitted copy, without closing it and replaying admission immediately.
+    with admitted_development93_template.open(tmp_path / 'development93.db') as store:
+        store.conn.execute('PRAGMA synchronous=NORMAL')
+        yield store
+
+
 @pytest.fixture(autouse=True)
 def destination_phase_costs(monkeypatch, record_property, completed_destination_schema):
     """Keep actual conversions and verifiers; report inclusive phase costs."""
@@ -919,9 +928,13 @@ def test_real_import_installs_or_rolls_back_with_feedback_retained(
         request, source_fixture, failure, installation_destination):
     from yt_playlist.core import legacy_journals, playback_feedback
     from yt_playlist.core.db_rebuild import job
-    path = request.getfixturevalue('admitted_development93' if source_fixture == 'development93' else source_fixture)
-    store = Store(path)
-    store.init_schema()
+    if source_fixture == 'development93':
+        store = request.getfixturevalue('admitted_development93_store')
+        path = store._db_path
+    else:
+        path = request.getfixturevalue(source_fixture)
+        store = Store(path)
+        store.init_schema()
     original_files = {}
     if source_fixture == 'development93':
         with store.conn:
@@ -974,4 +987,5 @@ def test_real_import_installs_or_rolls_back_with_feedback_retained(
                 '{"paid":true,"decision":"keep"}')
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
     finally:
-        store.conn.close()
+        if source_fixture != 'development93':
+            store.conn.close()

@@ -7,10 +7,16 @@ import pytest
 
 from tests.core.test_predecessor_writes import installed
 from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import numbered_store
 from yt_playlist.core import collection_recovery, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import road_trip_drafts as preparation
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Draft preparation does not construct the HTTP application."""
 
 
 def finish(conn, size=16):
@@ -42,14 +48,15 @@ def seed(store):
     return identity, raw
 
 
-@pytest.mark.parametrize('installed', [79, 93], indirect=True)
-def test_exact_decisions_repetitions_unknowns_and_authority_survive_preparation(installed):
-    store, _ = installed
+@pytest.mark.parametrize('numbered_store', [79, 93], indirect=True)
+def test_exact_decisions_repetitions_unknowns_and_authority_survive_preparation(numbered_store, independent_regular_ddl):
+    store, _ = numbered_store
     conn = store.conn
     identity, raw = seed(store)
     preparation.JOB.install(conn)
     assert preparation.JOB.step(conn, batch_size=2).processed == 2
     assert head(conn, identity) is None
+    regular.migrate(conn)
     finish(conn)
     row = head(conn, identity)
     assert preparation.read_original(conn, row) == raw

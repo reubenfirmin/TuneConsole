@@ -19,3 +19,8 @@ def _controller():
 
 def limit_native_threads():
     _controller().limit(limits=1)
+
+
+def single_threaded():
+    """Temporarily bound a calculation without rediscovering native libraries."""
+    return _controller().limit(limits=1)

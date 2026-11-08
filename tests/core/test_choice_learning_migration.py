@@ -50,6 +50,9 @@ def interests():
 def seed_learning_input(store):
     from tests.group_support import publish, recordings
 
+    # Completed private fixture writes need commit visibility; crash durability
+    # belongs to the real upgrade and recovery owners.
+    store.conn.execute('PRAGMA synchronous=NORMAL')
     store.tracks.upsert_track('video', 'Song', 'Artist', 'Album', 100, album_browse_id='release')
     store.rec_proposals.put_proposals('choice_interests', interests(), None)
     store.rec_proposals.put_proposals('choice_bandit', {'rows': [{'mode_id': 99, 'estimate': .5}], 'expires_at': None}, None)
@@ -68,6 +71,7 @@ def seed_learning_input(store):
 def learning_native_schema(_bounded_installed_schema, tmp_path_factory):
     with _bounded_installed_schema(92).open(
             tmp_path_factory.mktemp('choice-learning-regular-input') / 'source.db') as source:
+        source.conn.execute('PRAGMA synchronous=NORMAL')
         with source.conn:
             install_regular_input(source.conn, regular.CHANGES)
         yield capture_template(source, None)

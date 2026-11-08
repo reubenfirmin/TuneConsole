@@ -320,12 +320,17 @@ def test_callers_name_repository_owners_and_retired_modules_stay_retired(paths):
 
 def test_persistence_and_playlist_primitives_do_not_import_their_consumers():
     modules = _modules()
-    for name, tree in modules.items():
+    playlist_primitives = {"yt_playlist.library.playlist_metadata", "yt_playlist.library.playlist_writes",
+                          "yt_playlist.library.playlist_mutation", "yt_playlist.library.sync"}
+    for name in modules:
+        if not (name.startswith('yt_playlist.repos.') or name in playlist_primitives
+                or name == 'yt_playlist.rec.ordering'):
+            continue
+        tree = modules[name]
         imports = set(_imports(tree, name))
         if name.startswith("yt_playlist.repos."):
             assert not _persistence_consumers(tree, name), name
-        if name in {"yt_playlist.library.playlist_metadata", "yt_playlist.library.playlist_writes",
-                    "yt_playlist.library.playlist_mutation", "yt_playlist.library.sync"}:
+        if name in playlist_primitives:
             assert "yt_playlist.library.executor" not in imports, name
         if name == "yt_playlist.rec.ordering":
             assert not imports & {"yt_playlist.rec.journeys", "yt_playlist.rec.surfaces"}

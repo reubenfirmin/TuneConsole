@@ -8,14 +8,34 @@ import pytest
 
 from tests.group_support import publish, recordings
 from tests.test_group_preparation import seed
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.store import Store
 from yt_playlist.rec import group_discovery, group_preparation, group_versions
 from yt_playlist.repos import group_publication
 
 
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('house', 'House'),)) as schema:
+        yield schema
+
+
+def test_group_resume_input_keeps_empty_heads_and_real_guards(_pristine_current_schema):
+    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert _pristine_current_schema._revision_script
+    assert not _pristine_current_schema.execute('SELECT 1 FROM group_generations').fetchone()
+    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
+
+
 @pytest.fixture
 def database(file_backed_store):
+    # Real WAL commits, lease ownership and rollback remain under test; machine
+    # power-loss durability is independent of these committed-prefix cases.
+    file_backed_store.conn.execute('PRAGMA synchronous=NORMAL')
+    # Checkpoint scheduling has independent real owners in
+    # core/test_publication_checkpoint; retain every WAL commit here.
+    file_backed_store.conn.execute('PRAGMA wal_autocheckpoint=0')
     return file_backed_store
 
 
@@ -116,6 +136,8 @@ def test_preparation_resumes_exact_plan_and_legacy_versions(database, monkeypatc
         database.conn.close()
         database = Store(path)
         request.addfinalizer(database.conn.close)
+        database.conn.execute('PRAGMA synchronous=NORMAL')
+        database.conn.execute('PRAGMA wal_autocheckpoint=0')
         database.init_schema()
         worker = group_preparation.Preparation(database)
     assert worker.step(2060)

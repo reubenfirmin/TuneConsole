@@ -3,7 +3,21 @@ import sqlite3
 import numpy as np
 import pytest
 
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.rec import choice_bandit, choice_evidence as choices, mode_eval, rec_params
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('jazz', 'Jazz'), ('house', 'House'))) as schema:
+        yield schema
+
+
+def test_bandit_input_keeps_empty_evidence_and_real_guards(_pristine_current_schema):
+    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert _pristine_current_schema._revision_script
+    assert not _pristine_current_schema.execute('SELECT 1 FROM choice_mode_estimates').fetchone()
+    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def modes(store, *, space='basis', flipped=False, reps=('a', 'b')):

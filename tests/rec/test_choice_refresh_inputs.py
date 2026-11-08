@@ -6,8 +6,22 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.core import mix_choices
 from yt_playlist.rec import album_feedback_state, candidate_refresh, choice_learning, rec_params
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('jazz', 'Jazz'), ('house', 'House'))) as schema:
+        yield schema
+
+
+def test_refresh_input_keeps_empty_typed_owners_and_real_guards(_pristine_current_schema):
+    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert _pristine_current_schema._revision_script
+    assert not _pristine_current_schema.execute('SELECT 1 FROM choice_interest_contexts').fetchone()
+    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def full_fingerprint(store, now):

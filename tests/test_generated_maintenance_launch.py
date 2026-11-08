@@ -8,8 +8,37 @@ from fastapi.testclient import TestClient
 import pytest
 
 from tests.conftest import FakeClient, _track
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.library.sync import sync_identity
 from yt_playlist.web.app import create_app
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+def test_maintenance_input_keeps_empty_playlists_and_real_guards(_pristine_current_schema):
+    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert _pristine_current_schema._revision_script
+    assert not _pristine_current_schema.execute('SELECT 1 FROM playlists').fetchone()
+    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.fixture(autouse=True)
+def maintenance_routes(monkeypatch):
+    # Exercise the real middleware, generation, remote/local playlist handling,
+    # bridge and sync. Unrelated chart, discovery and editing routers are below
+    # this HTTP contract, as is metadata-provider configuration.
+    from yt_playlist.providers import genres
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, home, playlists, sync
+
+    monkeypatch.setattr(webapp, 'build_all',
+                        lambda ctx: [module.build(ctx) for module in
+                                     (app_update, audio_preview, home, playlists, sync)])
+    monkeypatch.setattr(genres, 'configure', lambda *args, **kwargs: None)
 
 
 @pytest.mark.parametrize('phase', ['compacting', 'checkpoint'])

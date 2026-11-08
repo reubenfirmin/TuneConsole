@@ -6,6 +6,7 @@ import pytest
 
 from tests.radio_candidate_support import intensity_inputs
 from tests.radio_session_support import controlled_radio_checkpoints, radio_controller, play
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.core import catalog
 from yt_playlist.rec import embedding_vectors, musical_character, radio_tuning
 from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, RadioCandidates
@@ -16,6 +17,17 @@ from yt_playlist.web.request_priority import RequestPriorityMiddleware
 from yt_playlist.web.routes import radio_session as radio_routes
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These controller checks build their own app without background jobs."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('electronic', 'Electronic'), ('ambient', 'Ambient'))) as schema:
+        yield schema
 
 
 @pytest.fixture

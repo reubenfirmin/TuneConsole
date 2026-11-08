@@ -10,6 +10,7 @@ import json
 import math
 
 from yt_playlist.core.activity import WorkBudgetExceeded, check_stopping
+from yt_playlist.core.numerics import single_threaded
 from . import vibe_joint_common as joint
 
 MAX_MIXTURE = joint.MAX_MIXTURE
@@ -55,7 +56,6 @@ def fit(rows, vibe, *, fixed=None, memory_bytes=joint.MEMORY_BYTES):
     from scipy.optimize import minimize
     from scipy.sparse import diags
     from scipy.special import expit, logit
-    from threadpoolctl import threadpool_limits
 
     rows = joint.unique(rows)
     if not rows:
@@ -66,7 +66,7 @@ def fit(rows, vibe, *, fixed=None, memory_bytes=joint.MEMORY_BYTES):
     base_bytes = len(joint.canonical(rows)) * 4 + len(rows) * 2048 + 8 * 1024 * 1024
     if base_bytes > memory_bytes:
         raise WorkBudgetExceeded('Joint vibe originals exceed the fit memory budget')
-    with threadpool_limits(limits=1):
+    with single_threaded():
         matrix, features, kinds = design(rows)
         order, fill, accounted = joint._ordering(matrix, base_bytes, memory_bytes)
         matrix, kinds = matrix[:, order], [kinds[index] for index in order]
@@ -150,7 +150,6 @@ def predict(posterior, artists, genre, *, album, metadata_prior):
     import numpy as np
     from scipy.optimize import brentq
     from scipy.special import expit, logit, ndtr
-    from threadpoolctl import threadpool_limits
 
     if metadata_prior is None or not math.isfinite(metadata_prior) or not 0 <= metadata_prior <= 1:
         raise ValueError('A calibrated prediction requires its masked metadata prior')
@@ -179,7 +178,7 @@ def predict(posterior, artists, genre, *, album, metadata_prior):
     means, variances, weights = [], [], []
     average = np.zeros(len(posterior.features))
     source_count = len({row['source'] for row in posterior.rows})
-    with threadpool_limits(limits=1):
+    with single_threaded():
         for (source, support, noise), count in posterior.population.items():
             check_stopping()
             conditional = vector.copy()

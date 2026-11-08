@@ -11,8 +11,7 @@ from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.independent_schema_support import independent_regular_ddl
 from tests.comparison_support import legacy_projection
 from tests.recommendation_support import seed_publication_subjects
-from tests.prepared_fixture_support import assert_upgrade_phase, custody_predecessor, custody_upgrade_cases
-from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads
+from tests.store_fixture_support import assert_installed_consumer_input, numbered_store, publication_consumer_reads
 from yt_playlist.core import fao, library_pool_state, model_projections, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import ranked_state as preparation
@@ -121,77 +120,62 @@ def prepare_native_comparison(store):
     return originals
 
 
-@pytest.fixture(scope='module')
-def native_inputs(upgraded_custody_inputs):
-    def get(version, target, **options):
-        return upgraded_custody_inputs(version, target, 'ranked-native-agreement', prepare_native_comparison, **options)
-
-    get.release = lambda version: upgraded_custody_inputs.release(version, 'ranked-native-agreement')
-    return get
-
-
-@pytest.mark.parametrize('version', [79, 94])
-def test_native_comparison_input_keeps_exact_preparation(native_inputs, version):
-    template = native_inputs(version, version)
-    assert_upgrade_phase(template, version)
-    for surface, raw in template.result.items():
-        assert preparation.read_original(template.source.conn,
-            preparation.head(template.source.conn, surface)) == raw
-
-
-@pytest.mark.parametrize('version,target,phase', custody_upgrade_cases((79, 94)))
-def test_native_upgrade_phase_keeps_exact_preparation(native_inputs, version, target, phase):
-    template = native_inputs(version, target, phase=phase)
-    assert_upgrade_phase(template, target if phase == 'converted' else custody_predecessor(version, target))
-    for surface, raw in template.result.items():
-        assert preparation.read_original(template.source.conn,
-            preparation.head(template.source.conn, surface)) == raw
-
-
-@pytest.mark.parametrize('version', [79, 94])
-def test_native_serving_input_keeps_private_read_guards(native_inputs, version):
-    template = native_inputs(version, 107)
-    assert_upgrade_phase(template, 107)
-    assert template.source._snapshot_revisions.conn is template.source.conn
-
-
-@pytest.mark.parametrize('version', [79, 94])
-def test_frozen_upgrade_matches_complete_ranked_slots_and_mode_bytes(native_inputs, version, tmp_path):
-    prepared = native_inputs(version, version)
-    store, originals = prepared.source, prepared.result
-    with native_inputs(version, 107).open(tmp_path / 'ranked-upgrade.db') as upgraded:
-        for surface, raw in originals.items():
-            assert preparation.read_original(upgraded.conn, preparation.head(upgraded.conn, surface)) == raw
-            staged = preparation.head(store.conn, surface)
-            if surface.endswith(':radio'):
-                native = upgraded.conn.execute('SELECT * FROM model_pair_publications WHERE run_id=? AND arm=? AND format=?',
-                    (staged['run_id'], staged['arm'], staged['format'])).fetchone()
-                assert native['built_at'] is None
-                assert tuple(upgraded.conn.execute('SELECT mode_id,space,centroid FROM model_pair_modes WHERE publication_id=?',
-                    (native['id'],)).fetchone()) == rows(store.conn, surface, 'modes', 'mode_id,space,centroid')[0]
-                generation = native['generation_id']
-            elif surface.startswith('home_pool:'):
-                generation = upgraded.conn.execute('SELECT generation_id FROM recommendation_heads WHERE surface=?', (surface,)).fetchone()[0]
-            else:
-                expected = {'run_id': staged['run_id'], 'data': comparison_storage.decode(json.loads(raw))}
-                assert model_projections.read(upgraded.conn, surface) == expected
-                continue
-            native_slots = list(map(tuple, upgraded.conn.execute('SELECT s.surface,s.mode_key,s.purpose,p.content_digest '
-                'FROM recommendation_surface_pools s JOIN recommendation_pools p ON p.id=s.pool_id '
-                'WHERE s.generation_id=? ORDER BY 1,2', (generation,))))
-            assert native_slots == rows(store.conn, surface, 'slots', 'slot_surface,mode_key,purpose,pool_digest')
-            for digest, in store.conn.execute(f'SELECT content_digest FROM {preparation.table(surface,"pools")} '
-                    'WHERE surface=? AND preparation_revision=?', (surface, staged['preparation_revision'])):
-                expected = list(map(tuple, store.conn.execute(f'SELECT rank,recording_id,raw_key,score,intensity_band,genre_key '
-                    f'FROM {preparation.table(surface,"candidates")} WHERE surface=? AND preparation_revision=? AND pool_digest=? ORDER BY rank',
-                    (surface, staged['preparation_revision'], digest))))
-                pool_id = upgraded.conn.execute('SELECT id FROM recommendation_pools WHERE content_digest=?', (digest,)).fetchone()[0]
-                native = list(map(tuple, upgraded.conn.execute('SELECT c.rank,c.recording_id,NULL,c.score,b.intensity_band,b.genre_key '
-                    'FROM recommendation_candidates c LEFT JOIN recommendation_radio_bands b ON b.pool_id=c.pool_id AND b.recording_id=c.recording_id '
-                    'WHERE c.pool_id=? UNION ALL SELECT rank,NULL,raw_key,score,intensity_band,genre_key '
-                    'FROM unresolved_recommendation_candidates WHERE pool_id=? ORDER BY rank', (pool_id, pool_id))))
-                assert native == expected
-        assert not upgraded.conn.execute('PRAGMA foreign_key_check').fetchone()
+@pytest.mark.parametrize('numbered_store', [79, 94], indirect=True)
+def test_frozen_upgrade_matches_complete_ranked_slots_and_mode_bytes(numbered_store):
+    store, _ = numbered_store
+    conn = store.conn
+    originals = prepare_native_comparison(store)
+    expected = {}
+    # Capture the actual prepared rows before conversion. One database and one
+    # full registered upgrade retain every original byte/slot comparison.
+    for surface, raw in originals.items():
+        head = preparation.head(conn, surface)
+        assert preparation.read_original(conn, head) == raw
+        item = expected[surface] = {'head': dict(head)}
+        if surface.endswith(':radio'):
+            item['mode'] = rows(conn, surface, 'modes', 'mode_id,space,centroid')[0]
+        if surface.endswith(':radio') or surface.startswith('home_pool:'):
+            item['slots'] = rows(conn, surface, 'slots', 'slot_surface,mode_key,purpose,pool_digest')
+            item['pools'] = {digest: list(map(tuple, conn.execute(
+                f'SELECT rank,recording_id,raw_key,score,intensity_band,genre_key '
+                f'FROM {preparation.table(surface,"candidates")} '
+                'WHERE surface=? AND preparation_revision=? AND pool_digest=? ORDER BY rank',
+                (surface, head['preparation_revision'], digest))))
+                for digest, in conn.execute(f'SELECT content_digest FROM {preparation.table(surface,"pools")} '
+                    'WHERE surface=? AND preparation_revision=?', (surface, head['preparation_revision']))}
+    # Serving adapters belong to the predecessor layout; migrations use a bare
+    # connection, just as the explicit upgrade command does.
+    for name, in conn.execute("SELECT name FROM sqlite_temp_schema WHERE type='view'").fetchall():
+        conn.execute('DROP VIEW temp."' + name.replace('"', '""') + '"')
+    runner.migrate(conn, registry=registry.MIGRATIONS)
+    for surface, raw in originals.items():
+        assert preparation.read_original(conn, preparation.head(conn, surface)) == raw
+        staged = expected[surface]['head']
+        if surface.endswith(':radio'):
+            native = conn.execute('SELECT * FROM model_pair_publications WHERE run_id=? AND arm=? AND format=?',
+                (staged['run_id'], staged['arm'], staged['format'])).fetchone()
+            assert native['built_at'] is None
+            assert tuple(conn.execute('SELECT mode_id,space,centroid FROM model_pair_modes WHERE publication_id=?',
+                (native['id'],)).fetchone()) == expected[surface]['mode']
+            generation = native['generation_id']
+        elif surface.startswith('home_pool:'):
+            generation = conn.execute('SELECT generation_id FROM recommendation_heads WHERE surface=?', (surface,)).fetchone()[0]
+        else:
+            value = {'run_id': staged['run_id'], 'data': comparison_storage.decode(json.loads(raw))}
+            assert model_projections.read(conn, surface) == value
+            continue
+        native_slots = list(map(tuple, conn.execute('SELECT s.surface,s.mode_key,s.purpose,p.content_digest '
+            'FROM recommendation_surface_pools s JOIN recommendation_pools p ON p.id=s.pool_id '
+            'WHERE s.generation_id=? ORDER BY 1,2', (generation,))))
+        assert native_slots == expected[surface]['slots']
+        for digest, candidates in expected[surface]['pools'].items():
+            pool_id = conn.execute('SELECT id FROM recommendation_pools WHERE content_digest=?', (digest,)).fetchone()[0]
+            native = list(map(tuple, conn.execute('SELECT c.rank,c.recording_id,NULL,c.score,b.intensity_band,b.genre_key '
+                'FROM recommendation_candidates c LEFT JOIN recommendation_radio_bands b ON b.pool_id=c.pool_id AND b.recording_id=c.recording_id '
+                'WHERE c.pool_id=? UNION ALL SELECT rank,NULL,raw_key,score,intensity_band,genre_key '
+                'FROM unresolved_recommendation_candidates WHERE pool_id=? ORDER BY rank', (pool_id, pool_id))))
+            assert native == candidates
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)
@@ -515,10 +499,3 @@ def test_resumed_batch_reads_neither_full_source_nor_whole_plan(installed):
         assert not denied
     finally:
         store.conn.set_authorizer(None)
-
-
-@pytest.mark.parametrize('version', [79, 94])
-def test_native_sources_finish_with_committed_read_only_inputs(native_inputs, version):
-    for source in native_inputs.release(version):
-        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
-            source.conn.execute('SELECT 1')

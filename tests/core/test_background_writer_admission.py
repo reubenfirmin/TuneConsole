@@ -4,11 +4,13 @@ from contextlib import closing, ExitStack
 import sqlite3
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from yt_playlist.core.activity import cancellable_work, check_cancellable_work, WorkClosing
 from yt_playlist.core import provider_frontiers
+from yt_playlist.core import db_writes
 from yt_playlist.rec import group_roots
 
 
@@ -85,9 +87,19 @@ def test_contended_background_entry_point_leaves_foreground_available(database, 
 
 @pytest.mark.parametrize('kind', ['provider-changed', 'recommendation-write', 'snapshot'])
 @pytest.mark.parametrize('ending', ['cancel', 'timeout'])
-def test_contended_background_unit_cancels_or_times_out_without_partial_output(database, kind, ending):
+def test_contended_background_unit_cancels_or_times_out_without_partial_output(database, kind, ending, monkeypatch):
     store = database
     stopped = threading.Event()
+    elapsed, waits = 0., []
+    def advance(seconds):
+        nonlocal elapsed
+        waits.append(seconds)
+        elapsed += seconds
+    # Keep actual SQLITE_BUSY attempts and the production one-second deadline;
+    # only the clock and sleeping beneath writer admission are controlled.
+    if ending == 'timeout':
+        monkeypatch.setattr(db_writes, 'time', SimpleNamespace(
+            monotonic=lambda: elapsed, sleep=advance))
     if ending == 'cancel':
         store.conn.set_trace_callback(lambda sql: stopped.set() if sql == 'BEGIN IMMEDIATE' else None)
     with ExitStack() as stack:
@@ -99,6 +111,8 @@ def test_contended_background_unit_cancels_or_times_out_without_partial_output(d
                 with cancellable_work(stopped.is_set), store.priority.background(check_cancellable_work):
                     run()
             assert time.monotonic() - started < (1 if ending == 'cancel' else 2)
+        if ending == 'timeout':
+            assert waits and elapsed == pytest.approx(1.)
         assert not store.conn.in_transaction
         assert store.settings.get_setting('result') is None
         assert store.conn.execute('SELECT fingerprint FROM enrichment_provider_config').fetchone()[0] == 'original'

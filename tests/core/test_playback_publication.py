@@ -7,10 +7,14 @@ import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_playback_context_preparation import finish, head, seed
+from tests.store_fixture_support import publication_schema_inspections
 from yt_playlist.core import album_playback_context, entity_names, playback_bindings
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import playback_context as preparation, playback_publication as publication
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_schema_inspections')
 
 
 def prepare(conn, owner):

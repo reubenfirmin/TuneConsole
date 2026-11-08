@@ -6,12 +6,25 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_metadata_owner_cutover import predecessor, seed
+from tests.core.test_metadata_owner_cutover import predecessor as metadata_predecessor, seed
 from tests.core.test_metadata_preparation import finish
 from tests.independent_schema_support import independent_regular_ddl
 from yt_playlist.core import catalog, genre_identity, metadata
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import metadata_evidence as preparation, metadata_publication as publication
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Metadata publication does not construct the HTTP application."""
+
+
+@pytest.fixture
+def predecessor(metadata_predecessor):
+    # These cases check committed SQL and file publication, without simulating
+    # a machine power failure between WAL synchronization points.
+    metadata_predecessor.conn.execute('PRAGMA synchronous=NORMAL')
+    return metadata_predecessor
 
 
 def publish(conn):
@@ -141,7 +154,8 @@ def test_stale_verification_and_interrupted_selection_preserve_owner(predecessor
 
 @pytest.mark.parametrize('owner,column', [('metadata_findings','value_json'),('enrichment_log','value'),
     ('metadata_decisions','legacy_ref'),('enrichment_provider_state','error')])
-def test_all_source_payloads_are_clipped_before_transfer_and_fail_without_truncation(predecessor,owner,column):
+def test_all_source_payloads_are_clipped_before_transfer_and_fail_without_truncation(
+        predecessor, owner, column, independent_regular_ddl):
     conn = predecessor.conn
     seed(predecessor)
     raw = 'x'*(preparation.MAX_SOURCE_BYTES+1)
@@ -154,4 +168,5 @@ def test_all_source_payloads_are_clipped_before_transfer_and_fail_without_trunca
     with pytest.raises(MigrationError,match='byte budget'):
         finish(conn)
     assert preparation.JOB.progress(conn).status=='failed'
+    regular.migrate(conn)
     assert conn.execute('SELECT 1 FROM '+owner+' WHERE '+column+'=?',(raw,)).fetchone()

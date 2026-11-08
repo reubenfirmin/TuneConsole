@@ -8,10 +8,13 @@ from uuid import uuid4
 import pytest
 
 from tests.test_audio_vibes import sample
+from tests.genre_catalog_support import bound_shipped_catalog
 from tests.prepared_fixture_support import capture_template, historical_template, prepared_template
-from tests.store_fixture_support import reuse_reporting_reader
+from tests.recommendation_support import seed_publication_subjects
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
 from yt_playlist.core import catalog, fao, vibe_provenance
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
+from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
 from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import home_vibe, musical_character, musical_preparation, vibe_prediction as policy
@@ -19,11 +22,59 @@ from yt_playlist.rec import vibe_preparation, vibe_joint_model as joint, vibe_jo
 from yt_playlist.rec.progressive import Budget, Preparation
 
 
+@pytest.fixture(scope='module')
+def prediction_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+def test_prediction_consumer_input_keeps_sql_guards_without_prepared_outputs(prediction_schema):
+    assert prediction_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert prediction_schema._revision_script
+    assert prediction_schema.execute('SELECT count(*) FROM recordings').fetchone()[0] == 0
+    assert prediction_schema.execute('SELECT count(*) FROM recording_vibes').fetchone()[0] == 0
+    assert prediction_schema.execute('SELECT count(*) FROM genre_catalog').fetchone()[0] == 0
+    assert not prediction_schema.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.fixture
+def prediction_store(prediction_schema, tmp_path, monkeypatch):
+    from yt_playlist.core import genre_identity
+
+    # Keep the documented parent edges used by the categorical-prior check.
+    bound_shipped_catalog(monkeypatch, ('psybient', 'detroit techno', 'electronic', 'techno', 'edm'))
+    store = Store(tmp_path / 'predictions.db')
+    try:
+        # These consumers own committed prediction facts, not power-loss recovery.
+        store.conn.execute('PRAGMA synchronous=NORMAL')
+        initialize_consumer(store, prediction_schema)
+        store.conn.execute('PRAGMA wal_autocheckpoint=0')
+        with store.conn:
+            genre_identity.seed_catalog(store.conn)
+        with reuse_reporting_reader(store, monkeypatch):
+            yield store
+    finally:
+        store.conn.close()
+
+
 def track(store, name, genre='Psybient', artist='Shared artist'):
     tid = store.tracks.upsert_track(name, name, artist, '', 240)
     with store.conn:
         catalog.choose_field(store.conn, tid, 'genre', genre)
     return tid, store.tracks.identity_key_for_video(name)
+
+
+def catalog_track(store, name, genre='Psybient', artist='Shared artist'):
+    """Completed catalog inputs beneath measurement and prediction owners."""
+    from yt_playlist.util.matching import identity_key
+
+    key = identity_key(name, artist)
+    with atomic_write(store):
+        seed_publication_subjects(store, [{'key': key, 'video_id': name, 'title': name,
+            'artist': artist, 'genre': genre, 'duration_s': 240}])
+        tid = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?', (name,)).fetchone()[0]
+        store.artists.observe(tid, artist, source='fixture')
+    return tid, key
 
 
 def capture(store, video, *, calm=True, count=3):
@@ -361,15 +412,17 @@ def test_consistent_distinct_songs_strengthen_sparse_prediction_and_disagreement
         joint.fit([crowded], 'relax', memory_bytes=12 * 1024 * 1024)
 
 
-def test_audio_wins_then_joint_artist_and_subgenre_then_sparse_fallback(store, qualified_candidate):
-    _tid, measured = track(store, 'measured')
-    _tid, same = track(store, 'same')
-    _tid, other_style = track(store, 'other-style', 'Detroit Techno')
-    _tid, other_artist = track(store, 'other-artist', artist='Another artist')
-    _tid, empty = track(store, 'empty', 'Electronic', 'Unrelated')
+def test_audio_wins_then_joint_artist_and_subgenre_then_sparse_fallback(
+        prediction_store, qualified_candidate, relax_joint_channel):
+    store = prediction_store
+    _tid, measured = catalog_track(store, 'measured')
+    _tid, same = catalog_track(store, 'same')
+    _tid, other_style = catalog_track(store, 'other-style', 'Detroit Techno')
+    _tid, other_artist = catalog_track(store, 'other-artist', artist='Another artist')
+    _tid, empty = catalog_track(store, 'empty', 'Electronic', 'Unrelated')
     capture(store, 'measured')
     capture(store, 'other-style', calm=False)
-    drain(store, batch=2)
+    drain(store)
     own, predicted, techno, genre, fallback = [fits(store, key) for key in
                                             (measured, same, other_style, other_artist, empty)]
     assert own['relax']['source'] == techno['relax']['source'] == 'audio_measurement'
@@ -390,9 +443,11 @@ def test_audio_wins_then_joint_artist_and_subgenre_then_sparse_fallback(store, q
     assert musical_character.intensity({'musical': compact[other_style]}) > .8
 
 
-def test_masked_metadata_refits_after_categorical_changes_without_learning_own_numeric_fields(store, qualified_candidate):
-    entry, own = track(store, 'metadata-original')
-    _entry, target = track(store, 'metadata-target')
+def test_masked_metadata_refits_after_categorical_changes_without_learning_own_numeric_fields(
+        prediction_store, qualified_candidate, relax_joint_channel):
+    store = prediction_store
+    entry, own = catalog_track(store, 'metadata-original')
+    _entry, target = catalog_track(store, 'metadata-target')
     capture(store, 'metadata-original')
     drain(store)
 
@@ -451,9 +506,11 @@ def test_symbolic_cache_rechecks_memory_and_distinguishes_equal_size_graphs(monk
     assert actual[1] != expected[1]
 
 
-def test_replays_are_one_recording_partial_runs_do_not_replace_complete_and_annotations_never_seed(store, qualified_candidate):
-    _tid, one = track(store, 'one')
-    _tid, two = track(store, 'two')
+def test_replays_are_one_recording_partial_runs_do_not_replace_complete_and_annotations_never_seed(
+        prediction_store, qualified_candidate, relax_joint_channel):
+    store = prediction_store
+    _tid, one = catalog_track(store, 'one')
+    _tid, two = catalog_track(store, 'two')
     samples = capture(store, 'one')
     drain(store)
     before = fits(store, two)
@@ -492,10 +549,11 @@ def test_broad_genres_cannot_seed_genre_predictions(store, genre):
     assert not store.conn.execute('SELECT 1 FROM recording_vibes WHERE subgenre_key IS NOT NULL').fetchone()
 
 
-def test_provider_classifiers_seed_predictions_without_captured_audio_or_prepared_state(file_backed_store, qualified_candidate):
-    store = file_backed_store
-    tid, own = track(store, 'provider')
-    _tid, target = track(store, 'target')
+def test_provider_classifiers_seed_predictions_without_captured_audio_or_prepared_state(
+        prediction_store, qualified_candidate, relax_joint_channel):
+    store = prediction_store
+    tid, own = catalog_track(store, 'provider')
+    _tid, target = catalog_track(store, 'target')
     store.enrichment_state.record_metadata_observations(tid, 'acousticbrainz', [
         MetadataObservation('mood_relaxed', .98, 'recording', 'native-recording', 'prediction',
                             match_evidence={'method': 'title_artist_match'}),
@@ -619,14 +677,20 @@ def test_installed_writes_survive_deferred_fit_restart_correction_and_retraction
 
 
 @pytest.mark.parametrize('failure', [vibe_preparation.WorkBudgetExceeded, fao.FileBudgetExceeded, fao.FileChanged])
-def test_ready_joint_vibes_refresh_when_last_channel_defers(store, monkeypatch, qualified_candidate, failure):
+def test_ready_joint_vibes_refresh_when_last_channel_defers(prediction_store, monkeypatch, qualified_candidate, failure):
     """One deferred channel must not strand other newly published models."""
     from yt_playlist.core import vibe_model_files
+    store = prediction_store
 
-    _entry, own = track(store, 'partial-original')
-    _entry, target = track(store, 'partial-target')
+    # Keep the real healthy/deferred interaction. Full taxonomy preparation is
+    # owned by the ordinary qualified-release case; six unrelated fits add no
+    # distinct failure or publication boundary to these three exceptions.
+    monkeypatch.setattr(vibe_joint_preparation, 'VIBES', ('relax', vibe_joint_preparation.VIBES[-1]))
+
+    _entry, own = catalog_track(store, 'partial-original')
+    _entry, target = catalog_track(store, 'partial-target')
     capture(store, 'partial-original')
-    drain(store, batch=1)
+    drain(store)
 
     def generation(key, vibe):
         return store.conn.execute(
@@ -650,7 +714,7 @@ def test_ready_joint_vibes_refresh_when_last_channel_defers(store, monkeypatch, 
 
     monkeypatch.setattr(joint, 'fit', defer_last)
     capture(store, 'partial-original', calm=False)
-    drain(store, batch=1)
+    drain(store)
 
     assert attempts == [deferred]
     assert fits(store, own)[healthy]['source'] == 'audio_measurement'
@@ -784,10 +848,12 @@ def test_prediction_queue_retries_after_committed_derived_state_and_restart(
         assert set(committed['measurements']) <= measurements
 
 
-def test_model_version_change_recomputes_all_evidence_in_pages(store, monkeypatch, qualified_candidate):
+def test_model_version_change_recomputes_all_evidence_in_pages(
+        prediction_store, monkeypatch, qualified_candidate, relax_joint_channel):
     from yt_playlist.core import vibe_versions
-    track(store, 'one')
-    _tid, target = track(store, 'two')
+    store = prediction_store
+    catalog_track(store, 'one')
+    _tid, target = catalog_track(store, 'two')
     capture(store, 'one')
     drain(store)
     old = fits(store, target)
@@ -819,9 +885,11 @@ def test_artist_tags_never_become_recording_measurements_or_propagation_seeds(fi
     assert not vibe_joint_preparation.due(store)
 
 
-def test_removed_audio_retracts_predictions_and_keeps_recording_fallback(store, qualified_candidate):
-    track(store, 'one')
-    _tid, target = track(store, 'two')
+def test_removed_audio_retracts_predictions_and_keeps_recording_fallback(
+        prediction_store, qualified_candidate, relax_joint_channel):
+    store = prediction_store
+    catalog_track(store, 'one')
+    _tid, target = catalog_track(store, 'two')
     capture(store, 'one')
     drain(store)
     assert fits(store, target)['relax']['source'] == 'artist_genre'

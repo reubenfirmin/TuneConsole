@@ -108,6 +108,9 @@ def test_large_unindexed_owner_history_makes_progress(owner_history, record_prop
     try:
         if external:
             writer._bind_repositories()
+            # This private collector fixture checks commit visibility and
+            # invalidation, independently of power-loss durability.
+            writer.conn.execute('PRAGMA synchronous=NORMAL')
         for turn in range(12):
             started = time.monotonic()
             recovery.maintain(store)

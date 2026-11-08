@@ -7,7 +7,8 @@ from tests.derived_rating_support import seed_dislike
 import pytest
 
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator
+from yt_playlist.core.store import Store
 from yt_playlist.core.audio_vibe_contract import INTENSITY_CHANNELS
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import album_feedback, growth_readiness, home_prepared, home_vibe, measurement, musical_character, vibe_preparation
@@ -37,10 +38,23 @@ def _pristine_current_schema():
         yield schema
 
 
-def test_readiness_schema_keeps_empty_current_owners_and_snapshot_guards(_pristine_current_schema):
-    assert _pristine_current_schema.execute('SELECT count(*) FROM recordings').fetchone()[0] == 0
-    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert _pristine_current_schema._revision_script
+@pytest.fixture(scope='module')
+def readiness_schema():
+    with bounded_consumer_schema((('jazz', 'Jazz'),), snapshot_guards=False) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(tmp_path, readiness_schema, monkeypatch):
+    database = Store(tmp_path / 'readiness.db')
+    with closing(database.conn):
+        # Readiness checks real SQL and published files below mocked snapshot
+        # coordination; power-loss durability of this disposable DB is unused.
+        database.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(database, readiness_schema, snapshot_guards=False)
+        database.conn.execute('PRAGMA wal_autocheckpoint=0')
+        with mock_snapshot_coordinator(database, monkeypatch):
+            yield database
 
 
 @pytest.fixture(autouse=True)
@@ -304,6 +318,7 @@ def completed_vibe_inputs(store, monkeypatch):
     # Eight candidates per lane and four per temporal band preserve full
     # cards, rotations and contrasting presets. Inventory thresholds retain
     # their real producer owner.
+    monkeypatch.setattr(vibe_preparation.audio_vibe_model, 'identity', lambda: 'readiness-model')
     lanes, audio_inputs = vibe_menu_inputs(store, fresh_count=8, comfort_count=12)
     rec_params.set_param(store, 'comfort_min_pool', 12)
     profiles = {}
@@ -325,7 +340,10 @@ def completed_vibe_inputs(store, monkeypatch):
 
 @pytest.fixture
 def completed_vibe_menus(store, completed_vibe_inputs):
-    publish_bundles(store, completed_vibe_inputs, vibes=True)
+    # These consumers have no genre filter. Keep every preset and lane while
+    # omitting unused genre-specific copies. Filter comparisons prepare their
+    # complete reserves directly from completed_vibe_inputs below.
+    publish_bundles(store, completed_vibe_inputs, vibes=True, genre_reserves=False)
     return completed_vibe_inputs['all']
 
 
@@ -551,15 +569,15 @@ def test_normal_worker_restored_readiness_is_visible_without_menu_republication(
 
 
 def test_missing_readiness_waits_for_worker_without_reading_profiles_or_ranked_pools(
-        store, monkeypatch, completed_vibe_inputs):
+        store, monkeypatch, completed_vibe_menus):
     from yt_playlist.core import profile_files
     from yt_playlist.rec import vibe_pools
     from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
 
-    bundle = vibe_pools.prepare(store, deepcopy(completed_vibe_inputs), 1000,
-                                measurement.PoolPolicies(store, 1000))
+    lanes = completed_vibe_menus
+    bundle = deepcopy(store._fixture_bundle_payload)
     bundle['_meta'].pop('vibe_readiness')
-    publish_bundles(store, bundle)
+    publish_bundles(store, bundle, genre_reserves=False)
 
     def unexpected(*args, **kwargs):
         raise AssertionError('Missing readiness must wait for workers without reconstructing inputs')
@@ -571,18 +589,21 @@ def test_missing_readiness_waits_for_worker_without_reading_profiles_or_ranked_p
         guards.setattr(profile_files, 'read', unexpected)
         guards.setattr(RecommendationPublicationsRepo, 'candidate_rows', unexpected)
         assert not growth_readiness.vibes(store, 1000)
-    # Compatible publication and current feedback have their distinct owner in
-    # test_compatible_vibe_evidence_survives_model_replacement_and_still_rechecks_feedback.
+    publish_bundles(store, bundle, vibes=True, genre_reserves=False)
+    assert growth_readiness.vibes(store, 1001)
+    with atomic_write(store):
+        for track in lanes['fresh'][3:]:
+            seed_dislike(store, track['key'], until=None, now=1001)
+    assert not growth_readiness.vibes(store, 1001)
 
 
 def test_oversized_optional_index_does_not_block_useful_menu_publication(
-        store, monkeypatch, completed_vibe_inputs):
+        store, monkeypatch, completed_vibe_menus):
     from yt_playlist.rec import home_vibe, vibe_pools, vibe_readiness_index
 
-    publish_bundles(store, {'all': {}, '_meta': {}})
     previous = store.recommendations.head('home')['id']
     monkeypatch.setattr(vibe_readiness_index, 'MAX_INDEX_BYTES', 1)
-    publish_bundles(store, deepcopy(completed_vibe_inputs), vibes=True)
+    publish_bundles(store, deepcopy(store._fixture_bundle_payload), vibes=True, genre_reserves=False)
     assert store.recommendations.head('home')['id'] != previous
     assert all(len(vibe_pools.assemble(store, 1000, preset)) == 4 for preset in home_vibe.PRESETS)
     assert not growth_readiness.vibes(store, 1000)

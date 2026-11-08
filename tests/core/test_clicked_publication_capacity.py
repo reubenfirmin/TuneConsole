@@ -10,7 +10,7 @@ from tests.core.test_ranked_state_preparation import seed
 from tests.genre_catalog_support import bound_catalog
 from tests.prepared_fixture_support import capture_template, prepared_template
 from tests.store_fixture_support import install_numbered_input
-from yt_playlist.core import library_pool_state
+from yt_playlist.core import library_pool_state, schema_inspection
 from yt_playlist.core.migrations import regular, runner
 from yt_playlist.core.preparation import clicked_publication as publication, ranked_state as preparation
 
@@ -75,7 +75,8 @@ def test_capacity_catalog_retains_full_8192_budget_and_three_nonempty_lanes(capa
 
 @pytest.fixture(scope='module')
 def capacity_short_lanes(capacity_catalog, tmp_path_factory):
-    with capacity_catalog.open(tmp_path_factory.mktemp('clicked-capacity-checkpoint') / 'checkpoint.db') as store:
+    with capacity_catalog.open(tmp_path_factory.mktemp('clicked-capacity-checkpoint') / 'checkpoint.db') as store, \
+            schema_inspection.reuse_tables(store.conn):
         OWNER.worker.install(store.conn)
         for _ in range(3):
             OWNER.worker.step(store.conn, batch_size=512)
@@ -140,7 +141,8 @@ def test_capacity_continuation_keeps_all_8192_ranks_and_foreign_keys(capacity_pr
 
 @pytest.fixture(scope='module')
 def capacity_map(capacity_prepared, tmp_path_factory):
-    with capacity_prepared.open(tmp_path_factory.mktemp('clicked-capacity-map') / 'mapped.db') as store:
+    with capacity_prepared.open(tmp_path_factory.mktemp('clicked-capacity-map') / 'mapped.db') as store, \
+            schema_inspection.reuse_tables(store.conn):
         stage = OWNER.step(store.conn)
         assert stage.complete and stage.copied == 4
         yield store, stage.id
@@ -160,8 +162,19 @@ def test_capacity_capture_uses_indexed_stage_and_generation_lookups(capacity_map
 @pytest.fixture(scope='module')
 def capacity_published(capacity_map):
     store, stage = capacity_map
-    OWNER.publish(store.conn, stage=stage)
+    publish_capacity(store, stage)
     return store, stage
+
+
+def publish_capacity(store, stage):
+    # The verifier owns every real file and SQL member. Per-query diagnostic
+    # instrumentation has separate tests and need not wrap all 8192 lookups.
+    with closing(sqlite3.connect(store._db_path)) as conn, schema_inspection.reuse_tables(conn):
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        conn.execute('PRAGMA synchronous=NORMAL')
+        OWNER.publish(conn, stage=stage)
+        assert not conn.in_transaction
 
 
 def test_capacity_publication_verifies_every_real_member_before_selecting(capacity_published):
@@ -186,7 +199,10 @@ def test_capacity_repository_reads_the_complete_ranked_set(capacity_published, c
 
 @pytest.fixture(scope='module')
 def capacity_damaged(capacity_prepared, tmp_path_factory):
-    with capacity_prepared.open(tmp_path_factory.mktemp('clicked-capacity-damage') / 'damaged.db') as store:
+    with capacity_prepared.open(tmp_path_factory.mktemp('clicked-capacity-damage') / 'damaged.db') as store, \
+            schema_inspection.reuse_tables(store.conn):
+        store.conn.execute('PRAGMA synchronous=NORMAL')
+        store.conn.execute('PRAGMA wal_autocheckpoint=0')
         stage = OWNER.step(store.conn).id
         header = OWNER.capture(store.conn, stage, SURFACE)
         reference = tuple(header[key] for key in ('plan_filename', 'plan_digest', 'plan_bytes'))
@@ -243,7 +259,7 @@ def test_capacity_repair_rebuilds_the_exact_manifest_after_regular_ddl(capacity_
 @pytest.fixture(scope='module')
 def capacity_republished(capacity_repaired):
     store, stage, _, _ = capacity_repaired
-    OWNER.publish(store.conn, stage=stage)
+    publish_capacity(store, stage)
     return store, stage
 
 

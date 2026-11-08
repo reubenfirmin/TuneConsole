@@ -5,15 +5,61 @@ import shutil
 
 import pytest
 
+from tests.genre_catalog_support import bound_shipped_catalog
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
 from yt_playlist.core import catalog, metadata_runtime
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.preparation import metadata_runtime as runtime_preparation
 from yt_playlist.core.store import Store
 from yt_playlist.providers.base import MetadataObservation
-from yt_playlist.rec import musical_preparation, musical_profiles as profiles
+from yt_playlist.rec import musical_preparation, musical_profiles as profiles, vibe_preparation
 from yt_playlist.rec.progressive import Budget, Preparation
 from yt_playlist.repos.musical_profiles import MusicalProfilesRepo
 from yt_playlist.controllers.musical_profiles import MusicalProfiles
+
+
+@pytest.fixture(scope='module')
+def profile_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture(autouse=True)
+def completed_vibe_producer(monkeypatch):
+    # These cases own musical source/profile capture, fairness and publication.
+    # Vibe inference has real owners in test_vibe_prediction; leave the actual
+    # worker, snapshots, musical resolver and publication transactions here.
+    def recording_steps(reader, rows, musical, **kwargs):
+        yield from ()
+        return musical, ({}, {}, [])
+
+    monkeypatch.setattr(vibe_preparation, 'step', lambda *args, **kwargs: False)
+    monkeypatch.setattr(vibe_preparation, 'recording_steps', recording_steps)
+
+
+def test_profile_input_keeps_real_sql_guards_without_prepared_profiles(profile_schema):
+    assert profile_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert profile_schema._revision_script
+    assert not profile_schema.execute('SELECT 1 FROM rec_musical_profiles').fetchone()
+    assert not profile_schema.execute('PRAGMA foreign_key_check').fetchone()
+
+
+@pytest.fixture
+def store(profile_schema, tmp_path, monkeypatch):
+    from yt_playlist.core import genre_identity
+
+    bound_shipped_catalog(monkeypatch, ('metal', 'ambient', 'techno', 'electronic', 'rock'))
+    database = Store(tmp_path / 'profiles.db')
+    try:
+        database.conn.execute('PRAGMA synchronous=NORMAL')
+        initialize_consumer(database, profile_schema)
+        database.conn.execute('PRAGMA wal_autocheckpoint=0')
+        with database.conn:
+            genre_identity.seed_catalog(database.conn)
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
+    finally:
+        database.conn.close()
 
 
 def observe(store, tid, value, *, entity='shared', scope='artist', field='tags', run='one', title=None, now=10):
@@ -36,7 +82,8 @@ def get(store, key='song|artist'):
 
 
 def test_shared_artist_fanout_is_paged_and_does_not_admit_content_refits(store):
-    tids = [store.tracks.upsert_track(f'v{i}', f'Song {i}', 'Artist', '', 200) for i in range(7)]
+    # Two full two-recording pages and a tail exercise shared-source fan-out.
+    tids = [store.tracks.upsert_track(f'v{i}', f'Song {i}', 'Artist', '', 200) for i in range(5)]
     for tid in tids:
         observe(store, tid, [{'name': 'Metal', 'count': 10}])
     drain(store, batch=2)
@@ -47,8 +94,8 @@ def test_shared_artist_fanout_is_paged_and_does_not_admit_content_refits(store):
     assert len(store.prepared_content.pending(32)) == 2
     drain(store, batch=2)
     assert store.prepared_content.counters() == before
-    values = store.musical_profiles.by_keys([f'song {i}|artist' for i in range(7)])
-    assert len(values) == 7
+    values = store.musical_profiles.by_keys([f'song {i}|artist' for i in range(5)])
+    assert len(values) == 5
     assert all(value['dimensions']['intensity']['value'] < .5 for value in values.values())
 
 
@@ -110,9 +157,7 @@ def test_source_reference_change_before_snapshot_pinning_defers_without_a_scope_
     assert get(store)['intensity']['value'] < .5
 
 
-def test_file_backed_delivery_relocation_preserves_last_good_and_retries(tmp_path, monkeypatch):
-    store = Store(tmp_path / 'profiles.db')
-    store.init_schema()
+def test_file_backed_delivery_relocation_preserves_last_good_and_retries(store, tmp_path, monkeypatch):
     try:
         tid = store.tracks.upsert_track('v', 'Song', 'Artist', '', 200)
         observe(store, tid, [{'name': 'Metal'}])
@@ -145,8 +190,7 @@ def test_file_backed_delivery_relocation_preserves_last_good_and_retries(tmp_pat
 
 
 @pytest.mark.parametrize('cutover_at', ['before-pin', 'during-calculation'])
-def test_file_backed_format_cutover_preserves_last_good_and_retries(file_backed_store, tmp_path, monkeypatch, cutover_at):
-    store = file_backed_store
+def test_file_backed_format_cutover_preserves_last_good_and_retries(store, tmp_path, monkeypatch, cutover_at):
     tid = store.tracks.upsert_track('v', 'Song', 'Artist', '', 200)
     observe(store, tid, [{'name': 'Metal'}])
     drain(store)
@@ -178,7 +222,9 @@ def test_file_backed_format_cutover_preserves_last_good_and_retries(file_backed_
         'SELECT * FROM rec_musical_source_profiles WHERE source_key=?', (key,)).fetchone())
     progress = tmp_path / 'cutover.json'
     for _ in range(100):
-        if runtime_preparation.step(store.conn, progress, batch_size=1)['complete']:
+        # The incomplete one-row checkpoint above owns the partial-input
+        # condition. Complete this independent cutover with ordinary batches.
+        if runtime_preparation.step(store.conn, progress)['complete']:
             break
     else:
         pytest.fail('Metadata preparation did not complete')
@@ -212,14 +258,16 @@ def test_file_backed_format_cutover_preserves_last_good_and_retries(file_backed_
     store.conn.close()
     reopened = Store(path)
     try:
+        reopened.conn.execute('PRAGMA synchronous=NORMAL')
         reopened.init_schema()
         assert metadata_runtime.active(reopened.conn)
         assert get(reopened) == previous
-        drain(reopened)
-        assert get(reopened)['intensity']['value'] > .5
-        observe(reopened, tid, [{'name': 'Ambient'}], run='after-cutover', now=11)
-        drain(reopened)
-        assert get(reopened)['intensity']['value'] < .5
+        with reuse_reporting_reader(reopened, monkeypatch):
+            drain(reopened)
+            assert get(reopened)['intensity']['value'] > .5
+            observe(reopened, tid, [{'name': 'Ambient'}], run='after-cutover', now=11)
+            drain(reopened)
+            assert get(reopened)['intensity']['value'] < .5
         assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchone()
     finally:
         reopened.conn.close()
@@ -309,8 +357,7 @@ def test_recording_snapshot_rejects_override_race_and_explicit_null_blocks_fallb
     assert get(store)['intensity']['override']
 
 
-def test_restart_budget_exhaustion_empty_tag_retraction_and_version_rebuild(file_backed_store, monkeypatch):
-    store = file_backed_store
+def test_restart_budget_exhaustion_empty_tag_retraction_and_version_rebuild(store, monkeypatch):
     path = store._db_path
     tid = store.tracks.upsert_track('v', 'Song', 'Artist', '', 200)
     observe(store, tid, [{'name': 'Metal'}])
@@ -324,16 +371,18 @@ def test_restart_budget_exhaustion_empty_tag_retraction_and_version_rebuild(file
     store.conn.close()
     store = Store(path)
     try:
+        store.conn.execute('PRAGMA synchronous=NORMAL')
         store.init_schema()
-        drain(store)
-        assert get(store)['intensity']['value'] is None
-        with store.conn:
-            store.conn.execute("UPDATE rec_musical_profiles SET version='old'")
-            store.conn.execute("UPDATE rec_musical_source_profiles SET version='old'")
-        assert musical_preparation.due(store)
-        drain(store, batch=1)
-        assert not any(store.musical_profiles.stale(profiles.VERSION))
-        assert get(store)['intensity']['value'] is None
+        with reuse_reporting_reader(store, monkeypatch):
+            drain(store)
+            assert get(store)['intensity']['value'] is None
+            with store.conn:
+                store.conn.execute("UPDATE rec_musical_profiles SET version='old'")
+                store.conn.execute("UPDATE rec_musical_source_profiles SET version='old'")
+            assert musical_preparation.due(store)
+            drain(store, batch=1)
+            assert not any(store.musical_profiles.stale(profiles.VERSION))
+            assert get(store)['intensity']['value'] is None
     finally:
         store.conn.close()
 

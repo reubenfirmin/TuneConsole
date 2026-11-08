@@ -7,6 +7,7 @@ import pytest
 
 from tests.core.test_predecessor_writes import installed
 from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import numbered_store
 from yt_playlist.core import recommendation_outputs as files, recommendation_reports as reports
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import recommendation_reports as preparation
@@ -18,6 +19,11 @@ VALUE = {'at': 98, 'schema': 2, 'watermark': 'captured-watermark', 'report_id': 
          'home_format': {'scores': {'mixes': 1.25}, 'episodes': {'albums': 3}, 'days': {'radio': 2},
                          'vibe_episodes': 4, 'half_life_days': 30},
          'explanation': 'Retained prose and unicode 🎵 ' * 6000}
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Report preparation does not construct an HTTP application."""
 
 
 def seed(store):
@@ -41,9 +47,9 @@ def head(conn, surface='listening_choices'):
                         'USING(surface,generation) WHERE surface=?', (surface,)).fetchone()
 
 
-@pytest.mark.parametrize('installed', [79, 92], indirect=True)
-def test_exact_multi_part_report_and_usage_keep_source_authority(installed):
-    store, _ = installed
+@pytest.mark.parametrize('numbered_store', [79, 92], indirect=True)
+def test_exact_multi_part_report_and_usage_keep_source_authority(numbered_store):
+    store, _ = numbered_store
     raw = seed(store)
     conn = store.conn
     preparation.JOB.install(conn)

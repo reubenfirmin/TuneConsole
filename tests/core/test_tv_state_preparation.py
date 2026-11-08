@@ -7,11 +7,18 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import numbered_store
 from tests.test_tv_stream import video
 from yt_playlist.core import tv_recommendation_state as state
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import artist_lookup, tv_state as preparation
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Preparation tests do not construct the HTTP application."""
 
 
 def finish(job, conn, size=128):
@@ -57,34 +64,30 @@ def aliases(conn):
     finish(artist_lookup.JOB, conn)
 
 
-@pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
-@pytest.mark.parametrize('name', preparation.JOBS)
-def test_each_job_retains_exact_shape_clock_and_reference_custody(installed, name):
-    store, _ = installed
+@pytest.mark.parametrize('numbered_store', [79, 93, 94], indirect=True)
+def test_all_five_jobs_retain_exact_shapes_clocks_and_reference_custody(numbered_store, independent_regular_ddl):
+    store, _ = numbered_store
     values, originals = seed(store)
-    if name in ('artwork', 'artwork-requests'):
-        aliases(store.conn)
-    job = preparation.JOBS[name]
-    job.install(store.conn)
-    finish(job, store.conn, size=1)
-    surface = preparation.SOURCES[name]
-    row = head(store.conn, surface)
-    assert preparation.read_original(store.conn, row) == originals[surface]
-    assert row['built_at'] is None
-    assert store.rec_proposals.get_proposals(surface) == values[surface]
-    for relation in preparation.RELATIONS[surface]:
-        assert not store.conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?', (relation,)).fetchone()
-        assert all(fk[2].startswith('prepared_') for fk in store.conn.execute(f'PRAGMA foreign_key_list({preparation.relation(relation)})'))
-    if name == 'pool':
-        assert [tuple(row) for row in store.conn.execute('SELECT source_resolution,video_resolution FROM ' +
-            preparation.relation('tv_pool_items') + ' ORDER BY position')] == [(None, None), ('missing_recording', 'external_video')]
-    elif name == 'artwork-requests':
-        assert [tuple(row) for row in store.conn.execute('SELECT requested_at,resolution_reason FROM ' +
-            preparation.relation('tv_artist_requests') + ' ORDER BY id')] == [(None, None), (None, 'missing_artist')]
-    elif name == 'continuations':
-        assert tuple(store.conn.execute('SELECT source_ref,target_ref,source_resolution,target_resolution,input_stream,request_id,built_at FROM ' +
-            preparation.relation('tv_continuation_receipts')).fetchone()) == (None, None, 'missing_playlist', 'missing_playlist', '', 'request:with:colons', None)
+    aliases(store.conn)
+    for name, job in preparation.JOBS.items():
+        job.install(store.conn)
+        finish(job, store.conn, size=1)
+        surface = preparation.SOURCES[name]
+        row = head(store.conn, surface)
+        assert preparation.read_original(store.conn, row) == originals[surface]
+        assert row['built_at'] is None
+        assert store.rec_proposals.get_proposals(surface) == values[surface]
+        for relation in preparation.RELATIONS[surface]:
+            assert not store.conn.execute('SELECT 1 FROM main.sqlite_schema WHERE name=?', (relation,)).fetchone()
+            assert all(fk[2].startswith('prepared_') for fk in store.conn.execute(f'PRAGMA foreign_key_list({preparation.relation(relation)})'))
+    assert [tuple(row) for row in store.conn.execute('SELECT source_resolution,video_resolution FROM ' +
+        preparation.relation('tv_pool_items') + ' ORDER BY position')] == [(None, None), ('missing_recording', 'external_video')]
+    assert [tuple(row) for row in store.conn.execute('SELECT requested_at,resolution_reason FROM ' +
+        preparation.relation('tv_artist_requests') + ' ORDER BY id')] == [(None, None), (None, 'missing_artist')]
+    assert tuple(store.conn.execute('SELECT source_ref,target_ref,source_resolution,target_resolution,input_stream,request_id,built_at FROM ' +
+        preparation.relation('tv_continuation_receipts')).fetchone()) == (None, None, 'missing_playlist', 'missing_playlist', '', 'request:with:colons', None)
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+    regular.migrate(store.conn)
 
 
 @pytest.mark.parametrize('installed', [79, 94], indirect=True)

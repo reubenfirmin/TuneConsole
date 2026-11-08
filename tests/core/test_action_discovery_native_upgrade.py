@@ -43,7 +43,18 @@ def native_journey(_bounded_installed_schema, tmp_path_factory):
             # Ordinary completed guards are a lower input here; the actual
             # numbered takeovers and retained publication guards remain real.
             install_regular_input(source.conn, regular.CHANGES)
-        yield dict(conn=source.conn, path=path, source=source, version=93)
+        # Numbered SQL owns the upgrade. Keep application diagnostics outside
+        # this boundary while retaining the same private WAL file and FKs.
+        with closing(sqlite3.connect(path)) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute('PRAGMA foreign_keys=ON')
+            conn.execute('PRAGMA synchronous=NORMAL')
+            conn.execute('PRAGMA wal_autocheckpoint=0')
+            # Column renames repeatedly inspect the complete retained schema.
+            # Keep its private pages resident instead of evicting them between
+            # real ALTER statements; WAL commits and file reopening stay real.
+            conn.execute('PRAGMA cache_size=-16384')
+            yield dict(conn=conn, path=path, source=source, version=93)
 
 
 def assert_history(state):

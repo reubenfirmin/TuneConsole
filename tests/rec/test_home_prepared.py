@@ -324,12 +324,12 @@ def test_album_budget_deferral_still_publishes_mixes_with_last_good_album_contex
 
 
 def test_reporting_failure_does_not_prevent_missing_mixes_from_preparing(
-        home_inputs, one_menu_per_attempt):
+        publication_inputs, one_menu_per_attempt):
     from types import SimpleNamespace
     from yt_playlist.rec import choice_evidence
     from yt_playlist.rec.worker_tasks import ServingTasks
 
-    store = home_inputs
+    store = publication_inputs.store
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) is None
     def stage(name, target, *args, **kwargs):
         if target is choice_evidence.refresh_report:
@@ -389,9 +389,19 @@ def test_slow_revisit_does_not_starve_first_mix_during_source_updates(
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) == refreshed
 
 
-def test_served_whole_menu_probability_is_recorded_and_frozen(store, prepared):
+def test_served_whole_menu_probability_is_recorded_and_frozen(store, cached_menu):
+    # Serving consumes completed worker alternatives. Actual enumeration and
+    # accumulation remain covered by the bounded preparation case below.
+    prepared = deepcopy(cached_menu)
+    alternate = deepcopy(prepared['menus'][0])
+    alternate['epoch'] += 3  # Both alternatives belong to the same choice band.
+    alternate['protos'] = list(reversed(alternate['protos']))
+    prepared['menus'].append(alternate)
+    home_cache.put(store, home_prepared.SURFACE, prepared, 1000)
     first = home_prepared.cards(store, prepared, 1001, service(store))
     assignment = first.protos[0]["assignment"]
+    assert len(assignment['candidates']) == 2
+    assert {row['menu'] for row in assignment['candidates']} == {0, 3}
     assert sum(row["probability"] for row in assignment["candidates"]) == pytest.approx(1)
     assert 0 < assignment["probability"] <= 1
     assert assignment["unit"] == "whole_menu"

@@ -1,5 +1,6 @@
 """One populated naming journey retains custom programs and retry custody."""
 import sqlite3
+from contextlib import closing
 from unittest.mock import Mock
 
 import pytest
@@ -175,17 +176,23 @@ def interrupted(populated_names, tmp_path_factory):
     try:
         populated_names.restore(store)
         before = list(store.conn.iterdump())
-
-        def stopped(conn, context):
-            v103_entity_names.apply(conn, context)
-            raise RuntimeError('interrupted naming cutover')
-
-        with pytest.raises(MigrationError, match='interrupted naming cutover'):
-            runner.migrate(store.conn, registry=(*registry.MIGRATIONS[:102], Migration(103, 'entity_names', stopped)))
-        assert list(store.conn.iterdump()) == before
         path = store._db_path
     finally:
         store.conn.close()
+
+    def stopped(conn, context):
+        v103_entity_names.apply(conn, context)
+        raise RuntimeError('interrupted naming cutover')
+
+    # The runner's rollback is a SQLite contract. Diagnostic wrappers have
+    # independent owners; use the actual file, FK checks and complete dump.
+    with closing(sqlite3.connect(path)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        conn.execute('PRAGMA synchronous=NORMAL')
+        with pytest.raises(MigrationError, match='interrupted naming cutover'):
+            runner.migrate(conn, registry=(*registry.MIGRATIONS[:102], Migration(103, 'entity_names', stopped)))
+        assert list(conn.iterdump()) == before
     reopened = Store(path)
     try:
         yield dict(store=reopened, original=populated_names.result)

@@ -80,7 +80,8 @@ def seed_bundle_subjects(store, bundle, *, fresh=()):
                     item.get('album'), item.get('thumbnail'), item.get('genre'), item.get('year'), None, 1)
 
 
-def publish_bundles(store, bundle, now=1000, *, fresh=(), vibes=False, retain_vibe_readiness=True):
+def publish_bundles(store, bundle, now=1000, *, fresh=(), vibes=False,
+                    retain_vibe_readiness=True, genre_reserves=True):
     with store.read_snapshot() as snapshot:
         policies = measurement.PoolPolicies(snapshot.store, now)
         if vibes:
@@ -99,7 +100,7 @@ def publish_bundles(store, bundle, now=1000, *, fresh=(), vibes=False, retain_vi
                 for lane, items in lanes.items()} for preset, lanes in selected.get('pools', {}).items()}
             selected['genres'] = {preset: {lane: {genre: policies.stamp(items, 'vibe:' + preset)
                 for genre, items in groups.items()} for lane, groups in lanes.items()}
-                for preset, lanes in selected.get('genres', {}).items()}
+                for preset, lanes in selected.get('genres', {}).items()} if genre_reserves else {}
             prepared['_vibes'] = selected
         generation = mode_surfaces._publish_typed_bundles(store, snapshot, prepared,
             policies.stamp(list(fresh), 'fresh'), policies, {}, now)

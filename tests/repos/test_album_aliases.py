@@ -5,6 +5,7 @@ import threading
 
 import pytest
 
+from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.core import album_aliases, albums, legacy_evidence, album_tracklists
 from yt_playlist.core.migrations import registry
 from yt_playlist.core.migrations.runner import validate_version
@@ -13,6 +14,22 @@ from yt_playlist.core.store import Store
 
 OLD = 'MPREb_KUo26z3y6bY'
 ALIAS = 'MPREb_JVmmhCojzaW'
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # Alias reconciliation consumes album identities and tracklists. Genre
+    # inference and application admission have independent owning tests.
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+def test_alias_input_keeps_empty_album_owners_and_real_guards(_pristine_current_schema, store):
+    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert store._snapshot_revisions.conn is store.conn
+    assert not store.conn.execute('SELECT 1 FROM albums').fetchone()
+    assert not store.conn.execute('SELECT 1 FROM album_alias_reconciliations').fetchone()
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def release():
@@ -248,10 +265,8 @@ def test_preferred_id_can_use_full_cache_captured_under_its_verified_alias(store
 @pytest.mark.parametrize('first', [OLD, ALIAS])
 @pytest.mark.parametrize('changed', [False, True])
 def test_concurrent_accepted_album_responses_publish_coherent_proofs_and_tracks(
-        tmp_path, monkeypatch, first, changed):
+        store, monkeypatch, first, changed):
     from yt_playlist.library.album_catalog import remember_album
-    store = Store(tmp_path / 'responses.db')
-    store.init_schema()
     second = ALIAS if first == OLD else OLD
     current, older = release(), release()
     if changed:
@@ -310,10 +325,8 @@ def test_concurrent_accepted_album_responses_publish_coherent_proofs_and_tracks(
 
 
 
-def test_verified_aliases_survive_restart_without_repeating_reconciliation(tmp_path):
-    path = tmp_path / 'aliases.db'
-    store = Store(path)
-    store.init_schema()
+def test_verified_aliases_survive_restart_without_repeating_reconciliation(store):
+    path = store._db_path
     payload = release()
     for bid in (OLD, ALIAS):
         store.collection.observe_album_representation(bid, payload, now=100)

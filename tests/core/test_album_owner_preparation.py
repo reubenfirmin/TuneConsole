@@ -148,12 +148,13 @@ def test_bounded_row_batches_and_reference_updates_reconcile_without_changing_so
     store, _ = installed
     album, entry = seed(store)
     with store.conn:
+        # Cross the hard 32-row cap and retain a tail for later reconciliation.
         store.conn.executemany("INSERT INTO album_tracks(album_id,entry_id,position,is_full,source) VALUES (?,?,?,1,'captured')",
-                               [(album, entry, index) for index in range(1040)])
+                               [(album, entry, index) for index in range(33)])
     rows.JOB.install(store.conn)
     assert rows.JOB.step(store.conn, batch_size=512).processed == 32
     finish(rows.JOB, store.conn)
-    assert store.conn.execute('SELECT count(*) FROM prepared_album_track_rows').fetchone()[0] == 1044
+    assert store.conn.execute('SELECT count(*) FROM prepared_album_track_rows').fetchone()[0] == 37
     with store.conn:
         store.conn.execute("INSERT INTO album_tracks(album_id,entry_id,position,is_full,source) VALUES (?,?,1041,1,'later')", (album,entry))
     finish(rows.JOB, store.conn)

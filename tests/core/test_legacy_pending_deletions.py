@@ -106,6 +106,14 @@ def _merge(store, account, memberships, client, now):
     executor.apply_result(store,{account:client},memberships,['a','b','c'],'all',now)
 
 
+def private_store(path):
+    store = Store(path)
+    # Keep real on-disk reopens and uncertain-write recovery, independently
+    # of SQLite's synchronization against a host power failure.
+    store.conn.execute('PRAGMA synchronous=NORMAL')
+    return store
+
+
 @pytest.mark.parametrize('already_converted',[False,True],ids=['pre98','converted98'])
 @pytest.mark.parametrize('remote_present',[True,False],ids=['present','absent'])
 def test_imported_pending_requires_readback_before_keeper_writes(tmp_path,monkeypatch,
@@ -113,7 +121,7 @@ def test_imported_pending_requires_readback_before_keeper_writes(tmp_path,monkey
                                                                deletion_inputs):
     monkeypatch.setenv('YT_PLAYLIST_HOME',str(tmp_path/'home'))
     path = tmp_path/'actions.db'
-    store = Store(path)
+    store = private_store(path)
     resources = ExitStack()
     try:
         # Completed empty SQL and regular guards are lower inputs. Each case
@@ -165,10 +173,10 @@ def test_imported_pending_requires_readback_before_keeper_writes(tmp_path,monkey
                 migrate(store.conn,registry=registry.MIGRATIONS[:98])
             assert (_step(store,action.id)['phase'],_step(store,action.id)['outcome'])==('pending','not_sent')
         store.conn.close()
-        store = Store(path)
+        store = private_store(path)
         store.init_schema()
         store.conn.close()
-        store = Store(path)
+        store = private_store(path)
         store.init_schema()
         version = 98 if already_converted else 97
         resources.enter_context(reuse_reporting_reader(store, monkeypatch))
@@ -233,7 +241,7 @@ def test_current_unsent_intent_survives_repair_and_admits_keeper_write(tmp_path,
                                                                   deletion_inputs):
     monkeypatch.setenv('YT_PLAYLIST_HOME',str(tmp_path/'home'))
     path = tmp_path/'unsent.db'
-    store = Store(path)
+    store = private_store(path)
     try:
         deletion_inputs(106).source.conn.backup(store.conn)
         store._bind_repositories()
@@ -252,7 +260,7 @@ def test_current_unsent_intent_survives_repair_and_admits_keeper_write(tmp_path,
         assert (step['phase'],step['outcome'])==('pending','not_sent')
         assert not client.attempts
         store.conn.close()
-        store = Store(path)
+        store = private_store(path)
         store.init_schema()
         assert dict(_step(store,action.id))==step
         JOB.install(store.conn)

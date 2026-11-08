@@ -9,7 +9,8 @@ import pytest
 from tests.core.test_collection_control_preparation import finish
 from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.prepared_fixture_support import assert_upgrade_phase, custody_predecessor
-from tests.store_fixture_support import assert_installed_consumer_input, publication_consumer_reads
+from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import assert_installed_consumer_input, numbered_store, publication_consumer_reads
 from yt_playlist.core import recommendation_outputs as files, recommendation_setting_outputs as outputs
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import saved_outputs as preparation
@@ -46,9 +47,9 @@ def head(conn, source):
     return conn.execute(f'SELECT g.* FROM {current} h JOIN {generations} g USING(source,preparation_revision)').fetchone()
 
 
-@pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
-def test_exact_files_ordered_references_and_old_readers_remain_usable(installed):
-    store, _ = installed
+@pytest.mark.parametrize('numbered_store', [79, 93, 94], indirect=True)
+def test_exact_files_ordered_references_and_old_readers_remain_usable(numbered_store, independent_regular_ddl):
+    store, _ = numbered_store
     sources, run = seed(store)
     for name, job in preparation.JOBS.items():
         job.install(store.conn)
@@ -67,8 +68,7 @@ def test_exact_files_ordered_references_and_old_readers_remain_usable(installed)
         ('missing-policy', None, 'missing_policy'), ('saved-policy', 'saved-policy', None)]
     assert store.conn.execute('SELECT count(*) FROM rec_model_selection_runs').fetchone()[0] == 1
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    # Regular DDL during pending/failed preparation belongs to the explicit
-    # interruption control below, rather than every saved-output shape.
+    regular.migrate(store.conn)
 
 
 def prepare_native_comparison(store):

@@ -1,5 +1,6 @@
 """Preference refreshes reuse the established models and update saved ranking provenance."""
 from pathlib import Path
+from contextlib import closing
 import time
 from types import SimpleNamespace
 from unittest.mock import Mock, call
@@ -15,9 +16,38 @@ from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import seed_publication_subjects
 from tests.candidate_timing_support import candidate_costs, candidate_prefix_costs
 from tests.rec.test_model_refresh import refresh_costs, seed
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
 from yt_playlist.core.db_writes import atomic_write
+from yt_playlist.core.store import Store
 from yt_playlist.rec import candidate_refresh, embedding_training as embed, home_prepared, model_refresh, mode_surfaces, rec_params, surfaces
 from yt_playlist.util import genre_map
+
+
+@pytest.fixture(scope='module')
+def candidate_schema():
+    with bounded_consumer_schema((('house', 'House'), ('techno', 'Techno'), ('jazz', 'Jazz'))) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(candidate_schema, tmp_path, monkeypatch):
+    database = Store(tmp_path / 'candidate-refresh.db')
+    with closing(database.conn):
+        initialize_consumer(database, candidate_schema)
+        database.conn.execute('PRAGMA synchronous=NORMAL')
+        # Reporting reads consume the current private database. Preparation
+        # keeps its actual pinned snapshots and guarded publication.
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
+
+
+@pytest.fixture(autouse=True)
+def completed_retention_maintenance(monkeypatch):
+    # Refresh admission, ranking and publication stay real. Collection of
+    # retired policy files belongs to the independent retention checks.
+    from yt_playlist.rec import measurement
+
+    monkeypatch.setattr(measurement, 'maintain_storage', lambda *args, **kwargs: True)
 
 
 def refresh(store, now=2000):

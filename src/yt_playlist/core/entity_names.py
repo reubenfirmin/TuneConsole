@@ -4,6 +4,7 @@ Current owners have one physical name. Explicit writer identifiers and read
 projections keep installed predecessors authoritative during preparation.
 """
 from dataclasses import dataclass
+import re
 
 from .schema_contract import TOKEN
 
@@ -38,6 +39,9 @@ PREDECESSOR_COLUMNS = {
     'rec_mode_picks': {'playlist_id': 'membership_ref_id'},
 }
 
+_RENAMED_DEFINITION = re.compile(r'\b(?:' + '|'.join(PREDECESSOR_NAMES) +
+    r'|playlist_scopes|cleanup_ignored|quarantined_playlists|suppressed_overlaps|overlap_kept|rec_mode_picks)\b', re.I)
+
 
 def predecessor_definition(sql):
     """Name retained schema definitions for validation, preserving literals.
@@ -45,6 +49,11 @@ def predecessor_definition(sql):
     This is used only for known DDL contracts, never application statements,
     provider input or recovery documents. Frozen upgrades keep their own copy.
     """
+    # Most definitions have no account or playlist naming to change. Avoid
+    # tokenizing those whole definitions twice; matches still take the literal-
+    # preserving path below, including names appearing only in comments.
+    if not _RENAMED_DEFINITION.search(sql):
+        return sql
     identifiers = {match.group().strip('"`[]').lower() for match in TOKEN.finditer(sql)
                    if not match.group().startswith(("'", '--', '/*'))}
     names = dict(PREDECESSOR_NAMES)

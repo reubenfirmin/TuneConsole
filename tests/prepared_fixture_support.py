@@ -135,6 +135,9 @@ class PreparedTemplate:
         assert self.revision_guards, 'Consumer cloning requires an admitted source'
         target = Store(database)
         try:
+            # Private consumers require real commit visibility and rollback;
+            # host power-loss durability is outside this fixture's contract.
+            target.conn.execute('PRAGMA synchronous=NORMAL')
             self.restore(target)
             for name in ('_schema_compatibility', '_rebuild_source_version', '_schema_recovery_pending'):
                 setattr(target, name, getattr(self.source, name))
@@ -368,6 +371,8 @@ def prepared_template(pristine, seed, *, database=None, defer_metadata=False):
             # The higher-scope fixture owns that path through tmp_path_factory.
             source = Store(':memory:' if database is None else database)
             resources.callback(source.conn.close)
+            if database is not None:
+                source.conn.execute('PRAGMA synchronous=NORMAL')
             if isinstance(pristine, PristineSchema) and not defer_metadata:
                 # The session builder already admitted this exact empty SQL
                 # schema. Bind the private consumer just like the store fixture

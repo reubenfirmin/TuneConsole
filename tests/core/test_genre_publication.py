@@ -8,11 +8,17 @@ import pytest
 
 from tests.core.test_predecessor_writes import installed
 from tests.independent_schema_support import independent_regular_ddl
+from tests.store_fixture_support import numbered_store
 from yt_playlist.core import albums, genre_classifications, genre_identity
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import genre_classifications as preparation, genre_publication as publication
 from yt_playlist.core.store import Store
 from yt_playlist.repos.listening_analytics import ListeningAnalyticsRepo
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Publication tests do not construct the HTTP application."""
 
 
 @pytest.mark.parametrize('version', [79, 85])
@@ -269,9 +275,9 @@ def test_slow_verification_keeps_writes_and_regular_admission_available(installe
         task.result(timeout=15)
 
 
-@pytest.mark.parametrize('installed', [79], indirect=True)
-def test_oversized_source_fails_durably_and_regular_schema_remains_independent(installed, independent_regular_ddl):
-    store, _ = installed
+@pytest.mark.parametrize('numbered_store', [79], indirect=True)
+def test_oversized_source_fails_durably_and_regular_schema_remains_independent(numbered_store, independent_regular_ddl):
+    store, _ = numbered_store
     seed(store)
     conn = store.conn
     with conn:

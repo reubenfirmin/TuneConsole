@@ -10,6 +10,7 @@ from collections import Counter
 import math
 
 from yt_playlist.core.activity import WorkBudgetExceeded, check_stopping
+from yt_playlist.core.numerics import single_threaded
 from . import vibe_joint_common as common
 from .vibe_joint_common import (BASELINE_VARIANCE, COMPONENTS, INITIAL, MAX_ROWS, MEMORY_BYTES,
                                VERSION, _encoded, _factor, _ordering, canonical, terms, unique)
@@ -54,9 +55,8 @@ def fit(rows, vibe, *, fixed=None, memory_bytes=MEMORY_BYTES):
     import numpy as np
     from scipy.optimize import minimize
     from scipy.sparse import diags
-    from threadpoolctl import threadpool_limits
 
-    with threadpool_limits(limits=1):
+    with single_threaded():
         design, features, kinds = _design(rows)
         order, fill, accounted = _ordering(design, base_bytes, memory_bytes)
         design = design[:, order]
@@ -133,7 +133,6 @@ class Posterior:
     def __init__(self, value):
         import numpy as np
         from scipy.sparse import csc_matrix
-        from threadpoolctl import threadpool_limits
 
         self.legacy = _LegacyPosterior(value) if value['format'] == 1 else None
         if self.legacy is not None:
@@ -183,7 +182,7 @@ class Posterior:
         precision = csc_matrix((numbers, indices, offsets), shape=(size, size))
         if not precision.has_canonical_format or (precision != precision.T).nnz:
             raise ValueError('Invalid joint vibe symmetric precision')
-        with threadpool_limits(limits=1):
+        with single_threaded():
             self.factor = _factor(precision, fill)
         self.artists = {artist for row in self.rows for artist in row['artists']}
         self.genres = {row['genre'] for row in self.rows if row['genre']}
@@ -204,7 +203,7 @@ class Posterior:
                 self.source_average[index] = weight
             self.source_prior = self.variances['source'] * sum(weight ** 2 for weight in weights.values())
             source_mean = float(self.source_average @ self.mean)
-            with threadpool_limits(limits=1):
+            with single_threaded():
                 variance = 0.
                 vector = np.zeros(size)
                 for index, weight in weights.items():
@@ -218,7 +217,6 @@ class Posterior:
 
     def predict(self, artists, genre, *, album=None, recording=None, metadata_prior=None):
         import numpy as np
-        from threadpoolctl import threadpool_limits
 
         if self.legacy is not None:
             return self.legacy.predict(artists, genre, album=album, recording=recording)
@@ -254,7 +252,7 @@ class Posterior:
                     new_groups += variance
                 else:
                     vector[index] = weight
-        with threadpool_limits(limits=1):
+        with single_threaded():
             mean_variance = max(0., float(new_groups + vector @ self.factor.solve(vector)))
         score = max(0., min(1., float(.5 + vector @ self.mean)))
         support = max(0., min(1., self.coverage * (1 - mean_variance / prior)))
@@ -291,7 +289,6 @@ class _LegacyPosterior:
     def predict(self, artists, genre, *, album=None, recording=None):
         import numpy as np
         from scipy.linalg import solve_triangular
-        from threadpoolctl import threadpool_limits
 
         if recording is not None and any(row['recording'] == recording for row in self.rows):
             raise ValueError('Target measurement was not hidden from fitting')
@@ -313,7 +310,7 @@ class _LegacyPosterior:
             for index, row in enumerate(self.terms):
                 covariance[index] += variances[kind] * sum(weight * row[kind].get(key, 0.)
                                                            for key, weight in feature.items())
-        with threadpool_limits(limits=1):
+        with single_threaded():
             projected = solve_triangular(self.lower, covariance, lower=True, check_finite=False)
         mean_variance = max(0., float(prior - projected @ projected))
         score = max(0., min(1., float(.5 + covariance @ self.alpha)))

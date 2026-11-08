@@ -10,10 +10,14 @@ from tests.core.test_listening_output_preparation import chunk, head, seed
 from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.prepared_fixture_support import assert_upgrade_phase
 from tests.publication_timing_support import publication_costs
+from tests.store_fixture_support import publication_schema_inspections
 from yt_playlist.core import recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import listening_outputs as preparation, listening_publication as publication
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_schema_inspections')
 
 
 @pytest.fixture(autouse=True)

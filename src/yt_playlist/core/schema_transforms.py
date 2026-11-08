@@ -34,6 +34,9 @@ CATALOG_RETIRED = {'catalog_tracks_update','tracks_update','discovered_tracks_up
 OBJECT = re.compile(r'CREATE (?:TABLE|VIEW|(?:UNIQUE )?INDEX|TRIGGER)\s+"?(\w+)"?',re.I)
 
 
+# Adjacent installed layouts share most definitions. These transformations
+# depend only on their complete SQL input and return immutable strings.
+@lru_cache(maxsize=2048)
 def taste_axes(sql):
     table = re.match(r'CREATE TABLE\s+"?(\w+)"?\s*\(',sql.lstrip(),re.I)
     if table and table[1] in TASTE_TABLES:
@@ -43,20 +46,24 @@ def taste_axes(sql):
     return sql
 
 
+@lru_cache(maxsize=2048)
 def recipe_memberships(sql):
     if re.match(r'CREATE TABLE\s+"?road_trip_recipes"?\s*\(',sql.lstrip(),re.I):
         sql = re.sub(r'\b(?:artists|genres|blacklist_genres)\s+TEXT\s+NOT NULL\s*,(?:[ \t]*--[^\n]*)?','',sql)
     return sql
 
 
+@lru_cache(maxsize=2048)
 def collection_state(sql):
     return '' if re.match(r'CREATE TABLE\s+"?road_trip_drafts"?\s*\(',sql.lstrip(),re.I) else sql
 
 
+@lru_cache(maxsize=2048)
 def collection_documents(sql):
     return '' if re.match(r'CREATE TABLE\s+"?(rec_recipes|cluster_canvas)"?\s*\(',sql.lstrip(),re.I) else sql
 
 
+@lru_cache(maxsize=2048)
 def action_work(sql):
     if (re.match(r'CREATE TABLE\s+"?actions"?\s*\(',sql.lstrip(),re.I)
             or re.match(r'CREATE INDEX ix_actions_delete_pending\b',sql.lstrip(),re.I)
@@ -65,6 +72,7 @@ def action_work(sql):
     return sql
 
 
+@lru_cache(maxsize=2048)
 def album_occurrences(sql):
     match = OBJECT.match(sql.lstrip())
     if match and (match[1] in ALBUM_RETIRED or re.match(r'rec_(?:capture|evidence)_album_tracks_',match[1])):
@@ -75,6 +83,7 @@ def album_occurrences(sql):
     return sql
 
 
+@lru_cache(maxsize=2048)
 def listening_subjects(sql):
     match = OBJECT.match(sql.lstrip())
     if match and match[1] in LISTENING_REPLACED:
@@ -87,6 +96,7 @@ def listening_subjects(sql):
     return sql
 
 
+@lru_cache(maxsize=2048)
 def discovery_subjects(sql):
     match = OBJECT.match(sql.lstrip())
     if match and match[1] in DISCOVERY_REPLACED:
@@ -100,6 +110,7 @@ def discovery_subjects(sql):
     return sql
 
 
+@lru_cache(maxsize=2048)
 def catalog_writes(sql):
     match = re.match(r'CREATE TRIGGER\s+"?(\w+)"?',sql.lstrip(),re.I)
     return '' if match and match[1] in CATALOG_RETIRED else sql
@@ -110,6 +121,7 @@ def entity_names(sql):
     return predecessor_definition(sql)
 
 
+@lru_cache(maxsize=2048)
 def domain_contracts(sql):
     match = re.match(r'CREATE TABLE\s+["`\[]?(\w+)["`\]]?\s*\(',sql.lstrip(),re.I)
     if match is None or match[1] not in CONTRACTS:

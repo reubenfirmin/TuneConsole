@@ -10,7 +10,7 @@ import pytest
 from tests.conftest import FakeClient
 from tests.playlist_fixture_support import remote_catalog
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator
 from yt_playlist.core.store import Store
 from yt_playlist.enrich.enrich_worker import EnrichWorker
 from yt_playlist.library import playlist_generated
@@ -27,7 +27,8 @@ def disable_periodic_library_sync():
 
 @pytest.fixture(scope='module')
 def enrichment_schema():
-    with bounded_consumer_schema((('house', 'House'), ('techno', 'Techno'), ('folk', 'Folk'))) as schema:
+    with bounded_consumer_schema(
+            (('house', 'House'), ('techno', 'Techno'), ('folk', 'Folk')), snapshot_guards=False) as schema:
         yield schema
 
 
@@ -35,9 +36,13 @@ def enrichment_schema():
 def store(tmp_path, enrichment_schema, monkeypatch):
     database = Store(tmp_path / 'fresh-enrichment.db')
     with closing(database.conn):
-        initialize_consumer(database, enrichment_schema)
+        # The SQL input is disposable and snapshot coordination is mocked.
+        # These cases still publish and read actual recommendation files.
+        database.conn.execute('PRAGMA synchronous=OFF')
+        initialize_consumer(database, enrichment_schema, snapshot_guards=False)
         database.conn.execute('PRAGMA wal_autocheckpoint=0')
-        with reuse_reporting_reader(database, monkeypatch):
+        with mock_snapshot_coordinator(database, monkeypatch):
+            monkeypatch.setattr(database.enrichment_queue, 'read_snapshot', database.read_snapshot)
             yield database
 
 
@@ -176,6 +181,19 @@ def _build_enrichment_inputs(store, signal):
                            taste=taste)
 
 
+@pytest.fixture(autouse=True)
+def unrelated_recommendation_inputs(monkeypatch):
+    for name in ('for_you', 'explore_for_you', 'comfort_listening'):
+        monkeypatch.setattr(surfaces, name, lambda *args, **kwargs: [])
+    monkeypatch.setattr(vibe_pools, 'prepare', lambda *args, **kwargs: None)
+    monkeypatch.setattr(ppr, 'mode_rankings', lambda *args, **kwargs: {})
+
+    def no_temporal_pool(store, payload, *args, **kwargs):
+        payload['all']['temporal'] = []
+
+    monkeypatch.setattr(mode_surfaces, '_build_temporal', no_temporal_pool)
+
+
 def _forbid_retraining(monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError('An enrichment update must reuse saved models and rankings')
@@ -187,12 +205,6 @@ def _forbid_retraining(monkeypatch):
 
 @pytest.mark.parametrize('signal', ['genre', 'year', 'audio'])
 def test_enrichment_updates_fresh_modes_and_generated_playlist(store, monkeypatch, signal):
-    # This workflow follows fresh discoveries. The other recommendation lanes,
-    # vibe menus and PPR ordering are separate inputs, not enrichment behavior.
-    for name in ('for_you', 'explore_for_you', 'comfort_listening'):
-        monkeypatch.setattr(surfaces, name, lambda *args, **kwargs: [])
-    monkeypatch.setattr(vibe_pools, 'prepare', lambda *args, **kwargs: None)
-    monkeypatch.setattr(ppr, 'mode_rankings', lambda *args, **kwargs: {})
     inputs = _build_enrichment_inputs(store, signal)
     monkeypatch.setattr(surfaces, 'playlist_taste', lambda s, *, now: inputs.taste)
     assert store.conn.execute('SELECT count(*) FROM recordings').fetchone()[0] == 22
@@ -240,7 +252,6 @@ def test_enrichment_updates_fresh_modes_and_generated_playlist(store, monkeypatc
         assert len(audio) == len(inputs.changed)
         assert all(tuple(row) == tuple(a['audio'][field] for field in ('bpm', 'energy', 'danceability'))
                   for row in audio)
-
     changed, reference = inputs.changed, inputs.reference
     # Enrichment only notifies the worker. The background pass reuses the library
     # encoder and original ranker before publishing the updated discovery pools.

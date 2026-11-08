@@ -7,6 +7,7 @@ from threading import Barrier
 
 import pytest
 
+from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
 from yt_playlist.core import album_note_requests as owner, albums, recommendation_outputs as outputs
 from yt_playlist.core.migrations import current, migrate, registry
 from yt_playlist.core.migrations.runner import MigrationError
@@ -14,6 +15,19 @@ from yt_playlist.core.store import Store
 
 ALBUM = {'browse_id': 'release-one', 'artist': 'Artist', 'title': 'Release',
          'year': '2020', 'thumbnail': None}
+
+
+@pytest.fixture(scope='module')
+def acknowledgement_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+def test_acknowledgement_input_keeps_empty_demand_and_real_guards(acknowledgement_schema):
+    assert acknowledgement_schema.execute('PRAGMA query_only').fetchone()[0] == 1
+    assert acknowledgement_schema._revision_script
+    assert not acknowledgement_schema.execute('SELECT 1 FROM album_note_requests').fetchone()
+    assert not acknowledgement_schema.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.fixture
@@ -126,12 +140,15 @@ def test_visible_polling_extends_visibility_without_starving_an_inflight_worker(
     assert store.album_notes.publish(ALBUM['browse_id'], {'label': 'Current'}, 120, expected_request=token)
 
 
-def test_two_connections_can_acknowledge_one_request_only_once(tmp_path):
-    path = tmp_path / 'shared.db'
+def test_two_connections_can_acknowledge_one_request_only_once(tmp_path, acknowledgement_schema):
+    # Admission has its own owners. The race needs two genuine writable
+    # connections, repositories and revision guards on one private WAL database.
+    path = tmp_path / 'acknowledgement.db'
     stores = [Store(path), Store(path)]
     try:
         for store in stores:
-            store.init_schema()
+            store.conn.execute('PRAGMA synchronous=NORMAL')
+            initialize_consumer(store, acknowledgement_schema)
         stores[0].album_notes.request([ALBUM], 100)
         _, token = stores[0].album_notes.next_request()
         barrier = Barrier(2)

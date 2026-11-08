@@ -7,6 +7,7 @@ they retain real repositories, revision guards, repair and WAL configuration.
 from copy import deepcopy
 from contextlib import closing, contextmanager, nullcontext
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,9 +25,29 @@ def file_consumer_store(tmp_path, _pristine_current_schema, monkeypatch):
     database = Store(directory / 'consumer.db')
     with closing(database.conn):
         initialize_consumer(database, _pristine_current_schema)
+        database.conn.execute('PRAGMA synchronous=NORMAL')
         database.conn.execute('PRAGMA wal_autocheckpoint=0')
         with reuse_reporting_reader(database, monkeypatch):
             yield database
+
+
+@pytest.fixture
+def publication_schema_inspections(request):
+    """Cache unchanged table observations within one publication case.
+
+    Validators still check live SQL and refresh after external commits. Keep
+    reader and artifact leases entirely under each test's control.
+    """
+    fixture = next((name for name in ('installed', 'unadmitted_installed')
+                    if name in request.fixturenames), None)
+    if fixture is None:
+        yield
+        return
+    from yt_playlist.core import schema_inspection
+
+    store, _ = request.getfixturevalue(fixture)
+    with schema_inspection.reuse_tables(store.conn):
+        yield
 
 
 @pytest.fixture
@@ -57,7 +78,16 @@ def assert_installed_consumer_input(store, version):
     assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
     assert list(map(tuple, store.conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
         (entry.version, entry.name) for entry in registry.MIGRATIONS[:version]]
-    assert regular.validate(store.conn) == regular.validate(source.conn)
+    # The immutable source was admitted when built. Validate the private copy
+    # against its recorded history without repeating the source's admission.
+    def history(conn):
+        if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='schema_changes'").fetchone():
+            return []
+        return list(map(tuple, conn.execute('SELECT version,name FROM schema_changes ORDER BY version')))
+
+    expected = history(source.conn)
+    assert history(store.conn) == expected
+    assert regular.validate(store.conn) == len(expected)
     assert store._snapshot_revisions.conn is store.conn
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
@@ -138,6 +168,34 @@ def initialize_consumer(store, pristine, *, snapshot_guards=True):
         store._snapshot_revisions = pristine.bind_revisions(store.conn)
 
 
+@pytest.fixture
+def numbered_store(request, tmp_path, monkeypatch):
+    """Build shipped predecessor SQL without running application startup.
+
+    Registered upgrades still admit and convert their actual populated input.
+    Consumers needing guarded snapshots use the admitted fixtures instead.
+    """
+    from tests.genre_catalog_support import bound_catalog
+    from yt_playlist.core import schema_inspection
+    from yt_playlist.core.store import Store
+
+    version = request.param
+    bound_catalog(monkeypatch)
+    database = Store(tmp_path / 'numbered-input.db')
+    with closing(database.conn):
+        with closing(sqlite3.connect(':memory:')) as schema:
+            install_numbered_input(schema, version)
+            schema.backup(database.conn)
+        database.conn.execute('PRAGMA journal_mode=WAL')
+        database.conn.execute('PRAGMA synchronous=NORMAL')
+        database._schema_compatibility = version < 103
+        database._rebuild_source_version = None
+        database._schema_recovery_pending = False
+        database._bind_repositories()
+        with schema_inspection.reuse_tables(database.conn):
+            yield database, version
+
+
 
 def install_numbered_input(conn, version, *, regular_owners=()):
     """Completed numbered SQL below an upgrade or publication test boundary.
@@ -190,6 +248,24 @@ def install_regular_input(conn, changes):
     for change in changes:
         change.apply(conn, Context(1.))
         conn.execute('INSERT INTO schema_changes VALUES (?,?,1)', (change.version, change.name))
+
+
+@contextmanager
+def mock_snapshot_coordinator(store, monkeypatch):
+    """Real private SQL reads/writes below consumers of snapshot coordination.
+
+    Conflict detection and source-change races use actual guarded snapshots in
+    their own tests. This helper supplies uncontended publication only.
+    """
+    def publish(target, **kwargs):
+        target()
+        return True
+
+    with reuse_reporting_reader(store, monkeypatch) as reader:
+        snapshot = SimpleNamespace(store=reader, release_reader=lambda: None,
+                                   publish_ordered=publish)
+        monkeypatch.setattr(store, 'read_snapshot', lambda: nullcontext(snapshot))
+        yield
 
 
 @contextmanager

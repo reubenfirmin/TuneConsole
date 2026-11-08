@@ -14,6 +14,11 @@ from yt_playlist.core.migrations import regular, MigrationError
 from yt_playlist.core.preparation import conflict_publication as publication, metadata_conflicts as preparation
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Conflict preparation and publication do not construct an HTTP app."""
+
+
 def publish(conn, size=1):
     for _ in range(100):
         stage = publication.OWNER.step(conn, batch_size=size)

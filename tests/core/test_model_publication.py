@@ -10,10 +10,14 @@ import pytest
 from tests.core.test_collection_control_preparation import finish
 from tests.core.test_model_artifact_preparation import current, seed
 from tests.core.test_predecessor_writes import consumer_installed as installed
+from tests.store_fixture_support import publication_schema_inspections
 from yt_playlist.core import model_state, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import model_artifacts as preparation, model_publication as publication
 from yt_playlist.core.store import Store
+
+
+pytestmark = pytest.mark.usefixtures('publication_schema_inspections')
 
 
 def prepare(store):

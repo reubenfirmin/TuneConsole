@@ -21,6 +21,11 @@ from yt_playlist.rec import discover, graduation, scorecard, scoring, surfaces
 DAY = 86400
 
 
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These library and recommendation checks do not create an HTTP app."""
+
+
 @pytest.fixture(scope='module')
 def _pristine_current_schema():
     with bounded_consumer_schema((('jazz', 'Jazz'), ('techno', 'Techno'),

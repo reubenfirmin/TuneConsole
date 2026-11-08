@@ -11,7 +11,7 @@ from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_predecessor_writes import consumer_installed as unadmitted_installed
 from tests.independent_schema_support import independent_regular_ddl
 from tests.core.test_discovery_owner_preparation import seed
-from tests.store_fixture_support import publication_consumer_reads
+from tests.store_fixture_support import numbered_store, publication_consumer_reads
 from yt_playlist.core import schema_inspection, collection_recovery, policy_documents
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import discovery_artists as preparation, discovery_artist_publication as publication
@@ -249,9 +249,9 @@ def test_slow_verification_allows_real_writer_and_independent_ddl(installed, mon
     assert owner.selected(store.conn) is None
 
 
-@pytest.mark.parametrize('installed', [79], indirect=True)
-def test_oversized_prepared_key_fails_before_map_writer_and_valid_original_is_retained(installed, independent_regular_ddl):
-    store, _ = installed
+@pytest.mark.parametrize('numbered_store', [79], indirect=True)
+def test_oversized_prepared_key_fails_before_map_writer_and_valid_original_is_retained(numbered_store, independent_regular_ddl):
+    store, _ = numbered_store
     seed(store)
     owner = prepare(store.conn)
     good = store.conn.execute('SELECT * FROM '+owner.header).fetchone()
