@@ -550,12 +550,12 @@ def cutover_library(tmp_path, monkeypatch, copy_routes, without_query_timing):
 @pytest.fixture
 def feedback_library(cutover_library, monkeypatch):
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, bridge, likes
+    from yt_playlist.web.routes import app_update, bridge, likes
 
     # The inbox consumes the same completed installed library. Preserve the
     # real HTTP rating, bridge control and player-event entry points while the
     # replacement closes its main handles.
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
-        module.build(ctx) for module in (app_update, audio_preview, likes)])
+        module.build(ctx) for module in (app_update, likes)])
     monkeypatch.setattr(webapp, 'build_bridge_route', bridge.build)
     return cutover_library

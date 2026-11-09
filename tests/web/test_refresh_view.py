@@ -198,12 +198,19 @@ def copy_move_library(tmp_path, native_sql_calls):
 @pytest.fixture
 def copy_move_routes(monkeypatch, without_metadata_providers):
     from fastapi import APIRouter
+    from yt_playlist.library import undo_capture
     from yt_playlist.web import app as webapp
     from yt_playlist.web.routes import app_update, audio_preview, move
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
         module.build(ctx) for module in (app_update, audio_preview, move)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    capture, pauses = undo_capture.capture_post, []
+    # Keep real constrained readback and every retry. Provider pacing is below
+    # the refresh-control assertion; test_undo_capture owns its readback rules.
+    monkeypatch.setattr(undo_capture, 'capture_post', lambda *args, **kwargs:
+                        capture(*args, **kwargs, sleep=pauses.append))
+    return pauses
 
 
 def test_copy_only_move_does_not_fire_refresh_view(copy_move_library, copy_move_routes):
@@ -215,7 +222,9 @@ def test_copy_only_move_does_not_fire_refresh_view(copy_move_library, copy_move_
                               now_fn=lambda: 1.0, bridge=bridge, background_work=False),
                    base_url='http://127.0.0.1')
 
-    r = c.post("/move/run", data={"playlist": pid, "target_identity": i2, "copy_only": "1"})
+    with c:
+        r = c.post("/move/run", data={"playlist": pid, "target_identity": i2, "copy_only": "1"})
 
     assert r.status_code == 200 and "Copied" in r.text
     assert bridge.calls == []
+    assert copy_move_routes == [.5, 1.]

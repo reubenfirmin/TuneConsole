@@ -7,8 +7,11 @@ import pytest
 
 from tests.store_fixture_support import (
     guarded_numbered_store as guarded_installed,
+    mock_preparation_schema,
+    native_sql_calls,
     numbered_store as installed,
     preparation_ddl_connection,
+    without_query_timing,
 )
 from yt_playlist.core import choice_learning_state as learning, recommendation_outputs as files
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -289,13 +292,15 @@ def test_partial_source_replacement_and_interrupted_final_head_preserve_prior_ge
 
 
 @pytest.mark.parametrize('installed', [92], indirect=True)
-def test_whitespace_in_original_counts_toward_the_byte_budget(installed, preparation_ddl_connection):
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_whitespace_in_original_counts_toward_the_byte_budget(installed, preparation_ddl_connection, monkeypatch):
     store, _ = installed
     conn = preparation_ddl_connection
     raw = '{}' + ' ' * learning.MAX_BYTES
     with conn:
         conn.execute('INSERT INTO rec_proposals VALUES (?,?,1)', ('choice_bandit', raw))
     preparation.JOB.install(conn)
+    mock_preparation_schema(monkeypatch, preparation.JOB.definition, conn)
     with pytest.raises(MigrationError, match='exceeds its preparation byte budget'):
         finish(conn)
     assert preparation.JOB.progress(conn).status == 'failed'

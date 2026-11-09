@@ -6,7 +6,11 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import consumer_installed as installed
-from tests.store_fixture_support import assert_installed_consumer_input, numbered_store, publication_consumer_reads
+from tests.publication_fixture_support import installed as guarded_installed
+from tests.store_fixture_support import (
+    assert_installed_consumer_input, mock_preparation_schema, native_sql_calls,
+    numbered_store, preparation_ddl_connection, publication_consumer_reads, without_query_timing,
+)
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import domain_contracts as audit
 from yt_playlist.core.store import Store
@@ -60,14 +64,17 @@ def test_future_guards_are_independent_of_audit_and_preserve_history(installed):
     assert audit.verify(store.conn,job).input_revision > verified.input_revision
 
 
-@pytest.mark.parametrize('installed',[93],indirect=True)
-def test_invalid_history_is_retained_and_blocks_verification_without_blocking_ddl(installed,monkeypatch):
-    store, _ = installed
+@pytest.mark.parametrize('guarded_installed',[93],indirect=True)
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_invalid_history_is_retained_and_blocks_verification_without_blocking_ddl(
+        guarded_installed, monkeypatch, preparation_ddl_connection):
+    store, _ = guarded_installed
     store.discovery.upsert_discovered_artist('Candidate',2,[],[],None,1)
     with store.conn:
         store.conn.execute('UPDATE main.discovered_artists SET score=?',(float('inf'),))
     job = audit.job(store.conn,'discovered_artists')
     job.install(store.conn)
+    mock_preparation_schema(monkeypatch, job, store.conn)
     finish(job,store.conn)
     captured = store.conn.execute('SELECT * FROM '+audit.table(job,'rows')).fetchone()
     assert json.loads(captured['violations']) == ['score']
@@ -81,7 +88,7 @@ def test_invalid_history_is_retained_and_blocks_verification_without_blocking_dd
     def validate(conn):
         assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='independent_contract_ddl'").fetchone()
     monkeypatch.setattr(regular,'CHANGES',(*regular.CHANGES,regular.Change(len(regular.CHANGES) + 1,'independent_contract_ddl',install,validate)))
-    regular.migrate(store.conn)
+    regular.migrate(preparation_ddl_connection)
     assert job.progress(store.conn) == progress
     with pytest.raises(sqlite3.IntegrityError,match='Invalid future discovered_artists.score'):
         with store.conn:
@@ -159,14 +166,16 @@ def test_historical_conversion_preserves_guard_and_audit_custody(installed,tmp_p
         upgraded.conn.close()
 
 
-@pytest.mark.parametrize('installed',[103],indirect=True)
-def test_all_future_field_guards_match_domain_boundaries_on_real_predecessor(installed):
+@pytest.mark.parametrize('guarded_installed',[103],indirect=True)
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_all_future_field_guards_match_domain_boundaries_on_real_predecessor(guarded_installed, monkeypatch):
     from tests.core.test_domain_contracts import seed
-    store, _ = installed
+    store, _ = guarded_installed
     seed(store.conn)
     for owner,fields in audit.CONTRACTS.items():
         selected = audit.job(store.conn,owner)
         selected.install(store.conn)
+        mock_preparation_schema(monkeypatch, selected, store.conn)
         finish(selected,store.conn)
         audit.verify(store.conn,selected)
         assert store.conn.execute('SELECT count(*) FROM main.' + owner).fetchone()[0] > 0

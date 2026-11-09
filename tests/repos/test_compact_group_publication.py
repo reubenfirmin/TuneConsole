@@ -14,7 +14,7 @@ from tests.core.test_compact_groups_migration import historical_groups, apply
 from tests.genre_catalog_support import bound_catalog
 from tests.prepared_fixture_support import capture_template, roots
 from yt_playlist.core.activity import WorkClosing
-from yt_playlist.core import group_documents, group_reads as group_queries
+from yt_playlist.core import group_content, group_documents, group_reads as group_queries, group_storage
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.migrations import v072_compact_groups as migration
 from yt_playlist.core.migrations import registry, runner
@@ -207,6 +207,115 @@ def test_expired_cleanup_removes_only_the_abandoned_build_and_can_rebuild(databa
     assert store.conn.execute('SELECT count(*) FROM group_versions').fetchone()[0] == 2
     assert store.conn.execute('SELECT count(*) FROM group_members').fetchone()[0] == 3
     assert not store.conn.execute("SELECT 1 FROM group_generations WHERE external_key='third'").fetchone()
+    owner = store.taste_groups.stage(prepared)
+    finish(store, prepared, owner)
+    assert group_queries.head_generation(store.conn) == 'third'
+
+
+@pytest.mark.parametrize('complete', [False, True])
+@pytest.mark.parametrize('interrupted', [False, True])
+def test_publication_during_partial_orphan_manifest_cleanup(database, monkeypatch, interrupted, complete):
+    store, prepared = database
+    payload = json.loads(prepared['payload'])
+    payload['recording_inputs']['one'] = '4' * 64
+    prepared['payload'] = json.dumps(payload)
+    identities = dict(store.conn.execute('SELECT identity_key,id FROM recordings'))
+    with store.conn:
+        store.conn.execute('BEGIN IMMEDIATE')
+        if complete:
+            manifest = group_storage.install_manifest(store.conn, payload['recording_inputs'], identities.get)
+        else:
+            rows = group_storage.normalized_inputs(payload['recording_inputs'], identities.get)
+            digest = group_content.digest(group_content.canonical([owner, value]) for owner, value in rows)
+            manifest = store.conn.execute('INSERT INTO group_input_manifests(content_digest) VALUES (?) '
+                                          'RETURNING id', (digest,)).fetchone()[0]
+            group_storage.insert_inputs(store.conn, manifest, rows)
+    exact = list(group_storage.manifest_rows(store.conn, manifest))
+    historical = group_queries.head(store.conn, members=True)
+    monkeypatch.setattr(publication, 'BATCH_ROWS', 1)
+    assert store.taste_groups.cleanup_builds()
+    assert 0 < len(list(group_storage.manifest_rows(store.conn, manifest))) < len(exact)
+    if interrupted:
+        original = compact.cleanup
+        def cleanup(repo, **kwargs):
+            original(repo, **kwargs)
+            raise WorkClosing('interrupted orphan manifest retirement')
+        monkeypatch.setattr(compact, 'cleanup', cleanup)
+        with pytest.raises(WorkClosing, match='orphan manifest retirement'):
+            store.taste_groups.stage(prepared)
+        assert group_queries.head(store.conn, members=True) == historical
+        monkeypatch.setattr(compact, 'cleanup', original)
+    owner = store.taste_groups.stage(prepared)
+    assert group_queries.head(store.conn, members=True) == historical
+    finish(store, prepared, owner)
+    selected = store.conn.execute("SELECT input_manifest_id FROM group_generations WHERE external_key='third'").fetchone()[0]
+    assert list(group_storage.manifest_rows(store.conn, selected)) == exact
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
+
+
+def test_unchanged_complete_orphan_manifest_is_reused(database):
+    store, prepared = database
+    payload = json.loads(prepared['payload'])
+    payload['recording_inputs']['one'] = '4' * 64
+    prepared['payload'] = json.dumps(payload)
+    identities = dict(store.conn.execute('SELECT identity_key,id FROM recordings'))
+    with store.conn:
+        store.conn.execute('BEGIN IMMEDIATE')
+        manifest = group_storage.install_manifest(store.conn, payload['recording_inputs'], identities.get)
+    exact = list(group_storage.manifest_rows(store.conn, manifest))
+    owner = store.taste_groups.stage(prepared)
+    selected = store.conn.execute("SELECT input_manifest_id FROM group_generations WHERE external_key='third'").fetchone()[0]
+    assert selected == manifest
+    assert list(group_storage.manifest_rows(store.conn, selected)) == exact
+    finish(store, prepared, owner)
+
+
+@pytest.mark.parametrize('unowned', [False, True])
+def test_input_manifest_digest_match_still_rejects_conflicting_content(database, monkeypatch, unowned):
+    store, prepared = database
+    payload = json.loads(prepared['payload'])
+    payload['recording_inputs']['one'] = '4' * 64
+    prepared['payload'] = json.dumps(payload)
+    identities = dict(store.conn.execute('SELECT identity_key,id FROM recordings'))
+    expected = [group_content.canonical([owner, value]) for owner, value in
+                group_storage.normalized_inputs(payload['recording_inputs'], identities.get)]
+    if unowned:
+        with store.conn:
+            store.conn.execute('BEGIN IMMEDIATE')
+            manifest = group_storage.install_manifest(store.conn, {'one': '5' * 64}, identities.get)
+        digest = store.conn.execute('SELECT content_digest FROM group_input_manifests WHERE id=?', (manifest,)).fetchone()[0]
+    else:
+        digest = store.conn.execute('SELECT content_digest FROM group_input_manifests').fetchone()[0]
+    real_digest = group_content.digest
+    def collide(rows):
+        rows = list(rows)
+        return digest if rows == expected else real_digest(rows)
+    monkeypatch.setattr(group_content, 'digest', collide)
+    before = list(store.conn.iterdump())
+    with pytest.raises(ValueError, match='Musical group input digest collision'):
+        store.taste_groups.stage(prepared)
+    assert list(store.conn.iterdump()) == before
+
+
+def test_referenced_incomplete_input_manifest_cannot_be_reused(database, monkeypatch):
+    store, prepared = database
+    payload = json.loads(prepared['payload'])
+    payload['recording_inputs']['one'] = '4' * 64
+    prepared['payload'] = json.dumps(payload)
+    original = CompactTasteGroupsRepo.install_inputs
+    def interrupt(*args):
+        raise WorkClosing('interrupted before manifest inputs')
+    monkeypatch.setattr(CompactTasteGroupsRepo, 'install_inputs', interrupt)
+    with pytest.raises(WorkClosing, match='before manifest inputs'):
+        store.taste_groups.stage(prepared)
+    other = deepcopy(prepared)
+    other.update(generation='fourth', at=4, serial=4)
+    other.pop('_stage_owner')
+    before = list(store.conn.iterdump())
+    with pytest.raises(publication.BuildUnavailable, match='inputs are leased'):
+        store.taste_groups.stage(other)
+    assert list(store.conn.iterdump()) == before
+    monkeypatch.setattr(CompactTasteGroupsRepo, 'install_inputs', original)
     owner = store.taste_groups.stage(prepared)
     finish(store, prepared, owner)
     assert group_queries.head_generation(store.conn) == 'third'

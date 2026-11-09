@@ -246,7 +246,7 @@ def test_later_incompatible_regular_owner_is_rejected(installed):
     assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone() == (93,)
 
 
-def interrupted_change(conn, failed, failure, changes):
+def interrupted_change(conn, failed, failure, changes, *, predecessor=None):
     """Fail a real runner turn and compare its exact committed predecessor."""
     case = f'{failed.version} {failed.name} ({failure})'
     interruption = f'Interrupted bounded change {failed.version} during {failure}: {failed.name}'
@@ -255,7 +255,8 @@ def interrupted_change(conn, failed, failure, changes):
     committed = []
 
     def apply(connection, context):
-        before.extend(contents(connection))
+        if predecessor is None:
+            before.extend(contents(connection))
         committed.extend(connection.execute('SELECT * FROM schema_changes ORDER BY version'))
         failed.apply(connection, context)
         if failure == 'apply':
@@ -273,7 +274,10 @@ def interrupted_change(conn, failed, failure, changes):
     assert not conn.in_transaction, case
     assert applied(conn) == [(change.version, change.name)
                              for change in regular.CHANGES[:failed.version - 1]], case
-    assert contents(conn) == before, case
+    if predecessor is None:
+        assert contents(conn) == before, case
+    else:
+        assert conn.serialize() == predecessor, case
     assert list(conn.execute('SELECT * FROM schema_migrations ORDER BY version')) == historical, case
     if committed:
         assert list(conn.execute('SELECT * FROM schema_changes ORDER BY version')) == committed, case
@@ -281,9 +285,15 @@ def interrupted_change(conn, failed, failure, changes):
 
 
 @pytest.mark.parametrize('failed', regular.CHANGES[:-1], ids=lambda change: f'{change.version}-{change.name}')
-def test_each_change_rolls_back_and_can_retry(tmp_path, regular_prefixes, failed):
+def test_each_change_rolls_back_and_can_retry(tmp_path, regular_prefixes, failed, monkeypatch):
     with closing(sqlite3.connect(tmp_path / 'retry.db')) as conn:
         regular_prefixes(failed.version - 1).backup(conn)
+        # This unit owns the selected change's SQL, validation and rollback.
+        # Its genuine prefix is built by the unmodified runner above. Historical
+        # layout admission and concurrent damage retain real validators in
+        # test_regular_session_inspects_each_unchanged_table_once and the
+        # concurrent/later-incompatible-owner cases in this module.
+        monkeypatch.setattr(regular, 'validate_version', lambda *args, **kwargs: None)
         check_change_retry(conn, failed)
 
 
@@ -293,7 +303,12 @@ def check_change_retry(conn, failed):
     # Each independently diagnosed change keeps both genuine fault boundaries,
     # its exact committed predecessor, successful retry and writable restart.
     for failure in ('apply', 'validate'):
-        committed = interrupted_change(conn, failed, failure, prefix)
+        # Only this change is pending. Compare the complete SQLite image before
+        # and after rollback, rather than re-encoding every empty table and DDL
+        # statement four times. Multi-change runs below retain their committed
+        # prefixes and still compare logical contents at the failed boundary.
+        predecessor = conn.serialize()
+        committed = interrupted_change(conn, failed, failure, prefix, predecessor=predecessor)
     regular.migrate(conn, changes=prefix)
     assert applied(conn) == [(change.version, change.name) for change in prefix], failed.name
     assert list(conn.execute('SELECT * FROM schema_changes WHERE version<? ORDER BY version',

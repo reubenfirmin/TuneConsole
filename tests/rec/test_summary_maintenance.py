@@ -1,4 +1,5 @@
 """Normal worker maintenance owns recap and cleanup freshness, including retries."""
+from contextlib import closing
 from datetime import datetime, timezone
 import logging
 from pathlib import Path
@@ -10,11 +11,19 @@ import pytest
 
 from tests.conftest import seed_catalog_track
 from tests.home_fixture_support import without_metadata_providers
-from tests.store_fixture_support import _file_consumer_store, bounded_consumer_schema, native_sql_calls
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls, reuse_reporting_reader,
+)
+from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
 from yt_playlist.library import analysis
 from yt_playlist.rec import actions, maintenance, trend_rollups
 from yt_playlist.rec.rec_worker import RecWorker
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """The focused FastAPI route has no application background lifecycle."""
 
 
 @pytest.fixture(scope='module')
@@ -166,34 +175,36 @@ def test_conflicting_publication_retries_with_backoff_and_keeps_last_good(store,
     assert store.rec_proposals.get_proposals('cleanup')['count'] == 1
 
 
-def test_restart_and_external_import_are_not_lost_and_shutdown_stops_admission(tmp_path, monkeypatch):
-    path = tmp_path / 'summaries.db'
-    store = Store(path)
-    store.init_schema()
-    iid = seed(store)
-    now = [timestamp('2026-10')]
-    worker = worker_for(store, monkeypatch, now)
-    tick(worker)
-    with sqlite3.connect(path) as writer:
-        writer.execute("INSERT INTO settings VALUES ('takeout_imported_at','123')")
-    worker.projections.retry_at.clear()
-    worker.projections.poll()
-    assert worker.jobs.has('trends') and worker.jobs.has('cleanup')
-    worker._run_pending()
-    store.conn.close()
-    store = Store(path)
-    try:
-        store.init_schema()
-        store.playlists.upsert_playlist(iid, 'offline-empty', 'Offline change', 0, '', now[0])
+def test_restart_and_external_import_are_not_lost_and_shutdown_stops_admission(summary_store, monkeypatch):
+    store = summary_store
+    path = store._db_path
+    with reuse_reporting_reader(store, monkeypatch):
+        iid = seed(store)
+        now = [timestamp('2026-10')]
         worker = worker_for(store, monkeypatch, now)
         tick(worker)
-        assert store.rec_proposals.get_proposals('cleanup')['count'] == 1
-        worker.shutdown()
-        worker.projections.completed.clear()
+        with sqlite3.connect(path) as writer:
+            writer.execute("INSERT INTO settings VALUES ('takeout_imported_at','123')")
+        worker.projections.retry_at.clear()
         worker.projections.poll()
-        assert not worker.busy
-    finally:
-        store.conn.close()
+        assert worker.jobs.has('trends') and worker.jobs.has('cleanup')
+        worker._run_pending()
+    store.conn.close()
+    store = Store(path)
+    with closing(store.conn), schema_inspection.reuse_tables(store.conn):
+        # Bootstrap is below this worker's boundary. Reopening and admission
+        # remain genuine, as do the external commit and publication guards.
+        store.conn.execute('PRAGMA synchronous=OFF')
+        store.init_schema()
+        with reuse_reporting_reader(store, monkeypatch):
+            store.playlists.upsert_playlist(iid, 'offline-empty', 'Offline change', 0, '', now[0])
+            worker = worker_for(store, monkeypatch, now)
+            tick(worker)
+            assert store.rec_proposals.get_proposals('cleanup')['count'] == 1
+            worker.shutdown()
+            worker.projections.completed.clear()
+            worker.projections.poll()
+            assert not worker.busy
 
 
 def test_full_rebuild_failure_does_not_swallow_summary_jobs(store, monkeypatch):

@@ -28,6 +28,15 @@ def manifest_rows(conn, manifest_id):
         yield canonical([['unresolved', raw_key], digest])
 
 
+def manifest_remainder_matches(conn, manifest_id, inputs):
+    """Verify every surviving row of an unowned, partially collected manifest."""
+    expected = iter(canonical([owner, value]) for owner, value in inputs)
+    for retained in manifest_rows(conn, manifest_id):
+        if not any(row == retained for row in expected):
+            return False
+    return True
+
+
 def install_manifest(conn, inputs, resolve):
     _writer(conn)
     rows = normalized_inputs(inputs, resolve)

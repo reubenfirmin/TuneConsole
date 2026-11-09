@@ -10,7 +10,7 @@ import pytest
 
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
-from tests.home_fixture_support import home_control_routes, home_routes_only, without_metadata_providers
+from tests.home_fixture_support import without_metadata_providers
 from tests.store_fixture_support import _file_consumer_store, bounded_consumer_schema
 
 
@@ -109,14 +109,21 @@ def deadline_library(tmp_path):
     # Keep instrumented handle admission, the actual SQL interrupt and a fresh
     # private reader. This fixture does not replace the timeout/cancellation
     # behavior checked below.
-    with bounded_consumer_schema(()) as schema:
+    with bounded_consumer_schema((('house', 'House'),)) as schema:
         with _file_consumer_store(tmp_path, schema) as store:
             yield store
 
 
 @pytest.fixture
-def deadline_routes(home_control_routes, without_metadata_providers):
-    """Retain the actual card/control routers below request recovery."""
+def deadline_routes(monkeypatch, without_metadata_providers):
+    from fastapi import APIRouter
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, home_board
+    from yt_playlist.web.routes.home_views import HomeViews
+
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
+        app_update.build(ctx), home_board.build(ctx, HomeViews(ctx))])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
 
 
 def test_home_card_deadline_preserves_the_board_and_recovers(deadline_library, deadline_routes,

@@ -255,6 +255,7 @@ def test_insufficient_activity_skips_all_fits(library):
     assert library['calls'] == []
 
 
+@pytest.mark.usefixtures('native_sql_calls')
 @pytest.mark.parametrize(('initial_targets', 'new_targets', 'expected'), [
     (26, 24, 'ready'),
     (26, 30, 'ready'),

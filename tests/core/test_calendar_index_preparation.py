@@ -6,11 +6,11 @@ import sqlite3
 
 import pytest
 
-from tests.publication_fixture_support import installed
+from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.repos.test_foreign_calendar_batches import stamp
 from tests.store_fixture_support import (
     bounded_consumer_schema, file_consumer_store as file_backed_store,
-    publication_consumer_reads, without_query_timing,
+    native_sql_calls, publication_consumer_reads, without_query_timing,
 )
 from yt_playlist.core import destination_schema, listening, listening_calendar, schema_inspection
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
@@ -77,7 +77,8 @@ def observed(conn,account):
 def test_calendar_input_keeps_each_installed_contract_and_snapshot_guards(_bounded_installed_schema, version):
     template = _bounded_installed_schema(version)
     source = template.source
-    with closing(sqlite3.connect(source._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
+    with (closing(sqlite3.connect(source._db_path.as_uri() + '?mode=ro', uri=True)) as reader,
+          schema_inspection.reuse_tables(reader)):
         reader.row_factory = sqlite3.Row
         runner.validate_version(reader, version)
         regular.validate(reader)
@@ -87,6 +88,7 @@ def test_calendar_input_keeps_each_installed_contract_and_snapshot_guards(_bound
 
 
 @pytest.mark.parametrize('installed',[100,103,105,107],indirect=True)
+@pytest.mark.usefixtures('native_sql_calls')
 def test_empty_index_install_bounded_build_and_explicit_dynamic_selection(installed):
     store, _ = installed
     accounts,_ = seed(store,count=40)

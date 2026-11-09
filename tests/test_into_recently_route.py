@@ -1,3 +1,5 @@
+from contextlib import closing
+
 from fastapi import Request
 from tests.enrichment_support import seed_enrichment
 from fastapi.testclient import TestClient
@@ -7,7 +9,11 @@ from yt_playlist.web.app import create_app
 from yt_playlist.rec import into_recently
 from yt_playlist.providers import wikipedia
 from tests.conftest import FakeClient
-from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, initialize_consumer,
+    native_sql_calls, reuse_reporting_reader,
+)
+from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
 
 NOW = 1_800_000_000
@@ -687,32 +693,39 @@ def test_only_visible_known_stories_count_and_fragment_polls_do_not_count_again(
     assert store.rec_ledger.story_views() == {'artist:Band': {'views': 1, 'last_shown': NOW}}
 
 
-def test_story_variety_waits_for_next_edition_and_survives_restart(tmp_path, monkeypatch):
+def test_story_variety_waits_for_next_edition_and_survives_restart(
+        tmp_path, monkeypatch, native_sql_calls):
+    from tests.genre_catalog_support import bound_catalog
     from yt_playlist.core.store import Store
 
-    path = tmp_path / 'stories.db'
-    store = Store(path)
-    store.init_schema()
+    bound_catalog(monkeypatch, entries=())
     subjects = [{'kind': 'artist', 'subject': f'artist:Band {i}', 'display': f'Band {i}'} for i in range(15)]
-    for subject in subjects:
-        store.wiki.put(subject['subject'], 'artist', subject['display'], {
-            'title': subject['display'], 'extract': 'About the band.', 'thumbnail': 'http://portrait',
-            'url': 'http://wiki/' + subject['display']}, NOW)
     monkeypatch.setattr(into_recently, 'ranked_subjects', lambda *a: subjects)
-    into_recently.prepare(store, NOW)
-    original, _ = into_recently.load(store, NOW)
-    assert [s['subject'] for s in original] == [s['subject'] for s in subjects[:9]]
-    store.rec_ledger.record_story_views([s['subject'] for s in original], NOW)
-    # More warming/polling must not replace an article while it is being read.
-    into_recently.prepare(store, NOW + 60)
-    assert into_recently.load(store, NOW + 60)[0] == original
+    # Bootstrap and reporting connection admission are below story selection.
+    # Keep the private WAL file, actual publication guards, all fifteen stories
+    # and the genuine close/reopen startup that proves persisted variety.
+    with bounded_consumer_schema(()) as schema, _file_consumer_store(tmp_path, schema) as store:
+        path = store._db_path
+        with reuse_reporting_reader(store, monkeypatch):
+            for subject in subjects:
+                store.wiki.put(subject['subject'], 'artist', subject['display'], {
+                    'title': subject['display'], 'extract': 'About the band.', 'thumbnail': 'http://portrait',
+                    'url': 'http://wiki/' + subject['display']}, NOW)
+            into_recently.prepare(store, NOW)
+            original, _ = into_recently.load(store, NOW)
+            assert [s['subject'] for s in original] == [s['subject'] for s in subjects[:9]]
+            store.rec_ledger.record_story_views([s['subject'] for s in original], NOW)
+            # More warming/polling must not replace an article while it is being read.
+            into_recently.prepare(store, NOW + 60)
+            assert into_recently.load(store, NOW + 60)[0] == original
     # A later edition uses persisted visible history, not only the top taste ranks.
-    store.conn.close()
     store = Store(path)
-    store.init_schema()
-    later = NOW + 2 * 86400
-    into_recently.prepare(store, later)
-    selected, _ = into_recently.load(store, later)
-    assert {s['subject'] for s in subjects[9:]} <= {s['subject'] for s in selected}
-    assert len(selected) == 9
-    store.conn.close()
+    with closing(store.conn), schema_inspection.reuse_tables(store.conn):
+        store.conn.execute('PRAGMA synchronous=OFF')
+        store.init_schema()
+        with reuse_reporting_reader(store, monkeypatch):
+            later = NOW + 2 * 86400
+            into_recently.prepare(store, later)
+            selected, _ = into_recently.load(store, later)
+            assert {s['subject'] for s in subjects[9:]} <= {s['subject'] for s in selected}
+            assert len(selected) == 9

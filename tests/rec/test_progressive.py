@@ -46,6 +46,21 @@ def grouping_schedule_store(svd_cache_store, monkeypatch):
         yield svd_cache_store
 
 
+@pytest.fixture
+def live_metadata_library(native_sql_calls, svd_cache_store, monkeypatch):
+    from tests.genre_catalog_support import bound_catalog
+
+    # Keep all 96 recordings and the real fit/publication race on private WAL.
+    # Reporting setup and unrelated taxonomy are below accepted-input fitting.
+    entries = (('techno', 'Techno'), ('jazz', 'Jazz'), ('rock', 'Rock'),
+               ('folk', 'Folk'), ('classical', 'Classical'))
+    bound_catalog(monkeypatch, entries=entries)
+    # test_vibe_prediction's ordinary qualified-release case owns joint-audio
+    # fitting; this case owns the content basis while metadata keeps changing.
+    monkeypatch.setattr(vibe_joint_preparation, 'qualified', lambda *args, **kwargs: False)
+    return svd_cache_store
+
+
 def catalog(store, n=12):
     # Preparation consumes selected catalog inputs. Provider observations and
     # per-field reconciliation have their own owners; retain every recording,
@@ -162,7 +177,8 @@ def test_repeated_unrelated_enrichment_keeps_advancing_bounded_batches(store, mo
     assert p.status()['prepared'] == 12 and p.status()['pending'] == 0
 
 
-def test_basis_publishes_accepted_inputs_while_live_metadata_keeps_changing(store, monkeypatch):
+def test_basis_publishes_accepted_inputs_while_live_metadata_keeps_changing(live_metadata_library, monkeypatch):
+    store = live_metadata_library
     ids = catalog(store, 96)
     rec_params.set_param(store, 'modes_k', 4)
     rec_params.set_param(store, 'modes_min_members', 10)

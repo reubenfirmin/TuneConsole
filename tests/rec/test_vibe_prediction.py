@@ -871,6 +871,68 @@ def test_model_version_change_recomputes_all_evidence_in_pages(
                               ('changed-model',)).fetchone()[0] == 2
 
 
+def test_arithmetic_rollout_preserves_originals_and_reuses_new_identity_after_restart(
+        prediction_store, monkeypatch, individual_model_rollout):
+    from tests.test_audio_vibe_cruise import samples
+    from yt_playlist.core import vibe_versions
+    from yt_playlist.rec import audio_vibe_runtime as runtime
+    store = prediction_store
+    entry, own = catalog_track(store, 'arithmetic-original')
+    _entry, target = catalog_track(store, 'arithmetic-target')
+    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '1')
+    monkeypatch.setenv(vibe_preparation.audio_vibe_model.ENVIRONMENT_KEY,
+                       str(vibe_preparation.audio_vibe_model.DEFAULT_PATH))
+    captured = samples('arithmetic-original')
+    for row in captured:
+        store.audio_vibes.save_sample(row, 100)
+    run = captured[0]['run_id']
+    store.audio_vibes.save_feedback(run, [row['id'] for row in captured], ['release'], TAXONOMY_VERSION, None, 101)
+    feedback = store.audio_vibes.feedback(run)
+    identity = runtime.identity
+    with monkeypatch.context() as old:
+        old.setattr(runtime, 'identity', lambda *args: identity(*args).replace('/' + runtime.ARITHMETIC_VERSION, ''))
+        old.setattr(runtime.math, 'sumprod', lambda left, right: sum(a * b for a, b in zip(left, right, strict=True)))
+        old_version = vibe_preparation.version()
+        drain(store).close()
+    original = {tuple(row) for row in store.conn.execute('SELECT * FROM measurements')}
+    links = {tuple(row) for row in store.conn.execute('SELECT * FROM measurement_samples')}
+    assert original and links
+    assert vibe_preparation.version() != old_version
+    drain(store, batch=1).close()
+    measurements = {tuple(row) for row in store.conn.execute('SELECT * FROM measurements')}
+    assert original < measurements
+    assert links < {tuple(row) for row in store.conn.execute('SELECT * FROM measurement_samples')}
+    assert {row[5] for row in measurements} == {'audio_measurement'}
+    current = {row['vibe']: row for row in store.conn.execute('SELECT v.* FROM recording_vibes v JOIN recordings r '
+        'ON r.id=v.recording_id WHERE r.identity_key=?', (own,))}
+    assert current and all(row['measurement_id'] is not None and row['prediction_id'] is None for row in current.values())
+    assert fits(store, target)['cruise']['source'] == 'artist_genre'
+    assert all(runtime.ARITHMETIC_VERSION in row[0] for row in store.conn.execute('SELECT ' +
+        vibe_versions.expression(store.conn, 'recording_vibes', 'v') + ' FROM recording_vibes v'))
+    with store.conn:
+        store.conn.execute('INSERT INTO rec_content_pending(identity_key) VALUES (?)', (own,))
+    restarted = Store(store._db_path)
+    try:
+        restarted.init_schema()
+        drain(restarted, batch=1).close()
+        assert {tuple(row) for row in restarted.conn.execute('SELECT * FROM measurements')} == measurements
+        assert restarted.audio_vibes.feedback(run) == feedback
+        for row in samples('arithmetic-original'):
+            row['embedding']['values'] = [.4] * 200
+            restarted.audio_vibes.save_sample(row, 200)
+        drain(restarted, batch=1).close()
+        assert measurements < {tuple(row) for row in restarted.conn.execute('SELECT * FROM measurements')}
+        with restarted.conn:
+            catalog.choose_field(restarted.conn, entry, 'genre', 'Detroit Techno')
+        drain(restarted, batch=1).close()
+        assert fits(restarted, own)['cruise']['source'] == 'audio_measurement'
+        assert original < {tuple(row) for row in restarted.conn.execute('SELECT * FROM measurements')}
+        assert links < {tuple(row) for row in restarted.conn.execute('SELECT * FROM measurement_samples')}
+        assert restarted.audio_vibes.feedback(run) == feedback
+    finally:
+        restarted.conn.close()
+
+
 def test_artist_tags_never_become_recording_measurements_or_propagation_seeds(file_backed_store, monkeypatch):
     store = file_backed_store
     monkeypatch.setattr(vibe_joint_preparation, 'QUALIFICATIONS', {})

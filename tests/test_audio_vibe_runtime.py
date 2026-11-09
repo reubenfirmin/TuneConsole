@@ -30,6 +30,22 @@ def test_native_coefficients_normalize_project_and_clip():
     assert runtime.predict(projected, [3., 0.]) == pytest.approx([0., .3])
 
 
+def test_coefficient_arithmetic_has_a_distinct_immutable_measurement_identity(monkeypatch):
+    # sumprod retains product precision that sum(a*b) has already rounded.
+    # The same artifact must not reuse measurements from that older arithmetic.
+    model = {'kind': 'ridge', 'mean': [0., 0.], 'scale': [1., 1.],
+             'weights': [[1. + 2**-27], [-1.]], 'intercept': [.5]}
+    values = [1. - 2**-27, 1.]
+    legacy = .5 + sum(row[0] * value for row, value in zip(model['weights'], values))
+    assert runtime.predict(model, values) != [legacy]
+    artifact = 'a' * 64
+    identity = runtime.identity('routing-1', 'active', 'artifact', lambda path: {'sha256': artifact})
+    assert identity == 'routing-1/active/native-coefficients-sumprod-1/' + artifact
+    assert identity != 'routing-1/active/' + artifact
+    monkeypatch.setattr(runtime, 'ARITHMETIC_VERSION', 'next-arithmetic')
+    assert runtime.identity('routing-1', 'active', 'artifact', lambda path: {'sha256': artifact}) != identity
+
+
 @pytest.mark.parametrize('module', SPECIALISTS, ids=VIBES)
 @pytest.mark.parametrize('compressed', [False, True])
 def test_logical_artifact_digest_and_cache_follow_replacement(module, compressed, tmp_path):

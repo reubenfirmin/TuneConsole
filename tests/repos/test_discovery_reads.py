@@ -5,7 +5,23 @@ from tests.enrichment_support import seed_discovered_audio, seed_discovered_enri
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.publication_fixture_support import installed as prepared_discovery
+from tests.store_fixture_support import _publication_preparation_input, native_sql_calls
 from yt_playlist.core.preparation.discovery_publication import read_owners
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Repository assertions do not construct an HTTP application."""
+
+
+@pytest.fixture(autouse=True)
+def repository_sql(native_sql_calls):
+    """Use real SQLite below these synchronous repository reads.
+
+    Instrumented handle admission and thread serialization have their own
+    test_db_thread_serialization owners.
+    """
 
 
 def seed(store):
@@ -118,12 +134,22 @@ def test_tracked_full_read_invalidates_each_changed_input(store, change):
         assert reader.discovery.discovered_track_keys() == {row['identity_key'] for row in expected}
 
 
-@pytest.mark.parametrize('installed', [79, 99], indirect=True)
-def test_reads_follow_prepared_discovery_selection_and_continuing_writes(installed):
+@pytest.fixture
+def prepared_read_sql(prepared_discovery, native_sql_calls, monkeypatch):
+    # Admission and historical replay belong to the installed membership cases
+    # above and test_installed_fixture. Keep real preparation/publication SQL,
+    # files and fresh reader connections beneath these repository assertions.
+    store, _ = prepared_discovery
+    _publication_preparation_input(store, monkeypatch)
+
+
+@pytest.mark.parametrize('prepared_discovery', [79, 99], indirect=True)
+def test_reads_follow_prepared_discovery_selection_and_continuing_writes(
+        prepared_discovery, prepared_read_sql):
     from tests.core.test_discovery_owner_preparation import seed as seed_owners
     from tests.core.test_discovery_publication import ready
 
-    store, _ = installed
+    store, _ = prepared_discovery
     seed_owners(store)
     owner, stage = ready(store.conn)
     owner.publish(store.conn, stage=stage)

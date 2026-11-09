@@ -308,7 +308,7 @@ def block():
         # alarm without spending two seconds on an intentionally idle child.
         while not Path('expire').exists():
             time.sleep(.005)
-        signal.setitimer(signal.ITIMER_REAL, .01)
+        signal.setitimer(signal.ITIMER_REAL, .001)
     if os.environ.get('PROBE_COVERAGE_LOCK') == '1':
         from coverage import Coverage
         collector = Coverage.current()._collector
@@ -348,10 +348,11 @@ def test_unstarted():
     assert False
 ''')
     command = [sys.executable, "-m", "pytest", "-p", "pytest_coverage_guard", "-p", "pytest_progress", "-p", "pytest_time_limit", "-p", "pytest_cov.plugin",
-               "-p", "xdist.plugin", "-n", str(workers), "--dist=" + ("loadfile" if workers else "no"),
                "-q", "--tb=no", "--test-progress=" + str(progress), "--cov=subject", "--cov-context=test",
                "--cov-report=", "--cov-config=" + str(tmp_path / "coverage.ini"),
                "--fixture-root=" + str(tmp_path / "fixtures")]
+    if workers:
+        command.extend(["-p", "xdist.plugin", "-n", str(workers), "--dist=loadfile"])
     if interruption.startswith("deadline"):
         command.append("--test-time-limit=2")
     elif interruption.startswith("pace"):
@@ -376,7 +377,7 @@ def test_unstarted():
                                          'SessionLimit' if interruption.startswith('deadline') else None)
             assert child.poll() is None
             while not (tmp_path / "entered").exists() and child.poll() is None and time.monotonic() < deadline:
-                time.sleep(.02)
+                time.sleep(.002)
             assert (tmp_path / "entered").exists(), output.read_text()
             # Both terminal and JSONL must already be readable while the call
             # is still blocked, rather than only after a session finishes.
@@ -419,8 +420,9 @@ def test_unstarted():
     receipts = [json.loads(line) for line in progress.read_text().splitlines()]
     collections = [row for row in receipts if row["event"] == "collection"]
     assert len(collections) == 1 and collections[0]["tests"] == 5 and collections[0]["files"] == 1
-    result = overlap_module().summarize(json.loads(report.read_text()), receipts)
-    assert overlap_module().summarize(overlap_module().load_coverage(tmp_path / ".coverage"), receipts) == result
+    overlap = overlap_module()
+    result = overlap.summarize(json.loads(report.read_text()), receipts)
+    assert overlap.summarize(overlap.load_coverage(tmp_path / ".coverage"), receipts) == result
     assert result["exitstatus"] == 2 and result["ended_tests"] == 3
     assert result["observed_tests"] == 4
     assert any(row["outcomes"].get("call") == "failed" for row in result["tests"])

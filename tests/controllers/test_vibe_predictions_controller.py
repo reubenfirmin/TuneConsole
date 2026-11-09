@@ -111,9 +111,12 @@ def test_changed_joint_conditioning_allocates_a_new_receipt(predictions):
     assert plan.provenance[0][1]['conditioning']['album'] == 'new'
 
 
-def test_original_measurement_identity_cannot_change_its_score(predictions):
+@pytest.mark.parametrize('stored', [(.1, .6, 'provider_measurement'),
+    (.8000000000000002, .6, 'provider_measurement'), (.8, .6000000000000001, 'provider_measurement'),
+    (.8, .6, 'audio_measurement')])
+def test_original_measurement_identity_cannot_change_its_score(predictions, stored):
     saved = predictions.repository.publication_facts.return_value
-    saved['measurements'] = {(3, 'relax'): (7, .1, .6, 'provider_measurement')}
+    saved['measurements'] = {(3, 'relax'): (7, *stored)}
     value = {**track(), 'evidence': {'source': 'provider_measurement', 'input_digest': 'digest',
                                     'fits': {'relax': {'score': .8, 'support': .6}}}}
     with pytest.raises(ValueError, match='changed its score'):

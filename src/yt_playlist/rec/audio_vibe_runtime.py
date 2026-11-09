@@ -16,6 +16,7 @@ from yt_playlist.core import audio_embedding, fao, features
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
 
 MAX_EXCERPTS = 128
+ARITHMETIC_VERSION = 'native-coefficients-sumprod-1'
 MODEL_ERRORS = (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError)
 
 
@@ -35,7 +36,7 @@ def configured(name, default):
 def identity(version, selected_mode, path, loader):
     if selected_mode != 'off' and path:
         try:
-            return '/'.join((version, selected_mode, loader(path)['sha256']))
+            return '/'.join((version, selected_mode, ARITHMETIC_VERSION, loader(path)['sha256']))
         except MODEL_ERRORS:
             pass
     return '/'.join((version, selected_mode, 'shared'))

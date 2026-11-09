@@ -11,6 +11,7 @@ from tests.repos.test_typed_recommendation_publication import (
     recommendation_predecessor, recommendations, publish, plan, collect,
 )
 from tests.rec.test_stored_fresh import fresh
+from tests.store_fixture_support import bounded_consumer_schema, native_sql_calls, without_query_timing
 from yt_playlist.core import recommendation_pools as pools
 from yt_playlist.rec import musical_character, radio_intensity, radio_tuning
 from yt_playlist.rec.radio_candidates import RadioCandidates, CLUSTER_POOL_LIMIT
@@ -21,15 +22,30 @@ from yt_playlist.controllers.recommendation_proposals import RecommendationPropo
 from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 
 
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # The empty-reader lifetime test does not depend on genre vocabulary.
+    with bounded_consumer_schema((('rock', 'Rock'),)) as schema:
+        yield schema
+
+
 @pytest.mark.parametrize('blocked_by', ['sql_writer', 'cancelled_work'])
-def test_database_close_releases_radio_readers_when_retirement_cannot_commit(file_backed_store, blocked_by):
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+def test_database_close_releases_radio_readers_when_retirement_cannot_commit(file_backed_store, monkeypatch, blocked_by):
     from tests.recommendation_support import publish_bundles
-    from yt_playlist.core import db_handles, group_documents
+    from yt_playlist.core import db_handles, group_admission, group_documents
     from yt_playlist.core.activity import WorkClosing, cancellable_work
     from yt_playlist.core.store import Store
     from yt_playlist.rec import group_roots
 
     store = file_backed_store
+    store.conn.execute('PRAGMA synchronous=OFF')
+    # Keep the actual competing SQLite writer. Each retirement can encounter
+    # SQLITE_BUSY immediately rather than spending a second retrying this
+    # deliberately held lock; writer retry timing has its own tests.
+    atomic_write = group_admission.atomic_write
+    monkeypatch.setattr(group_admission, 'atomic_write',
+                        lambda target: atomic_write(target, wait_seconds=0))
     publish_bundles(store, {'all': {}}, now=1000)
     readers = [PreparedRadio(store, 1001) for _ in range(2)]
     directory = group_documents.root_for_database(store._db_path, store._evidence_key) / '.pending'

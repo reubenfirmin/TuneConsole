@@ -62,10 +62,19 @@ def _claim(repo, prepared, inputs, policy_version, policy_reference, metadata_re
                                        (manifest_digest,)).fetchone()[0]
         else:
             manifest_id = manifest[0]
-            if not manifest[1]:
-                raise publication.BuildUnavailable('Musical group inputs are leased by another build')
-            if not content.equal(group_storage.manifest_rows(conn, manifest_id),
-                                 (canonical([key, digest]) for key, digest in inputs)):
+            if not manifest[1] or not content.equal(group_storage.manifest_rows(conn, manifest_id),
+                                                   (canonical([key, digest]) for key, digest in inputs)):
+                # Cleanup commits bounded deletions after the last generation
+                # releases a manifest. Its original complete flag can survive
+                # those deletions. Retire only a matching unowned remainder;
+                # exact complete manifests, including unowned ones, are reusable.
+                if conn.execute('SELECT 1 FROM group_generations WHERE input_manifest_id=? LIMIT 1',
+                                (manifest_id,)).fetchone() is None:
+                    if group_storage.manifest_remainder_matches(conn, manifest_id, inputs):
+                        raise publication._BuildBeingCleaned
+                    raise ValueError('Musical group input digest collision')
+                if not manifest[1]:
+                    raise publication.BuildUnavailable('Musical group inputs are leased by another build')
                 raise ValueError('Musical group input digest collision')
         parent_id = None
         if parent is not None:

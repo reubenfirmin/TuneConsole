@@ -9,7 +9,7 @@ from tests.store_fixture_support import install_numbered_input, install_regular_
 from yt_playlist.core import (
     credit_retention, embedding_files, group_checkpoint_retention, group_progress,
     group_retention_progress, metadata_runtime, mix_choices, mode_retention,
-    profile_files, served_facts, vibe_provenance,
+    profile_files, schema_inspection, served_facts, vibe_provenance,
 )
 from yt_playlist.core.migrations import current, regular, runner
 from yt_playlist.core.migrations import (
@@ -36,7 +36,7 @@ def installed_inputs():
             key = version, completed_regular
             if key not in templates:
                 conn = resources.enter_context(closing(sqlite3.connect(':memory:')))
-                with pytest.MonkeyPatch.context() as patch:
+                with pytest.MonkeyPatch.context() as patch, schema_inspection.reuse_tables(conn):
                     bound_catalog(patch)
                     install_numbered_input(conn, version)
                     if completed_regular:

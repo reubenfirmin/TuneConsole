@@ -9,9 +9,9 @@ import pytest
 from tests.publication_support import plan, publish, stage
 from tests.store_fixture_support import (
     bounded_consumer_schema, file_consumer_store as file_backed_store,
-    without_query_timing,
+    native_sql_calls, without_query_timing,
 )
-from yt_playlist.core import policy_config, recommendation_pools as pools
+from yt_playlist.core import policy_config, recommendation_pools as pools, schema_inspection
 from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded
 from yt_playlist.core.db_space import LowDiskSpace
 from yt_playlist.core.migrations import current
@@ -77,7 +77,13 @@ def test_staging_releases_writer_between_bounded_commits_and_keeps_last_good_vis
     assert database.recommendations.output('home', 'fixture') == {'title': 'café 🎵' * 1000}
 
 
-def test_interrupted_prefix_resumes_after_store_reopen_without_reinserting_rows(file_backed_store, monkeypatch):
+def test_interrupted_prefix_resumes_after_store_reopen_without_reinserting_rows(
+        native_sql_calls, file_backed_store, monkeypatch):
+    from tests.genre_catalog_support import bound_catalog
+
+    # Keep every actual prefix row, interrupt, reopen and resumed publication.
+    # Catalog vocabulary and SQL handle diagnostics are below this subject.
+    bound_catalog(monkeypatch, entries=())
     database = file_backed_store
     path = database._db_path
     prepared = plan(database, 'resumable', count=400)
@@ -103,7 +109,9 @@ def test_interrupted_prefix_resumes_after_store_reopen_without_reinserting_rows(
         return append(conn, identity, candidates, start)
     monkeypatch.setattr(pools, 'append', resumed)
     try:
-        database.init_schema()
+        database.conn.execute('PRAGMA synchronous=OFF')
+        with schema_inspection.reuse_tables(database.conn):
+            database.init_schema()
         reclaimed = database.recommendations.claim(prepared, owner=build.owner)
         assert reclaimed == build
         database.recommendations.stage(prepared, reclaimed)

@@ -2,11 +2,21 @@
 import threading
 
 from fastapi.testclient import TestClient
+import pytest
+
 from tests.home_fixture_support import home_routes_only, without_metadata_providers
+from tests.store_fixture_support import bounded_consumer_schema
 
 from yt_playlist.core import profile_files
 from yt_playlist.rec import home_prepared, model_refresh, vibe_pools, vibe_readiness
 from yt_playlist.web import app as web_app
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    # Startup gating consumes an empty library, independent of genre breadth.
+    with bounded_consumer_schema((('rock', 'Rock'),)) as schema:
+        yield schema
 
 
 def forbid_preparation(monkeypatch):
