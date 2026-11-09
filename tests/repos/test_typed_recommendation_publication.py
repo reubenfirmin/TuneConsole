@@ -1,80 +1,45 @@
 """Real SQL for bounded ranks, private leases, publication and shared lifetime."""
 from dataclasses import replace
-from contextlib import closing
 import sqlite3
 
 import pytest
 
-from tests.core.test_compact_groups_migration import apply as compact_groups, historical_groups
-from tests.genre_catalog_support import bound_catalog
-from tests.repos.test_compact_group_publication import (
-    bounded_compact_group_template as compact_group_template,
-)
+from tests.recommendation_support import seed_compact_group_history
 from tests.repos.test_group_retention import drain, enable
-from tests.store_fixture_support import reuse_reporting_reader, without_query_timing
-from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools, schema_inspection
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls,
+    reuse_reporting_reader, without_query_timing,
+)
+from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
 from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded
-from yt_playlist.core.db_revisions import Revisions
-from yt_playlist.core.migrations import v073_recommendation_publications as migration
-from yt_playlist.core.migrations import registry, runner
-from yt_playlist.core.migrations.runner import Context
-from yt_playlist.core.store import Store
 from yt_playlist.repos import group_retention, recommendation_publication as publication
 
 
-pytestmark = pytest.mark.usefixtures('without_query_timing')
+pytestmark = pytest.mark.usefixtures('without_query_timing', 'native_sql_calls')
 
 
-def test_recommendation_input_keeps_compact_groups_and_read_only_custody(compact_group_template):
-    source = compact_group_template.source
-    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert source.taste_groups.head_generation() == 'second'
-    assert source.taste_groups.head(members=True)['groups'][1]['members'] == {'one': (.9, .8)}
-    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Repository publication does not construct an HTTP application."""
 
 
 @pytest.fixture
-def recommendations(tmp_path, recommendation_predecessor):
-    # Build one actual populated input. A template Store, file restore and
-    # intermediate v72 revision guards add no publication obligation here.
-    path = tmp_path / 'recommendations.db'
-    with historical_groups(path, recommendation_predecessor) as conn:
-        compact_groups(conn)
-    store = Store(path)
-    with closing(store.conn), schema_inspection.reuse_tables(store.conn):
-        store.conn.execute('PRAGMA synchronous=OFF')
-        assert store.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0] == 'wal'
-        store.conn.execute('PRAGMA wal_autocheckpoint=0')
-        initialize_recommendations(store)
+def recommendations(tmp_path, _pristine_current_schema, monkeypatch):
+    # Publication consumes real current groups, without replaying the retired
+    # v69 input and three group/policy/recommendation conversion boundaries.
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as store:
+        with reuse_reporting_reader(store, monkeypatch):
+            seed_compact_group_history(store)
         assert store.taste_groups.head_generation() == 'second'
+        assert store.taste_groups.head(members=True)['groups'][1]['members'] == {'one': (.9, .8)}
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
         yield store
 
 
 @pytest.fixture(scope='module')
-def recommendation_predecessor():
-    # Retired v69 tables are needed by the real v70 conversion. Replay that
-    # complete predecessor instead of assembling a modern schema projection.
-    with pytest.MonkeyPatch.context() as patch, closing(sqlite3.connect(':memory:')) as source:
-        bound_catalog(patch, entries=(('house', 'House'),))
-        source.execute('PRAGMA foreign_keys=ON')
-        runner.migrate(source, registry=registry.MIGRATIONS[:69])
-        source.execute('PRAGMA query_only=ON')
-        yield source
-
-
-def initialize_recommendations(store):
-    """Build the real publication owners above the completed compact groups."""
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        migration.apply(store.conn, Context(4))
-    migration.validate(store.conn)
-    # This controlled v73 fixture applies individual boundaries without a
-    # contiguous admission history. Hydration still needs the same historical
-    # name projections as supported predecessor startup, including read views.
-    store._schema_compatibility = True
-    store._bind_repositories()
-    store._snapshot_revisions = Revisions(store.conn)
+def _pristine_current_schema():
+    with bounded_consumer_schema((('house', 'House'),)) as schema:
+        yield schema
 
 
 @pytest.fixture

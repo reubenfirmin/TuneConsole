@@ -7,8 +7,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from tests.legacy_recommendation_fixture_support import recommendation_predecessor, recommendations
 from tests.repos.test_typed_recommendation_publication import (
-    recommendation_predecessor, recommendations, publish, plan, collect,
+    publish, plan, collect,
 )
 from yt_playlist.core import group_documents
 from yt_playlist.rec import choice_evidence, group_roots, recommendation_roots

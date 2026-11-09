@@ -11,7 +11,8 @@ import pytest
 
 from tests.core.test_home_output_preparation import seed, root_rows
 from tests.store_fixture_support import (
-    guarded_numbered_store as installed,
+    _numbered_input,
+    mock_snapshot_coordinator,
     native_sql_calls,
     preparation_ddl_connection,
     publication_consumer_reads,
@@ -32,6 +33,12 @@ pytestmark = pytest.mark.usefixtures('publication_preparation_input', 'native_sq
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     pass
+
+
+@pytest.fixture
+def installed(request, tmp_path, monkeypatch, native_sql_calls, without_query_timing):
+    with _numbered_input(request.param, tmp_path, monkeypatch, snapshot_guards=True) as value:
+        yield value
 
 
 def prepare(conn):
@@ -59,8 +66,11 @@ def real_roots(store):
     tracks = recordings([('House', 12, .3)])
     with store.conn:
         store.conn.executemany('INSERT INTO recordings(identity_key) VALUES (?)', [(track.key,) for track in tracks])
-    groups = publish_groups(store, tracks)
-    generation = publish(store, plan(store)).generation_id
+    # Seed the actual group files/SQL and recommendation head below Home's
+    # custody checks. Snapshot races remain with the publication tests below.
+    with pytest.MonkeyPatch.context() as patch, mock_snapshot_coordinator(store, patch):
+        groups = publish_groups(store, tracks)
+        generation = publish(store, plan(store)).generation_id
     context = {'group_generation': groups['generation'], 'musical_groups': [
         {'version': groups['groups'][0]['version'], 'group_id': groups['groups'][0]['group_id']}]}
     with store.conn.atomic():

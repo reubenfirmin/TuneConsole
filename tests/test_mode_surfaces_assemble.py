@@ -6,15 +6,22 @@ from tests.derived_rating_support import seed_dislike
 from tests.retained_rating_support import apply_model_ratings
 import pytest
 from tests.conftest import seed_catalog_track
+from tests.genre_catalog_support import bound_shipped_catalog
 from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles, seed_bundle_subjects, seed_publication_subjects
 from tests.store_fixture_support import (
-    bounded_consumer_schema, file_consumer_store as store, initialize_consumer,
-    mock_snapshot_coordinator, native_sql_calls, without_query_timing,
+    _file_consumer_store, bounded_consumer_schema, file_consumer_store as store,
+    initialize_consumer, mock_snapshot_coordinator, native_sql_calls,
+    reuse_reporting_reader, without_query_timing,
 )
 from yt_playlist.core import catalog, schema_inspection
 from yt_playlist.core.store import Store
 from yt_playlist.rec import mode_selection, mode_surfaces as ms, stored_home
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Card assembly does not construct an HTTP application or background jobs."""
 
 
 def _eye(i, d=4):
@@ -506,8 +513,29 @@ def test_thin_mix_exhausts_deeper_family_before_adjacent_tracks(store, monkeypat
     assert _publication(store) == publication
 
 
+@pytest.fixture(scope='module')
+def thin_mix_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture
+def thin_mix_store(tmp_path, thin_mix_schema, native_sql_calls, monkeypatch):
+    from yt_playlist.core import genre_identity
+
+    # Keep the shipped aliases, family identities and distances for all four
+    # genres. Unrelated vocabulary and catalog ingestion are lower inputs.
+    bound_shipped_catalog(monkeypatch, ('soul', 'blues', 'techno', 'jazz'))
+    with _file_consumer_store(tmp_path, thin_mix_schema) as database:
+        with database.conn:
+            genre_identity.seed_catalog(database.conn)
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
+
+
 @pytest.mark.parametrize("lane", ["wheelhouse", "fresh"])
-def test_thin_mix_uses_close_neighbors_but_never_avoided_or_unrelated_genres(store, lane):
+def test_thin_mix_uses_close_neighbors_but_never_avoided_or_unrelated_genres(thin_mix_store, lane):
+    store = thin_mix_store
     store.modes.replace_modes([
         {"mode_id": 1, "label": "Soul", "families": [["soul-funk", 100]],
          "centroid": _eye(0), "size": 100, "rep_keys": []}], retired_ids=[], now=1.0)
@@ -518,7 +546,11 @@ def test_thin_mix_uses_close_neighbors_but_never_avoided_or_unrelated_genres(sto
     payload = {"1": {lane: core},
                "all": {lane: unrelated + avoided + nearby + core},
                "_meta": {"full_pools": True}}
-    _publish(store, payload)
+    subjects = {item['key']: item for item in core + nearby + unrelated + avoided}
+    seed_publication_subjects(store, subjects.values(),
+                              discoveries=subjects if lane == 'fresh' else ())
+    store._assembly_subject_keys = set(subjects)
+    _publish(store, payload, subjects_ready=True)
 
     cards = ms.assemble_cards(store, 10.0, 0, avoid_genres=["jazz"])
 

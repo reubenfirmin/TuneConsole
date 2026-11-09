@@ -5,10 +5,12 @@ import sqlite3
 
 import pytest
 
-from tests.store_fixture_support import numbered_store as installed
 from tests.store_fixture_support import guarded_numbered_store as guarded_installed
 from tests.core.test_radio_origin_preparation import finish, head, seed
-from tests.store_fixture_support import publication_consumer_reads, preparation_ddl_connection
+from tests.store_fixture_support import (
+    _numbered_input, mock_preparation_schema, native_sql_calls,
+    publication_consumer_reads, preparation_ddl_connection, without_query_timing,
+)
 from yt_playlist.core import radio_provenance
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import radio_origin_publication as publication, radio_origins as preparation
@@ -16,12 +18,19 @@ from yt_playlist.core.store import Store
 
 
 
-pytestmark = pytest.mark.usefixtures('publication_consumer_reads')
+pytestmark = pytest.mark.usefixtures('publication_consumer_reads', 'native_sql_calls', 'without_query_timing')
 
 
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     """This owner runs directly without the HTTP application."""
+
+
+@pytest.fixture
+def installed(request, tmp_path, monkeypatch, native_sql_calls, without_query_timing):
+    with _numbered_input(request.param, tmp_path, monkeypatch) as value:
+        yield value
+
 
 def prepare(conn):
     preparation.JOB.install(conn)
@@ -225,10 +234,12 @@ def test_missing_original_files_are_recovered_explicitly_without_replacing_membe
 
 
 @pytest.mark.parametrize('installed',[93],indirect=True)
-def test_long_repeated_lists_and_absent_sources_preserve_runtime_order(installed):
+def test_long_repeated_lists_and_absent_sources_preserve_runtime_order(installed, monkeypatch):
     store,_ = installed
     raw = json.dumps(['first','missing','first']*2700,indent=2)
     store.settings.set_setting(preparation.KEYS[0],raw)
+    preparation.JOB.install(store.conn)
+    mock_preparation_schema(monkeypatch, preparation.JOB.definition, store.conn)
     publication.publish(store.conn,revision=prepare(store.conn))
     assert radio_provenance.ids(store.conn) == ['first','missing']
     assert store.settings.get_setting(preparation.KEYS[0]) == raw

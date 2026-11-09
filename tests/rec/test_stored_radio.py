@@ -7,11 +7,13 @@ from contextlib import nullcontext
 import numpy as np
 import pytest
 
-from tests.repos.test_typed_recommendation_publication import (
-    recommendation_predecessor, recommendations, publish, plan, collect,
-)
+from tests.legacy_recommendation_fixture_support import recommendation_predecessor, recommendations
+from tests.repos.test_typed_recommendation_publication import publish, plan, collect
 from tests.rec.test_stored_fresh import fresh
-from tests.store_fixture_support import bounded_consumer_schema, native_sql_calls, without_query_timing
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, mock_snapshot_coordinator,
+    native_sql_calls, without_query_timing,
+)
 from yt_playlist.core import recommendation_pools as pools
 from yt_playlist.rec import musical_character, radio_intensity, radio_tuning
 from yt_playlist.rec.radio_candidates import RadioCandidates, CLUSTER_POOL_LIMIT
@@ -22,6 +24,12 @@ from yt_playlist.controllers.recommendation_proposals import RecommendationPropo
 from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 
 
+@pytest.fixture
+def disable_periodic_library_sync():
+    # These readers do not construct a web application or background sync loop.
+    pass
+
+
 @pytest.fixture(scope='module')
 def _pristine_current_schema():
     # The empty-reader lifetime test does not depend on genre vocabulary.
@@ -29,16 +37,24 @@ def _pristine_current_schema():
         yield schema
 
 
+@pytest.fixture
+def reader_store(tmp_path, native_sql_calls, without_query_timing):
+    # Lifetime roots use real writer transactions; only the seed publisher needs
+    # snapshot coordination, supplied separately below the close operation.
+    with bounded_consumer_schema((('rock', 'Rock'),), snapshot_guards=False) as schema:
+        with _file_consumer_store(tmp_path, schema, snapshot_guards=False) as store:
+            yield store
+
+
 @pytest.mark.parametrize('blocked_by', ['sql_writer', 'cancelled_work'])
-@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
-def test_database_close_releases_radio_readers_when_retirement_cannot_commit(file_backed_store, monkeypatch, blocked_by):
+def test_database_close_releases_radio_readers_when_retirement_cannot_commit(reader_store, monkeypatch, blocked_by):
     from tests.recommendation_support import publish_bundles
     from yt_playlist.core import db_handles, group_admission, group_documents
     from yt_playlist.core.activity import WorkClosing, cancellable_work
     from yt_playlist.core.store import Store
     from yt_playlist.rec import group_roots
 
-    store = file_backed_store
+    store = reader_store
     store.conn.execute('PRAGMA synchronous=OFF')
     # Keep the actual competing SQLite writer. Each retirement can encounter
     # SQLITE_BUSY immediately rather than spending a second retrying this
@@ -46,7 +62,8 @@ def test_database_close_releases_radio_readers_when_retirement_cannot_commit(fil
     atomic_write = group_admission.atomic_write
     monkeypatch.setattr(group_admission, 'atomic_write',
                         lambda target: atomic_write(target, wait_seconds=0))
-    publish_bundles(store, {'all': {}}, now=1000)
+    with mock_snapshot_coordinator(store, monkeypatch):
+        publish_bundles(store, {'all': {}}, now=1000)
     readers = [PreparedRadio(store, 1001) for _ in range(2)]
     directory = group_documents.root_for_database(store._db_path, store._evidence_key) / '.pending'
     assert all(reader._lifetime.alive for reader in readers)

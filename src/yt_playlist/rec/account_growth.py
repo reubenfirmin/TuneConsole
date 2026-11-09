@@ -20,15 +20,15 @@ PARENTS = dict(zip(MAIN_PATH[1:], MAIN_PATH)) | {
 
 
 def _node(identity, label, *, ready=False, used=False, bonus=False, optional=False, started=False,
-          connected=False, detail='', href='', x=0, y=0):
+          connected=False, detail='', how_to='', href='', x=0, y=0):
     state = 'explored' if ready and used else 'ready' if ready else 'preparing' if started else 'untouched'
     return {'id': identity, 'label': label, 'ready': ready, 'usable': ready, 'used': used,
             'optional': optional or bonus, 'unlocked': False, 'state': state, 'bonus': bonus,
             'connected': connected, 'upcoming': False,
             'status': ('Done' if bonus else 'Explored') if state == 'explored' else
                       'Ready to try' if state == 'ready' else
-                      'Preparing' if state == 'preparing' else 'Not started',
-            'detail': detail, 'href': href, 'x': x, 'y': y}
+                      'Getting ready' if state == 'preparing' else 'Not started',
+            'detail': detail, 'how_to': how_to, 'href': href, 'x': x, 'y': y}
 
 
 def _connect_paths(nodes, *, resume=()):
@@ -59,7 +59,7 @@ def _connect_paths(nodes, *, resume=()):
             or stop['id'] in MAIN_PATH and stop['unlocked']) else ''
         stop['status'] = (('Done' if stop['bonus'] else 'Explored') if stop['state'] == 'explored'
                           else 'Ready to try' if stop['ready'] else
-                          'Preparing' if stop['state'] == 'preparing' else 'Not started')
+                          'Getting ready' if stop['state'] == 'preparing' else 'Not started')
     # Preparation changes lighting, never the illustrated route or its parent.
     for stop in nodes:
         layout = festival_layout.LANDMARKS[stop['id']]
@@ -235,6 +235,9 @@ def _view(store, now, *, mixes_ready=None, albums_ready=None, radio=None, collec
         history = reader.readiness.journey_history()
         has_starts = history['live_starts']
         playable_owned = reader.readiness.playable_owned()
+        has_collection = bool(reader.readiness.playable_owned(exclude_generated=True)
+                              or reader.collection.get_saved_albums())
+        has_artist_picks = len(reader.discovery.starter_artists()) >= artist_start.MIN_ARTISTS
         first_ready = bool(playable_owned
                            or onboarding_outputs.starter_album(reader) or artist_start.first_set(reader, now))
         # Read the same bounded, currently eligible outputs that each area serves.
@@ -276,71 +279,99 @@ def _view(store, now, *, mixes_ready=None, albums_ready=None, radio=None, collec
             {'id': 'likes', 'label': 'A set of favorites', 'count': likes, 'goal': 12,
              'detail': 'Like twelve songs as you listen.'},
             {'id': 'audio', 'label': 'Hear the detail', 'count': measured, 'goal': 12,
-             'detail': 'Prepare measured sound details for twelve songs.'},
+             'detail': 'Play music with TuneConsole open while we learn how twelve songs sound.'},
         ]
         for achievement in achievements:
             achievement['complete'] = achievement['count'] >= achievement['goal']
         achievements_done = all(item['complete'] for item in achievements)
 
+    # Explain the listener's inputs, rather than the worker's output thresholds.
+    # Generated starter tracks are not an imported collection. Existing playlists
+    # and saved albums supply interests without requiring new plays or ratings.
+    music_input = ('Your saved playlists and albums give us a starting point.' if has_collection else
+                   'The artists you chose give us a starting point.' if has_artist_picks else
+                   f'Choose {artist_start.MIN_ARTISTS} artists you like for your first set.')
     nodes = [
         _node('first', 'First sounds', ready=first_ready, used=has_starts, started=bool(imported or total),
-              detail='We import your YouTube Music playlists and saved albums to prepare your first songs. '
-                     'If you have no collection, choose three artists so we can make a first set from their music.',
+              detail='Start listening to your saved music, or try a first set from artists you choose.',
+              how_to=('Play a song from your collection.' if has_collection else
+                      'Play your first set from the artists you chose.' if has_artist_picks else
+                      f'Choose {artist_start.MIN_ARTISTS} artists you like, then play your first set.'),
               x=6, y=75),
         _node('foundation', 'Your music', ready=foundation_ready, started=first_ready,
-              detail='First we scan your YouTube Music collection. If it is empty, we use the artists you choose instead. '
-                     'We then build an initial AI model that predicts your taste and find more music for you to explore.',
-              x=21, y=62),
+              detail='Your music is the starting point for finding more artists, songs and records you might enjoy.',
+              how_to=music_input + ' Keep TuneConsole open while we look up artists and genres and find more music for you.',
+              href='/playlists', x=21, y=62),
         _node('listening', 'Mix tapes', ready=mixes, used=bool(usage.get('mixes')), started=bool(total),
-              detail='We group and rank songs from your collection and the music we have found for you, '
-                     'then prepare four playable mix tapes. You can adjust a mix before playing it.',
+              detail='Mixes bring together familiar songs and new finds. Adjust a mix before you play it.',
+              how_to=(music_input + ' Keep TuneConsole open while we find songs and put your mixes together.'
+                      if has_collection else music_input + ' Play your first set while we find more songs for your mixes.'),
               href='/#directions',
               x=25, y=38),
         _node('albums', 'Long play', ready=albums, used=bool(usage.get('albums')), started=radio_ready,
-              detail='We use your taste model to recommend albums and load their track lists '
-                     'so you can choose a record and play it from the beginning.',
+              detail='Choose a recommended record and play it from the beginning.',
+              how_to=(
+                  'Your saved playlists and albums tell us which artists to look for. '
+                  'Keep TuneConsole open while we find their albums and choose records that fit your music.'
+                  if has_collection else music_input +
+                  ' Play your first set while we look for albums by those artists.'),
               href='/#album-choices',
               x=84, y=46),
         _node('radio', 'On air', ready=radio_ready, used=bool(usage.get('radio')), started=bool(mixes),
-              detail='We prepare starting songs using your taste model. Choose one to start a station; '
-                     'your listening and ratings help select the songs that follow.',
+              detail='Choose a song to start a station. Your listening and ratings help choose what plays next.',
+              how_to=music_input + ' Keep TuneConsole open while we find songs to start your stations.',
               href='/#radio', x=56, y=34),
         _node('vibes', 'Vibes', ready=vibes_ready, used=bool(format_usage.get('vibe_episodes')),
-              started=radio_ready, detail='We use sound analysis and artist and genre information to estimate which songs fit each mood. '
-                     'We then prepare different mix tapes for the moods you can choose.',
+              started=radio_ready, detail='Choose a mood for your mixes, from relaxed to energetic.',
+              how_to='Play a variety of music in YouTube Music with TuneConsole open. '
+                     'As you listen, we work out which songs suit each mood.',
               href='/#directions', x=73, y=16),
         _node('tv', 'TV', ready=tv_ready, used=tv.draw_number(reader) > 0, started=radio_ready,
-              detail='We search YouTube for videos of recommended songs, check that they contain moving pictures, '
-                     'and prepare a queue of music videos to play.',
+              detail='Watch music videos picked from your recommendations, with moving pictures rather than still covers.',
+              how_to='Keep TuneConsole open while we find music videos for your recommendations and check that they play.',
               href='/#tv', x=7, y=26),
         _node('discover', 'Discover', ready=discover_ready, started=bool(mixes),
-              detail='We use your taste model to rank songs, artists and albums outside your collection '
-                     'and list the results for you to browse.',
+              detail='Explore recommended songs, artists and albums beyond your collection.',
+              how_to=music_input + ' Keep TuneConsole open while we explore albums by those artists and find music you haven’t saved.',
               href='/#discover', x=44, y=53),
         _node('rediscover', 'Revisit', ready=revisit_ready, started=albums, optional=True,
-              detail='We compare your saved playlists, albums and songs with your listening history '
-                     'to find music you have not played recently.',
+              detail='Return to saved playlists and rediscover records and songs you haven’t heard in a while.',
+              how_to=('Keep playlists and albums you like saved in YouTube Music. ' if has_collection else
+                      'Save playlists or albums you enjoy in YouTube Music. ')
+                     + 'Add your past listening in Setup to help us find albums and songs you haven’t heard in a while, '
+                     'or let us learn what you play as you listen.',
               href='/#rediscover', x=86, y=75),
         _node('recent', 'Into recently', ready=recent_ready, started=discover_ready,
-              detail='We use your recent listening to identify artists and genres, then find Wikipedia articles '
-                     'about them and pair those articles with songs you can play.',
+              detail='Read about artists and genres you’ve been exploring, with songs to play alongside the stories.',
+              how_to='Try artists and genres beyond your usual favorites. As you listen, '
+                     'we look for articles about the music you’re getting into.',
               href='/#recent', x=30, y=72),
         _node('takeout', 'Your past listening', ready=bool(takeout), used=bool(takeout), bonus=True,
-              started=takeout_started, detail=f'{takeout:,} past listens imported' if takeout else 'Import past YouTube Music listening from Google Takeout.',
+              started=takeout_started, detail=f'{takeout:,} past plays added' if takeout else 'Add your past YouTube Music listening from Google Takeout.',
+              how_to='Download your YouTube Music listening history from Google Takeout. '
+                     'In Setup, choose Import and upload the file.',
               href='/setup?tab=import', x=54, y=79),
         _node('lastfm', 'Richer music details', ready=lastfm_ready, used=lastfm_ready, bonus=True,
               started=lastfm_available, connected=lastfm_available,
               detail=(f'{lastfm_done:,} of {total:,} songs checked' if lastfm_available else
-              'Look up song and artist genre information with Last.fm.'), href='/setup?tab=enrichment', x=71, y=61),
+              'Find more accurate genres for your music with Last.fm.'),
+              how_to=('Leave Last.fm turned on in Setup. ' if lastfm_available else
+                      'Register for a free Last.fm API key, paste it into Setup and turn Last.fm on. ')
+                     + 'Leave TuneConsole open while we find genres for your songs.',
+              href='/setup?tab=enrichment', x=71, y=61),
         _node('deepseek', 'Stories behind the records', ready=bool(descriptions), used=bool(descriptions), bonus=True,
               started=deep['configured'] and deep['enabled'], detail=(f'{descriptions:,} album descriptions' if descriptions else
                   'Paused in Setup' if deep['configured'] and not deep['enabled'] else
-                  'Preparing album descriptions' if descriptions_pending else
-                  'Open an album to try descriptions' if deep['configured'] else 'Generate short AI album descriptions when you open a record.'),
+                  'Writing album descriptions' if descriptions_pending else
+                  'Open an album to try descriptions' if deep['configured'] else 'Read a short AI introduction when you open a record.'),
+              how_to='Add credit to your DeepSeek account and paste its API key into Setup. '
+                     'Turn album descriptions on, choose a daily limit of at least one, then open an album.',
               href='/setup?tab=enrichment', x=68, y=81),
         _node('milestones', 'Little victories', ready=achievements_done, used=achievements_done,
               bonus=True, started=any(item['count'] for item in achievements),
-              detail='Save a playlist, like songs and prepare sound details to earn these optional achievements.'),
+              detail='Save a playlist, heart songs and keep listening to earn these optional achievements.',
+              how_to='Save a playlist from a set you enjoy, heart twelve songs, '
+                     'and play music with TuneConsole open while we learn how twelve songs sound.'),
     ]
     # Confirmed prior use keeps access earned even when its current output is
     # temporarily unavailable. A remembered preference alone proves no unlock.
@@ -359,7 +390,7 @@ def _view(store, now, *, mixes_ready=None, albums_ready=None, radio=None, collec
             'foundation_ready': foundation_ready, 'achievements': achievements,
             'vibes_ready': vibes_ready, 'health': {'total': total, 'processed': processed,
             'percent': math.floor(processed * 100 / total) if total else 0,
-            'label': 'Preparing your music' if processed < total else 'Ready to keep growing' if total else 'Waiting for music',
+            'label': 'Getting to know your music' if processed < total else 'Ready to keep growing' if total else 'Waiting for music',
             'measured': measured, 'predicted': predicted},
             'home_choice_available': bool(mixes and albums and radio_ready and not explicit_home),
             'home_choice': home_choice,

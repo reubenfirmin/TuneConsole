@@ -1,7 +1,7 @@
 """Verify automatic worker selection and real subprocess ownership on tiny suites."""
 
 import fcntl
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import json
 import os
 from pathlib import Path
@@ -14,6 +14,12 @@ from types import SimpleNamespace
 import pytest
 
 import local_test_workers as workers
+
+
+@pytest.fixture
+def disable_periodic_library_sync():
+    # These plugin checks construct their own isolated child lifecycles.
+    pass
 
 
 def config_for(tmp_path, args=("tests",), **options):
@@ -318,61 +324,26 @@ def test_next():
         assert expected in result.stdout  # The following cleanup assertion passed.
 
 
-@pytest.fixture(scope='module')
-def worker_custody_steps(tmp_path_factory):
-    root = tmp_path_factory.mktemp('parallel-worker-custody')
-    sequence = _worker_custody_workflow(root)
-    try:
-        yield sequence
-    finally:
-        sequence.close()
+def test_parallel_runtime_stop_keeps_storage_until_worker_finalizers_finish(tmp_path):
+    with closing(_worker_custody_workflow(tmp_path)) as sequence:
+        state = next(sequence)
+        assert json.loads((state.root / 'coordinator.json').read_text())['pid'] == state.child.pid
+        assert state.child.poll() is None
 
+        state = next(sequence)
+        started = list(state.root.glob('*.started.json'))
+        assert len(started) == 2
+        for path in started:
+            assert (Path(json.loads(path.read_text())['workspace']) / 'owned.sqlite3').is_file()
 
-@pytest.fixture(scope='module')
-def worker_custody_coordinator(worker_custody_steps):
-    return next(worker_custody_steps)
+        state = next(sequence)
+        assert len(list(state.root.glob('*.finalizing'))) == 2
+        assert not list(state.root.glob('*.finalized.json'))
+        assert state.child.poll() is None and state.basetemp.is_dir()
+        for path in started:
+            assert (Path(json.loads(path.read_text())['workspace']) / 'owned.sqlite3').is_file()
 
-
-def test_worker_custody_coordinator_installs_the_real_runtime_monitor(worker_custody_coordinator):
-    state = worker_custody_coordinator
-    assert json.loads((state.root / 'coordinator.json').read_text())['pid'] == state.child.pid
-    assert state.child.poll() is None
-
-
-@pytest.fixture(scope='module')
-def worker_custody_live(worker_custody_coordinator, worker_custody_steps):
-    return next(worker_custody_steps)
-
-
-def test_both_parallel_workers_own_live_sqlite_files_before_runtime_stop(worker_custody_live):
-    state = worker_custody_live
-    started = list(state.root.glob('*.started.json'))
-    assert len(started) == 2
-    for path in started:
-        assert (Path(json.loads(path.read_text())['workspace']) / 'owned.sqlite3').is_file()
-
-
-@pytest.fixture(scope='module')
-def worker_custody_finalizing(worker_custody_live, worker_custody_steps):
-    return next(worker_custody_steps)
-
-
-def test_runtime_stop_retains_both_workspaces_while_real_finalizers_are_blocked(worker_custody_finalizing):
-    state = worker_custody_finalizing
-    assert len(list(state.root.glob('*.finalizing'))) == 2
-    assert not list(state.root.glob('*.finalized.json'))
-    assert state.child.poll() is None and state.basetemp.is_dir()
-    for path in state.root.glob('*.started.json'):
-        assert (Path(json.loads(path.read_text())['workspace']) / 'owned.sqlite3').is_file()
-
-
-@pytest.fixture(scope='module')
-def worker_custody_stopped(worker_custody_finalizing, worker_custody_steps):
-    return next(worker_custody_steps)
-
-
-def test_parallel_runtime_stop_keeps_storage_until_worker_finalizers_finish(worker_custody_stopped):
-    state = worker_custody_stopped
+        state = next(sequence)
     root, basetemp, result = state.root, state.basetemp, state.result
     assert result.returncode == 2, result.stdout + result.stderr
     started = list(root.glob('*.started.json'))

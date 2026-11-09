@@ -12,13 +12,39 @@ from yt_playlist.core import audio_annotations, features
 from yt_playlist.core.store import Store
 from yt_playlist.rec import audio_vibe_prediction, home_vibe
 from yt_playlist.web.app import create_app
-from tests.store_fixture_support import bounded_consumer_schema
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, reuse_reporting_reader,
+)
 
 
 @pytest.fixture(scope='module')
 def _pristine_current_schema():
     with bounded_consumer_schema(()) as schema:
         yield schema
+
+
+@pytest.fixture
+def feedback_restart_routes(monkeypatch):
+    """Keep annotation HTTP, SQL and restart below unrelated feature setup."""
+    from tests.genre_catalog_support import bound_catalog
+    from tests.store_fixture_support import use_native_sql_calls
+    from yt_playlist.providers import genres
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_vibes
+
+    # This case owns real annotation transactions and populated Store admission.
+    # SQL timing and other routes have independent owners.
+    bound_catalog(monkeypatch, entries=())
+    use_native_sql_calls(monkeypatch)
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+                        for module in (app_update, audio_vibes)])
+    monkeypatch.setattr(genres, 'configure', lambda *args, **kwargs: None)
+
+
+@pytest.fixture
+def feedback_restart_store(tmp_path, _pristine_current_schema, feedback_restart_routes):
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as store:
+        yield store
 
 
 def attributes():
@@ -212,9 +238,10 @@ def test_samples_and_feedback_survive_reload_and_freeze_the_labeled_excerpts(sto
     assert store.conn.execute('SELECT COUNT(*) FROM rec_musical_profiles').fetchone()[0] == 0
 
 
-def test_feedback_route_preserves_withdrawal_and_explicit_empty_after_restart(file_backed_store, monkeypatch):
+def test_feedback_route_preserves_withdrawal_and_explicit_empty_after_restart(
+        feedback_restart_store, monkeypatch):
     monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '1')
-    store = file_backed_store
+    store = feedback_restart_store
     path = store._db_path
     run = str(uuid4())
     empty_sample = sample()
@@ -225,7 +252,8 @@ def test_feedback_route_preserves_withdrawal_and_explicit_empty_after_restart(fi
                                         taxonomy_version=audio_vibe_prediction.TAXONOMY_VERSION)
 
     try:
-        with TestClient(create_app(store, lambda: {}), base_url='http://127.0.0.1') as client:
+        with (reuse_reporting_reader(store, monkeypatch),
+              TestClient(create_app(store, lambda: {}), base_url='http://127.0.0.1') as client):
             for value in (*values, empty_sample):
                 response = client.post('/audio-vibes/samples', json=value)
                 assert response.status_code == 200, response.text
@@ -258,7 +286,8 @@ def test_feedback_route_preserves_withdrawal_and_explicit_empty_after_restart(fi
         assert latest(run)['id'] == cleared['id'] and latest(run)['state'] == 'withdrawn'
         assert latest(empty_sample['run_id'])['state'] == 'empty'
         assert audio_annotations.read(store.conn, first) == frozen
-        with TestClient(create_app(store, lambda: {}), base_url='http://127.0.0.1') as client:
+        with (reuse_reporting_reader(store, monkeypatch),
+              TestClient(create_app(store, lambda: {}), base_url='http://127.0.0.1') as client):
             assert client.get('/audio-vibes/runs/' + run).json()['feedback']['vibes'] == []
             # Repeated clear submissions must not turn a withdrawal into empty.
             assert client.post('/audio-vibes/feedback', json={**answer, 'vibes': []}).status_code == 200

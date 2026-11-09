@@ -7,11 +7,38 @@ import pytest
 
 from tests.core.test_playlist_page_accounting import first, page, token
 from tests.test_saved_album_snapshot import _production_client
-from tests.radio_session_support import poc, play
+from tests.radio_session_support import poc, play, radio_controller, seed_completed_pool
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, use_native_sql_calls,
+)
 from yt_playlist.core.album_snapshot import LibrarySnapshotError
 from yt_playlist.core.playlist_snapshot import _page_envelope
 from yt_playlist.library.playlist_snapshot import is_complete_playlist
 from yt_playlist.web.radio_session import PlaylistRadio
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Parser/controller tests have no HTTP application lifecycle."""
+
+
+@pytest.fixture(scope='module')
+def diagnostic_radio_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture
+def diagnostic_poc(tmp_path, diagnostic_radio_schema, monkeypatch):
+    # Continuation recovery consumes these same 32 admitted catalog subjects.
+    # Keep fresh real readers, thread admission and checkpoint publication in
+    # the concurrent subject; input ingestion diagnostics are below it.
+    with _file_consumer_store(tmp_path, diagnostic_radio_schema) as store:
+        with monkeypatch.context() as inputs:
+            use_native_sql_calls(inputs)
+            pool = seed_completed_pool(store)
+        with radio_controller(monkeypatch, store, pool) as state:
+            yield state
 
 
 @pytest.mark.parametrize('response,stage,clue', [
@@ -66,8 +93,8 @@ def test_continuation_envelope_categories_never_expose_provider_values(response,
 
 
 @pytest.mark.parametrize('stop', [False, True])
-def test_missing_page_two_after_append_preserves_checkpoint_and_controls(poc, monkeypatch, stop):
-    controller, remote, frames, *_ = poc
+def test_missing_page_two_after_append_preserves_checkpoint_and_controls(diagnostic_poc, monkeypatch, stop):
+    controller, remote, frames, *_ = diagnostic_poc
     assert controller.start()['ok']
     original = remote.get_playlist
     remaining = [0]

@@ -3,9 +3,9 @@ from dataclasses import replace
 
 import pytest
 
-from tests.repos.test_typed_recommendation_publication import (
-    recommendation_predecessor, recommendations, publish, plan,
-)
+from tests.legacy_recommendation_fixture_support import recommendation_predecessor, recommendations
+from tests.store_fixture_support import native_sql_calls
+from tests.repos.test_typed_recommendation_publication import publish, plan
 from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
 from yt_playlist.rec import fresh_pool
 from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
@@ -13,24 +13,32 @@ from yt_playlist.controllers.recommendation_publications import RecommendationPu
 from yt_playlist.repos import recommendation_publication as publication
 
 
+pytestmark = pytest.mark.usefixtures('native_sql_calls')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Synchronous recommendation readers do not construct the web app."""
+
+
 @pytest.fixture
 def fresh(recommendations):
     store = recommendations
-    candidates = []
+    records = [(index + 3, f'fresh-{index}', 'jazz' if index >= 258 else 'rock')
+               for index in range(260)]
+    items = [(f'fresh-upload-{index}', recording, key + ' title', f'artist-{index}', 'album')
+             for index, (recording, key, _genre) in enumerate(records)]
     with store.conn:
-        for index in range(260):
-            recording = index + 3
-            key, video = f'fresh-{index}', f'fresh-upload-{index}'
-            genre = 'jazz' if index >= 258 else 'rock'
-            store.conn.execute('INSERT INTO recordings(id,identity_key,genre) VALUES (?,?,?)',
-                               (recording, key, genre))
-            store.conn.execute('INSERT INTO youtube_items(video_id,recording_id,title,artist,album) VALUES (?,?,?,?,?)',
-                               (video, recording, key + ' title', f'artist-{index}', 'album'))
-            entry = store.conn.execute('INSERT INTO catalog_entries(recording_id,video_id) VALUES (?,?) RETURNING id',
-                                       (recording, video)).fetchone()[0]
-            store.conn.execute('INSERT INTO discovery_memberships(recording_id,entry_id,found_at) VALUES (?,?,?)',
-                               (recording, entry, 1))
-            candidates.append(pools.Candidate(recording, 1 / (index + 1)))
+        store.conn.executemany('INSERT INTO recordings(id,identity_key,genre) VALUES (?,?,?)', records)
+        store.conn.executemany('INSERT INTO youtube_items(video_id,recording_id,title,artist,album) '
+                               'VALUES (?,?,?,?,?)', items)
+        store.conn.executemany('INSERT INTO catalog_entries(recording_id,video_id) VALUES (?,?)',
+                               [(recording, video) for video, recording, *_ in items])
+        store.conn.execute('INSERT INTO discovery_memberships(recording_id,entry_id,found_at) '
+                           'SELECT recording_id,id,1 FROM catalog_entries WHERE recording_id BETWEEN 3 AND 262 '
+                           'ORDER BY recording_id')
+    candidates = [pools.Candidate(recording, 1 / (index + 1))
+                  for index, (recording, _key, _genre) in enumerate(records)]
     original = plan(store)
     ranked = pools.prepare('fresh', original.policy_version, None, 'c' * 64, 'fresh', candidates)
     prepared = replace(original, slots=(publication.Slot('fresh', 'all', 'fresh', ranked),),

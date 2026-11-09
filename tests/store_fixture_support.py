@@ -138,6 +138,24 @@ def mock_preparation_schema(monkeypatch, job, conn):
     monkeypatch.setattr(type(job), 'validate', admitted)
 
 
+def mock_regular_numbered_input(monkeypatch, conn):
+    """Admit the fixed numbered input once below a regular-DDL consumer.
+
+    Every regular history check, change and owner validator remains real. Use
+    only after numbered upgrades finish; other connections still admit normally.
+    """
+    from yt_playlist.core.migrations import registry, regular
+
+    validate = regular.validate_version
+    validate(conn, regular.history(conn, registry.MIGRATIONS))
+
+    def admitted(target, *args, **kwargs):
+        if target is not conn:
+            return validate(target, *args, **kwargs)
+
+    monkeypatch.setattr(regular, 'validate_version', admitted)
+
+
 @pytest.fixture
 def publication_consumer_reads(request, monkeypatch):
     """Reuse real reporting reads below installed publication workflows.

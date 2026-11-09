@@ -7,7 +7,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from tests.radio_session_support import poc, play
+from tests.radio_session_support import (
+    completed_poc as poc, completed_radio_schema, completed_radio_store, play,
+)
 from yt_playlist.core import radio_storage
 from yt_playlist.web.radio_edits import AppendOperation
 from yt_playlist.web.radio_persistence import encode, restore
@@ -16,12 +18,9 @@ from yt_playlist.web.routes import radio_session
 from yt_playlist.web.routes.bridge import build as bridge_routes
 
 
-@pytest.fixture
-def store(file_backed_store, radio_catalog_template):
-    # Production can use independent WAL readers for player metadata. An
-    # in-memory Store would introduce unrelated serialization in bridge status.
-    file_backed_store._fixture_radio_pool = radio_catalog_template.restore(file_backed_store)
-    return file_backed_store
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These small FastAPI routers have no application background lifecycle."""
 
 
 def test_checkpoint_waiting_for_writer_leaves_live_status_available(poc, monkeypatch):

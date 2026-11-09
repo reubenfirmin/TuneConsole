@@ -4,9 +4,20 @@ import threading
 
 import pytest
 
-from tests.radio_session_support import poc
+from tests.radio_session_support import (
+    completed_poc as poc, completed_radio_schema, completed_radio_store,
+)
+from tests.store_fixture_support import without_query_timing
 from yt_playlist.library import playlist_generated
 from yt_playlist.web import radio_session
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Controller concurrency has no HTTP application background loop."""
 
 
 @pytest.mark.parametrize('stop', [False, True])

@@ -6,7 +6,14 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.web.radio_playlist_io import readback_durations
 from yt_playlist.web.routes import radio_session as radio_routes
-from tests.radio_session_support import poc, play
+from tests.radio_session_support import (
+    uncontended_poc as poc, completed_radio_schema, completed_radio_store, play,
+)
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """The rendered playlist router has no application background lifecycle."""
 
 
 def with_remote_durations(remote, **durations):

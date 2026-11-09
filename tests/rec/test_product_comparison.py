@@ -287,12 +287,6 @@ def favorable_evidence(store, favorable_template):
     return favorable_template.restore(store)
 
 
-@pytest.fixture
-def prepared_trial(store, home_prepared_template):
-    normal = home_prepared_template.restore(store)
-    return _trial(store), normal
-
-
 @pytest.fixture(scope='module')
 def comparison_menu_schema():
     from tests.store_fixture_support import bounded_consumer_schema
@@ -315,6 +309,22 @@ def menu_trial(tmp_path, comparison_menu_schema, monkeypatch):
         with mock_snapshot_coordinator(store, monkeypatch):
             normal = publish_menu(store, modeled=True)
             yield store, _trial(store), normal
+
+
+@pytest.fixture
+def paired_menu_trial(menu_trial):
+    from tests.home_fixture_support import publish_menu
+
+    store, trial, normal = menu_trial
+    # Serving consumes completed model outputs. Keep two genuinely distinct
+    # four-card menus so selecting the wrong arm cannot pass by coincidence.
+    challenger = publish_menu(store, prefix='challenger', modeled=True,
+                             labels=tuple(f'Challenger {lane}' for lane in
+                                          ('comfort', 'wheelhouse', 'explore', 'temporal')))
+    normal = {**normal, 'menus': [*normal['menus'], *challenger['menus']]}
+    incumbent_ids = {p['experiment_id'] for p in normal['menus'][0]['protos']}
+    assert incumbent_ids.isdisjoint(p['experiment_id'] for p in normal['menus'][-1]['protos'])
+    return store, trial, normal
 
 
 @pytest.fixture(scope='module')
@@ -541,10 +551,10 @@ def test_album_readiness_does_not_publish_paired_assignments(paired_album_store,
     assert store.rec_proposals.get_proposals('model_album_assignment') == before
 
 
-def test_paired_mix_and_album_menus_serve_the_assigned_model_and_keep_the_window(store, prepared_trial):
+def test_paired_mix_and_album_menus_serve_the_assigned_model_and_keep_the_window(paired_menu_trial):
     from tests.home_fixture_support import service
     from yt_playlist.rec import album_choices, home_prepared
-    trial, normal = prepared_trial
+    store, trial, normal = paired_menu_trial
     selected = product.assignment(store, 'mixes', 'window', 1000)
     for arm, index in (('incumbent', 0), ('challenger', -1)):
         data = {'menus': [deepcopy(normal['menus'][index])], 'choice_context': {'arm_snapshot': arm},
@@ -557,6 +567,7 @@ def test_paired_mix_and_album_menus_serve_the_assigned_model_and_keep_the_window
     first = home_prepared.cards(store, normal, 1000, service(store))
     held = store.rec_proposals.get_proposals('home_choice')
     assert held['choice_context']['comparison']['arm'] == selected['arm']
+    assert first.choice_context['arm_snapshot'] == selected['arm']
     expected = normal['menus'][0 if selected['arm'] == 'incumbent' else -1]['protos']
     assert {p['experiment_id'] for p in first.protos} == {p['experiment_id'] for p in expected}
     albums = album_choices.load(store, 1000)

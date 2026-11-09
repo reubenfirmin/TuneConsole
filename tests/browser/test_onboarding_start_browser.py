@@ -192,7 +192,7 @@ def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, 
     expect(byline).to_have_text('Your first set is ready')
     expect(card).to_contain_text('The first record')
     expect(card.locator('.starter-context')).to_have_text(
-        "Here's an album to listen to while we perform initial customization.")
+        'Here’s an album to listen to while we find more music for you.')
     expect(page.locator('.starter-mix')).to_have_count(0)
     expect(page.locator('.arrival-progress')).to_be_hidden()
     play = card.get_by_role('button', name='Play The first record', exact=True)
@@ -223,9 +223,9 @@ def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, 
     expect(player).to_have_class(re.compile('is-onboarding-cue'))
     expect(byline).to_have_text('Your first set is ready')
     page.locator('.topbar nav').get_by_role('link', name='Home', exact=True).click()
-    expect(byline).to_have_text('Enjoy your first set while we prepare your account')
+    expect(byline).to_have_text('Enjoy your first set while we find more music for you')
     page.reload()
     expect(byline).to_be_visible()
-    expect(byline).to_have_text('Enjoy your first set while we prepare your account')
+    expect(byline).to_have_text('Enjoy your first set while we find more music for you')
     assert store.settings.get_setting('last_sync_at') is None
     assert errors == []

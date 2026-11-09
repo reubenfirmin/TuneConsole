@@ -6,14 +6,14 @@ import sqlite3
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.repos.test_foreign_calendar_batches import stamp
 from tests.store_fixture_support import (
     bounded_consumer_schema, file_consumer_store as file_backed_store,
+    guarded_numbered_store as installed,
     native_sql_calls, publication_consumer_reads, without_query_timing,
 )
 from yt_playlist.core import destination_schema, listening, listening_calendar, schema_inspection
-from yt_playlist.core.migrations import MigrationError, registry, regular, runner
+from yt_playlist.core.migrations import MigrationError, registry, regular
 from yt_playlist.core.preparation import calendar_indexes as indexes
 from yt_playlist.core.store import Store
 
@@ -73,24 +73,13 @@ def observed(conn,account):
     return list(map(tuple,listening_calendar._foreign_rows(conn,account,affected,None)))
 
 
-@pytest.mark.parametrize('version', [100, 103, 105, 107])
-def test_calendar_input_keeps_each_installed_contract_and_snapshot_guards(_bounded_installed_schema, version):
-    template = _bounded_installed_schema(version)
-    source = template.source
-    with (closing(sqlite3.connect(source._db_path.as_uri() + '?mode=ro', uri=True)) as reader,
-          schema_inspection.reuse_tables(reader)):
-        reader.row_factory = sqlite3.Row
-        runner.validate_version(reader, version)
-        regular.validate(reader)
-    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert source.conn.execute('SELECT count(*) FROM main.play_events').fetchone()[0] == 0
-    assert template.revision_guards
-
-
 @pytest.mark.parametrize('installed',[100,103,105,107],indirect=True)
 @pytest.mark.usefixtures('native_sql_calls')
 def test_empty_index_install_bounded_build_and_explicit_dynamic_selection(installed):
-    store, _ = installed
+    store, version = installed
+    assert list(map(tuple, store.conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
+        (item.version, item.name) for item in registry.MIGRATIONS[:version]]
+    assert store._snapshot_revisions.conn is store.conn
     accounts,_ = seed(store,count=40)
     expected = {account:observed(store.conn,account) for account in accounts}
     job = indexes.job(store.conn)

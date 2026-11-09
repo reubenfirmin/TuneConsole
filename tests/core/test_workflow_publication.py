@@ -8,9 +8,11 @@ import time
 
 import pytest
 
-from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_workflow_receipt_preparation import seed
-from tests.store_fixture_support import native_sql_calls, publication_consumer_reads, without_query_timing
+from tests.store_fixture_support import (
+    _numbered_input, native_sql_calls,
+    publication_consumer_reads, without_query_timing,
+)
 from yt_playlist.core import workflow_settings
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import workflow_receipts as preparation, workflow_publication as publication
@@ -27,15 +29,18 @@ def disable_periodic_library_sync():
     """Workflow SQL and file publication do not start the HTTP lifecycle."""
 
 
-def test_workflow_publication_input_keeps_installed_history_and_snapshot_guards(_bounded_installed_schema):
-    from yt_playlist.core.migrations import registry
+@pytest.fixture
+def installed(request, tmp_path, monkeypatch, native_sql_calls):
+    # Publication consumes one completed private predecessor. It still owns
+    # real SQL, WAL snapshots, source guards and its explicit later admission.
+    with _numbered_input(request.param, tmp_path, monkeypatch, snapshot_guards=True) as value:
+        yield value
 
-    source = _bounded_installed_schema(93).source
-    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert list(map(tuple, source.conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
-        (entry.version, entry.name) for entry in registry.MIGRATIONS[:93]]
-    assert source._snapshot_revisions.conn is source.conn
-    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+
+@pytest.fixture
+def unadmitted_installed(request, tmp_path, monkeypatch, native_sql_calls, without_query_timing):
+    with _numbered_input(request.param, tmp_path, monkeypatch) as value:
+        yield value
 
 
 def prepare(owner, conn, *, size=128):
@@ -248,9 +253,9 @@ def test_source_and_reference_races_reject_selection_without_admitting_missing_i
     owner.publish(store.conn, stage=stage(owner, store.conn))
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
-def test_file_recovery_and_explicit_failure_retry_do_not_block_regular_ddl(installed, monkeypatch):
-    store, _ = installed
+@pytest.mark.parametrize('unadmitted_installed', [93], indirect=True)
+def test_file_recovery_and_explicit_failure_retry_do_not_block_regular_ddl(unadmitted_installed, monkeypatch):
+    store, _ = unadmitted_installed
     _, originals, _, source = seed(store)
     owner = publication.OWNERS['playlists']
     identity = stage(owner, store.conn)

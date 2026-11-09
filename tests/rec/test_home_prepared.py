@@ -191,6 +191,24 @@ def cached_menu(store, monkeypatch):
 
 
 @pytest.fixture
+def full_cached_menu(menu_publication_store, monkeypatch):
+    """Completed twelve-track menus and shadows below serving/feedback."""
+    store = menu_publication_store
+    with monkeypatch.context() as producer:
+        inputs = controlled_publication_inputs(store, producer, tracks_per_card=12)
+        result = inputs.cards(service(store), home_cards.CardsRequest(1000, epoch=0, record=False))
+    for proto in result.protos:
+        proto['counterfactual'] = {'ranker': 'cosine', 'tracks': list(reversed(proto['tracks']))}
+    home_prepared.remember(store, {'generation': 'controlled-worker-output'}, result, 1000)
+    payload = home_cache.read(store, 'home_tuned')
+    home_cache.put(store, home_prepared.SURFACE, payload, 1000)
+    home_cache.put(store, 'home_tuned', None, 1000)
+    home_cache.put(store, 'home_choice', {}, 1000)
+    assert home_prepared._valid(payload)
+    return store, payload
+
+
+@pytest.fixture
 def publication_inputs(store, monkeypatch):
     return controlled_publication_inputs(store, monkeypatch)
 
@@ -725,10 +743,12 @@ def test_corrupt_prepared_payload_never_breaks_home_routes(store, cached_menu, d
     assert scheduled
 
 
-def test_saving_fresh_tracks_in_generated_playlists_does_not_truncate_worker_mixes(store, prepared, monkeypatch):
+def test_saving_fresh_tracks_in_generated_playlists_does_not_truncate_worker_mixes(full_cached_menu, monkeypatch):
+    store, prepared = full_cached_menu
     initial = home_prepared.cards(store, prepared, 1000, service(store))
     proto = next(p for p in initial.protos if p['lane'] == 'fresh')
     assert len(proto['tracks']) == 12
+    assert proto['counterfactual']['tracks'] == list(reversed(proto['tracks']))
     original = deepcopy(prepared)
     iid = store.accounts.upsert_account('main', 'cred', None, True)
     pid = store.playlists.upsert_playlist(iid, 'saved-mix', 'Saved mix', 7, None, 1001)
@@ -743,10 +763,17 @@ def test_saving_fresh_tracks_in_generated_playlists_does_not_truncate_worker_mix
 
     monkeypatch.setattr(mode_surfaces, 'assemble_cards', forbidden)
     monkeypatch.setattr(surfaces, 'for_you', forbidden)
-    monkeypatch.setattr(store.rec_query, 'tracks_by_keys', forbidden)
-    monkeypatch.setattr(store.rec_eligibility, 'offer_metadata', forbidden)
-    monkeypatch.setattr(store.discovery, 'discovered_tracks_by_keys', forbidden)
-    current = home_prepared.cards(store, prepared, 1002, service(store))
+
+    def serve(now):
+        # Catch revalidation on private readers as well as the serving writer.
+        # Feedback setup and the explicit eligibility checks below stay real.
+        with monkeypatch.context() as serving:
+            serving.setattr(type(store.rec_query), 'tracks_by_keys', forbidden)
+            serving.setattr(type(store.rec_eligibility), 'offer_metadata', forbidden)
+            serving.setattr(type(store.discovery), 'discovered_tracks_by_keys', forbidden)
+            return home_prepared.cards(store, prepared, now, service(store))
+
+    current = serve(1002)
     assert len(current.protos) == len(current.slots) == 4
     assert {p['lane']: p['tracks'] for p in current.protos} == {
         p['lane']: p['tracks'] for p in initial.protos}
@@ -755,7 +782,7 @@ def test_saving_fresh_tracks_in_generated_playlists_does_not_truncate_worker_mix
     assert not store.rec_eligibility.suppressed_candidate_keys(keys, 1002)
     # Feedback changes future preparation, never the frozen tracks or shadows.
     seed_dislike(store, keys[0], until=None, now=1003)
-    disliked = home_prepared.cards(store, prepared, 1003, service(store))
+    disliked = serve(1003)
     assert [p['tracks'] for p in disliked.protos] == [p['tracks'] for p in initial.protos]
     assert [p.get('counterfactual') for p in disliked.protos] == [p.get('counterfactual') for p in initial.protos]
     assert prepared == original
@@ -1454,15 +1481,25 @@ def test_explicit_preview_round_trip_preserves_tracks_and_choice_context(
     assert served.protos[0]['counterfactual']['tracks'] == list(reversed(expected_tracks))
 
 
-def test_tuned_result_is_reused_and_expiry_restores_baseline(store, prepared):
+def test_tuned_result_is_reused_and_expiry_restores_baseline(menu_publication_store):
+    store = menu_publication_store
+    prepared = publish_menu(store, genre='jazz', modeled=True)
     with mix_tuning.adjusting(store, 1000):
         store.rec_model.set_lean("genre:jazz", 2, 1000)
-    result = service(store).cards(home_cards.CardsRequest(1000, record=False))
+    # Cache reuse consumes a completed explicit result. Ranking under leans
+    # has its own HomeCards owners; keep real subjects, publication and expiry.
+    result = home_cards.CardsResult(**deepcopy(prepared['menus'][0]))
+    result.protos[0]['tracks'].reverse()
+    assert result.protos[0]['tracks'] != prepared['menus'][0]['protos'][0]['tracks']
     home_prepared.remember(store, prepared, result, 1000)
     tuned = home_prepared.load(store, 1001)
     assert tuned["tuning"] == home_prepared.tuning_key(store, 1000)
+    assert tuned['tuning'] != prepared['tuning']
     assert len(tuned["menus"]) == 1
-    assert home_prepared.load(store, 1000 + mix_tuning.TTL_S)["tuning"] == prepared["tuning"]
+    assert tuned['menus'][0]['protos'][0]['tracks'] == result.protos[0]['tracks']
+    expired = home_prepared.load(store, 1000 + mix_tuning.TTL_S)
+    assert expired["tuning"] == prepared["tuning"]
+    assert expired['menus'] == prepared['menus']
     assert store.rec_model.get_leans() == {}
 
 

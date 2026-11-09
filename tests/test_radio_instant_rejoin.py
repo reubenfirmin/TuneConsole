@@ -7,12 +7,24 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from tests.radio_session_support import poc, play
+from tests.radio_session_support import (
+    completed_poc as poc, completed_radio_schema, completed_radio_store, play,
+    controlled_radio_checkpoints,
+)
+from tests.store_fixture_support import without_query_timing
 from tests.template_support import web_templates
 from yt_playlist.rec.radio_restored import RestoredCandidates
 from yt_playlist.web import radio_session
 from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.web.routes.radio_session import build as radio_routes
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing', 'controlled_radio_checkpoints')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These controllers and route-only apps have no periodic application jobs."""
 
 
 def saved_session(poc):

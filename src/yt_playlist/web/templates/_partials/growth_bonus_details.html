@@ -1,28 +1,27 @@
 <div x-show="selectedNode.id === 'takeout'">
   <p class="growth-small">Your past listening · Google Takeout</p>
-  <p>Bring in past YouTube Music listens so TuneConsole can learn from music you’ve already played. Without this, it learns from new listening as you go.</p>
-  <details><summary>See the import steps</summary><p>Download a copy of your listening history from Google, then choose that file in Setup, Import.</p><p>Choose only listening history. You don’t need to share your Google password or export all your Google data.</p><a class="btn btn-primary" href="/setup?tab=import">Open history import {{ arrow_icon('right') }}</a></details>
+  <p>Add the music you’ve played on YouTube Music before, so TuneConsole can get to know you sooner. It also learns from what you play now.</p>
 </div>
 <div x-show="selectedNode.id === 'lastfm'">
   <p class="growth-small">Richer music details · Last.fm</p>
-  <p>We look up song and artist tags on Last.fm and add their genre information to the music details used by your taste model, mixes and radio.</p>
-  <p x-show="growth.provider_status.lastfm && growth.provider_status.lastfm !== 'available'">Last.fm is currently unavailable. Check its connection in Setup.</p>
-  <details><summary>See the setup steps</summary><p>Get a Last.fm key: a code that lets TuneConsole look up music details. Setup shows where to get one and where to paste it.</p><p>Song and artist names are sent to Last.fm for lookups. TuneConsole doesn’t post your listening there.</p><a class="btn btn-primary" href="/setup?tab=enrichment">Open music details setup {{ arrow_icon('right') }}</a></details>
+  <p>Last.fm has better genre labels than the free, public sources we use by default. You can register for a free API key, a code that lets TuneConsole ask Last.fm about songs. Those genre labels help improve your recommendations over time.</p>
+  <p>To find genres, TuneConsole sends Last.fm song and artist names. It doesn’t post what you listen to on your Last.fm profile.</p>
 </div>
 <div x-show="selectedNode.id === 'deepseek'">
   <p class="growth-small">Stories behind the records · DeepSeek</p>
-  <p>When you open an album, we can ask DeepSeek to write a short AI description from its public album details.</p>
-  <p x-show="growth.provider_status.deepseek">Album descriptions are waiting. Check the service status and request limit in Setup.</p>
-  <details><summary>See the setup steps</summary><p>Add a DeepSeek API key in Setup and choose a daily request limit. This service uses your own paid DeepSeek account; requests can incur charges.</p><p>Only public album details are sent: artist, album title and year. Your listening history stays here.</p><a class="btn btn-primary" href="/setup?tab=enrichment">Open album description setup {{ arrow_icon('right') }}</a></details>
+  <p>DeepSeek can write a short AI introduction to an album when you open it.</p>
+  <p>It’s very cheap: with the default daily limit, these introductions should cost well under $1 a month. You can set your own daily limit in Setup.</p>
+  <p>Its API key is a code that lets TuneConsole use your DeepSeek account. We send only the artist, album title and year.</p>
 </div>
 <div x-show="selectedNode.id === 'milestones'">
-  <p>Save a playlist, like songs and prepare sound details to earn these optional achievements.</p>
+  <p>Save a playlist, heart songs and keep listening to earn these optional achievements.</p>
   <ul class="growth-achievements">
     <template x-for="achievement in growth.achievements" :key="achievement.id"><li>
       <strong x-text="achievement.label"></strong>
-      <span x-text="achievement.complete ? 'Earned' : Math.min(achievement.count, achievement.goal) + ' of ' + achievement.goal"></span>
+      <span class="tag" x-text="achievement.complete ? 'Earned' : Math.min(achievement.count, achievement.goal) + ' of ' + achievement.goal"></span>
       <p x-text="achievement.detail"></p>
+      <a class="btn btn-primary" :href="({playlist: '/#directions', likes: '/playlists', audio: '/playlists'})[achievement.id]"
+         x-text="({playlist: 'Find a mix to save', likes: 'Find songs to rate', audio: 'Find music to play'})[achievement.id]"></a>
     </li></template>
   </ul>
 </div>
-<button class="btn-ghost" type="button" x-show="selectedNode.bonus" @click="closeNode()">Back to the festival</button>

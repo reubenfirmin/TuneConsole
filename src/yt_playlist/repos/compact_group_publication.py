@@ -175,8 +175,14 @@ def _clear_foreign_conflicts(repo, prepared, plans):
 
 def group_state(repo, generation_id, owner, plan):
     position, group, value, fields, digest = plan
-    with publication._write(repo) as conn:
-        _touch(conn, generation_id, owner)
+    # Resuming a committed group must not spend the next turn renewing the
+    # lease once per completed group. Every subsequent mutation renews and
+    # rechecks ownership under its writer; this state inspection only reads.
+    with repo._store.read_snapshot() as snapshot:
+        conn = snapshot.store.conn
+        if conn.execute('SELECT 1 FROM group_builds WHERE generation_id=? AND owner=? AND ready=0',
+                        (generation_id, owner)).fetchone() is None:
+            raise RuntimeError('Musical group build is no longer owned by this worker')
         group_id = conn.execute('SELECT id FROM taste_groups WHERE external_key=?', (group['group_id'],)).fetchone()[0]
         selected = conn.execute('SELECT external_version FROM generation_groups WHERE generation_id=? AND group_id=?',
                                 (generation_id, group_id)).fetchone()
@@ -197,13 +203,11 @@ def group_state(repo, generation_id, owner, plan):
                               (version_id,)).fetchone() is not None
         if pending is None and not sealed:
             raise publication.BuildUnavailable('Unfinished musical group content is awaiting cleanup')
-    if sealed:
-        # Published content is immutable. Resume cursors only apply to an
-        # unfinished build; the controller still verifies the complete content
-        # before linking an existing version into this generation.
-        return {'version_id': version_id, 'group_id': group_id, 'sealed': True}
-    with repo._store.read_snapshot() as snapshot:
-        conn = snapshot.store.conn
+        if sealed:
+            # Published content is immutable. Resume cursors only apply to an
+            # unfinished build; the controller still verifies the complete content
+            # before linking an existing version into this generation.
+            return {'version_id': version_id, 'group_id': group_id, 'sealed': True}
         count = _count(conn, version_id, ('group_members', 'unresolved_group_members'), 'group_version_id')
         reps = _count(conn, version_id, ('group_representatives',), 'group_version_id')
     return {'version_id': version_id, 'group_id': group_id, 'sealed': sealed, 'members': count, 'representatives': reps}

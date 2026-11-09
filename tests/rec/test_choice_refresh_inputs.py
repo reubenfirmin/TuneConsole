@@ -6,9 +6,16 @@ import sqlite3
 import pytest
 
 from tests.core.test_predecessor_writes import installed
-from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
+from tests.store_fixture_support import (
+    bounded_consumer_schema, file_consumer_store as store, native_sql_calls,
+)
 from yt_playlist.core import mix_choices
 from yt_playlist.rec import album_feedback_state, candidate_refresh, choice_learning, rec_params
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Fingerprint and SQL ownership checks construct no HTTP application."""
 
 
 @pytest.fixture(scope='module')
@@ -70,7 +77,7 @@ def test_refresh_skips_vectors_tracks_estimates_and_album_history(store):
             reader.conn.set_authorizer(None)
 
 
-def test_refresh_preserves_transient_boundaries_future_and_mix_precision(store):
+def test_refresh_preserves_transient_boundaries_future_and_mix_precision(store, native_sql_calls):
     for name, value in {'now_gain': 1, 'now_window_h': 1, 'session_alpha': 0,
                         'choice_recent_w': 0, 'choice_saved_w': 1, 'choice_saved_days': 3}.items():
         rec_params.set_param(store, name, value)

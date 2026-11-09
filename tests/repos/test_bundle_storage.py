@@ -6,10 +6,11 @@ import sqlite3
 
 import pytest
 
-from tests.prepared_fixture_support import capture_template
-from tests.repos.test_compact_group_publication import restored_groups
-from tests.repos.test_typed_recommendation_publication import initialize_recommendations, publish, collect
-from tests.store_fixture_support import reuse_reporting_reader
+from tests.recommendation_support import seed_compact_group_history
+from tests.repos.test_typed_recommendation_publication import publish, collect
+from tests.store_fixture_support import (
+    _numbered_input, native_sql_calls, reuse_reporting_reader, without_query_timing,
+)
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.core import bundle_plan, policy_config, recommendation_plan, recommendation_revalidations as revalidations
 from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
@@ -20,48 +21,33 @@ from yt_playlist.controllers import recommendation_import
 from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
 
 
-@pytest.fixture(scope='module')
-def bundle_template(tmp_path_factory, compact_group_template):
-    root = tmp_path_factory.mktemp('bundle-publication-input')
-    with restored_groups(compact_group_template, root / 'source.db') as (source, _):
-        initialize_recommendations(source)
-        source._rebuild_source_version = None
-        source._schema_recovery_pending = False
-        with source.conn:
-            revalidations.install(source.conn)
-        source._bind_repositories()
-        yield capture_template(source, None)
+pytestmark = pytest.mark.usefixtures('without_query_timing', 'native_sql_calls')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Bundle publication does not construct an HTTP application."""
 
 
 @pytest.fixture
-def recommendations(tmp_path, bundle_template):
-    with bundle_template.open(tmp_path / 'bundle.db') as store:
+def recommendations(tmp_path, monkeypatch, native_sql_calls):
+    # Conversion consumes retained mode_bundles and the original genre labels.
+    # Supply completed SQL before those owners retire, with real groups/files.
+    with _numbered_input(79, tmp_path, monkeypatch, snapshot_guards=True) as (store, _):
+        # Keep real WAL commits and visibility. These disposable fixtures do
+        # not need a checkpoint after every bounded publication write.
+        store.conn.execute('PRAGMA wal_autocheckpoint=0')
+        with store.conn:
+            revalidations.install(store.conn)
+        with reuse_reporting_reader(store, monkeypatch):
+            seed_compact_group_history(store)
+        assert store.taste_groups.head_generation() == 'second'
+        assert store.taste_groups.head(members=True)['groups'][1]['members'] == {'one': (.9, .8)}
+        assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+        assert store.conn.execute('SELECT count(*) FROM recommendation_heads').fetchone()[0] == 0
+        assert store.conn.execute('SELECT count(*) FROM recommendation_pool_revalidations').fetchone()[0] == 0
+        assert store._snapshot_revisions.conn is store.conn
         yield store
-
-
-def test_bundle_historical_input_keeps_genuine_numbered_prefix(_pristine_installed_schema):
-    source = _pristine_installed_schema(69)
-    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert [row[0] for row in source.execute('SELECT version FROM schema_migrations ORDER BY version')] == list(range(1, 70))
-    assert not source.execute('PRAGMA foreign_key_check').fetchone()
-
-
-def test_bundle_input_keeps_real_groups_ranked_members_and_read_only_custody(compact_group_template):
-    source = compact_group_template.source
-    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert source.taste_groups.head_generation() == 'second'
-    assert source.taste_groups.head(members=True)['groups'][1]['members'] == {'one': (.9, .8)}
-    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
-
-
-def test_bundle_publication_input_keeps_empty_heads_and_real_revalidation_owners(bundle_template):
-    source = bundle_template.source
-    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert source.conn.execute('SELECT count(*) FROM recommendation_heads').fetchone()[0] == 0
-    assert source.conn.execute('SELECT count(*) FROM recommendation_pool_revalidations').fetchone()[0] == 0
-    assert source.taste_groups.head_generation() == 'second'
-    assert bundle_template.revision_guards
-    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.fixture

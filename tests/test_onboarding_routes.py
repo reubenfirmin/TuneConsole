@@ -69,7 +69,7 @@ def test_saved_album_starter_arrives_without_tracks_or_training(store):
                                       'artist': 'My artist', 'type': 'Album'})
     html = client.get('/home/onboard/start').text
     assert 'First record' in html
-    assert "Here's an album to listen to while we perform initial customization." in html
+    assert 'Here’s an album to listen to while we find more music for you.' in html
     assert 'hx-post="/album/play"' in html
     assert 'data-onboarding-album="MPRE_first"' in html
     assert 'Play album' in html and 'Play mix' not in html
@@ -96,7 +96,7 @@ def test_album_starter_can_use_familiar_artists_but_not_incomplete_imports(store
         albums.observe(store.conn, 'MPRE_familiar', title='Familiar record', artist='Familiar artist')
     html = client.get('/home/onboard/start').text
     assert 'Familiar record' in html and 'Unverified album' not in html
-    assert "Here's an album to listen to while we perform initial customization." in html
+    assert 'Here’s an album to listen to while we find more music for you.' in html
     assert 'Play mix' not in html
     # A saved release takes priority over the familiar-artist fallback.
     store.collection.add_saved_album({'browse': 'MPRE_saved', 'title': 'Saved record', 'artist': 'Other artist'})
@@ -114,7 +114,7 @@ def test_radio_starter_uses_ready_radio_and_falls_back_without_building_models(s
     monkeypatch.setattr(radio, 'seeds', lambda: pytest.fail('Starter must only read prepared radio'))
     html = client.get('/home/onboard/start').text
     assert 'Play mix' in html
-    assert 'while we prepare your Radio Session' in html
+    assert 'while we find songs for your station' in html
     radio.offer = [{'key': 'ready|artist', 'video_id': 'ready', 'title': 'Ready song', 'artist': 'Artist'}]
     radio.offer_id = 'prepared-radio-offer'
     html = client.get('/home/onboard/start').text
@@ -271,7 +271,7 @@ def test_first_mix_polls_until_verified_songs_arrive(store, home_routes_only):
     assert "Verified song" in ready and "Unverified song" not in ready
     assert "Play mix" in ready
     assert "Something to listen to" in ready
-    assert "while we complete setup for you." in ready
+    assert 'while we find more music for you.' in ready
     assert c.post("/home/refresh-card/onboard_library").status_code == 200
     status = c.get("/home/onboard/status").json()
     assert status["songs"] == 1

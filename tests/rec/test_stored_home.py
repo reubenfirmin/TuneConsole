@@ -4,13 +4,29 @@ from tests.derived_rating_support import seed_dislike
 import numpy as np
 import pytest
 
-from tests.repos.test_typed_recommendation_publication import (
-    recommendation_predecessor, recommendations, publish, plan,
-)
+from tests.legacy_recommendation_fixture_support import recommendation_predecessor, recommendations
+from tests.repos.test_typed_recommendation_publication import publish, plan
 from tests.rec.test_stored_fresh import fresh, forbid_legacy
+from tests.store_fixture_support import native_sql_calls, reuse_reporting_reader
 from yt_playlist.rec import bundle_storage, mode_surfaces, rec_params
 from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Synchronous Home assembly does not construct the web app."""
+
+
+@pytest.fixture
+def home_assembly_reads(fresh, monkeypatch):
+    """Compare both assemblers on one actual, independent reporting reader."""
+    store, _ = fresh
+    with reuse_reporting_reader(store, monkeypatch):
+        yield
 
 
 def modes(store, families):
@@ -100,7 +116,7 @@ def test_unmodeled_genre_selection_reaches_complete_tail_with_bounded_pages(fres
 @pytest.mark.parametrize('share', [0, .5, 1])
 @pytest.mark.parametrize('steering', [False, True], ids=['neutral', 'penalized'])
 def test_real_typed_assembly_matches_complete_legacy_opportunities_and_experiment_evidence(
-        fresh, share, steering, monkeypatch):
+        fresh, home_assembly_reads, share, steering, monkeypatch):
     store, _ = fresh
     with store.conn:
         store.conn.execute("UPDATE youtube_items SET album='',mb_year='1980'")

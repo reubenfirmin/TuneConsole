@@ -16,11 +16,10 @@ from yt_playlist.core import schema_inspection
 from yt_playlist.core.store import Store
 from yt_playlist.rec import candidate_refresh, embedding_vectors as embed, measurement, mode_surfaces, surfaces
 from tests import model_support
-from tests.prepared_fixture_support import prepared_template
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.store_fixture_support import (
-    bounded_consumer_schema, initialize_consumer, native_sql_calls,
-    reuse_reporting_reader, without_query_timing,
+    _file_consumer_store, bounded_consumer_schema, initialize_consumer,
+    mock_snapshot_coordinator, native_sql_calls, reuse_reporting_reader, without_query_timing,
 )
 from yt_playlist.rec.rec_worker import RecWorker
 
@@ -38,10 +37,16 @@ def isolation_schema():
         yield schema
 
 
-@pytest.fixture(scope="module")
-def isolation_template(isolation_schema):
-    with prepared_template(isolation_schema, _seed) as template:
-        yield template
+@pytest.fixture
+def isolation_model_input(tmp_path, isolation_schema):
+    # The independent comparison needs a model and modes, not a second saved
+    # publication, exported files or a restored template.
+    directory = tmp_path / 'model-input'
+    directory.mkdir()
+    with _file_consumer_store(directory, isolation_schema, snapshot_guards=False) as store:
+        with pytest.MonkeyPatch.context() as patch, mock_snapshot_coordinator(store, patch):
+            _seed_model(store)
+        yield store
 
 
 @pytest.fixture(params=["memory", "file"])
@@ -98,15 +103,15 @@ def ranking_inputs(monkeypatch):
 
 
 @pytest.fixture
-def _worker_store(tmp_path):
-    # The worker control retains actual fresh startup as well as real seeding.
-    store = Store(tmp_path / 'state.db')
-    with closing(store.conn):
-        store.init_schema()
-        yield store
+def _worker_store(tmp_path, isolation_schema, monkeypatch):
+    # Startup is below this worker/UI race. Keep real SQL diagnostics, revision
+    # guards, WAL snapshots and cancellation throughout the actual interaction.
+    with _file_consumer_store(tmp_path, isolation_schema) as store:
+        with reuse_reporting_reader(store, monkeypatch):
+            yield store
 
 
-def _seed(store):
+def _seed_model(store):
     seed_publication_subjects(store, [{'key': 'song|artist', 'video_id': 'video',
         'title': 'Song', 'artist': 'Artist', 'genre': 'House'}])
     model_support.build_content_model(store)
@@ -114,6 +119,11 @@ def _seed(store):
     store.modes.replace_modes([{"mode_id": 1, "label": "House", "families": [["house", 1]],
         "centroid": vectors[0], "size": 1, "rep_keys": keys,
         "space": embed.content_space_id(store)}], retired_ids=[], now=1)
+    return keys
+
+
+def _seed(store):
+    keys = _seed_model(store)
     fresh = {'key': 'fresh|new artist', 'video_id': 'fresh', 'title': 'Fresh',
              'artist': 'New artist', 'genre': 'House'}
     seed_publication_subjects(store, [fresh], discoveries=[fresh['key']])
@@ -147,10 +157,11 @@ def _saved(store):
 
 
 def test_ui_read_and_write_complete_while_bundle_scorer_is_still_running(
-        _worker_store, isolation_template, monkeypatch):
+        _worker_store, isolation_model_input, monkeypatch):
     store = _worker_store
-    _seed(store)
-    _assert_content_inputs(store, isolation_template.source)
+    with monkeypatch.context() as patch, mock_snapshot_coordinator(store, patch):
+        _seed(store)
+    _assert_content_inputs(store, isolation_model_input)
     started = threading.Event()
     work = Activity()
     worker = RecWorker(SimpleNamespace(store=store, work=work,

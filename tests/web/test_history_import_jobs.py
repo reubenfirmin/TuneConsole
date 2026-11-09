@@ -23,19 +23,29 @@ from yt_playlist.library import spotify_data, takeout
 from yt_playlist.web.history_imports import HistoryImports
 from yt_playlist.web.routes import bridge, setup
 from tests.test_spotify_library_import import _account_zip
+from tests.store_fixture_support import bounded_consumer_schema
 
 
 REPORT = {'matched': 0, 'unmatched': 0, 'plays_added': 0, 'events_added': 0,
           'span_days': 0, 'unmatched_artists': {}, 'skipped': 0, 'unparsed_dates': 0}
 
 
-def test_history_import_schema_input_keeps_current_sql_and_real_revision_guards(_pristine_current_schema):
+@pytest.fixture
+def disable_periodic_library_sync():
+    # These import workers and explicit routers do not construct the app lifecycle.
+    pass
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
     from yt_playlist.core.migrations import registry
 
-    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert _pristine_current_schema.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == len(registry.MIGRATIONS)
-    assert _pristine_current_schema._revision_script
-    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
+    with bounded_consumer_schema(()) as schema:
+        assert schema.execute('PRAGMA query_only').fetchone()[0] == 1
+        assert schema.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == len(registry.MIGRATIONS)
+        assert schema._revision_script
+        assert not schema.execute('PRAGMA foreign_key_check').fetchone()
+        yield schema
 
 
 def context(store):

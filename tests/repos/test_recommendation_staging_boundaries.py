@@ -12,10 +12,34 @@ import pytest
 
 from tests.core.test_predecessor_writes import installed
 from tests.publication_support import plan, publish
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls,
+    reuse_reporting_reader,
+)
 from yt_playlist.core import db_checkpoint, recommendation_outputs as outputs, recommendation_pools as pools
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.core.store import Store
 from yt_playlist.repos import proposal_cache, recommendation_publication as publication
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Staging owners do not construct an HTTP application or background jobs."""
+
+
+@pytest.fixture(scope='module')
+def staging_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture
+def output_staging_store(tmp_path, staging_schema, native_sql_calls, monkeypatch):
+    # Keep real revision guards, independent readers, files and transactions.
+    # Catalog bootstrap and SQL diagnostics are below this staging contract.
+    with _file_consumer_store(tmp_path, staging_schema) as store:
+        with reuse_reporting_reader(store, monkeypatch):
+            yield store
 
 
 def output_plan(store, key, count):
@@ -78,8 +102,9 @@ def test_failed_slot_attachment_leaves_verified_prefix_unsealed_until_retry(file
     assert len(store.recommendations.page('home', 'all', 'wheelhouse', limit=256)) == 130
 
 
-def test_cancelled_output_batch_keeps_only_committed_prefix_and_reuses_durable_files(file_backed_store, monkeypatch):
-    store = file_backed_store
+def test_cancelled_output_batch_keeps_only_committed_prefix_and_reuses_durable_files(
+        output_staging_store, monkeypatch):
+    store = output_staging_store
     previous = publish(store, plan(store, 'previous'))
     prepared = output_plan(store, 'interrupted-files', 35)
     build = store.recommendations.claim(prepared)

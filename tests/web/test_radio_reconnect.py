@@ -7,10 +7,18 @@ import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from tests.radio_session_support import poc, play
+from tests.radio_session_support import (
+    uncontended_poc as session_poc, completed_radio_schema, completed_radio_store,
+    poc, play,
+)
 from yt_playlist.core.bridge import Bridge
 from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN, build
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These isolated controllers and transport routers have no app jobs."""
 
 
 def _run_preparation(worker):
@@ -19,8 +27,8 @@ def _run_preparation(worker):
     args[0]()
 
 
-def test_playback_arriving_after_startup_restores_and_extends_the_last_saved_song(poc):
-    original, remote, frames, workers, _ = poc
+def test_playback_arriving_after_startup_restores_and_extends_the_last_saved_song(session_poc):
+    original, remote, frames, workers, _ = session_poc
     original.start()
     play(original, 'v2')
     original.suspend()
@@ -58,8 +66,8 @@ def test_playback_arriving_after_startup_restores_and_extends_the_last_saved_son
     assert len(workers) == queued + 1
 
 
-def test_reconnect_restarts_one_suspended_monitor_but_never_restarts_explicit_stop(poc):
-    controller, remote, frames, workers, _ = poc
+def test_reconnect_restarts_one_suspended_monitor_but_never_restarts_explicit_stop(session_poc):
+    controller, remote, frames, workers, _ = session_poc
     controller.start()
     play(controller, 'v2')
     controller.seeds()

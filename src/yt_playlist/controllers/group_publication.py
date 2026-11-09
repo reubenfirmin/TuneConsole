@@ -38,6 +38,15 @@ class GroupPublication:
             return owner
 
     def _groups(self, prepared, generation, owner, plans, identities):
+        selected = self.repository.selected_groups(generation, owner)
+        pending = []
+        for row in plans:
+            group = row[1]
+            if group['group_id'] not in selected:
+                pending.append(row)
+            elif selected[group['group_id']] != group['version']:
+                raise ValueError('Musical group staged selection changed')
+        plans = pending
         positions = {row[0]: row for row in plans}
         for batch in _batches((row[0], row[1]['group_id'], row[4], row[1]['payload']) for row in plans):
             pending = self.repository.definition_candidates(generation, owner, batch)

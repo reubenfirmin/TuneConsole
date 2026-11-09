@@ -2,7 +2,7 @@
   {% if growth_intro|default(false) %}
   <header class="festival-intro-copy">
     <h1 id="arrival-title">Welcome to TuneConsole</h1>
-    <p class="festival-intro-sub" x-show="(starterReady || choosingArtists) && connected" x-cloak x-text="choosingArtists ? 'Choose your artists' : starterPlayed ? 'Enjoy your first set while we prepare your account' : 'Your first set is ready'"></p>
+    <p class="festival-intro-sub" x-show="(starterReady || choosingArtists) && connected" x-cloak x-text="choosingArtists ? 'Choose your artists' : starterPlayed ? 'Enjoy your first set while we find more music for you' : 'Your first set is ready'"></p>
     <div class="festival-entry-action" x-show="!connected && !imported && !running && !songs && !artists_required" x-cloak>
       <a class="btn btn-primary" href="https://chromewebstore.google.com/detail/opmmbolbdgdkphfocffpjpgmelkkjkcn"
          target="_blank" rel="noopener">Get the extension {{ arrow_icon('external') }}</a>
@@ -64,7 +64,7 @@
         <path class="landmark-hit" d="{{ stop.shape }}"/>
         <g class="landmark-sign" text-anchor="start" transform="translate({{ stop.sign_x }}, {{ stop.sign_y }})">
           <text class="landmark-label">{{ {'takeout': 'Past listening', 'lastfm': 'Music details', 'deepseek': 'Album stories'}.get(stop.id, stop.label) }}</text>
-          <text class="landmark-hint" y="25" x-show="node('{{ stop.id }}').upcoming"{% if not stop.upcoming %} style="display:none"{% endif %} x-text="node('{{ stop.id }}').state === 'preparing' ? 'Preparing' : 'Up next'"></text>
+          <text class="landmark-hint" y="25" x-show="node('{{ stop.id }}').upcoming"{% if not stop.upcoming %} style="display:none"{% endif %} x-text="node('{{ stop.id }}').state === 'preparing' ? 'Getting ready' : 'Up next'"></text>
         </g>
       </g>
       {% endfor %}

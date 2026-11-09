@@ -86,6 +86,14 @@ class CompactTasteGroupsRepo(GroupPreparationRepo):
     def install_identities(self, prepared, generation_id, owner):
         return publication._identities(self, prepared, generation_id, owner)
 
+    @snapshot_read
+    def selected_groups(self, generation_id, owner):
+        if self.conn.execute('SELECT 1 FROM group_builds WHERE generation_id=? AND owner=? AND ready=0',
+                             (generation_id, owner)).fetchone() is None:
+            raise RuntimeError('Musical group build is no longer owned by this worker')
+        return dict(self.conn.execute('SELECT t.external_key,x.external_version FROM generation_groups x '
+            'JOIN taste_groups t ON t.id=x.group_id WHERE x.generation_id=?', (generation_id,)))
+
     def definition_candidates(self, generation_id, owner, batch):
         return publication.definition_candidates(self, generation_id, owner, batch)
 

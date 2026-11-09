@@ -7,14 +7,38 @@ import pytest
 
 from tests.conftest import seed_catalog_track
 from tests.group_support import publish as publish_groups, recordings
+from tests.legacy_recommendation_fixture_support import recommendation_predecessor, recommendations
 from tests.repos.test_typed_recommendation_publication import (
-    recommendation_predecessor, recommendations, plan,
+    plan,
 )
 from tests.rec.test_stored_fresh import fresh
 from tests.rec.test_stored_home import publish_bundle, candidates
+from tests.store_fixture_support import native_sql_calls, reuse_reporting_reader
 from yt_playlist.rec import group_home, group_serving, home_vibe, stored_groups
 from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
 from yt_playlist.controllers.recommendation_publications import RecommendationPublications
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Synchronous adaptive serving does not construct the web app."""
+
+
+@pytest.fixture(autouse=True)
+def prepared_vibe_access():
+    """Ranking consumes an unlocked control; journey access has its own owners."""
+    with home_vibe.access_policy(lambda _store, _now: True):
+        yield
+
+
+@pytest.fixture
+def group_assembly_reads(recommendations, monkeypatch):
+    """Keep real reporting SQL below synchronous preview/assembly comparisons."""
+    with reuse_reporting_reader(recommendations, monkeypatch):
+        yield
 
 
 def forbid_bundle(monkeypatch):
@@ -28,7 +52,7 @@ def forbid_bundle(monkeypatch):
 
 @pytest.mark.parametrize('preset', ['', 'energize'])
 def test_real_adaptive_preview_and_choice_preserve_complete_legacy_membership_and_ranking(
-        recommendations, monkeypatch, preset):
+        recommendations, group_assembly_reads, monkeypatch, preset):
     store = recommendations
     policy = plan(store).policy_version
     records = recordings([('House', 32, .1), ('Jazz', 32, .9)])
@@ -45,6 +69,7 @@ def test_real_adaptive_preview_and_choice_preserve_complete_legacy_membership_an
     generation = publish_bundle(store, value)
     if preset:
         store.settings.set_setting(home_vibe.SETTING, preset)
+    assert home_vibe.current(store, 1200) == preset
     store._recommendation_files = False
     try:
         store.rec_proposals.put_proposals('mode_bundles', value, 1050)

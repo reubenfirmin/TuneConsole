@@ -1,4 +1,5 @@
 """Taste publication proves the complete retained document before selection."""
+from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
@@ -7,8 +8,12 @@ import pytest
 
 from tests.core.test_taste_control_preparation import finish, members, seed
 from tests.publication_fixture_support import installed
-from tests.store_fixture_support import preparation_ddl_connection, publication_consumer_reads, reuse_reporting_reader, without_query_timing
-from yt_playlist.core import collection_recovery, experiment_decision_state, recommendation_outputs as files, taste_control_state
+from tests.store_fixture_support import numbered_store as unadmitted_installed
+from tests.store_fixture_support import (
+    mock_regular_numbered_input, native_sql_calls, preparation_ddl_connection,
+    publication_consumer_reads, reuse_reporting_reader, without_query_timing,
+)
+from yt_playlist.core import collection_recovery, experiment_decision_state, recommendation_outputs as files, schema_inspection, taste_control_state
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import taste_controls as preparation, taste_control_publication as publication
 from yt_playlist.core.store import Store
@@ -20,13 +25,6 @@ pytestmark = pytest.mark.usefixtures('without_query_timing', 'publication_consum
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     """Taste SQL and file publication do not start the HTTP lifecycle."""
-
-
-def test_optional_owner_input_keeps_installed_85_history_and_snapshot_guards(_bounded_installed_schema):
-    source = _bounded_installed_schema(85).source
-    assert source.conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 85
-    assert source._snapshot_revisions.conn is source.conn
-    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def prepare(conn, owner):
@@ -215,18 +213,27 @@ def test_missing_retained_files_require_explicit_retry_without_mutating_publishe
             conn.execute('DELETE FROM prepared_taste_comparison_entries')
 
 
-@pytest.mark.parametrize('installed', [85], indirect=True)
-def test_new_optional_owners_withdraw_old_selection_without_blocking_regular_ddl(installed, tmp_path):
-    store, _ = installed
+@pytest.mark.parametrize('unadmitted_installed', [85], indirect=True)
+@pytest.mark.usefixtures('native_sql_calls')
+def test_new_optional_owners_withdraw_old_selection_without_blocking_regular_ddl(unadmitted_installed, tmp_path, monkeypatch):
+    # Both connections perform real DDL/publication without Store snapshots.
+    store, _ = unadmitted_installed
+    assert list(map(tuple, store.conn.execute('SELECT version,name FROM schema_migrations ORDER BY version'))) == [
+        (entry.version, entry.name) for entry in registry.MIGRATIONS[:85]]
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
     _, originals = seed(store)
     owner = publication.OWNERS['checkpoint']
     owner.publish(store.conn, revision=prepare(store.conn, owner))
     upgraded = Store(tmp_path/'taste-optional-publication.db')
-    try:
+    with closing(upgraded.conn), schema_inspection.reuse_tables(upgraded.conn):
+        upgraded.conn.execute('PRAGMA synchronous=OFF')
         store.conn.backup(upgraded.conn)
+        upgraded.conn.execute('PRAGMA journal_mode=WAL')
         runner.migrate(upgraded.conn, registry=registry.MIGRATIONS[:88])
         assert owner.selected(upgraded.conn) is None
-        regular.migrate(upgraded.conn)
+        with monkeypatch.context() as patch:
+            mock_regular_numbered_input(patch, upgraded.conn)
+            regular.migrate(upgraded.conn)
         owner.publish(upgraded.conn, revision=prepare(upgraded.conn, owner))
         from yt_playlist.core import taste_axes
         with upgraded.conn:
@@ -235,8 +242,6 @@ def test_new_optional_owners_withdraw_old_selection_without_blocking_regular_ddl
         owner.publish(upgraded.conn, revision=prepare(upgraded.conn, owner))
         assert members(upgraded.conn, owner.source, 'weights')[0]['axis_ref'] == axis
         assert owner.value(upgraded.conn, 0) == originals[owner.source]
-    finally:
-        upgraded.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

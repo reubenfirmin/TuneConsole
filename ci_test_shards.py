@@ -93,7 +93,7 @@ def load_report(path):
 
 
 def partition(nodeids, durations, count=2):
-    """Keep module fixtures together and greedily balance measured file duration."""
+    """Keep files together and spread each timing source across the new shards."""
     if count < 1 or len(nodeids) != len(set(nodeids)):
         raise ValueError("Shard count must be positive and collected case IDs must be unique")
     files = defaultdict(list)
@@ -102,7 +102,7 @@ def partition(nodeids, durations, count=2):
     observed = [float(value["seconds"]) / value["cases"] for value in durations.values()
                 if value["cases"] > 0 and value["seconds"] > 0]
     unknown_case = statistics.median(observed) if observed else 1.0
-    estimates = {}
+    estimates, sources = {}, defaultdict(list)
     for name, cases in files.items():
         measured = durations.get(name)
         # Removing consumers does not remove a module's fixture construction
@@ -112,11 +112,20 @@ def partition(nodeids, durations, count=2):
                            if measured and measured["cases"] else unknown_case * len(cases))
         if not math.isfinite(estimates[name]) or estimates[name] < 0:
             raise ValueError(f"Invalid duration estimate for {name}")
+        source = measured.get('source_shard', 0) if measured else 0
+        if type(source) is not int or source < 0:
+            raise ValueError(f"Invalid source shard for {name}")
+        sources[source].append(name)
     owners, loads = {}, [0.0] * count
-    for name in sorted(files, key=lambda name: (-estimates[name], name)):
-        owner = min(range(count), key=lambda index: (loads[index], index))
-        owners[name] = owner + 1
-        loads[owner] += estimates[name]
+    # Errors in one earlier runner's absolute times can affect many files
+    # together. Spread that source's work instead of concentrating its error.
+    for source in sorted(sources, key=lambda source: (-sum(estimates[name] for name in sources[source]), source)):
+        source_loads = [0.0] * count
+        for name in sorted(sources[source], key=lambda name: (-estimates[name], name)):
+            owner = min(range(count), key=lambda index: (source_loads[index], loads[index], index))
+            owners[name] = owner + 1
+            loads[owner] += estimates[name]
+            source_loads[owner] += estimates[name]
     return owners, loads
 
 
@@ -343,7 +352,8 @@ def _measure(reports, suite, total, *, diagnostic=False):
             "files": {name: {"seconds": sum(phase["seconds"] for report in reports
                                              for nodeid, phases in report["tests"].items()
                                              if nodeid.split("::", 1)[0] == name for phase in phases.values()),
-                              "cases": sum(nodeid.split("::", 1)[0] == name for nodeid in original)}
+                              "cases": sum(nodeid.split("::", 1)[0] == name for nodeid in original),
+                              **({'source_shard': reports[0]['file_owners'][name]} if suite == 'unit' else {})}
                       for name in reports[0]["file_owners"]}}
 
 

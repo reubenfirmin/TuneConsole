@@ -8,9 +8,12 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from tests.rec.test_progressive import catalog, drain, _pristine_current_schema
+from tests.rec.test_progressive import catalog, drain
 from tests.genre_catalog_support import bound_catalog
-from tests.store_fixture_support import _file_consumer_store, initialize_consumer, reuse_reporting_reader
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, initialize_consumer,
+    native_sql_calls, reuse_reporting_reader, without_query_timing,
+)
 from yt_playlist.rec import content_model, embedding_vectors, progressive, taste_modes
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core import activity, content_preparation_state
@@ -25,7 +28,7 @@ def disable_periodic_library_sync():
 
 
 @pytest.fixture
-def audit_library(tmp_path, _pristine_current_schema, monkeypatch, native_sql_calls):
+def audit_library(tmp_path, _pristine_current_schema, monkeypatch, native_sql_calls, without_query_timing):
     # This audit owns content-input recovery and aged-evidence publication.
     # Joint audio-model qualification is an independent preparation branch;
     # keep actual content capture, fitting, queues and snapshot guards here.
@@ -38,10 +41,15 @@ def audit_library(tmp_path, _pristine_current_schema, monkeypatch, native_sql_ca
             yield store
 
 
-def test_recovery_schema_input_keeps_completed_sql_and_real_guards(_pristine_current_schema):
-    assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert _pristine_current_schema._revision_script
-    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('techno', 'Techno'), ('jazz', 'Jazz'),
+                                 ('rock', 'Rock'), ('folk', 'Folk'),
+                                 ('classical', 'Classical'))) as source:
+        assert source.execute('PRAGMA query_only').fetchone()[0] == 1
+        assert source._revision_script
+        assert not source.execute('PRAGMA foreign_key_check').fetchone()
+        yield source
 
 
 def test_preallocated_encoding_preserves_exact_vectors_and_empty_rows():
@@ -120,94 +128,33 @@ def _repair_after_losing_a_queue_prefix(store):
     return p
 
 
-@pytest.fixture(scope='module')
-def periodic_audit_home(tmp_path_factory):
-    return tmp_path_factory.mktemp('periodic-audit') / 'app-home'
-
-
-@pytest.fixture(scope='module')
-def periodic_audit_queue(periodic_audit_home, _pristine_current_schema):
-    # Queue repair has no reopen contract. Keep its original in-memory SQL
-    # writer; file durability is exercised by the restart cases below.
-    store = Store(':memory:')
-    try:
-        initialize_consumer(store, _pristine_current_schema)
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setenv('YT_PLAYLIST_HOME', str(periodic_audit_home))
-            patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
-            patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
-            patch.delenv('DEEPSEEK_API_KEY', raising=False)
-            patch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: 0.0))
-            patch.setattr(progressive.vibe_joint_preparation, 'qualified', lambda: False)
-            p = _repair_after_losing_a_queue_prefix(store)
-        yield p
-    finally:
-        store.conn.close()
-
-
-def test_periodic_audit_requeues_a_lost_prefix_without_reordering_existing_work(periodic_audit_queue):
-    p = periodic_audit_queue
-    expected = [row[0] for row in p.store.conn.execute('SELECT identity_key FROM recordings ORDER BY identity_key')]
-    assert [row[0] for row in p.store.prepared_content.pending(100)] == expected[1:] + expected[:1]
-    assert p._repair_after is None
-    assert not p.store.conn.in_transaction
-
-
-@pytest.fixture(scope='module')
-def periodic_audit_inputs(periodic_audit_queue, periodic_audit_home):
-    p = periodic_audit_queue
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setenv('YT_PLAYLIST_HOME', str(periodic_audit_home))
-        patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
-        patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
-        patch.delenv('DEEPSEEK_API_KEY', raising=False)
-        patch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: 0.0))
-        patch.setattr(progressive.vibe_joint_preparation, 'qualified', lambda: False)
-        drain(p, 2000)
-    return p
-
-
-def test_periodic_audit_captures_every_repaired_input(periodic_audit_inputs):
-    p = periodic_audit_inputs
-    assert not p.store.prepared_content.pending(100)
-    assert p.store.conn.execute('SELECT count(*) FROM prepared_recording_inputs').fetchone()[0] == 19
-    assert not p.store.conn.in_transaction
-
-
-@pytest.fixture(scope='module')
-def periodic_audit_publication(periodic_audit_inputs, periodic_audit_home):
-    p = periodic_audit_inputs
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setenv('YT_PLAYLIST_HOME', str(periodic_audit_home))
-        patch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
-        patch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
-        patch.delenv('DEEPSEEK_API_KEY', raising=False)
-        patch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: 0.0))
-        patch.setattr(progressive.vibe_joint_preparation, 'qualified', lambda: False)
-        assert p.fit(2060)
-    return p, p.store.rec_model.content_generation()
-
-
-def test_periodic_audit_publishes_every_repaired_input(periodic_audit_publication):
-    p, before = periodic_audit_publication
-    assert len(before['library']) == 19
-    assert not p.store.prepared_content.pending(100)
-    assert not p.store.conn.in_transaction
-
-
 def test_periodic_audit_repairs_a_lost_queue_in_bounded_batches(
-        periodic_audit_publication, periodic_audit_home, monkeypatch, record_property):
+        audit_library, tmp_path, monkeypatch, record_property):
     # Real queue scans, fitting and publication continue on the same writer.
     # Only the budget clock is controlled; deadline rejection has its own case.
-    p, before = periodic_audit_publication
-    store = p.store
-    monkeypatch.setenv('YT_PLAYLIST_HOME', str(periodic_audit_home))
+    store = audit_library
+    monkeypatch.setenv('YT_PLAYLIST_HOME', str(tmp_path / 'app-home'))
     monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '0')
     monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBE_MODEL', '')
     monkeypatch.delenv('DEEPSEEK_API_KEY', raising=False)
     monkeypatch.setattr(activity, 'time', SimpleNamespace(monotonic=lambda: 0.0))
     monkeypatch.setattr(progressive.vibe_joint_preparation, 'qualified', lambda: False)
+    # This workflow does not replace model artifacts. Resolve the real lower
+    # release identity once, keeping capture, prediction and publication live.
+    vibe_version = progressive.vibe_preparation.version()
+    monkeypatch.setattr(progressive.vibe_preparation, 'version', lambda: vibe_version)
     record_property('work_budget_clock', 'controlled; production budget values unchanged')
+    p = _repair_after_losing_a_queue_prefix(store)
+    assert not store.conn.in_transaction
+    drain(p, 2000)
+    assert not store.prepared_content.pending(100)
+    assert store.conn.execute('SELECT count(*) FROM prepared_recording_inputs').fetchone()[0] == 19
+    assert not store.conn.in_transaction
+    assert p.fit(2060)
+    before = store.rec_model.content_generation()
+    assert len(before['library']) == 19
+    assert not store.prepared_content.pending(100)
+    assert not store.conn.in_transaction
     key = before['library'][0][0]
     with store.conn:
         store.conn.execute('DELETE FROM prepared_recording_inputs WHERE recording_id='

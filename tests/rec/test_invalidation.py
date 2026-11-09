@@ -6,6 +6,10 @@ from tests.derived_rating_support import seed_dislike, seed_like
 from tests.core.test_early_schema_upgrade import rename_owner, restore_programs
 from tests.genre_catalog_support import bound_catalog
 from tests.prepared_fixture_support import capture_template
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls,
+    reuse_reporting_reader, without_query_timing,
+)
 
 from yt_playlist.core import embeddings
 from yt_playlist.core.migrations import registry, regular, runner
@@ -83,17 +87,24 @@ def test_actual_regular_identity_owner_preserves_rollback_evidence(identity_jour
     assert_identity_history(identity_journey)
 
 
-def test_invalidation_input_keeps_shipped_history_and_read_only_guards(_pristine_current_schema):
-    from yt_playlist.core.migrations import registry, regular
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('house', 'House'),)) as source:
+        assert source.execute('PRAGMA query_only').fetchone()[0] == 1
+        assert list(source.execute('SELECT version,name FROM schema_migrations ORDER BY version')) == [
+            (entry.version, entry.name) for entry in registry.MIGRATIONS]
+        assert list(source.execute('SELECT version,name FROM schema_changes ORDER BY version')) == [
+            (entry.version, entry.name) for entry in regular.CHANGES]
+        assert source.execute("SELECT 1 FROM sqlite_temp_schema WHERE name='snapshot_revisions'").fetchone()
+        assert not source.execute('PRAGMA foreign_key_check').fetchone()
+        yield source
 
-    source = _pristine_current_schema
-    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert list(source.execute('SELECT version,name FROM schema_migrations ORDER BY version')) == [
-        (entry.version, entry.name) for entry in registry.MIGRATIONS]
-    assert list(source.execute('SELECT version,name FROM schema_changes ORDER BY version')) == [
-        (entry.version, entry.name) for entry in regular.CHANGES]
-    assert source.execute("SELECT 1 FROM sqlite_temp_schema WHERE name='snapshot_revisions'").fetchone()
-    assert not source.execute('PRAGMA foreign_key_check').fetchone()
+
+@pytest.fixture
+def store(native_sql_calls, without_query_timing, _pristine_current_schema, tmp_path, monkeypatch):
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as database:
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
 
 
 def _identity_inputs(store, *, current):
@@ -150,7 +161,6 @@ def test_completed_identity_upgrade_keeps_private_read_only_admission(upgraded_i
 @pytest.mark.parametrize('change', ['model', 'artist'])
 def test_refresh_retains_playable_menus_usage_and_tv_until_replacement(store, change):
     from tests.onboarding_support import publish_personal_mix
-    from tests.test_tv_stream import video
     from yt_playlist.rec import home_prepared, onboarding, tv
 
     # Invalidation consumes completed menus and TV output. The actual resolver
@@ -161,8 +171,11 @@ def test_refresh_retains_playable_menus_usage_and_tv_until_replacement(store, ch
     store.rec_proposals.put_proposals(tv.SURFACE, {
         'schema': tv.SCHEMA, 'key': 'invalidation-input', 'at': 1000,
         'attempted': [seed['key'] for seed in seeds],
-        'items': [{**video(index), 'source_key': seed['key'],
-                   'source_artist': seed['artist']} for index, seed in enumerate(seeds)],
+        'items': [{'video_id': f'visual{index:05}', 'title': f'Video {index}',
+                   'artist': f'Artist {index}', 'duration': 200,
+                   'kind': 'Music video', 'group': tv.GROUPS[index % 3],
+                   'source_key': seed['key'], 'source_artist': seed['artist']}
+                  for index, seed in enumerate(seeds)],
         'offset': 0, 'state': 'exhausted', 'retry_at': 1000 + tv.SEARCH_RETRY_S,
     }, 1000)
     previous_tv = tv.cached(store)

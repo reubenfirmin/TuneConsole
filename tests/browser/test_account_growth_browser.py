@@ -134,25 +134,83 @@ def test_festival_states_notices_home_choice_and_bonus_details(live_app, store, 
     assert not page.evaluate(f'{growth_model}.growth.home_choice_available')
     page.unroute('**/home/growth', hold_old_growth)
     assert_quiet_action(page)
+    # Every popup explains its actual next step, without disclosure controls.
+    # Earned access hides the instructions even while fresh output prepares.
+    popup = page.locator('.growth-detail')
+    current_nodes = page.evaluate(f'{growth_model}.growth.nodes')
+    for item in current_nodes:
+        if item['id'] == 'first':
+            continue
+        destination = page.get_by_role('button', name=re.compile('^' + re.escape(item['label']) + ','))
+        destination.locator('.landmark-label').click()
+        expect(popup.locator('.growth-status')).to_have_text(item['status'])
+        expect(popup.locator('details, summary')).to_have_count(0)
+        guidance = popup.get_by_role('region', name='How to get here')
+        accessible = item['ready'] if item['bonus'] else item['unlocked'] and bool(item['href'])
+        if accessible:
+            expect(guidance).to_be_hidden()
+        else:
+            expect(guidance).to_be_visible()
+            expect(guidance).to_contain_text(item['how_to'])
+        if item['href']:
+            expect(popup.locator('a.btn-primary').last).to_have_attribute('href', item['href'])
+        if item['id'] == 'deepseek':
+            popup.evaluate('el => Promise.all(el.getAnimations().map(animation => animation.finished))')
+            page.screenshot(path=f'/tmp/tuneconsole-festival-deepseek-{width}.png', full_page=True)
+        page.get_by_role('button', name='Close destination', exact=True).click()
+    page.get_by_role('button', name=re.compile('^Vibes,')).locator('.landmark-label').click()
+    expect(popup.get_by_role('region', name='How to get here')).to_contain_text(
+        'Play a variety of music in YouTube Music with TuneConsole open.')
+    popup.evaluate('el => Promise.all(el.getAnimations().map(animation => animation.finished))')
+    page.screenshot(path=f'/tmp/tuneconsole-festival-vibes-{width}.png', full_page=True)
+    page.get_by_role('button', name='Close destination', exact=True).click()
+    page.get_by_role('button', name=re.compile('^Long play,')).click()
+    expect(popup.locator('.growth-status')).to_have_text('Explored')
+    expect(popup.locator('.growth-status')).to_have_class(re.compile(r'\btag\b'))
+    page.get_by_role('link', name='Open Long play', exact=True).click()
+    expect(page.get_by_role('tab', name='Long play', exact=True)).to_have_attribute('aria-selected', 'true')
+    expect(popup).to_be_hidden()
+    page.get_by_role('tab', name='Your unlocks', exact=True).click()
+    page.evaluate(f'''() => {{
+        const destination = {growth_model}.node('tv');
+        window.originalTv = {{...destination}};
+        Object.assign(destination, {{unlocked: true, ready: false, usable: false, state: 'preparing', href: '/#tv'}});
+    }}''')
+    page.get_by_role('button', name=re.compile('^TV,')).click()
+    expect(popup.get_by_role('region', name='How to get here')).to_be_hidden()
+    expect(popup.get_by_role('link', name='Open TV', exact=True)).to_be_visible()
+    page.get_by_role('button', name='Close destination', exact=True).click()
+    page.evaluate(f'Object.assign({growth_model}.node("tv"), window.originalTv)')
     bonus = page.get_by_role('button', name=re.compile('^Richer music details,'))
-    bonus.scroll_into_view_if_needed()
-    hit = bonus.evaluate('''button => {
-        const box = button.getBoundingClientRect();
+    bonus_label = bonus.locator('.landmark-label')
+    bonus_label.scroll_into_view_if_needed()
+    hit = bonus_label.evaluate('''label => {
+        const button = label.closest('.festival-destination');
+        const box = label.getBoundingClientRect();
         const target = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
         return {clickable: button.contains(target), target: target?.outerHTML.slice(0, 180),
             pointer: getComputedStyle(button).pointerEvents, parent: button.parentElement.className,
             box: box.toJSON(), map: button.closest('.festival-map').getBoundingClientRect().toJSON()};
     }''')
     assert hit['clickable'], json.dumps(hit)
-    bonus.click()
+    bonus_label.click()
     expect(page.get_by_role('heading', name='Find more music that fits')).to_be_visible()
-    expect(page.get_by_text('Get a Last.fm key:', exact=False)).to_be_hidden()
-    page.get_by_text('See the setup steps', exact=True).filter(visible=True).click()
-    expect(page.get_by_text('Song and artist names are sent to Last.fm', exact=False)).to_be_visible()
+    expect(popup.get_by_role('region', name='How to get here')).to_contain_text('Register for a free Last.fm API key')
+    expect(popup).to_contain_text('Last.fm has better genre labels than the free, public sources we use by default.')
+    expect(page.get_by_text('To find genres, TuneConsole sends Last.fm song and artist names.', exact=False)).to_be_visible()
     assert store.settings.get_setting('home_format') == 'albums'
     assert page.locator('body').evaluate('(body) => body.scrollWidth <= innerWidth')
     assert page.locator('.growth-detail h2').evaluate('(el) => getComputedStyle(el).textAlign') == 'left'
     page.screenshot(path=f'/tmp/tuneconsole-festival-{width}.png', full_page=True)
+    page.evaluate(f'{growth_model}.node("lastfm").ready = true')
+    expect(popup.get_by_role('region', name='How to get here')).to_be_hidden()
+    page.evaluate(f'{growth_model}.node("lastfm").ready = false')
+    page.get_by_role('link', name='Set up Last.fm', exact=True).click()
+    expect(page.get_by_role('tab', name='Enrichment', exact=True)).to_have_attribute('aria-selected', 'true')
+    expect(page.locator('.provider-card[data-name="lastfm"]')).to_contain_text(
+        'Register for a free API key to improve recommendations over time.')
+    page.goto(live_app + '/#unlocks', wait_until='domcontentloaded')
+    bonus.locator('.landmark-hit').click()
     page.get_by_role('button', name='Close destination', exact=True).click()
     for label in ('Your past listening', 'Richer music details', 'Stories behind the records'):
         destination = page.get_by_role('button', name=re.compile('^' + re.escape(label) + ','))

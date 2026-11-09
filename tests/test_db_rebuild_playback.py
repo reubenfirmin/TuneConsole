@@ -6,17 +6,32 @@ from fastapi.testclient import TestClient
 import pytest
 
 from tests.conftest import FakeClient
-from tests.core.test_predecessor_writes import installed
+from tests.publication_fixture_support import installed as playback_library
 from tests.test_deferred_playback_feedback import library
 from yt_playlist.core import db_handles
 from yt_playlist.web.app import create_app
 from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.fixture
+def playback_routes(monkeypatch):
+    from yt_playlist.providers import genres
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, playlists
+
+    # Keep actual playback/WebSocket transport, playlist rendering and storage
+    # maintenance. Other feature routes and metadata providers are lower inputs.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+                        for module in (app_update, audio_preview, playlists)])
+    monkeypatch.setattr(genres, 'configure', lambda *args, **kwargs: None)
+
+
+@pytest.mark.parametrize('playback_library', [93], indirect=True)
 @pytest.mark.parametrize('failure', [None, 'original_moved', 'reopening', 'repositories'])
-def test_queued_play_survives_install_or_rollback(installed, monkeypatch, failure):
-    store, version = installed
+def test_queued_play_survives_install_or_rollback(playback_library, playback_routes, monkeypatch, failure):
+    # Historical admission is below this cutover workflow. Actual close/reopen,
+    # handle/thread fences, copy/replacement and rollback remain the subject.
+    store, version = playback_library
     account = store.accounts.upsert_account('Main', 'bridge', None, True)
     playlist = store.playlists.upsert_playlist(account, 'RAIN', 'Rainy evening', 2, '', 1)
     tracks = [store.tracks.upsert_track('rain-'+str(i), title, 'Artist', None, 180)

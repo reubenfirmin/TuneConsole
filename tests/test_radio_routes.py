@@ -12,7 +12,10 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.library import playlist_generated
 from yt_playlist.web.routes import radio_session as radio_routes
-from tests.radio_session_support import poc, play
+from tests.radio_session_support import (
+    uncontended_poc as route_poc, completed_radio_schema, completed_radio_store,
+    completed_poc as poc, play,
+)
 
 @pytest.mark.parametrize("values", [{}, {"comfort": 2, "theme": .5, "energy": .5},
                                    {"comfort": True, "theme": .5, "energy": .5}, []])
@@ -26,8 +29,8 @@ def test_tune_route_rejects_invalid_controls_without_changing_session(poc, value
     assert remote.ids == ["v1", "v2", "v3"]
 
 
-def test_routes_use_independent_playlist_session(poc, monkeypatch):
-    c, remote, *_ = poc
+def test_routes_use_independent_playlist_session(route_poc, monkeypatch):
+    c, remote, *_ = route_poc
     c.ctx.store.settings.set_setting('onboard_listening_format', 'radio')
     offer = c.seeds()
     c.ctx.templates = Jinja2Templates(directory="src/yt_playlist/web/templates")
@@ -194,8 +197,8 @@ def test_playlist_seed_route_rejects_invalid_ids(poc, playlist_id):
     assert remote.ids == frames == []
 
 
-def test_playlist_seed_route_uses_playlist_and_rejects_conflicting_seed(poc):
-    c, remote, *_ = poc
+def test_playlist_seed_route_uses_playlist_and_rejects_conflicting_seed(route_poc):
+    c, remote, *_ = route_poc
     store = c.ctx.store
     c.seeds()
     store.rec_proposals.put_proposals('listening_choices', {

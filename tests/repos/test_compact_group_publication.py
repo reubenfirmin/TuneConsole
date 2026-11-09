@@ -14,7 +14,7 @@ from tests.core.test_compact_groups_migration import historical_groups, apply
 from tests.genre_catalog_support import bound_catalog
 from tests.prepared_fixture_support import capture_template, roots
 from yt_playlist.core.activity import WorkClosing
-from yt_playlist.core import group_content, group_documents, group_reads as group_queries, group_storage
+from yt_playlist.core import group_content, group_documents, group_plan, group_reads as group_queries, group_storage
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.migrations import v072_compact_groups as migration
 from yt_playlist.core.migrations import registry, runner
@@ -165,6 +165,51 @@ def test_committed_prefix_resumes_without_duplicate_members_or_early_visibility(
     assert group_queries.head(store.conn, members=True)['groups'][1]['members'] == {'one': (.5, .8)}
 
 
+def test_committed_groups_resume_read_only_after_store_restart_with_ownership_checks(database, monkeypatch):
+    store, prepared = database
+    original = CompactTasteGroupsRepo.link_group
+    def interrupt(repo, *args):
+        original(repo, *args)
+        raise WorkClosing('interrupted after committed group')
+    monkeypatch.setattr(CompactTasteGroupsRepo, 'link_group', interrupt)
+    with pytest.raises(WorkClosing, match='committed group'):
+        store.taste_groups.stage(prepared)
+    store.conn.close()
+    restarted = Store(store._db_path)
+    with closing(restarted.conn):
+        bind_compact_store(restarted)
+        repository = restarted.taste_groups.repository
+        identities = repository.recording_ids(group_plan.recording_keys(prepared))
+        _inputs, plans, _policy, _metadata = group_plan.prepare(prepared, identities)
+        generation = restarted.conn.execute("SELECT id FROM group_generations WHERE external_key='third'").fetchone()[0]
+        owner = prepared['_stage_owner']
+        before = restarted.conn.total_changes
+        assert repository.group_state(generation, owner, plans[0]) is None
+        assert repository.selected_groups(generation, owner) == {
+            prepared['groups'][0]['group_id']: prepared['groups'][0]['version']}
+        assert restarted.conn.total_changes == before
+        with pytest.raises(RuntimeError, match='no longer owned'):
+            repository.group_state(generation, 'another-worker', plans[0])
+        with pytest.raises(RuntimeError, match='no longer owned'):
+            repository.selected_groups(generation, 'another-worker')
+        conflicting = deepcopy(plans[0])
+        conflicting[1]['version'] = 'different-alias'
+        with pytest.raises(ValueError, match='staged selection changed'):
+            repository.group_state(generation, owner, conflicting)
+        assert group_queries.head_generation(restarted.conn) == 'second'
+        resumed = deepcopy(prepared)
+        resumed.pop('_stage_owner')
+        with pytest.raises(publication.BuildUnavailable, match='leased by another worker'):
+            restarted.taste_groups.stage(resumed)
+        with restarted.conn:
+            restarted.conn.execute('UPDATE group_builds SET expires_at=0 WHERE generation_id=?', (generation,))
+        monkeypatch.setattr(CompactTasteGroupsRepo, 'link_group', original)
+        next_owner = restarted.taste_groups.stage(resumed)
+        assert next_owner != owner
+        finish(restarted, resumed, next_owner)
+        assert group_queries.head_generation(restarted.conn) == 'third'
+
+
 def test_live_lease_blocks_takeover_and_expired_lease_fences_the_old_owner(database, monkeypatch):
     store, prepared = database
     prepared = changed(prepared)
@@ -183,6 +228,27 @@ def test_live_lease_blocks_takeover_and_expired_lease_fences_the_old_owner(datab
     with pytest.raises(RuntimeError, match='incomplete or no longer owned'):
         finish(store, prepared, old_owner)
     finish(store, other, new_owner)
+    assert group_queries.head_generation(store.conn) == 'third'
+
+
+def test_graph_retry_skips_committed_group_batches(database, monkeypatch):
+    store, prepared = database
+    original = CompactTasteGroupsRepo.install_caches
+    def interrupt(*args):
+        raise WorkClosing('interrupted before graph publication')
+    monkeypatch.setattr(CompactTasteGroupsRepo, 'install_caches', interrupt)
+    with pytest.raises(WorkClosing, match='before graph publication'):
+        store.taste_groups.stage(prepared)
+    assert store.conn.execute("SELECT count(*) FROM generation_groups x JOIN group_generations g "
+                              "ON g.id=x.generation_id WHERE g.external_key='third'").fetchone()[0] == len(prepared['groups'])
+    monkeypatch.setattr(CompactTasteGroupsRepo, 'install_caches', original)
+    def revisit(*args):
+        pytest.fail('Graph retry revisited a committed group batch')
+    monkeypatch.setattr(CompactTasteGroupsRepo, 'definition_candidates', revisit)
+    monkeypatch.setattr(CompactTasteGroupsRepo, 'group_state', revisit)
+    owner = store.taste_groups.stage(prepared)
+    assert group_queries.head_generation(store.conn) == 'second'
+    finish(store, prepared, owner)
     assert group_queries.head_generation(store.conn) == 'third'
 
 

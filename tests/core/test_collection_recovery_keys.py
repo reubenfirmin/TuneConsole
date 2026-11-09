@@ -8,9 +8,11 @@ import pytest
 
 from tests.core.test_action_work_migration import backup
 from tests.genre_catalog_support import bound_catalog
-from tests.prepared_fixture_support import historical_template
-from tests.store_fixture_support import install_numbered_input
-from yt_playlist.core import action_backup_files, collection_recovery as recovery
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, install_numbered_input,
+    native_sql_calls, without_query_timing,
+)
+from yt_playlist.core import action_backup_files, collection_recovery as recovery, schema_inspection
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.migrations import regular
 from yt_playlist.core.store import Store
@@ -22,41 +24,49 @@ def disable_periodic_library_sync():
 
 
 @pytest.fixture(scope='module')
-def before_key_guards(tmp_path_factory):
+def before_key_guards():
     # Recovery owns the interrupted scan, not replay of the preceding empty
     # schema. Preserve the exact pre-key-trigger SQL and regular history.
-    root = tmp_path_factory.mktemp('before-recovery-key-guards')
     with closing(sqlite3.connect(':memory:')) as source, pytest.MonkeyPatch.context() as patch:
         bound_catalog(patch)
         install_numbered_input(source, 107, regular_owners=regular.CHANGES[:27])
-        with historical_template(source, lambda store: None,
-                                 database=root / 'source.db') as template:
-            yield template
+        source.execute('PRAGMA query_only=ON')
+        assert source.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 107
+        assert regular.validate(source) == 27
+        assert source.execute('PRAGMA query_only').fetchone()[0] == 1
+        assert [row[1] for row in source.execute('PRAGMA table_info(action_backups)') if row[5]] == [
+            'action_id', 'position']
+        assert source.execute("SELECT 1 FROM sqlite_schema WHERE name='collection_recovery_epoch'").fetchone()
+        assert not source.execute(
+            "SELECT 1 FROM sqlite_schema WHERE name='collection_recovery_changed_action_backups_key'").fetchone()
+        yield source
 
 
-def test_pending_key_guard_input_keeps_real_owners_and_regular_prefix(before_key_guards):
-    conn = before_key_guards.source.conn
-    assert conn.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 107
-    assert regular.validate(conn) == 27
-    assert conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert [row[1] for row in conn.execute('PRAGMA table_info(action_backups)') if row[5]] == [
-        'action_id', 'position']
-    assert conn.execute("SELECT 1 FROM sqlite_schema WHERE name='collection_recovery_epoch'").fetchone()
-    assert not conn.execute(
-        "SELECT 1 FROM sqlite_schema WHERE name='collection_recovery_changed_action_backups_key'").fetchone()
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('rock', 'Rock'), ('jazz', 'Jazz'))) as source:
+        yield source
+
+
+@pytest.fixture
+def file_backed_store(tmp_path, _pristine_current_schema):
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as store:
+        yield store
 
 
 @pytest.mark.parametrize('key_guards', [False, True], ids=['pending-ddl', 'current'])
 @pytest.mark.parametrize('move', ['unchanged', 'position', 'action_id'])
 def test_retained_backup_survives_seek_key_move(
-        request, tmp_path, monkeypatch, key_guards, move):
+        request, tmp_path, monkeypatch, native_sql_calls, without_query_timing, key_guards, move):
     if key_guards:
         store = request.getfixturevalue('file_backed_store')
     else:
         store = Store(tmp_path / 'before-key-guards.db')
         request.addfinalizer(store.conn.close)
-        request.getfixturevalue('before_key_guards').restore(store)
-        store.init_schema(defer_metadata=True)
+        store.conn.execute('PRAGMA synchronous=OFF')
+        request.getfixturevalue('before_key_guards').backup(store.conn)
+        with schema_inspection.reuse_tables(store.conn):
+            store.init_schema(defer_metadata=True)
         assert regular.validate(store.conn) == 27
     try:
         earlier = store.actions.record_action('copy_playlist', '{}', '{}', 'executed', '{}', 1)

@@ -58,7 +58,7 @@ main.page-home { animation-fill-mode:backwards; }
 .growth-route { fill:none; stroke:var(--festival-route); stroke-width:3px; stroke-linecap:round; stroke-linejoin:round; opacity:.85; }
 .growth-route.is-preparing { stroke:var(--festival-pending); stroke-width:7px; opacity:.65; mix-blend-mode:screen; filter:url(#festival-path-light); }
 .festival-destination { outline:none; }
-.festival-destination[role=button] { cursor:pointer; pointer-events:bounding-box; }
+.festival-destination[role=button] { cursor:pointer; pointer-events:visiblePainted; }
 .landmark-halo { fill:var(--festival-halo); opacity:0; pointer-events:none; transition:opacity .25s; }
 .landmark-light { filter:brightness(.65) saturate(.8); pointer-events:none; transition:filter .25s; }
 .landmark-art { pointer-events:none; }
@@ -84,14 +84,18 @@ main.page-home { animation-fill-mode:backwards; }
 .growth-detail p { color:var(--dim); line-height:1.6; }
 .growth-detail .btn { display:inline-flex; align-items:center; justify-content:flex-start; text-align:left; gap:10px; margin:10px 0; white-space:normal; }
 .growth-detail .btn-ghost { display:block; margin-top:12px; }
-.growth-detail details { border-top:1px solid var(--border-strong); padding-top:18px; margin-top:22px; }
-.growth-detail summary { cursor:pointer; font-weight:700; color:var(--accent-2); }
+.growth-destination-badges { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin:0 0 20px; }
+.growth-destination-badges .tag { font-family:var(--font-sans); font-size:.8rem; padding:5px 11px; letter-spacing:0; }
+.growth-how-to { margin:20px 0; padding:16px 18px; border:1px solid var(--border-strong); border-radius:12px; background:var(--surface-2); }
+.growth-how-to h3 { margin:0 0 8px; }
+.growth-how-to p { margin:8px 0 0; font-size:.9rem; }
 .growth-small { font-size:.82rem; line-height:1.5; color:var(--dim); }
 .growth-unlock-notice .btn,.growth-unlock-notice .btn-ghost { text-align:left; justify-content:flex-start; }
 .growth-achievements { list-style:none; padding:0; display:grid; gap:20px; }
 .growth-achievements li { display:grid; grid-template-columns:1fr auto; gap:8px; }
 .growth-achievements span { color:var(--amber); }
 .growth-achievements p { grid-column:1 / -1; margin:0; }
+.growth-achievements .btn { grid-column:1 / -1; justify-self:start; }
 body main.page-home:has(.festival-intro), body:not(:has(.page-clusters)) main.page-home:has(.home-dashboard.is-unlocks) { padding:0; }
 @media(min-width:65rem) {
   body main.page-home:has(.festival-intro) { width:calc(100% - 13.5rem); margin-inline:13.5rem 0; }

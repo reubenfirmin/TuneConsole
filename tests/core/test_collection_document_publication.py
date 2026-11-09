@@ -1,5 +1,6 @@
 """Saved-document maps preserve mixed generations, deletion and continuing use."""
 from dataclasses import replace
+from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
@@ -10,7 +11,11 @@ import pytest
 from tests.publication_fixture_support import installed, installed_reader
 from tests.store_fixture_support import numbered_store as unadmitted_installed
 from tests.core.test_collection_document_preparation import seed
-from tests.store_fixture_support import native_sql_calls, publication_consumer_reads, preparation_ddl_connection, without_query_timing
+from tests.store_fixture_support import (
+    mock_regular_numbered_input, native_sql_calls, publication_consumer_reads,
+    preparation_ddl_connection, without_query_timing,
+)
+from yt_playlist.core import schema_inspection
 from yt_playlist.core.migrations import MigrationError, registry, regular, runner
 from yt_playlist.core.preparation import collection_documents as preparation, collection_document_publication as publication
 from yt_playlist.core.store import Store
@@ -306,22 +311,25 @@ def test_missing_files_can_be_repaired_without_rewriting_mapped_rows_or_blocking
     assert owner.value(store.conn, identity, 'PLAYLIST') == original
 
 
-@pytest.mark.parametrize('installed', [85], indirect=True)
-def test_new_optional_axis_owner_withdraws_selection_without_blocking_regular_ddl(installed, tmp_path):
-    store, _ = installed
+@pytest.mark.parametrize('unadmitted_installed', [85], indirect=True)
+def test_new_optional_axis_owner_withdraws_selection_without_blocking_regular_ddl(unadmitted_installed, tmp_path, monkeypatch):
+    # This edge performs real DDL and publication without taking a Store
+    # snapshot, so its completed source needs no unused TEMP revision guards.
+    store, _ = unadmitted_installed
     seed(store)
     owner = publication.OWNERS['recipes']
     owner.publish(store.conn, stage=stage(owner, store.conn))
     upgraded = Store(tmp_path/'recipe-optional-owner.db')
-    try:
+    with closing(upgraded.conn), schema_inspection.reuse_tables(upgraded.conn):
         upgraded.conn.execute('PRAGMA synchronous=OFF')
         store.conn.backup(upgraded.conn)
+        upgraded.conn.execute('PRAGMA journal_mode=WAL')
         runner.migrate(upgraded.conn, registry=registry.MIGRATIONS[:88])
         assert owner.selected(upgraded.conn) is None
-        regular.migrate(upgraded.conn)
+        with monkeypatch.context() as patch:
+            mock_regular_numbered_input(patch, upgraded.conn)
+            regular.migrate(upgraded.conn)
         owner.publish(upgraded.conn, stage=stage(owner, upgraded.conn))
-    finally:
-        upgraded.conn.close()
 
 
 @pytest.mark.parametrize('installed', [88], indirect=True)

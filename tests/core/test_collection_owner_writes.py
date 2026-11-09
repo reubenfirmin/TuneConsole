@@ -11,6 +11,7 @@ from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.core.test_collection_feedback_publication import prepare
 from tests.repos.test_album_aliases import release
 from tests.prepared_fixture_support import historical_template
+from tests.store_fixture_support import _numbered_input, native_sql_calls, without_query_timing
 from yt_playlist.core import album_feedback_storage
 from yt_playlist.core.preparation import collection_feedback_publication
 from yt_playlist.core.store import Store
@@ -32,6 +33,14 @@ def select(store, key):
 
 FORMATS = [(version, state) for version in (79, 93) for state in ('source-only', 'partial', 'selected')]
 FORMATS.append((107, 'native'))
+
+
+@pytest.fixture
+def context_installed(request, tmp_path, monkeypatch, native_sql_calls, without_query_timing):
+    # Sequential context updates consume completed SQL; no snapshot is opened
+    # on this writer. The independently opened Store below still admits itself.
+    with _numbered_input(request.param, tmp_path, monkeypatch) as value:
+        yield value
 
 
 @pytest.mark.parametrize('version', [79, 93, 107])
@@ -93,10 +102,10 @@ def feedback_writer_prefix(installed, feedback_writer_templates):
     return template
 
 
-@pytest.mark.parametrize('installed,state', FORMATS, indirect=['installed'])
+@pytest.mark.parametrize('context_installed,state', FORMATS, indirect=['context_installed'])
 @pytest.mark.parametrize('operation', ['flag', 'clear'])
-def test_existing_context_updates_keep_other_accounts(installed, operation, state):
-    store, version = installed
+def test_existing_context_updates_keep_other_accounts(context_installed, operation, state):
+    store, version = context_installed
     first = store.accounts.upsert_account('First', 'first.json', None, True)
     second = store.accounts.upsert_account('Second', 'second.json', None, False)
     if operation == 'clear':

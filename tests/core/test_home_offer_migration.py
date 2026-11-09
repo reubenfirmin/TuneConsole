@@ -1,9 +1,12 @@
 """Offer storage survives migration, output eviction, rollback and restarts."""
+from contextlib import closing
 import json
 import sqlite3
 
 import pytest
 
+from tests.store_fixture_support import _numbered_input, native_sql_calls, without_query_timing
+from yt_playlist.core import schema_inspection
 from yt_playlist.core.migrations import current, migrate, registry
 from yt_playlist.core.migrations import v083_home_offers as migration
 from yt_playlist.core.migrations.runner import Migration, MigrationError
@@ -14,18 +17,20 @@ from yt_playlist.core.store import Store
 def disable_periodic_library_sync():
     pass
 
-
-
-
 @pytest.fixture
 def predecessor(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path / 'offers.db')
-    try:
+    with closing(store.conn):
         _pristine_installed_schema(82).backup(store.conn)
         store._bind_repositories()
         yield store
-    finally:
-        store.conn.close()
+
+
+@pytest.fixture
+def restart_input(tmp_path, monkeypatch, native_sql_calls, without_query_timing):
+    # This consumer needs the completed edge input, not replay of its prefix.
+    with _numbered_input(82, tmp_path, monkeypatch) as (store, _):
+        yield store
 
 
 def seed(store, value=None):
@@ -41,8 +46,8 @@ def upgrade(store):
     store._bind_repositories()
 
 
-def test_upgrade_eviction_restart_and_continuing_writes_preserve_offer_state(predecessor):
-    store = predecessor
+def test_upgrade_eviction_restart_and_continuing_writes_preserve_offer_state(restart_input):
+    store = restart_input
     seed(store)
     upgrade(store)
     assert store.rec_proposals.get_proposals('home_shown') == {'epoch': 4, 'signatures': ['first', 'second']}
@@ -54,15 +59,14 @@ def test_upgrade_eviction_restart_and_continuing_writes_preserve_offer_state(pre
     with store.conn:
         store.conn.execute('DELETE FROM rec_proposals')
     reopened = Store(store._db_path)
-    try:
+    with closing(reopened.conn), schema_inspection.reuse_tables(reopened.conn):
+        reopened.conn.execute('PRAGMA synchronous=OFF')
         reopened.init_schema()
         assert reopened.rec_proposals.get_proposals('home_shown') == updated
         assert reopened.conn.execute('SELECT built_at FROM home_offer_dedup').fetchone()[0] == 2000
         reopened.rec_proposals.put_proposals('home_shown', {'epoch': 5, 'signatures': ['first']}, 2200)
         assert reopened.rec_proposals.get_proposals('home_shown') == {'epoch': 5, 'signatures': ['first']}
         assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchall()
-    finally:
-        reopened.conn.close()
 
 
 @pytest.mark.parametrize('value', [None, [], {'signatures': []}, {'epoch': True, 'signatures': []},

@@ -4,16 +4,24 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from tests.repos.test_typed_recommendation_publication import (
-    recommendation_predecessor, recommendations, publish, plan,
-)
+from tests.legacy_recommendation_fixture_support import recommendation_predecessor, recommendations
+from tests.repos.test_typed_recommendation_publication import publish, plan
 from tests.rec.test_stored_fresh import fresh
+from tests.store_fixture_support import native_sql_calls
 from yt_playlist.core import recommendation_outputs, recommendation_pools as pools
 from yt_playlist.rec import album_choices, home_prepared, home_themes, rec_params
 from yt_playlist.repos import recommendation_publication as publication
 from yt_playlist.controllers.recommendation_proposals import RecommendationProposals
 from yt_playlist.controllers.recommendation_publications import RecommendationPublications
 from yt_playlist.repos.genres import GenreRepo
+
+
+pytestmark = pytest.mark.usefixtures('native_sql_calls')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Synchronous Home input readers do not construct the web app."""
 
 
 @pytest.fixture

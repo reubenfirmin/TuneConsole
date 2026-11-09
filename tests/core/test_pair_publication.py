@@ -1,4 +1,5 @@
 """Pair cutover retains complete ranked projections and comparison custody."""
+from contextlib import closing
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -8,8 +9,8 @@ import pytest
 
 from tests.core.test_ranked_state_preparation import seed
 from tests.store_fixture_support import (
+    _numbered_input,
     guarded_numbered_store as installed,
-    numbered_store as unadmitted_installed,
     mock_snapshot_coordinator,
     native_sql_calls,
     preparation_ddl_connection,
@@ -17,7 +18,7 @@ from tests.store_fixture_support import (
     publication_preparation_input,
     without_query_timing,
 )
-from yt_playlist.core import group_evidence, recommendation_custody
+from yt_playlist.core import group_evidence, recommendation_custody, schema_inspection
 from yt_playlist.core.migrations import MigrationError, regular
 from yt_playlist.core.preparation import pair_publication as publication, ranked_state as preparation
 from yt_playlist.core.store import Store
@@ -28,6 +29,12 @@ pytestmark = pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     """Publication owners do not construct an HTTP application."""
+
+
+@pytest.fixture
+def unadmitted_installed(request, tmp_path, monkeypatch, native_sql_calls, without_query_timing):
+    with _numbered_input(request.param, tmp_path, monkeypatch) as value:
+        yield value
 
 
 def roots(store, run_id):
@@ -72,16 +79,16 @@ def ready(conn, size=8):
     pytest.fail('Pair publication map did not finish bounded fixture')
 
 
-@pytest.mark.parametrize('installed', [79, 93, 94], indirect=True)
+@pytest.mark.parametrize('unadmitted_installed', [79, 93, 94], indirect=True)
 @pytest.mark.usefixtures('publication_consumer_reads')
 def test_preopened_readers_keep_compressed_originals_ranked_members_modes_and_roots(
-        installed):
-    store, _ = installed
+        unadmitted_installed):
+    store, _ = unadmitted_installed
     originals, run_id = seed(store)
     roots(store, run_id)
     owner = publication.OWNER
     other = Store(store._db_path)
-    try:
+    with closing(other.conn), schema_inspection.reuse_tables(other.conn):
         other.conn.execute('PRAGMA synchronous=OFF')
         other.init_schema(defer_metadata=True)
         stage = ready(store.conn)
@@ -100,15 +107,11 @@ def test_preopened_readers_keep_compressed_originals_ranked_members_modes_and_ro
             "WHERE m.stage=? AND m.owner='unresolved_group_contexts'", (stage,)).fetchall()
         assert any(json.loads(row[0])['source_context'] == 'original:unavailable' for row in contexts)
         regular.migrate(other.conn)
-    finally:
-        other.conn.close()
     reopened = Store(store._db_path)
-    try:
+    with closing(reopened.conn), schema_inspection.reuse_tables(reopened.conn):
         reopened.conn.execute('PRAGMA synchronous=OFF')
         reopened.init_schema(defer_metadata=True)
         assert reopened.rec_proposals.get_proposals(f'model_pair:{run_id}:challenger:radio') == json.loads(originals[f'model_pair:{run_id}:challenger:radio'])
-    finally:
-        reopened.conn.close()
 
 
 @pytest.mark.parametrize('unadmitted_installed', [93], indirect=True)
@@ -152,10 +155,10 @@ def test_unverified_projection_or_retention_state_cannot_publish(unadmitted_inst
     regular.migrate(conn)
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.parametrize('unadmitted_installed', [93], indirect=True)
 @pytest.mark.usefixtures('publication_consumer_reads')
-def test_released_roots_withdraw_selection_keep_old_pins_and_reconcile_unknown_context(installed):
-    store, _ = installed
+def test_released_roots_withdraw_selection_keep_old_pins_and_reconcile_unknown_context(unadmitted_installed):
+    store, _ = unadmitted_installed
     _, run_id = seed(store)
     key = roots(store, run_id)
     owner = publication.OWNER
@@ -241,11 +244,11 @@ def test_interrupted_publication_and_root_race_cannot_select_partial_custody(ins
     owner.publish(store.conn, stage=ready(store.conn))
 
 
-@pytest.mark.parametrize('installed', [93], indirect=True)
+@pytest.mark.parametrize('unadmitted_installed', [93], indirect=True)
 @pytest.mark.usefixtures('publication_consumer_reads')
 def test_missing_display_or_output_files_and_failed_roots_do_not_block_ddl(
-        installed, preparation_ddl_connection, native_sql_calls):
-    store, _ = installed
+        unadmitted_installed, preparation_ddl_connection, native_sql_calls):
+    store, _ = unadmitted_installed
     _, run_id = seed(store)
     key = roots(store, run_id)
     owner, surface = publication.OWNER, f'model_pair:{run_id}:challenger:radio'

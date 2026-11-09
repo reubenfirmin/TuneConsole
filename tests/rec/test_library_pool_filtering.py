@@ -16,13 +16,10 @@ def disable_periodic_library_sync():
 @pytest.fixture(scope='module')
 def _pristine_current_schema():
     with bounded_consumer_schema((('jazz', 'Jazz'),)) as schema:
+        assert schema.execute('SELECT count(*) FROM schema_migrations').fetchone()[0] > 0
+        assert schema._revision_script
+        assert not schema.execute('PRAGMA foreign_key_check').fetchone()
         yield schema
-
-
-def test_temporal_pool_input_keeps_real_schema_and_private_snapshot_guards(_pristine_current_schema):
-    assert _pristine_current_schema.execute('SELECT count(*) FROM schema_migrations').fetchone()[0] > 0
-    assert _pristine_current_schema._revision_script
-    assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def test_temporal_pool_keeps_its_date_band_and_live_feedback(store, monkeypatch):

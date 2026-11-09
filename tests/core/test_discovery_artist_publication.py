@@ -1,5 +1,6 @@
 """Artist file selection must retain originals and leave old writers usable."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 import json
 import sqlite3
@@ -9,12 +10,13 @@ import pytest
 
 from tests.core.test_discovery_owner_preparation import seed
 from tests.store_fixture_support import (
-    guarded_numbered_store as unadmitted_installed,
+    _numbered_input,
     native_sql_calls,
     numbered_store,
     numbered_store as installed,
     preparation_ddl_connection,
     publication_consumer_reads,
+    reuse_reporting_reader,
     without_query_timing,
 )
 from yt_playlist.core import schema_inspection, collection_recovery, policy_documents
@@ -29,6 +31,15 @@ pytestmark = pytest.mark.usefixtures('without_query_timing')
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     """Publication owners do not construct an HTTP application."""
+
+
+@pytest.fixture
+def unadmitted_installed(request, tmp_path, monkeypatch, native_sql_calls):
+    # The consumer's native SQL dependency must precede input construction.
+    # Explicit other.init_schema and every real snapshot remain in the case.
+    # Only the independently admitted reader below takes a real snapshot.
+    with _numbered_input(request.param, tmp_path, monkeypatch) as value:
+        yield value
 
 
 def prepare(conn, *, installed=False):
@@ -56,7 +67,7 @@ def ready(conn, size=8, *, installed=False):
 
 @pytest.mark.parametrize('unadmitted_installed', [79, 85, 86, 100], indirect=True)
 @pytest.mark.usefixtures('publication_consumer_reads', 'native_sql_calls')
-def test_selected_files_keep_installed_identity_counters_genres_and_preopened_readers(unadmitted_installed):
+def test_selected_files_keep_installed_identity_counters_genres_and_preopened_readers(unadmitted_installed, monkeypatch):
     store, _ = unadmitted_installed
     _, aid, _, _ = seed(store)
     with store.conn:
@@ -68,18 +79,18 @@ def test_selected_files_keep_installed_identity_counters_genres_and_preopened_re
     originals = list(map(dict, store.conn.execute('SELECT * FROM main.discovered_artists ORDER BY artist')))
     history = list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
     other = Store(store._db_path)
-    try:
+    with closing(other.conn), schema_inspection.reuse_tables(other.conn):
         other.conn.execute('PRAGMA synchronous=OFF')
-        with schema_inspection.reuse_tables(other.conn):
-            other.init_schema(defer_metadata=True)
+        other.init_schema(defer_metadata=True)
         with other.read_snapshot() as snapshot:
             pinned = snapshot.store
-            assert pinned.discovery.get_discovered_artists() == expected
-            owner, stage = ready(store.conn)
-            owner.publish(store.conn, stage=stage)
-            assert owner.selected(pinned.conn) is None
-            assert pinned.discovery.get_discovered_artists() == expected
-        with other.read_view() as selected:
+            with schema_inspection.reuse_tables(pinned.conn):
+                assert pinned.discovery.get_discovered_artists() == expected
+                owner, stage = ready(store.conn)
+                owner.publish(store.conn, stage=stage)
+                assert owner.selected(pinned.conn) is None
+                assert pinned.discovery.get_discovered_artists() == expected
+        with reuse_reporting_reader(other, monkeypatch), other.read_view() as selected, schema_inspection.reuse_tables(selected.conn):
             def deny_old(action, table, column, *_):
                 return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ and table == 'discovered_artists' else sqlite3.SQLITE_OK
             selected.conn.set_authorizer(deny_old)
@@ -95,8 +106,6 @@ def test_selected_files_keep_installed_identity_counters_genres_and_preopened_re
         assert list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version'))) == history
         regular.migrate(other.conn)
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-    finally:
-        other.conn.close()
 
 
 @pytest.mark.parametrize('installed', [93], indirect=True)

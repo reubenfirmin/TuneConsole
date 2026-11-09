@@ -362,7 +362,7 @@ def historical_template(pristine, seed, *, database, logical_coordinates=(), sch
 
 
 @contextmanager
-def prepared_template(pristine, seed, *, database=None, defer_metadata=False):
+def prepared_template(pristine, seed, *, database=None, defer_metadata=False, snapshot_guards=True):
     """Build with ordinary test settings; retain private files and a read-only template."""
     with ExitStack() as resources:
         home = resources.enter_context(TemporaryDirectory(prefix='tuneconsole-template-home-'))
@@ -386,8 +386,9 @@ def prepared_template(pristine, seed, *, database=None, defer_metadata=False):
                 # instead of revalidating hundreds of unchanged DDL objects for
                 # every independently prepared dataset. Historical/raw sources
                 # and explicit deferred-admission checks retain real admission.
-                initialize_consumer(source, pristine)
+                initialize_consumer(source, pristine, snapshot_guards=snapshot_guards)
             else:
+                assert snapshot_guards, 'Raw schema admission owns its snapshot guards'
                 pristine.backup(source.conn)
                 source.init_schema(defer_metadata=defer_metadata)
             files = roots(source.conn)

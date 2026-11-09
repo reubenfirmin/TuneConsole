@@ -6,9 +6,40 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 
-from tests.radio_session_support import poc
+from tests.radio_session_support import (
+    controlled_radio_checkpoints, radio_controller, seed_completed_pool,
+)
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, use_native_sql_calls, without_query_timing,
+)
 from yt_playlist.library import playlist_generated
 from yt_playlist.web.routes import radio_session
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing', 'controlled_radio_checkpoints')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """The route-only app has no periodic application jobs."""
+
+
+@pytest.fixture(scope='module')
+def radio_schema():
+    # These request races do not prepare optimistic recommendation snapshots.
+    # Keep actual SQLite admission/WAL; do not build unused TEMP revision guards.
+    with bounded_consumer_schema((), snapshot_guards=False) as schema:
+        yield schema
+
+
+@pytest.fixture
+def poc(tmp_path, radio_schema, monkeypatch):
+    with _file_consumer_store(tmp_path, radio_schema, snapshot_guards=False) as store:
+        with monkeypatch.context() as inputs:
+            use_native_sql_calls(inputs)
+            songs = seed_completed_pool(store)
+        with radio_controller(monkeypatch, store, songs) as state:
+            yield state
 
 
 @pytest.mark.parametrize('pending_readback', [False, True])

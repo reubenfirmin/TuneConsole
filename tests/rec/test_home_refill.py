@@ -43,7 +43,10 @@ def returning_vibe_listener(store):
 
 @pytest.mark.usefixtures('returning_vibe_listener')
 @pytest.mark.parametrize('change', ['vibe', 'genre', 'both', 'learning'])
-def test_preferences_keep_prepared_mixes_and_explain_pending_update(store, prepared, monkeypatch, change):
+def test_preferences_keep_prepared_mixes_and_explain_pending_update(store, cached_menu, monkeypatch, change):
+    # Preference fallback consumes an existing accepted menu. Worker ranking
+    # has independent owners; keep cache reads, notices and scheduling real.
+    prepared = cached_menu
     if change in ('genre', 'both'):
         with mix_tuning.adjusting(store, 1001):
             store.rec_proposals.put_proposals('home_genre_request', {
@@ -136,7 +139,8 @@ def test_updated_set_replaces_fallback_in_same_window_and_clears_notice(
 
 
 @pytest.mark.usefixtures('returning_vibe_listener')
-def test_stale_worker_mixes_survive_new_dislikes_until_replaced(store, prepared):
+def test_stale_worker_mixes_survive_new_dislikes_until_replaced(store, cached_menu):
+    prepared = cached_menu
     first = home_prepared.cards(store, prepared, 1000, service(store), record=False)
     key = first.protos[0]['tracks'][0]['key']
     with mix_tuning.adjusting_vibe(store, 1001):

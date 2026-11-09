@@ -26,7 +26,7 @@ function onboardingArrival(artistsRequired = false) {
       }
       if (!this.imported && !this.songs) return 'Bringing in your music';
       if (this.listening_format === 'albums') return 'Finding your first album';
-      if (this.listening_format === 'radio') return 'Preparing your first Radio Session';
+      if (this.listening_format === 'radio') return 'Finding songs for your first station';
       return 'Finding your first mix tape';
     },
     showStarter() {

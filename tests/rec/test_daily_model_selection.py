@@ -1,5 +1,5 @@
 """Chronology, shared comparisons, daily admission and atomic serving changes."""
-from contextlib import contextmanager, ExitStack, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 
 import sqlite3
 
@@ -10,7 +10,7 @@ from tests.prepared_fixture_support import prepared_template, roots
 from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema,
-    reuse_reporting_reader, use_native_sql_calls, without_query_timing,
+    use_native_sql_calls, without_query_timing,
 )
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core import embedding_files, schema_inspection
@@ -37,10 +37,20 @@ def _pristine_current_schema():
 
 
 @pytest.fixture
-def library(store, monkeypatch, request):
+def library(monkeypatch, request, native_sql_calls):
     if 'daily_library_template' in request.fixturenames:
-        return _library(store, monkeypatch, request.getfixturevalue('daily_library_template'))
-    return configured_library(store, monkeypatch, _seed_library(store, _seed_catalog(store)))
+        # Restore the populated input once, without first cloning empty SQL.
+        store = Store(':memory:')
+        with closing(store.conn), schema_inspection.reuse_tables(store.conn):
+            value = _library(store, monkeypatch, request.getfixturevalue('daily_library_template'))
+            # The model workflow owns real guarded snapshots. Its immutable
+            # seed and the reporting-only sibling do not open snapshots.
+            schema = request.getfixturevalue('_pristine_current_schema')
+            store._snapshot_revisions = schema.bind_revisions(store.conn)
+            yield value
+    else:
+        store = request.getfixturevalue('store')
+        yield configured_library(store, monkeypatch, _seed_library(store, _seed_catalog(store)))
 
 
 @pytest.fixture
@@ -56,13 +66,24 @@ def daily_library_template(_pristine_current_schema):
         # SQL diagnostics have independent owners.
         # The cold input builder has one writer. Owned repository reads reuse
         # that connection; actual ingestion/vector writes still commit normally.
-        with pytest.MonkeyPatch.context() as patch, source._lock:
+        with pytest.MonkeyPatch.context() as patch, source._lock, schema_inspection.reuse_tables(source.conn):
             use_native_sql_calls(patch)
             patch.setattr(source, 'read_view', lambda **kwargs: nullcontext(source))
             return _seed_library(source, _seed_catalog(source))
 
-    with prepared_template(_pristine_current_schema, seed) as template:
+    with prepared_template(_pristine_current_schema, seed, snapshot_guards=False) as template:
         yield template
+
+
+@pytest.fixture
+def daily_file_library(tmp_path, daily_library_template, native_sql_calls):
+    # A populated clone supplies its own SQL, files and genuine TEMP guards.
+    store = Store(tmp_path / 'daily-library.db')
+    with closing(store.conn), schema_inspection.reuse_tables(store.conn):
+        store.conn.execute('PRAGMA synchronous=OFF')
+        value = daily_library_template.restore(store)
+        store._bind_repositories()
+        yield store, value
 
 
 @pytest.fixture(scope='module')
@@ -104,6 +125,7 @@ def _seed_library(store, value):
 
 def _library(store, monkeypatch, template):
     value = template.restore(store)
+    store._bind_repositories()
     return configured_library(store, monkeypatch, value)
 
 
@@ -136,30 +158,27 @@ def complete(library, *, start=None):
 
 
 @pytest.fixture
-def comparison_reporting_reads(library, daily_library_template, file_backed_store, monkeypatch):
-    # These copies have one synchronous consumer. Reporting-reader construction
-    # is lower setup; daily comparison retains its actual guarded snapshots.
+def comparison_reporting_reads(library, daily_library_template, daily_file_library, monkeypatch):
+    # Copy assertions have one synchronous owner and no concurrent writes.
+    # Supply their existing SQL connections below reporting reads; daily
+    # comparison still opens its actual guarded snapshots independently.
     @contextmanager
     def owned_reader(target):
         with target._lock:
             yield target
 
-    with ExitStack() as readers:
-        for target in (library['store'], daily_library_template.source, file_backed_store):
-            if target._db_path is not None:
-                readers.enter_context(reuse_reporting_reader(target, monkeypatch))
-            else:
-                monkeypatch.setattr(target, 'read_view', lambda target=target, **kwargs: owned_reader(target))
-        yield
+    for target in (library['store'], daily_library_template.source, daily_file_library[0]):
+        monkeypatch.setattr(target, 'read_view', lambda target=target, **kwargs: owned_reader(target))
 
 
 @pytest.mark.usefixtures('native_sql_calls', 'comparison_reporting_reads')
 def test_all_prior_history_single_holdout_shared_inputs_and_full_refit(
-        library, daily_library_template, file_backed_store, monkeypatch):
+        library, daily_library_template, daily_file_library, monkeypatch):
     store, now = library['store'], library['now']
+    file_backed_store, copied = daily_file_library
     # Compare the real seed and both restore modes before any selection work.
     with monkeypatch.context() as patch:
-        sibling = _library(file_backed_store, patch, daily_library_template)
+        sibling = configured_library(file_backed_store, patch, copied)
         for current in (daily_library_template.source, store, file_backed_store):
             # Compare all the same SQL/vector inputs through one real reader
             # per copy. No writes occur between these complete-copy assertions.

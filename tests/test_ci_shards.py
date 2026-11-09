@@ -46,6 +46,52 @@ def test_removed_consumers_do_not_erase_measured_module_setup_from_the_plan():
     assert expanded_loads == [200, 60]
 
 
+@pytest.mark.parametrize('total', [2, 4, 8])
+def test_source_balance_spreads_correlated_estimation_errors(total):
+    # Equal absolute estimates can put every underestimated source-A file on
+    # one set of runners and every source-B file on another. Use the source
+    # identities to distribute both kinds of work without changing their costs.
+    timings = {f'{source}-{weight}.py': {'seconds': weight, 'cases': 2, 'source_shard': index}
+               for index, source in enumerate(('a', 'b'), 1) for weight in range(1, 2 * total + 1)}
+    nodes = [f'{name}::test_case[{case}]' for name in timings for case in range(2)]
+    observed = {name: row['seconds'] * (2 if name.startswith('a-') else 1)
+                for name, row in timings.items()}
+    legacy = {name: {key: value for key, value in row.items() if key != 'source_shard'}
+              for name, row in timings.items()}
+    legacy_owners, legacy_loads = partition(nodes, legacy, total)
+    legacy_actual = [sum(observed[name] for name, owner in legacy_owners.items() if owner == index)
+                     for index in range(1, total + 1)]
+    assert max(legacy_loads) == min(legacy_loads)
+    assert max(legacy_actual) == 2 * min(legacy_actual)
+
+    owners, loads = partition(nodes, timings, total)
+    assert owners == partition(list(reversed(nodes)), dict(reversed(list(timings.items()))), total)[0]
+    assert set(owners) == set(timings)
+    assert sum(loads) == sum(row['seconds'] for row in timings.values())
+    actual = [sum(observed[name] for name, owner in owners.items() if owner == index)
+              for index in range(1, total + 1)]
+    assert max(loads) == min(loads)
+    assert max(actual) == min(actual)
+
+
+@pytest.mark.parametrize('source', [None, '1', -1, True])
+def test_invalid_source_identity_is_rejected(source):
+    with pytest.raises(ValueError, match='Invalid source shard'):
+        partition(['one.py::test_case'], {'one.py': {'seconds': 1, 'cases': 1, 'source_shard': source}})
+
+
+def test_source_balance_keeps_new_files_and_legacy_measurements():
+    timings = {'a.py': {'seconds': 8, 'cases': 2, 'source_shard': 1},
+               'b.py': {'seconds': 4, 'cases': 2, 'source_shard': 2},
+               'legacy.py': {'seconds': 2, 'cases': 1}}
+    nodes = ['a.py::test_one', 'a.py::test_two', 'b.py::test_one', 'b.py::test_two',
+             'legacy.py::test_one', 'new.py::test_one', 'new.py::test_two']
+    owners, loads = partition(nodes, timings, 4)
+    assert set(owners) == {'a.py', 'b.py', 'legacy.py', 'new.py'}
+    assert sum(loads) == 18  # The two new cases retain the measured 2s median estimate.
+    assert owners == partition(list(reversed(nodes)), timings, 4)[0]
+
+
 @pytest.mark.parametrize("suite,total", [("unit", 8), ("browser", 4)])
 def test_retained_measured_timings_balance_whole_file_groups(suite, total):
     baseline = json.loads(BASELINE.read_text())
@@ -106,12 +152,21 @@ def test_runner_configuration_accepts_supported_splits_and_rejects_invalid_indic
 
 
 def test_every_parameter_case_executes_once_and_all_phases_feed_timings():
-    result = verify(reports(), "unit")
+    rows = reports()
+    result = verify(rows, "unit")
     assert result["cases"] == 3
     assert result["files"]["one.py"]["cases"] == 2
     assert result["files"]["one.py"]["seconds"] == pytest.approx(.6)
     assert result["test_runner_minutes"] == pytest.approx(20 / 60)
     assert result["phase_seconds"] == pytest.approx({"setup": .3, "call": .3, "teardown": .3})
+    assert {name: row['source_shard'] for name, row in result['files'].items()} == rows[0]['file_owners']
+
+
+def test_browser_measurements_keep_the_existing_allocation_input():
+    rows = reports()
+    for row in rows:
+        row['suite'] = 'browser'
+    assert all('source_shard' not in measured for measured in verify(rows, 'browser')['files'].values())
 
 
 def test_baseline_refresh_retains_eight_unit_and_four_browser_receipts():

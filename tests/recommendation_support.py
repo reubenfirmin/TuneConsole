@@ -1,9 +1,42 @@
 """Publish controlled candidate rankings through the ordinary current owner."""
 from copy import deepcopy
+import json
 
 from tests.conftest import seed_catalog_track
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import measurement, mode_surfaces
+
+
+def seed_compact_group_history(store):
+    """Two real published group generations below recommendation consumers."""
+    with store.conn:
+        store.conn.executemany('INSERT INTO recordings(id,identity_key) VALUES (?,?)', [(1, 'one'), (2, 'two')])
+    for generation, at in (('first', 1), ('second', 2)):
+        groups = []
+        for key, parent, members in (
+                ('parent', None, [('one', .9, .8), ('two', .7, .6)]),
+                ('leaf', generation + '-parent', [('one', .9, .8)])):
+            groups.append(dict(group_id=key, version=generation + '-' + key,
+                parent_version=parent, legacy_mode_id=None, members=members,
+                payload=json.dumps(dict(name=key, leaf=key == 'leaf', legacy=False,
+                    membership_known=True, size=len(members), depth=int(key == 'leaf'),
+                    rep_keys=['one'], naming_policy='naming-1', genres=[['House', 1.0]]))))
+        prepared = dict(generation=generation, policy='{"algorithm":"grouping-1"}',
+            fingerprint='input-fingerprint', at=at, serial=at, groups=groups,
+            payload=json.dumps(dict(recording_inputs={
+                'one': '1' * 64, 'two': '2' * 64, 'unknown-old-key': '3' * 64},
+                last_structure_at=1, diagnostics={'at': at})),
+            unknown=[('unknown-old-key', 'unmeasured')],
+            edges=[('one', 'two', .8, .7), ('one', 'unknown-old-key', .6, .5)],
+            lineage=[('first-leaf', 'second-leaf', 'continuation', json.dumps(dict(
+                old_share=1, new_share=1, overlap=1, compatible=True)))] if at == 2 else [],
+            _stage_parent='first' if at == 2 else None)
+        store.taste_groups.publish(prepared)
+        with store.conn:
+            store.conn.execute('INSERT INTO group_assignments(generation_id,recording_id,group_version_id,'
+                'similarity,support,profile_digest,prepared_at) SELECT g.id,2,a.group_version_id,.7,.6,?,? '
+                'FROM group_generations g JOIN group_version_aliases a ON a.external_version=? '
+                'WHERE g.external_key=?', ('profile-digest', at, generation + '-leaf', generation))
 
 
 def seed_publication_subjects(store, items, *, discoveries=(), unowned=(), now=1):

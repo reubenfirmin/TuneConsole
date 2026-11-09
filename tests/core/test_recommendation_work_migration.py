@@ -1,8 +1,11 @@
 """Scheduling and preparation outcomes survive independent cache replacement."""
+from contextlib import closing
 import sqlite3
 
 import pytest
 
+from tests.store_fixture_support import _numbered_input, native_sql_calls, without_query_timing
+from yt_playlist.core import schema_inspection
 from yt_playlist.core.migrations import current, migrate, registry
 from yt_playlist.core.migrations import v082_recommendation_work as migration
 from yt_playlist.core.migrations.runner import Migration, MigrationError
@@ -14,18 +17,20 @@ from yt_playlist.rec import daily_model_selection
 def disable_periodic_library_sync():
     pass
 
-
-
-
 @pytest.fixture
 def predecessor(tmp_path, _pristine_installed_schema):
     store = Store(tmp_path / 'work.db')
-    try:
+    with closing(store.conn):
         _pristine_installed_schema(81).backup(store.conn)
         store._bind_repositories()
         yield store
-    finally:
-        store.conn.close()
+
+
+@pytest.fixture
+def restart_input(tmp_path, monkeypatch, native_sql_calls, without_query_timing):
+    # This consumer needs the completed edge input, not replay of its prefix.
+    with _numbered_input(81, tmp_path, monkeypatch) as (store, _):
+        yield store
 
 
 def seed(store):
@@ -43,8 +48,8 @@ def upgrade(store):
     store._bind_repositories()
 
 
-def test_upgrade_restart_and_cache_eviction_preserve_work_state(predecessor):
-    store = predecessor
+def test_upgrade_restart_and_cache_eviction_preserve_work_state(restart_input):
+    store = restart_input
     seed(store)
     upgrade(store)
     assert store.model_selection.next_daily_at() == 1234.5
@@ -54,15 +59,14 @@ def test_upgrade_restart_and_cache_eviction_preserve_work_state(predecessor):
     with store.conn:
         store.conn.execute('DELETE FROM rec_proposals')
     reopened = Store(store._db_path)
-    try:
+    with closing(reopened.conn), schema_inspection.reuse_tables(reopened.conn):
+        reopened.conn.execute('PRAGMA synchronous=OFF')
         reopened.init_schema()
         assert reopened.model_selection.next_daily_at() == 1234.5
         assert reopened.tv_preparation.state() == {'failed': False, 'at': 999.5}
         assert not daily_model_selection.due(reopened, 1200)
         assert daily_model_selection.due(reopened, 1300)
         assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchall()
-    finally:
-        reopened.conn.close()
 
 
 @pytest.mark.parametrize('surface,raw', [

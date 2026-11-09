@@ -6,15 +6,45 @@ import pytest
 from yt_playlist.library import playlist_generated
 from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending
-from tests.radio_session_support import poc, play
+from tests.radio_session_support import (
+    completed_poc as poc, completed_radio_schema, completed_radio_store,
+    play, radio_controller, seed_completed_pool,
+)
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls, reuse_reporting_reader,
+)
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Controller tests never construct the HTTP app or its background loop."""
+
+
+@pytest.fixture(scope='module')
+def append_schema():
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture
+def append_poc(tmp_path, append_schema, native_sql_calls, monkeypatch):
+    # Keep all 32 catalog subjects and actual checkpoint SQL/files. Controller
+    # progression consumes an admitted empty schema, independently of bootstrap
+    # and per-query diagnostics. Publication snapshots and guards remain real.
+    with _file_consumer_store(tmp_path, append_schema) as store:
+        with reuse_reporting_reader(store, monkeypatch):
+            pool = seed_completed_pool(store)
+            with radio_controller(monkeypatch, store, pool) as state:
+                yield state
+
 
 @pytest.mark.parametrize("prior_titles", [
     [],
     ["Radio Session · 2026-10-22"],
     ["Radio Session · 2026-10-22 #1", "Radio Session · 2026-10-22 #2"],
 ])
-def test_radio_session_titles_are_numbered_per_local_day(poc, prior_titles):
-    c, *_ = poc
+def test_radio_session_titles_are_numbered_per_local_day(append_poc, prior_titles):
+    c, *_ = append_poc
     store = c.ctx.store
     identity = store.accounts.get_master_account().id
     for index, title in enumerate([*prior_titles, "Radio Session · 2026-10-21 #9",
@@ -39,8 +69,8 @@ def test_radio_session_titles_are_numbered_per_local_day(poc, prior_titles):
     assert result["ok"] and result["title"] == "Radio Session · 2026-10-23 #1"
 
 
-def test_three_to_start_then_one_append_per_song_and_no_playback_queue_commands(poc):
-    c, remote, frames, workers, _ = poc
+def test_three_to_start_then_one_append_per_song_and_no_playback_queue_commands(append_poc):
+    c, remote, frames, workers, _ = append_poc
     assert c.start()["ok"]
     assert remote.ids == ["v1", "v2", "v3"]
     assert len(workers) == 1
@@ -76,11 +106,18 @@ def test_skip_forward_catches_up_and_going_back_does_not_append(poc):
 
 
 @pytest.mark.parametrize('retries', [0, 2])
-def test_explicit_skip_records_one_request_and_stale_retries_do_not_reject_the_next_song(poc, monkeypatch, retries):
-    c, *_ = poc
+def test_explicit_skip_records_one_request_and_stale_retries_do_not_reject_the_next_song(
+        append_poc, monkeypatch, retries):
+    c, *_ = append_poc
     c.start()
     play(c, 'v1', position=1)
     advance, attempts = c._advance, []
+    waits = []
+
+    def pacing(delay):
+        assert not c.session.stop.is_set()
+        waits.append(delay)
+        return False
 
     def preparing(s):
         attempts.append(True)
@@ -95,7 +132,12 @@ def test_explicit_skip_records_one_request_and_stale_retries_do_not_reject_the_n
 
     monkeypatch.setattr(c, '_advance', preparing)
     monkeypatch.setattr(c.playback, 'next', next_song)
+    # Retry pacing is below this durable-intent check. Every preparation
+    # attempt and the final playback observation still run separately.
+    monkeypatch.setattr(c.session.stop, 'wait', pacing)
     assert c.skip('v1') == {'ok': True}
+    assert len(attempts) == retries + 1
+    assert waits == [.25] * (retries + 1)
     rows = c.ctx.store.player_events.player_events_since(0, kind='next')
     assert len(rows) == 1
     assert rows[0]['video_id'] == 'v1' and rows[0]['position'] == 1

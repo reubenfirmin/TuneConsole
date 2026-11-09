@@ -1,10 +1,8 @@
 """Daily collection yields between bounded batches without losing file custody."""
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
 from pathlib import Path
 import json
 import logging
-import sqlite3
 import threading
 import time
 from types import SimpleNamespace
@@ -12,8 +10,9 @@ from types import SimpleNamespace
 import pytest
 
 from tests.core.test_action_work_migration import backup
-from tests.prepared_fixture_support import prepared_template
-from tests.store_fixture_support import bounded_consumer_schema
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls, without_query_timing,
+)
 from yt_playlist.core import collection_recovery as recovery
 from yt_playlist.core import activity
 from yt_playlist.core.activity import Activity, WorkBudgetExceeded
@@ -34,9 +33,19 @@ def disable_periodic_library_sync():
 
 
 @pytest.fixture(scope='module')
-def collection_schema():
+def _pristine_current_schema():
     with bounded_consumer_schema((('rock', 'Rock'), ('jazz', 'Jazz'))) as source:
+        assert source.execute('PRAGMA query_only').fetchone()[0] == 1
+        assert source.execute("SELECT 1 FROM sqlite_temp_schema WHERE type='trigger' LIMIT 1").fetchone()
+        assert not source.execute('PRAGMA foreign_key_check').fetchone()
+        assert source.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 107
         yield source
+
+
+@pytest.fixture
+def file_backed_store(tmp_path, _pristine_current_schema):
+    with _file_consumer_store(tmp_path, _pristine_current_schema) as store:
+        yield store
 
 
 def seed_recipe_owners(store, owners):
@@ -55,52 +64,22 @@ def seed_recipe_owners(store, owners):
         store.conn.executemany(
             'INSERT INTO rec_recipes(id,playlist_scope_id,revision,created_at,model,'
             "recovery_filename,recovery_digest,recovery_bytes) VALUES (?,?,?,1,'fixture',?,?,?)", rows)
-    return owners
-
-
-@pytest.fixture(scope='module')
-def recipe_owner_templates(collection_schema, tmp_path_factory):
-    directory = tmp_path_factory.mktemp('recipe-owner-templates')
-    templates = {}
-    with ExitStack() as resources:
-        def template(owners):
-            if owners not in templates:
-                home = directory / str(owners)
-                home.mkdir()
-                templates[owners] = resources.enter_context(prepared_template(
-                    collection_schema, lambda source: seed_recipe_owners(source, owners),
-                    database=home / 'library.db'))
-            return templates[owners]
-        yield template
-
-
-def test_collection_schema_input_keeps_sql_history_and_real_guards(collection_schema):
-    source = collection_schema
-    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert source.execute("SELECT 1 FROM sqlite_temp_schema WHERE type='trigger' LIMIT 1").fetchone()
-    assert not source.execute('PRAGMA foreign_key_check').fetchone()
-    assert source.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 107
-
-
-@pytest.mark.parametrize('owners', [16, 128])
-def test_collection_owner_input_keeps_exact_recipe_sql_and_distinct_readable_files(recipe_owner_templates, owners):
-    source = recipe_owner_templates(owners).source
-    assert source.conn.execute('PRAGMA query_only').fetchone()[0] == 1
-    rows = source.conn.execute('SELECT id,playlist_scope_id,created_at,model,'
+    rows = store.conn.execute('SELECT id,playlist_scope_id,created_at,model,'
                               'recovery_filename,recovery_digest,recovery_bytes FROM rec_recipes ORDER BY id').fetchall()
     assert len(rows) == owners
     assert len({row[4] for row in rows}) == owners
     for i, row in enumerate(rows):
         assert tuple(row[:4]) == (i + 1, f'owned-{i}', 1, 'fixture')
         assert recovery.read(*row[4:], kind='playlist-recipe', owner=i + 1) == {'model': 'fixture', 'value': i}
-    assert not source.conn.execute('PRAGMA foreign_key_check').fetchone()
+    assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
+    return owners
 
 
-@pytest.mark.parametrize('owners', [16])
+@pytest.mark.parametrize('owners', [16, 1024])
 def test_batches_bound_candidates_and_allow_read_write_between_turns(
-        file_backed_store, monkeypatch, owners, record_property, recipe_owner_templates):
+        file_backed_store, monkeypatch, owners, record_property):
     store = file_backed_store
-    assert recipe_owner_templates(owners).restore(store) == owners
+    assert seed_recipe_owners(store, owners) == owners
     monkeypatch.setattr(recovery.OrphanCollector, 'LIMIT', 8)
     held = {Path(row[3]) for row in recovery.references(store.conn)}
     orphaned = {Path(recovery.publish(store.conn, 'playlist-recipe', f'orphan-{i}', {'value': i})[0])
@@ -224,11 +203,15 @@ def test_interrupted_batch_retains_cursor_and_releases_all_protection(file_backe
 
 
 @pytest.fixture
-def deadline_store(tmp_path, recipe_owner_templates):
-    # 128 real owners cross the unchanged 1,000-opcode callback interval. The
+def deadline_store(native_sql_calls, without_query_timing, tmp_path):
+    # Preserve all 1,024 owners and the unchanged 1,000-opcode callback interval. The
     # test observes that callback interrupting SQL rather than assuming size.
-    with recipe_owner_templates(128).open(tmp_path / 'deadline-collection.db') as store:
-        yield store
+    # No captured Store view participates in this SQL progress-handler check.
+    # The snapshot-retention owner above keeps the real TEMP guard input.
+    with bounded_consumer_schema((('rock', 'Rock'), ('jazz', 'Jazz')), snapshot_guards=False) as source:
+        with _file_consumer_store(tmp_path, source, snapshot_guards=False) as store:
+            assert seed_recipe_owners(store, 1024) == 1024
+            yield store
 
 
 def test_sql_deadline_interrupts_owner_scan_and_preserves_its_batch(
@@ -266,7 +249,7 @@ def test_sql_deadline_interrupts_owner_scan_and_preserves_its_batch(
     store.settings.set_setting('after SQL deadline', 'usable')
     finish(store)
     assert not orphan.exists()
-    assert store.conn.execute('SELECT count(*) FROM rec_recipes').fetchone()[0] == 128
+    assert store.conn.execute('SELECT count(*) FROM rec_recipes').fetchone()[0] == 1024
 
 
 def test_worker_continues_local_batches_without_clients(file_backed_store, monkeypatch):
@@ -313,13 +296,3 @@ def test_worker_continues_local_batches_without_clients(file_backed_store, monke
     assert clock[0] == 86400  # Discovery keeps its original daily deadline.
     assert discoveries == [0]
     assert not any(path.exists() for path in orphaned)
-
-
-@pytest.mark.parametrize('owners', [16, 128])
-def test_collection_owner_inputs_release_their_connections(recipe_owner_templates, owners):
-    source = recipe_owner_templates(owners).source
-    assert not source.conn.in_transaction
-    source._fixture_released = True
-    source.conn.close()
-    with pytest.raises(sqlite3.ProgrammingError, match='closed database'):
-        source.conn.execute('SELECT 1')

@@ -6,10 +6,21 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from tests.radio_session_support import poc
+from tests.radio_session_support import (
+    completed_poc as poc, completed_radio_schema, completed_radio_store,
+)
+from tests.store_fixture_support import without_query_timing
 from yt_playlist.rec import account_growth
 from yt_playlist.web.routes import radio_session
 from yt_playlist.web.routes.bridge import build as bridge_routes
+
+
+pytestmark = pytest.mark.usefixtures('without_query_timing')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """The actual ASGI preflight routes have no application background jobs."""
 
 
 @pytest.mark.parametrize('phase', ['bootstrap', 'start_access', 'tune_access'])

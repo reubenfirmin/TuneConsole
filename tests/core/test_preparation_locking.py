@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import pytest
 
 from tests.core.test_predecessor_writes import installed
+from tests.publication_fixture_support import installed as serialized_library
 from yt_playlist.core.preparation import (
     embeddings, legacy_journals, policy_history, profiles, vibe_provenance,
 )
@@ -71,8 +72,25 @@ def test_idle_maintenance_serializes_every_statement(installed, preparation, mon
     assert store.settings.get_setting('after maintenance') == 'accepted'
 
 
-@pytest.mark.parametrize('installed', [107], indirect=True)
-def test_concurrent_sync_enrichment_and_retention_keep_serving_sql_serialized(installed, monkeypatch):
+@pytest.fixture
+def serialized_serving_routes(monkeypatch):
+    from fastapi import APIRouter
+
+    from yt_playlist.providers import genres
+    from yt_playlist.web import app as webapp
+    from yt_playlist.web.routes import app_update, audio_preview, playlists
+
+    # Keep the real pages, settings mutation and maintenance endpoints used
+    # alongside the workers, without constructing unrelated feature routers.
+    monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
+                        for module in (app_update, audio_preview, playlists)])
+    monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
+    monkeypatch.setattr(genres, 'configure', lambda *args, **kwargs: None)
+
+
+@pytest.mark.parametrize('serialized_library', [107], indirect=True)
+def test_concurrent_sync_enrichment_and_retention_keep_serving_sql_serialized(
+        serialized_library, serialized_serving_routes, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     import traceback
 
@@ -84,7 +102,9 @@ def test_concurrent_sync_enrichment_and_retention_keep_serving_sql_serialized(in
     from yt_playlist.rec import measurement
     from yt_playlist.web.app import create_app
 
-    store, _ = installed
+    # The installed SQL layout is a lower input. Keep actual diagnostic/thread
+    # admission, private reporting readers and all three concurrent workers.
+    store, _ = serialized_library
     account = store.accounts.upsert_account('Main', 'bridge', None, True)
     remote = Client()
     assert sync.sync_all(store, {account: remote}, 100)['status'] == 'complete'

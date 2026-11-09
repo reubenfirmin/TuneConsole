@@ -11,10 +11,17 @@ from yt_playlist.web.radio_persistence import RadioPersistence, SESSION_KEY
 from yt_playlist.web.radio_playlist_io import PlaylistEdit, RadioPlaylistIO
 from yt_playlist.web.radio_playlist_tail import RadioPlaylistTail, TailView
 from yt_playlist.web.radio_state import Phase
-from tests.radio_session_support import poc, play
+from tests.radio_session_support import (
+    uncontended_poc as poc, completed_radio_schema, completed_radio_store, play,
+)
 from tests.conftest import FakeClient
 from yt_playlist.library import playlist_generated
 from yt_playlist.library.playlist_generated import create_generated_playlist
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """Transaction controllers never construct the HTTP application."""
 
 
 def test_existing_radio_keeps_running_with_discarded_writes_and_resumes_saving(poc):

@@ -3,17 +3,29 @@ import time
 
 import pytest
 
-from tests.radio_session_support import poc, play
+from tests.radio_session_support import (
+    completed_poc as poc, completed_radio_schema, completed_radio_store, play,
+    controlled_radio_checkpoints, uncontended_poc as owned_poc,
+)
+from tests.store_fixture_support import without_query_timing
 from yt_playlist.web.radio_playlist_io import PlaylistChanged, PlaylistPending
 from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.library import playlist_generated
 
 
+pytestmark = pytest.mark.usefixtures('without_query_timing', 'controlled_radio_checkpoints')
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """These controllers and route-only apps have no periodic application jobs."""
+
+
 @pytest.fixture
-def owned_playback(poc, monkeypatch):
+def owned_playback(owned_poc, monkeypatch):
     from yt_playlist.core.bridge import Bridge
 
-    controller, remote, frames, *_ = poc
+    controller, remote, frames, *_ = owned_poc
     bridge = Bridge()
     bridge._send = frames.append
     monkeypatch.setattr('yt_playlist.core.bridge.asyncio.run_coroutine_threadsafe', lambda frame, loop: None)

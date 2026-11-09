@@ -23,6 +23,53 @@ def nodes(state):
     return {node['id']: node for node in state['nodes']}
 
 
+def test_guidance_follows_artist_picks_then_owned_music_without_demanding_more_listens(store):
+    from yt_playlist.library.playlist_generated import create_generated_playlist
+    from yt_playlist.rec import artist_start
+
+    def guidance():
+        return nodes(account_growth.view(store, 1000, mixes_ready=False, albums_ready=False, radio={}))
+
+    assert 'Choose 3 artists' in guidance()['albums']['how_to']
+    fake = Catalog()
+    account = store.accounts.upsert_account('main', 'credential', None, True)
+    for page in fake._artists.values():
+        for song in page['songs']['results']:
+            fake._catalog[song['videoId']] = song
+    artists = artist_start.ArtistCatalog(lambda: {account: fake})
+    for index in range(3):
+        artists.select(store, f'UCartist{index}', True, 1000.)
+    # Mirroring the generated set must not switch an empty-library listener to
+    # instructions that presume an existing personal collection.
+    create_generated_playlist(store, 'My first set', store.discovery.starter_tracks(), fake, 1000., account)
+    picked = guidance()
+    assert 'artists you chose' in picked['albums']['how_to']
+    assert 'Play your first set' in picked['albums']['how_to']
+    assert 'Save playlists or albums' in picked['rediscover']['how_to']
+    assert 'saved playlists and albums' not in picked['albums']['how_to']
+
+    seed_catalog_track(store, 'owned|artist', 'Owned song', 'Artist', video_id='owned')
+    owned = guidance()
+    for identity in ('foundation', 'albums', 'discover', 'listening', 'radio'):
+        assert 'saved playlists and albums' in owned[identity]['how_to']
+        assert 'Play your first set' not in owned[identity]['how_to']
+        assert 'Choose 3 artists' not in owned[identity]['how_to']
+    assert 'Keep TuneConsole open' in owned['albums']['how_to']
+    assert store.conn.execute('SELECT COUNT(*) FROM play_events').fetchone()[0] == 0
+    for state in (picked, owned):
+        for node in state.values():
+            copy = ' '.join(node[field] for field in ('detail', 'how_to', 'status')).lower()
+            assert 'taste model' not in copy and 'prepar' not in copy
+            assert 'connect the extension' not in copy
+
+
+def test_guidance_uses_saved_albums_even_before_their_songs_arrive(store):
+    store.collection.add_saved_album({'browse': 'MPREready', 'title': 'My record', 'artist': 'Artist'})
+    state = nodes(account_growth.view(store, 1000, mixes_ready=False, albums_ready=False, radio={}))
+    assert 'saved playlists and albums' in state['albums']['how_to']
+    assert 'Choose 3 artists' not in state['foundation']['how_to']
+
+
 def test_home_inputs_reuse_journey_and_invalidate_on_supplied_or_committed_changes(file_backed_store, monkeypatch):
     store = file_backed_store
     catalog(store, processed=10, total=10)
@@ -81,13 +128,13 @@ def test_health_counts_distinct_scoped_recordings_from_empty_through_new_additio
     complete_entries(store, [cached], 21)
     assert store.conn.execute('SELECT COUNT(*) FROM library_memberships').fetchone()[0] == 1
     assert store.conn.execute('SELECT COUNT(*) FROM discovery_memberships').fetchone()[0] == 2
-    assert health() == (2, 1, 50, 'Preparing your music')
+    assert health() == (2, 1, 50, 'Getting to know your music')
 
     complete_discovered(store, [discovered_key], 30)
     # Processing coverage can be complete while listening menus still prepare.
     assert health() == (2, 2, 100, 'Ready to keep growing')
     store.tracks.upsert_track('new', 'New song', 'Artist', None, 200)
-    assert health() == (3, 2, 66, 'Preparing your music')
+    assert health() == (3, 2, 66, 'Getting to know your music')
 
 
 def test_health_excludes_available_provider_refresh_jobs_until_they_finish(store):

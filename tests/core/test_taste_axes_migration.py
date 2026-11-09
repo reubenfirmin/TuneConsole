@@ -4,7 +4,8 @@ import sqlite3
 
 import pytest
 
-from tests.store_fixture_support import native_sql_calls, without_query_timing
+from tests.genre_catalog_support import bound_shipped_catalog
+from tests.store_fixture_support import install_numbered_input, native_sql_calls, without_query_timing
 from yt_playlist.core import genre_identity
 from yt_playlist.core.migrations import migrate, registry
 from yt_playlist.core.migrations.runner import validate_version
@@ -16,17 +17,6 @@ from yt_playlist.repos.rec_signals import RecSignalsRepo
 @pytest.fixture(autouse=True)
 def disable_periodic_library_sync():
     """These SQL migration checks do not construct an HTTP application."""
-
-
-@pytest.mark.parametrize('version', [79, 87])
-def test_taste_axis_input_keeps_genuine_history_and_read_only_sql(_pristine_installed_schema, version):
-    source = _pristine_installed_schema(version)
-    assert source.execute('PRAGMA query_only').fetchone()[0] == 1
-    assert [row[0] for row in source.execute('SELECT version FROM schema_migrations ORDER BY version')] == list(range(1, version + 1))
-    if version == 87:
-        assert source.execute("SELECT key FROM genre_catalog WHERE key='synth pop'").fetchone()
-        assert genre_identity.resolve(source, 'Drum And Bass') == ('drum bass', None)
-    assert not source.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
@@ -91,16 +81,23 @@ def test_new_axes_constraints_and_unknown_evidence(store):
                 store.conn.execute(sql)
 
 
-def test_alias_collision_in_current_axes_rolls_back_losslessly(tmp_path, _pristine_installed_schema):
+def test_alias_collision_in_current_axes_rolls_back_losslessly(
+        tmp_path, monkeypatch, native_sql_calls, without_query_timing):
+    # Only the alias-collision edge is under test. Supply its completed v87
+    # input with the actual shipped spellings and families used by the case.
+    bound_shipped_catalog(monkeypatch, ('synth pop', 'drum bass', 'jazz'))
     old = Store(tmp_path / 'collision.db')
-    try:
-        _pristine_installed_schema(87).backup(old.conn)
-        old._bind_repositories()
-        old.rec_model.set_lean('genre:Synth Pop', 1.3, 10)
-        old.rec_model.set_lean('genre:synth pop', 1.4, 10)
+    with closing(old.conn), old._lock:
+        old.conn.execute('PRAGMA synchronous=OFF')
+        install_numbered_input(old.conn, 87)
+        assert [row[0] for row in old.conn.execute(
+            'SELECT version FROM schema_migrations ORDER BY version')] == list(range(1, 88))
+        assert genre_identity.resolve(old.conn, 'Drum And Bass') == ('drum bass', None)
+        assert not old.conn.execute('PRAGMA foreign_key_check').fetchone()
+        model = RecModelRepo(old)
+        model.set_lean('genre:Synth Pop', 1.3, 10)
+        model.set_lean('genre:synth pop', 1.4, 10)
         with pytest.raises(Exception, match='multiple legacy axes'):
             migrate(old.conn, registry=registry.MIGRATIONS)
         assert old.conn.execute('SELECT count(*) FROM rec_lean').fetchone()[0] == 2
         assert not old.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='taste_axes'").fetchone()
-    finally:
-        old.conn.close()

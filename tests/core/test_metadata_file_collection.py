@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import sqlite3
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,7 +13,19 @@ from yt_playlist.core import catalog, fao, metadata_native, metadata_runtime, me
 from yt_playlist.core.metadata_observations import MetadataObservation
 from yt_playlist.core.preparation import managed_files
 from tests.core.test_metadata_runtime import runtime_store, entry
+from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.core.store import Store
+
+
+@pytest.fixture(autouse=True)
+def disable_periodic_library_sync():
+    """File-owner workflows have no HTTP application lifecycle."""
+
+
+@pytest.fixture(scope='module')
+def _pristine_current_schema():
+    with bounded_consumer_schema((('jazz', 'Jazz'),)) as schema:
+        yield schema
 
 
 def native(store, track, recording, value, run, now):
@@ -141,7 +154,9 @@ def test_stale_collector_keeps_replacement_and_incomplete_publication(runtime_st
 
 
 @pytest.mark.parametrize('rollback', [False, True])
-def test_collection_waits_for_real_publication_transaction(runtime_store, rollback):
+def test_collection_waits_for_real_publication_transaction(runtime_store, monkeypatch, rollback):
+    from yt_playlist.core import db_writes
+
     store = runtime_store
     track, _recording = entry(store)
     entered, release = threading.Event(), threading.Event()
@@ -167,8 +182,27 @@ def test_collection_waits_for_real_publication_transaction(runtime_store, rollba
                 assert entered.wait(5)
                 orphan, = list((p for p in file_collection.walk_entries(root) if p is not None))
                 # SQL writer admission must fail before any ownership decision.
-                with pytest.raises(sqlite3.OperationalError, match='locked'):
-                    work.step(store, time.time() + 31 * 86400)
+                # Keep actual competing SQLite transactions and every bounded
+                # retry. Advance only the admission pacing clock, rather than
+                # spending its full second while this test owns the publisher.
+                clock, waits, statements = [0.], [], []
+
+                def wait(seconds):
+                    waits.append(seconds)
+                    clock[0] += seconds
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(db_writes, 'time', SimpleNamespace(
+                        monotonic=lambda: clock[0], sleep=wait))
+                    store.conn.set_trace_callback(statements.append)
+                    try:
+                        with pytest.raises(sqlite3.OperationalError, match='locked'):
+                            work.step(store, time.time() + 31 * 86400)
+                    finally:
+                        store.conn.set_trace_callback(None)
+                assert sum(waits) == pytest.approx(1.)
+                assert statements.count('BEGIN IMMEDIATE') > 1
+                assert not any('metadata_runtime_choices' in sql for sql in statements)
                 assert orphan.exists()
             finally:
                 release.set()

@@ -6,9 +6,10 @@ import sqlite3
 import pytest
 
 from tests.prepared_fixture_support import assert_upgrade_phase, custody_predecessor, custody_upgrade_cases
+from tests.store_fixture_support import native_sql_calls, numbered_store, without_query_timing
 from yt_playlist.core import account_auth_state, action_work, collection_recovery, playlist_scopes
-from yt_playlist.core import schema_inspection, workflow_settings
-from yt_playlist.core.migrations import current
+from yt_playlist.core import entity_names, schema_inspection, workflow_settings
+from yt_playlist.core.migrations import current, migrate, registry
 
 
 @pytest.fixture(autouse=True)
@@ -110,12 +111,21 @@ def test_action_upgrade_serving_input_keeps_real_revision_guards(action_upgrade_
     assert_original_action_target(template.source.conn, template.result)
 
 
-def test_legacy_auth_unknown_account_is_retained_without_assigning_current_master(action_upgrade_inputs):
-    template = action_upgrade_inputs(107)
-    conn, master = template.source.conn, template.result['account']
+@pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
+@pytest.mark.parametrize('numbered_store', [92], indirect=True)
+def test_legacy_auth_unknown_account_is_retained_without_assigning_current_master(numbered_store):
+    store, _ = numbered_store
+    master = store.accounts.upsert_account('Main', 'main.json', None, True)
+    store.settings.set_setting(account_auth_state.KEY, json.dumps({str(master): 'Main', '999': 'Retired'}))
+    # Authentication owns this populated conversion, not the action/receipt
+    # template used by the other workflows. Keep the complete original upgrade.
+    conn = store.conn
+    entity_names.clear_predecessor_reads(conn)
+    migrate(conn, registry=registry.MIGRATIONS)
     assert account_auth_state.read(conn) == {master: 'Main', 999: 'Retired'}
     assert tuple(conn.execute('SELECT account_id,unresolved_account_id FROM account_auth_expirations '
                               'WHERE unresolved_account_id=999').fetchone()) == (None, 999)
+    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.fixture

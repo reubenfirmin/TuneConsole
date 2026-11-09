@@ -51,6 +51,58 @@ def seed_pool(store):
     return pool
 
 
+def seed_completed_pool(store):
+    """The same 32 catalog subjects below controller tests, without ingestion."""
+    from tests.recommendation_support import seed_publication_subjects
+    from yt_playlist.util.matching import identity_key
+
+    pool = [{'key': identity_key(f'Song {i}', f'Artist {i}'), 'video_id': f'v{i}',
+             'title': f'Song {i}', 'artist': f'Artist {i}'} for i in range(1, 33)]
+    seed_publication_subjects(store, pool)
+    return pool
+
+
+@pytest.fixture(scope='module')
+def completed_radio_schema():
+    from tests.store_fixture_support import bounded_consumer_schema
+
+    with bounded_consumer_schema(()) as schema:
+        yield schema
+
+
+@pytest.fixture
+def completed_radio_store(tmp_path, completed_radio_schema, monkeypatch):
+    """Keep actual writer/readers and checkpoint publication below consumers."""
+    from tests.store_fixture_support import _file_consumer_store, use_native_sql_calls
+
+    with _file_consumer_store(tmp_path, completed_radio_schema) as store:
+        # Catalog ingestion is a lower input. Restore instrumented SQL before
+        # the subject so writer admission and concurrent reads remain real.
+        with monkeypatch.context() as inputs:
+            use_native_sql_calls(inputs)
+            store._fixture_radio_pool = seed_completed_pool(store)
+        yield store
+
+
+@pytest.fixture
+def completed_poc(completed_radio_store, monkeypatch):
+    with radio_controller(monkeypatch, completed_radio_store,
+                          completed_radio_store._fixture_radio_pool) as state:
+        yield state
+
+
+@pytest.fixture
+def uncontended_poc(completed_radio_store, monkeypatch):
+    """Real checkpoint SQL/files below synchronous controller consumers."""
+    from tests.store_fixture_support import reuse_reporting_reader, use_native_sql_calls
+
+    use_native_sql_calls(monkeypatch)
+    with reuse_reporting_reader(completed_radio_store, monkeypatch):
+        with radio_controller(monkeypatch, completed_radio_store,
+                              completed_radio_store._fixture_radio_pool) as state:
+            yield state
+
+
 class Playlist:
     def __init__(self):
         self.ids = []

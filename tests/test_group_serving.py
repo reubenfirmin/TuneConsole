@@ -1,17 +1,48 @@
 from fastapi.testclient import TestClient
+import pytest
 
-from tests.conftest import seed_catalog_track
 from tests.group_support import publish as publish_groups, recordings
-from tests.recommendation_support import publish_bundles
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
+from tests.store_fixture_support import (
+    _file_consumer_store, bounded_consumer_schema, native_sql_calls, reuse_reporting_reader,
+)
+from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import group_serving
 from yt_playlist.web.app import create_app
 
 
+@pytest.fixture(scope='module')
+def preview_schema():
+    with bounded_consumer_schema((('house', 'House'), ('death-metal', 'Death Metal'),
+                                  ('pop', 'Pop'))) as schema:
+        yield schema
+
+
+@pytest.fixture
+def store(tmp_path, preview_schema, native_sql_calls, monkeypatch):
+    # These consumers own group calculation, publication and rendered output.
+    # Catalog ingestion, bootstrap and per-query diagnostics are lower inputs.
+    with _file_consumer_store(tmp_path, preview_schema) as database:
+        with reuse_reporting_reader(database, monkeypatch):
+            yield database
+
+
+def catalog_inputs(tracks, *, one_album=False):
+    return [{'key': track.key, 'title': f'Song {i}', 'video_id': f'v{i}',
+             'artist': f'Artist {i // 2}', 'genre': track.genre,
+             'album': 'One album' if one_album else f'Album {i // 2}'}
+            for i, track in enumerate(tracks)]
+
+
+def seed_missing(store, items):
+    owned = {row[0] for row in store.conn.execute('SELECT identity_key FROM recordings')}
+    missing = [item for item in items if item['key'] not in owned]
+    if missing:
+        seed_publication_subjects(store, missing)
+
+
 def publish(store, tracks, *args):
-    for i, track in enumerate(tracks):
-        if not store.conn.execute('SELECT 1 FROM recordings WHERE identity_key=?', (track.key,)).fetchone():
-            seed_catalog_track(store, track.key, f'Song {i}', f'Artist {i // 2}',
-                               video_id=f'v{i}', album=f'Album {i // 2}', genre=track.genre)
+    seed_missing(store, catalog_inputs(tracks))
     return publish_groups(store, tracks, *args)
 
 
@@ -89,16 +120,11 @@ def test_view_preserves_visible_ancestry_through_hidden_names_without_mutating_p
 
 
 def pools(store, tracks, *, one_album=False):
-    pool = [{'key': r.key, 'title': f'Song {i}', 'video_id': f'v{i}', 'artist': f'Artist {i // 2}',
-             'album': 'One album' if one_album else f'Album {i // 2}'} for i, r in enumerate(tracks)]
-    for track, item in zip(tracks, pool):
-        if not store.conn.execute('SELECT 1 FROM recordings WHERE identity_key=?', (track.key,)).fetchone():
-            seed_catalog_track(store, track.key, item['title'], item['artist'],
-                               video_id=item['video_id'], album=item['album'], genre=track.genre)
-        else:
-            with store.conn:
-                store.conn.execute('UPDATE youtube_items SET album=? WHERE video_id=?',
-                                   (item['album'], item['video_id']))
+    pool = catalog_inputs(tracks, one_album=one_album)
+    seed_missing(store, pool)
+    with atomic_write(store):
+        store.conn.executemany('UPDATE youtube_items SET album=? WHERE video_id=?',
+                               [(item['album'], item['video_id']) for item in pool])
     publish_bundles(store, {'all': {'wheelhouse': pool, 'fresh': pool}})
 
 
